@@ -1,0 +1,348 @@
+"""
+Main AI Task Orchestrator - Coordinates all components
+"""
+import asyncio
+import logging
+import time
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+from datetime import datetime
+import uuid
+
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+
+from core import (
+    ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskParser, 
+    AsyncFileWatcher
+)
+from bridges import ClaudeBridge, LlamaMediator
+from config import config
+
+logger = logging.getLogger(__name__)
+
+class TaskOrchestrator(ITaskOrchestrator):
+    """Main orchestrator that coordinates all AI task processing"""
+    
+    def __init__(self):
+        # Initialize core components
+        self.task_parser = TaskParser()
+        self.file_watcher = AsyncFileWatcher(config.system.tasks_dir)
+        self.claude_bridge = ClaudeBridge()
+        self.llama_mediator = LlamaMediator()
+        
+        # Task management
+        self.task_queue = asyncio.Queue()
+        self.active_tasks: Dict[str, Task] = {}
+        self.task_results: Dict[str, TaskResult] = {}
+        
+        # System state
+        self.running = False
+        self.worker_tasks: List[asyncio.Task] = []
+        
+        # Component status
+        self.component_status = {
+            "claude_available": False,
+            "llama_available": False,
+            "file_watcher_running": False
+        }
+        
+        logger.info("TaskOrchestrator initialized")
+    
+    async def start(self):
+        """Start all system components"""
+        if self.running:
+            logger.warning("Orchestrator is already running")
+            return
+        
+        logger.info("Starting AI Task Orchestrator...")
+        
+        # Check component availability
+        await self._check_component_status()
+        
+        # Start file watcher
+        await self.file_watcher.start_async(self._handle_new_task_file)
+        self.component_status["file_watcher_running"] = True
+        
+        # Start task processing workers
+        for i in range(config.system.max_concurrent_tasks):
+            worker = asyncio.create_task(self._task_worker(f"worker-{i}"))
+            self.worker_tasks.append(worker)
+        
+        self.running = True
+        
+        # Log startup status
+        self._log_startup_status()
+        
+        logger.info("AI Task Orchestrator started successfully!")
+    
+    async def stop(self):
+        """Stop all system components"""
+        if not self.running:
+            return
+        
+        logger.info("Stopping AI Task Orchestrator...")
+        
+        self.running = False
+        
+        # Stop file watcher
+        await self.file_watcher.stop_async()
+        self.component_status["file_watcher_running"] = False
+        
+        # Cancel worker tasks
+        for worker in self.worker_tasks:
+            worker.cancel()
+        
+        # Wait for workers to finish
+        await asyncio.gather(*self.worker_tasks, return_exceptions=True)
+        self.worker_tasks.clear()
+        
+        logger.info("AI Task Orchestrator stopped")
+    
+    async def _check_component_status(self):
+        """Check availability of all components"""
+        
+        # Check Claude Code CLI
+        self.component_status["claude_available"] = self.claude_bridge.test_connection()
+        
+        # Check LLAMA availability
+        llama_status = self.llama_mediator.get_status()
+        self.component_status["llama_available"] = llama_status["ollama_available"]
+        
+        logger.info(f"Component status: {self.component_status}")
+    
+    def _log_startup_status(self):
+        """Log detailed startup status"""
+        status_lines = [
+            "=== AI Task Orchestrator Status ===",
+            f"Claude Code CLI: {'[OK] Available' if self.component_status['claude_available'] else '[--] Not found'}",
+            f"LLAMA/Ollama: {'[OK] Available' if self.component_status['llama_available'] else '[--] Using fallback'}",
+            f"File Watcher: {'[OK] Running' if self.component_status['file_watcher_running'] else '[--] Stopped'}",
+            f"Task Workers: {len(self.worker_tasks)} active",
+            f"Watch Directory: {Path(config.system.tasks_dir).resolve()}",
+            "===================================="
+        ]
+        
+        for line in status_lines:
+            logger.info(line)
+    
+    async def _handle_new_task_file(self, file_path: str):
+        """Handle detection of new task file"""
+        try:
+            logger.info(f"Processing new task file: {file_path}")
+            
+            # Validate task file format
+            errors = self.task_parser.validate_task_format(file_path)
+            if errors:
+                logger.error(f"Invalid task file format: {errors}")
+                return
+            
+            # Parse task
+            task = self.task_parser.parse_task_file(file_path)
+            task.status = TaskStatus.PENDING
+            
+            # Add to queue
+            await self.task_queue.put(task)
+            self.active_tasks[task.id] = task
+            
+            logger.info(f"Queued task: {task.id} ({task.type.value}, {task.priority.value})")
+            
+        except Exception as e:
+            logger.error(f"Error processing task file {file_path}: {e}")
+    
+    async def _task_worker(self, worker_name: str):
+        """Worker coroutine that processes tasks from the queue"""
+        logger.info(f"Task worker {worker_name} started")
+        
+        while self.running:
+            try:
+                # Get task from queue with timeout
+                task = await asyncio.wait_for(
+                    self.task_queue.get(), 
+                    timeout=1.0
+                )
+                
+                logger.info(f"Worker {worker_name} processing task: {task.id}")
+                
+                # Process the task
+                result = await self.process_task(task)
+                
+                # Store result
+                self.task_results[task.id] = result
+                
+                # Update task status
+                task.status = TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
+                
+                # Log completion
+                status = "SUCCESS" if result.success else "FAILED"
+                logger.info(f"Task {task.id} completed: {status} ({result.execution_time:.2f}s)")
+                
+                # Mark task as done in queue
+                self.task_queue.task_done()
+                
+            except asyncio.TimeoutError:
+                # No tasks available, continue
+                continue
+            except asyncio.CancelledError:
+                logger.info(f"Worker {worker_name} cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Worker {worker_name} error: {e}")
+                # Continue processing other tasks
+                continue
+        
+        logger.info(f"Task worker {worker_name} stopped")
+    
+    async def process_task(self, task: Task) -> TaskResult:
+        """Process a single task through the complete pipeline"""
+        start_time = time.time()
+        
+        try:
+            task.status = TaskStatus.PROCESSING
+            
+            # Step 1: Use LLAMA to parse and optimize the task (or fallback)
+            logger.debug(f"Step 1: Parsing task {task.id} with LLAMA mediator")
+            
+            # Read the task content for LLAMA processing
+            task_content = self._reconstruct_task_content(task)
+            parsed_task = self.llama_mediator.parse_task(task_content)
+            
+            # Step 2: Create optimized Claude prompt
+            logger.debug(f"Step 2: Creating Claude prompt for task {task.id}")
+            claude_prompt = self.llama_mediator.create_claude_prompt(parsed_task)
+            # Ensure Claude executes the optimized prompt
+            task.prompt = claude_prompt
+            
+            # Step 3: Execute with Claude Code
+            logger.debug(f"Step 3: Executing task {task.id} with Claude Code")
+            
+            # Always run real Claude bridge; rely on bridge errors if any
+            result = await self.claude_bridge.execute_task(task)
+            
+            # Step 4: Summarize results with LLAMA
+            logger.debug(f"Step 4: Summarizing results for task {task.id}")
+            summary = self.llama_mediator.summarize_result(result, task)
+            
+            # Add summary to result
+            result.output = summary + "\n\n" + result.output
+            
+            return result
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            logger.error(f"Task processing failed for {task.id}: {e}")
+            
+            return TaskResult(
+                task_id=task.id,
+                success=False,
+                output="",
+                errors=[str(e)],
+                files_modified=[],
+                execution_time=execution_time,
+                timestamp=datetime.now().isoformat()
+            )
+    
+    def _reconstruct_task_content(self, task: Task) -> str:
+        """Reconstruct task content for LLAMA processing"""
+        content = f"""---
+id: {task.id}
+type: {task.type.value}
+priority: {task.priority.value}
+created: {task.created}
+---
+
+# {task.title}
+
+**Target Files:**
+{chr(10).join('- ' + f for f in task.target_files)}
+
+**Prompt:**
+{task.prompt}
+
+**Success Criteria:**
+{chr(10).join('- [ ] ' + c for c in task.success_criteria)}
+
+**Context:**
+{task.context}
+"""
+        return content
+    
+    # Simulation execution removed: system now always runs real Claude Code CLI
+    
+    def create_task_from_description(self, description: str) -> str:
+        """Create a task file from natural language description"""
+        
+        task_id = f"task_{uuid.uuid4().hex[:8]}"
+        
+        # Use LLAMA to parse description or simple template
+        if self.component_status["llama_available"]:
+            parsed = self._parse_description_with_llama(description)
+        else:
+            parsed = self._parse_description_simple(description)
+        
+        # Create task file
+        task_content = f"""---
+id: {task_id}
+type: {parsed.get('type', 'analyze')}
+priority: {parsed.get('priority', 'medium')}
+created: {datetime.now().isoformat()}
+---
+
+# {parsed.get('title', 'Auto-generated Task')}
+
+**Target Files:**
+{chr(10).join('- ' + f for f in parsed.get('target_files', []))}
+
+**Prompt:**
+{parsed.get('prompt', description)}
+
+**Success Criteria:**
+- [ ] Task completed successfully
+- [ ] Results validated
+- [ ] Documentation updated if needed
+
+**Context:**
+Generated from user description: {description}
+"""
+        
+        # Write task file
+        task_file = Path(config.system.tasks_dir) / f"{task_id}.task.md"
+        task_file.write_text(task_content, encoding='utf-8')
+        
+        logger.info(f"Created task file: {task_file}")
+        return task_id
+    
+    def _parse_description_simple(self, description: str) -> Dict[str, Any]:
+        """Simple parsing of task description"""
+        
+        # Basic keyword detection
+        task_type = "analyze"
+        if any(word in description.lower() for word in ["fix", "bug", "error"]):
+            task_type = "fix"
+        elif any(word in description.lower() for word in ["review", "check"]):
+            task_type = "code_review"
+        elif any(word in description.lower() for word in ["summary", "summarize"]):
+            task_type = "summarize"
+        
+        return {
+            "type": task_type,
+            "title": f"Task: {description[:50]}...",
+            "prompt": description,
+            "priority": "medium",
+            "target_files": []
+        }
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get comprehensive orchestrator status"""
+        return {
+            "running": self.running,
+            "components": self.component_status,
+            "tasks": {
+                "active": len(self.active_tasks),
+                "queued": self.task_queue.qsize(),
+                "completed": len(self.task_results),
+                "workers": len(self.worker_tasks)
+            },
+            "llama_status": self.llama_mediator.get_status()
+        }
