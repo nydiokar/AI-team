@@ -48,6 +48,14 @@ class TaskResult:
     files_modified: List[str]
     execution_time: float
     timestamp: str
+    # Raw process data for artifact persistence and diagnostics
+    raw_stdout: str = ""
+    raw_stderr: str = ""
+    parsed_output: Any = None
+    return_code: int = 0
+    # Retry metadata (filled by orchestrator)
+    retries: int = 0
+    error_class: str = ""
 
 @dataclass
 class ValidationResult:

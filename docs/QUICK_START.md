@@ -3,6 +3,9 @@
 ## 1. Start the System
 ```bash
 cd orchestrator
+# Optional: allow non-interactive permissions for CI
+# On Windows PowerShell:
+#   $env:CLAUDE_SKIP_PERMISSIONS="true"  # only for unattended runs
 python main.py
 ```
 
@@ -13,7 +16,7 @@ AI Task Orchestrator
 
 Component Status:
   Claude Code CLI: [OK] Available
-  LLAMA/Ollama: [OK] Available (llama3.2:latest)  
+  LLAMA/Ollama: [OK] Available (llama3.2:latest)
   File Watcher: [OK] Running
 
 Orchestrator is running. Press Ctrl+C to stop.
@@ -32,8 +35,8 @@ The system will automatically:
 ## 3. Check Results (after ~30-60 seconds)
 
 **Files Created:**
-- `results/comprehensive_test_001_result.json`
-- `summaries/comprehensive_test_001_summary.txt`
+- `results/{task_id}.json`
+- `summaries/{task_id}_summary.txt`
 
 **Files Modified:**
 - `src/core/interfaces.py` (new exception classes added)

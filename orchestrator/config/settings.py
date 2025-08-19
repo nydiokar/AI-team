@@ -13,6 +13,7 @@ class ClaudeConfig:
     headless_mode: bool = True
     skip_permissions: bool = False
     timeout: int = 300  # 5 minutes
+    max_turns: int = 10
     
 @dataclass
 class LlamaConfig:
@@ -54,7 +55,8 @@ class Config:
     
     def __init__(self):
         self.claude = ClaudeConfig(
-            base_command=self._get_claude_command()
+            base_command=self._get_claude_command(),
+            skip_permissions=os.getenv("CLAUDE_SKIP_PERMISSIONS", "false").lower() == "true"
         )
         self.llama = LlamaConfig()
         self.telegram = TelegramConfig(

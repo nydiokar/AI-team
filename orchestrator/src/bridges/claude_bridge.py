@@ -39,7 +39,7 @@ class ClaudeBridge(IClaudeBridge):
         # Structured output for parsing
         cmd.extend(["--output-format", "json"])
         
-        # Headless permissions behavior
+        # Headless permissions behavior (default to bypassPermissions unless explicitly skipped)
         if config.claude.skip_permissions:
             cmd.append("--dangerously-skip-permissions")
         else:
@@ -63,8 +63,13 @@ class ClaudeBridge(IClaudeBridge):
             if allowed_tools:
                 command.extend(["--allowedTools", ",".join(allowed_tools)])
 
-            # Cap max conversation turns for safety
-            command.extend(["--max-turns", "10"])  
+            # Cap max conversation turns for safety (configurable, by task type)
+            max_turns = config.claude.max_turns
+            if task.type == TaskType.SUMMARIZE:
+                max_turns = min(max_turns, 4)
+            elif task.type == TaskType.CODE_REVIEW:
+                max_turns = min(max_turns, 6)
+            command.extend(["--max-turns", str(max_turns)])  
             
             # Add the prompt
             command.append(prompt)
@@ -151,25 +156,43 @@ class ClaudeBridge(IClaudeBridge):
                 ""
             ])
         
-        prompt_parts.extend([
-            "Please:",
-            "1. Analyze the current state of the specified files",
-            "2. Implement the requested changes",
-            "3. Provide a clear summary of what was accomplished",
-            "4. Note any issues or limitations encountered"
-        ])
+        # Tailor instructions by task type
+        if task.type == TaskType.SUMMARIZE:
+            prompt_parts.extend([
+                "Please:",
+                "1. Read the specified files",
+                "2. Produce a concise summary and key insights",
+                "3. Do not modify any files or execute commands",
+                "4. Note any limitations encountered"
+            ])
+        elif task.type == TaskType.CODE_REVIEW:
+            prompt_parts.extend([
+                "Please:",
+                "1. Review the specified files for issues and improvements",
+                "2. Provide actionable feedback and examples",
+                "3. Do not modify any files",
+                "4. Summarize key findings"
+            ])
+        else:
+            prompt_parts.extend([
+                "Please:",
+                "1. Analyze the current state of the specified files",
+                "2. Implement the requested changes",
+                "3. Provide a clear summary of what was accomplished",
+                "4. Note any issues or limitations encountered"
+            ])
         
         return "\n".join(prompt_parts)
     
     def _get_allowed_tools_for_task(self, task_type) -> List[str]:
-        """Get allowed tools based on task type"""
-        base_tools = ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob"]
-        
+        """Get allowed tools based on task type (least-privilege)"""
         if task_type in (TaskType.FIX, TaskType.ANALYZE):
-            # For fix and analyze tasks, allow bash execution
-            base_tools.extend(["Bash"])
-        
-        return base_tools
+            return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]
+        elif task_type in (TaskType.CODE_REVIEW, TaskType.SUMMARIZE):
+            return ["Read", "LS", "Grep", "Glob"]
+        else:
+            # Default to safe read-only if unknown
+            return ["Read", "LS", "Grep", "Glob"]
     
     async def _execute_command(self, command: List[str], target_files: List[str]) -> Dict[str, Any]:
         """Execute Claude command asynchronously"""
@@ -177,11 +200,16 @@ class ClaudeBridge(IClaudeBridge):
         # Change to the appropriate working directory if target files are specified
         cwd = None
         if target_files:
-            # Find common directory for target files
-            paths = [Path(f).parent for f in target_files if Path(f).is_absolute()]
-            if paths:
-                # Use the most common parent directory
-                cwd = str(paths[0])
+            abs_parents = [Path(f).parent for f in target_files if Path(f).is_absolute()]
+            if abs_parents:
+                cwd = str(abs_parents[0])
+            else:
+                # If targets are relative like 'orchestrator/src/...', run from repo root
+                try:
+                    repo_root = Path(__file__).resolve().parents[3]
+                    cwd = str(repo_root)
+                except Exception:
+                    cwd = None
         
         # Execute the command
         process = await asyncio.create_subprocess_exec(
@@ -198,8 +226,8 @@ class ClaudeBridge(IClaudeBridge):
         
         return {
             'returncode': process.returncode,
-            'stdout': stdout.decode('utf-8') if stdout else '',
-            'stderr': stderr.decode('utf-8') if stderr else ''
+            'stdout': stdout.decode('utf-8', errors='replace') if stdout else '',
+            'stderr': stderr.decode('utf-8', errors='replace') if stderr else ''
         }
     
     def _parse_result(self, task_id: str, result: Dict[str, Any], execution_time: float) -> TaskResult:
@@ -223,8 +251,6 @@ class ClaudeBridge(IClaudeBridge):
                         parsed_output = json.loads(s[start:end+1])
                     except json.JSONDecodeError:
                         parsed_output = None
-            except json.JSONDecodeError:
-                pass
             
             # If we parsed structured output, prefer its content when available
             if isinstance(parsed_output, dict):
@@ -260,5 +286,9 @@ class ClaudeBridge(IClaudeBridge):
             errors=errors,
             files_modified=files_modified,
             execution_time=execution_time,
-            timestamp=time.strftime("%Y-%m-%d %H:%M:%S")
+            timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+            raw_stdout=result.get('stdout', ''),
+            raw_stderr=result.get('stderr', ''),
+            parsed_output=parsed_output,
+            return_code=result.get('returncode', -1)
         )

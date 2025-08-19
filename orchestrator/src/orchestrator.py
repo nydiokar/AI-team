@@ -130,7 +130,7 @@ class TaskOrchestrator(ITaskOrchestrator):
     async def _handle_new_task_file(self, file_path: str):
         """Handle detection of new task file"""
         try:
-            logger.info(f"Processing new task file: {file_path}")
+            logger.info(f"event=task_received file={file_path}")
             
             # Validate task file format
             errors = self.task_parser.validate_task_format(file_path)
@@ -141,6 +141,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             # Parse task
             task = self.task_parser.parse_task_file(file_path)
             task.status = TaskStatus.PENDING
+            logger.info(f"event=parsed task_id={task.id} type={task.type.value} priority={task.priority.value}")
             
             # Add to queue
             await self.task_queue.put(task)
@@ -163,7 +164,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     timeout=1.0
                 )
                 
-                logger.info(f"Worker {worker_name} processing task: {task.id}")
+                logger.info(f"event=claude_started worker={worker_name} task_id={task.id}")
                 
                 # Process the task
                 result = await self.process_task(task)
@@ -176,7 +177,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                 
                 # Log completion
                 status = "SUCCESS" if result.success else "FAILED"
-                logger.info(f"Task {task.id} completed: {status} ({result.execution_time:.2f}s)")
+                logger.info(f"event=claude_finished task_id={task.id} status={status} duration_s={result.execution_time:.2f}")
+                
+                # Write artifacts
+                try:
+                    self._write_artifacts(task.id, result)
+                    logger.info(f"event=artifacts_written task_id={task.id}")
+                except Exception as e:
+                    logger.error(f"event=artifacts_error task_id={task.id} error={e}")
                 
                 # Mark task as done in queue
                 self.task_queue.task_done()
@@ -203,36 +211,48 @@ class TaskOrchestrator(ITaskOrchestrator):
             
             # Step 1: Use LLAMA to parse and optimize the task (or fallback)
             logger.debug(f"Step 1: Parsing task {task.id} with LLAMA mediator")
-            
-            # Read the task content for LLAMA processing
             task_content = self._reconstruct_task_content(task)
             parsed_task = self.llama_mediator.parse_task(task_content)
             
             # Step 2: Create optimized Claude prompt
             logger.debug(f"Step 2: Creating Claude prompt for task {task.id}")
             claude_prompt = self.llama_mediator.create_claude_prompt(parsed_task)
-            # Ensure Claude executes the optimized prompt
             task.prompt = claude_prompt
             
-            # Step 3: Execute with Claude Code
+            # Step 3: Execute with Claude Code with limited retries on transient errors
             logger.debug(f"Step 3: Executing task {task.id} with Claude Code")
-            
-            # Always run real Claude bridge; rely on bridge errors if any
-            result = await self.claude_bridge.execute_task(task)
+            max_retries = 2
+            retry_delay = 2.0
+            attempt = 0
+            last_result: Optional[TaskResult] = None
+            while True:
+                attempt += 1
+                result = await self.claude_bridge.execute_task(task)
+                error_class = self._classify_error(result)
+                result.error_class = error_class
+                result.retries = attempt - 1
+                
+                if error_class == "transient" and attempt <= max_retries and not result.success:
+                    logger.warning(f"event=retry task_id={task.id} attempt={attempt} class=transient delay_s={retry_delay}")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                    last_result = result
+                    continue
+                else:
+                    last_result = result
+                    break
             
             # Step 4: Summarize results with LLAMA
             logger.debug(f"Step 4: Summarizing results for task {task.id}")
-            summary = self.llama_mediator.summarize_result(result, task)
+            summary = self.llama_mediator.summarize_result(last_result, task)
+            last_result.output = summary + "\n\n" + last_result.output
+            logger.info(f"event=summarized task_id={task.id}")
             
-            # Add summary to result
-            result.output = summary + "\n\n" + result.output
-            
-            return result
+            return last_result
             
         except Exception as e:
             execution_time = time.time() - start_time
             logger.error(f"Task processing failed for {task.id}: {e}")
-            
             return TaskResult(
                 task_id=task.id,
                 success=False,
@@ -267,6 +287,60 @@ created: {task.created}
 {task.context}
 """
         return content
+
+    def _write_artifacts(self, task_id: str, result: TaskResult):
+        """Persist results and summaries to disk"""
+        results_dir = Path(config.system.results_dir)
+        summaries_dir = Path(config.system.summaries_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        summaries_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write raw JSON artifact with structured fields
+        artifact = {
+            "task_id": task_id,
+            "success": result.success,
+            "return_code": result.return_code,
+            "timestamp": result.timestamp,
+            "execution_time": result.execution_time,
+            "errors": result.errors,
+            "files_modified": result.files_modified,
+            "raw_stdout": result.raw_stdout,
+            "raw_stderr": result.raw_stderr,
+            "parsed_output": result.parsed_output,
+            "retry": {
+                "retries": getattr(result, "retries", 0),
+                "error_class": getattr(result, "error_class", ""),
+            },
+        }
+
+        import json
+        (results_dir / f"{task_id}.json").write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+
+        # Write human readable summary (top of result.output before raw CLI content)
+        summary_text = result.output.split("\n\n", 1)[0] if result.output else ""
+        (summaries_dir / f"{task_id}_summary.txt").write_text(
+            summary_text,
+            encoding="utf-8"
+        )
+
+    def _classify_error(self, result: TaskResult) -> str:
+        """Classify error type for retry policy: transient|fatal|none"""
+        if result.success:
+            return "none"
+        text = (result.raw_stderr or "") + "\n" + (result.raw_stdout or "")
+        text_lower = text.lower()
+        transient_markers = [
+            "rate limit", "rate-limit", "too many requests", "temporarily unavailable",
+            "timeout", "timed out", "connection reset", "connection aborted",
+            "503", "504", "network error", "retry later"
+        ]
+        for marker in transient_markers:
+            if marker in text_lower:
+                return "transient"
+        return "fatal"
     
     # Simulation execution removed: system now always runs real Claude Code CLI
     

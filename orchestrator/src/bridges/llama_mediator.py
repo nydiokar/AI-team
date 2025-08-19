@@ -22,6 +22,7 @@ class LlamaMediator(ILlamaMediator):
     def __init__(self):
         self.ollama_available = self._check_ollama_availability()
         self.client = None
+        self.model_installed = False
         
         if self.ollama_available:
             try:
@@ -29,6 +30,7 @@ class LlamaMediator(ILlamaMediator):
                 self.client = ollama.Client(
                     host=f"http://{config.llama.host}:{config.llama.port}"
                 )
+                self.model_installed = self._is_model_installed(config.llama.model)
                 logger.info("LLAMA/Ollama client initialized successfully")
             except ImportError:
                 logger.warning("Ollama package not available, using fallback mode")
@@ -52,12 +54,31 @@ class LlamaMediator(ILlamaMediator):
         except Exception:
             return False
     
+    def _is_model_installed(self, model_name: str) -> bool:
+        """Check if specified model is installed locally to avoid long pulls"""
+        if not self.ollama_available:
+            return False
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            output = (result.stdout or "") + (result.stderr or "")
+            return model_name.split(":")[0] in output
+        except Exception:
+            return False
+    
     def parse_task(self, task_content: str) -> Dict[str, Any]:
         """Parse task content using LLAMA or fallback to simple parsing"""
         
-        if self.ollama_available and self.client:
+        if self.ollama_available and self.client and self.model_installed:
             return self._parse_with_llama(task_content)
         else:
+            if self.ollama_available and not self.model_installed:
+                logger.info("LLAMA model not installed; using fallback parser to avoid long downloads")
             return self._parse_with_fallback(task_content)
     
     def _parse_with_llama(self, task_content: str) -> Dict[str, Any]:
@@ -166,7 +187,7 @@ class LlamaMediator(ILlamaMediator):
     def create_claude_prompt(self, parsed_task: Dict[str, Any]) -> str:
         """Create Claude-optimized prompt"""
         
-        if self.ollama_available and self.client:
+        if self.ollama_available and self.client and self.model_installed:
             return self._create_prompt_with_llama(parsed_task)
         else:
             return self._create_prompt_with_template(parsed_task)
@@ -238,7 +259,7 @@ Focus on quality, maintainability, and following established code conventions.""
     def summarize_result(self, result: TaskResult, original_task: Task) -> str:
         """Create concise summary for user notification"""
         
-        if self.ollama_available and self.client:
+        if self.ollama_available and self.client and self.model_installed:
             return self._summarize_with_llama(result, original_task)
         else:
             return self._summarize_with_template(result, original_task)
