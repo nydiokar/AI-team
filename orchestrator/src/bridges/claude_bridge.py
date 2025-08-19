@@ -63,13 +63,8 @@ class ClaudeBridge(IClaudeBridge):
             if allowed_tools:
                 command.extend(["--allowedTools", ",".join(allowed_tools)])
 
-            # Cap max conversation turns for safety (configurable, by task type)
-            max_turns = config.claude.max_turns
-            if task.type == TaskType.SUMMARIZE:
-                max_turns = min(max_turns, 4)
-            elif task.type == TaskType.CODE_REVIEW:
-                max_turns = min(max_turns, 6)
-            command.extend(["--max-turns", str(max_turns)])  
+            # Use global max-turns from config without task-specific overrides
+            command.extend(["--max-turns", str(config.claude.max_turns)])
             
             # Add the prompt
             command.append(prompt)
@@ -125,64 +120,16 @@ class ClaudeBridge(IClaudeBridge):
             return False
     
     def _build_prompt(self, task: Task) -> str:
-        """Build a comprehensive prompt for Claude"""
-        prompt_parts = [
-            f"Task Type: {task.type.value.upper()}",
-            f"Task: {task.title}",
-            "",
-            "Description:",
-            task.prompt,
-            ""
-        ]
-        
+        """Pass through the task prompt with minimal framing."""
+        # Keep only the raw task prompt and optional target files/context
+        parts = [task.prompt]
         if task.target_files:
-            prompt_parts.extend([
-                "Target Files:",
-                *[f"- {file}" for file in task.target_files],
-                ""
-            ])
-        
-        if task.success_criteria:
-            prompt_parts.extend([
-                "Success Criteria:",
-                *[f"- {criteria}" for criteria in task.success_criteria],
-                ""
-            ])
-        
+            parts.append("\nTarget Files:")
+            parts.extend([f"- {file}" for file in task.target_files])
         if task.context:
-            prompt_parts.extend([
-                "Context:",
-                task.context,
-                ""
-            ])
-        
-        # Tailor instructions by task type
-        if task.type == TaskType.SUMMARIZE:
-            prompt_parts.extend([
-                "Please:",
-                "1. Read the specified files",
-                "2. Produce a concise summary and key insights",
-                "3. Do not modify any files or execute commands",
-                "4. Note any limitations encountered"
-            ])
-        elif task.type == TaskType.CODE_REVIEW:
-            prompt_parts.extend([
-                "Please:",
-                "1. Review the specified files for issues and improvements",
-                "2. Provide actionable feedback and examples",
-                "3. Do not modify any files",
-                "4. Summarize key findings"
-            ])
-        else:
-            prompt_parts.extend([
-                "Please:",
-                "1. Analyze the current state of the specified files",
-                "2. Implement the requested changes",
-                "3. Provide a clear summary of what was accomplished",
-                "4. Note any issues or limitations encountered"
-            ])
-        
-        return "\n".join(prompt_parts)
+            parts.append("\nContext:")
+            parts.append(task.context)
+        return "\n".join(parts)
     
     def _get_allowed_tools_for_task(self, task_type) -> List[str]:
         """Get allowed tools based on task type (least-privilege)"""
@@ -197,19 +144,15 @@ class ClaudeBridge(IClaudeBridge):
     async def _execute_command(self, command: List[str], target_files: List[str]) -> Dict[str, Any]:
         """Execute Claude command asynchronously"""
         
-        # Change to the appropriate working directory if target files are specified
+        # Set working directory to project root for best results
         cwd = None
-        if target_files:
-            abs_parents = [Path(f).parent for f in target_files if Path(f).is_absolute()]
-            if abs_parents:
-                cwd = str(abs_parents[0])
-            else:
-                # If targets are relative like 'orchestrator/src/...', run from repo root
-                try:
-                    repo_root = Path(__file__).resolve().parents[3]
-                    cwd = str(repo_root)
-                except Exception:
-                    cwd = None
+        try:
+            # Use the project root as the working directory
+            project_root = Path(__file__).resolve().parents[3]  # bridges -> src -> orchestrator -> project_root
+            cwd = str(project_root)
+            print(f"Setting Claude working directory to project root: {cwd}")
+        except Exception:
+            cwd = None
         
         # Execute the command
         process = await asyncio.create_subprocess_exec(

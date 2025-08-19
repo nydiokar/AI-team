@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-# Add project root (which contains the `src` package) to path
+# Add `orchestrator` (parent of `src`) to sys.path so `src` is importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.orchestrator import TaskOrchestrator
@@ -41,7 +41,7 @@ created: {datetime.now().isoformat()}
 # E2E Watcher Smoke
 
 **Target Files:**
-- orchestrator/src/orchestrator.py
+- src/orchestrator.py
 
 **Prompt:**
 Summarize the orchestrator file. Do not write any changes.
@@ -58,21 +58,24 @@ Watcher E2E smoke test.
     # Ensure logging is configured for tests to capture events
     import logging
     from config import config as app_config
+    # Ensure logs directory exists for FileHandler
+    logs_dir = Path(app_config.system.logs_dir)
+    logs_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=getattr(logging, app_config.system.log_level),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(Path(app_config.system.logs_dir) / "orchestrator.log")
+            logging.FileHandler(logs_dir / "orchestrator.log")
         ]
     )
 
     # Start orchestrator
     await orchestrator.start()
 
-    # Wait up to 60s for artifacts
-    results_dir = Path(orchestrator.file_watcher.watch_directory).parent / "results"
-    summaries_dir = Path(orchestrator.file_watcher.watch_directory).parent / "summaries"
+    # Wait up to 60s for artifacts (use configured directories)
+    results_dir = Path(app_config.system.results_dir)
+    summaries_dir = Path(app_config.system.summaries_dir)
 
     ok = False
     for _ in range(60):
@@ -89,6 +92,13 @@ Watcher E2E smoke test.
     await orchestrator.stop()
 
     if ok:
+        # Print summary content for verification
+        summary_content = summary_txt.read_text(encoding="utf-8") if summary_txt.exists() else "No summary found"
+        print("\nSummary content preview:")
+        print("-" * 40)
+        print(summary_content[:500] + "..." if len(summary_content) > 500 else summary_content)
+        print("-" * 40)
+        
         print("OK: Artifacts created for E2E watcher smoke test")
         return True
     else:

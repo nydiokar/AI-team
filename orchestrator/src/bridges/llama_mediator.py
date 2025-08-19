@@ -27,9 +27,7 @@ class LlamaMediator(ILlamaMediator):
         if self.ollama_available:
             try:
                 import ollama
-                self.client = ollama.Client(
-                    host=f"http://{config.llama.host}:{config.llama.port}"
-                )
+                self.client = ollama.Client(host=f"http://{config.llama.host}:{config.llama.port}")
                 self.model_installed = self._is_model_installed(config.llama.model)
                 logger.info("LLAMA/Ollama client initialized successfully")
             except ImportError:
@@ -228,22 +226,35 @@ class LlamaMediator(ILlamaMediator):
             return self._create_prompt_with_template(parsed_task)
     
     def _create_prompt_with_template(self, parsed_task: Dict[str, Any]) -> str:
-        """Create prompt using a template"""
+        """Create prompt using a template (task-type aware)"""
         
-        template = f"""Task: {parsed_task['type'].upper()} - {parsed_task['title']}
+        task_type = (parsed_task.get('type') or 'analyze').lower()
+        
+        header = f"""Task: {task_type.upper()} - {parsed_task['title']}
 
 Priority: {parsed_task['priority'].upper()}
 
 Description:
 {parsed_task['main_request']}"""
         
+        files_block = ""
         if parsed_task['target_files']:
-            template += f"""
+            files_block = f"""
 
 Target Files:
 {chr(10).join('- ' + f for f in parsed_task['target_files'])}"""
         
-        template += """
+        if task_type in ("summarize", "code_review"):
+            body = """
+
+Please:
+1. Read the specified files
+2. Provide a concise {} of the content with key insights
+3. Do not modify any files or execute commands
+4. Note any limitations encountered
+""".format("summary" if task_type == "summarize" else "code review")
+        else:
+            body = """
 
 Please:
 1. Analyze the current state of the specified files
@@ -251,10 +262,12 @@ Please:
 3. Provide a clear summary of what was accomplished
 4. Note any issues or limitations encountered
 5. Ensure all changes are properly tested where applicable
-
+"""
+        
+        footer = """
 Focus on quality, maintainability, and following established code conventions."""
         
-        return template
+        return header + files_block + body + "\n" + footer
     
     def summarize_result(self, result: TaskResult, original_task: Task) -> str:
         """Create concise summary for user notification"""

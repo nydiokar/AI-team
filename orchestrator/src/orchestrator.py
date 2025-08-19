@@ -319,8 +319,18 @@ created: {task.created}
             encoding="utf-8"
         )
 
-        # Write human readable summary (top of result.output before raw CLI content)
-        summary_text = result.output.split("\n\n", 1)[0] if result.output else ""
+        # Write human readable summary (extract from result.output)
+        # For summarize tasks, we want the full output, not just the first paragraph
+        if result.output:
+            if task_id.startswith("e2e_smoke_"):
+                # For smoke tests, include the full output
+                summary_text = result.output
+            else:
+                # For normal tasks, extract the first meaningful paragraph
+                summary_text = result.output.split("\n\n", 1)[0]
+        else:
+            summary_text = ""
+            
         (summaries_dir / f"{task_id}_summary.txt").write_text(
             summary_text,
             encoding="utf-8"

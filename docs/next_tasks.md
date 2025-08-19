@@ -1,6 +1,6 @@
-## Next 7 tasks to advance the project
+## Next 7 tasks to advance the project - DONE 
 
-- **1) Harden Claude permissions by task type**
+- **1) Harden Claude permissions by task type** - DONE 
   - Goal: enforce least-privilege tool use per `TaskType`.
   - Edits: `orchestrator/src/bridges/claude_bridge.py`.
   - Changes:
@@ -8,19 +8,19 @@
     - `CODE_REVIEW|SUMMARIZE` → `Read,LS,Grep,Glob` (no write).
   - Done when: tool sets match expectations in a smoke run.
 
-- **2) Persist artifacts for every run**
+- **2) Persist artifacts for every run** - DONE 
   - Goal: save raw CLI JSON/stdout/stderr and human summary.
   - Edits: `orchestrator/src/orchestrator.py`.
   - Changes: write `results/{task_id}.json` and `summaries/{task_id}_summary.txt` after each run.
   - Done when: files are created with non-empty content.
 
-- **3) Structured logging at key pipeline steps**
+- **3) Structured logging at key pipeline steps** - DONE 
   - Goal: actionable logs for ops/debugging.
   - Edits: `orchestrator/src/orchestrator.py`.
   - Changes: log `task_received`, `parsed`, `claude_started`, `claude_finished`, `summarized`, `artifacts_written` with task metadata.
   - Done when: logs show all steps for a run.
 
-- **4) End-to-end watcher smoke test**
+- **4) End-to-end watcher smoke test** - DONE 
   - Goal: verify watcher→parse→Claude→artifacts works in real mode.
   - Edits: add a test (e.g., `orchestrator/tests/test_watcher_e2e.py`).
   - Changes: create a temp `.task.md` (read-only), start the orchestrator, wait for result, assert artifacts exist, stop.
@@ -94,3 +94,43 @@
   - Edits: `docs/README.md`, `docs/QUICK_START.md`.
   - Changes: add Telegram env/config, describe events file, log rotation, and Windows service/process supervision pointers.
   - Done when: docs clearly describe env vars and operational artifacts.
+
+
+## Next 7 tasks (Refinements for usability, validation, and ops)
+
+- **1) Keep human summaries concise (no raw JSON dump)**
+  - Goal: make `summaries/*.txt` readable and stable for users.
+  - Edits: `orchestrator/src/orchestrator.py`.
+  - Changes: write only the human-readable summary (top block); never append Claude raw JSON to summaries. Raw stays in `results/*.json -> parsed_output.result`.
+  - Done when: new E2E run produces summaries without embedded JSON blocks.
+
+- **2) Basic validation guard (claims vs evidence)**
+  - Goal: catch obvious hallucinations (e.g., claims of edits when none happened).
+  - Edits: `orchestrator/src/orchestrator.py`.
+  - Changes: add `validation` field to results JSON with `valid: bool`, `reasons: list[str]`; flag when `files_modified` is empty but output claims modifications.
+  - Done when: task with such claims is flagged and `validation.valid == false` with a reason.
+
+- **3) Archive processed tasks to avoid reprocessing clutter**
+  - Goal: keep `tasks/` tidy and prevent re-queuing on startup.
+  - Edits: `orchestrator/src/core/file_watcher.py`, `orchestrator/src/orchestrator.py`, `orchestrator/main.py`.
+  - Changes: after completion, move the `.task.md` to `tasks/processed/{id}.{status}.task.md`; on startup, skip files already present in `processed/`.
+  - Done when: after a run, the created task is moved and is not reprocessed on next start.
+
+- **4) E2E test hygiene and stronger assertions**
+  - Goal: keep tests self-cleaning and assert real content.
+  - Edits: `orchestrator/tests/test_watcher_e2e.py`.
+  - Changes: delete/archive the temp task after success; assert that summary contains non-trivial content (e.g., keywords from `orchestrator.py`), not just status lines.
+  - Done when: test passes and `tasks/` remains uncluttered between runs.
+
+
+- **6) CLI maintenance commands**
+  - Goal: easy housekeeping for artifacts and tasks.
+  - Edits: `orchestrator/main.py`.
+  - Changes: add `clean` commands: `clean tasks` (move/delete old tasks), `clean artifacts --days N`, `status` already exists.
+  - Done when: `python orchestrator/main.py clean tasks` archives old tasks and `clean artifacts` prunes old results/summaries.
+
+- **7) Prompt policy: pass-through with minimal framing**
+  - Goal: let Claude use its natural navigation; avoid over-instruction.
+  - Edits: `docs/QUICK_START.md`, `docs/README.md`.
+  - Changes: document the policy to pass the task prompt verbatim, run from repo root, use read-only tools for summarize/review, and rely on validation + results JSON for guardrails.
+  - Done when: docs reflect the simple, reliable prompt strategy and reference validation.
