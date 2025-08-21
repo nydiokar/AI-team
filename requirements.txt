@@ -1,4 +1,4 @@
-python-telegram-bot==20.7
+telegraf==1.35.3
 ollama==0.1.7
 watchdog==3.0.0
 pydantic==2.5.0

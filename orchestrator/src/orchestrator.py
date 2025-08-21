@@ -19,6 +19,7 @@ from core import (
 )
 from bridges import ClaudeBridge, LlamaMediator
 from config import config
+from validation.engine import ValidationEngine
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         }
         
         logger.info("TaskOrchestrator initialized")
+        self.validation_engine = ValidationEngine()
+        # Ensure logs directory exists for event emission
+        try:
+            Path(config.system.logs_dir).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
     
     async def start(self):
         """Start all system components"""
@@ -131,6 +138,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """Handle detection of new task file"""
         try:
             logger.info(f"event=task_received file={file_path}")
+            self._emit_event("task_received", None, {"file": file_path})
             
             # Validate task file format
             errors = self.task_parser.validate_task_format(file_path)
@@ -141,7 +149,15 @@ class TaskOrchestrator(ITaskOrchestrator):
             # Parse task
             task = self.task_parser.parse_task_file(file_path)
             task.status = TaskStatus.PENDING
+            # Track source file path for post-processing archival
+            try:
+                if getattr(task, "metadata", None) is None:
+                    task.metadata = {}
+                task.metadata["__file_path"] = file_path
+            except Exception:
+                pass
             logger.info(f"event=parsed task_id={task.id} type={task.type.value} priority={task.priority.value}")
+            self._emit_event("parsed", task)
             
             # Add to queue
             await self.task_queue.put(task)
@@ -165,6 +181,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 )
                 
                 logger.info(f"event=claude_started worker={worker_name} task_id={task.id}")
+                self._emit_event("claude_started", task, {"worker": worker_name})
                 
                 # Process the task
                 result = await self.process_task(task)
@@ -178,13 +195,36 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # Log completion
                 status = "SUCCESS" if result.success else "FAILED"
                 logger.info(f"event=claude_finished task_id={task.id} status={status} duration_s={result.execution_time:.2f}")
+                self._emit_event("claude_finished", task, {"status": status, "duration_s": result.execution_time})
                 
                 # Write artifacts
                 try:
                     self._write_artifacts(task.id, result)
                     logger.info(f"event=artifacts_written task_id={task.id}")
+                    self._emit_event("artifacts_written", task)
                 except Exception as e:
                     logger.error(f"event=artifacts_error task_id={task.id} error={e}")
+                    self._emit_event("artifacts_error", task, {"error": str(e)})
+
+                # Archive processed task file to avoid reprocessing
+                try:
+                    source_path_str = None
+                    if getattr(task, "metadata", None):
+                        source_path_str = task.metadata.get("__file_path")
+                    if source_path_str:
+                        source_path = Path(source_path_str)
+                        processed_dir = Path(config.system.tasks_dir) / "processed"
+                        processed_dir.mkdir(parents=True, exist_ok=True)
+                        target_name = f"{task.id}.{task.status.value}.task.md"
+                        target_path = processed_dir / target_name
+                        # Only move if source exists and is not already in processed
+                        if source_path.exists() and source_path.parent != processed_dir:
+                            source_path.replace(target_path)
+                            logger.info(f"event=task_archived task_id={task.id} to={target_path}")
+                            self._emit_event("task_archived", task, {"to": str(target_path)})
+                except Exception as e:
+                    logger.warning(f"event=task_archive_failed task_id={task.id} error={e}")
+                    self._emit_event("task_archive_failed", task, {"error": str(e)})
                 
                 # Mark task as done in queue
                 self.task_queue.task_done()
@@ -234,6 +274,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 
                 if error_class == "transient" and attempt <= max_retries and not result.success:
                     logger.warning(f"event=retry task_id={task.id} attempt={attempt} class=transient delay_s={retry_delay}")
+                    self._emit_event("retry", task, {"attempt": attempt, "class": "transient", "delay_s": retry_delay})
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2
                     last_result = result
@@ -247,7 +288,41 @@ class TaskOrchestrator(ITaskOrchestrator):
             summary = self.llama_mediator.summarize_result(last_result, task)
             last_result.output = summary + "\n\n" + last_result.output
             logger.info(f"event=summarized task_id={task.id}")
+            self._emit_event("summarized", task)
             
+            # Step 5: Validation pass (MVP)
+            try:
+                validation_summary = {
+                    "llama": self.validation_engine.validate_llama_output(
+                        input_text=task.prompt or "",
+                        output=last_result.output or "",
+                        task_type=task.type,
+                    ).__dict__,
+                    "result": self.validation_engine.validate_task_result(
+                        result=last_result,
+                        expected_files=task.target_files or [],
+                    ).__dict__,
+                }
+                # Attach lightweight validation data into parsed_output for artifacts
+                if isinstance(last_result.parsed_output, dict):
+                    last_result.parsed_output.setdefault("validation", validation_summary)
+                else:
+                    last_result.parsed_output = {"content": last_result.output, "validation": validation_summary}
+                # Also surface at top level for artifact visibility
+                setattr(last_result, "validation", validation_summary)
+                logger.info(
+                    f"event=validated task_id={task.id} "
+                    f"valid_llama={validation_summary['llama']['valid']} "
+                    f"valid_result={validation_summary['result']['valid']}"
+                )
+                self._emit_event("validated", task, {
+                    "valid_llama": validation_summary["llama"]["valid"],
+                    "valid_result": validation_summary["result"]["valid"],
+                })
+            except Exception as _:
+                # Non-fatal; continue
+                pass
+
             return last_result
             
         except Exception as e:
@@ -307,6 +382,7 @@ created: {task.created}
             "raw_stdout": result.raw_stdout,
             "raw_stderr": result.raw_stderr,
             "parsed_output": result.parsed_output,
+            "validation": getattr(result, "validation", None),
             "retry": {
                 "retries": getattr(result, "retries", 0),
                 "error_class": getattr(result, "error_class", ""),
@@ -351,6 +427,30 @@ created: {task.created}
             if marker in text_lower:
                 return "transient"
         return "fatal"
+
+    def _emit_event(self, name: str, task: Optional[Task] = None, extra: Optional[Dict[str, Any]] = None) -> None:
+        """Append a single NDJSON event line to logs/events.ndjson"""
+        try:
+            event_path = Path(config.system.logs_dir) / "events.ndjson"
+            payload: Dict[str, Any] = {
+                "timestamp": datetime.now().isoformat(),
+                "event": name,
+            }
+            if task is not None:
+                payload.update({
+                    "task_id": task.id,
+                    "task_type": getattr(task.type, "value", str(task.type)),
+                    "priority": getattr(task.priority, "value", str(task.priority)),
+                    "status": getattr(task.status, "value", str(task.status)),
+                })
+            if extra:
+                payload.update(extra)
+            import json
+            with event_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            # Do not fail the pipeline on telemetry errors
+            pass
     
     # Simulation execution removed: system now always runs real Claude Code CLI
     

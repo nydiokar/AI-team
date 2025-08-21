@@ -132,14 +132,18 @@ class ClaudeBridge(IClaudeBridge):
         return "\n".join(parts)
     
     def _get_allowed_tools_for_task(self, task_type) -> List[str]:
-        """Get allowed tools based on task type (least-privilege)"""
-        if task_type in (TaskType.FIX, TaskType.ANALYZE):
+        """Get allowed tools based on task type (least-privilege).
+
+        Accepts either a TaskType enum (from any import path) or a string.
+        We normalize to a lowercase string to avoid enum identity issues across modules.
+        """
+        type_value = getattr(task_type, "value", str(task_type)).lower()
+        if type_value in ("fix", "analyze"):
             return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]
-        elif task_type in (TaskType.CODE_REVIEW, TaskType.SUMMARIZE):
+        if type_value in ("code_review", "summarize"):
             return ["Read", "LS", "Grep", "Glob"]
-        else:
-            # Default to safe read-only if unknown
-            return ["Read", "LS", "Grep", "Glob"]
+        # Default to safe read-only if unknown
+        return ["Read", "LS", "Grep", "Glob"]
     
     async def _execute_command(self, command: List[str], target_files: List[str]) -> Dict[str, Any]:
         """Execute Claude command asynchronously"""
