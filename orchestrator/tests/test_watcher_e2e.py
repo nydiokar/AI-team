@@ -99,11 +99,35 @@ Watcher E2E smoke test.
         print(summary_content[:500] + "..." if len(summary_content) > 500 else summary_content)
         print("-" * 40)
         
-        print("OK: Artifacts created for E2E watcher smoke test")
+        # Stronger assertions: concise human-readable summary (no raw JSON dump) and results JSON has validation
+        import json
+        data = json.loads(result_json.read_text(encoding="utf-8"))
+        assert isinstance(data.get("validation"), (dict, type(None)))
+        # Summary should be non-trivial text and not a JSON blob
+        assert len(summary_content.strip()) >= 50
+        assert "{" not in summary_content[:500] and "}\n" not in summary_content[:500]
+        print("OK: Artifacts created and validated for E2E watcher smoke test")
+        
+        # Cleanup: move processed task to processed/ (or ensure it's already archived)
+        processed_dir = tasks_dir / "processed"
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        if task_file.exists():
+            # If not auto-archived, move it
+            target = processed_dir / f"{task_id}.completed.task.md"
+            try:
+                task_file.replace(target)
+            except Exception:
+                pass
         return True
     else:
         print("FAIL: Artifacts not found within timeout")
         return False
+
+
+def test_e2e_watcher():
+    """Pytest test function for E2E watcher smoke test"""
+    success = asyncio.run(run_e2e_watcher_test())
+    assert success, "E2E watcher test failed"
 
 
 if __name__ == "__main__":

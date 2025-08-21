@@ -119,6 +119,15 @@ class ValidationEngine(IValidationEngine):
             # This is not necessarily invalid for summarize/review, but for fix/analyze it can be
             issues.append("no_files_modified_but_success")
 
+        # Detect claims of modifications without evidence of files_modified
+        text = (result.output or "").lower()
+        claims_edit_markers = [
+            "modified:", "edited:", "updated:", "created:",
+            "apply patch", "applied patch", "wrote", "changes saved",
+        ]
+        if not result.files_modified and any(marker in text for marker in claims_edit_markers):
+            issues.append("claims_modifications_without_evidence")
+
         valid = len(issues) == 0
         # We do not compute similarity here; keep it 0.0 for the structure check
         return ValidationResult(valid=valid, similarity=0.0, entropy=entropy, issues=issues)

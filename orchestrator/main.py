@@ -6,6 +6,7 @@ import asyncio
 import signal
 import sys
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # Add src to path
@@ -14,14 +15,20 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from src.orchestrator import TaskOrchestrator
 from config import config
 
-# Configure logging
+# Configure logging with rotation for file handler
+logs_dir = Path(config.system.logs_dir)
+logs_dir.mkdir(parents=True, exist_ok=True)
+file_handler = RotatingFileHandler(
+    logs_dir / "orchestrator.log",
+    maxBytes=1_000_000,  # ~1MB
+    backupCount=3,
+    encoding="utf-8"
+)
+stream_handler = logging.StreamHandler()
 logging.basicConfig(
     level=getattr(logging, config.system.log_level),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(Path(config.system.logs_dir) / "orchestrator.log")
-    ]
+    handlers=[stream_handler, file_handler]
 )
 
 logger = logging.getLogger(__name__)
@@ -132,17 +139,22 @@ def main():
     
     if len(sys.argv) > 1:
         command = sys.argv[1]
-        
+        # Maintenance commands
+        if command == "clean":
+            _handle_clean(sys.argv[2:])
+            return
         if command == "status":
             asyncio.run(show_status())
-        elif command == "create-sample":
+            return
+        if command == "create-sample":
             asyncio.run(create_sample_task())
-        elif command == "help":
+            return
+        if command == "help":
             print_help()
-        else:
-            print(f"Unknown command: {command}")
-            print_help()
-            sys.exit(1)
+            return
+        print(f"Unknown command: {command}")
+        print_help()
+        sys.exit(1)
     else:
         # Default: start the orchestrator
         cli = OrchestratorCLI()
@@ -156,6 +168,8 @@ Usage:
     python main.py                 Start the orchestrator
     python main.py status          Show component status
     python main.py create-sample   Create a sample task for testing
+    python main.py clean tasks     Archive loose tasks to tasks/processed
+    python main.py clean artifacts --days N   Delete results/summaries older than N days
     python main.py help            Show this help
 
 Environment Setup:
@@ -172,6 +186,57 @@ Directory Structure:
 
 For full functionality, ensure Claude Code CLI is installed and accessible.
 """)
+
+def _handle_clean(args):
+    """Handle maintenance clean commands"""
+    if not args:
+        print("Usage: python main.py clean [tasks|artifacts] [--days N]")
+        return
+    action = args[0]
+    if action == "tasks":
+        _clean_tasks()
+        print("Archived loose tasks to tasks/processed")
+        return
+    if action == "artifacts":
+        days = 30
+        # Simple flag parsing
+        if len(args) >= 3 and args[1] == "--days":
+            try:
+                days = int(args[2])
+            except Exception:
+                pass
+        n = _clean_artifacts(days)
+        print(f"Deleted {n} old artifacts older than {days} days")
+        return
+    print("Unknown clean target. Use 'tasks' or 'artifacts'.")
+
+def _clean_tasks():
+    tasks_dir = Path(config.system.tasks_dir)
+    processed = tasks_dir / "processed"
+    processed.mkdir(parents=True, exist_ok=True)
+    for p in tasks_dir.glob("*.task.md"):
+        target = processed / f"{p.stem}.archived.task.md"
+        try:
+            if p.resolve().parent != processed.resolve():
+                p.replace(target)
+        except Exception:
+            continue
+
+def _clean_artifacts(days: int) -> int:
+    from datetime import datetime, timedelta
+    cutoff = datetime.now() - timedelta(days=days)
+    removed = 0
+    for base in (Path(config.system.results_dir), Path(config.system.summaries_dir)):
+        base.mkdir(parents=True, exist_ok=True)
+        for p in base.glob("*"):
+            try:
+                mtime = datetime.fromtimestamp(p.stat().st_mtime)
+                if mtime < cutoff:
+                    p.unlink(missing_ok=True)
+                    removed += 1
+            except Exception:
+                continue
+    return removed
 
 if __name__ == "__main__":
     main()

@@ -395,15 +395,26 @@ created: {task.created}
             encoding="utf-8"
         )
 
-        # Write human readable summary (extract from result.output)
-        # For summarize tasks, we want the full output, not just the first paragraph
+        # Write human readable summary (extract the LLAMA-generated summary)
+        # LLAMA generates a summary and prepends it to result.output
         if result.output:
-            if task_id.startswith("e2e_smoke_"):
-                # For smoke tests, include the full output
-                summary_text = result.output
-            else:
-                # For normal tasks, extract the first meaningful paragraph
-                summary_text = result.output.split("\n\n", 1)[0]
+            # The LLAMA summary is prepended to the output, separated by double newlines
+            # So we take everything before the first double newline as the summary
+            summary_text = result.output.split("\n\n", 1)[0]
+            
+            # If the summary is too short (just a title), try to get more content
+            if len(summary_text.strip()) < 50:
+                # Look for the actual summary content after the title
+                paragraphs = result.output.split("\n\n")
+                if len(paragraphs) > 1:
+                    # Take first 2-3 paragraphs that look like actual content
+                    meaningful_paras = []
+                    for para in paragraphs[1:4]:  # Skip first (title), take next 3
+                        para = para.strip()
+                        if para and len(para) > 30 and not para.startswith("#"):
+                            meaningful_paras.append(para)
+                    if meaningful_paras:
+                        summary_text = "\n\n".join(meaningful_paras)
         else:
             summary_text = ""
             
