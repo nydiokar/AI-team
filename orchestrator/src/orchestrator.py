@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import uuid
+import random
 
 import sys
 import os
@@ -48,6 +49,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             "llama_available": False,
             "file_watcher_running": False
         }
+        # In-memory lock to prevent duplicate processing of the same task file
+        self._inflight_paths: set[str] = set()
         
         logger.info("TaskOrchestrator initialized")
         self.validation_engine = ValidationEngine()
@@ -56,6 +59,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             Path(config.system.logs_dir).mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
+        # Queue persistence
+        self._state_path = Path(config.system.logs_dir) / "state.json"
+        self._pending_files: set[str] = set()
+        self._load_state()
     
     async def start(self):
         """Start all system components"""
@@ -68,16 +75,30 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Check component availability
         await self._check_component_status()
         
-        # Start file watcher
-        await self.file_watcher.start_async(self._handle_new_task_file)
-        self.component_status["file_watcher_running"] = True
-        
+        # Mark running BEFORE starting workers so they don't immediately exit
+        self.running = True
+
         # Start task processing workers
         for i in range(config.system.max_concurrent_tasks):
             worker = asyncio.create_task(self._task_worker(f"worker-{i}"))
             self.worker_tasks.append(worker)
-        
-        self.running = True
+
+        # Resume pending before starting watcher to avoid duplicate/racy processing
+        try:
+            for file_path in list(self._pending_files):
+                p = Path(file_path)
+                processed_dir = Path(config.system.tasks_dir) / "processed"
+                if p.exists() and p.parent != processed_dir:
+                    await self._handle_new_task_file(file_path)
+                else:
+                    self._pending_files.discard(file_path)
+            self._save_state()
+        except Exception as e:
+            logger.warning(f"event=state_resume_failed error={e}")
+
+        # Start file watcher after resuming pending
+        await self.file_watcher.start_async(self._handle_new_task_file)
+        self.component_status["file_watcher_running"] = True
         
         # Log startup status
         self._log_startup_status()
@@ -133,10 +154,44 @@ class TaskOrchestrator(ITaskOrchestrator):
         
         for line in status_lines:
             logger.info(line)
+
+    def _load_state(self) -> None:
+        """Load pending state from logs/state.json"""
+        try:
+            if self._state_path.exists():
+                import json
+                data = json.loads(self._state_path.read_text(encoding="utf-8"))
+                pending = data.get("pending_files", [])
+                if isinstance(pending, list):
+                    self._pending_files = set(map(str, pending))
+        except Exception as e:
+            logger.warning(f"event=state_load_failed error={e}")
+
+    def _save_state(self) -> None:
+        """Persist minimal pending state to logs/state.json"""
+        try:
+            import json
+            payload = {
+                "pending_files": sorted(self._pending_files),
+                "updated": datetime.now().isoformat(),
+            }
+            self._state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"event=state_save_failed error={e}")
     
     async def _handle_new_task_file(self, file_path: str):
         """Handle detection of new task file"""
         try:
+            # Acquire per-file lock; skip if already processing
+            path_key = str(file_path)
+            if path_key in self._inflight_paths:
+                logger.info(f"event=task_skipped reason=already_inflight file={file_path}")
+                return
+            self._inflight_paths.add(path_key)
+            # Track as pending for persistence
+            self._pending_files.add(path_key)
+            self._save_state()
+
             logger.info(f"event=task_received file={file_path}")
             self._emit_event("task_received", None, {"file": file_path})
             
@@ -144,6 +199,17 @@ class TaskOrchestrator(ITaskOrchestrator):
             errors = self.task_parser.validate_task_format(file_path)
             if errors:
                 logger.error(f"Invalid task file format: {errors}")
+                # Remove from pending if file is gone or invalid
+                try:
+                    self._pending_files.discard(path_key)
+                    self._save_state()
+                except Exception:
+                    pass
+                # Release lock on invalid format to allow future corrections
+                try:
+                    self._inflight_paths.discard(path_key)
+                except Exception:
+                    pass
                 return
             
             # Parse task
@@ -167,6 +233,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             
         except Exception as e:
             logger.error(f"Error processing task file {file_path}: {e}")
+            # Best-effort release of lock on exception
+            try:
+                self._inflight_paths.discard(str(file_path))
+            except Exception:
+                pass
     
     async def _task_worker(self, worker_name: str):
         """Worker coroutine that processes tasks from the queue"""
@@ -225,6 +296,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 except Exception as e:
                     logger.warning(f"event=task_archive_failed task_id={task.id} error={e}")
                     self._emit_event("task_archive_failed", task, {"error": str(e)})
+                finally:
+                    # Release in-flight lock now that processing is complete
+                    try:
+                        if getattr(task, "metadata", None):
+                            self._inflight_paths.discard(task.metadata.get("__file_path", ""))
+                            # Clear pending and persist
+                            self._pending_files.discard(task.metadata.get("__file_path", ""))
+                            self._save_state()
+                    except Exception:
+                        pass
                 
                 # Mark task as done in queue
                 self.task_queue.task_done()
@@ -261,8 +342,9 @@ class TaskOrchestrator(ITaskOrchestrator):
             
             # Step 3: Execute with Claude Code with limited retries on transient errors
             logger.debug(f"Step 3: Executing task {task.id} with Claude Code")
-            max_retries = 2
-            retry_delay = 2.0
+            max_retries = getattr(config.validation, "max_retries", 2)
+            retry_delay = 1.0
+            backoff_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
             attempt = 0
             last_result: Optional[TaskResult] = None
             while True:
@@ -273,10 +355,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                 result.retries = attempt - 1
                 
                 if error_class == "transient" and attempt <= max_retries and not result.success:
-                    logger.warning(f"event=retry task_id={task.id} attempt={attempt} class=transient delay_s={retry_delay}")
-                    self._emit_event("retry", task, {"attempt": attempt, "class": "transient", "delay_s": retry_delay})
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
+                    jitter = random.uniform(0.75, 1.5)
+                    delay = retry_delay * jitter
+                    logger.warning(f"event=retry task_id={task.id} attempt={attempt} class=transient delay_s={delay:.2f}")
+                    self._emit_event("retry", task, {"attempt": attempt, "class": "transient", "delay_s": delay})
+                    await asyncio.sleep(delay)
+                    retry_delay *= backoff_mult
                     last_result = result
                     continue
                 else:
@@ -457,8 +541,33 @@ created: {task.created}
             if extra:
                 payload.update(extra)
             import json
+            # Write event line
             with event_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            
+            # Simple size-based rotation (~1MB, keep 3 backups)
+            try:
+                max_bytes = 1_000_000
+                backup_count = 3
+                if event_path.stat().st_size > max_bytes:
+                    # Rotate: events.ndjson -> events.ndjson.1, .1 -> .2, etc.
+                    for idx in range(backup_count - 1, 0, -1):
+                        src = event_path.with_suffix(event_path.suffix + f".{idx}")
+                        dst = event_path.with_suffix(event_path.suffix + f".{idx+1}")
+                        if src.exists():
+                            try:
+                                src.replace(dst)
+                            except Exception:
+                                pass
+                    # Move current to .1 and recreate empty base file
+                    first_backup = event_path.with_suffix(event_path.suffix + ".1")
+                    try:
+                        event_path.replace(first_backup)
+                        event_path.touch()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         except Exception:
             # Do not fail the pipeline on telemetry errors
             pass
@@ -501,9 +610,17 @@ created: {datetime.now().isoformat()}
 Generated from user description: {description}
 """
         
-        # Write task file
-        task_file = Path(config.system.tasks_dir) / f"{task_id}.task.md"
-        task_file.write_text(task_content, encoding='utf-8')
+        # Write task file atomically: write to tmp then rename to final
+        tasks_dir = Path(config.system.tasks_dir)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        task_file = tasks_dir / f"{task_id}.task.md"
+        tmp_file = tasks_dir / f".{task_id}.task.tmp"
+        tmp_file.write_text(task_content, encoding='utf-8')
+        try:
+            tmp_file.replace(task_file)
+        except Exception:
+            # Fallback to writing directly if replace fails
+            task_file.write_text(task_content, encoding='utf-8')
         
         logger.info(f"Created task file: {task_file}")
         return task_id

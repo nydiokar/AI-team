@@ -5,8 +5,9 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Callable, Optional
+import time
 from watchdog.observers import Observer as WatchdogObserver
-from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileModifiedEvent
+from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileModifiedEvent, FileMovedEvent
 
 from .interfaces import IFileWatcher
 
@@ -19,18 +20,47 @@ class TaskFileHandler(FileSystemEventHandler):
         self.callback = callback
         self.loop = loop
         self.processed_files = set()  # Track processed files to avoid duplicates
+        self._last_event_ts: dict[str, float] = {}
+        self._debounce_seconds: float = 0.25
         
     def on_created(self, event):
         """Handle file creation events"""
         if not event.is_directory and self._is_task_file(event.src_path):
-            self._process_file(event.src_path)
+            self._debounced_process(event.src_path)
     
     def on_modified(self, event):
         """Handle file modification events"""
         if not event.is_directory and self._is_task_file(event.src_path):
             # Only process if not already processed
             if event.src_path not in self.processed_files:
-                self._process_file(event.src_path)
+                self._debounced_process(event.src_path)
+
+    def on_moved(self, event):
+        """Handle file move/rename events (atomic tmp -> final)."""
+        if not event.is_directory:
+            dest_path = getattr(event, "dest_path", None)
+            if dest_path and self._is_task_file(dest_path):
+                if dest_path not in self.processed_files:
+                    self._debounced_process(dest_path)
+
+    def _debounced_process(self, file_path: str) -> None:
+        now = time.time()
+        self._last_event_ts[file_path] = now
+        # Schedule safely from watchdog thread into asyncio loop, then set a delayed check
+        def _schedule_in_loop() -> None:
+            def _maybe_process() -> None:
+                ts = self._last_event_ts.get(file_path, 0.0)
+                if time.time() - ts >= self._debounce_seconds:
+                    self._process_file(file_path)
+            self.loop.call_later(self._debounce_seconds, _maybe_process)
+        try:
+            self.loop.call_soon_threadsafe(_schedule_in_loop)
+        except Exception:
+            # Fallback if loop isn't available
+            time.sleep(self._debounce_seconds)
+            ts = self._last_event_ts.get(file_path, 0.0)
+            if time.time() - ts >= self._debounce_seconds:
+                self._process_file(file_path)
     
     def _is_task_file(self, file_path: str) -> bool:
         """Check if file is a task file"""
@@ -126,7 +156,7 @@ class FileWatcher(IFileWatcher):
                 
                 for task_file in task_files:
                     if self.handler:
-                        self.handler._process_file(str(task_file))
+                        self.handler._debounced_process(str(task_file))
             else:
                 logger.info("No existing task files found")
                 

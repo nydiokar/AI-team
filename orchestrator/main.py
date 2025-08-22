@@ -146,6 +146,9 @@ def main():
         if command == "status":
             asyncio.run(show_status())
             return
+        if command == "stats":
+            _print_stats()
+            return
         if command == "create-sample":
             asyncio.run(create_sample_task())
             return
@@ -167,6 +170,7 @@ def print_help():
 Usage:
     python main.py                 Start the orchestrator
     python main.py status          Show component status
+    python main.py stats           Show metrics from logs/events.ndjson
     python main.py create-sample   Create a sample task for testing
     python main.py clean tasks     Archive loose tasks to tasks/processed
     python main.py clean artifacts --days N   Delete results/summaries older than N days
@@ -237,6 +241,72 @@ def _clean_artifacts(days: int) -> int:
             except Exception:
                 continue
     return removed
+
+def _print_stats():
+    """Compute and print lightweight metrics from logs/events.ndjson"""
+    import json
+    from datetime import datetime
+    from statistics import median
+
+    events_path = Path(config.system.logs_dir) / "events.ndjson"
+    if not events_path.exists():
+        print("No events found. Run the orchestrator to generate events.")
+        return
+
+    total_tasks = 0
+    successes = 0
+    failures = 0
+    durations = []
+    first_ts = None
+    last_ts = None
+
+    with events_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            # timestamps
+            try:
+                ts = datetime.fromisoformat(ev.get("timestamp", ""))
+                if ts:
+                    first_ts = ts if first_ts is None else min(first_ts, ts)
+                    last_ts = ts if last_ts is None else max(last_ts, ts)
+            except Exception:
+                pass
+            if ev.get("event") == "claude_finished":
+                total_tasks += 1
+                status = ev.get("status", "").upper()
+                if status == "SUCCESS":
+                    successes += 1
+                elif status == "FAILED":
+                    failures += 1
+                dur = ev.get("duration_s")
+                if isinstance(dur, (int, float)):
+                    durations.append(float(dur))
+
+    if total_tasks == 0:
+        print("No completed tasks found in events.")
+        return
+
+    success_rate = (successes / total_tasks) * 100.0 if total_tasks else 0.0
+    d_sorted = sorted(durations)
+    def pct(p: float) -> float:
+        if not d_sorted:
+            return 0.0
+        idx = max(0, min(len(d_sorted) - 1, int(round((p/100.0) * (len(d_sorted) - 1)))))
+        return d_sorted[idx]
+
+    print("Metrics (from logs/events.ndjson)")
+    print("=================================")
+    if first_ts and last_ts:
+        print(f"Window: {first_ts.isoformat()} -> {last_ts.isoformat()}")
+    print(f"Tasks: total={total_tasks} success={successes} failed={failures} success_rate={success_rate:.1f}%")
+    print("Durations (s):")
+    print(f"  p50={pct(50):.2f}  p90={pct(90):.2f}  p95={pct(95):.2f}  p99={pct(99):.2f}")
 
 if __name__ == "__main__":
     main()

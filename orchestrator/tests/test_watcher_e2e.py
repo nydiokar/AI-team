@@ -13,17 +13,32 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.orchestrator import TaskOrchestrator
 from src.core.task_parser import TaskParser
+from src.core.interfaces import TaskResult
 
 
 async def run_e2e_watcher_test():
     """Create a temp .task.md, start orchestrator, wait for artifacts, stop."""
     orchestrator = TaskOrchestrator()
 
-    # Check Claude availability; skip if not available to keep test stable
+    # Check Claude availability; if not available, stub execute_task so we still produce events
     await orchestrator._check_component_status()
     if not orchestrator.component_status.get("claude_available", False):
-        print("SKIP: Claude CLI not available; e2e watcher test skipped.")
-        return True
+        async def _fake_execute_task(task):
+            # Minimal successful result to drive pipeline and events
+            return TaskResult(
+                task_id=task.id,
+                success=True,
+                output="OK",
+                errors=[],
+                files_modified=[],
+                execution_time=0.05,
+                timestamp=datetime.now().isoformat(),
+                raw_stdout="",
+                raw_stderr="",
+                parsed_output={"content": "ok"},
+                return_code=0,
+            )
+        orchestrator.claude_bridge.execute_task = _fake_execute_task  # type: ignore
 
     # Prepare temp task file (read-only)
     tasks_dir = Path(orchestrator.file_watcher.watch_directory)

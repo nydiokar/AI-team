@@ -129,7 +129,16 @@ class ClaudeBridge(IClaudeBridge):
         if task.context:
             parts.append("\nContext:")
             parts.append(task.context)
-        return "\n".join(parts)
+        assembled = "\n".join(parts)
+        # Safety cap on prompt size to avoid CLI issues
+        try:
+            from config import config as _cfg
+            max_chars = getattr(_cfg.llama, "max_prompt_chars", 32_000)
+        except Exception:
+            max_chars = 32_000
+        if len(assembled) > max_chars:
+            assembled = assembled[:max_chars]
+        return assembled
     
     def _get_allowed_tools_for_task(self, task_type) -> List[str]:
         """Get allowed tools based on task type (least-privilege).

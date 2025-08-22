@@ -27,10 +27,11 @@ Watching for task files in: C:\Users\...\orchestrator\tasks
 
 The system will automatically:
 1. 🔍 **Detect** the test task file
-2. 🦙 **LLAMA parses** the task intelligently  
-3. 🤖 **Claude Code** modifies the actual files
+2. 🦙 **LLAMA parses** the task intelligently (or fallback parser)
+3. 🤖 **Claude Code** executes the task (least-privilege tools)
 4. 🦙 **LLAMA summarizes** the results
-5. 📁 **Saves** results and summaries
+5. ✅ **Validation** checks (lightweight sanity/structure)
+6. 📁 **Saves** results and summaries, archives the task
 
 ## 3. Check Results (after ~30-60 seconds)
 
@@ -38,15 +39,14 @@ The system will automatically:
 - `results/{task_id}.json`
 - `summaries/{task_id}_summary.txt`
 
-**Files Modified:**
-- `src/core/interfaces.py` (new exception classes added)
-- `src/core/task_parser.py` (enhanced error handling)
+**Events (NDJSON):**
+- `logs/events.ndjson` appends one line per event (e.g., `task_received`, `parsed`, `claude_started`, `summarized`, `validated`, `artifacts_written`, `task_archived`).
 
 ## 4. Verify Success
 
 Read `VERIFICATION_CONTEXT.md` for detailed verification steps.
 
-**Quick Check**: If both result files exist and source files were modified with new error handling code, the entire system is working perfectly!
+**Quick Check**: If both result files exist, the summary is non-empty, and `logs/events.ndjson` contains recent events, the system is working.
 
 ---
 

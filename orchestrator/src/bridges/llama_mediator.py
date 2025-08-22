@@ -71,7 +71,14 @@ class LlamaMediator(ILlamaMediator):
     
     def parse_task(self, task_content: str) -> Dict[str, Any]:
         """Parse task content using LLAMA or fallback to simple parsing"""
-        
+        # Enforce content size cap to avoid timeouts/memory pressure
+        max_chars = getattr(config.llama, "max_parse_chars", 200_000)
+        if len(task_content) > max_chars:
+            logger.info(
+                f"event=truncate_parse before_chars={len(task_content)} after_chars={max_chars}"
+            )
+            task_content = task_content[:max_chars]
+
         if self.ollama_available and self.client and self.model_installed:
             return self._parse_with_llama(task_content)
         else:
@@ -267,7 +274,15 @@ Please:
         footer = """
 Focus on quality, maintainability, and following established code conventions."""
         
-        return header + files_block + body + "\n" + footer
+        prompt = header + files_block + body + "\n" + footer
+        # Cap prompt size per config to keep Claude requests reliable
+        max_chars = getattr(config.llama, "max_prompt_chars", 32_000)
+        if len(prompt) > max_chars:
+            logger.info(
+                f"event=truncate_prompt before_chars={len(prompt)} after_chars={max_chars}"
+            )
+            prompt = prompt[:max_chars]
+        return prompt
     
     def summarize_result(self, result: TaskResult, original_task: Task) -> str:
         """Create concise summary for user notification"""
@@ -333,8 +348,12 @@ Duration: {result.execution_time:.1f}s
                 summary += f"\n✗ Errors: {'; '.join(result.errors[:2])}"
         
         if result.output:
-            # Extract key information from output
-            output_preview = result.output[:200].replace('\n', ' ')
+            # Extract key information from output with size cap
+            preview_source = result.output
+            max_input = getattr(config.llama, "max_summary_input_chars", 40_000)
+            if len(preview_source) > max_input:
+                preview_source = preview_source[:max_input]
+            output_preview = preview_source[:200].replace('\n', ' ')
             summary += f"\n\nOutput: {output_preview}..."
         
         return summary

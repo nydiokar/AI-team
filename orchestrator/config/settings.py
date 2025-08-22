@@ -23,6 +23,10 @@ class LlamaConfig:
     port: int = 11434
     timeout: int = 120
     context_window: int = 128000  # 128k context for llama3.2
+    # Soft caps to keep prompts within reliable size in characters
+    max_parse_chars: int = 200_000
+    max_prompt_chars: int = 32_000
+    max_summary_input_chars: int = 40_000
     
 @dataclass
 class TelegramConfig:

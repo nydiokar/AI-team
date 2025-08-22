@@ -135,6 +135,14 @@ The system automatically detects available components:
 - **LLAMA/Ollama**: Attempts `ollama list`
 - **Fallback Mode**: Uses built-in parsers if components unavailable
 
+### Prompt Policy
+
+For reliability, we use a pass-through prompt policy with minimal framing:
+- Pass the task's prompt verbatim
+- Add `Target Files:` and `Context:` when provided
+- Let Claude Code decide how to reason and which allowed tools to use
+- Guardrails are provided by validation and structured results/NDJSON, not heavy prompt instructions
+
 ## 🖥️ Production Setup
 
 ### On Your Workstation (Full Setup)
@@ -164,12 +172,15 @@ python main.py
 
 ### Logs
 - **Console**: Real-time status updates
-- **File**: `logs/orchestrator.log`
+- **File**: `logs/orchestrator.log` (rotated automatically, ~1MB x 3)
+- **Events (NDJSON)**: `logs/events.ndjson` — one line per event (`task_received`, `parsed`, `claude_started`, `claude_finished`, `summarized`, `validated`, `artifacts_written`, `task_archived`, `retry`).
 
 ### Status Commands
 ```bash
 python main.py status          # Component status
 python main.py create-sample   # Test task creation
+python main.py clean tasks                 # Archive loose tasks to tasks/processed
+python main.py clean artifacts --days 30   # Prune old results/summaries
 ```
 
 ## 🔄 Workflow Examples
