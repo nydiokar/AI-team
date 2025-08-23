@@ -187,6 +187,15 @@ def main():
         if command == "clean":
             _handle_clean(sys.argv[2:])
             return
+        if command == "validate-artifacts":
+            _validate_artifacts(sys.argv[2:])
+            return
+        if command == "create-sample-artifact":
+            _create_sample_artifact()
+            return
+        if command == "doctor":
+            _doctor()
+            return
         if command == "status":
             asyncio.run(show_status())
             return
@@ -222,6 +231,9 @@ Usage:
     python main.py test-telegram   Test Telegram interface (if configured)
     python main.py clean tasks     Archive loose tasks to tasks/processed
     python main.py clean artifacts --days N   Delete results/summaries older than N days
+    python main.py validate-artifacts        Validate results/*.json against schema
+    python main.py create-sample-artifact    Generate a sample artifact (new schema)
+    python main.py doctor                    Print effective config and CLI availability
     python main.py help            Show this help
 
 Environment Setup:
@@ -355,6 +367,186 @@ def _print_stats():
     print(f"Tasks: total={total_tasks} success={successes} failed={failures} success_rate={success_rate:.1f}%")
     print("Durations (s):")
     print(f"  p50={pct(50):.2f}  p90={pct(90):.2f}  p95={pct(95):.2f}  p99={pct(99):.2f}")
+
+def _validate_artifacts(args=None):
+    """Validate artifacts against docs/schema/results.schema.json
+
+    Usage:
+      python main.py validate-artifacts [--ignore-legacy] [glob1] [glob2] ...
+
+    By default this is strict and fails on legacy artifacts (no schema_version).
+    Use --ignore-legacy to skip those.
+    """
+    from pathlib import Path as _Path
+    import json as _json
+    import sys as _sys
+
+    schema_path = _Path("docs/schema/results.schema.json")
+    results_dir = _Path(config.system.results_dir)
+
+    if not schema_path.exists():
+        print("Schema not found: docs/schema/results.schema.json")
+        _sys.exit(1)
+    if not results_dir.exists():
+        try:
+            results_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Created results directory: {results_dir}")
+        except Exception as e:
+            print(f"Failed to create results directory {results_dir}: {e}")
+            _sys.exit(1)
+
+    try:
+        schema = _json.loads(schema_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Failed to read schema: {e}")
+        _sys.exit(1)
+
+    # Minimal validator to avoid external deps: check required keys and simple types
+    def _type_ok(value, expected):
+        if expected == "string":
+            return isinstance(value, str)
+        if expected == "boolean":
+            return isinstance(value, bool)
+        if expected == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if expected == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if expected == "object":
+            return isinstance(value, dict)
+        if expected == "array":
+            return isinstance(value, list)
+        return True
+
+    def _validate_required(doc, subschema, path_prefix="$"):
+        errors = []
+        required = subschema.get("required", [])
+        for key in required:
+            if key not in doc:
+                errors.append(f"{path_prefix}.{key}: required property missing")
+        for key, prop in subschema.get("properties", {}).items():
+            if key in doc:
+                val = doc[key]
+                expected_type = prop.get("type")
+                if isinstance(expected_type, list):
+                    # Allow any of listed types
+                    if not any(_type_ok(val, t) for t in expected_type if isinstance(t, str)):
+                        errors.append(f"{path_prefix}.{key}: invalid type")
+                elif isinstance(expected_type, str):
+                    if not _type_ok(val, expected_type):
+                        errors.append(f"{path_prefix}.{key}: expected {expected_type}")
+                # Recurse for nested objects
+                if isinstance(val, dict) and isinstance(prop.get("properties"), dict):
+                    errors.extend(_validate_required(val, prop, f"{path_prefix}.{key}"))
+        return errors
+
+    # Parse flags and patterns
+    args = args or []
+    ignore_legacy = "--ignore-legacy" in args
+    patterns = [a for a in args if not a.startswith("--")] or ["*.json"]
+
+    # Resolve matched files (support absolute/relative and results/ globs)
+    matched_files = []
+    for pat in patterns:
+        p = _Path(pat)
+        if any(ch in pat for ch in ("/", "\\", ":")):
+            matched_files.extend(sorted(p.parent.glob(p.name)))
+        else:
+            matched_files.extend(sorted(_Path(results_dir).glob(pat)))
+
+    if not matched_files:
+        print("No artifacts matched the given patterns.")
+        return
+
+    total = 0
+    ok = 0
+    failed = 0
+    skipped_legacy = 0
+    for p in matched_files:
+        total += 1
+        try:
+            doc = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"{p.name}: invalid JSON: {e}")
+            failed += 1
+            continue
+        if "schema_version" not in doc and ignore_legacy:
+            print(f"{p.name}: SKIP (legacy, no schema_version)")
+            skipped_legacy += 1
+            continue
+        errors = _validate_required(doc, schema)
+        # Extra checks: schema_version exact match if present
+        sv = doc.get("schema_version")
+        if sv != "1.0":
+            errors.append("$.schema_version: must equal '1.0'")
+        if errors:
+            print(f"{p.name}: INVALID")
+            for e in errors[:10]:
+                print(f"  - {e}")
+            if len(errors) > 10:
+                print(f"  ... and {len(errors)-10} more")
+            failed += 1
+        else:
+            print(f"{p.name}: OK")
+            ok += 1
+
+    print()
+    print(f"Validation summary: total={total} ok={ok} failed={failed} skipped_legacy={skipped_legacy}")
+    if failed:
+        _sys.exit(1)
+
+def _create_sample_artifact():
+    """Create a new-schema sample artifact via orchestrator writer."""
+    from datetime import datetime as _dt
+    from src.core.interfaces import TaskResult as _TaskResult
+
+    orch = TaskOrchestrator()
+    task_id = f"sample_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
+    tr = _TaskResult(
+        task_id=task_id,
+        success=True,
+        output="Sample Summary\n\nDetailed content...",
+        errors=[],
+        files_modified=[],
+        execution_time=0.02,
+        timestamp=_dt.now().isoformat(),
+        raw_stdout="stdout preview...\nmore lines...",
+        raw_stderr="",
+        parsed_output={"content": "ok", "meta": {"note": "sample"}},
+        return_code=0,
+    )
+    orch._write_artifacts(task_id, tr)
+    print(f"Created sample artifact: {Path(config.system.results_dir) / (task_id + '.json')}")
+
+def _doctor():
+    """Print effective configuration and check CLI availability."""
+    from shutil import which as _which
+    from subprocess import run as _run
+
+    # Reload env-derived fields to reflect current environment
+    try:
+        config.reload_from_env()
+    except Exception:
+        pass
+
+    print("Effective configuration:")
+    print(f"  CLAUDE timeout (s): {config.claude.timeout}")
+    print(f"  CLAUDE max_turns  : {config.claude.max_turns} (0=unlimited/CLI default)")
+    print(f"  Skip permissions  : {config.claude.skip_permissions}")
+    print(f"  Base CWD          : {config.claude.base_cwd}")
+    print(f"  Allowed root      : {config.claude.allowed_root}")
+
+    exe = _which("claude") or "claude"
+    print(f"\nClaude executable: {exe}")
+    try:
+        r = _run([exe, "--version"], capture_output=True, text=True, timeout=5)
+        print(f"  --version rc={r.returncode} out={r.stdout.strip()[:80]}")
+    except Exception as e:
+        print(f"  Version check failed: {e}")
+    try:
+        r2 = _run([exe, "auth", "status"], capture_output=True, text=True, timeout=5)
+        print(f"  auth status rc={r2.returncode} out={(r2.stdout or r2.stderr).strip()[:120]}")
+    except Exception as e:
+        print(f"  Auth check failed: {e}")
 
 if __name__ == "__main__":
     main()

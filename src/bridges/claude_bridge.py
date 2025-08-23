@@ -63,8 +63,12 @@ class ClaudeBridge(IClaudeBridge):
             if allowed_tools:
                 command.extend(["--allowedTools", ",".join(allowed_tools)])
 
-            # Use global max-turns from config without task-specific overrides
-            command.extend(["--max-turns", str(config.claude.max_turns)])
+            # Use global max-turns from config when > 0 (0 means unlimited/CLI default)
+            try:
+                if int(getattr(config.claude, "max_turns", 0)) > 0:
+                    command.extend(["--max-turns", str(config.claude.max_turns)])
+            except Exception:
+                pass
             
             # Add the prompt
             command.append(prompt)
@@ -260,6 +264,15 @@ class ClaudeBridge(IClaudeBridge):
         stdout = result['stdout']
         stderr = result['stderr']
         
+        # Detect interactive prompts proactively (common CLI changes)
+        interactive_markers = [
+            "Do you trust the files in this folder",
+            "trust the files",
+            "Allow this tool to edit files",
+            "Press Enter to continue",
+            "confirm to proceed",
+        ]
+
         # Try to parse JSON output if available
         parsed_output = None
         if stdout:
@@ -286,6 +299,11 @@ class ClaudeBridge(IClaudeBridge):
         if not success and not errors:
             errors.append("Command execution failed")
         
+        # Classify likely interactive block
+        text_combined = (stdout or "") + "\n" + (stderr or "")
+        if any(m in text_combined for m in interactive_markers):
+            errors.append("interactive_prompt_detected")
+
         # Try to detect modified files from output
         # This is a simple heuristic - in practice, you might want more sophisticated detection
         files_modified = []

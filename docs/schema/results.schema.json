@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/results.schema.json",
+  "title": "Task Result Artifact",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task_id",
+    "success",
+    "timestamp",
+    "execution_time",
+    "return_code",
+    "errors",
+    "files_modified",
+    "raw_stdout",
+    "raw_stderr",
+    "triage",
+    "parsed_output",
+    "retry",
+    "orchestrator",
+    "bridge",
+    "llama"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "success": { "type": "boolean" },
+    "return_code": { "type": "integer" },
+    "timestamp": { "type": "string" },
+    "execution_time": { "type": "number", "minimum": 0 },
+    "errors": { "type": "array", "items": { "type": "string" } },
+    "files_modified": { "type": "array", "items": { "type": "string" } },
+    "raw_stdout": { "type": "string" },
+    "raw_stderr": { "type": "string" },
+    "triage": {
+      "type": "object",
+      "required": ["stdout_head", "stdout_tail", "stderr_head", "stderr_tail"],
+      "properties": {
+        "stdout_head": { "type": "string" },
+        "stdout_tail": { "type": "string" },
+        "stderr_head": { "type": "string" },
+        "stderr_tail": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "parsed_output": {},
+    "validation": { "type": ["object", "null"] },
+    "retry": {
+      "type": "object",
+      "required": ["retries", "error_class"],
+      "properties": {
+        "retries": { "type": "integer", "minimum": 0 },
+        "error_class": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "orchestrator": {
+      "type": "object",
+      "required": ["components", "workers"],
+      "properties": {
+        "components": {
+          "type": "object",
+          "required": ["claude_available", "llama_available", "file_watcher_running"],
+          "properties": {
+            "claude_available": { "type": "boolean" },
+            "llama_available": { "type": "boolean" },
+            "file_watcher_running": { "type": "boolean" }
+          },
+          "additionalProperties": true
+        },
+        "workers": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "bridge": {
+      "type": "object",
+      "required": ["available", "claude_executable", "max_turns", "timeout", "skip_permissions"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "claude_executable": { "type": "string" },
+        "max_turns": { "type": "integer", "minimum": 0 },
+        "timeout": { "type": "integer", "minimum": 1 },
+        "skip_permissions": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "llama": {
+      "type": "object",
+      "required": ["ollama_available", "client_initialized", "model", "mode"],
+      "properties": {
+        "ollama_available": { "type": "boolean" },
+        "client_initialized": { "type": "boolean" },
+        "model": { "type": "string" },
+        "mode": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
+

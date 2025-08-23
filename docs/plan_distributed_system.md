@@ -3,8 +3,22 @@
 ## Architecture Overview
 
 ```
-You (Telegram) → LLAMA (Local Mediator) → Claude Code (Remote Executor) → Results → LLAMA → You
+You (Telegram) → LLAMA (Intelligent Mediator) → Claude Code (Remote Executor) → Results → LLAMA → You
 ```
+
+**Key Insight: LLAMA is the "brain" that mediates between user intent and Claude's execution**
+
+### LLAMA's Mediation Role
+1. **Pre-emptive Problem Solving**: Craft prompts that avoid interactive scenarios
+2. **Interactive Prompt Resolution**: When Claude hits prompts, LLAMA can suggest alternatives
+3. **Claude Confusion Handling**: If Claude doesn't understand, LLAMA rephrases or tries different approach
+4. **Context Management**: Maintains conversation flow and task understanding
+
+### Interactive Prompt Strategy
+- **Primary**: Use proper CLI flags (`--dangerously-skip-permissions`, `-p`) to prevent prompts
+- **Secondary**: LLAMA detects when Claude gets stuck and mediates
+- **Safety Net**: Interactive detection as fallback, but not primary solution
+- **False Positive Protection**: Only fail if task is genuinely incomplete, not just on prompt detection
 ## Phase 1: Foundation (Week 1-2)
 
 ### Core Components
@@ -56,9 +70,9 @@ Previous attempts failed due to connection pool exhaustion during high load.
 #### Option A: CLI Flags (Check First)
 ```bash
 # Test these commands:
-claude-code --help
-claude-code --auto-approve --help
-claude-code --yes --help
+claude --help
+claude --auto-approve --help
+claude --yes --help
 ```
 #### Option B: Input Automation
 ```python
@@ -131,7 +145,7 @@ class AnthropicAPIBridge:
 ```
 ## Phase 3: LLAMA Integration (Week 3-5)
 
-### Local LLM Bridge
+### Local LLM Bridge - Intelligent Mediator
 ```python
 import ollama
 
@@ -184,6 +198,57 @@ class LLAMAMediator:
         
         Format your response with clear sections and actionable items.
         """
+    
+    def handle_claude_confusion(self, claude_output, original_task, error_type):
+        """LLAMA mediates when Claude gets confused or hits interactive prompts"""
+        
+        if error_type == "interactive_prompt":
+            # Claude hit a trust prompt - LLAMA suggests non-interactive approach
+            return self._suggest_alternative_approach(original_task, "trust_prompt")
+        
+        elif error_type == "unclear_output":
+            # Claude's output is confusing - LLAMA rephrases the request
+            return self._rephrase_for_clarity(original_task, claude_output)
+        
+        elif error_type == "incomplete_task":
+            # Task seems incomplete - LLAMA determines if it's actually done
+            return self._assess_completion(original_task, claude_output)
+        
+        return None  # No mediation needed
+    
+    def _suggest_alternative_approach(self, task, issue_type):
+        """LLAMA suggests different ways to accomplish the task"""
+        if issue_type == "trust_prompt":
+            return f"""
+            Task: {task['main_request']}
+            
+            Alternative approach to avoid trust prompts:
+            1. Use read-only analysis first
+            2. Generate code changes as suggestions
+            3. Provide manual steps for user to execute
+            
+            This avoids the need for Claude to modify files directly.
+            """
+    
+    def _rephrase_for_clarity(self, task, claude_output):
+        """LLAMA rephrases the task to be clearer for Claude"""
+        return f"""
+        Rephrased task for clarity:
+        
+        Instead of: {task['main_request']}
+        
+        Try: "Analyze the code structure and provide specific, actionable recommendations 
+        with code examples. Focus on {task['main_request']}"
+        
+        Claude output was: {claude_output[:200]}...
+        """
+    
+    def _assess_completion(self, task, claude_output):
+        """LLAMA determines if task is actually complete despite seeming incomplete"""
+        # Analyze if the core request was fulfilled
+        # Check if output contains actionable information
+        # Determine if "incomplete" is just a false positive
+        pass
     
     def summarize_claude_result(self, claude_output, original_task):
         """Create concise summary for user notification"""
@@ -425,6 +490,64 @@ class TaskOrchestrator:
             await self.telegram.notify_error(f"💥 Task failed: {str(e)}")
             logging.error(f"Task processing error: {e}", exc_info=True)
 ```
+
+## Interactive Reply Flow (Turn-Based, Mediated)
+
+### Objective
+Allow users to reply to an already-processed task (e.g., “yes, proceed but skip A/B and focus on X”) while preserving context. LLAMA mediates the constraints and re-invokes Claude in a new non-interactive turn.
+
+### Flow
+1. Turn 0: Initial task → LLAMA parses/frames → Claude executes (headless) → artifact v1 written
+2. User reply: via Telegram `/reply <task_id> ...`
+3. LLAMA mediation: summarize prior context, apply constraints, craft next prompt
+4. Turn 1: Re-invoke Claude with prior context and constraints (still headless)
+5. Persist results: append to `conversation` in artifact, or create a linked artifact
+6. Emit events: `turn_started`, `turn_finished` referencing the original task_id and turn index
+
+### Data Model Changes
+- Artifact adds optional `conversation: [{ role: "user"|"llama"|"claude", content: string, timestamp: iso, turn: int }]`
+- Turn linkage via `parent_task_id` or `turn_of` for derived artifacts
+
+### Prerequisites
+- Artifact schema v1 (with `schema_version`, status blocks) and validator
+- CLI hardening (non-interactive flags, retry taxonomy, triage)
+- Minimal context loader (reads previous artifact for summarization)
+
+### Acceptance
+- A reply produces a new turn that respects constraints and validates against schema
+- Conversation is visible in artifacts and summaries, with clear turn boundaries
+- No reliance on interactive CLI prompts; all turns are headless
+
+### Activation with Current Artifacts and Processed Tasks
+
+- Current behavior: completed tasks are archived to `tasks/processed/` and results are in `results/<task_id>.json`
+- We will rely on artifacts (not the original `.task.md`) as the source of truth for replies
+- Required enhancements to activate:
+  1. Schema: optional `conversation` block; `parent_task_id`/`turn_of` linkage for derived turns
+  2. Artifact index: simple lookup to find latest artifact for a `task_id`
+  3. Context loader: read last artifact → build condensed context for LLAMA (summary, constraints, files_modified)
+  4. Telegram `/reply <task_id> ...`: authorized, rate-limited endpoint that enqueues a new turn
+  5. Orchestrator `turn` execution: LLAMA mediates constraints → Claude executes headless → new-turn artifact written
+  6. Events: `turn_started`, `turn_finished` including `parent_task_id` and `turn_index`
+- Non-goals:
+  - No persistent live CLI session; each turn is a stateless, idempotent invocation
+  - No schema-breaking changes; all new fields are optional and versioned
+
+#### Remediation checklist (do-first tasks, non-breaking)
+- Config
+  - Add `reload_from_env()` or a `doctor` CLI command to print/verify effective config (timeout, max_turns, flags)
+  - Document expectation that env should be set before process start if hot-reload is not implemented
+- Artifact index/loader
+  - Implement `results.index.json` (map task_id → latest artifact path, updated on write)
+  - Add `load_context(task_id)` in orchestrator to produce a compact context (summary, constraints, files list)
+- Events
+  - Emit `turn_started`/`turn_finished` with `parent_task_id`, `turn_index` and worker id
+  - Extend stats tooling to display turn counts per task
+- Schema/validator
+  - Add optional `conversation` and `parent_task_id`/`turn_of` fields; keep strict default; provide `--ignore-legacy`
+- Tests
+  - Unit: config env overrides; artifact index; context loader; turn events; schema for new fields
+  - E2E: reply flow creates a new turn that respects constraints and validates strictly
 
 ## Critical Success Factors
 

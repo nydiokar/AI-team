@@ -9,13 +9,17 @@ from typing import List, Dict, Any, Optional
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
-    # Load .env from the orchestrator directory
-    env_path = Path(__file__).parent.parent.parent / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
-        print(f"Loaded environment from: {env_path}")
+    # Prefer .env from this project root (AI-team/.env); fallback to CWD
+    project_env = Path(__file__).parent.parent / ".env"
+    cwd_env = Path.cwd() / ".env"
+    if project_env.exists():
+        load_dotenv(project_env)
+        print(f"Loaded environment from: {project_env}")
+    elif cwd_env.exists():
+        load_dotenv(cwd_env)
+        print(f"Loaded environment from: {cwd_env}")
     else:
-        print(f"Warning: .env file not found at {env_path}")
+        print("Warning: .env file not found in project or current directory")
 except ImportError:
     print("Warning: python-dotenv not available, using system environment only")
 
@@ -27,7 +31,7 @@ class ClaudeConfig:
     headless_mode: bool = True
     skip_permissions: bool = False
     timeout: int = 300  # 5 minutes
-    max_turns: int = 10
+    max_turns: int = 0
     # Working directory controls
     base_cwd: Optional[str] = None
     allowed_root: Optional[str] = None
@@ -87,6 +91,19 @@ class Config:
         # Note: This is intentionally not sourced from environment variables.
         self.claude.base_cwd = r"C:\Users\Cicada38\Projects"
         self.claude.allowed_root = self.claude.base_cwd
+        # Optional overrides from env
+        try:
+            mt = os.getenv("CLAUDE_MAX_TURNS")
+            if mt is not None:
+                self.claude.max_turns = max(1, int(mt))
+        except Exception:
+            pass
+        try:
+            to = os.getenv("CLAUDE_TIMEOUT_SEC")
+            if to is not None:
+                self.claude.timeout = max(1, int(to))
+        except Exception:
+            pass
         self.llama = LlamaConfig()
         self.telegram = TelegramConfig(
             bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
@@ -95,6 +112,8 @@ class Config:
         )
         self.validation = ValidationConfig()
         self.system = SystemConfig()
+        # Apply env overrides for selected runtime-tunable settings
+        self._apply_env_overrides()
         
     def _get_claude_command(self) -> List[str]:
         """Determine the best Claude Code command configuration"""
@@ -147,6 +166,34 @@ class Config:
             errors.append("TELEGRAM_CHAT_ID environment variable is required")
             
         return errors
+
+    def _apply_env_overrides(self) -> None:
+        """Apply environment variable overrides to runtime-tunable settings."""
+        try:
+            mt = os.getenv("CLAUDE_MAX_TURNS")
+            if mt is not None:
+                self.claude.max_turns = max(0, int(mt))
+        except Exception:
+            pass
+        try:
+            to = os.getenv("CLAUDE_TIMEOUT_SEC")
+            if to is not None:
+                self.claude.timeout = max(1, int(to))
+        except Exception:
+            pass
+
+    def reload_from_env(self) -> None:
+        """Reload environment-derived configuration fields at runtime.
+
+        Notes:
+        - Safe to call during runtime; only adjusts fields that are read on turn execution.
+        - Base command is re-evaluated to reflect flag env changes.
+        """
+        # Recompute fields derived from env
+        self.claude.skip_permissions = os.getenv("CLAUDE_SKIP_PERMISSIONS", "false").lower() == "true"
+        self.claude.base_command = self._get_claude_command()
+        # Re-apply runtime overrides
+        self._apply_env_overrides()
 
 # Global config instance
 config = Config()

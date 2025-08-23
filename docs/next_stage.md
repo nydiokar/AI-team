@@ -32,6 +32,13 @@ Strengthen reliability and operability, add interactive control, and stabilize a
    - Scope: Detect interactive prompts proactively; expand transient error taxonomy; capture first/last 2KB of stdout/stderr in artifacts; optional `--max-turns`/timeout config via env.
    - Acceptance: New unit tests simulate CLI failures; retries behave as expected; artifacts contain concise triage fields.
 
+**Updated Scope with LLAMA Mediation:**
+- **Primary**: Use proper CLI flags (`--dangerously-skip-permissions`, `-p`) to prevent interactive prompts
+- **Secondary**: LLAMA mediates when Claude gets confused or hits prompts (suggests alternatives, rephrases requests)
+- **Safety Net**: Interactive detection as fallback, but LLAMA determines if task is actually incomplete
+- **False Positive Protection**: Only fail if task is genuinely incomplete, not just on prompt detection
+- **Environment Config**: `CLAUDE_TIMEOUT_SEC` and `CLAUDE_MAX_TURNS` for operational control
+
 5) Packaging and CI hygiene (project-wide)
    - Goal: Reproducible installs and green checks on Windows.
    - Scope: Introduce `pyproject.toml` with extras (dev,test); pre-commit hooks (black/ruff/mypy where applicable); GitHub Actions to run pytest on Windows.
@@ -41,6 +48,26 @@ Strengthen reliability and operability, add interactive control, and stabilize a
    - Goal: Operational safety for long-running tasks.
    - Scope: Per-task timeout overrides, graceful cancel, status transitions persisted; surface ETA/elapsed in NDJSON; optional concurrency by `TaskPriority`.
    - Acceptance: Timeouts cancel correctly; `/status` (or CLI) shows lifecycle; events include `cancelled` and timeout markers.
+
+7) LLAMA‑mediated interactive reply flow (turn-based)
+   - Goal: Enable user to continue an already-processed task with follow-up instructions without losing context; LLAMA mediates constraints and re-invokes Claude in a new turn.
+   - Scope:
+     - Telegram `/reply <task_id> ...` to post follow-up instructions (no live sessions required)
+     - Persist a `conversation` array in artifacts (turns with role, content, timestamp)
+     - LLAMA summarizes prior turns and applies user constraints; Claude runs again headless, using prior context
+     - Events: emit `turn_started`/`turn_finished` with linkage to original task
+   - Acceptance:
+     - Given an existing artifact, a reply creates a new turn artifact linked to the original
+     - Constraints like “yes, but skip A/B; focus on X” are respected in resulting changes
+     - Strict validation passes for new artifacts; summaries show conversation context
+   - Prerequisites (activation with current system):
+     - Add optional `conversation` field to results schema and validator (no breaking change)
+     - Add `parent_task_id` or `turn_of` linkage field in new-turn artifacts for traceability
+     - Implement a lightweight artifact index/lookup (map `task_id` → latest `results/*.json`) to avoid relying on original `.task.md` (which is archived under `tasks/processed/`)
+     - Orchestrator context loader that pulls latest artifact for a task and passes condensed context to LLAMA
+     - Telegram `/reply` endpoint wiring (authz via allowlist), rate limiting, and basic input validation
+     - Eventing: add `turn_started/turn_finished` with `turn_index`, `parent_task_id`
+     - Tests: conversation persistence, constraint application, schema validation for new-turn artifacts
 
 
 ### Nice-to-have (after the six above)
@@ -62,6 +89,18 @@ Strengthen reliability and operability, add interactive control, and stabilize a
 ### Notes
 - All proposed work keeps changes minimal and localized, building on the existing architecture and tests.
 - Telegram remains strictly optional and is off by default unless env is configured.
-- Coordinator role today: `TaskOrchestrator` orchestrates parse → Claude → summarize → persist/telemetry. `LlamaMediator` is not a tool-calling agent; it crafts prompts and summaries. If you want LLAMA to act as a tool-calling coordinator, track it under the optional “Agentic coordinator mode”.
+- **LLAMA Mediation Vision**: LLAMA acts as intelligent mediator between user intent and Claude execution, handling confusion, suggesting alternatives, and preventing false positive failures from interactive prompts.
+- **Interactive Prompt Strategy**: Use CLI flags to prevent prompts, LLAMA to mediate when they occur, and detection only as safety net - never fail a task just because of prompt detection.
+- Coordinator role today: `TaskOrchestrator` orchestrates parse → Claude → summarize → persist/telemetry. `LlamaMediator` is not a tool-calling agent; it crafts prompts and summaries. If you want LLAMA to act as a tool-calling coordinator, track it under the optional "Agentic coordinator mode".
+
+
+### Cross-cutting prerequisites and compatibility (for interactive reply enablement)
+- **Config reload semantics**: Add `config.reload_from_env()` and a `python main.py doctor` command to verify env and CLI flags; ensure timeout/max_turns can be changed without process restart or document that env must be set before run.
+- **Artifact linkage/index**: Create a lightweight index to resolve latest artifact by `task_id`; implement an orchestrator context loader that compacts previous artifact into a prompt-ready summary.
+- **Events model**: Add `turn_started`/`turn_finished` with `parent_task_id`, `turn_index` and surface in NDJSON for observability.
+- **Schema evolution (backward-compatible)**: Add optional `conversation` and `parent_task_id`/`turn_of` fields; keep validator strict by default with `--ignore-legacy` for older runs.
+- **Security/limits**: Enforce `allowed_root` and least-privilege tool set on reply turns; validate constraints (e.g., “don’t touch A/B”).
+- **Performance**: Compact context passed to LLAMA/Claude (avoid dumping whole artifacts); cap sizes using existing config soft caps.
+- **Tests**: Add unit tests for config overrides, artifact index/context loader, turn events, schema validation for new fields, and end-to-end reply flow (Telegram optional).
 
 

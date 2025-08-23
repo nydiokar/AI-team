@@ -63,6 +63,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._state_path = Path(config.system.logs_dir) / "state.json"
         self._pending_files: set[str] = set()
         self._load_state()
+        # Artifact index path (task_id -> latest artifact path)
+        self._artifact_index_path = Path(config.system.results_dir) / "index.json"
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -211,6 +213,67 @@ class TaskOrchestrator(ITaskOrchestrator):
             self._state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             logger.warning(f"event=state_save_failed error={e}")
+
+    def _update_artifact_index(self, task_id: str, artifact_path: Path) -> None:
+        """Persist minimal index mapping task_id to latest artifact path."""
+        try:
+            import json
+            idx = {}
+            if self._artifact_index_path.exists():
+                try:
+                    idx = json.loads(self._artifact_index_path.read_text(encoding="utf-8"))
+                except Exception:
+                    idx = {}
+            idx[str(task_id)] = str(artifact_path)
+            self._artifact_index_path.parent.mkdir(parents=True, exist_ok=True)
+            self._artifact_index_path.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"event=artifact_index_save_failed task_id={task_id} error={e}")
+
+    def load_compact_context(self, task_id: str) -> Dict[str, Any]:
+        """Load the latest artifact for a task and produce a compact context summary."""
+        import json
+        try:
+            # Resolve artifact path from index; fallback to scan
+            artifact_path: Path | None = None
+            if self._artifact_index_path.exists():
+                try:
+                    idx = json.loads(self._artifact_index_path.read_text(encoding="utf-8"))
+                    p = idx.get(str(task_id))
+                    if p:
+                        ap = Path(p)
+                        if ap.exists():
+                            artifact_path = ap
+                except Exception:
+                    pass
+            if artifact_path is None:
+                # Fallback: scan for results/{task_id}.json
+                cand = Path(config.system.results_dir) / f"{task_id}.json"
+                if cand.exists():
+                    artifact_path = cand
+
+            if not artifact_path or not artifact_path.exists():
+                return {"summary": "", "constraints": {}, "files_modified": []}
+
+            data = json.loads(artifact_path.read_text(encoding="utf-8"))
+            summary_text = ""
+            try:
+                # Prefer summary in parsed_output or top-level validation hints
+                po = data.get("parsed_output") or {}
+                content = po.get("content") if isinstance(po, dict) else None
+                if isinstance(content, str):
+                    summary_text = content[:2000]
+            except Exception:
+                pass
+            files_modified = data.get("files_modified") or []
+            constraints = {"prior_success": bool(data.get("success"))}
+            return {
+                "summary": summary_text,
+                "constraints": constraints,
+                "files_modified": files_modified,
+            }
+        except Exception:
+            return {"summary": "", "constraints": {}, "files_modified": []}
     
     async def _handle_new_task_file(self, file_path: str):
         """Handle detection of new task file"""
@@ -504,6 +567,7 @@ created: {task.created}
 
         # Write raw JSON artifact with structured fields
         artifact = {
+            "schema_version": "1.0",
             "task_id": task_id,
             "success": result.success,
             "return_code": result.return_code,
@@ -511,14 +575,34 @@ created: {task.created}
             "execution_time": result.execution_time,
             "errors": result.errors,
             "files_modified": result.files_modified,
+            # Keep full stdout/stderr for now, but add triage previews
             "raw_stdout": result.raw_stdout,
             "raw_stderr": result.raw_stderr,
+            "triage": {
+                "stdout_head": (result.raw_stdout or "")[:2048],
+                "stdout_tail": (result.raw_stdout or "")[-2048:] if result.raw_stdout else "",
+                "stderr_head": (result.raw_stderr or "")[:2048],
+                "stderr_tail": (result.raw_stderr or "")[-2048:] if result.raw_stderr else "",
+            },
             "parsed_output": result.parsed_output,
             "validation": getattr(result, "validation", None),
             "retry": {
                 "retries": getattr(result, "retries", 0),
                 "error_class": getattr(result, "error_class", ""),
             },
+            # Minimal status blocks for operability/triage
+            "orchestrator": {
+                "components": self.component_status,
+                "workers": len(self.worker_tasks),
+            },
+            "bridge": {
+                "available": bool(self.component_status.get("claude_available")),
+                "claude_executable": getattr(self.claude_bridge, "claude_executable", "claude"),
+                "max_turns": getattr(config.claude, "max_turns", 3),
+                "timeout": getattr(config.claude, "timeout", 600),
+                "skip_permissions": bool(getattr(config.claude, "skip_permissions", True)),
+            },
+            "llama": self.llama_mediator.get_status(),
         }
 
         import json
@@ -526,6 +610,11 @@ created: {task.created}
             json.dumps(artifact, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
+        # Update artifact index (best-effort)
+        try:
+            self._update_artifact_index(task_id, results_dir / f"{task_id}.json")
+        except Exception:
+            pass
 
         # Write human readable summary (extract the LLAMA-generated summary)
         # LLAMA generates a summary and prepends it to result.output

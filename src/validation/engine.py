@@ -20,7 +20,7 @@ try:
 except Exception:
     _ST_AVAILABLE = False
 
-from core.interfaces import (
+from src.core.interfaces import (
     IValidationEngine,
     ValidationResult,
     TaskResult,
@@ -55,6 +55,19 @@ def _shannon_entropy(text: str) -> float:
     return entropy / max_entropy
 
 
+def _jaccard_trigram_similarity(a: str, b: str) -> float:
+    a = (a or "").lower()
+    b = (b or "").lower()
+    if len(a) < 3 or len(b) < 3:
+        return 0.0
+    grams_a = {a[i:i+3] for i in range(len(a) - 2)}
+    grams_b = {b[i:i+3] for i in range(len(b) - 2)}
+    if not grams_a or not grams_b:
+        return 0.0
+    inter = len(grams_a & grams_b)
+    union = len(grams_a | grams_b)
+    return inter / union if union else 0.0
+
 class ValidationEngine(IValidationEngine):
     """Basic validation engine with optional sentence-transformers support."""
 
@@ -79,7 +92,11 @@ class ValidationEngine(IValidationEngine):
                 return _cosine_similarity(emb[0], emb[1])
             except Exception:
                 pass
-        # Fallback: Jaccard over lowercased word sets
+        # Fallback 1: character trigram Jaccard (better for short phrases)
+        tri = _jaccard_trigram_similarity(a, b)
+        if tri > 0:
+            return tri
+        # Fallback 2: word Jaccard
         set_a = set(a.lower().split())
         set_b = set(b.lower().split())
         if not set_a or not set_b:
@@ -95,7 +112,8 @@ class ValidationEngine(IValidationEngine):
 
         if similarity < self.config.similarity_threshold:
             issues.append(f"low_similarity:{similarity:.2f}")
-        if entropy < self.config.entropy_threshold:
+        # Length-aware entropy: avoid flagging very short outputs solely for entropy
+        if len(output or "") >= 20 and entropy < self.config.entropy_threshold:
             issues.append(f"low_entropy:{entropy:.2f}")
 
         # Very light structure hints: summary/review should be mostly read-only commentary
@@ -127,6 +145,12 @@ class ValidationEngine(IValidationEngine):
         ]
         if not result.files_modified and any(marker in text for marker in claims_edit_markers):
             issues.append("claims_modifications_without_evidence")
+
+        # Cross-check modified vs expected files allowlist
+        if expected_files and result.files_modified:
+            unexpected = [p for p in result.files_modified if p not in expected_files]
+            if unexpected:
+                issues.append("modified_files_outside_expected")
 
         valid = len(issues) == 0
         # We do not compute similarity here; keep it 0.0 for the structure check
