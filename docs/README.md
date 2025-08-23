@@ -121,11 +121,51 @@ TELEGRAM_CHAT_ID=123456789
 
 # Claude Code Settings
 CLAUDE_SKIP_PERMISSIONS=false
+# Optional: base working directory where Claude starts (recommended)
+# Example (Windows): C:\\Users\\User\\Projects
+# Example (POSIX): /home/you/Projects
+CLAUDE_BASE_CWD=
+# Optional: safety allowlist root (defaults to CLAUDE_BASE_CWD if set)
+CLAUDE_ALLOWED_ROOT=
 
 # System Settings
 LOG_LEVEL=INFO
 MAX_CONCURRENT_TASKS=3
 ```
+
+### Telegram Bot Integration
+
+The system includes an optional Telegram bot interface for remote task management:
+
+**Setup:**
+1. Create a bot with [@BotFather](https://t.me/botfather) on Telegram
+2. Get your bot token and add it to `.env`:
+   ```bash
+   TELEGRAM_BOT_TOKEN=your_bot_token_here
+   TELEGRAM_ALLOWED_USERS=your_user_id  # Optional: restrict access
+   ```
+3. Install the dependency: `pip install python-telegram-bot>=20.0`
+
+**Commands:**
+- `/start` - Welcome message and help
+- `/help` - Detailed help and examples
+- `/task <description>` - Create a new AI task
+- `/status` - Show system status and task queue
+- `/cancel <task_id>` - Request task cancellation
+
+**Natural Language:**
+You can also just send messages like:
+- "Create a new pijama directory and set up a Python project there"
+- "Review the authentication code in /auth-system"
+- "Fix the database connection timeout in /backend"
+
+**Working Directory Support:**
+- Use "in /project-name" for relative paths under your Projects folder
+- Use "in C:\\path\\to\\project" for absolute Windows paths
+- If no path specified, Claude starts in your configured base directory
+
+**Notifications:**
+The bot automatically notifies you when tasks complete or fail, with summaries and next steps.
 
 ### Component Detection
 

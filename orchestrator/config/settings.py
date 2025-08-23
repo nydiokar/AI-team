@@ -2,8 +2,22 @@
 Configuration settings for the AI Task Orchestrator
 """
 import os
+from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    # Load .env from the orchestrator directory
+    env_path = Path(__file__).parent.parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"Loaded environment from: {env_path}")
+    else:
+        print(f"Warning: .env file not found at {env_path}")
+except ImportError:
+    print("Warning: python-dotenv not available, using system environment only")
 
 @dataclass
 class ClaudeConfig:
@@ -14,6 +28,9 @@ class ClaudeConfig:
     skip_permissions: bool = False
     timeout: int = 300  # 5 minutes
     max_turns: int = 10
+    # Working directory controls
+    base_cwd: Optional[str] = None
+    allowed_root: Optional[str] = None
     
 @dataclass
 class LlamaConfig:
@@ -31,10 +48,14 @@ class LlamaConfig:
 @dataclass
 class TelegramConfig:
     """Telegram bot configuration"""
-    bot_token: str
-    allowed_users: List[int]
-    notification_chat_id: int
+    bot_token: str = ""
+    allowed_users: List[int] = None
+    notification_chat_id: Optional[int] = None
     
+    def __post_init__(self):
+        if self.allowed_users is None:
+            self.allowed_users = []
+            
 @dataclass
 class ValidationConfig:
     """Validation engine configuration"""
@@ -62,11 +83,15 @@ class Config:
             base_command=self._get_claude_command(),
             skip_permissions=os.getenv("CLAUDE_SKIP_PERMISSIONS", "false").lower() == "true"
         )
+        # Base working directory and allowlist root (configured in code by request)
+        # Note: This is intentionally not sourced from environment variables.
+        self.claude.base_cwd = r"C:\Users\Cicada38\Projects"
+        self.claude.allowed_root = self.claude.base_cwd
         self.llama = LlamaConfig()
         self.telegram = TelegramConfig(
             bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             allowed_users=self._parse_allowed_users(),
-            notification_chat_id=int(os.getenv("TELEGRAM_CHAT_ID", 0))
+            notification_chat_id=self._parse_chat_id()
         )
         self.validation = ValidationConfig()
         self.system = SystemConfig()
@@ -91,7 +116,22 @@ class Config:
         users_str = os.getenv("TELEGRAM_ALLOWED_USERS", "")
         if not users_str:
             return []
-        return [int(uid.strip()) for uid in users_str.split(",")]
+        
+        try:
+            return [int(uid.strip()) for uid in users_str.split(",") if uid.strip()]
+        except ValueError:
+            return []
+    
+    def _parse_chat_id(self) -> Optional[int]:
+        """Parse Telegram chat ID from environment"""
+        chat_id_str = os.getenv("TELEGRAM_CHAT_ID", "")
+        if not chat_id_str:
+            return None
+        
+        try:
+            return int(chat_id_str)
+        except ValueError:
+            return None
         
     def validate(self) -> List[str]:
         """Validate configuration and return any errors"""

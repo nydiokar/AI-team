@@ -9,8 +9,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# Add src to path after site-packages to avoid shadowing third-party modules (e.g., telegram)
+src_path = Path(__file__).parent / "src"
+if str(src_path) not in sys.path:
+    sys.path.append(str(src_path))
 
 from src.orchestrator import TaskOrchestrator
 from config import config
@@ -94,6 +96,12 @@ class OrchestratorCLI:
         
         print(f"  File Watcher: {'[OK] Running' if components['file_watcher_running'] else '[--] Stopped'}")
         
+        # Show Telegram status
+        if hasattr(status, 'telegram_interface') and status.get('telegram_interface'):
+            print(f"  Telegram Bot: [OK] Available")
+        else:
+            print(f"  Telegram Bot: [--] Not configured (set TELEGRAM_BOT_TOKEN)")
+        
         print()
         print("Task Status:")
         tasks = status["tasks"]
@@ -134,6 +142,42 @@ async def show_status():
     cli = OrchestratorCLI()
     cli._print_status(status)
 
+async def test_telegram_interface():
+    """Test Telegram interface functionality"""
+    
+    orchestrator = TaskOrchestrator()
+    
+    if not orchestrator.telegram_interface:
+        print("❌ Telegram interface not configured")
+        print("Set TELEGRAM_BOT_TOKEN environment variable to enable Telegram")
+        return
+    
+    if not orchestrator.telegram_interface.is_available():
+        print("❌ Telegram interface not available")
+        print("Check that python-telegram-bot is installed and bot token is valid")
+        return
+    
+    print("✅ Telegram interface is available and configured")
+    print(f"Bot token: {orchestrator.telegram_interface.bot_token[:10]}...")
+    print(f"Allowed users: {orchestrator.telegram_interface.allowed_users or 'No restrictions'}")
+    
+    # Test notification functionality
+    try:
+        # Start bot temporarily for sending message
+        await orchestrator.telegram_interface.start()
+        await orchestrator.telegram_interface.notify_completion(
+            "test_task",
+            "This is a test notification from the AI Task Orchestrator",
+            success=True,
+        )
+        # Give Telegram API a brief moment
+        import asyncio as _asyncio
+        await _asyncio.sleep(1.0)
+        await orchestrator.telegram_interface.stop()
+        print("✅ Test notification dispatched (check your Telegram)")
+    except Exception as e:
+        print(f"❌ Failed to send test notification: {e}")
+
 def main():
     """Main entry point"""
     
@@ -151,6 +195,9 @@ def main():
             return
         if command == "create-sample":
             asyncio.run(create_sample_task())
+            return
+        if command == "test-telegram":
+            asyncio.run(test_telegram_interface())
             return
         if command == "help":
             print_help()
@@ -172,6 +219,7 @@ Usage:
     python main.py status          Show component status
     python main.py stats           Show metrics from logs/events.ndjson
     python main.py create-sample   Create a sample task for testing
+    python main.py test-telegram   Test Telegram interface (if configured)
     python main.py clean tasks     Archive loose tasks to tasks/processed
     python main.py clean artifacts --days N   Delete results/summaries older than N days
     python main.py help            Show this help

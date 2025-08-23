@@ -63,6 +63,23 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._state_path = Path(config.system.logs_dir) / "state.json"
         self._pending_files: set[str] = set()
         self._load_state()
+        
+        # Initialize Telegram interface if configured
+        self.telegram_interface = None
+        if config.telegram.bot_token:
+            try:
+                from src.telegram.interface import TelegramInterface
+                self.telegram_interface = TelegramInterface(
+                    bot_token=config.telegram.bot_token,
+                    orchestrator=self,
+                    allowed_users=config.telegram.allowed_users
+                )
+                logger.info("Telegram interface initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Telegram interface: {e}")
+                self.telegram_interface = None
+        else:
+            logger.info("Telegram interface not configured (no bot token)")
     
     async def start(self):
         """Start all system components"""
@@ -100,6 +117,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         await self.file_watcher.start_async(self._handle_new_task_file)
         self.component_status["file_watcher_running"] = True
         
+        # Start Telegram interface if available
+        if self.telegram_interface:
+            try:
+                await self.telegram_interface.start()
+                logger.info("Telegram interface started")
+            except Exception as e:
+                logger.error(f"Failed to start Telegram interface: {e}")
+        
         # Log startup status
         self._log_startup_status()
         
@@ -113,6 +138,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info("Stopping AI Task Orchestrator...")
         
         self.running = False
+        
+        # Stop Telegram interface if available
+        if self.telegram_interface:
+            try:
+                await self.telegram_interface.stop()
+                logger.info("Telegram interface stopped")
+            except Exception as e:
+                logger.error(f"Failed to stop Telegram interface: {e}")
         
         # Stop file watcher
         await self.file_watcher.stop_async()
@@ -267,6 +300,21 @@ class TaskOrchestrator(ITaskOrchestrator):
                 status = "SUCCESS" if result.success else "FAILED"
                 logger.info(f"event=claude_finished task_id={task.id} status={status} duration_s={result.execution_time:.2f}")
                 self._emit_event("claude_finished", task, {"status": status, "duration_s": result.execution_time})
+                
+                # Send Telegram notification if available
+                if self.telegram_interface and result.success:
+                    try:
+                        # Extract summary from result output
+                        summary = result.output.split('\n\n', 1)[0] if result.output else "Task completed"
+                        await self.telegram_interface.notify_completion(task.id, summary, success=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to send Telegram completion notification: {e}")
+                elif self.telegram_interface and not result.success:
+                    try:
+                        error_summary = f"Task failed with errors: {'; '.join(result.errors[:2])}" if result.errors else "Task failed"
+                        await self.telegram_interface.notify_completion(task.id, error_summary, success=False)
+                    except Exception as e:
+                        logger.warning(f"Failed to send Telegram failure notification: {e}")
                 
                 # Write artifacts
                 try:
@@ -585,12 +633,32 @@ created: {task.created}
         else:
             parsed = self._parse_description_simple(description)
         
+        # Heuristic: detect inline path hints like "in C:\\Users\\..." or "in /path/..."
+        # and inject into frontmatter as `cwd` if allowed by config
+        try:
+            import re
+            path_hint = None
+            # Windows-style absolute path after 'in '
+            m = re.search(r"\bin\s+([A-Za-z]:\\[^\n\r]+)", description)
+            if m:
+                path_hint = m.group(1).strip()
+            else:
+                # POSIX-like
+                m2 = re.search(r"\bin\s+(/[^\n\r]+)", description)
+                if m2:
+                    path_hint = m2.group(1).strip()
+            if path_hint:
+                parsed.setdefault("metadata", {})["cwd"] = path_hint
+        except Exception:
+            pass
+        
         # Create task file
         task_content = f"""---
 id: {task_id}
 type: {parsed.get('type', 'analyze')}
 priority: {parsed.get('priority', 'medium')}
 created: {datetime.now().isoformat()}
+cwd: {parsed.get('metadata', {}).get('cwd', '')}
 ---
 
 # {parsed.get('title', 'Auto-generated Task')}

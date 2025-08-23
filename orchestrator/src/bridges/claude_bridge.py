@@ -69,13 +69,24 @@ class ClaudeBridge(IClaudeBridge):
             # Add the prompt
             command.append(prompt)
             
+            # Resolve working directory (per-task override -> base_cwd -> repo root)
+            cwd_override = self._resolve_cwd(task)
+            
             # Execute the command
-            result = await self._execute_command(command, task.target_files)
+            result = await self._execute_command(command, task.target_files, cwd_override=cwd_override)
             
             execution_time = time.time() - start_time
             
             # Parse the result
-            return self._parse_result(task.id, result, execution_time)
+            parsed = self._parse_result(task.id, result, execution_time)
+            # Attach execution cwd for diagnostics
+            try:
+                po = parsed.parsed_output if isinstance(parsed.parsed_output, dict) else {}
+                po.setdefault("meta", {})["execution_cwd"] = cwd_override
+                parsed.parsed_output = po or {"meta": {"execution_cwd": cwd_override}}
+            except Exception:
+                pass
+            return parsed
             
         except Exception as e:
             execution_time = time.time() - start_time
@@ -154,18 +165,13 @@ class ClaudeBridge(IClaudeBridge):
         # Default to safe read-only if unknown
         return ["Read", "LS", "Grep", "Glob"]
     
-    async def _execute_command(self, command: List[str], target_files: List[str]) -> Dict[str, Any]:
+    async def _execute_command(self, command: List[str], target_files: List[str], cwd_override: Optional[str] = None) -> Dict[str, Any]:
         """Execute Claude command asynchronously"""
         
-        # Set working directory to project root for best results
-        cwd = None
-        try:
-            # Use the project root as the working directory
-            project_root = Path(__file__).resolve().parents[3]  # bridges -> src -> orchestrator -> project_root
-            cwd = str(project_root)
-            print(f"Setting Claude working directory to project root: {cwd}")
-        except Exception:
-            cwd = None
+        # Determine working directory: per-task override -> CLAUDE_BASE_CWD; no repo-root fallback
+        cwd = cwd_override or config.claude.base_cwd
+        if not cwd:
+            raise RuntimeError("CLAUDE_BASE_CWD not set and no per-task cwd provided")
         
         # Execute the command
         process = await asyncio.create_subprocess_exec(
@@ -185,6 +191,67 @@ class ClaudeBridge(IClaudeBridge):
             'stdout': stdout.decode('utf-8', errors='replace') if stdout else '',
             'stderr': stderr.decode('utf-8', errors='replace') if stderr else ''
         }
+
+    def _resolve_cwd(self, task: Task) -> Optional[str]:
+        """Resolve the effective working directory for a task with safety checks."""
+        try:
+            # 1) Per-task override from frontmatter (Task.metadata['cwd'])
+            task_cwd = None
+            if getattr(task, "metadata", None):
+                task_cwd = task.metadata.get("cwd")
+
+            # 2) Configured base cwd
+            base_cwd = config.claude.base_cwd
+            allowed_root = config.claude.allowed_root or base_cwd
+
+            # If task_cwd provided, support absolute and base-relative forms ("/proj", "proj/sub")
+            candidate: Optional[Path] = None
+            if task_cwd:
+                tc = str(task_cwd).strip()
+                p = Path(tc)
+                # Detect Windows drive-qualified absolute like C:\...
+                is_drive_abs = False
+                try:
+                    import re as _re
+                    is_drive_abs = bool(_re.match(r"^[A-Za-z]:\\", tc))
+                except Exception:
+                    is_drive_abs = False
+                if base_cwd and (tc.startswith("/") or tc.startswith("\\")) and not is_drive_abs:
+                    candidate = Path(base_cwd) / tc.lstrip("/\\")
+                elif not p.is_absolute() and base_cwd:
+                    candidate = Path(base_cwd) / tc
+                else:
+                    candidate = p
+
+                # Normalize and validate allowlist
+                if candidate:
+                    candidate = candidate.resolve()
+                    if allowed_root:
+                        try:
+                            allowed = Path(allowed_root).resolve()
+                            # Ensure candidate is within allowed root
+                            if allowed in candidate.parents or candidate == allowed:
+                                return str(candidate)
+                            else:
+                                # Fallback: ignore invalid override
+                                pass
+                        except Exception:
+                            pass
+                    else:
+                        return str(candidate)
+
+            # No valid per-task cwd; use base_cwd if set
+            if base_cwd:
+                try:
+                    base = Path(base_cwd).resolve()
+                    return str(base)
+                except Exception:
+                    pass
+
+            # No fallback to repository root; require explicit base
+            return None
+        except Exception:
+            return None
     
     def _parse_result(self, task_id: str, result: Dict[str, Any], execution_time: float) -> TaskResult:
         """Parse command result into TaskResult"""
