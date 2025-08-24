@@ -24,18 +24,24 @@ Task File → LLAMA Parser → Claude Code → Results → Summary → Notificat
 
 ## 🚀 Quick Start
 
-### 1. Setup Environment
+### 1. Setup Environment (Windows PowerShell)
 
-```bash
-# Clone and enter directory
-cd orchestrator
+```powershell
+# Create and activate venv (recommended)
+python -m venv .venv
+. .venv\Scripts\Activate.ps1
 
-# Install dependencies
-pip install -r requirements-minimal.txt
+# Install project in editable mode with dev and test extras
+pip install -e ".[dev,test]"
 
-# Copy environment template
-cp .env.example .env
-# Edit .env with your settings (Telegram optional)
+# Optional extras
+# For Telegram integration
+pip install -e ".[telegram]"
+# For LLAMA (Ollama) mediation and sentence-transformers (optional)
+pip install -e ".[llama]"
+
+# Copy environment template if present
+if (Test-Path .env.example) { Copy-Item .env.example .env -Force }
 ```
 
 ### 2. Test Components
@@ -53,7 +59,10 @@ python main.py help
 
 ### 3. Run Orchestrator
 
-```bash
+```powershell
+# Optional non-interactive flag for CI/unattended runs
+$env:CLAUDE_SKIP_PERMISSIONS = "true"
+
 # Start the system
 python main.py
 

@@ -12,22 +12,22 @@
 Strengthen reliability and operability, add interactive control, and stabilize artifacts/validation so the system is safer to run unattended and easier to monitor.
 
 ### Prioritized next 6 tasks
-1) Telegram minimal interface (opt-in)
+1) Telegram minimal interface (opt-in) - PARTIAL
    - Goal: Chat-based control and notifications.
    - Scope: `/task <desc>` creates `.task.md`; `/status` shows components/workers/queue; optional `/cancel <task_id>`.
    - Acceptance: With valid env vars, commands work end-to-end and notifications on completion/failure are delivered.
 
-2) Validation Engine 2.0 (coherence + structure)
+2) Validation Engine 2.0 (coherence + structure) - DONE
    - Goal: Reduce false positives/negatives and verify outputs align with requested task type and files.
    - Scope: length-aware entropy, optional 3-gram Jaccard fallback, per-`TaskType` structure keywords, cross-check claimed edits vs `files_modified` and target file allowlist.
    - Acceptance: New tests cover summarize/review vs fix/analyze behavior; artifacts include richer `validation` block.
 
-3) Artifact schema v1 (versioned, documented)
+3) Artifact schema v1 (versioned, documented) - DONE
    - Goal: Make results machine-stable for analytics and external tooling.
    - Scope: Add `schema_version`, define JSON Schema for `results/*.json`, include `orchestrator`, `bridge`, and `llama` status in artifacts; add `python main.py validate-artifacts` command.
    - Acceptance: Schema file exists in `docs/schema/`, validation command reports OK on fresh runs, CI step passes.
 
-4) Claude CLI hardening and observability
+4) Claude CLI hardening and observability - DONE
    - Goal: Fewer flaky runs and better diagnostics when CLI behavior changes.
    - Scope: Detect interactive prompts proactively; expand transient error taxonomy; capture first/last 2KB of stdout/stderr in artifacts; optional `--max-turns`/timeout config via env.
    - Acceptance: New unit tests simulate CLI failures; retries behave as expected; artifacts contain concise triage fields.
@@ -49,7 +49,7 @@ Strengthen reliability and operability, add interactive control, and stabilize a
    - Scope: Per-task timeout overrides, graceful cancel, status transitions persisted; surface ETA/elapsed in NDJSON; optional concurrency by `TaskPriority`.
    - Acceptance: Timeouts cancel correctly; `/status` (or CLI) shows lifecycle; events include `cancelled` and timeout markers.
 
-7) LLAMA‑mediated interactive reply flow (turn-based)
+7) LLAMA‑mediated interactive reply flow (turn-based) - PARTIAL (groundwork)
    - Goal: Enable user to continue an already-processed task with follow-up instructions without losing context; LLAMA mediates constraints and re-invokes Claude in a new turn.
    - Scope:
      - Telegram `/reply <task_id> ...` to post follow-up instructions (no live sessions required)

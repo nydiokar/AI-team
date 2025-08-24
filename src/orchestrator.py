@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 import uuid
 import random
+import contextlib
 
 import sys
 import os
@@ -65,6 +66,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._load_state()
         # Artifact index path (task_id -> latest artifact path)
         self._artifact_index_path = Path(config.system.results_dir) / "index.json"
+        # Cancellation and runtime tracking
+        self._task_cancel_events: Dict[str, asyncio.Event] = {}
+        self._running_exec_tasks: Dict[str, asyncio.Task] = {}
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -347,6 +351,28 @@ class TaskOrchestrator(ITaskOrchestrator):
                     timeout=1.0
                 )
                 
+                # Ensure cancel event exists for this task
+                cancel_ev = self._task_cancel_events.get(task.id)
+                if cancel_ev is None:
+                    cancel_ev = asyncio.Event()
+                    self._task_cancel_events[task.id] = cancel_ev
+
+                # If cancellation was requested before start, mark and skip
+                if cancel_ev.is_set():
+                    task.status = TaskStatus.FAILED
+                    logger.info(f"event=cancelled_before_start worker={worker_name} task_id={task.id}")
+                    self._emit_event("cancelled", task, {"worker": worker_name, "when": "before_start"})
+                    self.task_queue.task_done()
+                    # Release inflight locks and pending state, similar to completion path
+                    try:
+                        if getattr(task, "metadata", None):
+                            self._inflight_paths.discard(task.metadata.get("__file_path", ""))
+                            self._pending_files.discard(task.metadata.get("__file_path", ""))
+                            self._save_state()
+                    except Exception:
+                        pass
+                    continue
+
                 logger.info(f"event=claude_started worker={worker_name} task_id={task.id}")
                 self._emit_event("claude_started", task, {"worker": worker_name})
                 
@@ -418,6 +444,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                     except Exception:
                         pass
                 
+                # Cleanup cancellation and running maps
+                try:
+                    self._task_cancel_events.pop(task.id, None)
+                    self._running_exec_tasks.pop(task.id, None)
+                except Exception:
+                    pass
                 # Mark task as done in queue
                 self.task_queue.task_done()
                 
@@ -451,16 +483,75 @@ class TaskOrchestrator(ITaskOrchestrator):
             claude_prompt = self.llama_mediator.create_claude_prompt(parsed_task)
             task.prompt = claude_prompt
             
-            # Step 3: Execute with Claude Code with limited retries on transient errors
+            # Step 3: Execute with Claude Code with timeout and cooperative cancellation
             logger.debug(f"Step 3: Executing task {task.id} with Claude Code")
             max_retries = getattr(config.validation, "max_retries", 2)
             retry_delay = 1.0
             backoff_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
             attempt = 0
             last_result: Optional[TaskResult] = None
+            # Per-task timeout override via frontmatter metadata `timeout_sec`, else system default
+            try:
+                timeout_s = int(task.metadata.get("timeout_sec", config.system.task_timeout)) if getattr(task, "metadata", None) else config.system.task_timeout
+            except Exception:
+                timeout_s = config.system.task_timeout
+            cancel_ev = self._task_cancel_events.get(task.id)
             while True:
                 attempt += 1
-                result = await self.claude_bridge.execute_task(task)
+                # Run execution as a task to allow timeout/cancel
+                exec_task = asyncio.create_task(self.claude_bridge.execute_task(task))
+                self._running_exec_tasks[task.id] = exec_task
+                # Wait for whichever happens first
+                wait_set = {exec_task}
+                cancel_waiter: Optional[asyncio.Task] = None
+                timeout_waiter: Optional[asyncio.Task] = None
+                try:
+                    if cancel_ev is not None:
+                        cancel_waiter = asyncio.create_task(cancel_ev.wait())
+                        wait_set.add(cancel_waiter)
+                    if timeout_s and timeout_s > 0:
+                        timeout_waiter = asyncio.create_task(asyncio.sleep(timeout_s))
+                        wait_set.add(timeout_waiter)
+                    done, pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+                    if exec_task in done:
+                        result = exec_task.result()
+                    elif cancel_waiter and cancel_waiter in done:
+                        # Cooperative cancellation
+                        exec_task.cancel()
+                        with contextlib.suppress(Exception):
+                            await exec_task
+                        execution_time = time.time() - start_time
+                        self._emit_event("cancelled", task, {"when": "during_execution"})
+                        return TaskResult(
+                            task_id=task.id,
+                            success=False,
+                            output="",
+                            errors=["cancelled"],
+                            files_modified=[],
+                            execution_time=execution_time,
+                            timestamp=datetime.now().isoformat(),
+                        )
+                    else:
+                        # Timeout
+                        exec_task.cancel()
+                        with contextlib.suppress(Exception):
+                            await exec_task
+                        execution_time = time.time() - start_time
+                        self._emit_event("timeout", task, {"timeout_s": timeout_s})
+                        return TaskResult(
+                            task_id=task.id,
+                            success=False,
+                            output="",
+                            errors=[f"timeout after {timeout_s}s"],
+                            files_modified=[],
+                            execution_time=execution_time,
+                            timestamp=datetime.now().isoformat(),
+                        )
+                finally:
+                    # Cancel any pending helper waiters
+                    for w in (cancel_waiter, timeout_waiter):
+                        if w and not w.done():
+                            w.cancel()
                 error_class = self._classify_error(result)
                 result.error_class = error_class
                 result.retries = attempt - 1
@@ -643,6 +734,31 @@ created: {task.created}
             summary_text,
             encoding="utf-8"
         )
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Request cooperative cancellation for a task.
+
+        Returns True if a cancel signal was set for a queued or running task.
+        """
+        ev = self._task_cancel_events.get(task_id)
+        if ev is None:
+            # If task exists but no event yet (e.g., still queued elsewhere), create and set
+            if task_id in self.active_tasks:
+                ev = asyncio.Event()
+                self._task_cancel_events[task_id] = ev
+            else:
+                return False
+        if not ev.is_set():
+            ev.set()
+            # Best-effort cancel running exec task
+            task = self._running_exec_tasks.get(task_id)
+            if task is not None and not task.done():
+                task.cancel()
+            # Emit cancel_requested event
+            t = self.active_tasks.get(task_id)
+            self._emit_event("cancel_requested", t if t else None, None)
+            return True
+        return False
 
     def _classify_error(self, result: TaskResult) -> str:
         """Classify error type for retry policy: transient|fatal|none"""

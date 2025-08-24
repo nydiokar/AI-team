@@ -171,7 +171,12 @@ You can also just send me a message describing what you want to do!
             task_id = self.orchestrator.create_task_from_description(task_description)
             
             # Get task file path for confirmation
-            task_file = Path(self.orchestrator.config.system.tasks_dir) / f"{task_id}.task.md"
+            try:
+                from config import config as app_config
+                tasks_dir = Path(app_config.system.tasks_dir)
+            except Exception:
+                tasks_dir = Path("tasks")
+            task_file = tasks_dir / f"{task_id}.task.md"
             
             response = f"""
 ✅ Task created successfully!
@@ -204,6 +209,12 @@ The system will now process this task automatically. You'll receive a notificati
             status = self.orchestrator.get_status()
             
             # Format status response
+            # Resolve base working directory safely
+            try:
+                from config import config as app_config
+                base_cwd = app_config.claude.base_cwd
+            except Exception:
+                base_cwd = ""
             status_text = f"""
 📊 System Status
 
@@ -218,7 +229,7 @@ The system will now process this task automatically. You'll receive a notificati
 • Completed: {status['tasks']['completed']}
 • Workers: {status['tasks']['workers']}
 
-**Working Directory:** `{self.orchestrator.config.claude.base_cwd}`
+**Working Directory:** `{base_cwd}`
             """.strip()
             
             await update.message.reply_text(status_text)
@@ -244,15 +255,17 @@ The system will now process this task automatically. You'll receive a notificati
         task_id = context.args[0]
         
         try:
-            # Check if task exists and is active
-            if task_id in self.orchestrator.active_tasks:
-                # Cancel the task (this would need to be implemented in orchestrator)
-                # For now, just acknowledge the request
-                response = f"🔄 Cancellation requested for task `{task_id}`\n\nNote: Task cancellation is not yet implemented."
+            ok = False
+            try:
+                ok = bool(self.orchestrator.cancel_task(task_id))
+            except Exception:
+                ok = False
+            if ok:
+                response = f"🔄 Cancellation requested for task `{task_id}`."
                 await update.message.reply_text(response)
                 logger.info(f"Telegram user requested cancellation of task {task_id}")
             else:
-                await update.message.reply_text(f"❌ Task `{task_id}` not found or not active.")
+                await update.message.reply_text(f"❌ Task `{task_id}` not found or already finished.")
                 
         except Exception as e:
             error_msg = f"❌ Failed to cancel task: {str(e)}"
@@ -281,7 +294,12 @@ The system will now process this task automatically. You'll receive a notificati
             task_id = self.orchestrator.create_task_from_description(message_text)
             
             # Get task file path
-            task_file = Path(self.orchestrator.config.system.tasks_dir) / f"{task_id}.task.md"
+            try:
+                from config import config as app_config
+                tasks_dir = Path(app_config.system.tasks_dir)
+            except Exception:
+                tasks_dir = Path("tasks")
+            task_file = tasks_dir / f"{task_id}.task.md"
             
             response = f"""
 ✅ Task created from your message!
@@ -332,7 +350,8 @@ Check the results in `results/{task_id}.json` and summary in `summaries/{task_id
             else:
                 # Fallback: use configured notification chat id when allowlist is empty
                 try:
-                    chat_id = getattr(self.orchestrator.config.telegram, "notification_chat_id", None)
+                    from config import config as app_config
+                    chat_id = getattr(app_config.telegram, "notification_chat_id", None)
                     if chat_id:
                         await self.app.bot.send_message(chat_id=chat_id, text=message)
                     else:
