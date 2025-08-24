@@ -30,9 +30,11 @@ dev = [
   "black>=24.4.0",
   "mypy>=1.10.0",
   "pytest>=8.2.0",
+  "pytest-asyncio>=0.23.0",
 ]
 test = [
   "pytest>=8.2.0",
+  "pytest-asyncio>=0.23.0",
 ]
 
 [tool.setuptools]
