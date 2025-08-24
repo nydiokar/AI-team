@@ -33,7 +33,36 @@ async def test_full_pipeline():
     
     # Parse our test task
     parser = TaskParser()
-    task = parser.parse_task_file(str(Path(__file__).parent / "tasks" / "test_llama.task.md"))
+    # Use absolute path to test task file
+    test_task_path = Path(__file__).parent / "tasks" / "test_llama.task.md"
+    if not test_task_path.exists():
+        # Fallback: try to create a minimal test task
+        test_task_path.parent.mkdir(parents=True, exist_ok=True)
+        test_task_content = """---
+id: test_pipeline
+type: analyze
+priority: medium
+created: 2025-01-01T00:00:00Z
+---
+
+# Test Pipeline Task
+
+**Target Files:**
+- src/orchestrator.py
+
+**Prompt:**
+Analyze the orchestrator code and provide a brief summary.
+
+**Success Criteria:**
+- [ ] Code analyzed
+- [ ] Summary provided
+
+**Context:**
+This is a test task for the full pipeline.
+"""
+        test_task_path.write_text(test_task_content, encoding='utf-8')
+    
+    task = parser.parse_task_file(str(test_task_path))
     
     print(f"Processing Task: {task.title}")
     print(f"Type: {task.type.value}, Priority: {task.priority.value}")
