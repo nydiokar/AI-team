@@ -18,47 +18,8 @@ Strengthen reliability and operability, add essential operational tools, and sta
 
 ### Prioritized next 6-7 tasks
 
-1) **Implement results index + compact context loader** - DONE 
-   - Goal: Create a lightweight artifact index for efficient task context lookup and provide compact, prompt-ready context summaries.
-   - Scope: 
-     - Maintain `results/index.json` mapping `task_id -> latest artifact path`
-     - Implement `ContextLoader` class that returns summarized, prompt-ready context from latest artifacts
-     - Add artifact linkage fields (`parent_task_id`, `turn_of`) for future multi-turn support
-   - Acceptance: Index stays current; context loader produces concise summaries under token caps; artifacts include linkage metadata.
 
-2) **Add `doctor` command and env reload pipeline** - DONE 
-   - Goal: Provide system health diagnostics and runtime configuration management.
-   - Scope:
-     - Implement `python main.py doctor` to validate env vars, Claude availability, working directory access
-     - Add `config.reload_from_env()` for runtime tunables (timeouts, max_turns, working directories)
-     - Document supported environment variables and their effects
-   - Acceptance: Doctor reports clear status; env changes take effect without restart; documentation covers all configurable options.
-
-3) **Extend error taxonomy and retry logic** - DONE 
-   - Goal: Improve error classification and provide actionable error information in artifacts.
-   - Scope:
-     - Extend transient/fatal classifier with specific interactive and network markers
-     - Produce clearer error messages in artifacts with suggested actions
-     - Implement smarter retry backoff for different error types
-   - Acceptance: Errors are clearly categorized; artifacts contain actionable error information; retry behavior is predictable and appropriate.
-
-4) **Implement guarded-write mode and enforce allowlist boundaries**
-   - Goal: Add optional safety controls and improve security monitoring.
-   - Scope:
-     - Optional "guarded-write mode" that stages edits for review before applying
-     - Enhanced allowlist enforcement with telemetry for attempted out-of-root access
-     - Logging and alerting for security boundary violations
-   - Acceptance: Guarded mode works when enabled; all file operations respect allowlist; security events are logged and surfaced.
-
-5) **Add on-demand progress monitoring**
-   - Goal: Provide progress visibility without real-time spam.
-   - Scope:
-     - Telegram `/progress <task_id>` command showing current status and recent events
-     - CLI `python main.py tail-events` for non-blocking event inspection
-     - Windows-friendly log tailing with rotation
-   - Acceptance: Progress commands work end-to-end; tail-events doesn't block orchestrator; events are properly formatted and accessible.
-
-6) **Strengthen test suite (Windows-first)**
+6) **Strengthen test suite (Windows-first)** - PARTIAL
    - Goal: Ensure system stability and catch regressions early.
    - Scope:
      - Golden task tests for agents (deterministic assertions)
@@ -67,14 +28,28 @@ Strengthen reliability and operability, add essential operational tools, and sta
      - Windows-specific test coverage
    - Acceptance: All tests pass on Windows; golden tests are deterministic; CI pipeline is green.
 
-7) **Project cleanup and consistency**
-   - Goal: Improve code quality and maintainability.
-   - Scope:
-     - Standardize imports (`from src.core ...` project-wide)
-     - Remove sys.path hacks and clean up import resolution
-     - Light linting pass for consistency
-     - Consolidate any remaining duplicate code
-   - Acceptance: Clean import structure; no sys.path modifications; consistent code style; no duplicate functionality.
+### Proposed next 7 production-grade tasks
+
+1) **Metrics and SLOs (operator visibility)**
+   - Extend `python main.py stats` with per-type success rate, error-class counts, and p50/p95 per phase; emit `logs/metrics.json` snapshots periodically.
+
+2) **Artifact schema v1.1 + validator update**
+   - Add `security` block (guarded_write, allowlist_root, violations[]); clarify linkage fields; keep `--ignore-legacy` for old artifacts.
+
+3) **Guarded-write staging (optional)**
+   - Persist diffs to `results/guarded/<task_id>.diff`; add `python main.py apply-guarded <task_id>`; Telegram approval hint when staging occurs.
+
+4) **E2E watcher and restart resilience (Windows-first)**
+   - Deterministic watcher tests; verify queue persistence on restart; handle Windows file lock edge cases.
+
+5) **Rate limiting and backpressure**
+   - Queue caps with `throttled`/`dropped_low_priority` events; Telegram `/task` rate limiting; runtime worker pool via `reload_from_env`.
+
+6) **Secrets and privacy hardening**
+   - Expand redaction patterns; add `.env.example`; pre-commit secret scan; mask sensitive artifact fields when present.
+
+7) **Operational UX polish**
+   - `tail-events` follow mode and colorized output (Windows-safe); `doctor` write probes; `/progress` supports `--since` and clearer status summaries.
 
 ### Future/Optional tasks (post-v1)
 
