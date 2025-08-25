@@ -1,5 +1,10 @@
 ## AI Task Orchestrator — Next Stage Plan
 
+### Current Status Summary
+- ✅ **COMPLETED (7/9)**: Validation Engine 2.0, Artifact Schema v1, Claude CLI hardening, Telegram interface, Task lifecycle controls, Packaging & CI, Prompt-template agents
+- 🔄 **IN PROGRESS**: LLAMA-mediated reply flow (groundwork complete)
+- 📋 **REMAINING**: Real-time progress monitoring, implement /reply flow, broaden CLI error taxonomy
+
 ### Where we are
 - File-based workflow is implemented and robust: debounced `FileWatcher`, atomic writes, and processed task archiving.
 - Parsing pipeline is solid: `TaskParser` + `LlamaMediator` with Ollama support and reliable fallback, prompt capping and JSON-mode where available.
@@ -12,10 +17,11 @@
 Strengthen reliability and operability, add interactive control, and stabilize artifacts/validation so the system is safer to run unattended and easier to monitor.
 
 ### Prioritized next 6 tasks
-1) Telegram minimal interface (opt-in) - PARTIAL
+1) Telegram minimal interface (opt-in) - DONE
    - Goal: Chat-based control and notifications.
-   - Scope: `/task <desc>` creates `.task.md`; `/status` shows components/workers/queue; optional `/cancel <task_id>`.
+   - Scope: `/task <desc>` creates `.task.md`; `/status` shows components/workers/queue; `/cancel <task_id>` for task cancellation.
    - Acceptance: With valid env vars, commands work end-to-end and notifications on completion/failure are delivered.
+   - ✅ **COMPLETED**: All commands implemented, cancel integration wired to orchestrator, notifications working.
 
 2) Validation Engine 2.0 (coherence + structure) - DONE
    - Goal: Reduce false positives/negatives and verify outputs align with requested task type and files.
@@ -44,10 +50,11 @@ Strengthen reliability and operability, add interactive control, and stabilize a
    - Scope: Introduce `pyproject.toml` with extras (dev,test); pre-commit hooks (black/ruff/mypy where applicable); GitHub Actions to run pytest on Windows.
    - Acceptance: One-command local setup works; CI is green; `requirements.txt` deprecated in favor of `pyproject.toml`.
 
-6) Task lifecycle controls and SLAs
+6) Task lifecycle controls and SLAs - DONE
    - Goal: Operational safety for long-running tasks.
    - Scope: Per-task timeout overrides, graceful cancel, status transitions persisted; surface ETA/elapsed in NDJSON; optional concurrency by `TaskPriority`.
    - Acceptance: Timeouts cancel correctly; `/status` (or CLI) shows lifecycle; events include `cancelled` and timeout markers.
+   - ✅ **COMPLETED**: Per-task timeout, cooperative cancellation, cancel events, Telegram /cancel integration.
 
 7) LLAMA‑mediated interactive reply flow (turn-based) - PARTIAL (groundwork)
    - Goal: Enable user to continue an already-processed task with follow-up instructions without losing context; LLAMA mediates constraints and re-invokes Claude in a new turn.
@@ -58,7 +65,7 @@ Strengthen reliability and operability, add interactive control, and stabilize a
      - Events: emit `turn_started`/`turn_finished` with linkage to original task
    - Acceptance:
      - Given an existing artifact, a reply creates a new turn artifact linked to the original
-     - Constraints like “yes, but skip A/B; focus on X” are respected in resulting changes
+     - Constraints like "yes, but skip A/B; focus on X" are respected in resulting changes
      - Strict validation passes for new artifacts; summaries show conversation context
    - Prerequisites (activation with current system):
      - Add optional `conversation` field to results schema and validator (no breaking change)
@@ -70,6 +77,38 @@ Strengthen reliability and operability, add interactive control, and stabilize a
      - Tests: conversation persistence, constraint application, schema validation for new-turn artifacts
 
 
+8) Prompt‑template agents and Telegram commands (LLAMA‑expanded) - DONE
+   - Goal: Enable concise user intents like `/documentation <file>` or `/code-review <path>` to expand into high‑quality, best‑practice tasks via LLAMA, then execute with Claude headlessly.
+   - Scope:
+     - Define agent templates (documentation, code_review, bug_fix, analyze) with structured JSON outputs and embedded best‑practice hints
+     - Implement `LlamaMediator.expand_agent_intent(agent, args, attachments)` → enriched task (type, prompt, targets, success criteria)
+     - Add Telegram commands: `/documentation`, `/code_review`, `/bug_fix`, `/analyze` with input validation and allowlist
+     - Attachment/path ingestion from messages; safe path resolution under allowed root
+     - Tests: golden prompts for determinism, safety checks, schema validation of expanded tasks
+   - Acceptance:
+     - Given a blueprint file and `/documentation`, the system creates an enriched task with clear sections and best practices, then runs successfully under constraints
+     - Expanded tasks remain within token caps, produce valid artifacts, and pass validation
+   - ✅ **COMPLETED**: Agent templates with few-shots, Telegram commands, LLAMA expansion, file attachment handling, directory creation, file copying to working directory
+   - Pitfalls → Mitigations:
+     - Prompt drift/hallucination → Use JSON schema + few‑shot examples; validate required fields; fallback to minimal template
+     - Context bloat (token overrun) → Summarize input files; cap sizes via config; include only salient snippets
+     - Unsafe paths/overreach → Enforce allowed root; sanitize user paths; deny absolute paths unless configured
+     - Inconsistent outputs → Pin template versions; snapshot template id in artifact; add golden tests
+
+9) Real‑time progress monitoring and status - NEW
+   - Goal: Provide live visibility into running work: phases, percent complete heuristic, ETA, and recent events via CLI/Telegram.
+   - Scope:
+     - Extend events with `step_started/step_finished`, include `phase`, `elapsed_ms`, `percent_complete` heuristic
+     - Improve `/status` to list active tasks with elapsed/ETA and last 3 events; add CLI `python main.py tail-events`
+     - File change feed: show recent `files_modified` deltas as they’re detected
+     - Lightweight log tailing with rotation; Windows‑friendly
+   - Acceptance:
+     - `/status` shows active/queued tasks with live elapsed/ETA and recent steps; `events.ndjson` contains step events; `tail-events` streams without blocking the orchestrator
+   - Pitfalls → Mitigations:
+     - Event volume/noise → Sample non‑critical events; size‑cap and rotate logs
+     - ETA accuracy → Display ranges/confidence; degrade gracefully when cues are missing
+     - Overhead in hot loop → Batch writes, async buffers; avoid synchronous fs ops on critical path
+
 ### Nice-to-have (after the six above)
 - Optional guarded-write mode: stage code edits as diffs in results and require manual apply; or restrict edits to allowlisted directories.
 - Lightweight dashboard: tail `events.ndjson`, show success-rate and p50/p95 durations.
@@ -78,7 +117,7 @@ Strengthen reliability and operability, add interactive control, and stabilize a
 ### Add-on task (high utility): Per-task working directory selection - DONE 
 - Goal: Spawn Claude in the correct project folder per task/message.
 - Scope:
-  - Support `cwd` in task YAML frontmatter and detect patterns like “in C:\path\to\project” or “in /path/project” in free-text descriptions when creating tasks.
+  - Support `cwd` in task YAML frontmatter and detect patterns like "in C:\path\to\project" or "in /path/project" in free-text descriptions when creating tasks.
   - Pass `cwd` through `Task.metadata` and have `ClaudeBridge` run with that as working directory (fallback: project root).
   - Validate path existence and restrict to an allowlist root for safety (configurable).
 - Acceptance:
@@ -99,8 +138,6 @@ Strengthen reliability and operability, add interactive control, and stabilize a
 - **Artifact linkage/index**: Create a lightweight index to resolve latest artifact by `task_id`; implement an orchestrator context loader that compacts previous artifact into a prompt-ready summary.
 - **Events model**: Add `turn_started`/`turn_finished` with `parent_task_id`, `turn_index` and surface in NDJSON for observability.
 - **Schema evolution (backward-compatible)**: Add optional `conversation` and `parent_task_id`/`turn_of` fields; keep validator strict by default with `--ignore-legacy` for older runs.
-- **Security/limits**: Enforce `allowed_root` and least-privilege tool set on reply turns; validate constraints (e.g., “don’t touch A/B”).
+- **Security/limits**: Enforce `allowed_root` and least-privilege tool set on reply turns; validate constraints (e.g., "don't touch A/B").
 - **Performance**: Compact context passed to LLAMA/Claude (avoid dumping whole artifacts); cap sizes using existing config soft caps.
 - **Tests**: Add unit tests for config overrides, artifact index/context loader, turn events, schema validation for new fields, and end-to-end reply flow (Telegram optional).
-
-

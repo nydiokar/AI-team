@@ -59,6 +59,11 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("task", self._handle_task_command))
         self.app.add_handler(CommandHandler("status", self._handle_status_command))
         self.app.add_handler(CommandHandler("cancel", self._handle_cancel_command))
+        # Agent command handlers (explicit)
+        self.app.add_handler(CommandHandler("documentation", self._handle_agent_documentation))
+        self.app.add_handler(CommandHandler("code_review", self._handle_agent_code_review))
+        self.app.add_handler(CommandHandler("bug_fix", self._handle_agent_bug_fix))
+        self.app.add_handler(CommandHandler("analyze", self._handle_agent_analyze))
         
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -130,6 +135,10 @@ You can also just send me a message describing what you want to do!
 • `/task <description>` - Create a new AI task
 • `/status` - Show current system status
 • `/cancel <task_id>` - Cancel a running task
+• `/documentation <intent>` - Create a documentation task (attach files optionally)
+• `/code_review <intent>` - Create a code review task
+• `/bug_fix <intent>` - Create a bug fix task
+• `/analyze <intent>` - Create an analysis task
 
 **Examples:**
 • `/task Review the authentication code in /auth-system`
@@ -320,6 +329,56 @@ The system will now process this task automatically. You'll receive a notificati
             error_msg = f"❌ Failed to create task from message: {str(e)}"
             await update.message.reply_text(error_msg)
             logger.error(f"Telegram message-to-task creation failed: {e}")
+
+    # --- Agent commands ---
+    async def _handle_agent_command(self, agent: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        intent_text = " ".join(context.args).strip()
+        if not intent_text:
+            await update.message.reply_text("❌ Please provide a brief intent or description.")
+            return
+        try:
+            # Download attached documents (if any) to a safe location under tasks/
+            files: list[str] = []
+            try:
+                if update.message and update.message.document:
+                    doc = update.message.document
+                    tg_file = await context.bot.get_file(doc.file_id)
+                    from config import config as app_config
+                    attachments_dir = Path(app_config.system.tasks_dir) / "attachments"
+                    attachments_dir.mkdir(parents=True, exist_ok=True)
+                    safe_name = doc.file_name or f"file_{doc.file_id}"
+                    target_path = attachments_dir / safe_name
+                    await tg_file.download_to_drive(custom_path=str(target_path))
+                    files.append(str(target_path))
+            except Exception as e:
+                logger.warning(f"Attachment download failed or none present: {e}")
+
+            # Expand via LLAMA mediator
+            expanded = self.orchestrator.llama_mediator.expand_agent_intent(agent, intent_text, files=files)
+            # Create task using expanded structure (preserves target_files and cwd)
+            task_id = self.orchestrator.create_task_from_expanded(expanded)
+            await update.message.reply_text(
+                f"✅ {agent.replace('_',' ').title()} task created: `{task_id}`\n"
+                f"Title: {expanded.get('title','')}"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Failed to create {agent} task: {e}")
+            logger.error(f"Agent command failed ({agent}): {e}")
+
+    async def _handle_agent_documentation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._handle_agent_command("documentation", update, context)
+
+    async def _handle_agent_code_review(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._handle_agent_command("code_review", update, context)
+
+    async def _handle_agent_bug_fix(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._handle_agent_command("bug_fix", update, context)
+
+    async def _handle_agent_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._handle_agent_command("analyze", update, context)
     
     async def notify_completion(self, task_id: str, summary: str, success: bool = True):
         """Notify users of task completion"""

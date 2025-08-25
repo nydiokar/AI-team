@@ -6,12 +6,13 @@ import re
 import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime
+from pathlib import Path
 
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from core import ILlamaMediator, Task, TaskResult, TaskType
+from src.core import ILlamaMediator, Task, TaskResult, TaskType
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -366,3 +367,98 @@ Duration: {result.execution_time:.1f}s
             "model": config.llama.model if self.ollama_available else "fallback",
             "mode": "LLAMA" if self.ollama_available else "FALLBACK"
         }
+
+    # --- Agent expansion (command-driven) ---
+    def expand_agent_intent(self, agent: str, intent_text: str, files: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Expand an agent command + brief intent into a structured enriched task using few-shot templates.
+
+        Returns a dict with keys: type, title, prompt, target_files, metadata.cwd (optional).
+        """
+        agent_norm = (agent or "").strip().lower().replace("-", "_")
+        files = files or []
+
+        # Resolve safe working directory hint from phrases like: new directory called "name"
+        cwd_hint: Optional[str] = None
+        try:
+            m = re.search(r"new\s+directory\s+called\s+\"?([^\"\n]+)\"?", intent_text, re.IGNORECASE)
+            if m:
+                safe_name = re.sub(r"[^A-Za-z0-9 _.-]", "", m.group(1)).strip().strip(". ")
+                base = config.claude.base_cwd
+                if base:
+                    sep = "\\" if "\\" in base else "/"
+                    cwd_hint = f"{base.rstrip(sep)}{sep}{safe_name}"
+        except Exception:
+            cwd_hint = None
+
+        # Build target files list from provided paths (sanitized, capped)
+        target_files: List[str] = []
+        for p in files[:20]:
+            try:
+                target_files.append(str(p))
+            except Exception:
+                continue
+
+        # Enforce template-driven expansion via LLAMA
+        if not self._load_agent_template(agent_norm):
+            available = ", ".join(self.list_available_agents())
+            raise ValueError(f"Unknown agent '{agent_norm}'. Available: {available}")
+        if not (self.ollama_available and self.client and self.model_installed):
+            raise RuntimeError("LLAMA (Ollama) is not available; cannot expand agent template")
+        return self._expand_with_llama_template(agent_norm, intent_text, target_files, cwd_hint)
+
+    def _load_agent_template(self, agent: str) -> Optional[str]:
+        try:
+            # Project root = .../AI-team; this file lives under src/bridges/
+            root = Path(__file__).resolve().parents[2]
+            path = root / "prompts" / "agents" / f"{agent}.md"
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+        return None
+
+    def list_available_agents(self) -> List[str]:
+        try:
+            root = Path(__file__).resolve().parents[2]
+            glob = (root / "prompts" / "agents").glob("*.md")
+            return sorted(p.stem for p in glob)
+        except Exception:
+            return []
+
+    def _expand_with_llama_template(self, agent: str, intent_text: str, target_files: List[str], cwd_hint: Optional[str]) -> Dict[str, Any]:
+        """Use few-shot prompt template to expand into a structured enriched task (JSON)."""
+        template = self._load_agent_template(agent)
+        if not template:
+            raise RuntimeError(f"Template not found for agent: {agent}")
+        # Build context payload
+        payload = {
+            "agent": agent,
+            "intent": intent_text,
+            "target_files": target_files,
+            "cwd_hint": cwd_hint or "",
+            "template_id": f"{agent}-v1"
+        }
+        prompt = (
+            template.strip()
+            + "\n\n" 
+            + "Context:" 
+            + "\n" 
+            + json.dumps(payload, ensure_ascii=False)
+            + "\n\n"
+            + "Respond with only a single JSON object with keys: type, title, prompt, target_files, metadata."
+        )
+        response = self.client.generate(
+            model=config.llama.model,
+            prompt=prompt,
+            format='json',
+            options={'temperature': 0.2}
+        )
+        enriched = json.loads(response['response'])
+        # Basic normalization
+        enriched.setdefault("type", "analyze")
+        enriched.setdefault("title", "Enriched Task")
+        enriched.setdefault("target_files", target_files)
+        meta = enriched.setdefault("metadata", {})
+        if cwd_hint and not meta.get("cwd"):
+            meta["cwd"] = cwd_hint
+        return enriched

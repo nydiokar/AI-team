@@ -586,6 +586,63 @@ Allow users to reply to an already-processed task (e.g., “yes, proceed but ski
 - Context history browser
 - Performance profiling
 
+## Prompt‑Template Agents & Command Routing (High‑Level)
+
+### Purpose
+Enable concise, natural intents (for example: “make docs from this blueprint”) to expand into high‑quality, best‑practice tasks via LLAMA, then execute headlessly with Claude. Provide predictable command entry points now, with optional natural‑language auto‑routing later.
+
+### Approach
+- Command‑first routing: Telegram commands `/documentation`, `/code_review`, `/bug_fix`, `/analyze` map to agent templates
+- LLAMA expansion: `LlamaMediator.expand_agent_intent(agent, args, attachments)` returns a structured task (type, prompt, targets, success criteria)
+- Guardrails: schema‑constrained outputs, allowlisted paths, token caps, versioned templates with golden tests
+- Future: optional intent auto‑detection when reliability is proven
+
+### Integration Points
+- Telegram → Agent command parsing → `LlamaMediator.expand_agent_intent` → `TaskOrchestrator.create_task_from_description`
+- Artifacts: snapshot `template_id` and inputs in results; keep schema v1 compatible
+- Events: emit `agent_selected`, `expansion_completed`, and step events for visibility
+
+### Expected Outcomes
+- Faster task authoring with consistent best practices
+- Safer execution via constrained prompts and path allowlists
+- Repeatable behavior through versioned templates and tests
+
+### Risks & Mitigations
+- Prompt drift/hallucination → JSON schema + few‑shot examples; validate required fields; fallback minimal template
+- Token overflow → Summarize inputs; cap sizes; include salient snippets only
+- Incorrect routing → Start with explicit commands; evaluate auto‑routing later
+
+### Execution (Phased)
+1) Define templates and examples; pin `template_id`
+2) Implement expansion in `LlamaMediator`; add golden and safety tests
+3) Wire Telegram commands; sanitize inputs; rate‑limit
+4) Record template/version and inputs in artifacts
+5) Iterate with usage; consider auto‑routing
+
+## Real‑Time Progress Monitoring (High‑Level)
+
+### Purpose
+Expose live execution phases, recent events, files touched, and ETA to increase operator confidence and speed up debugging.
+
+### Approach
+- Extend the event model with `step_started/step_finished`, phases, and percent‑complete heuristics
+- Improve `/status` and add a CLI `python main.py tail-events` utility
+- Lightweight rotation and sampling to minimize overhead
+
+### Integration Points
+- Orchestrator emits step events around parse → execute → summarize → validate
+- Telegram `/status` shows active tasks with elapsed/ETA and recent events
+- CI can assert presence of step events in logs or artifacts
+
+### Expected Outcomes
+- Operators see progress and recent activity at a glance
+- Faster triage using correlated step events and summaries
+
+### Risks & Mitigations
+- Log volume → rotation, sampling, size caps
+- Timing noise → heuristics with ranges; avoid false precision
+- Runtime overhead → async, buffered writes; avoid blocking hot paths
+
 ## Deployment Strategy
 
 ### Development Environment
