@@ -393,8 +393,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 
                 # Log completion
                 status = "SUCCESS" if result.success else "FAILED"
-                logger.info(f"event=claude_finished task_id={task.id} status={status} duration_s={result.execution_time:.2f}")
-                self._emit_event("claude_finished", task, {"status": status, "duration_s": result.execution_time})
+                logger.info(f"event=claude_finished task_id={task.id} status={status} duration_s={result.execution_time:.2f} class={getattr(result,'error_class','')}")
+                self._emit_event("claude_finished", task, {"status": status, "duration_s": result.execution_time, "error_class": getattr(result, "error_class", "")})
                 
                 # Send Telegram notification if available
                 if self.telegram_interface and result.success:

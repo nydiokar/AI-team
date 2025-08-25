@@ -30,7 +30,7 @@ Strengthen reliability and operability, add essential operational tools, and sta
 
 ### Proposed next 7 production-grade tasks
 
-1) **Metrics and SLOs (operator visibility)**
+1) **Metrics and SLOs (operator visibility)** - DONE 
    - Extend `python main.py stats` with per-type success rate, error-class counts, and p50/p95 per phase; emit `logs/metrics.json` snapshots periodically.
 
 2) **Artifact schema v1.1 + validator update**

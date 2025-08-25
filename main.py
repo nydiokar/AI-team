@@ -241,7 +241,7 @@ def main():
             asyncio.run(show_status())
             return
         if command == "stats":
-            _print_stats()
+            _print_stats(sys.argv[2:])
             return
         if command == "create-sample":
             asyncio.run(create_sample_task())
@@ -347,11 +347,13 @@ def _clean_artifacts(days: int) -> int:
                 continue
     return removed
 
-def _print_stats():
+def _print_stats(args=None):
     """Compute and print lightweight metrics from logs/events.ndjson"""
     import json
     from datetime import datetime
     from statistics import median
+    args = args or []
+    write_json = "--write-json" in args
 
     events_path = Path(config.system.logs_dir) / "events.ndjson"
     if not events_path.exists():
@@ -362,6 +364,8 @@ def _print_stats():
     successes = 0
     failures = 0
     durations = []
+    by_type = {}
+    by_error = {}
     first_ts = None
     last_ts = None
 
@@ -392,6 +396,16 @@ def _print_stats():
                 dur = ev.get("duration_s")
                 if isinstance(dur, (int, float)):
                     durations.append(float(dur))
+                t = ev.get("task_type", "unknown")
+                by_type.setdefault(t, {"total": 0, "success": 0, "failed": 0}).update(
+                    {k: v for k, v in {"total": by_type.get(t, {}).get("total", 0) + 1}.items()}
+                )
+                if status == "SUCCESS":
+                    by_type[t]["success"] += 1
+                else:
+                    by_type[t]["failed"] += 1
+                ec = (ev.get("error_class") or "none").lower()
+                by_error[ec] = by_error.get(ec, 0) + 1
 
     if total_tasks == 0:
         print("No completed tasks found in events.")
@@ -412,6 +426,42 @@ def _print_stats():
     print(f"Tasks: total={total_tasks} success={successes} failed={failures} success_rate={success_rate:.1f}%")
     print("Durations (s):")
     print(f"  p50={pct(50):.2f}  p90={pct(90):.2f}  p95={pct(95):.2f}  p99={pct(99):.2f}")
+    print("By Task Type:")
+    for t, d in sorted(by_type.items()):
+        tot = d["total"]
+        sr = (d["success"] / tot * 100.0) if tot else 0.0
+        print(f"  {t}: total={tot} success={d['success']} failed={d['failed']} sr={sr:.1f}%")
+    print("Error Classes:")
+    for ec, cnt in sorted(by_error.items(), key=lambda x: (-x[1], x[0])):
+        print(f"  {ec}: {cnt}")
+
+    if write_json:
+        payload = {
+            "window": {
+                "from": first_ts.isoformat() if first_ts else None,
+                "to": last_ts.isoformat() if last_ts else None,
+            },
+            "tasks": {
+                "total": total_tasks,
+                "success": successes,
+                "failed": failures,
+                "success_rate": success_rate,
+                "durations": {
+                    "p50": pct(50),
+                    "p90": pct(90),
+                    "p95": pct(95),
+                    "p99": pct(99),
+                },
+                "by_type": by_type,
+                "by_error": by_error,
+            },
+        }
+        out = Path(config.system.logs_dir) / "metrics.json"
+        try:
+            out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"Wrote {out}")
+        except Exception as e:
+            print(f"Failed to write metrics: {e}")
 
 def _tail_events(args=None):
     """Print recent events from logs/events.ndjson (Windows-friendly).
