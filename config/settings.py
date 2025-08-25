@@ -78,6 +78,7 @@ class SystemConfig:
     log_level: str = "INFO"
     max_concurrent_tasks: int = 3
     task_timeout: int = 1800  # 30 minutes
+    guarded_write: bool = False
     
 class Config:
     """Main configuration class"""
@@ -191,6 +192,13 @@ class Config:
             allowed = os.getenv("CLAUDE_ALLOWED_ROOT")
             if allowed:
                 self.claude.allowed_root = allowed
+        except Exception:
+            pass
+        # Guarded write mode
+        try:
+            gw = os.getenv("GUARDED_WRITE")
+            if gw is not None:
+                self.system.guarded_write = gw.lower() == "true"
         except Exception:
             pass
 

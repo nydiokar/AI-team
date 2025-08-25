@@ -57,8 +57,11 @@ class ClaudeBridge(IClaudeBridge):
             # Build command with allowed tools
             command = self.base_command.copy()
             
-            # Add specific tool permissions for safety
-            allowed_tools = self._get_allowed_tools_for_task(task.type)
+            # Add specific tool permissions for safety (guarded write -> read-only)
+            if getattr(config.system, "guarded_write", False):
+                allowed_tools = ["Read", "LS", "Grep", "Glob"]
+            else:
+                allowed_tools = self._get_allowed_tools_for_task(task.type)
             if allowed_tools:
                 command.extend(["--allowedTools", ",".join(allowed_tools)])
 

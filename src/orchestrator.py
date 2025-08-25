@@ -708,6 +708,11 @@ created: {task.created}
                 "retries": getattr(result, "retries", 0),
                 "error_class": getattr(result, "error_class", ""),
             },
+            "security": {
+                "guarded_write": bool(getattr(config.system, "guarded_write", False)),
+                "allowlist_root": getattr(config.claude, "allowed_root", None),
+                "violations": [],
+            },
             "suggested_actions": self._suggest_actions(getattr(result, "error_class", ""), result) if not result.success else [],
             # Minimal status blocks for operability/triage
             "orchestrator": {
@@ -725,6 +730,32 @@ created: {task.created}
         }
 
         import json
+        # Allowlist enforcement on files_modified (telemetry + artifact note)
+        try:
+            allow_root = getattr(config.claude, "allowed_root", None)
+            if allow_root and artifact.get("files_modified"):
+                from pathlib import Path as _P
+                root = _P(allow_root).resolve()
+                bad = []
+                for f in list(artifact.get("files_modified") or []):
+                    try:
+                        p = _P(f).resolve()
+                        if not (root in p.parents or p == root):
+                            bad.append(f)
+                    except Exception:
+                        bad.append(f)
+                if bad:
+                    artifact["security"]["violations"] = [
+                        {"type": "out_of_root", "path": b} for b in bad
+                    ]
+                    # Emit security event
+                    try:
+                        self._emit_event("security_violation", None, {"paths": bad})
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         (results_dir / f"{task_id}.json").write_text(
             json.dumps(artifact, ensure_ascii=False, indent=2),
             encoding="utf-8"

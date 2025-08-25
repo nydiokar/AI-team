@@ -631,6 +631,10 @@ def _doctor():
     print(f"  CLAUDE timeout (s): {config.claude.timeout}")
     print(f"  CLAUDE max_turns  : {config.claude.max_turns} (0=unlimited/CLI default)")
     print(f"  Skip permissions  : {config.claude.skip_permissions}")
+    try:
+        print(f"  Guarded write    : {getattr(config.system, 'guarded_write', False)}")
+    except Exception:
+        pass
     print(f"  Base CWD          : {config.claude.base_cwd}")
     print(f"  Allowed root      : {config.claude.allowed_root}")
 
