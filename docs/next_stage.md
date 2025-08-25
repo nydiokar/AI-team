@@ -18,7 +18,7 @@ Strengthen reliability and operability, add essential operational tools, and sta
 
 ### Prioritized next 6-7 tasks
 
-1) **Implement results index + compact context loader**
+1) **Implement results index + compact context loader** - DONE 
    - Goal: Create a lightweight artifact index for efficient task context lookup and provide compact, prompt-ready context summaries.
    - Scope: 
      - Maintain `results/index.json` mapping `task_id -> latest artifact path`
@@ -26,7 +26,7 @@ Strengthen reliability and operability, add essential operational tools, and sta
      - Add artifact linkage fields (`parent_task_id`, `turn_of`) for future multi-turn support
    - Acceptance: Index stays current; context loader produces concise summaries under token caps; artifacts include linkage metadata.
 
-2) **Add `doctor` command and env reload pipeline**
+2) **Add `doctor` command and env reload pipeline** - DONE 
    - Goal: Provide system health diagnostics and runtime configuration management.
    - Scope:
      - Implement `python main.py doctor` to validate env vars, Claude availability, working directory access
@@ -34,7 +34,7 @@ Strengthen reliability and operability, add essential operational tools, and sta
      - Document supported environment variables and their effects
    - Acceptance: Doctor reports clear status; env changes take effect without restart; documentation covers all configurable options.
 
-3) **Extend error taxonomy and retry logic**
+3) **Extend error taxonomy and retry logic** - DONE 
    - Goal: Improve error classification and provide actionable error information in artifacts.
    - Scope:
      - Extend transient/fatal classifier with specific interactive and network markers

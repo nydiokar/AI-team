@@ -146,6 +146,8 @@ MAX_CONCURRENT_TASKS=3
 ```
 
 - `python main.py doctor` prints the effective configuration, checks Claude CLI availability, shows relevant env overrides, and verifies key directories.
+- `python main.py tail-events [--task TASK_ID] [--lines N]` prints recent events from `logs/events.ndjson` without blocking the orchestrator.
+- Telegram: `/progress <task_id>` shows the last events for a task (optional, when Telegram is configured).
 - At runtime, the system can `reload_from_env()` to pick up changes to `CLAUDE_*` values without restart.
 
 ### Telegram Bot Integration
@@ -166,6 +168,7 @@ The system includes an optional Telegram bot interface for remote task managemen
 - `/help` - Detailed help and examples
 - `/task <description>` - Create a new AI task
 - `/status` - Show system status and task queue
+- `/progress <task_id>` - Show recent events for a task
 - `/cancel <task_id>` - Request task cancellation
 
 **Natural Language:**
@@ -237,6 +240,7 @@ python main.py create-sample   # Test task creation
 python main.py clean tasks                 # Archive loose tasks to tasks/processed
 python main.py clean artifacts --days 30   # Prune old results/summaries
 python main.py validate-artifacts          # Validate results/*.json against schema
+python main.py tail-events [--task TASK_ID] [--lines N]   # Show recent NDJSON events
 python main.py doctor                      # Diagnostics + effective env/config
 ```
 

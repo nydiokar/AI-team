@@ -33,6 +33,47 @@ logging.basicConfig(
     handlers=[stream_handler, file_handler]
 )
 
+# Reduce noise from third-party HTTP logs (python-telegram-bot uses httpx)
+try:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+except Exception:
+    pass
+
+# Global redaction filter for sensitive values in logs
+class _RedactFilter(logging.Filter):
+    def __init__(self) -> None:
+        super().__init__(name="redact")
+        import re as _re
+        # Compile common sensitive patterns
+        self._patterns = [
+            # Telegram bot token in URL path: /bot<token>/...
+            (_re.compile(r"/bot[0-9A-Za-z:_-]+"), "/bot<REDACTED>"),
+            # Authorization headers
+            (_re.compile(r"(Authorization:\s*Bearer\s+)[^\s]+", flags=_re.IGNORECASE), r"\1<REDACTED>"),
+            # Generic token key=value appearances (best-effort)
+            (_re.compile(r"(TELEGRAM_BOT_TOKEN=)[^\s]+", flags=_re.IGNORECASE), r"\1<REDACTED>"),
+        ]
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            redacted = msg
+            for pat, repl in self._patterns:
+                redacted = pat.sub(repl, redacted)
+            if redacted != msg:
+                record.msg = redacted
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+# Attach redaction filter to both handlers
+try:
+    _rf = _RedactFilter()
+    file_handler.addFilter(_rf)
+    stream_handler.addFilter(_rf)
+except Exception:
+    pass
+
 logger = logging.getLogger(__name__)
 
 class OrchestratorCLI:
@@ -208,6 +249,9 @@ def main():
         if command == "test-telegram":
             asyncio.run(test_telegram_interface())
             return
+        if command == "tail-events":
+            _tail_events(sys.argv[2:])
+            return
         if command == "help":
             print_help()
             return
@@ -234,6 +278,7 @@ Usage:
     python main.py validate-artifacts        Validate results/*.json against schema
     python main.py create-sample-artifact    Generate a sample artifact (new schema)
     python main.py doctor                    Print effective config and CLI availability
+    python main.py tail-events [--task TASK_ID] [--lines N]   Show recent NDJSON events
     python main.py help            Show this help
 
 Environment Setup:
@@ -367,6 +412,58 @@ def _print_stats():
     print(f"Tasks: total={total_tasks} success={successes} failed={failures} success_rate={success_rate:.1f}%")
     print("Durations (s):")
     print(f"  p50={pct(50):.2f}  p90={pct(90):.2f}  p95={pct(95):.2f}  p99={pct(99):.2f}")
+
+def _tail_events(args=None):
+    """Print recent events from logs/events.ndjson (Windows-friendly).
+
+    Usage:
+      python main.py tail-events [--task TASK_ID] [--lines N]
+    """
+    import json as _json
+    from collections import deque as _deque
+    args = args or []
+    task_filter = None
+    max_lines = 50
+    # Simple flag parsing
+    it = iter(args)
+    for a in it:
+        if a == "--task":
+            try:
+                task_filter = next(it)
+            except StopIteration:
+                break
+        elif a == "--lines":
+            try:
+                max_lines = max(1, int(next(it)))
+            except Exception:
+                pass
+    events_path = Path(config.system.logs_dir) / "events.ndjson"
+    if not events_path.exists():
+        print("No events file found.")
+        return
+    buf = _deque(maxlen=max_lines)
+    try:
+        with events_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = _json.loads(line)
+                except Exception:
+                    continue
+                if task_filter and ev.get("task_id") != task_filter:
+                    continue
+                buf.append(ev)
+    except Exception as e:
+        print(f"Failed to read events: {e}")
+        return
+    for ev in buf:
+        ts = ev.get("timestamp", "")
+        name = ev.get("event", "")
+        tid = ev.get("task_id", "-")
+        extra = {k: v for k, v in ev.items() if k not in ("timestamp", "event", "task_id")}
+        print(f"{ts}  {name:18s}  task={tid}  {extra}")
 
 def _validate_artifacts(args=None):
     """Validate artifacts against docs/schema/results.schema.json
@@ -522,7 +619,6 @@ def _doctor():
     from shutil import which as _which
     from subprocess import run as _run
     from pathlib import Path as _Path
-    import os as _os
 
     # Reload env-derived fields to reflect current environment
     try:
@@ -531,24 +627,12 @@ def _doctor():
         pass
 
     print("Effective configuration:")
+    print(f"  Log level        : {config.system.log_level}")
     print(f"  CLAUDE timeout (s): {config.claude.timeout}")
     print(f"  CLAUDE max_turns  : {config.claude.max_turns} (0=unlimited/CLI default)")
     print(f"  Skip permissions  : {config.claude.skip_permissions}")
     print(f"  Base CWD          : {config.claude.base_cwd}")
     print(f"  Allowed root      : {config.claude.allowed_root}")
-
-    # Environment snapshot (only keys we care about)
-    print("\nEnvironment overrides (if set):")
-    for key in [
-        "CLAUDE_SKIP_PERMISSIONS",
-        "CLAUDE_TIMEOUT_SEC",
-        "CLAUDE_MAX_TURNS",
-        "CLAUDE_BASE_CWD",
-        "CLAUDE_ALLOWED_ROOT",
-        "LOG_LEVEL",
-    ]:
-        val = _os.getenv(key)
-        print(f"  {key:20s} = {val if val is not None else '(unset)'}")
 
     # Basic directory diagnostics (existence and readability)
     print("\nDirectory diagnostics:")

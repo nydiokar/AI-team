@@ -570,19 +570,24 @@ class TaskOrchestrator(ITaskOrchestrator):
                 error_class = self._classify_error(result)
                 result.error_class = error_class
                 result.retries = attempt - 1
-                
-                if error_class == "transient" and attempt <= max_retries and not result.success:
-                    jitter = random.uniform(0.75, 1.5)
-                    delay = retry_delay * jitter
-                    logger.warning(f"event=retry task_id={task.id} attempt={attempt} class=transient delay_s={delay:.2f}")
-                    self._emit_event("retry", task, {"attempt": attempt, "class": "transient", "delay_s": delay})
+
+                # Determine retry strategy per error class
+                strategy = self._get_retry_strategy(error_class)
+                max_retries = strategy.get("max_retries", max_retries)
+                if attempt == 1:
+                    retry_delay = strategy.get("initial_delay", retry_delay)
+                    backoff_mult = strategy.get("backoff_multiplier", backoff_mult)
+                if (not result.success) and attempt <= max_retries:
+                    jitter = random.uniform(0.85, 1.35)
+                    delay = max(0.0, retry_delay * jitter)
+                    logger.warning(f"event=retry task_id={task.id} attempt={attempt} class={error_class} delay_s={delay:.2f}")
+                    self._emit_event("retry", task, {"attempt": attempt, "class": error_class, "delay_s": delay})
                     await asyncio.sleep(delay)
-                    retry_delay *= backoff_mult
+                    retry_delay = retry_delay * backoff_mult if retry_delay > 0 else strategy.get("initial_delay", 1.0) * backoff_mult
                     last_result = result
                     continue
-                else:
-                    last_result = result
-                    break
+                last_result = result
+                break
             
             # Step 4: Summarize results with LLAMA
             logger.debug(f"Step 4: Summarizing results for task {task.id}")
@@ -703,6 +708,7 @@ created: {task.created}
                 "retries": getattr(result, "retries", 0),
                 "error_class": getattr(result, "error_class", ""),
             },
+            "suggested_actions": self._suggest_actions(getattr(result, "error_class", ""), result) if not result.success else [],
             # Minimal status blocks for operability/triage
             "orchestrator": {
                 "components": self.component_status,
@@ -757,6 +763,41 @@ created: {task.created}
             encoding="utf-8"
         )
 
+    def _get_retry_strategy(self, error_class: str) -> Dict[str, Any]:
+        """Return retry strategy for an error class.
+
+        Fields: max_retries, initial_delay, backoff_multiplier
+        """
+        default_max = max(0, getattr(config.validation, "max_retries", 2))
+        default_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
+        if error_class in ("none", "interactive", "auth", "fatal"):
+            return {"max_retries": 0, "initial_delay": 0.0, "backoff_multiplier": 1}
+        if error_class == "timeout":
+            return {"max_retries": min(1, default_max), "initial_delay": 1.0, "backoff_multiplier": 1}
+        if error_class == "network":
+            return {"max_retries": max(1, default_max), "initial_delay": 1.5, "backoff_multiplier": default_mult}
+        if error_class == "rate_limit":
+            return {"max_retries": max(2, default_max), "initial_delay": 2.0, "backoff_multiplier": max(2, default_mult)}
+        return {"max_retries": default_max, "initial_delay": 1.0, "backoff_multiplier": default_mult}
+
+    def _suggest_actions(self, error_class: str, result: TaskResult) -> List[str]:
+        """Return actionable hints for common failure classes."""
+        actions: List[str] = []
+        ec = (error_class or "").lower()
+        if ec == "interactive":
+            actions.append("Enable skip-permissions or trust the folder; ensure non-interactive flags.")
+        elif ec == "rate_limit":
+            actions.append("Retry later; lower concurrency; check API/service quotas.")
+        elif ec == "timeout":
+            actions.append("Increase CLAUDE_TIMEOUT_SEC or reduce task scope.")
+        elif ec == "network":
+            actions.append("Check connectivity/VPN; retry with backoff.")
+        elif ec == "auth":
+            actions.append("Run 'claude auth status' and re-authenticate if needed.")
+        elif ec == "fatal":
+            actions.append("Inspect stderr for root cause; adjust prompt/targets.")
+        return actions
+
     def cancel_task(self, task_id: str) -> bool:
         """Request cooperative cancellation for a task.
 
@@ -783,19 +824,28 @@ created: {task.created}
         return False
 
     def _classify_error(self, result: TaskResult) -> str:
-        """Classify error type for retry policy: transient|fatal|none"""
+        """Classify error type for retry policy.
+
+        Returns one of: none|interactive|rate_limit|timeout|network|auth|fatal
+        """
         if result.success:
             return "none"
+        # Prefer explicit interactive marker from bridge
+        try:
+            if any(isinstance(e, str) and "interactive_prompt_detected" in e for e in (result.errors or [])):
+                return "interactive"
+        except Exception:
+            pass
         text = (result.raw_stderr or "") + "\n" + (result.raw_stdout or "")
         text_lower = text.lower()
-        transient_markers = [
-            "rate limit", "rate-limit", "too many requests", "temporarily unavailable",
-            "timeout", "timed out", "connection reset", "connection aborted",
-            "503", "504", "network error", "retry later"
-        ]
-        for marker in transient_markers:
-            if marker in text_lower:
-                return "transient"
+        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests")):
+            return "rate_limit"
+        if any(s in text_lower for s in ("timeout", "timed out")):
+            return "timeout"
+        if any(s in text_lower for s in ("connection reset", "connection aborted", "network error", "503", "504", "temporarily unavailable")):
+            return "network"
+        if any(s in text_lower for s in ("unauthorized", "forbidden", "permission denied", "not logged in", "authentication")):
+            return "auth"
         return "fatal"
 
     def _emit_event(self, name: str, task: Optional[Task] = None, extra: Optional[Dict[str, Any]] = None) -> None:

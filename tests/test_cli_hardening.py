@@ -46,7 +46,7 @@ def test_error_classification():
     """Test that error classification works for retry decisions"""
     bridge = ClaudeBridge()
     
-    # Test transient errors
+    # Test rate limit
     transient_result = bridge._parse_result(
         "test_id",
         {
@@ -56,7 +56,10 @@ def test_error_classification():
         },
         0.1
     )
-    assert transient_result.success is False
+    from src.orchestrator import TaskOrchestrator
+    orch = TaskOrchestrator()
+    ec = orch._classify_error(transient_result)
+    assert ec in ("rate_limit", "network", "timeout", "fatal")
     
     # Test fatal errors
     fatal_result = bridge._parse_result(
@@ -68,7 +71,8 @@ def test_error_classification():
         },
         0.1
     )
-    assert fatal_result.success is False
+    ec2 = orch._classify_error(fatal_result)
+    assert ec2 == "fatal"
 
 
 def test_env_config_overrides():

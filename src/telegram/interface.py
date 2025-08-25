@@ -58,6 +58,7 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("help", self._handle_help))
         self.app.add_handler(CommandHandler("task", self._handle_task_command))
         self.app.add_handler(CommandHandler("status", self._handle_status_command))
+        self.app.add_handler(CommandHandler("progress", self._handle_progress_command))
         self.app.add_handler(CommandHandler("cancel", self._handle_cancel_command))
         # Agent command handlers (explicit)
         self.app.add_handler(CommandHandler("documentation", self._handle_agent_documentation))
@@ -134,6 +135,7 @@ You can also just send me a message describing what you want to do!
 **Commands:**
 • `/task <description>` - Create a new AI task
 • `/status` - Show current system status
+• `/progress <task_id>` - Show recent events for a task
 • `/cancel <task_id>` - Cancel a running task
 • `/documentation <intent>` - Create a documentation task (attach files optionally)
 • `/code_review <intent>` - Create a code review task
@@ -247,6 +249,118 @@ The system will now process this task automatically. You'll receive a notificati
             error_msg = f"❌ Failed to get status: {str(e)}"
             await update.message.reply_text(error_msg)
             logger.error(f"Telegram status request failed: {e}")
+
+    async def _handle_progress_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /progress <task_id> command to show recent events"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        if not context.args:
+            await update.message.reply_text("❌ Please provide a task ID. Example: /progress task_abc123")
+            return
+        task_id = context.args[0]
+        # Read recent events from NDJSON
+        try:
+            from config import config as app_config
+            events_path = Path(app_config.system.logs_dir) / "events.ndjson"
+            if not events_path.exists():
+                await update.message.reply_text("No events found.")
+                return
+            import json as _json
+            from collections import deque as _deque
+            buf = _deque(maxlen=20)
+            with events_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = _json.loads(line)
+                    except Exception:
+                        continue
+                    if ev.get("task_id") == task_id:
+                        buf.append(ev)
+            if not buf:
+                await update.message.reply_text(f"No recent events for `{task_id}`.")
+                return
+            lines = [self._format_progress_line(ev) for ev in list(buf)[-10:]]
+            header = f"📈 Progress for `{task_id}` (last {len(lines)} events)"
+            await update.message.reply_text("\n".join([header, *lines]))
+        except Exception as e:
+            await update.message.reply_text(f"❌ Failed to load progress: {e}")
+            logger.error(f"Telegram progress failed: {e}")
+
+    def _format_progress_line(self, ev: Dict[str, Any]) -> str:
+        """Format a single NDJSON event into a concise, human-readable line."""
+        ts = ev.get("timestamp", "")
+        # Use HH:MM:SS for brevity when possible
+        try:
+            tshort = ts.split("T", 1)[-1][:8]
+        except Exception:
+            tshort = ts
+        name = ev.get("event", "")
+        pretty = name
+        icon = "•"
+        details = ""
+        if name == "task_received":
+            icon = "📥"
+            src = ev.get("file")
+            details = f"from {Path(src).name}" if src else ""
+        elif name == "parsed":
+            icon = "🧩"
+        elif name == "claude_started":
+            icon = "🚀"
+            worker = ev.get("worker")
+            details = f"worker {worker}" if worker else ""
+        elif name == "summarized":
+            icon = "📝"
+        elif name == "validated":
+            icon = "✅"
+            vl = ev.get("valid_llama")
+            vr = ev.get("valid_result")
+            if vl is not None or vr is not None:
+                details = f"llama={vl} result={vr}"
+        elif name == "retry":
+            icon = "🔁"
+            attempt = ev.get("attempt")
+            cls = ev.get("class")
+            delay = ev.get("delay_s")
+            details = f"attempt {attempt} class={cls} delay={delay:.2f}s" if isinstance(delay, (int, float)) else f"attempt {attempt} class={cls}"
+        elif name == "timeout":
+            icon = "⏱️"
+            to = ev.get("timeout_s")
+            details = f"after {to}s" if to is not None else ""
+        elif name == "claude_finished":
+            icon = "🏁"
+            status = ev.get("status")
+            dur = ev.get("duration_s")
+            details = f"{status} in {dur:.2f}s" if isinstance(dur, (int, float)) else f"{status}"
+        elif name == "artifacts_written":
+            icon = "💾"
+        elif name == "task_archived":
+            icon = "📦"
+            to_path = ev.get("to")
+            details = f"→ {Path(to_path).name}" if to_path else ""
+        elif name == "artifacts_error":
+            icon = "⚠️"
+            details = ev.get("error", "")
+        # Fallback pretty name
+        pretty_map = {
+            "task_received": "received",
+            "parsed": "parsed",
+            "claude_started": "started",
+            "summarized": "summarized",
+            "validated": "validated",
+            "retry": "retry",
+            "timeout": "timeout",
+            "claude_finished": "finished",
+            "artifacts_written": "artifacts",
+            "artifacts_error": "artifacts error",
+            "task_archived": "archived",
+        }
+        pretty = pretty_map.get(name, name)
+        tail = f" — {details}" if details else ""
+        return f"{tshort} {icon} {pretty}{tail}"
     
     async def _handle_cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /cancel command"""
