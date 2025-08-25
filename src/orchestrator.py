@@ -26,7 +26,20 @@ from src.validation.engine import ValidationEngine
 logger = logging.getLogger(__name__)
 
 class TaskOrchestrator(ITaskOrchestrator):
-    """Main orchestrator that coordinates all AI task processing"""
+    """Main orchestrator that coordinates all AI task processing.
+
+    Responsibilities:
+    - Watch `tasks/` for new `.task.md` files and parse them into `Task` objects
+    - Queue and execute tasks concurrently with bounded worker pool
+    - Build prompts and invoke Claude Code via `ClaudeBridge`
+    - Optionally leverage LLAMA via `LlamaMediator` for parsing/summarization
+    - Persist artifacts (`results/*.json`, `summaries/*.txt`) and maintain a lightweight index
+    - Emit structured events to `logs/events.ndjson` for observability
+
+    Threading/async model:
+    - File system events come from watchdog thread → marshalled into asyncio loop
+    - Workers are asyncio Tasks consuming from an in-memory queue
+    """
     
     def __init__(self):
         # Initialize core components
@@ -88,7 +101,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.info("Telegram interface not configured (no bot token)")
     
     async def start(self):
-        """Start all system components"""
+        """Start all system components.
+
+        Actions:
+        - Check component availability (Claude CLI, LLAMA)
+        - Spawn worker coroutines up to `config.system.max_concurrent_tasks`
+        - Resume any pending files captured in persisted state
+        - Start the file watcher to ingest newly created task files
+        """
         if self.running:
             logger.warning("Orchestrator is already running")
             return
@@ -137,7 +157,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info("AI Task Orchestrator started successfully!")
     
     async def stop(self):
-        """Stop all system components"""
+        """Stop orchestrator and all workers.
+
+        Ensures graceful cancellation of workers and stops the file watcher.
+        """
         if not self.running:
             return
         
@@ -168,7 +191,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info("AI Task Orchestrator stopped")
     
     async def _check_component_status(self):
-        """Check availability of all components"""
+        """Check availability of core components and cache status.
+
+        Populates `self.component_status` with:
+        - claude_available: Claude CLI detected and responsive
+        - llama_available: Ollama client reachable and model installed
+        - file_watcher_running: based on watcher state
+        """
         
         # Check Claude Code CLI
         self.component_status["claude_available"] = self.claude_bridge.test_connection()
@@ -235,7 +264,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.warning(f"event=artifact_index_save_failed task_id={task_id} error={e}")
 
     def load_compact_context(self, task_id: str) -> Dict[str, Any]:
-        """Load the latest artifact for a task and produce a compact context summary."""
+        """Load the latest artifact for a task and produce a compact context summary.
+
+        Returns a small dict suitable for inclusion in prompts or UIs.
+        """
         import json
         try:
             # Resolve artifact path from index; fallback to scan
@@ -280,7 +312,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"summary": "", "constraints": {}, "files_modified": []}
     
     async def _handle_new_task_file(self, file_path: str):
-        """Handle detection of new task file"""
+        """Handle detection of a new `.task.md` file.
+
+        Debounces duplicates, validates format, parses into `Task`, emits events,
+        and enqueues for processing.
+        """
         try:
             # Acquire per-file lock; skip if already processing
             path_key = str(file_path)
@@ -336,11 +372,17 @@ class TaskOrchestrator(ITaskOrchestrator):
             # Best-effort release of lock on exception
             try:
                 self._inflight_paths.discard(str(file_path))
+                # Also drop from pending and persist to avoid stuck entries
+                self._pending_files.discard(str(file_path))
+                self._save_state()
             except Exception:
                 pass
     
     async def _task_worker(self, worker_name: str):
-        """Worker coroutine that processes tasks from the queue"""
+        """Worker coroutine that processes tasks from the queue.
+
+        Each worker pulls tasks, calls `process_task`, and persists artifacts.
+        """
         logger.info(f"Task worker {worker_name} started")
         
         while self.running:
@@ -448,6 +490,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 try:
                     self._task_cancel_events.pop(task.id, None)
                     self._running_exec_tasks.pop(task.id, None)
+                    self.active_tasks.pop(task.id, None)
                 except Exception:
                     pass
                 # Mark task as done in queue
@@ -467,7 +510,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info(f"Task worker {worker_name} stopped")
     
     async def process_task(self, task: Task) -> TaskResult:
-        """Process a single task through the complete pipeline"""
+        """Process a single task through the complete pipeline.
+
+        Steps:
+        1) Build Claude prompt (LLAMA-assisted if enabled) and execute via CLI
+        2) Summarize results with LLAMA (or fallback) for `summaries/*.txt`
+        3) Run validation engine and attach metadata
+        4) Persist `results/*.json` and emit events
+        """
         start_time = time.time()
         
         try:
@@ -587,6 +637,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     "result": self.validation_engine.validate_task_result(
                         result=last_result,
                         expected_files=task.target_files or [],
+                        task_type=task.type,
                     ).__dict__,
                 }
                 # Attach lightweight validation data into parsed_output for artifacts
@@ -625,7 +676,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
     
     def _reconstruct_task_content(self, task: Task) -> str:
-        """Reconstruct task content for LLAMA processing"""
+        """Reconstruct a `.task.md` representation for LLAMA processing.
+
+        Used to provide consistent context to LLAMA summarization/optimizations.
+        """
         content = f"""---
 id: {task.id}
 type: {task.type.value}
@@ -828,7 +882,11 @@ created: {task.created}
     # Simulation execution removed: system now always runs real Claude Code CLI
     
     def create_task_from_description(self, description: str) -> str:
-        """Create a task file from natural language description"""
+        """Create and persist a `.task.md` task from a natural language description.
+
+        May use LLAMA to expand metadata; heuristically extracts `cwd` hints.
+        Returns the created file path.
+        """
         
         task_id = f"task_{uuid.uuid4().hex[:8]}"
         

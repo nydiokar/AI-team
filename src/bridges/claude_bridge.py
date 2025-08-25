@@ -13,42 +13,41 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from core import IClaudeBridge, Task, TaskResult, TaskStatus, TaskType
+from src.core import IClaudeBridge, Task, TaskResult, TaskStatus, TaskType
 from config import config
 
 class ClaudeBridge(IClaudeBridge):
-    """Bridge to interact with Claude Code CLI"""
+    """Bridge to interact with Claude Code CLI.
+
+    Runs Claude in headless mode with structured output, least-privilege tool
+    permissions, stdin-piped prompts, and robust parsing/triage of results.
+    """
     
     def __init__(self):
         self.claude_executable = self._find_claude_executable()
         self.base_command = self._build_base_command()
         
     def _find_claude_executable(self) -> str:
-        """Find the Claude executable path"""
+        """Find the Claude executable path."""
         # Prefer the PATH-resolved executable
         claude_path = shutil.which("claude")
         return claude_path or "claude"
         
     def _build_base_command(self) -> List[str]:
-        """Build the base Claude command with optimal settings for automation"""
-        cmd = [self.claude_executable]
-        
-        # Use headless mode for automation
-        cmd.append("-p")  # Non-interactive
-        
-        # Structured output for parsing
-        cmd.extend(["--output-format", "json"])
-        
-        # Headless permissions behavior (default to bypassPermissions unless explicitly skipped)
-        if config.claude.skip_permissions:
-            cmd.append("--dangerously-skip-permissions")
-        else:
-            cmd.extend(["--permission-mode", "bypassPermissions"])  # non-interactive
-        
-        return cmd
+        """Build the base Claude command from a single source of truth.
+
+        Consolidated to `config.claude.base_command` to avoid drift. This method
+        returns a shallow copy so we can safely extend it per-execution without
+        mutating global config.
+        """
+        try:
+            return list(config.claude.base_command)
+        except Exception:
+            # Fallback: minimal sane defaults
+            return [self.claude_executable, "--output-format", "json", "-p"]
     
     async def execute_task(self, task: Task) -> TaskResult:
-        """Execute a task using Claude Code CLI"""
+        """Execute a task using Claude Code CLI."""
         start_time = time.time()
         
         try:
@@ -69,15 +68,13 @@ class ClaudeBridge(IClaudeBridge):
                     command.extend(["--max-turns", str(config.claude.max_turns)])
             except Exception:
                 pass
-            
-            # Add the prompt
-            command.append(prompt)
+            # Prefer passing the prompt via stdin to avoid CLI argument parsing issues
             
             # Resolve working directory (per-task override -> base_cwd -> repo root)
             cwd_override = self._resolve_cwd(task)
             
             # Execute the command
-            result = await self._execute_command(command, task.target_files, cwd_override=cwd_override)
+            result = await self._execute_command(command, task.target_files, cwd_override=cwd_override, stdin_input=prompt)
             
             execution_time = time.time() - start_time
             
@@ -105,7 +102,10 @@ class ClaudeBridge(IClaudeBridge):
             )
     
     def test_connection(self) -> bool:
-        """Test if Claude Code is available and working"""
+        """Test if Claude Code is available and working.
+
+        More permissive on Windows: accept rc==0 even if version prints to stderr.
+        """
         try:
             # Prefer a non-interactive check first
             version = subprocess.run(
@@ -114,7 +114,7 @@ class ClaudeBridge(IClaudeBridge):
                 text=True,
                 timeout=5
             )
-            if version.returncode == 0 and version.stdout.strip():
+            if version.returncode == 0 and (version.stdout.strip() or version.stderr.strip()):
                 return True
 
             # Fallback: auth status may show an interactive trust prompt; treat that as presence
@@ -135,7 +135,11 @@ class ClaudeBridge(IClaudeBridge):
             return False
     
     def _build_prompt(self, task: Task) -> str:
-        """Pass through the task prompt with minimal framing."""
+        """Build the CLI-ready prompt with minimal framing.
+
+        Includes the task's prompt, optional target files, and context, with a
+        configurable size cap to avoid CLI issues.
+        """
         # Keep only the raw task prompt and optional target files/context
         parts = [task.prompt]
         if task.target_files:
@@ -169,8 +173,8 @@ class ClaudeBridge(IClaudeBridge):
         # Default to safe read-only if unknown
         return ["Read", "LS", "Grep", "Glob"]
     
-    async def _execute_command(self, command: List[str], target_files: List[str], cwd_override: Optional[str] = None) -> Dict[str, Any]:
-        """Execute Claude command asynchronously"""
+    async def _execute_command(self, command: List[str], target_files: List[str], cwd_override: Optional[str] = None, stdin_input: Optional[str] = None) -> Dict[str, Any]:
+        """Execute Claude command asynchronously."""
         
         # Determine working directory: per-task override -> CLAUDE_BASE_CWD; no repo-root fallback
         cwd = cwd_override or config.claude.base_cwd
@@ -180,15 +184,17 @@ class ClaudeBridge(IClaudeBridge):
         # Execute the command
         process = await asyncio.create_subprocess_exec(
             *command,
+            stdin=asyncio.subprocess.PIPE if stdin_input is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd
         )
         
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=config.claude.timeout
-        )
+        if stdin_input is not None:
+            input_bytes = stdin_input.encode('utf-8')
+        else:
+            input_bytes = None
+        stdout, stderr = await asyncio.wait_for(process.communicate(input=input_bytes), timeout=config.claude.timeout)
         
         return {
             'returncode': process.returncode,
@@ -258,7 +264,7 @@ class ClaudeBridge(IClaudeBridge):
             return None
     
     def _parse_result(self, task_id: str, result: Dict[str, Any], execution_time: float) -> TaskResult:
-        """Parse command result into TaskResult"""
+        """Parse command result into `TaskResult` with triage metadata."""
         
         success = result['returncode'] == 0
         stdout = result['stdout']

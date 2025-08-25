@@ -10,10 +10,18 @@ from pathlib import Path
 from .interfaces import ITaskParser, Task, TaskType, TaskPriority, TaskStatus
 
 class TaskParser(ITaskParser):
-    """Parse .task.md files into Task objects"""
+    """Parse `.task.md` files into `Task` objects.
+
+    Expects YAML frontmatter followed by Markdown sections. Extracts:
+    - Title (`# Heading`)
+    - Target files (`**Target Files:**` list)
+    - Prompt (`**Prompt:**` block)
+    - Success criteria (checkbox list)
+    - Context (`**Context:**` block)
+    """
     
     def parse_task_file(self, file_path: str) -> Task:
-        """Parse a .task.md file into a Task object"""
+        """Parse a `.task.md` file into a `Task` instance."""
         
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -60,7 +68,7 @@ class TaskParser(ITaskParser):
         )
     
     def validate_task_format(self, file_path: str) -> List[str]:
-        """Validate task file format and return errors"""
+        """Validate task file format and return errors."""
         errors = []
         
         try:
@@ -104,7 +112,7 @@ class TaskParser(ITaskParser):
         return errors
     
     def _parse_task_type(self, type_str: str) -> TaskType:
-        """Parse task type string into TaskType enum"""
+        """Parse task type string into `TaskType` enum."""
         if not type_str:
             raise ValueError("Task type is required")
         
@@ -121,7 +129,7 @@ class TaskParser(ITaskParser):
         return type_map[type_str]
     
     def _parse_priority(self, priority_str: str) -> TaskPriority:
-        """Parse priority string into TaskPriority enum"""
+        """Parse priority string into `TaskPriority` enum."""
         priority_map = {
             'high': TaskPriority.HIGH,
             'medium': TaskPriority.MEDIUM,
@@ -134,7 +142,11 @@ class TaskParser(ITaskParser):
         return priority_map[priority_str]
     
     def _parse_markdown_sections(self, body: str) -> Dict[str, Any]:
-        """Parse markdown body into sections"""
+        """Parse markdown body into sections.
+
+        Uses conservative regexes that look ahead for the next section header to
+        avoid truncating multi-line blocks.
+        """
         sections = {}
         
         # Extract title (first # heading)
@@ -153,7 +165,7 @@ class TaskParser(ITaskParser):
             ]
         
         # Extract prompt
-        prompt_match = re.search(r'\*\*Prompt:\*\*\s*\n(.+?)(?=\n\*\*|\n##|\Z)', body, re.DOTALL)
+        prompt_match = re.search(r'\*\*Prompt:\*\*\s*\n(.+?)(?=\n\*\*[A-Za-z]|\n##|\Z)', body, re.DOTALL)
         if prompt_match:
             sections['prompt'] = prompt_match.group(1).strip()
         
@@ -168,7 +180,7 @@ class TaskParser(ITaskParser):
             ]
         
         # Extract context
-        context_match = re.search(r'\*\*Context:\*\*\s*\n(.+?)(?=\n\*\*|\n##|\Z)', body, re.DOTALL)
+        context_match = re.search(r'\*\*Context:\*\*\s*\n(.+?)(?=\n\*\*[A-Za-z]|\n##|\Z)', body, re.DOTALL)
         if context_match:
             sections['context'] = context_match.group(1).strip()
         

@@ -14,7 +14,11 @@ from .interfaces import IFileWatcher
 logger = logging.getLogger(__name__)
 
 class TaskFileHandler(FileSystemEventHandler):
-    """Handler for task file system events"""
+    """Handler for task file system events.
+
+    Debounces rapid file events and safely marshals callbacks into the asyncio loop.
+    Tracks processed files to avoid duplicate processing of the same path.
+    """
     
     def __init__(self, callback: Callable[[str], None], loop: asyncio.AbstractEventLoop):
         self.callback = callback
@@ -95,7 +99,12 @@ class TaskFileHandler(FileSystemEventHandler):
             logger.error(f"Error in task file callback for {file_path}: {e}")
 
 class FileWatcher(IFileWatcher):
-    """File system watcher for task files"""
+    """File system watcher for task files.
+
+    Watches a single directory (non-recursive) for `*.task.md` files and invokes
+    the provided callback on creation/modification/move events, with basic
+    debouncing to avoid duplicate triggers.
+    """
     
     def __init__(self, watch_directory: str):
         self.watch_directory = Path(watch_directory).resolve()
@@ -109,7 +118,11 @@ class FileWatcher(IFileWatcher):
         logger.info(f"FileWatcher initialized for directory: {self.watch_directory}")
     
     def start(self, callback: Callable[[str], None]):
-        """Start watching for new task files"""
+        """Start watching for new task files.
+
+        Captures the active event loop so filesystem events from the watchdog
+        thread can be scheduled back into asyncio safely.
+        """
         if self.observer and self.observer.is_alive():
             logger.warning("FileWatcher is already running")
             return
@@ -137,7 +150,7 @@ class FileWatcher(IFileWatcher):
         self._process_existing_files()
     
     def stop(self):
-        """Stop file watching"""
+        """Stop file watching."""
         if self.observer and self.observer.is_alive():
             self.observer.stop()
             self.observer.join(timeout=5)
@@ -147,7 +160,7 @@ class FileWatcher(IFileWatcher):
         self.handler = None
     
     def _process_existing_files(self):
-        """Process any existing task files in the directory"""
+        """Process any existing task files in the directory."""
         try:
             task_files = list(self.watch_directory.glob("*.task.md"))
             
@@ -164,14 +177,14 @@ class FileWatcher(IFileWatcher):
             logger.error(f"Error processing existing task files: {e}")
     
     def is_running(self) -> bool:
-        """Check if the file watcher is currently running"""
+        """Check if the file watcher is currently running."""
         return self.observer is not None and self.observer.is_alive()
 
 class AsyncFileWatcher(FileWatcher):
-    """Async version of FileWatcher with better integration"""
+    """Async version of FileWatcher with better integration."""
     
     async def start_async(self, callback: Callable[[str], None]):
-        """Start watching asynchronously"""
+        """Start watching asynchronously."""
         self.start(callback)
         
         # Run the observer in a separate thread
@@ -180,5 +193,5 @@ class AsyncFileWatcher(FileWatcher):
             logger.info("AsyncFileWatcher started successfully")
     
     async def stop_async(self):
-        """Stop watching asynchronously"""
+        """Stop watching asynchronously."""
         await asyncio.get_event_loop().run_in_executor(None, self.stop)

@@ -18,7 +18,13 @@ from config import config
 logger = logging.getLogger(__name__)
 
 class LlamaMediator(ILlamaMediator):
-    """LLAMA mediator with automatic fallback to simple parsing"""
+    """LLAMA mediator with automatic fallback to simple parsing.
+
+    Provides three roles when available:
+    - Parse task files into normalized fields (type, targets, main request)
+    - Create optimized Claude prompts (task-type aware)
+    - Summarize results into concise human-readable summaries
+    """
     
     def __init__(self):
         self.ollama_available = self._check_ollama_availability()
@@ -41,7 +47,7 @@ class LlamaMediator(ILlamaMediator):
             logger.info("LLAMA not available, using built-in parsing fallback")
     
     def _check_ollama_availability(self) -> bool:
-        """Check if Ollama is running and accessible"""
+        """Check if Ollama is running and accessible."""
         try:
             import subprocess
             result = subprocess.run(
@@ -54,7 +60,7 @@ class LlamaMediator(ILlamaMediator):
             return False
     
     def _is_model_installed(self, model_name: str) -> bool:
-        """Check if specified model is installed locally to avoid long pulls"""
+        """Check if specified model is installed locally to avoid long pulls."""
         if not self.ollama_available:
             return False
         try:
@@ -71,7 +77,7 @@ class LlamaMediator(ILlamaMediator):
             return False
     
     def parse_task(self, task_content: str) -> Dict[str, Any]:
-        """Parse task content using LLAMA or fallback to simple parsing"""
+        """Parse task content using LLAMA or fallback to simple parsing."""
         # Enforce content size cap to avoid timeouts/memory pressure
         max_chars = getattr(config.llama, "max_parse_chars", 200_000)
         if len(task_content) > max_chars:
@@ -88,7 +94,7 @@ class LlamaMediator(ILlamaMediator):
             return self._parse_with_fallback(task_content)
     
     def _parse_with_llama(self, task_content: str) -> Dict[str, Any]:
-        """Parse using LLAMA/Ollama"""
+        """Parse using LLAMA/Ollama."""
         try:
             prompt = f"""
             Parse this task file and extract the following information in JSON format:
@@ -127,7 +133,7 @@ class LlamaMediator(ILlamaMediator):
             return self._parse_with_fallback(task_content)
     
     def _parse_with_fallback(self, task_content: str) -> Dict[str, Any]:
-        """Simple rule-based parsing fallback"""
+        """Simple rule-based parsing fallback."""
         
         # Split into frontmatter and body
         parts = task_content.split('---', 2)
@@ -169,7 +175,7 @@ class LlamaMediator(ILlamaMediator):
                 ]
             
             # Extract main prompt
-            prompt_match = re.search(r'\*\*Prompt:\*\*\s*\n(.+?)(?=\n\*\*|\n##|\Z)', body, re.DOTALL)
+            prompt_match = re.search(r'\*\*Prompt:\*\*\s*\n(.+?)(?=\n\*\*[A-Za-z]|\n##|\Z)', body, re.DOTALL)
             if prompt_match:
                 result["main_request"] = prompt_match.group(1).strip()
             else:
@@ -191,7 +197,7 @@ class LlamaMediator(ILlamaMediator):
             }
     
     def create_claude_prompt(self, parsed_task: Dict[str, Any]) -> str:
-        """Create Claude-optimized prompt"""
+        """Create Claude-optimized prompt."""
         
         if self.ollama_available and self.client and self.model_installed:
             return self._create_prompt_with_llama(parsed_task)
@@ -199,7 +205,7 @@ class LlamaMediator(ILlamaMediator):
             return self._create_prompt_with_template(parsed_task)
     
     def _create_prompt_with_llama(self, parsed_task: Dict[str, Any]) -> str:
-        """Use LLAMA to create an optimized Claude prompt"""
+        """Use LLAMA to create an optimized Claude prompt."""
         try:
             prompt = f"""
             Create an optimized prompt for Claude Code to execute this task:
@@ -234,7 +240,7 @@ class LlamaMediator(ILlamaMediator):
             return self._create_prompt_with_template(parsed_task)
     
     def _create_prompt_with_template(self, parsed_task: Dict[str, Any]) -> str:
-        """Create prompt using a template (task-type aware)"""
+        """Create prompt using a template (task-type aware)."""
         
         task_type = (parsed_task.get('type') or 'analyze').lower()
         

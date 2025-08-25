@@ -124,7 +124,7 @@ class ValidationEngine(IValidationEngine):
         valid = len(issues) == 0
         return ValidationResult(valid=valid, similarity=similarity, entropy=entropy, issues=issues)
 
-    def validate_task_result(self, result: TaskResult, expected_files: List[str]) -> ValidationResult:
+    def validate_task_result(self, result: TaskResult, expected_files: List[str], task_type: TaskType) -> ValidationResult:
         # Use output entropy as a weak signal of degenerate replies
         entropy = _shannon_entropy(result.output or "")
 
@@ -133,9 +133,10 @@ class ValidationEngine(IValidationEngine):
         if result.success is False and not result.errors:
             issues.append("failed_without_errors")
 
-        if expected_files and not result.files_modified and result.success:
-            # This is not necessarily invalid for summarize/review, but for fix/analyze it can be
-            issues.append("no_files_modified_but_success")
+        # Only meaningful for fix/analyze tasks; summarize/code_review are read-only by design
+        if result.success and expected_files and task_type in (TaskType.FIX, TaskType.ANALYZE):
+            if not result.files_modified:
+                issues.append("no_files_modified_but_success")
 
         # Detect claims of modifications without evidence of files_modified
         text = (result.output or "").lower()
