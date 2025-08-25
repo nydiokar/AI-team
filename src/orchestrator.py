@@ -13,7 +13,6 @@ import contextlib
 
 import sys
 import os
-sys.path.append(os.path.dirname(__file__))
 
 from src.core import (
     ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskParser, 
