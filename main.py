@@ -521,6 +521,8 @@ def _doctor():
     """Print effective configuration and check CLI availability."""
     from shutil import which as _which
     from subprocess import run as _run
+    from pathlib import Path as _Path
+    import os as _os
 
     # Reload env-derived fields to reflect current environment
     try:
@@ -534,6 +536,57 @@ def _doctor():
     print(f"  Skip permissions  : {config.claude.skip_permissions}")
     print(f"  Base CWD          : {config.claude.base_cwd}")
     print(f"  Allowed root      : {config.claude.allowed_root}")
+
+    # Environment snapshot (only keys we care about)
+    print("\nEnvironment overrides (if set):")
+    for key in [
+        "CLAUDE_SKIP_PERMISSIONS",
+        "CLAUDE_TIMEOUT_SEC",
+        "CLAUDE_MAX_TURNS",
+        "CLAUDE_BASE_CWD",
+        "CLAUDE_ALLOWED_ROOT",
+        "LOG_LEVEL",
+    ]:
+        val = _os.getenv(key)
+        print(f"  {key:20s} = {val if val is not None else '(unset)'}")
+
+    # Basic directory diagnostics (existence and readability)
+    print("\nDirectory diagnostics:")
+    dirs = {
+        "tasks_dir"    : _Path(config.system.tasks_dir),
+        "results_dir"  : _Path(config.system.results_dir),
+        "summaries_dir": _Path(config.system.summaries_dir),
+        "logs_dir"     : _Path(config.system.logs_dir),
+    }
+    for name, path in dirs.items():
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            readable = path.exists()
+            writable = False
+            try:
+                # Non-destructive writeability probe in logs dir only
+                if name == "logs_dir":
+                    tmp = path / ".doctor.tmp"
+                    tmp.write_text("ok", encoding="utf-8")
+                    tmp.unlink(missing_ok=True)
+                    writable = True
+            except Exception:
+                writable = False
+            print(f"  {name:14s}: {str(path)} | exists={readable} writable={writable if name=='logs_dir' else 'n/a'}")
+        except Exception as e:
+            print(f"  {name:14s}: {str(path)} | ERROR: {e}")
+
+    # Validate working directory allowlist relationship
+    try:
+        base = _Path(config.claude.base_cwd).resolve() if config.claude.base_cwd else None
+        allowed = _Path(config.claude.allowed_root).resolve() if config.claude.allowed_root else None
+        if base and allowed:
+            within = (allowed in base.parents) or (base == allowed)
+            print(f"\nWorking directory allowlist: base_within_allowed={within}")
+            if not within:
+                print("  WARNING: base CWD is outside allowed root; cwd overrides may be rejected.")
+    except Exception as e:
+        print(f"\nWorking directory allowlist: check failed: {e}")
 
     exe = _which("claude") or "claude"
     print(f"\nClaude executable: {exe}")

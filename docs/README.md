@@ -136,11 +136,17 @@ CLAUDE_SKIP_PERMISSIONS=false
 CLAUDE_BASE_CWD=
 # Optional: safety allowlist root (defaults to CLAUDE_BASE_CWD if set)
 CLAUDE_ALLOWED_ROOT=
+# Execution behavior caps
+CLAUDE_TIMEOUT_SEC=300
+CLAUDE_MAX_TURNS=0   # 0 means CLI default/unlimited
 
 # System Settings
 LOG_LEVEL=INFO
 MAX_CONCURRENT_TASKS=3
 ```
+
+- `python main.py doctor` prints the effective configuration, checks Claude CLI availability, shows relevant env overrides, and verifies key directories.
+- At runtime, the system can `reload_from_env()` to pick up changes to `CLAUDE_*` values without restart.
 
 ### Telegram Bot Integration
 
@@ -230,6 +236,8 @@ python main.py status          # Component status
 python main.py create-sample   # Test task creation
 python main.py clean tasks                 # Archive loose tasks to tasks/processed
 python main.py clean artifacts --days 30   # Prune old results/summaries
+python main.py validate-artifacts          # Validate results/*.json against schema
+python main.py doctor                      # Diagnostics + effective env/config
 ```
 
 ## 🔄 Workflow Examples

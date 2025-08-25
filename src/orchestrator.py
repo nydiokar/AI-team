@@ -79,6 +79,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._load_state()
         # Artifact index path (task_id -> latest artifact path)
         self._artifact_index_path = Path(config.system.results_dir) / "index.json"
+        # Lazy-initialized context loader (simple functional helper encapsulated here)
+        self._context_loader = None
         # Cancellation and runtime tracking
         self._task_cancel_events: Dict[str, asyncio.Event] = {}
         self._running_exec_tasks: Dict[str, asyncio.Task] = {}
@@ -264,52 +266,15 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.warning(f"event=artifact_index_save_failed task_id={task_id} error={e}")
 
     def load_compact_context(self, task_id: str) -> Dict[str, Any]:
-        """Load the latest artifact for a task and produce a compact context summary.
+        """Load compact, prompt-ready context for a given task_id.
 
-        Returns a small dict suitable for inclusion in prompts or UIs.
+        Delegates to a lightweight internal loader that reads the latest
+        artifact via `results/index.json` with a scan fallback. Keeps output
+        under small token/char caps.
         """
-        import json
-        try:
-            # Resolve artifact path from index; fallback to scan
-            artifact_path: Path | None = None
-            if self._artifact_index_path.exists():
-                try:
-                    idx = json.loads(self._artifact_index_path.read_text(encoding="utf-8"))
-                    p = idx.get(str(task_id))
-                    if p:
-                        ap = Path(p)
-                        if ap.exists():
-                            artifact_path = ap
-                except Exception:
-                    pass
-            if artifact_path is None:
-                # Fallback: scan for results/{task_id}.json
-                cand = Path(config.system.results_dir) / f"{task_id}.json"
-                if cand.exists():
-                    artifact_path = cand
-
-            if not artifact_path or not artifact_path.exists():
-                return {"summary": "", "constraints": {}, "files_modified": []}
-
-            data = json.loads(artifact_path.read_text(encoding="utf-8"))
-            summary_text = ""
-            try:
-                # Prefer summary in parsed_output or top-level validation hints
-                po = data.get("parsed_output") or {}
-                content = po.get("content") if isinstance(po, dict) else None
-                if isinstance(content, str):
-                    summary_text = content[:2000]
-            except Exception:
-                pass
-            files_modified = data.get("files_modified") or []
-            constraints = {"prior_success": bool(data.get("success"))}
-            return {
-                "summary": summary_text,
-                "constraints": constraints,
-                "files_modified": files_modified,
-            }
-        except Exception:
-            return {"summary": "", "constraints": {}, "files_modified": []}
+        if self._context_loader is None:
+            self._context_loader = _ContextLoader(self._artifact_index_path, Path(config.system.results_dir))
+        return self._context_loader.load(task_id)
     
     async def _handle_new_task_file(self, file_path: str):
         """Handle detection of a new `.task.md` file.
@@ -720,6 +685,9 @@ created: {task.created}
             "execution_time": result.execution_time,
             "errors": result.errors,
             "files_modified": result.files_modified,
+            # Linkage for multi-turn/threaded contexts (optional)
+            "parent_task_id": getattr(result, "parent_task_id", None),
+            "turn_of": getattr(result, "turn_of", None),
             # Keep full stdout/stderr for now, but add triage previews
             "raw_stdout": result.raw_stdout,
             "raw_stderr": result.raw_stderr,
@@ -1076,3 +1044,57 @@ Generated from agent expansion with attachments copied to working directory
             },
             "llama_status": self.llama_mediator.get_status()
         }
+
+
+class _ContextLoader:
+    """Lightweight loader that produces compact, prompt-ready context.
+
+    Reads `results/index.json` to resolve the latest artifact path for a task
+    id, with a fallback to `results/{task_id}.json` when missing. Returns a
+    small dictionary containing a short summary, constraints, and files list.
+    """
+
+    def __init__(self, index_path: Path, results_dir: Path) -> None:
+        self._index_path = index_path
+        self._results_dir = results_dir
+
+    def load(self, task_id: str) -> Dict[str, Any]:
+        import json
+        default: Dict[str, Any] = {"summary": "", "constraints": {}, "files_modified": []}
+        try:
+            artifact_path: Optional[Path] = None
+            if self._index_path.exists():
+                try:
+                    idx = json.loads(self._index_path.read_text(encoding="utf-8"))
+                    p = idx.get(str(task_id))
+                    if p:
+                        ap = Path(p)
+                        if ap.exists():
+                            artifact_path = ap
+                except Exception:
+                    artifact_path = None
+            if artifact_path is None:
+                cand = self._results_dir / f"{task_id}.json"
+                if cand.exists():
+                    artifact_path = cand
+
+            if artifact_path is None or not artifact_path.exists():
+                return default
+
+            data = json.loads(artifact_path.read_text(encoding="utf-8"))
+            # Extract up to ~2000 chars for prompt friendliness
+            summary_text: str = ""
+            po = data.get("parsed_output")
+            if isinstance(po, dict):
+                content = po.get("content")
+                if isinstance(content, str):
+                    summary_text = content[:2000]
+            files_modified: List[str] = list(data.get("files_modified") or [])
+            constraints: Dict[str, Any] = {"prior_success": bool(data.get("success"))}
+            return {
+                "summary": summary_text,
+                "constraints": constraints,
+                "files_modified": files_modified,
+            }
+        except Exception:
+            return default

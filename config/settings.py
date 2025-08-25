@@ -181,6 +181,18 @@ class Config:
                 self.claude.timeout = max(1, int(to))
         except Exception:
             pass
+        # Optional working directory overrides (Windows-first). If provided, use them.
+        try:
+            base = os.getenv("CLAUDE_BASE_CWD")
+            if base:
+                self.claude.base_cwd = base
+                # Default allowed_root to base if not explicitly set via env
+                self.claude.allowed_root = base
+            allowed = os.getenv("CLAUDE_ALLOWED_ROOT")
+            if allowed:
+                self.claude.allowed_root = allowed
+        except Exception:
+            pass
 
     def reload_from_env(self) -> None:
         """Reload environment-derived configuration fields at runtime.
@@ -192,7 +204,7 @@ class Config:
         # Recompute fields derived from env
         self.claude.skip_permissions = os.getenv("CLAUDE_SKIP_PERMISSIONS", "false").lower() == "true"
         self.claude.base_command = self._get_claude_command()
-        # Re-apply runtime overrides
+        # Re-apply runtime overrides (timeout/max_turns, and optionally base/allowed roots)
         self._apply_env_overrides()
 
 # Global config instance
