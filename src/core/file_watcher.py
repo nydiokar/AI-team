@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Optional
 import time
+import os
 from watchdog.observers import Observer as WatchdogObserver
 from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileModifiedEvent, FileMovedEvent
 
@@ -18,6 +19,7 @@ class TaskFileHandler(FileSystemEventHandler):
 
     Debounces rapid file events and safely marshals callbacks into the asyncio loop.
     Tracks processed files to avoid duplicate processing of the same path.
+    Handles Windows file locking edge cases with retry logic.
     """
     
     def __init__(self, callback: Callable[[str], None], loop: asyncio.AbstractEventLoop):
@@ -26,6 +28,9 @@ class TaskFileHandler(FileSystemEventHandler):
         self.processed_files = set()  # Track processed files to avoid duplicates
         self._last_event_ts: dict[str, float] = {}
         self._debounce_seconds: float = 0.25
+        # Windows file locking resilience
+        self._max_retries = 3
+        self._retry_delay = 0.1  # Start with 100ms delay
         
     def on_created(self, event):
         """Handle file creation events"""
@@ -72,21 +77,42 @@ class TaskFileHandler(FileSystemEventHandler):
         return path.suffix.lower() in ['.md'] and '.task.' in path.name
     
     def _process_file(self, file_path: str):
-        """Process a task file"""
-        try:
-            # Add to processed files to avoid duplicate processing
-            self.processed_files.add(file_path)
-            
-            logger.info(f"New task file detected: {file_path}")
-            
-            # Schedule the callback safely into the main event loop thread
-            if asyncio.iscoroutinefunction(self.callback):
-                asyncio.run_coroutine_threadsafe(self._async_callback(file_path), self.loop)
-            else:
-                self.loop.call_soon_threadsafe(self.callback, file_path)
-            
-        except Exception as e:
-            logger.error(f"Error processing task file {file_path}: {e}")
+        """Process a task file with Windows file locking resilience"""
+        for attempt in range(self._max_retries):
+            try:
+                # Add to processed files to avoid duplicate processing
+                self.processed_files.add(file_path)
+                
+                logger.info(f"New task file detected: {file_path}")
+                
+                # Schedule the callback safely into the main event loop thread
+                if asyncio.iscoroutinefunction(self.callback):
+                    asyncio.run_coroutine_threadsafe(self._async_callback(file_path), self.loop)
+                else:
+                    self.loop.call_soon_threadsafe(self.callback, file_path)
+                
+                # Success - break out of retry loop
+                break
+                
+            except (PermissionError, OSError) as e:
+                # Windows file locking/sharing violation - retry with backoff
+                if attempt < self._max_retries - 1:
+                    delay = self._retry_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"Windows file lock detected on {file_path}, retrying in {delay:.2f}s (attempt {attempt + 1}/{self._max_retries}): {e}")
+                    time.sleep(delay)
+                    # Remove from processed to allow retry
+                    self.processed_files.discard(file_path)
+                    continue
+                else:
+                    # Final attempt failed
+                    logger.error(f"Failed to process {file_path} after {self._max_retries} attempts due to file locking: {e}")
+                    # Remove from processed to allow future attempts
+                    self.processed_files.discard(file_path)
+            except Exception as e:
+                logger.error(f"Error processing task file {file_path}: {e}")
+                # Remove from processed to allow future attempts
+                self.processed_files.discard(file_path)
+                break
     
     async def _async_callback(self, file_path: str):
         """Async wrapper for callback"""

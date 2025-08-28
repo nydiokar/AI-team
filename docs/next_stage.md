@@ -33,19 +33,19 @@ Strengthen reliability and operability, add essential operational tools, and sta
 1) **Metrics and SLOs (operator visibility)** - DONE 
    - Extend `python main.py stats` with per-type success rate, error-class counts, and p50/p95 per phase; emit `logs/metrics.json` snapshots periodically.
 
-2) **Artifact schema v1.1 + validator update**
+2) **Artifact schema v1.1 + validator update** - DONE 
    - Add `security` block (guarded_write, allowlist_root, violations[]); clarify linkage fields; keep `--ignore-legacy` for old artifacts.
 
-3) **Guarded-write staging (optional)**
+3) **Guarded-write staging (optional)** - DONE 
    - Persist diffs to `results/guarded/<task_id>.diff`; add `python main.py apply-guarded <task_id>`; Telegram approval hint when staging occurs.
 
-4) **E2E watcher and restart resilience (Windows-first)**
+4) **E2E watcher and restart resilience (Windows-first)** - DONE 
    - Deterministic watcher tests; verify queue persistence on restart; handle Windows file lock edge cases.
 
 5) **Rate limiting and backpressure**
    - Queue caps with `throttled`/`dropped_low_priority` events; Telegram `/task` rate limiting; runtime worker pool via `reload_from_env`.
 
-6) **Secrets and privacy hardening**
+6) **Secrets and privacy hardening** - DONE 
    - Expand redaction patterns; add `.env.example`; pre-commit secret scan; mask sensitive artifact fields when present.
 
 7) **Operational UX polish**

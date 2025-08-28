@@ -48,7 +48,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.llama_mediator = LlamaMediator()
         
         # Task management
-        self.task_queue = asyncio.Queue()
+        self.task_queue = asyncio.Queue(maxsize=config.system.max_queue_size)
         self.active_tasks: Dict[str, Task] = {}
         self.task_results: Dict[str, TaskResult] = {}
         
@@ -191,6 +191,41 @@ class TaskOrchestrator(ITaskOrchestrator):
         
         logger.info("AI Task Orchestrator stopped")
     
+    async def reload_worker_pool(self):
+        """Reload worker pool size from environment configuration at runtime"""
+        try:
+            # Reload config from environment
+            config.reload_from_env()
+            target_workers = config.system.max_concurrent_tasks
+            current_workers = len(self.worker_tasks)
+            
+            if target_workers == current_workers:
+                logger.info(f"Worker pool unchanged: {current_workers} workers")
+                return
+            
+            logger.info(f"Adjusting worker pool: {current_workers} -> {target_workers}")
+            
+            if target_workers > current_workers:
+                # Add more workers
+                for i in range(current_workers, target_workers):
+                    worker = asyncio.create_task(self._task_worker(f"worker-{i}"))
+                    self.worker_tasks.append(worker)
+                logger.info(f"Added {target_workers - current_workers} workers")
+                self._emit_event("worker_pool_scaled", None, {"from": current_workers, "to": target_workers})
+                
+            elif target_workers < current_workers:
+                # Remove excess workers
+                workers_to_remove = current_workers - target_workers
+                for i in range(workers_to_remove):
+                    worker = self.worker_tasks.pop()
+                    worker.cancel()
+                logger.info(f"Removed {workers_to_remove} workers")
+                self._emit_event("worker_pool_scaled", None, {"from": current_workers, "to": target_workers})
+                
+        except Exception as e:
+            logger.error(f"Failed to reload worker pool: {e}")
+            self._emit_event("worker_pool_reload_failed", None, {"error": str(e)})
+    
     async def _check_component_status(self):
         """Check availability of core components and cache status.
 
@@ -325,11 +360,36 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.info(f"event=parsed task_id={task.id} type={task.type.value} priority={task.priority.value}")
             self._emit_event("parsed", task)
             
-            # Add to queue
-            await self.task_queue.put(task)
-            self.active_tasks[task.id] = task
-            
-            logger.info(f"Queued task: {task.id} ({task.type.value}, {task.priority.value})")
+            # Add to queue with backpressure handling
+            try:
+                # Try to add immediately (non-blocking)
+                self.task_queue.put_nowait(task)
+                self.active_tasks[task.id] = task
+                logger.info(f"Queued task: {task.id} ({task.type.value}, {task.priority.value})")
+            except asyncio.QueueFull:
+                # Queue is full - apply backpressure based on priority
+                if hasattr(task.priority, 'value'):
+                    priority_val = task.priority.value
+                else:
+                    priority_val = str(task.priority)
+                
+                if priority_val == 'low':
+                    # Drop low priority tasks when queue is full
+                    logger.warning(f"event=dropped_low_priority task_id={task.id} reason=queue_full")
+                    self._emit_event("dropped_low_priority", task, {"reason": "queue_full"})
+                else:
+                    # Throttle medium/high priority tasks
+                    logger.warning(f"event=throttled task_id={task.id} reason=queue_full priority={priority_val}")
+                    self._emit_event("throttled", task, {"reason": "queue_full", "priority": priority_val})
+                    # Try with a short timeout
+                    try:
+                        await asyncio.wait_for(self.task_queue.put(task), timeout=5.0)
+                        self.active_tasks[task.id] = task
+                        logger.info(f"Queued throttled task: {task.id} ({task.type.value}, {priority_val})")
+                    except asyncio.TimeoutError:
+                        # Still couldn't queue after throttling - drop it
+                        logger.error(f"event=dropped_after_throttle task_id={task.id}")
+                        self._emit_event("dropped_after_throttle", task, {"timeout": 5.0})
             
         except Exception as e:
             logger.error(f"Error processing task file {file_path}: {e}")
@@ -938,11 +998,8 @@ created: {task.created}
         
         task_id = f"task_{uuid.uuid4().hex[:8]}"
         
-        # Use LLAMA to parse description or simple template
-        if self.component_status["llama_available"]:
-            parsed = self._parse_description_with_llama(description)
-        else:
-            parsed = self._parse_description_simple(description)
+        # Use simple template for now - can be enhanced with LLAMA later
+        parsed = self._parse_description_simple(description)
         
         # Heuristic: detect inline path hints like "in C:\\Users\\..." or "in /path/..."
         # and inject into frontmatter as `cwd` if allowed by config

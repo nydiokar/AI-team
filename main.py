@@ -199,8 +199,8 @@ async def test_telegram_interface():
         return
     
     print("✅ Telegram interface is available and configured")
-    print(f"Bot token: {orchestrator.telegram_interface.bot_token[:10]}...")
-    print(f"Allowed users: {orchestrator.telegram_interface.allowed_users or 'No restrictions'}")
+    print("Bot token: [CONFIGURED]")
+    print("Allowed users: [CONFIGURED]")
     
     # Test notification functionality
     try:
@@ -252,6 +252,9 @@ def main():
         if command == "tail-events":
             _tail_events(sys.argv[2:])
             return
+        if command == "reload-workers":
+            asyncio.run(_reload_workers())
+            return
         if command == "help":
             print_help()
             return
@@ -279,6 +282,7 @@ Usage:
     python main.py create-sample-artifact    Generate a sample artifact (new schema)
     python main.py doctor                    Print effective config and CLI availability
     python main.py tail-events [--task TASK_ID] [--lines N]   Show recent NDJSON events
+    python main.py reload-workers  Reload worker pool from environment
     python main.py help            Show this help
 
 Environment Setup:
@@ -738,6 +742,31 @@ def _doctor():
         print(f"  auth status rc={r2.returncode} out={(r2.stdout or r2.stderr).strip()[:120]}")
     except Exception as e:
         print(f"  Auth check failed: {e}")
+
+async def _reload_workers():
+    """Reload worker pool configuration from environment variables"""
+    print("Reloading worker pool configuration from environment...")
+    
+    # Create a temporary orchestrator to access the reload functionality
+    orchestrator = TaskOrchestrator()
+    
+    try:
+        # Check if we need to start the orchestrator first to access workers
+        if not orchestrator.running:
+            print("Note: Orchestrator is not currently running. This would only apply to a running instance.")
+            print("Current environment configuration:")
+            config.reload_from_env()
+            print(f"  MAX_CONCURRENT_TASKS: {config.system.max_concurrent_tasks}")
+            print(f"  MAX_QUEUE_SIZE: {config.system.max_queue_size}")
+            print(f"  TELEGRAM_RATE_LIMIT_REQUESTS: {config.system.telegram_rate_limit_requests}")
+            print(f"  TELEGRAM_RATE_LIMIT_WINDOW_SEC: {config.system.telegram_rate_limit_window_sec}")
+        else:
+            # This would be used if orchestrator is running (future enhancement)
+            await orchestrator.reload_worker_pool()
+            print("Worker pool reloaded successfully")
+            
+    except Exception as e:
+        print(f"Failed to reload worker pool: {e}")
 
 if __name__ == "__main__":
     main()

@@ -40,7 +40,11 @@ class ClaudeBridge(IClaudeBridge):
         mutating global config.
         """
         try:
-            return list(config.claude.base_command)
+            cmd = list(config.claude.base_command)
+            # Always use the resolved executable to avoid PATH/environment drift
+            if cmd:
+                cmd[0] = self.claude_executable
+            return cmd
         except Exception:
             # Fallback: minimal sane defaults
             return [self.claude_executable, "--output-format", "json", "-p"]

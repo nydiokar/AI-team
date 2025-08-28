@@ -79,6 +79,10 @@ class SystemConfig:
     max_concurrent_tasks: int = 3
     task_timeout: int = 1800  # 30 minutes
     guarded_write: bool = False
+    # Rate limiting and backpressure settings
+    max_queue_size: int = 50
+    telegram_rate_limit_requests: int = 5
+    telegram_rate_limit_window_sec: int = 60
     
 class Config:
     """Main configuration class"""
@@ -199,6 +203,31 @@ class Config:
             gw = os.getenv("GUARDED_WRITE")
             if gw is not None:
                 self.system.guarded_write = gw.lower() == "true"
+        except Exception:
+            pass
+        # Rate limiting and backpressure settings
+        try:
+            max_tasks = os.getenv("MAX_CONCURRENT_TASKS")
+            if max_tasks is not None:
+                self.system.max_concurrent_tasks = max(1, int(max_tasks))
+        except Exception:
+            pass
+        try:
+            max_queue = os.getenv("MAX_QUEUE_SIZE")
+            if max_queue is not None:
+                self.system.max_queue_size = max(1, int(max_queue))
+        except Exception:
+            pass
+        try:
+            tg_rate = os.getenv("TELEGRAM_RATE_LIMIT_REQUESTS")
+            if tg_rate is not None:
+                self.system.telegram_rate_limit_requests = max(1, int(tg_rate))
+        except Exception:
+            pass
+        try:
+            tg_window = os.getenv("TELEGRAM_RATE_LIMIT_WINDOW_SEC")
+            if tg_window is not None:
+                self.system.telegram_rate_limit_window_sec = max(1, int(tg_window))
         except Exception:
             pass
 

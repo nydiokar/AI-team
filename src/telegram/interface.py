@@ -35,6 +35,8 @@ class TelegramInterface:
         self.allowed_users = allowed_users or []
         self.app: Optional[Application] = None
         self.is_running = False
+        # Rate limiting for task creation
+        self._rate_limit_state: Dict[int, list[float]] = {}
         
         if not TELEGRAM_AVAILABLE:
             logger.warning("python-telegram-bot not available. Telegram interface disabled.")
@@ -103,6 +105,35 @@ class TelegramInterface:
             return True  # No restrictions if no allowed users specified
         return user_id in self.allowed_users
     
+    def _check_rate_limit(self, user_id: int) -> bool:
+        """Check if user is within rate limits for task creation"""
+        import time
+        try:
+            from config import config as app_config
+            max_requests = app_config.system.telegram_rate_limit_requests
+            window_sec = app_config.system.telegram_rate_limit_window_sec
+        except Exception:
+            max_requests = 5
+            window_sec = 60
+        
+        current_time = time.time()
+        
+        # Get user's request history
+        user_requests = self._rate_limit_state.get(user_id, [])
+        
+        # Remove old requests outside the time window
+        user_requests = [req_time for req_time in user_requests if current_time - req_time < window_sec]
+        
+        # Check if user is within limits
+        if len(user_requests) >= max_requests:
+            return False
+        
+        # Add current request
+        user_requests.append(current_time)
+        self._rate_limit_state[user_id] = user_requests
+        
+        return True
+    
     async def _handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command"""
         if not self._check_user_permission(update.effective_user.id):
@@ -165,6 +196,20 @@ You can also just send me a message describing what you want to do!
         """Handle /task command"""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
+            return
+            
+        # Check rate limiting
+        if not self._check_rate_limit(update.effective_user.id):
+            try:
+                from config import config as app_config
+                window_sec = app_config.system.telegram_rate_limit_window_sec
+                max_req = app_config.system.telegram_rate_limit_requests
+            except Exception:
+                window_sec = 60
+                max_req = 5
+            await update.message.reply_text(
+                f"🚫 Rate limit exceeded. Maximum {max_req} task requests per {window_sec} seconds."
+            )
             return
             
         if not context.args:
@@ -401,6 +446,20 @@ The system will now process this task automatically. You'll receive a notificati
             await update.message.reply_text("❌ Access denied.")
             return
             
+        # Check rate limiting for task creation
+        if not self._check_rate_limit(update.effective_user.id):
+            try:
+                from config import config as app_config
+                window_sec = app_config.system.telegram_rate_limit_window_sec
+                max_req = app_config.system.telegram_rate_limit_requests
+            except Exception:
+                window_sec = 60
+                max_req = 5
+            await update.message.reply_text(
+                f"🚫 Rate limit exceeded. Maximum {max_req} task requests per {window_sec} seconds."
+            )
+            return
+            
         message_text = update.message.text.strip()
         user_id = update.effective_user.id
         
@@ -448,6 +507,20 @@ The system will now process this task automatically. You'll receive a notificati
     async def _handle_agent_command(self, agent: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
+            return
+            
+        # Check rate limiting for task creation
+        if not self._check_rate_limit(update.effective_user.id):
+            try:
+                from config import config as app_config
+                window_sec = app_config.system.telegram_rate_limit_window_sec
+                max_req = app_config.system.telegram_rate_limit_requests
+            except Exception:
+                window_sec = 60
+                max_req = 5
+            await update.message.reply_text(
+                f"🚫 Rate limit exceeded. Maximum {max_req} task requests per {window_sec} seconds."
+            )
             return
         intent_text = " ".join(context.args).strip()
         if not intent_text:
