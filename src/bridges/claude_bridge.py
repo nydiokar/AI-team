@@ -8,45 +8,39 @@ import time
 import shutil
 from typing import Dict, List, Any, Optional
 from pathlib import Path
-
-import sys
-import os
+from datetime import datetime
+import logging
 
 from src.core import IClaudeBridge, Task, TaskResult, TaskStatus, TaskType
 from config import config
+from .claude_session_parser import ClaudeSessionParser
+
+logger = logging.getLogger(__name__)
 
 class ClaudeBridge(IClaudeBridge):
     """Bridge to interact with Claude Code CLI.
-
-    Runs Claude in headless mode with structured output, least-privilege tool
-    permissions, stdin-piped prompts, and robust parsing/triage of results.
+    
+    Uses Claude session files to detect actual file changes instead of filesystem snapshots.
     """
     
     def __init__(self):
         self.claude_executable = self._find_claude_executable()
         self.base_command = self._build_base_command()
+        self.session_parser = ClaudeSessionParser()
         
     def _find_claude_executable(self) -> str:
         """Find the Claude executable path."""
-        # Prefer the PATH-resolved executable
         claude_path = shutil.which("claude")
         return claude_path or "claude"
         
     def _build_base_command(self) -> List[str]:
-        """Build the base Claude command from a single source of truth.
-
-        Consolidated to `config.claude.base_command` to avoid drift. This method
-        returns a shallow copy so we can safely extend it per-execution without
-        mutating global config.
-        """
+        """Build the base Claude command."""
         try:
             cmd = list(config.claude.base_command)
-            # Always use the resolved executable to avoid PATH/environment drift
             if cmd:
                 cmd[0] = self.claude_executable
             return cmd
         except Exception:
-            # Fallback: minimal sane defaults
             return [self.claude_executable, "--output-format", "json", "-p"]
     
     async def execute_task(self, task: Task) -> TaskResult:
@@ -54,13 +48,19 @@ class ClaudeBridge(IClaudeBridge):
         start_time = time.time()
         
         try:
+            # Resolve working directory
+            cwd_override = self._resolve_cwd(task)
+            
+            # Record timestamp before execution for session file filtering
+            execution_start_time = datetime.now()
+            
             # Build the complete prompt
             prompt = self._build_prompt(task)
             
             # Build command with allowed tools
             command = self.base_command.copy()
             
-            # Add specific tool permissions for safety (guarded write -> read-only)
+            # Add specific tool permissions for safety
             if getattr(config.system, "guarded_write", False):
                 allowed_tools = ["Read", "LS", "Grep", "Glob"]
             else:
@@ -68,16 +68,12 @@ class ClaudeBridge(IClaudeBridge):
             if allowed_tools:
                 command.extend(["--allowedTools", ",".join(allowed_tools)])
 
-            # Use global max-turns from config when > 0 (0 means unlimited/CLI default)
+            # Use global max-turns from config when > 0
             try:
                 if int(getattr(config.claude, "max_turns", 0)) > 0:
                     command.extend(["--max-turns", str(config.claude.max_turns)])
             except Exception:
                 pass
-            # Prefer passing the prompt via stdin to avoid CLI argument parsing issues
-            
-            # Resolve working directory (per-task override -> base_cwd -> repo root)
-            cwd_override = self._resolve_cwd(task)
             
             # Execute the command
             result = await self._execute_command(command, task.target_files, cwd_override=cwd_override, stdin_input=prompt)
@@ -86,6 +82,12 @@ class ClaudeBridge(IClaudeBridge):
             
             # Parse the result
             parsed = self._parse_result(task.id, result, execution_time)
+            
+            # Detect file changes using Claude session files (more accurate than filesystem snapshots)
+            if cwd_override:
+                files_modified = self._detect_file_changes_from_sessions(cwd_override, execution_start_time)
+                parsed.files_modified = files_modified
+            
             # Attach execution cwd for diagnostics
             try:
                 po = parsed.parsed_output if isinstance(parsed.parsed_output, dict) else {}
@@ -93,6 +95,7 @@ class ClaudeBridge(IClaudeBridge):
                 parsed.parsed_output = po or {"meta": {"execution_cwd": cwd_override}}
             except Exception:
                 pass
+            
             return parsed
             
         except Exception as e:
@@ -107,184 +110,139 @@ class ClaudeBridge(IClaudeBridge):
                 timestamp=time.strftime("%Y-%m-%d %H:%M:%S")
             )
     
-    def test_connection(self) -> bool:
-        """Test if Claude Code is available and working.
-
-        More permissive on Windows: accept rc==0 even if version prints to stderr.
-        """
+    def _detect_file_changes_from_sessions(self, cwd: str, execution_start_time: datetime) -> List[str]:
+        """Detect file changes using Claude session files (more accurate than filesystem snapshots)."""
         try:
-            # Prefer a non-interactive check first
-            version = subprocess.run(
-                [self.claude_executable, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if version.returncode == 0 and (version.stdout.strip() or version.stderr.strip()):
-                return True
-
-            # Fallback: auth status may show an interactive trust prompt; treat that as presence
-            status = subprocess.run(
-                [self.claude_executable, "auth", "status"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if status.returncode == 0:
-                return True
-            text_out = (status.stdout or "") + (status.stderr or "")
-            if "Do you trust the files in this folder" in text_out or "trust the files" in text_out:
-                # CLI is present; interactive prompt is expected in some environments
-                return True
-            return False
-        except Exception:
-            return False
+            # Find relevant session files for this working directory
+            session_files = self.session_parser.find_session_files(cwd, execution_start_time)
+            
+            if not session_files:
+                logger.debug(f"No Claude session files found for {cwd}")
+                return []
+            
+            # Parse the session files to extract actual file changes
+            changes = self.session_parser.parse_file_changes(session_files)
+            
+            # Combine all changes into a single list for files_modified
+            all_changes = []
+            
+            # Add created files
+            for file_path in changes["created"]:
+                all_changes.append(f"Created: {file_path}")
+            
+            # Add modified files
+            for file_path in changes["modified"]:
+                all_changes.append(f"Modified: {file_path}")
+            
+            # Add deleted files
+            for file_path in changes["deleted"]:
+                all_changes.append(f"Deleted: {file_path}")
+            
+            if all_changes:
+                logger.info(f"Detected file changes from Claude sessions: {len(all_changes)} changes")
+                logger.debug(f"Changes: {all_changes}")
+            else:
+                logger.debug("No file changes detected in Claude sessions")
+            
+            return all_changes
+            
+        except Exception as e:
+            logger.warning(f"Error detecting file changes from sessions: {e}")
+            return []
     
     def _build_prompt(self, task: Task) -> str:
-        """Build the CLI-ready prompt with minimal framing.
-
-        Includes the task's prompt, optional target files, and context, with a
-        configurable size cap to avoid CLI issues.
-        """
-        # Keep only the raw task prompt and optional target files/context
-        parts = [task.prompt]
+        """Build a comprehensive prompt for Claude."""
+        prompt_parts = [
+            f"Task Type: {task.type.value.upper()}",
+            f"Task: {task.title}",
+            "",
+            "Description:",
+            task.prompt,
+            ""
+        ]
+        
         if task.target_files:
-            parts.append("\nTarget Files:")
-            parts.extend([f"- {file}" for file in task.target_files])
+            prompt_parts.extend([
+                "Target Files:",
+                *[f"- {file}" for file in task.target_files],
+                ""
+            ])
+        
+        if task.success_criteria:
+            prompt_parts.extend([
+                "Success Criteria:",
+                *[f"- {criteria}" for criteria in task.success_criteria],
+                ""
+            ])
+        
         if task.context:
-            parts.append("\nContext:")
-            parts.append(task.context)
-        assembled = "\n".join(parts)
-        # Safety cap on prompt size to avoid CLI issues
-        try:
-            from config import config as _cfg
-            max_chars = getattr(_cfg.llama, "max_prompt_chars", 32_000)
-        except Exception:
-            max_chars = 32_000
-        if len(assembled) > max_chars:
-            assembled = assembled[:max_chars]
-        return assembled
+            prompt_parts.extend([
+                "Context:",
+                task.context,
+                ""
+            ])
+        
+        prompt_parts.extend([
+            "Please:",
+            "1. Analyze the current state of the specified files",
+            "2. Implement the requested changes",
+            "3. Provide a clear summary of what was accomplished",
+            "4. Note any issues or limitations encountered"
+        ])
+        
+        return "\n".join(prompt_parts)
     
     def _get_allowed_tools_for_task(self, task_type) -> List[str]:
-        """Get allowed tools based on task type (least-privilege).
-
-        Accepts either a TaskType enum (from any import path) or a string.
-        We normalize to a lowercase string to avoid enum identity issues across modules.
-        """
-        type_value = getattr(task_type, "value", str(task_type)).lower()
-        if type_value in ("fix", "analyze"):
-            return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]
-        if type_value in ("code_review", "summarize"):
-            return ["Read", "LS", "Grep", "Glob"]
-        # Default to safe read-only if unknown
-        return ["Read", "LS", "Grep", "Glob"]
+        """Get allowed tools based on task type."""
+        base_tools = ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob"]
+        
+        if task_type in (TaskType.FIX, TaskType.ANALYZE):
+            base_tools.extend(["Bash"])
+        
+        return base_tools
     
-    async def _execute_command(self, command: List[str], target_files: List[str], cwd_override: Optional[str] = None, stdin_input: Optional[str] = None) -> Dict[str, Any]:
+    async def _execute_command(self, command: List[str], target_files: List[str], 
+                              cwd_override: Optional[str] = None, stdin_input: Optional[str] = None) -> Dict[str, Any]:
         """Execute Claude command asynchronously."""
         
-        # Determine working directory: per-task override -> CLAUDE_BASE_CWD; no repo-root fallback
-        cwd = cwd_override or config.claude.base_cwd
-        if not cwd:
-            raise RuntimeError("CLAUDE_BASE_CWD not set and no per-task cwd provided")
+        # Change to the appropriate working directory if specified
+        cwd = cwd_override if cwd_override else None
         
         # Execute the command
         process = await asyncio.create_subprocess_exec(
             *command,
-            stdin=asyncio.subprocess.PIPE if stdin_input is not None else None,
+            stdin=asyncio.subprocess.PIPE if stdin_input else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd
         )
         
-        if stdin_input is not None:
-            input_bytes = stdin_input.encode('utf-8')
+        # Send input via stdin if provided
+        if stdin_input:
+            stdin_data = stdin_input.encode('utf-8')
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(stdin_data),
+                timeout=config.claude.timeout
+            )
         else:
-            input_bytes = None
-        stdout, stderr = await asyncio.wait_for(process.communicate(input=input_bytes), timeout=config.claude.timeout)
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=config.claude.timeout
+            )
         
         return {
             'returncode': process.returncode,
-            'stdout': stdout.decode('utf-8', errors='replace') if stdout else '',
-            'stderr': stderr.decode('utf-8', errors='replace') if stderr else ''
+            'stdout': stdout.decode('utf-8') if stdout else '',
+            'stderr': stderr.decode('utf-8') if stderr else ''
         }
-
-    def _resolve_cwd(self, task: Task) -> Optional[str]:
-        """Resolve the effective working directory for a task with safety checks."""
-        try:
-            # 1) Per-task override from frontmatter (Task.metadata['cwd'])
-            task_cwd = None
-            if getattr(task, "metadata", None):
-                task_cwd = task.metadata.get("cwd")
-
-            # 2) Configured base cwd
-            base_cwd = config.claude.base_cwd
-            allowed_root = config.claude.allowed_root or base_cwd
-
-            # If task_cwd provided, support absolute and base-relative forms ("/proj", "proj/sub")
-            candidate: Optional[Path] = None
-            if task_cwd:
-                tc = str(task_cwd).strip()
-                p = Path(tc)
-                # Detect Windows drive-qualified absolute like C:\...
-                is_drive_abs = False
-                try:
-                    import re as _re
-                    is_drive_abs = bool(_re.match(r"^[A-Za-z]:\\", tc))
-                except Exception:
-                    is_drive_abs = False
-                if base_cwd and (tc.startswith("/") or tc.startswith("\\")) and not is_drive_abs:
-                    candidate = Path(base_cwd) / tc.lstrip("/\\")
-                elif not p.is_absolute() and base_cwd:
-                    candidate = Path(base_cwd) / tc
-                else:
-                    candidate = p
-
-                # Normalize and validate allowlist
-                if candidate:
-                    candidate = candidate.resolve()
-                    if allowed_root:
-                        try:
-                            allowed = Path(allowed_root).resolve()
-                            # Ensure candidate is within allowed root
-                            if allowed in candidate.parents or candidate == allowed:
-                                return str(candidate)
-                            else:
-                                # Fallback: ignore invalid override
-                                pass
-                        except Exception:
-                            pass
-                    else:
-                        return str(candidate)
-
-            # No valid per-task cwd; use base_cwd if set
-            if base_cwd:
-                try:
-                    base = Path(base_cwd).resolve()
-                    return str(base)
-                except Exception:
-                    pass
-
-            # No fallback to repository root; require explicit base
-            return None
-        except Exception:
-            return None
     
     def _parse_result(self, task_id: str, result: Dict[str, Any], execution_time: float) -> TaskResult:
-        """Parse command result into `TaskResult` with triage metadata."""
+        """Parse command result into TaskResult."""
         
         success = result['returncode'] == 0
         stdout = result['stdout']
         stderr = result['stderr']
         
-        # Detect interactive prompts proactively (common CLI changes)
-        interactive_markers = [
-            "Do you trust the files in this folder",
-            "trust the files",
-            "Allow this tool to edit files",
-            "Press Enter to continue",
-            "confirm to proceed",
-        ]
-
         # Try to parse JSON output if available
         parsed_output = None
         if stdout:
@@ -311,33 +269,12 @@ class ClaudeBridge(IClaudeBridge):
         if not success and not errors:
             errors.append("Command execution failed")
         
-        # Classify likely interactive block
-        text_combined = (stdout or "") + "\n" + (stderr or "")
-        if any(m in text_combined for m in interactive_markers):
-            errors.append("interactive_prompt_detected")
-
-        # Try to detect modified files from output
-        # This is a simple heuristic - in practice, you might want more sophisticated detection
-        files_modified = []
-        if stdout:
-            # Look for file modification patterns in the output
-            import re
-            file_patterns = [
-                r'Modified:\s+(.+)',
-                r'Edited:\s+(.+)',
-                r'Updated:\s+(.+)',
-                r'Created:\s+(.+)'
-            ]
-            for pattern in file_patterns:
-                matches = re.findall(pattern, stdout, re.IGNORECASE)
-                files_modified.extend(matches)
-        
         return TaskResult(
             task_id=task_id,
             success=success,
             output=stdout,
             errors=errors,
-            files_modified=files_modified,
+            files_modified=[],
             execution_time=execution_time,
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
             raw_stdout=result.get('stdout', ''),
@@ -345,3 +282,42 @@ class ClaudeBridge(IClaudeBridge):
             parsed_output=parsed_output,
             return_code=result.get('returncode', -1)
         )
+    
+    def _resolve_cwd(self, task: Task) -> Optional[str]:
+        """Resolve working directory for task execution."""
+        try:
+            # Check for per-task cwd override in metadata
+            if hasattr(task, 'metadata') and task.metadata:
+                cwd_override = task.metadata.get('cwd')
+                if cwd_override:
+                    candidate = Path(cwd_override)
+                    if candidate.exists() and candidate.is_dir():
+                        return str(candidate)
+            
+            # Use base_cwd from config if set
+            base_cwd = getattr(config.claude, 'base_cwd', None)
+            if base_cwd:
+                try:
+                    base = Path(base_cwd).resolve()
+                    return str(base)
+                except Exception:
+                    pass
+            
+            # No fallback - return None
+            return None
+            
+        except Exception:
+            return None
+    
+    def test_connection(self) -> bool:
+        """Test if Claude Code is available and working."""
+        try:
+            result = subprocess.run(
+                [self.claude_executable, "auth", "status"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            return result.returncode == 0
+        except Exception:
+            return False

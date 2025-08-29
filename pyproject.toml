@@ -12,19 +12,15 @@ authors = [{ name = "AI-team" }]
 license = { text = "MIT" }
 dependencies = [
   "watchdog==3.0.0",
-  "pydantic==2.5.0",
+  "pydantic>=2.10.0",
   "python-dotenv==1.0.0",
   "pyyaml>=6.0.1,<7",
+  "ollama>=0.1.7",
+  "sentence-transformers>=2.2.2",
+  "python-telegram-bot>=20.0",
 ]
 
 [project.optional-dependencies]
-llama = [
-  "ollama>=0.1.7",
-  "sentence-transformers>=2.2.2",
-]
-telegram = [
-  "python-telegram-bot>=20.0",
-]
 dev = [
   "ruff>=0.5.0",
   "black>=24.4.0",

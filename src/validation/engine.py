@@ -110,10 +110,23 @@ class ValidationEngine(IValidationEngine):
         entropy = _shannon_entropy(output)
         issues: List[str] = []
 
-        if similarity < self.config.similarity_threshold:
+        # Get agent-specific thresholds if available
+        from src.core.agent_manager import AgentManager
+        agent_manager = AgentManager()
+        agent = agent_manager.get_agent_for_task_type(task_type)
+        
+        if agent:
+            thresholds = agent.get_validation_thresholds()
+            similarity_threshold = thresholds.get("similarity", self.config.similarity_threshold)
+            entropy_threshold = thresholds.get("entropy", self.config.entropy_threshold)
+        else:
+            similarity_threshold = self.config.similarity_threshold
+            entropy_threshold = self.config.entropy_threshold
+
+        if similarity < similarity_threshold:
             issues.append(f"low_similarity:{similarity:.2f}")
         # Length-aware entropy: avoid flagging very short outputs solely for entropy
-        if len(output or "") >= 20 and entropy < self.config.entropy_threshold:
+        if len(output or "") >= 20 and entropy < entropy_threshold:
             issues.append(f"low_entropy:{entropy:.2f}")
 
         # Very light structure hints: summary/review should be mostly read-only commentary

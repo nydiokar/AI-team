@@ -149,10 +149,14 @@ class LlamaMediator(ILlamaMediator):
             # Parse YAML frontmatter if available
             if len(parts) >= 3:
                 import yaml
-                frontmatter = yaml.safe_load(parts[1])
-                if frontmatter:
-                    result["type"] = frontmatter.get("type", "analyze")
-                    result["priority"] = frontmatter.get("priority", "medium")
+                try:
+                    frontmatter = yaml.safe_load(parts[1])
+                    if frontmatter:
+                        result["type"] = frontmatter.get("type", "analyze")
+                        result["priority"] = frontmatter.get("priority", "medium")
+                except yaml.YAMLError:
+                    logger.warning("Invalid YAML frontmatter, using defaults")
+                    frontmatter = {}
                 
                 body = parts[2].strip()
             else:
@@ -239,10 +243,35 @@ class LlamaMediator(ILlamaMediator):
             return self._create_prompt_with_template(parsed_task)
     
     def _create_prompt_with_template(self, parsed_task: Dict[str, Any]) -> str:
-        """Create prompt using a template (task-type aware)."""
+        """Create prompt using the modular agent system."""
         
         task_type = (parsed_task.get('type') or 'analyze').lower()
         
+        # Get the appropriate agent for this task type
+        from src.core.agent_manager import AgentManager
+        agent_manager = AgentManager()
+        
+        # Map task type to agent name
+        type_to_agent = {
+            'analyze': 'analyze',
+            'fix': 'bug_fix',
+            'bug_fix': 'bug_fix',
+            'code_review': 'code_review',
+            'documentation': 'documentation',
+            'summarize': 'analyze'
+        }
+        
+        agent_name = type_to_agent.get(task_type, 'analyze')
+        agent = agent_manager.get_agent(agent_name)
+        
+        if agent:
+            # Use agent-specific instructions
+            agent_instructions = agent.get_agent_instructions()
+        else:
+            # Fallback to generic instructions
+            agent_instructions = "Please analyze and provide insights on the requested task."
+        
+        # Build the prompt with general system instructions + agent-specific instructions
         header = f"""Task: {task_type.upper()} - {parsed_task['title']}
 
 Priority: {parsed_task['priority'].upper()}
@@ -256,35 +285,33 @@ Description:
 
 Target Files:
 {chr(10).join('- ' + f for f in parsed_task['target_files'])}"""
-        
-        if task_type in ("summarize", "code_review"):
-            body = """
-
-Please:
-1. Read the specified files
-2. Provide a concise {} of the content with key insights
-3. Do not modify any files or execute commands
-4. Note any limitations encountered
-""".format("summary" if task_type == "summarize" else "code review")
         else:
-            # When no explicit target files are provided, require discovery then edits
-            discovery_block = "" if parsed_task['target_files'] else """
-First, identify the relevant files in this repository by searching and reading project code and documentation. Determine the minimal set of files to change.
-"""
-            body = f"""
+            files_block = """
 
-Please:
-{discovery_block}1. Implement the requested changes following best practices and the principle of least action
-2. Make concrete code edits; do not only summarize
-3. Provide a clear summary of what was accomplished
-4. Note any issues or limitations encountered
-5. Ensure all changes are properly tested where applicable
-"""
+Target Files: To be discovered (search and identify relevant files first)"""
         
-        footer = """
+        # Agent-specific instructions
+        agent_block = f"""
+
+Agent Instructions:
+{agent_instructions}"""
+        
+        # General system instructions
+        system_block = """
+
+General Instructions:
+1. Follow the agent's specific instructions above
+2. If no target files are specified, first identify relevant files by searching the repository
+3. Provide clear, actionable output
+4. Include a changelog section at the end if files are modified:
+   Created: path/to/file
+   Modified: path/to/file
+5. Note any limitations or issues encountered
+
 Focus on quality, maintainability, and following established code conventions."""
         
-        prompt = header + files_block + body + "\n" + footer
+        prompt = header + files_block + agent_block + system_block
+        
         # Cap prompt size per config to keep Claude requests reliable
         max_chars = getattr(config.llama, "max_prompt_chars", 32_000)
         if len(prompt) > max_chars:

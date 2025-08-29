@@ -11,6 +11,8 @@ class TaskType(Enum):
     SUMMARIZE = "summarize"
     FIX = "fix"
     ANALYZE = "analyze"
+    DOCUMENTATION = "documentation"
+    BUG_FIX = "bug_fix"  # Alias for FIX to match agent names
 
 class TaskPriority(Enum):
     HIGH = "high"
@@ -174,4 +176,32 @@ class ITaskOrchestrator(ABC):
     @abstractmethod
     def create_task_from_description(self, description: str) -> str:
         """Create a task file from natural language description"""
+        pass
+
+class IAgent(ABC):
+    """Interface for modular task agents"""
+    
+    @abstractmethod
+    def get_agent_name(self) -> str:
+        """Return the agent's name"""
+        pass
+    
+    @abstractmethod
+    def get_agent_instructions(self) -> str:
+        """Return the agent's specific instructions"""
+        pass
+    
+    @abstractmethod
+    def get_allowed_tools(self) -> List[str]:
+        """Return tools this agent is allowed to use"""
+        pass
+    
+    @abstractmethod
+    def should_modify_files(self) -> bool:
+        """Whether this agent should modify files"""
+        pass
+    
+    @abstractmethod
+    def get_validation_thresholds(self) -> Dict[str, float]:
+        """Get validation thresholds specific to this agent"""
         pass

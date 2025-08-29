@@ -120,7 +120,8 @@ class TaskParser(ITaskParser):
             'code_review': TaskType.CODE_REVIEW,
             'summarize': TaskType.SUMMARIZE,
             'fix': TaskType.FIX,
-            'analyze': TaskType.ANALYZE
+            'analyze': TaskType.ANALYZE,
+            'documentation': TaskType.DOCUMENTATION
         }
         
         if type_str not in type_map:

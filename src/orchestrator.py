@@ -21,6 +21,7 @@ from src.core import (
 from src.bridges import ClaudeBridge, LlamaMediator
 from config import config
 from src.validation.engine import ValidationEngine
+from src.core.agent_manager import AgentManager
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.file_watcher = AsyncFileWatcher(config.system.tasks_dir)
         self.claude_bridge = ClaudeBridge()
         self.llama_mediator = LlamaMediator()
+        self.agent_manager = AgentManager()
         
         # Task management
         self.task_queue = asyncio.Queue(maxsize=config.system.max_queue_size)
