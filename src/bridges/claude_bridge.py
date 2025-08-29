@@ -316,7 +316,28 @@ class ClaudeBridge(IClaudeBridge):
                     if Path(cwd_override).is_absolute():
                         candidate = Path(cwd_override)
                         if candidate.exists() and candidate.is_dir():
-                            return str(candidate)
+                            # Check if it's within allowed root
+                            allowed_root = getattr(config.claude, 'allowed_root', None)
+                            if allowed_root:
+                                try:
+                                    allowed_root_path = Path(allowed_root).resolve()
+                                    if not str(candidate).startswith(str(allowed_root_path)):
+                                        logger.warning(f"Absolute path {candidate} is outside allowed root {allowed_root_path}, falling back to base")
+                                        # Fall back to base directory instead of rejecting
+                                        base_cwd = getattr(config.claude, 'base_cwd', None)
+                                        if base_cwd:
+                                            try:
+                                                base = Path(base_cwd).resolve()
+                                                return str(base)
+                                            except Exception:
+                                                pass
+                                    else:
+                                        return str(candidate)
+                                except Exception:
+                                    # If check fails, allow the path
+                                    return str(candidate)
+                            else:
+                                return str(candidate)
                     
                     # Handle relative paths by appending to base_cwd
                     base_cwd = getattr(config.claude, 'base_cwd', None)
@@ -325,6 +346,10 @@ class ClaudeBridge(IClaudeBridge):
                             # Handle POSIX-style paths on Windows (e.g., "/pijama" -> "pijama")
                             if cwd_override.startswith('/') and cwd_override != '/':
                                 cwd_override = cwd_override[1:]  # Remove leading slash
+                            
+                            # Handle Windows backslash-relative paths (e.g., "\AI-team" -> "AI-team")
+                            if cwd_override.startswith('\\') and cwd_override != '\\':
+                                cwd_override = cwd_override[1:]  # Remove leading backslash
                             
                             # Combine base_cwd with relative path
                             combined_path = Path(base_cwd) / cwd_override
@@ -336,12 +361,20 @@ class ClaudeBridge(IClaudeBridge):
                                 try:
                                     allowed_root_path = Path(allowed_root).resolve()
                                     if not str(resolved_path).startswith(str(allowed_root_path)):
-                                        logger.warning(f"Resolved path {resolved_path} is outside allowed root {allowed_root_path}")
-                                        return None
+                                        logger.warning(f"Resolved path {resolved_path} is outside allowed root {allowed_root_path}, falling back to base")
+                                        # Fall back to base directory instead of rejecting
+                                        try:
+                                            base = Path(base_cwd).resolve()
+                                            return str(base)
+                                        except Exception:
+                                            pass
+                                    else:
+                                        return str(resolved_path)
                                 except Exception:
-                                    pass
-                            
-                            return str(resolved_path)
+                                    # If check fails, allow the resolved path
+                                    return str(resolved_path)
+                            else:
+                                return str(resolved_path)
                         except Exception as e:
                             logger.debug(f"Error resolving relative path {cwd_override}: {e}")
             
