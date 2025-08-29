@@ -13,20 +13,20 @@ import logging
 
 from src.core import IClaudeBridge, Task, TaskResult, TaskStatus, TaskType
 from config import config
-from .claude_session_parser import ClaudeSessionParser
+from src.core.git_file_detector import GitFileDetector
 
 logger = logging.getLogger(__name__)
 
 class ClaudeBridge(IClaudeBridge):
     """Bridge to interact with Claude Code CLI.
-    
-    Uses Claude session files to detect actual file changes instead of filesystem snapshots.
+
+    Uses git to detect actual file changes instead of complex session parsing.
     """
-    
+
     def __init__(self):
         self.claude_executable = self._find_claude_executable()
         self.base_command = self._build_base_command()
-        self.session_parser = ClaudeSessionParser()
+        self.git_detector = GitFileDetector()  # Initialize git detector
         
     def _find_claude_executable(self) -> str:
         """Find the Claude executable path."""
@@ -51,7 +51,7 @@ class ClaudeBridge(IClaudeBridge):
             # Resolve working directory
             cwd_override = self._resolve_cwd(task)
             
-            # Record timestamp before execution for session file filtering
+            # Record timestamp for execution timing
             execution_start_time = datetime.now()
             
             # Build the complete prompt
@@ -83,9 +83,9 @@ class ClaudeBridge(IClaudeBridge):
             # Parse the result
             parsed = self._parse_result(task.id, result, execution_time)
             
-            # Detect file changes using Claude session files (more accurate than filesystem snapshots)
+            # Detect file changes using git (simple and reliable)
             if cwd_override:
-                files_modified = self._detect_file_changes_from_sessions(cwd_override, execution_start_time)
+                files_modified = self._detect_file_changes_from_git(cwd_override)
                 parsed.files_modified = files_modified
             
             # Attach execution cwd for diagnostics
@@ -110,18 +110,14 @@ class ClaudeBridge(IClaudeBridge):
                 timestamp=time.strftime("%Y-%m-%d %H:%M:%S")
             )
     
-    def _detect_file_changes_from_sessions(self, cwd: str, execution_start_time: datetime) -> List[str]:
-        """Detect file changes using Claude session files (more accurate than filesystem snapshots)."""
+    def _detect_file_changes_from_git(self, cwd: str) -> List[str]:
+        """Detect file changes using git (simple and reliable)."""
         try:
-            # Find relevant session files for this working directory
-            session_files = self.session_parser.find_session_files(cwd, execution_start_time)
+            # Create git detector for the specific working directory
+            git_detector = GitFileDetector(cwd)
             
-            if not session_files:
-                logger.debug(f"No Claude session files found for {cwd}")
-                return []
-            
-            # Parse the session files to extract actual file changes
-            changes = self.session_parser.parse_file_changes(session_files)
+            # Detect changes
+            changes = git_detector.detect_file_changes()
             
             # Combine all changes into a single list for files_modified
             all_changes = []
@@ -139,15 +135,15 @@ class ClaudeBridge(IClaudeBridge):
                 all_changes.append(f"Deleted: {file_path}")
             
             if all_changes:
-                logger.info(f"Detected file changes from Claude sessions: {len(all_changes)} changes")
+                logger.info(f"Detected file changes from git: {len(all_changes)} changes")
                 logger.debug(f"Changes: {all_changes}")
             else:
-                logger.debug("No file changes detected in Claude sessions")
+                logger.debug("No file changes detected via git")
             
             return all_changes
             
         except Exception as e:
-            logger.warning(f"Error detecting file changes from sessions: {e}")
+            logger.warning(f"Error detecting file changes from git: {e}")
             return []
     
     def _build_prompt(self, task: Task) -> str:
