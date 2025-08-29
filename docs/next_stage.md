@@ -6,12 +6,16 @@
 - 📋 **REMAINING**: 6-7 focused tasks to achieve production-ready v1
 
 ### Where we are
-- File-based workflow is implemented and robust: debounced `FileWatcher`, atomic writes, and processed task archiving.
-- Parsing pipeline is solid: `TaskParser` + `LlamaMediator` with Ollama support and reliable fallback, prompt capping and JSON-mode where available.
-- Execution bridge is operational: `ClaudeBridge` with non-interactive mode, structured output, least-privilege `--allowedTools`, retries with backoff, timeout caps.
-- Orchestrator reliability features: async workers, queue persistence on restart (`logs/state.json`), structured telemetry (`logs/events.ndjson`), artifacts persisted to `results/` and `summaries/`.
-- Validation MVP exists: similarity/entropy checks and basic structure/coherence validation wired into artifacts and events.
-- CLI and docs: `python main.py` (plus `status`, `stats`, `clean`, `create-sample`), quick start and architecture docs in place. Unit tests include permission policy and queue persistence.
+- **File-based workflow** is implemented and robust: debounced `FileWatcher`, atomic writes, and processed task archiving.
+- **Parsing pipeline** is solid: `TaskParser` + `LlamaMediator` with Ollama support and reliable fallback, prompt capping and JSON-mode where available.
+- **Execution bridge** is operational: `ClaudeBridge` with non-interactive mode, structured output, least-privilege `--allowedTools`, retries with backoff, timeout caps.
+- **Orchestrator reliability features**: async workers, queue persistence on restart (`logs/state.json`), structured telemetry (`logs/events.ndjson`), artifacts persisted to `results/` and `summaries/`.
+- **Validation MVP exists**: similarity/entropy checks and basic structure/coherence validation wired into artifacts and events.
+- **CLI and docs**: `python main.py` (plus `status`, `stats`, `clean`, `create-sample`), quick start and architecture docs in place. Unit tests include permission policy and queue persistence.
+- **Modular agent system**: `AgentManager` with configurable agents (analyze, bug_fix, code_review, documentation) loaded from `prompts/agents/` with task-specific instructions and validation thresholds.
+- **Git-based file detection**: `GitFileDetector` replaces complex session parsing with reliable git status detection, integrated into `ClaudeBridge` for accurate `files_modified` tracking.
+- **Enhanced task types**: Extended `TaskType` enum with `DOCUMENTATION` and `BUG_FIX` aliases, integrated with agent system and validation engine.
+- **Telegram integration**: Full bot interface with agent commands (`/documentation`, `/code_review`, `/bug_fix`, `/analyze`), task management, and completion notifications.
 
 ### Next-stage objective (2–3 weeks)
 Strengthen reliability and operability, add essential operational tools, and stabilize artifacts/validation so the system is production-ready and easier to monitor.
@@ -50,6 +54,22 @@ Strengthen reliability and operability, add essential operational tools, and sta
 
 7) **Operational UX polish**
    - `tail-events` follow mode and colorized output (Windows-safe); `doctor` write probes; `/progress` supports `--since` and clearer status summaries.
+
+8) **Git automation and safe commit workflow** - NEW
+   - Goal: Enable safe, automated git operations through Telegram with LLAMA-generated commit messages and intelligent branching.
+   - Scope:
+     - Telegram commands: `/commit <task_id>` and `/commit-all` for staged changes
+     - LLAMA reads git diff and generates contextual commit messages based on task description
+     - Safe branching strategy: create feature branch per task (`feature/task-{id}-{description}`)
+     - Automatic `git add`, `git commit`, `git push` with safety checks
+     - Filter sensitive files (.env, .key, secrets) from commits
+     - Optional PR creation for review workflows
+   - Safety features:
+     - Pre-commit validation of file types and patterns
+     - Branch naming conventions and conflict detection
+     - Rollback capability if commit fails
+     - Integration with existing `files_modified` detection
+   - Acceptance: Users can safely commit task changes via Telegram; LLAMA generates meaningful commit messages; sensitive files are protected; branching strategy is clean and conflict-free.
 
 ### Future/Optional tasks (post-v1)
 
@@ -90,3 +110,4 @@ Strengthen reliability and operability, add essential operational tools, and sta
 - Artifacts are well-structured and machine-readable for external tooling
 - Security boundaries are enforced and monitored
 - Documentation is complete and accurate
+- Git workflow is automated and safe with LLAMA-generated commit messages and intelligent branching

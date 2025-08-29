@@ -189,13 +189,21 @@ class ClaudeBridge(IClaudeBridge):
         return "\n".join(prompt_parts)
     
     def _get_allowed_tools_for_task(self, task_type) -> List[str]:
-        """Get allowed tools based on task type."""
-        base_tools = ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob"]
-        
-        if task_type in (TaskType.FIX, TaskType.ANALYZE):
-            base_tools.extend(["Bash"])
-        
-        return base_tools
+        """Get allowed tools based on task type for Claude."""
+        # Claude tool permissions based on task type, not agent manager
+        if task_type == TaskType.CODE_REVIEW:
+            return ["Read", "LS", "Grep", "Glob"]  # Read-only tools
+        elif task_type == TaskType.SUMMARIZE:
+            return ["Read", "LS", "Grep", "Glob"]  # Read-only tools
+        elif task_type == TaskType.DOCUMENTATION:
+            return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob"]  # Can edit for docs
+        elif task_type in (TaskType.FIX, TaskType.BUG_FIX):
+            return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]  # Full edit + bash
+        elif task_type == TaskType.ANALYZE:
+            return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]  # Full edit + bash
+        else:
+            # Default: read-only for safety
+            return ["Read", "LS", "Grep", "Glob"]
     
     async def _execute_command(self, command: List[str], target_files: List[str], 
                               cwd_override: Optional[str] = None, stdin_input: Optional[str] = None) -> Dict[str, Any]:
@@ -260,6 +268,22 @@ class ClaudeBridge(IClaudeBridge):
         
         # Extract error messages
         errors = []
+        
+        # Check for interactive prompts
+        interactive_markers = [
+            "Do you trust the files in this folder",
+            "Allow this tool to edit files",
+            "Press Enter to continue",
+            "Continue? (y/n)",
+            "Proceed? (y/n)",
+            "Do you want to continue",
+            "Are you sure"
+        ]
+        
+        combined_output = (stdout or "") + "\n" + (stderr or "")
+        if any(marker in combined_output for marker in interactive_markers):
+            errors.append("interactive_prompt_detected")
+        
         if stderr:
             errors.append(stderr)
         if not success and not errors:
@@ -285,12 +309,43 @@ class ClaudeBridge(IClaudeBridge):
             # Check for per-task cwd override in metadata
             if hasattr(task, 'metadata') and task.metadata:
                 cwd_override = task.metadata.get('cwd')
-                if cwd_override:
-                    candidate = Path(cwd_override)
-                    if candidate.exists() and candidate.is_dir():
-                        return str(candidate)
+                if cwd_override and cwd_override.strip():
+                    cwd_override = cwd_override.strip()
+                    
+                    # Handle absolute paths
+                    if Path(cwd_override).is_absolute():
+                        candidate = Path(cwd_override)
+                        if candidate.exists() and candidate.is_dir():
+                            return str(candidate)
+                    
+                    # Handle relative paths by appending to base_cwd
+                    base_cwd = getattr(config.claude, 'base_cwd', None)
+                    if base_cwd:
+                        try:
+                            # Handle POSIX-style paths on Windows (e.g., "/pijama" -> "pijama")
+                            if cwd_override.startswith('/') and cwd_override != '/':
+                                cwd_override = cwd_override[1:]  # Remove leading slash
+                            
+                            # Combine base_cwd with relative path
+                            combined_path = Path(base_cwd) / cwd_override
+                            resolved_path = combined_path.resolve()
+                            
+                            # Verify the resolved path is within the allowed root
+                            allowed_root = getattr(config.claude, 'allowed_root', None)
+                            if allowed_root:
+                                try:
+                                    allowed_root_path = Path(allowed_root).resolve()
+                                    if not str(resolved_path).startswith(str(allowed_root_path)):
+                                        logger.warning(f"Resolved path {resolved_path} is outside allowed root {allowed_root_path}")
+                                        return None
+                                except Exception:
+                                    pass
+                            
+                            return str(resolved_path)
+                        except Exception as e:
+                            logger.debug(f"Error resolving relative path {cwd_override}: {e}")
             
-            # Use base_cwd from config if set
+            # Use base_cwd from config if set (fallback)
             base_cwd = getattr(config.claude, 'base_cwd', None)
             if base_cwd:
                 try:
