@@ -459,8 +459,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # Send Telegram notification if available
                 if self.telegram_interface and result.success:
                     try:
-                        # Extract summary from result output
-                        summary = result.output.split('\n\n', 1)[0] if result.output else "Task completed"
+                        # Read the summary file directly to get the LLAMA-generated summary
+                        summary_file = Path(config.system.summaries_dir) / f"{task.id}_summary.txt"
+                        if summary_file.exists():
+                            summary = summary_file.read_text(encoding='utf-8').strip()
+                            if not summary:
+                                summary = "Task completed successfully"
+                        else:
+                            # Fallback to result output if summary file doesn't exist yet
+                            summary = result.output.split('\n\n', 1)[0] if result.output else "Task completed successfully"
+                        
                         await self.telegram_interface.notify_completion(task.id, summary, success=True)
                     except Exception as e:
                         logger.warning(f"Failed to send Telegram completion notification: {e}")
@@ -1152,12 +1160,19 @@ Generated from agent expansion with attachments copied to working directory
         """Simple parsing of task description"""
         
         # Basic keyword detection
+        text = description.lower()
         task_type = "analyze"
-        if any(word in description.lower() for word in ["fix", "bug", "error"]):
+        # Treat action verbs as edit intent (fix) so Claude will make changes
+        edit_verbs = [
+            "fix", "bug", "error", "implement", "add", "create", "build",
+            "write", "generate", "apply", "refactor", "enforce", "replace",
+            "wire", "integrate"
+        ]
+        if any(word in text for word in edit_verbs):
             task_type = "fix"
-        elif any(word in description.lower() for word in ["review", "check"]):
+        elif any(word in text for word in ["review", "check", "audit"]):
             task_type = "code_review"
-        elif any(word in description.lower() for word in ["summary", "summarize"]):
+        elif any(word in text for word in ["summary", "summarize", "outline", "overview"]):
             task_type = "summarize"
         
         return {

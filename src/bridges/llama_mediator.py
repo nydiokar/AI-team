@@ -267,11 +267,15 @@ Please:
 4. Note any limitations encountered
 """.format("summary" if task_type == "summarize" else "code review")
         else:
-            body = """
+            # When no explicit target files are provided, require discovery then edits
+            discovery_block = "" if parsed_task['target_files'] else """
+First, identify the relevant files in this repository by searching and reading project code and documentation. Determine the minimal set of files to change.
+"""
+            body = f"""
 
 Please:
-1. Analyze the current state of the specified files
-2. Implement the requested changes following best practices
+{discovery_block}1. Implement the requested changes following best practices and the principle of least action
+2. Make concrete code edits; do not only summarize
 3. Provide a clear summary of what was accomplished
 4. Note any issues or limitations encountered
 5. Ensure all changes are properly tested where applicable
