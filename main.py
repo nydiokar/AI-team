@@ -255,6 +255,15 @@ def main():
         if command == "reload-workers":
             asyncio.run(_reload_workers())
             return
+        if command == "git-commit":
+            _handle_git_commit(sys.argv[2:])
+            return
+        if command == "git-commit-all":
+            _handle_git_commit_all(sys.argv[2:])
+            return
+        if command == "git-status":
+            _handle_git_status()
+            return
         if command == "help":
             print_help()
             return
@@ -283,6 +292,9 @@ Usage:
     python main.py doctor                    Print effective config and CLI availability
     python main.py tail-events [--task TASK_ID] [--lines N]   Show recent NDJSON events
     python main.py reload-workers  Reload worker pool from environment
+    python main.py git-commit <task_id> [--no-branch] [--push]  Commit task changes safely
+    python main.py git-commit-all <task_id> [--no-branch] [--push]  Commit all staged changes
+    python main.py git-status     Show git repository status and safety info
     python main.py help            Show this help
 
 Environment Setup:
@@ -290,6 +302,7 @@ Environment Setup:
     - TELEGRAM_BOT_TOKEN (optional for Telegram integration)
     - TELEGRAM_ALLOWED_USERS (optional)
     - TELEGRAM_CHAT_ID (optional)
+    - AGENTS_ENABLED (optional, default: true) - Set to "false" to disable agent system
 
 Directory Structure:
     tasks/      - Drop .task.md files here
@@ -689,6 +702,7 @@ def _doctor():
         print(f"  Guarded write    : {getattr(config.system, 'guarded_write', False)}")
     except Exception:
         pass
+    print(f"  Agents enabled    : {config.system.agents_enabled}")
     print(f"  Base CWD          : {config.claude.base_cwd}")
     print(f"  Allowed root      : {config.claude.allowed_root}")
 
@@ -742,6 +756,149 @@ def _doctor():
         print(f"  auth status rc={r2.returncode} out={(r2.stdout or r2.stderr).strip()[:120]}")
     except Exception as e:
         print(f"  Auth check failed: {e}")
+
+def _handle_git_commit(args):
+    """Handle git-commit command"""
+    if not args:
+        print("Usage: python main.py git-commit <task_id> [--no-branch] [--push]")
+        print("Example: python main.py git-commit abc123 --push")
+        return
+    
+    task_id = args[0]
+    create_branch = "--no-branch" not in args
+    push_branch = "--push" in args
+    
+    try:
+        from src.core.git_automation import GitAutomationService
+        git_service = GitAutomationService()
+        
+        # For CLI, we'll use a generic description since we don't have task context
+        task_description = f"Task {task_id} changes"
+        
+        print(f"Committing changes for task {task_id}...")
+        result = git_service.safe_commit_task(
+            task_id=task_id,
+            task_description=task_description,
+            create_branch=create_branch,
+            push_branch=push_branch
+        )
+        
+        if result["success"]:
+            print(f"Successfully committed task {task_id}")
+            if result["branch_name"]:
+                print(f"Branch: {result['branch_name']}")
+            if result["files_committed"]:
+                print(f"Files committed: {len(result['files_committed'])}")
+            if result["sensitive_files_blocked"]:
+                print(f"Sensitive files blocked: {len(result['sensitive_files_blocked'])}")
+            if push_branch and result["branch_name"]:
+                print("Branch pushed to remote")
+        else:
+            print(f"Failed to commit task {task_id}:")
+            for error in result["errors"]:
+                print(f"  • {error}")
+                
+    except ImportError as e:
+        print(f"❌ Git automation service not available: {e}")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+def _handle_git_commit_all(args):
+    """Handle git-commit-all command"""
+    if not args:
+        print("Usage: python main.py git-commit-all <task_id> [--no-branch] [--push]")
+        print("⚠️  This commits ALL staged changes - use with caution!")
+        return
+    
+    task_id = args[0]
+    create_branch = "--no-branch" not in args
+    push_branch = "--push" in args
+    
+    try:
+        from src.core.git_automation import GitAutomationService
+        git_service = GitAutomationService()
+        
+        task_description = f"Task {task_id} changes"
+        
+        print(f"Committing all staged changes for task {task_id}...")
+        result = git_service.commit_all_staged(
+            task_id=task_id,
+            task_description=task_description,
+            create_branch=create_branch,
+            push_branch=push_branch
+        )
+        
+        if result["success"]:
+            print(f"Successfully committed all staged changes for task {task_id}")
+            if result["branch_name"]:
+                print(f"Branch: {result['branch_name']}")
+            if result["files_committed"]:
+                print(f"Files committed: {len(result['files_committed'])}")
+            if push_branch and result["branch_name"]:
+                print("Branch pushed to remote")
+        else:
+            print(f"Failed to commit staged changes for task {task_id}:")
+            for error in result["errors"]:
+                print(f"  • {error}")
+                
+    except ImportError as e:
+        print(f"Git automation service not available: {e}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+def _handle_git_status():
+    """Handle git-status command"""
+    try:
+        from src.core.git_automation import GitAutomationService
+        git_service = GitAutomationService()
+        
+        print("Git Repository Status")
+        print("=" * 30)
+        
+        status = git_service.get_git_status_summary()
+        
+        if "error" in status:
+            print(f"Error: {status['error']}")
+            return
+        
+        print(f"Branch: {status['current_branch']}")
+        print(f"Working directory: {'Clean' if status['working_directory_clean'] else 'Has changes'}")
+        
+        if not status['working_directory_clean']:
+            changes = status['changes']
+            print(f"\nChanges:")
+            print(f"  • Modified: {changes['modified']}")
+            print(f"  • Created: {changes['created']}")
+            print(f"  • Deleted: {changes['deleted']}")
+            print(f"  • Total: {changes['total']}")
+            
+            if status['staged_files']:
+                print(f"\nStaged files: {len(status['staged_files'])}")
+                for file_path in status['staged_files'][:5]:
+                    print(f"  • {file_path}")
+                if len(status['staged_files']) > 5:
+                    print(f"  • ... and {len(status['staged_files']) - 5} more")
+            
+            if status['unstaged_files']:
+                print(f"\nUnstaged files: {len(status['unstaged_files'])}")
+                for file_path in status['unstaged_files'][:5]:
+                    print(f"  • {file_path}")
+                if len(status['unstaged_files']) > 5:
+                    print(f"  • ... and {len(status['unstaged_files']) - 5} more")
+            
+            # Safety information
+            safety = status['safety']
+            if safety['has_sensitive_files']:
+                print(f"\nSensitive files detected: {len(safety['sensitive_files'])}")
+                for file_path in safety['sensitive_files'][:5]:
+                    print(f"  • {file_path}")
+                if len(safety['sensitive_files']) > 5:
+                    print(f"  • ... and {len(safety['sensitive_files']) - 5} more")
+                    
+    except ImportError as e:
+        print(f"Git automation service not available: {e}")
+    except Exception as e:
+        print(f"Error: {e}")
 
 async def _reload_workers():
     """Reload worker pool configuration from environment variables"""

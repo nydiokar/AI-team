@@ -7,6 +7,7 @@ from typing import Dict, Optional, Type
 from abc import ABC
 
 from .interfaces import IAgent, TaskType
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,11 @@ class AgentManager:
     
     def _load_agents(self):
         """Load all available agents from the agents directory"""
+        # Check if agents are enabled via configuration
+        if not config.system.agents_enabled:
+            logger.info("Agents disabled via configuration (AGENTS_ENABLED=false)")
+            return
+            
         if not self.agents_dir.exists():
             logger.warning(f"Agents directory not found: {self.agents_dir}")
             return
@@ -74,7 +80,7 @@ class AgentManager:
             }
         }
         
-        for agent_name, config in agent_configs.items():
+        for agent_name, agent_config in agent_configs.items():
             agent_file = self.agents_dir / f"{agent_name}.md"
             if agent_file.exists():
                 try:
@@ -82,9 +88,9 @@ class AgentManager:
                     agent = BaseAgent(
                         agent_name=agent_name,
                         instructions=instructions,
-                        allowed_tools=config["allowed_tools"],
-                        should_modify_files=config["should_modify_files"],
-                        validation_thresholds=config["validation_thresholds"]
+                        allowed_tools=agent_config["allowed_tools"],
+                        should_modify_files=agent_config["should_modify_files"],
+                        validation_thresholds=agent_config["validation_thresholds"]
                     )
                     self.agents[agent_name] = agent
                     logger.info(f"Loaded agent: {agent_name}")
