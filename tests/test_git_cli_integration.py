@@ -27,8 +27,24 @@ class TestGitCLIIntegration:
         
         yield repo_path
         
-        # Cleanup
-        shutil.rmtree(temp_dir)
+        # Cleanup - handle Windows file locking issues
+        try:
+            # Force close any git processes that might be holding file handles
+            subprocess.run(['git', 'gc'], cwd=repo_path, capture_output=True, timeout=5)
+        except:
+            pass
+        
+        try:
+            shutil.rmtree(temp_dir)
+        except PermissionError:
+            # On Windows, sometimes files are still locked
+            import time
+            time.sleep(0.1)
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                # If still failing, just log it and continue
+                print(f"Warning: Could not clean up temp directory {temp_dir}")
     
     @pytest.fixture
     def temp_project(self, temp_repo):

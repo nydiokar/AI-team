@@ -784,17 +784,17 @@ def _handle_git_commit(args):
         )
         
         if result["success"]:
-            print(f"Successfully committed task {task_id}")
+            print(f"✅ Successfully committed task {task_id}")
             if result["branch_name"]:
-                print(f"Branch: {result['branch_name']}")
+                print(f"📁 Branch: {result['branch_name']}")
             if result["files_committed"]:
-                print(f"Files committed: {len(result['files_committed'])}")
+                print(f"📄 Files committed: {len(result['files_committed'])}")
             if result["sensitive_files_blocked"]:
-                print(f"Sensitive files blocked: {len(result['sensitive_files_blocked'])}")
+                print(f"🚫 Sensitive files blocked: {len(result['sensitive_files_blocked'])}")
             if push_branch and result["branch_name"]:
-                print("Branch pushed to remote")
+                print("🚀 Branch pushed to remote")
         else:
-            print(f"Failed to commit task {task_id}:")
+            print(f"❌ Failed to commit task {task_id}:")
             for error in result["errors"]:
                 print(f"  • {error}")
                 
@@ -829,22 +829,22 @@ def _handle_git_commit_all(args):
         )
         
         if result["success"]:
-            print(f"Successfully committed all staged changes for task {task_id}")
+            print(f"✅ Successfully committed all staged changes for task {task_id}")
             if result["branch_name"]:
-                print(f"Branch: {result['branch_name']}")
+                print(f"📁 Branch: {result['branch_name']}")
             if result["files_committed"]:
-                print(f"Files committed: {len(result['files_committed'])}")
+                print(f"📄 Files committed: {len(result['files_committed'])}")
             if push_branch and result["branch_name"]:
-                print("Branch pushed to remote")
+                print("🚀 Branch pushed to remote")
         else:
-            print(f"Failed to commit staged changes for task {task_id}:")
+            print(f"❌ Failed to commit staged changes for task {task_id}:")
             for error in result["errors"]:
                 print(f"  • {error}")
                 
     except ImportError as e:
-        print(f"Git automation service not available: {e}")
+        print(f"❌ Git automation service not available: {e}")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error: {e}")
 
 def _handle_git_status():
     """Handle git-status command"""
@@ -852,35 +852,38 @@ def _handle_git_status():
         from src.core.git_automation import GitAutomationService
         git_service = GitAutomationService()
         
-        print("Git Repository Status")
+        print("📊 Git Repository Status")
         print("=" * 30)
         
         status = git_service.get_git_status_summary()
         
         if "error" in status:
-            print(f"Error: {status['error']}")
+            if "Not in a git repository" in status['error']:
+                print(f"❌ Not in a git repository")
+            else:
+                print(f"❌ {status['error']}")
             return
         
-        print(f"Branch: {status['current_branch']}")
-        print(f"Working directory: {'Clean' if status['working_directory_clean'] else 'Has changes'}")
+        print(f"🌿 Branch: {status['current_branch']}")
+        print(f"🧹 Working directory: {'Clean' if status['working_directory_clean'] else 'Has changes'}")
         
         if not status['working_directory_clean']:
             changes = status['changes']
-            print(f"\nChanges:")
+            print(f"\n📝 Changes:")
             print(f"  • Modified: {changes['modified']}")
             print(f"  • Created: {changes['created']}")
             print(f"  • Deleted: {changes['deleted']}")
             print(f"  • Total: {changes['total']}")
             
             if status['staged_files']:
-                print(f"\nStaged files: {len(status['staged_files'])}")
+                print(f"\n📦 Staged files: {len(status['staged_files'])}")
                 for file_path in status['staged_files'][:5]:
                     print(f"  • {file_path}")
                 if len(status['staged_files']) > 5:
                     print(f"  • ... and {len(status['staged_files']) - 5} more")
             
             if status['unstaged_files']:
-                print(f"\nUnstaged files: {len(status['unstaged_files'])}")
+                print(f"\n📄 Unstaged files: {len(status['unstaged_files'])}")
                 for file_path in status['unstaged_files'][:5]:
                     print(f"  • {file_path}")
                 if len(status['unstaged_files']) > 5:
@@ -889,16 +892,16 @@ def _handle_git_status():
             # Safety information
             safety = status['safety']
             if safety['has_sensitive_files']:
-                print(f"\nSensitive files detected: {len(safety['sensitive_files'])}")
+                print(f"\n🚫 Sensitive files detected: {len(safety['sensitive_files'])}")
                 for file_path in safety['sensitive_files'][:5]:
                     print(f"  • {file_path}")
                 if len(safety['sensitive_files']) > 5:
                     print(f"  • ... and {len(safety['sensitive_files']) - 5} more")
                     
     except ImportError as e:
-        print(f"Git automation service not available: {e}")
+        print(f"❌ Git automation service not available: {e}")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error: {e}")
 
 async def _reload_workers():
     """Reload worker pool configuration from environment variables"""
