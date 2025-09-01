@@ -142,7 +142,8 @@ class LlamaMediator(ILlamaMediator):
             "target_files": [],
             "main_request": "",
             "priority": "medium",
-            "title": "Task"
+            "title": "Task",
+            "metadata": {}
         }
         
         try:
@@ -154,6 +155,9 @@ class LlamaMediator(ILlamaMediator):
                     if frontmatter:
                         result["type"] = frontmatter.get("type", "analyze")
                         result["priority"] = frontmatter.get("priority", "medium")
+                        # Extract agent_type for manual agent selection
+                        if "agent_type" in frontmatter:
+                            result["metadata"]["agent_type"] = frontmatter["agent_type"]
                 except yaml.YAMLError:
                     logger.warning("Invalid YAML frontmatter, using defaults")
                     frontmatter = {}
@@ -202,32 +206,63 @@ class LlamaMediator(ILlamaMediator):
     def create_claude_prompt(self, parsed_task: Dict[str, Any]) -> str:
         """Create Claude-optimized prompt."""
         
+        # Check if this is a manually selected agent (bypass automatic processing)
+        agent_type = parsed_task.get('metadata', {}).get('agent_type')
+        if agent_type:
+            return self._create_prompt_for_manual_agent(agent_type, parsed_task)
+        
         if self.ollama_available and self.client and self.model_installed:
             return self._create_prompt_with_llama(parsed_task)
         else:
             return self._create_prompt_with_template(parsed_task)
     
     def _create_prompt_with_llama(self, parsed_task: Dict[str, Any]) -> str:
-        """Use LLAMA to create an optimized Claude prompt."""
+        """Use LLAMA to create an optimized Claude prompt in unified natural structure."""
         try:
-            prompt = f"""
-            Create an optimized prompt for Claude Code to execute this task:
+            # Load general principles to include in LLAMA prompt
+            try:
+                root = Path(__file__).resolve().parents[2]
+                general_principles_path = root / "prompts" / "general_prompt_coding.md"
+                if general_principles_path.exists():
+                    general_principles = general_principles_path.read_text(encoding="utf-8")
+                else:
+                    general_principles = "Follow best coding practices and maintain code quality."
+            except Exception:
+                general_principles = "Follow best coding practices and maintain code quality."
             
-            Task details:
+            # Get task type for specialized instructions
+            task_type = (parsed_task.get('type') or 'analyze').lower()
+            agent_instructions = self._get_agent_instructions_for_claude(task_type)
+            
+            prompt = f"""
+            Create an optimized prompt for Claude Code using this EXACT structure:
+
+            "Our task today consists of [USER_INTENT] for {task_type.replace('_', ' ')}.
+
+            Following these core principles:
+            {general_principles}
+
+            For this specific {task_type.replace('_', ' ')} task, here are the specialized instructions:
+            {agent_instructions}
+
+            Task Details:
+            - Title: [TITLE]
+            - Type: {task_type.replace('_', ' ').title()} (auto-selected with LLAMA optimization)
+            - Priority: [PRIORITY]
+            - Target Files: [FILES OR 'To be discovered...']
+
+            Let's begin: [USER_INTENT]
+
+            Please provide a comprehensive approach that follows both the general principles above and the specific {task_type.replace('_', ' ')} guidelines. Focus on quality, maintainability, and clear communication of what you accomplish."
+
+            Task details to fill in:
             - Type: {parsed_task['type']}
-            - Title: {parsed_task['title']}
+            - Title: {parsed_task['title']}  
             - Files: {parsed_task['target_files']}
-            - Request: {parsed_task['main_request']}
+            - Request (USER_INTENT): {parsed_task['main_request']}
             - Priority: {parsed_task['priority']}
             
-            Create a clear, actionable prompt that:
-            1. Explains the task context
-            2. Specifies exactly what to do
-            3. Lists the target files
-            4. Includes success criteria
-            5. Asks for a summary of changes
-            
-            Generate only the prompt text, no additional formatting:
+            Generate the complete prompt using the structure above, filling in the bracketed placeholders with the task details. Make the USER_INTENT natural and actionable. Return only the final prompt text:
             """
             
             response = self.client.generate(
@@ -243,84 +278,57 @@ class LlamaMediator(ILlamaMediator):
             return self._create_prompt_with_template(parsed_task)
     
     def _create_prompt_with_template(self, parsed_task: Dict[str, Any]) -> str:
-        """Create prompt using the modular agent system."""
+        """Create prompt using unified natural structure (same as manual agents)."""
         
         task_type = (parsed_task.get('type') or 'analyze').lower()
         
-        # Get the appropriate agent for this task type
-        from src.core.agent_manager import AgentManager
-        agent_manager = AgentManager()
-        
-        # Map task type to agent name
-        type_to_agent = {
-            'analyze': 'analyze',
-            'fix': 'bug_fix',
-            'bug_fix': 'bug_fix',
-            'code_review': 'code_review',
-            'documentation': 'documentation',
-            'summarize': 'analyze'
-        }
-        
-        agent_name = type_to_agent.get(task_type, 'analyze')
-        agent = agent_manager.get_agent(agent_name)
-        
-        if agent:
-            # Use agent-specific instructions
-            agent_instructions = agent.get_agent_instructions()
-        else:
-            # Fallback to generic instructions when agents are disabled or unavailable
-            if task_type == 'code_review':
-                agent_instructions = "Please review the code for quality, security, and best practices. Focus on identifying potential issues, code smells, and areas for improvement."
-            elif task_type in ('fix', 'bug_fix'):
-                agent_instructions = "Please identify and fix the reported issue. Ensure the solution is robust, well-tested, and follows established coding patterns."
-            elif task_type == 'documentation':
-                agent_instructions = "Please create or update documentation as requested. Ensure clarity, completeness, and consistency with existing documentation."
-            elif task_type == 'summarize':
-                agent_instructions = "Please provide a clear, concise summary of the requested information or analysis."
+        # Load general principles (same as manual agents)
+        try:
+            root = Path(__file__).resolve().parents[2]
+            general_principles_path = root / "prompts" / "general_prompt_coding.md"
+            if general_principles_path.exists():
+                general_principles = general_principles_path.read_text(encoding="utf-8")
             else:
-                agent_instructions = "Please analyze and provide insights on the requested task. Focus on understanding the current state and providing actionable recommendations."
+                general_principles = "Follow best coding practices and maintain code quality."
+        except Exception as e:
+            logger.warning(f"Could not load general principles: {e}")
+            general_principles = "Follow best coding practices and maintain code quality."
         
-        # Build the prompt with general system instructions + agent-specific instructions
-        header = f"""Task: {task_type.upper()} - {parsed_task['title']}
-
-Priority: {parsed_task['priority'].upper()}
-
-Description:
-{parsed_task['main_request']}"""
+        # Get agent instructions (reuse the same method as manual agents)
+        agent_instructions = self._get_agent_instructions_for_claude(task_type)
         
-        files_block = ""
-        if parsed_task['target_files']:
-            files_block = f"""
+        # Get task details
+        user_intent = parsed_task.get('main_request', 'Complete the requested task')
+        task_title = parsed_task.get('title', 'Auto-selected Task')
+        target_files = parsed_task.get('target_files', [])
+        
+        # Build unified natural prompt (same structure as manual agents)
+        prompt = f"""Our task today consists of {user_intent} for {task_type.replace('_', ' ')}.
 
-Target Files:
-{chr(10).join('- ' + f for f in parsed_task['target_files'])}"""
+Following these core principles:
+{general_principles}
+
+For this specific {task_type.replace('_', ' ')} task, here are the specialized instructions:
+{agent_instructions}
+
+Task Details:
+- Title: {task_title}
+- Type: {task_type.replace('_', ' ').title()} (auto-selected)
+- Priority: {parsed_task.get('priority', 'medium').title()}"""
+
+        if target_files:
+            prompt += f"""
+- Target Files: {', '.join(target_files)}"""
         else:
-            files_block = """
+            prompt += """
+- Target Files: To be discovered (search and identify relevant files first)"""
 
-Target Files: To be discovered (search and identify relevant files first)"""
-        
-        # Agent-specific instructions
-        agent_block = f"""
+        prompt += f"""
 
-Agent Instructions:
-{agent_instructions}"""
-        
-        # General system instructions
-        system_block = """
+Let's begin: {user_intent}
 
-General Instructions:
-1. Follow the agent's specific instructions above
-2. If no target files are specified, first identify relevant files by searching the repository
-3. Provide clear, actionable output
-4. Include a changelog section at the end if files are modified:
-   Created: path/to/file
-   Modified: path/to/file
-5. Note any limitations or issues encountered
+Please provide a comprehensive approach that follows both the general principles above and the specific {task_type.replace('_', ' ')} guidelines. Focus on quality, maintainability, and clear communication of what you accomplish."""
 
-Focus on quality, maintainability, and following established code conventions."""
-        
-        prompt = header + files_block + agent_block + system_block
-        
         # Cap prompt size per config to keep Claude requests reliable
         max_chars = getattr(config.llama, "max_prompt_chars", 32_000)
         if len(prompt) > max_chars:
@@ -329,6 +337,153 @@ Focus on quality, maintainability, and following established code conventions.""
             )
             prompt = prompt[:max_chars]
         return prompt
+    
+    def _create_prompt_for_manual_agent(self, agent_type: str, parsed_task: Dict[str, Any]) -> str:
+        """Create prompt for manually selected agent using templates."""
+        
+        # Load general principles
+        try:
+            root = Path(__file__).resolve().parents[2]
+            general_principles_path = root / "prompts" / "general_prompt_coding.md"
+            if general_principles_path.exists():
+                general_principles = general_principles_path.read_text(encoding="utf-8")
+            else:
+                general_principles = "Follow best coding practices and maintain code quality."
+        except Exception as e:
+            logger.warning(f"Could not load general principles: {e}")
+            general_principles = "Follow best coding practices and maintain code quality."
+        
+        # Get agent-specific instructions (extract from existing templates or use built-in)
+        agent_instructions = self._get_agent_instructions_for_claude(agent_type)
+        
+        # Get user intent from the task
+        user_intent = parsed_task.get('main_request', 'Complete the requested task')
+        task_title = parsed_task.get('title', 'Manual Agent Task')
+        target_files = parsed_task.get('target_files', [])
+        
+        # Build the natural prompt following your preferred structure
+        prompt = f"""Our task today consists of {user_intent} for {agent_type.replace('_', ' ')}.
+
+Following these core principles:
+{general_principles}
+
+For this specific {agent_type.replace('_', ' ')} task, here are the specialized instructions:
+{agent_instructions}
+
+Task Details:
+- Title: {task_title}
+- Type: {agent_type.replace('_', ' ').title()}
+- Priority: {parsed_task.get('priority', 'medium').title()}"""
+
+        if target_files:
+            prompt += f"""
+- Target Files: {', '.join(target_files)}"""
+        else:
+            prompt += """
+- Target Files: To be discovered (search and identify relevant files first)"""
+
+        prompt += f"""
+
+Let's begin: {user_intent}
+
+Please provide a comprehensive approach that follows both the general principles above and the specific {agent_type.replace('_', ' ')} guidelines. Focus on quality, maintainability, and clear communication of what you accomplish."""
+
+        return prompt
+    
+    def _get_agent_instructions_for_claude(self, agent_type: str) -> str:
+        """Get Claude-specific instructions for each agent type."""
+        
+        instructions = {
+            'documentation': """
+**Documentation Standards:**
+- Structure documentation to mirror the codebase architecture
+- Break complex concepts into digestible, focused sections  
+- Cover all public APIs, configuration options, and usage patterns
+- Include practical, working examples for each major feature
+- Ensure documentation can be easily updated as code evolves
+
+**Process Approach:**
+1. First examine the existing codebase structure and current documentation
+2. Identify missing, outdated, or incomplete documentation
+3. Plan the documentation structure to serve both new developers and maintainers
+4. Create comprehensive documentation with practical examples
+5. Validate that examples work and accurately reflect the code
+6. Create clear navigation paths and link related documentation
+
+**Quality Checks:**
+- Verify all code examples are functional and up-to-date
+- Ensure documentation addresses common use cases and edge cases
+- Check that technical terminology is explained for newcomers
+- Identify and document any inconsistencies or potential improvements in the codebase""",
+
+            'code_review': """
+**Focus Areas:**
+- Security: input validation, authorization, secrets handling
+- Correctness and readability of code logic
+- Error handling and logging completeness
+- Performance considerations and potential bottlenecks  
+- Test coverage and documentation quality
+
+**Review Process:**
+1. Examine code structure, patterns, and architectural decisions
+2. Identify security vulnerabilities and potential attack vectors
+3. Check error handling paths and edge case coverage
+4. Evaluate performance implications and resource usage
+5. Assess maintainability and code clarity
+6. Verify test coverage and documentation accuracy
+
+**Deliverables:**
+- Prioritized list of issues found (critical, major, minor)
+- Specific recommendations with code examples where helpful
+- Security concerns with mitigation strategies
+- Performance optimization opportunities
+- Code quality improvements and refactoring suggestions""",
+
+            'bug_fix': """
+**Bug Fix Principles:**
+- Reproduce the issue reliably before attempting fixes
+- Write or adjust tests first to capture the bug behavior
+- Implement minimal changes with clear rationale
+- Document the fix and add safeguards against regression
+
+**Process Approach:**
+1. Analyze the reported issue and understand the expected vs actual behavior
+2. Locate the root cause through systematic debugging
+3. Create or update tests that demonstrate the bug
+4. Implement the minimal fix that addresses the root cause
+5. Verify the fix resolves the issue without breaking existing functionality
+6. Document the change and add preventive measures
+
+**Quality Assurance:**
+- Ensure the fix doesn't introduce new bugs
+- Validate that related functionality still works correctly
+- Add appropriate logging or error handling if needed
+- Update documentation if the behavior change affects users""",
+
+            'analyze': """
+**Analysis Priorities:**
+- Summarize the current state and identify key issues
+- Propose concrete improvements with clear rationale
+- Estimate impact and implementation risks
+- Prefer incremental, manageable steps over major rewrites
+
+**Analysis Process:**  
+1. Examine the codebase structure and understand the current implementation
+2. Identify patterns, anti-patterns, and areas for improvement
+3. Assess technical debt and maintenance challenges
+4. Evaluate performance, security, and scalability aspects
+5. Research best practices and industry standards relevant to the domain
+6. Propose actionable recommendations with implementation roadmap
+
+**Deliverables:**
+- Current state assessment with key findings
+- Prioritized improvement recommendations
+- Risk assessment for proposed changes
+- Implementation timeline and resource estimates
+- Specific next steps and success metrics"""
+        }
+        
+        return instructions.get(agent_type, f"Perform {agent_type.replace('_', ' ')} task with attention to quality, maintainability, and best practices.")
     
     def summarize_result(self, result: TaskResult, original_task: Task) -> str:
         """Create concise summary for user notification"""

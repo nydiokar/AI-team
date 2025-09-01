@@ -1014,6 +1014,8 @@ created: {task.created}
         # Override task type if provided
         if task_type:
             parsed["type"] = task_type
+            # Mark this as a manually selected agent for bypass logic
+            parsed.setdefault("metadata", {})["agent_type"] = task_type
         
         # Override target files if provided
         if target_files:
@@ -1045,6 +1047,7 @@ type: {parsed.get('type', 'analyze')}
 priority: {parsed.get('priority', 'medium')}
 created: {datetime.now().isoformat()}
 cwd: {parsed.get('metadata', {}).get('cwd', '')}
+agent_type: {parsed.get('metadata', {}).get('agent_type', '')}
 ---
 
 # {parsed.get('title', 'Auto-generated Task')}
