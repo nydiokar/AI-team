@@ -55,7 +55,7 @@ Strengthen reliability and operability, add essential operational tools, and sta
 7) **Operational UX polish**
    - `tail-events` follow mode and colorized output (Windows-safe); `doctor` write probes; `/progress` supports `--since` and clearer status summaries.
 
-8) **Git automation and safe commit workflow** - NEW
+8) **Git automation and safe commit workflow** - IN PROGRESS
    - Goal: Enable safe, automated git operations through Telegram with LLAMA-generated commit messages and intelligent branching.
    - Scope:
      - Telegram commands: `/commit <task_id>` and `/commit-all` for staged changes
@@ -70,10 +70,52 @@ Strengthen reliability and operability, add essential operational tools, and sta
      - Rollback capability if commit fails
      - Integration with existing `files_modified` detection
    - Acceptance: Users can safely commit task changes via Telegram; LLAMA generates meaningful commit messages; sensitive files are protected; branching strategy is clean and conflict-free.
+   - Status: Core implementation complete, needs thorough testing and validation
+   - **Testing Requirements**:
+     - **Unit Tests**: Test `GitAutomationService` methods in isolation
+     - **Integration Tests**: Test git operations with real repository
+     - **CLI Tests**: Test `python main.py git-*` commands
+     - **Telegram Tests**: Test `/commit`, `/commit-all`, `/git-status` commands
+     - **Safety Tests**: Verify sensitive file filtering works correctly
+     - **Branch Management**: Test feature branch creation and conflict handling
+     - **LLAMA Integration**: Test commit message generation (with and without LLAMA)
+     - **Error Handling**: Test various failure scenarios (no git repo, permission issues, etc.)
+     - **Windows Compatibility**: Ensure all git operations work on Windows
+
+9) **Code duplication elimination and shared service layer** - NEW
+   - Goal: Eliminate significant code duplication between Telegram interface and CLI handlers, improve maintainability and consistency.
+   - Scope:
+     - **High Priority**: Git automation commands (~90% duplication)
+       - Extract shared business logic into `GitAutomationService` (DONE)
+       - Create result formatters for CLI vs Telegram output
+       - Update both handlers to use shared service
+     - **Medium Priority**: Status and progress commands (~60-70% duplication)
+       - Extract status logic into `SystemStatusService`
+       - Extract progress logic into `ProgressService`
+       - Create output adapters for different interfaces
+     - **Low Priority**: Task creation commands (~40% duplication)
+       - Extract task creation logic into `TaskCreationService`
+       - Standardize input validation across interfaces
+   - Architecture options:
+     - **Option 1**: Shared service layer with output formatters (RECOMMENDED)
+     - **Option 2**: Command pattern with output adapters
+     - **Option 3**: Mixin/shared base classes
+   - Benefits:
+     - Eliminate 60-90% code duplication
+     - Single source of truth for business logic
+     - Easier testing and maintenance
+     - Consistent behavior across interfaces
+     - Easy to add new interfaces (web API, Discord bot, etc.)
+   - Implementation phases:
+     - Phase 1: Complete git automation refactoring (IN PROGRESS)
+     - Phase 2: Extract status and progress commands
+     - Phase 3: Extract task creation commands
+     - Phase 4: Create comprehensive output formatting system
+   - Acceptance: All shared functionality uses common services; no duplicate business logic; consistent behavior across CLI and Telegram; comprehensive test coverage.
 
 ### Future/Optional tasks (post-v1)
 
-8) **LLAMA‑mediated interactive reply flow (turn-based)**
+10) **LLAMA‑mediated interactive reply flow (turn-based)**
    - Goal: Enable user to continue an already-processed task with follow-up instructions without losing context.
    - Scope:
      - Telegram `/reply <task_id> ...` to post follow-up instructions
@@ -83,7 +125,7 @@ Strengthen reliability and operability, add essential operational tools, and sta
    - Prerequisites: Tasks 1-3 must be completed first (artifact index, context loader, error taxonomy)
    - Status: **DEFERRED** - Building blocks in place, but not required for v1
 
-9) **Real‑time progress monitoring and status**
+11) **Real‑time progress monitoring and status**
    - Goal: Provide live visibility into running work: phases, percent complete heuristic, ETA, and recent events.
    - Scope:
      - Extend events with `step_started/step_finished`, include `phase`, `elapsed_ms`, `percent_complete` heuristic

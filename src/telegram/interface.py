@@ -68,6 +68,11 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("bug_fix", self._handle_agent_bug_fix))
         self.app.add_handler(CommandHandler("analyze", self._handle_agent_analyze))
         
+        # Git automation command handlers
+        self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
+        self.app.add_handler(CommandHandler("commit-all", self._handle_git_commit_all))
+        self.app.add_handler(CommandHandler("git-status", self._handle_git_status))
+        
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
     
@@ -172,6 +177,11 @@ You can also just send me a message describing what you want to do!
 • `/code_review <intent>` - Create a code review task
 • `/bug_fix <intent>` - Create a bug fix task
 • `/analyze <intent>` - Create an analysis task
+
+**Git Automation:**
+• `/commit <task_id> [--no-branch] [--push]` - Commit task changes safely
+• `/commit-all <task_id> [--no-branch] [--push]` - Commit all staged changes
+• `/git-status` - Show git repository status and safety info
 
 **Examples:**
 • `/task Review the authentication code in /auth-system`
@@ -639,3 +649,215 @@ Please check the system logs for more details.
     def is_available(self) -> bool:
         """Check if Telegram interface is available and configured"""
         return TELEGRAM_AVAILABLE and self.app is not None and bool(self.bot_token)
+    
+    async def _handle_git_commit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /commit command for committing task-specific changes"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        
+        try:
+            # Parse command arguments
+            args = context.args if context.args else []
+            if len(args) < 1:
+                await update.message.reply_text(
+                    "❌ Usage: `/commit <task_id> [--no-branch] [--push]`\n"
+                    "Example: `/commit abc123` or `/commit abc123 --push`"
+                )
+                return
+            
+            task_id = args[0]
+            create_branch = "--no-branch" not in args
+            push_branch = "--push" in args
+            
+            # Get task information from orchestrator
+            task_result = self.orchestrator.task_results.get(task_id)
+            if not task_result:
+                await update.message.reply_text(f"❌ Task {task_id} not found or not completed")
+                return
+            
+            # Import git automation service
+            try:
+                from src.core.git_automation import GitAutomationService
+                git_service = GitAutomationService()
+            except ImportError as e:
+                await update.message.reply_text(f"❌ Git automation service not available: {e}")
+                return
+            
+            # Get task description for commit message
+            task_description = task_result.get('task', {}).get('description', f'Task {task_id}')
+            
+            # Perform safe commit
+            result = git_service.safe_commit_task(
+                task_id=task_id,
+                task_description=task_description,
+                create_branch=create_branch,
+                push_branch=push_branch
+            )
+            
+            if result["success"]:
+                # Success message
+                message_parts = [f"✅ Successfully committed task {task_id}"]
+                
+                if result["branch_name"]:
+                    message_parts.append(f"📁 Branch: `{result['branch_name']}`")
+                
+                if result["files_committed"]:
+                    file_count = len(result["files_committed"])
+                    message_parts.append(f"📄 Files committed: {file_count}")
+                    if file_count <= 5:
+                        for file_path in result["files_committed"][:5]:
+                            message_parts.append(f"  • {file_path}")
+                    else:
+                        message_parts.append(f"  • ... and {file_count - 5} more files")
+                
+                if result["sensitive_files_blocked"]:
+                    blocked_count = len(result["sensitive_files_blocked"])
+                    message_parts.append(f"🚫 Sensitive files blocked: {blocked_count}")
+                
+                if push_branch and result["branch_name"]:
+                    message_parts.append(f"🚀 Branch pushed to remote")
+                
+                await update.message.reply_text("\n".join(message_parts))
+            else:
+                # Error message
+                error_msg = f"❌ Failed to commit task {task_id}:\n"
+                for error in result["errors"]:
+                    error_msg += f"• {error}\n"
+                await update.message.reply_text(error_msg)
+                
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error processing commit command: {e}")
+            logger.error(f"Git commit command failed: {e}")
+    
+    async def _handle_git_commit_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /commit-all command for committing all staged changes"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        
+        try:
+            # Parse command arguments
+            args = context.args if context.args else []
+            if len(args) < 1:
+                await update.message.reply_text(
+                    "❌ Usage: `/commit-all <task_id> [--no-branch] [--push]`\n"
+                    "⚠️  This commits ALL staged changes - use with caution!"
+                )
+                return
+            
+            task_id = args[0]
+            create_branch = "--no-branch" not in args
+            push_branch = "--push" in args
+            
+            # Import git automation service
+            try:
+                from src.core.git_automation import GitAutomationService
+                git_service = GitAutomationService()
+            except ImportError as e:
+                await update.message.reply_text(f"❌ Git automation service not available: {e}")
+                return
+            
+            # Get task information from orchestrator
+            task_result = self.orchestrator.task_results.get(task_id)
+            if not task_result:
+                await update.message.reply_text(f"❌ Task {task_id} not found or not completed")
+                return
+            
+            task_description = task_result.get('task', {}).get('description', f'Task {task_id}')
+            
+            # Perform commit all staged
+            result = git_service.commit_all_staged(
+                task_id=task_id,
+                task_description=task_description,
+                create_branch=create_branch,
+                push_branch=push_branch
+            )
+            
+            if result["success"]:
+                message_parts = [f"✅ Successfully committed all staged changes for task {task_id}"]
+                
+                if result["branch_name"]:
+                    message_parts.append(f"📁 Branch: `{result['branch_name']}`")
+                
+                if result["files_committed"]:
+                    file_count = len(result["files_committed"])
+                    message_parts.append(f"📄 Files committed: {file_count}")
+                
+                if push_branch and result["branch_name"]:
+                    message_parts.append(f"🚀 Branch pushed to remote")
+                
+                await update.message.reply_text("\n".join(message_parts))
+            else:
+                error_msg = f"❌ Failed to commit staged changes for task {task_id}:\n"
+                for error in result["errors"]:
+                    error_msg += f"• {error}\n"
+                await update.message.reply_text(error_msg)
+                
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error processing commit-all command: {e}")
+            logger.error(f"Git commit-all command failed: {e}")
+    
+    async def _handle_git_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /git-status command for showing git repository status"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        
+        try:
+            # Import git automation service
+            try:
+                from src.core.git_automation import GitAutomationService
+                git_service = GitAutomationService()
+            except ImportError as e:
+                await update.message.reply_text(f"❌ Git automation service not available: {e}")
+                return
+            
+            # Get git status summary
+            status = git_service.get_git_status_summary()
+            
+            if "error" in status:
+                await update.message.reply_text(f"❌ {status['error']}")
+                return
+            
+            # Format status message
+            message_parts = ["📊 Git Repository Status"]
+            message_parts.append(f"🌿 Branch: `{status['current_branch']}`")
+            message_parts.append(f"🧹 Working directory: {'✅ Clean' if status['working_directory_clean'] else '⚠️  Has changes'}")
+            
+            if not status['working_directory_clean']:
+                changes = status['changes']
+                message_parts.append(f"\n📝 Changes:")
+                message_parts.append(f"  • Modified: {changes['modified']}")
+                message_parts.append(f"  • Created: {changes['created']}")
+                message_parts.append(f"  • Deleted: {changes['deleted']}")
+                message_parts.append(f"  • Total: {changes['total']}")
+                
+                if status['staged_files']:
+                    message_parts.append(f"\n📦 Staged files: {len(status['staged_files'])}")
+                    for file_path in status['staged_files'][:3]:
+                        message_parts.append(f"  • {file_path}")
+                    if len(status['staged_files']) > 3:
+                        message_parts.append(f"  • ... and {len(status['staged_files']) - 3} more")
+                
+                if status['unstaged_files']:
+                    message_parts.append(f"\n📋 Unstaged files: {len(status['unstaged_files'])}")
+                    for file_path in status['unstaged_files'][:3]:
+                        message_parts.append(f"  • {file_path}")
+                    if len(status['unstaged_files']) > 3:
+                        message_parts.append(f"  • ... and {len(status['unstaged_files']) - 3} more")
+                
+                # Safety information
+                safety = status['safety']
+                if safety['has_sensitive_files']:
+                    message_parts.append(f"\n🚫 Sensitive files detected: {len(safety['sensitive_files'])}")
+                    for file_path in safety['sensitive_files'][:3]:
+                        message_parts.append(f"  • {file_path}")
+                    if len(safety['sensitive_files']) > 3:
+                        message_parts.append(f"  • ... and {len(safety['sensitive_files']) - 3} more")
+            
+            await update.message.reply_text("\n".join(message_parts))
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error getting git status: {e}")
+            logger.error(f"Git status command failed: {e}")

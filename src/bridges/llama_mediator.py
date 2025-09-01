@@ -268,8 +268,17 @@ class LlamaMediator(ILlamaMediator):
             # Use agent-specific instructions
             agent_instructions = agent.get_agent_instructions()
         else:
-            # Fallback to generic instructions
-            agent_instructions = "Please analyze and provide insights on the requested task."
+            # Fallback to generic instructions when agents are disabled or unavailable
+            if task_type == 'code_review':
+                agent_instructions = "Please review the code for quality, security, and best practices. Focus on identifying potential issues, code smells, and areas for improvement."
+            elif task_type in ('fix', 'bug_fix'):
+                agent_instructions = "Please identify and fix the reported issue. Ensure the solution is robust, well-tested, and follows established coding patterns."
+            elif task_type == 'documentation':
+                agent_instructions = "Please create or update documentation as requested. Ensure clarity, completeness, and consistency with existing documentation."
+            elif task_type == 'summarize':
+                agent_instructions = "Please provide a clear, concise summary of the requested information or analysis."
+            else:
+                agent_instructions = "Please analyze and provide insights on the requested task. Focus on understanding the current state and providing actionable recommendations."
         
         # Build the prompt with general system instructions + agent-specific instructions
         header = f"""Task: {task_type.upper()} - {parsed_task['title']}
