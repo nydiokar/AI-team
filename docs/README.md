@@ -26,6 +26,8 @@ Task File → LLAMA Parser → Claude Code → Results → Summary → Notificat
 
 ### 1. Setup Environment (Windows PowerShell)
 
+**💡 Performance Tip:** The basic installation is now much faster. Heavy dependencies (LLAMA, Telegram) are optional and only installed when needed.
+
 ```powershell
 # Create and activate venv (recommended)
 python -m venv .venv
@@ -34,11 +36,14 @@ python -m venv .venv
 # Install project in editable mode with dev and test extras
 pip install -e ".[dev,test]"
 
-# Optional extras
+# Optional extras (install only what you need)
 # For Telegram integration
 pip install -e ".[telegram]"
 # For LLAMA (Ollama) mediation and sentence-transformers (optional)
 pip install -e ".[llama]"
+
+# Or install everything at once (slower)
+pip install -e ".[dev,test,llama,telegram]"
 
 # Copy environment template if present
 if (Test-Path .env.example) { Copy-Item .env.example .env -Force }

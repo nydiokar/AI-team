@@ -126,7 +126,9 @@ class GitFileDetector:
             # Clean description for branch name
             clean_desc = re.sub(r'[^a-zA-Z0-9\s-]', '', description)
             clean_desc = re.sub(r'\s+', '-', clean_desc).strip('-')
-            clean_desc = clean_desc[:30]  # Limit length
+            # Don't truncate too aggressively - allow longer descriptions
+            if len(clean_desc) > 50:
+                clean_desc = clean_desc[:50]
             
             branch_name = f"feature/task-{task_id}-{clean_desc}"
             

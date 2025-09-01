@@ -791,6 +791,8 @@ def _handle_git_commit(args):
                 print(f"📄 Files committed: {len(result['files_committed'])}")
             if result["sensitive_files_blocked"]:
                 print(f"🚫 Sensitive files blocked: {len(result['sensitive_files_blocked'])}")
+                for file_path in result["sensitive_files_blocked"]:
+                    print(f"  • {file_path}")
             if push_branch and result["branch_name"]:
                 print("🚀 Branch pushed to remote")
         else:

@@ -165,7 +165,9 @@ class TestGitCLIIntegration:
                 text=True,
                 check=True
             )
-            assert result.stdout.strip() == "main"  # Should still be on main
+            # Git might create 'master' or 'main' as default branch
+            current_branch = result.stdout.strip()
+            assert current_branch in ["main", "master"]  # Should still be on default branch
             
         finally:
             os.chdir(original_cwd)
