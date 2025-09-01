@@ -98,11 +98,7 @@ class AgentManager:
         with open(agent_file, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Extract the main instructions (everything after the first few lines)
-        lines = content.split('\n')
-        # Skip the first few lines (title, principles, examples) and get the core instructions
-        if len(lines) > 10:
-            return '\n'.join(lines[10:]).strip()
+        # Return the full content; agent files are now pure instructions
         return content.strip()
     
     def get_agent(self, agent_name: str) -> Optional[BaseAgent]:

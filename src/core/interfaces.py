@@ -174,7 +174,7 @@ class ITaskOrchestrator(ABC):
         pass
     
     @abstractmethod
-    def create_task_from_description(self, description: str) -> str:
+    def create_task_from_description(self, description: str, task_type: str = None, target_files: List[str] = None) -> str:
         """Create a task file from natural language description"""
         pass
 

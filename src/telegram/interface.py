@@ -543,13 +543,16 @@ The system will now process this task automatically. You'll receive a notificati
             except Exception as e:
                 logger.warning(f"Attachment download failed or none present: {e}")
 
-            # Expand via LLAMA mediator
-            expanded = self.orchestrator.llama_mediator.expand_agent_intent(agent, intent_text, files=files)
-            # Create task using expanded structure (preserves target_files and cwd)
-            task_id = self.orchestrator.create_task_from_expanded(expanded)
+            # Create simple task directly (no LLAMA expansion)
+            task_id = self.orchestrator.create_task_from_description(
+                f"{agent.replace('_', ' ').title()}: {intent_text}",
+                task_type=agent,
+                target_files=files
+            )
+
             await update.message.reply_text(
                 f"✅ {agent.replace('_',' ').title()} task created: `{task_id}`\n"
-                f"Title: {expanded.get('title','')}"
+                f"Description: {intent_text}"
             )
         except Exception as e:
             await update.message.reply_text(f"❌ Failed to create {agent} task: {e}")

@@ -999,7 +999,7 @@ created: {task.created}
     
     # Simulation execution removed: system now always runs real Claude Code CLI
     
-    def create_task_from_description(self, description: str) -> str:
+    def create_task_from_description(self, description: str, task_type: str = None, target_files: List[str] = None) -> str:
         """Create and persist a `.task.md` task from a natural language description.
 
         May use LLAMA to expand metadata; heuristically extracts `cwd` hints.
@@ -1010,6 +1010,14 @@ created: {task.created}
         
         # Use simple template for now - can be enhanced with LLAMA later
         parsed = self._parse_description_simple(description)
+
+        # Override task type if provided
+        if task_type:
+            parsed["type"] = task_type
+        
+        # Override target files if provided
+        if target_files:
+            parsed["target_files"] = target_files
         
         # Heuristic: detect inline path hints like "in C:\\Users\\..." or "in /path/..."
         # and inject into frontmatter as `cwd` if allowed by config
