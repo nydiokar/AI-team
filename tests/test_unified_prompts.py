@@ -9,7 +9,7 @@ src_path = Path(__file__).parent / "src"
 if str(src_path) not in sys.path:
     sys.path.append(str(src_path))
 
-from bridges.llama_mediator import LlamaMediator
+from src.bridges.llama_mediator import LlamaMediator
 
 def test_unified_prompts():
     mediator = LlamaMediator()

@@ -4,7 +4,13 @@ LLAMA mediator with intelligent fallback modes
 import json
 import re
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    try:
+        import ollama
+    except ImportError:
+        pass
 from datetime import datetime
 from pathlib import Path
 
@@ -27,7 +33,7 @@ class LlamaMediator(ILlamaMediator):
     
     def __init__(self):
         self.ollama_available = self._check_ollama_availability()
-        self.client = None
+        self.client: Optional[Any] = None  # ollama.Client when available
         self.model_installed = False
         
         if self.ollama_available:
@@ -116,6 +122,8 @@ class LlamaMediator(ILlamaMediator):
             }}
             """
             
+            if not self.client:
+                raise RuntimeError("Ollama client not available")
             response = self.client.generate(
                 model=config.llama.model,
                 prompt=prompt,
@@ -206,103 +214,95 @@ class LlamaMediator(ILlamaMediator):
     def create_claude_prompt(self, parsed_task: Dict[str, Any]) -> str:
         """Create Claude-optimized prompt."""
         
-        # Check if this is a manually selected agent (bypass automatic processing)
-        agent_type = parsed_task.get('metadata', {}).get('agent_type')
-        if agent_type:
-            return self._create_prompt_for_manual_agent(agent_type, parsed_task)
-        
-        if self.ollama_available and self.client and self.model_installed:
-            return self._create_prompt_with_llama(parsed_task)
-        else:
-            return self._create_prompt_with_template(parsed_task)
-    
-    def _create_prompt_with_llama(self, parsed_task: Dict[str, Any]) -> str:
-        """Use LLAMA to create an optimized Claude prompt in unified natural structure."""
-        try:
-            # Load general principles to include in LLAMA prompt
-            try:
-                root = Path(__file__).resolve().parents[2]
-                general_principles_path = root / "prompts" / "general_prompt_coding.md"
-                if general_principles_path.exists():
-                    general_principles = general_principles_path.read_text(encoding="utf-8")
-                else:
-                    general_principles = "Follow best coding practices and maintain code quality."
-            except Exception:
-                general_principles = "Follow best coding practices and maintain code quality."
-            
-            # Get task type for specialized instructions
-            task_type = (parsed_task.get('type') or 'analyze').lower()
-            agent_instructions = self._get_agent_instructions_for_claude(task_type)
-            
-            prompt = f"""
-            Create an optimized prompt for Claude Code using this EXACT structure:
-
-            "Our task today consists of [USER_INTENT] for {task_type.replace('_', ' ')}.
-
-            Following these core principles:
-            {general_principles}
-
-            For this specific {task_type.replace('_', ' ')} task, here are the specialized instructions:
-            {agent_instructions}
-
-            Task Details:
-            - Title: [TITLE]
-            - Type: {task_type.replace('_', ' ').title()} (auto-selected with LLAMA optimization)
-            - Priority: [PRIORITY]
-            - Target Files: [FILES OR 'To be discovered...']
-
-            Let's begin: [USER_INTENT]
-
-            Please provide a comprehensive approach that follows both the general principles above and the specific {task_type.replace('_', ' ')} guidelines. Focus on quality, maintainability, and clear communication of what you accomplish."
-
-            Task details to fill in:
-            - Type: {parsed_task['type']}
-            - Title: {parsed_task['title']}  
-            - Files: {parsed_task['target_files']}
-            - Request (USER_INTENT): {parsed_task['main_request']}
-            - Priority: {parsed_task['priority']}
-            
-            Generate the complete prompt using the structure above, filling in the bracketed placeholders with the task details. Make the USER_INTENT natural and actionable. Return only the final prompt text:
-            """
-            
-            response = self.client.generate(
-                model=config.llama.model,
-                prompt=prompt,
-                options={'temperature': 0.3}
-            )
-            
-            return response['response'].strip()
-            
-        except Exception as e:
-            logger.warning(f"LLAMA prompt creation failed, using template: {e}")
-            return self._create_prompt_with_template(parsed_task)
-    
-    def _create_prompt_with_template(self, parsed_task: Dict[str, Any]) -> str:
-        """Create prompt using unified natural structure (same as manual agents)."""
-        
-        task_type = (parsed_task.get('type') or 'analyze').lower()
-        
-        # Load general principles (same as manual agents)
+        # Load general principles
         try:
             root = Path(__file__).resolve().parents[2]
             general_principles_path = root / "prompts" / "general_prompt_coding.md"
-            if general_principles_path.exists():
-                general_principles = general_principles_path.read_text(encoding="utf-8")
-            else:
-                general_principles = "Follow best coding practices and maintain code quality."
+            general_principles = general_principles_path.read_text(encoding="utf-8") if general_principles_path.exists() else "Follow best coding practices and maintain code quality."
         except Exception as e:
             logger.warning(f"Could not load general principles: {e}")
             general_principles = "Follow best coding practices and maintain code quality."
         
-        # Get agent instructions (reuse the same method as manual agents)
-        agent_instructions = self._get_agent_instructions_for_claude(task_type)
+        # Get agent instructions (from file or hardcoded fallback)
+        agent_type = parsed_task.get('metadata', {}).get('agent_type') or parsed_task.get('type', 'analyze')
+        agent_instructions = self._get_agent_instructions(agent_type)
         
-        # Get task details
+        # TODO: ARCHITECTURAL DECISION - Remove LLAMA from prompt generation
+        # Current: Use LLAMA to "enhance" prompt, but this adds complexity and unpredictability
+        # Better: Use mechanical template assembly directly - it's faster, reliable, and uses curated agent content
+        # 
+        # CHANGE TO MAKE: Replace this entire if/else block with just:
+        # return self._build_prompt_template(parsed_task, general_principles, agent_instructions)
+        # 
+        # REASON: Agent files already contain crafted instructions. LLAMA rewriting them adds:
+        # - Unpredictable output format
+        # - Latency and resource usage  
+        # - Potential hallucination/degradation of carefully crafted prompts
+        # - External dependency that can fail
+        #
+        # KEEP LLAMA FOR: Task parsing, result summarization, agent expansion (where it adds clear value)
+        # REMOVE LLAMA FROM: Prompt generation (where templates work better)
+        
+        if self.ollama_available and self.client and self.model_installed:
+            return self._build_prompt_with_llama(parsed_task, general_principles, agent_instructions)
+        else:
+            return self._build_prompt_template(parsed_task, general_principles, agent_instructions)
+    
+    def _build_prompt_with_llama(self, parsed_task: Dict[str, Any], general_principles: str, agent_instructions: str) -> str:
+        """Use LLAMA to generate enhanced Claude prompt.
+        
+        TODO: CONSIDER REMOVING - This method asks LLAMA to rewrite already-crafted agent instructions.
+        The mechanical template assembly in _build_prompt_template() is likely better because:
+        - Uses curated agent content directly (no rewriting/degradation)  
+        - 100% predictable output format
+        - Faster (no LLM call)
+        - More reliable (no hallucination risk)
+        """
+        try:
+            task_type = (parsed_task.get('type') or 'analyze').lower()
+            user_intent = parsed_task.get('main_request', 'Complete the requested task')
+            
+            meta_prompt = f"""
+Create an optimized Claude prompt using this structure:
+"Our task today consists of {user_intent} for {task_type.replace('_', ' ')}.
+
+Following these core principles:
+{general_principles}
+
+For this specific {task_type.replace('_', ' ')} task:
+{agent_instructions}
+
+Task Details:
+- Title: {parsed_task.get('title', 'Auto-selected Task')}
+- Type: {task_type.replace('_', ' ').title()}
+- Priority: {parsed_task.get('priority', 'medium').title()}
+- Target Files: {', '.join(parsed_task.get('target_files', [])) or 'To be discovered'}
+
+Let's begin: {user_intent}
+
+Please provide a comprehensive approach following both principles and guidelines above."
+
+Return only the final prompt text:"""
+            
+            if not self.client:
+                raise RuntimeError("Ollama client not available")
+            response = self.client.generate(
+                model=config.llama.model,
+                prompt=meta_prompt,
+                options={'temperature': 0.3}
+            )
+            return response['response'].strip()
+            
+        except Exception as e:
+            logger.warning(f"LLAMA prompt creation failed, using template: {e}")
+            return self._build_prompt_template(parsed_task, general_principles, agent_instructions)
+    
+    def _build_prompt_template(self, parsed_task: Dict[str, Any], general_principles: str, agent_instructions: str) -> str:
+        """Create prompt using template structure."""
+        task_type = (parsed_task.get('type') or 'analyze').lower()
         user_intent = parsed_task.get('main_request', 'Complete the requested task')
-        task_title = parsed_task.get('title', 'Auto-selected Task')
         target_files = parsed_task.get('target_files', [])
         
-        # Build unified natural prompt (same structure as manual agents)
         prompt = f"""Our task today consists of {user_intent} for {task_type.replace('_', ' ')}.
 
 Following these core principles:
@@ -312,178 +312,46 @@ For this specific {task_type.replace('_', ' ')} task, here are the specialized i
 {agent_instructions}
 
 Task Details:
-- Title: {task_title}
-- Type: {task_type.replace('_', ' ').title()} (auto-selected)
-- Priority: {parsed_task.get('priority', 'medium').title()}"""
-
-        if target_files:
-            prompt += f"""
-- Target Files: {', '.join(target_files)}"""
-        else:
-            prompt += """
-- Target Files: To be discovered (search and identify relevant files first)"""
-
-        prompt += f"""
+- Title: {parsed_task.get('title', 'Auto-selected Task')}
+- Type: {task_type.replace('_', ' ').title()}
+- Priority: {parsed_task.get('priority', 'medium').title()}
+- Target Files: {', '.join(target_files) if target_files else 'To be discovered'}
 
 Let's begin: {user_intent}
 
 Please provide a comprehensive approach that follows both the general principles above and the specific {task_type.replace('_', ' ')} guidelines. Focus on quality, maintainability, and clear communication of what you accomplish."""
 
-        # Cap prompt size per config to keep Claude requests reliable
+        # Cap prompt size to keep Claude requests reliable
         max_chars = getattr(config.llama, "max_prompt_chars", 32_000)
         if len(prompt) > max_chars:
-            logger.info(
-                f"event=truncate_prompt before_chars={len(prompt)} after_chars={max_chars}"
-            )
+            logger.info(f"event=truncate_prompt before_chars={len(prompt)} after_chars={max_chars}")
             prompt = prompt[:max_chars]
         return prompt
     
-    def _create_prompt_for_manual_agent(self, agent_type: str, parsed_task: Dict[str, Any]) -> str:
-        """Create prompt for manually selected agent using templates."""
-        
-        # Load general principles
+    def _get_agent_instructions(self, agent_type: str) -> str:
+        """Get agent instructions from file or fallback to hardcoded."""
+        # Try to load from agent file first
         try:
             root = Path(__file__).resolve().parents[2]
-            general_principles_path = root / "prompts" / "general_prompt_coding.md"
-            if general_principles_path.exists():
-                general_principles = general_principles_path.read_text(encoding="utf-8")
-            else:
-                general_principles = "Follow best coding practices and maintain code quality."
+            agent_file = root / "prompts" / "agents" / f"{agent_type}.md"
+            if agent_file.exists():
+                content = agent_file.read_text(encoding="utf-8")
+                # Extract actual instructions (skip template boilerplate)
+                if "Guidelines:" in content:
+                    return content.split("Guidelines:")[1].split("Few-shot examples:")[0].strip()
+                return content[:500]  # First part as fallback
         except Exception as e:
-            logger.warning(f"Could not load general principles: {e}")
-            general_principles = "Follow best coding practices and maintain code quality."
+            logger.debug(f"Could not load agent file {agent_type}: {e}")
         
-        # Get agent-specific instructions (extract from existing templates or use built-in)
-        agent_instructions = self._get_agent_instructions_for_claude(agent_type)
-        
-        # Get user intent from the task
-        user_intent = parsed_task.get('main_request', 'Complete the requested task')
-        task_title = parsed_task.get('title', 'Manual Agent Task')
-        target_files = parsed_task.get('target_files', [])
-        
-        # Build the natural prompt following your preferred structure
-        prompt = f"""Our task today consists of {user_intent} for {agent_type.replace('_', ' ')}.
-
-Following these core principles:
-{general_principles}
-
-For this specific {agent_type.replace('_', ' ')} task, here are the specialized instructions:
-{agent_instructions}
-
-Task Details:
-- Title: {task_title}
-- Type: {agent_type.replace('_', ' ').title()}
-- Priority: {parsed_task.get('priority', 'medium').title()}"""
-
-        if target_files:
-            prompt += f"""
-- Target Files: {', '.join(target_files)}"""
-        else:
-            prompt += """
-- Target Files: To be discovered (search and identify relevant files first)"""
-
-        prompt += f"""
-
-Let's begin: {user_intent}
-
-Please provide a comprehensive approach that follows both the general principles above and the specific {agent_type.replace('_', ' ')} guidelines. Focus on quality, maintainability, and clear communication of what you accomplish."""
-
-        return prompt
-    
-    def _get_agent_instructions_for_claude(self, agent_type: str) -> str:
-        """Get Claude-specific instructions for each agent type."""
-        
-        instructions = {
-            'documentation': """
-**Documentation Standards:**
-- Structure documentation to mirror the codebase architecture
-- Break complex concepts into digestible, focused sections  
-- Cover all public APIs, configuration options, and usage patterns
-- Include practical, working examples for each major feature
-- Ensure documentation can be easily updated as code evolves
-
-**Process Approach:**
-1. First examine the existing codebase structure and current documentation
-2. Identify missing, outdated, or incomplete documentation
-3. Plan the documentation structure to serve both new developers and maintainers
-4. Create comprehensive documentation with practical examples
-5. Validate that examples work and accurately reflect the code
-6. Create clear navigation paths and link related documentation
-
-**Quality Checks:**
-- Verify all code examples are functional and up-to-date
-- Ensure documentation addresses common use cases and edge cases
-- Check that technical terminology is explained for newcomers
-- Identify and document any inconsistencies or potential improvements in the codebase""",
-
-            'code_review': """
-**Focus Areas:**
-- Security: input validation, authorization, secrets handling
-- Correctness and readability of code logic
-- Error handling and logging completeness
-- Performance considerations and potential bottlenecks  
-- Test coverage and documentation quality
-
-**Review Process:**
-1. Examine code structure, patterns, and architectural decisions
-2. Identify security vulnerabilities and potential attack vectors
-3. Check error handling paths and edge case coverage
-4. Evaluate performance implications and resource usage
-5. Assess maintainability and code clarity
-6. Verify test coverage and documentation accuracy
-
-**Deliverables:**
-- Prioritized list of issues found (critical, major, minor)
-- Specific recommendations with code examples where helpful
-- Security concerns with mitigation strategies
-- Performance optimization opportunities
-- Code quality improvements and refactoring suggestions""",
-
-            'bug_fix': """
-**Bug Fix Principles:**
-- Reproduce the issue reliably before attempting fixes
-- Write or adjust tests first to capture the bug behavior
-- Implement minimal changes with clear rationale
-- Document the fix and add safeguards against regression
-
-**Process Approach:**
-1. Analyze the reported issue and understand the expected vs actual behavior
-2. Locate the root cause through systematic debugging
-3. Create or update tests that demonstrate the bug
-4. Implement the minimal fix that addresses the root cause
-5. Verify the fix resolves the issue without breaking existing functionality
-6. Document the change and add preventive measures
-
-**Quality Assurance:**
-- Ensure the fix doesn't introduce new bugs
-- Validate that related functionality still works correctly
-- Add appropriate logging or error handling if needed
-- Update documentation if the behavior change affects users""",
-
-            'analyze': """
-**Analysis Priorities:**
-- Summarize the current state and identify key issues
-- Propose concrete improvements with clear rationale
-- Estimate impact and implementation risks
-- Prefer incremental, manageable steps over major rewrites
-
-**Analysis Process:**  
-1. Examine the codebase structure and understand the current implementation
-2. Identify patterns, anti-patterns, and areas for improvement
-3. Assess technical debt and maintenance challenges
-4. Evaluate performance, security, and scalability aspects
-5. Research best practices and industry standards relevant to the domain
-6. Propose actionable recommendations with implementation roadmap
-
-**Deliverables:**
-- Current state assessment with key findings
-- Prioritized improvement recommendations
-- Risk assessment for proposed changes
-- Implementation timeline and resource estimates
-- Specific next steps and success metrics"""
+        # Hardcoded fallback (simplified)
+        fallbacks = {
+            'documentation': "Create comprehensive, well-structured documentation with examples",
+            'code_review': "Focus on security, correctness, performance, and maintainability", 
+            'bug_fix': "Reproduce issue, write tests, implement minimal fix, verify solution",
+            'analyze': "Examine code structure, identify improvements, propose actionable recommendations"
         }
-        
-        return instructions.get(agent_type, f"Perform {agent_type.replace('_', ' ')} task with attention to quality, maintainability, and best practices.")
+        return fallbacks.get(agent_type, f"Perform {agent_type.replace('_', ' ')} task with attention to quality and best practices.")
+    
     
     def summarize_result(self, result: TaskResult, original_task: Task) -> str:
         """Create concise summary for user notification"""
@@ -516,6 +384,8 @@ Please provide a comprehensive approach that follows both the general principles
             Keep it actionable and focused:
             """
             
+            if not self.client:
+                raise RuntimeError("Ollama client not available")
             response = self.client.generate(
                 model=config.llama.model,
                 prompt=prompt,
@@ -647,6 +517,8 @@ Duration: {result.execution_time:.1f}s
             + "\n\n"
             + "Respond with only a single JSON object with keys: type, title, prompt, target_files, metadata."
         )
+        if not self.client:
+            raise RuntimeError("Ollama client not available")
         response = self.client.generate(
             model=config.llama.model,
             prompt=prompt,

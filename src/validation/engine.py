@@ -19,6 +19,8 @@ try:
     _ST_AVAILABLE = True
 except Exception:
     _ST_AVAILABLE = False
+    # Type stub for when not available
+    SentenceTransformer = None  # type: ignore
 
 from src.core.interfaces import (
     IValidationEngine,

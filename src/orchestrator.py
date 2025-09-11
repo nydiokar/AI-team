@@ -999,7 +999,7 @@ created: {task.created}
     
     # Simulation execution removed: system now always runs real Claude Code CLI
     
-    def create_task_from_description(self, description: str, task_type: str = None, target_files: List[str] = None) -> str:
+    def create_task_from_description(self, description: str, task_type: Optional[str] = None, target_files: Optional[List[str]] = None) -> str:
         """Create and persist a `.task.md` task from a natural language description.
 
         May use LLAMA to expand metadata; heuristically extracts `cwd` hints.
