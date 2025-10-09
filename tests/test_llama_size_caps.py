@@ -44,7 +44,7 @@ def test_prompt_truncation_logs(monkeypatch, caplog):
     }
 
     caplog.set_level(logging.INFO)
-    prompt = lm._create_prompt_with_template(parsed)
+    prompt = lm.create_claude_prompt(parsed)
     assert len(prompt) <= 500
     logs = "\n".join([rec.getMessage() for rec in caplog.records])
     assert "event=truncate_prompt" in logs
