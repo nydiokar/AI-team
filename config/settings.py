@@ -93,10 +93,7 @@ class Config:
             base_command=self._get_claude_command(),
             skip_permissions=os.getenv("CLAUDE_SKIP_PERMISSIONS", "false").lower() == "true"
         )
-        # Base working directory and allowlist root (configured in code by request)
-        # Note: This is intentionally not sourced from environment variables.
-        self.claude.base_cwd = r"C:\Users\Cicada38\Projects"
-        self.claude.allowed_root = self.claude.base_cwd
+        # Base working directory and allowlist root are expected via environment overrides; no OS-specific default.
         # Optional overrides from env
         try:
             mt = os.getenv("CLAUDE_MAX_TURNS")
