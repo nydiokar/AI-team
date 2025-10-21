@@ -16,12 +16,55 @@ from src.core.interfaces import Task, TaskType, TaskPriority, TaskStatus
 from config import config
 
 
+@pytest.fixture(autouse=True)
+def configure_projects_base(tmp_path_factory, request):
+    """Configure a temporary base working directory for each test."""
+    base_dir = tmp_path_factory.mktemp("projects")
+    config.claude.base_cwd = str(base_dir)
+    config.claude.allowed_root = str(base_dir)
+    if getattr(request, "cls", None):
+        request.cls._configured_base_dir = Path(base_dir)
+    yield
+    config.claude.base_cwd = None
+    config.claude.allowed_root = None
+    if getattr(request, "cls", None):
+        request.cls._configured_base_dir = None
+
+
 class TestWorkingDirectoryResolution:
     """Test working directory resolution logic"""
 
     def setup_method(self):
         """Set up test fixtures"""
         self.bridge = ClaudeBridge()
+
+        base_path = getattr(self, "_configured_base_dir", None)
+        if base_path is None:
+            base_cwd = config.claude.base_cwd
+            assert base_cwd, "Test fixture did not set config.claude.base_cwd"
+            base_path = Path(base_cwd)
+        else:
+            base_path = Path(base_path)
+
+        self.base_dir = base_path
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.base_dir_str = str(self.base_dir)
+
+        # Prepare a representative project structure inside the base directory
+        self.ai_team_dir = self.base_dir / "AI-team"
+        self.ai_team_dir.mkdir(parents=True, exist_ok=True)
+        (self.ai_team_dir / "subfolder").mkdir(parents=True, exist_ok=True)
+        (self.ai_team_dir / "nested" / "project").mkdir(parents=True, exist_ok=True)
+
+        self.pijama_dir = self.base_dir / "pijama"
+        self.pijama_dir.mkdir(parents=True, exist_ok=True)
+        (self.pijama_dir / "subfolder").mkdir(parents=True, exist_ok=True)
+
+        # Directories outside the allowed root for fallback tests
+        self.outside_dir = self.base_dir.parent / "outside"
+        self.outside_dir.mkdir(parents=True, exist_ok=True)
+        self.remote_dir = self.base_dir.parent / "other-projects"
+        self.remote_dir.mkdir(parents=True, exist_ok=True)
         
         # Mock task with metadata
         self.base_task = Task(
@@ -41,7 +84,7 @@ class TestWorkingDirectoryResolution:
     def test_default_base_directory(self):
         """Test that default working directory is set to Projects folder"""
         # The base directory should be set in config
-        expected_base = r"C:\Users\Cicada38\Projects"
+        expected_base = self.base_dir_str
         
         assert config.claude.base_cwd == expected_base
         assert config.claude.allowed_root == expected_base
@@ -52,18 +95,18 @@ class TestWorkingDirectoryResolution:
         cwd = self.bridge._resolve_cwd(self.base_task)
         
         # Should return the configured base directory
-        expected = r"C:\Users\Cicada38\Projects"
+        expected = self.base_dir_str
         assert cwd == expected
 
     def test_resolve_cwd_with_absolute_path(self):
-        """Test cwd resolution with absolute Windows path"""
+        """Test cwd resolution with absolute path"""
         task = self.base_task
-        task.metadata = {"cwd": r"C:\Users\Cicada38\Projects\AI-team"}
+        task.metadata = {"cwd": str(self.ai_team_dir)}
         
         cwd = self.bridge._resolve_cwd(task)
         
         # Should return the absolute path as-is
-        expected = r"C:\Users\Cicada38\Projects\AI-team"
+        expected = str(self.ai_team_dir)
         assert cwd == expected
 
     def test_resolve_cwd_with_base_relative_path(self):
@@ -74,7 +117,7 @@ class TestWorkingDirectoryResolution:
         cwd = self.bridge._resolve_cwd(task)
         
         # Should resolve relative to base directory
-        expected = r"C:\Users\Cicada38\Projects\AI-team"
+        expected = str(self.ai_team_dir)
         assert cwd == expected
 
     def test_resolve_cwd_with_backslash_relative_path(self):
@@ -85,7 +128,7 @@ class TestWorkingDirectoryResolution:
         cwd = self.bridge._resolve_cwd(task)
         
         # Should resolve relative to base directory
-        expected = r"C:\Users\Cicada38\Projects\AI-team"
+        expected = str(self.ai_team_dir)
         assert cwd == expected
 
     def test_resolve_cwd_with_subdirectory_path(self):
@@ -96,29 +139,29 @@ class TestWorkingDirectoryResolution:
         cwd = self.bridge._resolve_cwd(task)
         
         # Should resolve relative to base directory
-        expected = r"C:\Users\Cicada38\Projects\AI-team\subfolder"
+        expected = str(self.ai_team_dir / "subfolder")
         assert cwd == expected
 
     def test_resolve_cwd_with_different_drive(self):
-        """Test cwd resolution with different drive (should fallback to base)"""
+        """Test cwd resolution with path on different root (should fallback to base)"""
         task = self.base_task
-        task.metadata = {"cwd": r"D:\OtherProjects"}
+        task.metadata = {"cwd": str(self.remote_dir)}
         
         cwd = self.bridge._resolve_cwd(task)
         
         # Should fallback to base directory instead of rejecting
-        expected = r"C:\Users\Cicada38\Projects"
+        expected = self.base_dir_str
         assert cwd == expected
 
     def test_resolve_cwd_with_path_outside_allowed_root(self):
         """Test cwd resolution with path outside allowed root (should fallback to base)"""
         task = self.base_task
-        task.metadata = {"cwd": r"C:\Users\Cicada38\Documents"}
+        task.metadata = {"cwd": str(self.outside_dir)}
         
         cwd = self.bridge._resolve_cwd(task)
         
         # Should fallback to base directory instead of rejecting
-        expected = r"C:\Users\Cicada38\Projects"
+        expected = self.base_dir_str
         assert cwd == expected
 
     def test_resolve_cwd_with_nested_project(self):
@@ -129,7 +172,7 @@ class TestWorkingDirectoryResolution:
         cwd = self.bridge._resolve_cwd(task)
         
         # Should resolve to nested path
-        expected = r"C:\Users\Cicada38\Projects\AI-team\nested\project"
+        expected = str(self.ai_team_dir / "nested" / "project")
         assert cwd == expected
 
     def test_resolve_cwd_with_root_itself(self):
@@ -140,7 +183,7 @@ class TestWorkingDirectoryResolution:
         cwd = self.bridge._resolve_cwd(task)
         
         # Should resolve to base directory
-        expected = r"C:\Users\Cicada38\Projects"
+        expected = self.base_dir_str
         assert cwd == expected
 
     def test_resolve_cwd_with_empty_string(self):
@@ -151,7 +194,7 @@ class TestWorkingDirectoryResolution:
         cwd = self.bridge._resolve_cwd(task)
         
         # Should return base directory
-        expected = r"C:\Users\Cicada38\Projects"
+        expected = self.base_dir_str
         assert cwd == expected
 
     def test_resolve_cwd_with_whitespace_only(self):
@@ -162,7 +205,7 @@ class TestWorkingDirectoryResolution:
         cwd = self.bridge._resolve_cwd(task)
         
         # Should return base directory
-        expected = r"C:\Users\Cicada38\Projects"
+        expected = self.base_dir_str
         assert cwd == expected
 
     def test_execute_command_cwd_resolution(self):
@@ -177,9 +220,9 @@ class TestWorkingDirectoryResolution:
             mock_subprocess.return_value = mock_process
             
             # Mock the cwd resolution
-            with patch.object(self.bridge, '_resolve_cwd', return_value=r"C:\Users\Cicada38\Projects\AI-team"):
+            with patch.object(self.bridge, '_resolve_cwd', return_value=str(self.ai_team_dir)):
                 # This would normally call _execute_command, but we're testing the cwd resolution
-                expected_cwd = r"C:\Users\Cicada38\Projects\AI-team"
+                expected_cwd = str(self.ai_team_dir)
                 assert self.bridge._resolve_cwd(task) == expected_cwd
 
     def test_task_creation_with_path_hint(self):
@@ -224,7 +267,7 @@ class TestWorkingDirectoryResolution:
         cwd = self.bridge._resolve_cwd(task)
         
         # Should resolve to pijama subdirectory under Projects
-        expected = r"C:\Users\Cicada38\Projects\pijama"
+        expected = str(self.pijama_dir)
         assert cwd == expected
         
         # Test 2: What if they say "in /pijama" (POSIX style)
@@ -235,7 +278,7 @@ class TestWorkingDirectoryResolution:
         # Test 3: What if they say "in pijama/subfolder"
         task.metadata = {"cwd": "pijama/subfolder"}
         cwd = self.bridge._resolve_cwd(task)
-        expected_nested = r"C:\Users\Cicada38\Projects\pijama\subfolder"
+        expected_nested = str(self.pijama_dir / "subfolder")
         assert cwd == expected_nested
 
     def test_config_validation(self):
@@ -246,7 +289,7 @@ class TestWorkingDirectoryResolution:
         assert config.claude.base_cwd == config.claude.allowed_root
         
         # Verify it's the expected path
-        expected = r"C:\Users\Cicada38\Projects"
+        expected = self.base_dir_str
         assert config.claude.base_cwd == expected
         
         # Verify it's not an environment variable
