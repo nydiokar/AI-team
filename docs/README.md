@@ -48,6 +48,7 @@ pip install -e ".[dev,test,llama,telegram]"
 # Copy environment template if present
 if (Test-Path .env.example) { Copy-Item .env.example .env -Force }
 ```
+After copying, edit the .env file and set CLAUDE_BASE_CWD and CLAUDE_ALLOWED_ROOT to your project workspace (see docs/IMPLEMENTATION_ROADMAP.md for platform-specific guidance).
 
 ### 2. Test Components
 
@@ -128,26 +129,35 @@ Additional background information.
 ### Environment Variables (.env)
 
 ```bash
-# Telegram Integration (Optional)
+# Claude CLI (required)
+CLAUDE_BASE_CWD=/home/you/projects
+CLAUDE_ALLOWED_ROOT=/home/you/projects
+CLAUDE_SKIP_PERMISSIONS=false
+CLAUDE_TIMEOUT_SEC=300
+CLAUDE_MAX_TURNS=0
+
+# Telegram integration (optional)
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_ALLOWED_USERS=123456789,987654321
 TELEGRAM_CHAT_ID=123456789
 
-# Claude Code Settings
-CLAUDE_SKIP_PERMISSIONS=false
-# Optional: base working directory where Claude starts (recommended)
-# Example (Windows): C:\\Users\\User\\Projects
-# Example (POSIX): /home/you/Projects
-CLAUDE_BASE_CWD=
-# Optional: safety allowlist root (defaults to CLAUDE_BASE_CWD if set)
-CLAUDE_ALLOWED_ROOT=
-# Execution behavior caps
-CLAUDE_TIMEOUT_SEC=300
-CLAUDE_MAX_TURNS=0   # 0 means CLI default/unlimited
-
-# System Settings
-LOG_LEVEL=INFO
+# System tuning
 MAX_CONCURRENT_TASKS=3
+MAX_QUEUE_SIZE=50
+GUARDED_WRITE=false
+TELEGRAM_RATE_LIMIT_REQUESTS=5
+TELEGRAM_RATE_LIMIT_WINDOW_SEC=60
+AGENTS_ENABLED=true
+
+# Validation parameters
+VALIDATION_SIMILARITY_THRESHOLD=0.7
+VALIDATION_ENTROPY_THRESHOLD=0.8
+VALIDATION_MAX_RETRIES=3
+VALIDATION_BACKOFF_MULTIPLIER=2
+
+# Time-Lab adapter (optional)
+TIME_LAB_ENABLED=true
+TIME_LAB_PATH=/home/you/time-lab
 ```
 
 - `python main.py doctor` prints the effective configuration, checks Claude CLI availability, shows relevant env overrides, and verifies key directories.
