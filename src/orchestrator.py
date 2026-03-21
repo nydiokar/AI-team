@@ -15,10 +15,11 @@ import sys
 import os
 
 from src.core import (
-    ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskParser, 
-    AsyncFileWatcher
+    ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskParser,
+    AsyncFileWatcher, SessionStore, SessionStatus
 )
 from src.bridges import ClaudeBridge, LlamaMediator
+from src.backends import ClaudeCodeBackend, CodexBackend
 from config import config
 from src.validation.engine import ValidationEngine
 from src.core.agent_manager import AgentManager
@@ -48,6 +49,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.claude_bridge = ClaudeBridge()
         self.llama_mediator = LlamaMediator()
         self.agent_manager = AgentManager()
+        self.session_store = SessionStore()
+        self._backends = {
+            "claude": ClaudeCodeBackend(),
+            "codex": CodexBackend(),
+        }
         
         # Task management
         self.task_queue = asyncio.Queue(maxsize=config.system.max_queue_size)
@@ -490,6 +496,27 @@ class TaskOrchestrator(ITaskOrchestrator):
                     logger.error(f"event=artifacts_error task_id={task.id} error={e}")
                     self._emit_event("artifacts_error", task, {"error": str(e)})
 
+                # Update session record + write compact summary + per-session event log
+                try:
+                    session_id = (task.metadata or {}).get("session_id", "").strip()
+                    if session_id:
+                        session = self.session_store.get(session_id)
+                        if session:
+                            session.last_task_id = task.id
+                            session.last_result_summary = (result.errors[0] if result.errors else result.output[:200]) if not result.success else result.output[:200]
+                            artifact_path = str(Path(config.system.results_dir) / f"{task.id}.json")
+                            session.last_artifact_path = artifact_path
+                            session.status = SessionStatus.IDLE if result.success else SessionStatus.ERROR
+                            self.session_store.save(session)
+
+                            # Compact summary  state/summaries/<session_id>.md
+                            self._write_session_summary(session, result)
+
+                            # Per-session event log  logs/session_events/<session_id>.log
+                            self._append_session_event(session_id, task.id, result)
+                except Exception as e:
+                    logger.warning(f"session_update_failed task_id={task.id} error={e}")
+
                 # Archive processed task file to avoid reprocessing
                 try:
                     source_path_str = None
@@ -567,8 +594,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             claude_prompt = self.llama_mediator.create_claude_prompt(parsed_task)
             task.prompt = claude_prompt
             
-            # Step 3: Execute with Claude Code with timeout and cooperative cancellation
-            logger.debug(f"Step 3: Executing task {task.id} with Claude Code")
+            # Step 3: Execute via session backend (resume) or Claude bridge (stateless)
+            logger.debug(f"Step 3: Executing task {task.id}")
             max_retries = getattr(config.validation, "max_retries", 2)
             retry_delay = 1.0
             backoff_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
@@ -583,7 +610,22 @@ class TaskOrchestrator(ITaskOrchestrator):
             while True:
                 attempt += 1
                 # Run execution as a task to allow timeout/cancel
-                exec_task = asyncio.create_task(self.claude_bridge.execute_task(task))
+                # Use session backend (with native resume) when task belongs to a session
+                session_id = (task.metadata or {}).get("session_id", "").strip()
+                session = self.session_store.get(session_id) if session_id else None
+                if session:
+                    backend = self._backends.get(session.backend, self._backends["claude"])
+                    session.last_user_message = task.prompt
+                    if session.backend_session_id:
+                        exec_task = asyncio.create_task(
+                            asyncio.to_thread(backend.resume_session, session, task.prompt)
+                        )
+                    else:
+                        exec_task = asyncio.create_task(
+                            asyncio.to_thread(backend.create_session, session)
+                        )
+                else:
+                    exec_task = asyncio.create_task(self.claude_bridge.execute_task(task))
                 self._running_exec_tasks[task.id] = exec_task
                 # Wait for whichever happens first
                 wait_set = {exec_task}
@@ -598,7 +640,25 @@ class TaskOrchestrator(ITaskOrchestrator):
                         wait_set.add(timeout_waiter)
                     done, pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
                     if exec_task in done:
-                        result = exec_task.result()
+                        raw = exec_task.result()
+                        # Normalize ExecutionResult (from backends) to TaskResult
+                        from src.core.interfaces import ExecutionResult as _ER
+                        if isinstance(raw, _ER):
+                            # Persist backend session ID back onto the session record
+                            if session and raw.backend_session_id:
+                                session.backend_session_id = raw.backend_session_id
+                                self.session_store.save(session)
+                            result = TaskResult(
+                                task_id=task.id,
+                                success=raw.success,
+                                output=raw.output,
+                                errors=raw.errors,
+                                files_modified=raw.files_modified,
+                                execution_time=raw.execution_time,
+                                timestamp=datetime.now().isoformat(),
+                            )
+                        else:
+                            result = raw
                     elif cancel_waiter and cancel_waiter in done:
                         # Cooperative cancellation
                         exec_task.cancel()
@@ -999,7 +1059,7 @@ created: {task.created}
     
     # Simulation execution removed: system now always runs real Claude Code CLI
     
-    def create_task_from_description(self, description: str, task_type: Optional[str] = None, target_files: Optional[List[str]] = None) -> str:
+    def create_task_from_description(self, description: str, task_type: Optional[str] = None, target_files: Optional[List[str]] = None, session_id: Optional[str] = None) -> str:
         """Create and persist a `.task.md` task from a natural language description.
 
         May use LLAMA to expand metadata; heuristically extracts `cwd` hints.
@@ -1047,7 +1107,7 @@ type: {parsed.get('type', 'analyze')}
 priority: {parsed.get('priority', 'medium')}
 created: {datetime.now().isoformat()}
 cwd: {parsed.get('metadata', {}).get('cwd', '')}
-agent_type: {parsed.get('metadata', {}).get('agent_type', '')}
+session_id: {session_id or ''}
 ---
 
 # {parsed.get('title', 'Auto-generated Task')}
@@ -1209,6 +1269,52 @@ Generated from agent expansion with attachments copied to working directory
             },
             "llama_status": self.llama_mediator.get_status()
         }
+
+
+    def _write_session_summary(self, session, result: TaskResult) -> None:
+        """Write/overwrite a compact human-readable summary for a session."""
+        try:
+            import json as _json
+            summaries_dir = Path("state/summaries")
+            summaries_dir.mkdir(parents=True, exist_ok=True)
+            lines = [
+                f"# Session {session.session_id}",
+                f"Backend: {session.backend}  |  Status: {session.status.value}",
+                f"Path: {session.repo_path}",
+                f"Updated: {session.updated_at}",
+                "",
+                f"## Last instruction",
+                session.last_user_message or "(none)",
+                "",
+                f"## Last result",
+                session.last_result_summary or "(none)",
+                "",
+                f"## Last artifact",
+                session.last_artifact_path or "(none)",
+            ]
+            (summaries_dir / f"{session.session_id}.md").write_text(
+                "\n".join(lines), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"session_summary_write_failed id={session.session_id} error={e}")
+
+    def _append_session_event(self, session_id: str, task_id: str, result: TaskResult) -> None:
+        """Append one line to the per-session event log."""
+        try:
+            import json as _json
+            log_dir = Path(config.system.logs_dir) / "session_events"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            entry = _json.dumps({
+                "timestamp": datetime.now().isoformat(),
+                "task_id": task_id,
+                "success": result.success,
+                "execution_time": result.execution_time,
+                "error": result.errors[0] if result.errors else "",
+            }, ensure_ascii=False)
+            with (log_dir / f"{session_id}.log").open("a", encoding="utf-8") as f:
+                f.write(entry + "\n")
+        except Exception as e:
+            logger.warning(f"session_event_log_failed id={session_id} error={e}")
 
 
 class _ContextLoader:

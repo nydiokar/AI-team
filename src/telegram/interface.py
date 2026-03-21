@@ -6,6 +6,9 @@ import logging
 from typing import Dict, Any, Optional
 from pathlib import Path
 
+from src.core.session_store import SessionStore
+from src.core.interfaces import SessionStatus
+
 try:
     from telegram import Update
     from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -35,6 +38,7 @@ class TelegramInterface:
         self.allowed_users = allowed_users or []
         self.app: Optional[Application] = None
         self.is_running = False
+        self.session_store = SessionStore()
         # Rate limiting for task creation
         self._rate_limit_state: Dict[int, list[float]] = {}
         
@@ -62,6 +66,12 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("status", self._handle_status_command))
         self.app.add_handler(CommandHandler("progress", self._handle_progress_command))
         self.app.add_handler(CommandHandler("cancel", self._handle_cancel_command))
+        # Session command handlers
+        self.app.add_handler(CommandHandler("session_new", self._handle_session_new))
+        self.app.add_handler(CommandHandler("session_list", self._handle_session_list))
+        self.app.add_handler(CommandHandler("session_use", self._handle_session_use))
+        self.app.add_handler(CommandHandler("session_status", self._handle_session_status))
+        self.app.add_handler(CommandHandler("session_close", self._handle_session_close))
         # Git automation command handlers
         self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
         self.app.add_handler(CommandHandler("commit-all", self._handle_git_commit_all))
@@ -456,46 +466,162 @@ The system will now process this task automatically. You'll receive a notificati
             
         message_text = update.message.text.strip()
         user_id = update.effective_user.id
-        
+        chat_id = update.effective_chat.id
+
         # Skip very short messages
         if len(message_text) < 10:
             await update.message.reply_text(
-                "🤔 Please provide a more detailed description of what you'd like me to do.\n"
-                "Example: 'Review the authentication code in /auth-system'"
+                "Please provide a more detailed description of what you'd like me to do."
             )
             return
-        
+
         try:
-            # Create task from natural language
-            task_id = self.orchestrator.create_task_from_description(message_text)
-            
-            # Get task file path
-            try:
-                from config import config as app_config
-                tasks_dir = Path(app_config.system.tasks_dir)
-            except Exception:
-                tasks_dir = Path("tasks")
-            task_file = tasks_dir / f"{task_id}.task.md"
-            
-            response = f"""
-✅ Task created from your message!
+            # Route to active session if one exists, otherwise create a standalone task
+            active_session = self.session_store.get_active(chat_id)
 
-**Task ID:** `{task_id}`
-**Description:** {message_text[:100]}{'...' if len(message_text) > 100 else ''}
-**File:** `{task_file.name}`
+            if active_session:
+                # Update session metadata and hand off to orchestrator for resume
+                active_session.last_user_message = message_text
+                self.session_store.save(active_session)
+                task_id = self.orchestrator.create_task_from_description(
+                    message_text,
+                    session_id=active_session.session_id,
+                )
+                await update.message.reply_text(
+                    f"Running in session `{active_session.session_id}` [{active_session.backend}]\n"
+                    f"Task: `{task_id}`"
+                )
+            else:
+                # No active session — create a standalone task as before
+                task_id = self.orchestrator.create_task_from_description(message_text)
+                await update.message.reply_text(
+                    f"Task created: `{task_id}`\n"
+                    f"Tip: use /session_new to start a persistent session."
+                )
 
-The system will now process this task automatically. You'll receive a notification when it completes.
-            """.strip()
-            
-            await update.message.reply_text(response)
-            
-            # Log the task creation
-            logger.info(f"Telegram user {user_id} created task {task_id} from message: {message_text[:100]}...")
-            
+            logger.info(f"user={user_id} chat={chat_id} task={task_id} session={active_session.session_id if active_session else 'none'}")
+
         except Exception as e:
-            error_msg = f"❌ Failed to create task from message: {str(e)}"
-            await update.message.reply_text(error_msg)
-            logger.error(f"Telegram message-to-task creation failed: {e}")
+            await update.message.reply_text(f"❌ Failed to create task: {e}")
+            logger.error(f"message handler failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Session commands
+    # ------------------------------------------------------------------
+
+    async def _handle_session_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_new <backend> <path>"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        args = context.args or []
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: /session_new <backend> <path>\n"
+                "Example: /session_new claude C:\\Users\\me\\Projects\\myrepo"
+            )
+            return
+        backend, repo_path = args[0].lower(), " ".join(args[1:])
+        if backend not in ("claude", "codex"):
+            await update.message.reply_text("❌ Backend must be 'claude' or 'codex'.")
+            return
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        session = self.session_store.create(
+            backend=backend,
+            repo_path=repo_path,
+            telegram_chat_id=chat_id,
+            owner_user_id=user_id,
+        )
+        self.session_store.bind(chat_id, session.session_id)
+        await update.message.reply_text(
+            f"✅ Session created and set as active.\n"
+            f"ID: `{session.session_id}`\n"
+            f"Backend: {backend}\n"
+            f"Path: `{repo_path}`"
+        )
+
+    async def _handle_session_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_list"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        sessions = self.session_store.list_all()
+        if not sessions:
+            await update.message.reply_text("No sessions found.")
+            return
+        active = self.session_store.get_active(update.effective_chat.id)
+        active_id = active.session_id if active else None
+        lines = []
+        for s in sessions[:10]:
+            marker = " <-- active" if s.session_id == active_id else ""
+            lines.append(f"`{s.session_id}` [{s.backend}] {s.status.value} — {s.repo_path}{marker}")
+        await update.message.reply_text("Sessions:\n" + "\n".join(lines))
+
+    async def _handle_session_use(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_use <session_id>"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        args = context.args or []
+        if not args:
+            await update.message.reply_text("Usage: /session_use <session_id>")
+            return
+        session_id = args[0]
+        session = self.session_store.get(session_id)
+        if not session:
+            await update.message.reply_text(f"❌ Session `{session_id}` not found.")
+            return
+        self.session_store.bind(update.effective_chat.id, session_id)
+        await update.message.reply_text(
+            f"✅ Active session set to `{session_id}` [{session.backend}] — {session.repo_path}"
+        )
+
+    async def _handle_session_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_status [session_id]"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        args = context.args or []
+        if args:
+            session = self.session_store.get(args[0])
+        else:
+            session = self.session_store.get_active(update.effective_chat.id)
+        if not session:
+            await update.message.reply_text("No active session. Use /session_new or /session_use.")
+            return
+        lines = [
+            f"Session: `{session.session_id}`",
+            f"Backend: {session.backend}  |  Status: {session.status.value}",
+            f"Path: `{session.repo_path}`",
+            f"Machine: {session.machine_id}",
+            f"Updated: {session.updated_at}",
+        ]
+        if session.backend_session_id:
+            lines.append(f"Backend session ID: `{session.backend_session_id}`")
+        if session.last_task_id:
+            lines.append(f"Last task: `{session.last_task_id}`")
+        if session.last_result_summary:
+            lines.append(f"Last result: {session.last_result_summary[:200]}")
+        await update.message.reply_text("\n".join(lines))
+
+    async def _handle_session_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_close [session_id]"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        args = context.args or []
+        if args:
+            session = self.session_store.get(args[0])
+        else:
+            session = self.session_store.get_active(update.effective_chat.id)
+        if not session:
+            await update.message.reply_text("No session found.")
+            return
+        session.status = SessionStatus.CLOSED
+        self.session_store.save(session)
+        self.session_store.unbind(update.effective_chat.id)
+        await update.message.reply_text(f"Session `{session.session_id}` closed.")
 
     async def notify_completion(self, task_id: str, summary: str, success: bool = True):
         """Notify users of task completion"""

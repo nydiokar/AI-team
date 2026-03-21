@@ -153,6 +153,81 @@ class IFileWatcher(ABC):
         """Stop file watching"""
         pass
 
+class SessionStatus(Enum):
+    IDLE = "idle"
+    BUSY = "busy"
+    AWAITING_INPUT = "awaiting_input"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+    CLOSED = "closed"
+
+@dataclass
+class Session:
+    """Gateway session — maps a Telegram conversation to a backend coding agent session."""
+    session_id: str
+    backend: str                        # "claude" | "codex"
+    repo_path: str                      # working directory / repo root
+    status: SessionStatus
+    created_at: str
+    updated_at: str
+    machine_id: str = ""
+    backend_session_id: str = ""        # native session ID returned by the backend
+    last_task_id: str = ""
+    last_artifact_path: str = ""
+    last_summary: str = ""
+    last_user_message: str = ""
+    last_result_summary: str = ""
+    telegram_chat_id: Optional[int] = None
+    telegram_thread_id: Optional[int] = None
+    owner_user_id: Optional[int] = None
+
+
+@dataclass
+class ExecutionResult:
+    """Result returned by a CodingBackend after one turn."""
+    success: bool
+    output: str
+    backend_session_id: str = ""   # native session ID to store for next resume
+    files_modified: List[str] = None
+    errors: List[str] = None
+    execution_time: float = 0.0
+
+    def __post_init__(self):
+        if self.files_modified is None:
+            self.files_modified = []
+        if self.errors is None:
+            self.errors = []
+
+
+class CodingBackend(ABC):
+    """Protocol for coding agent backends (Claude Code, Codex, …)."""
+
+    @abstractmethod
+    def create_session(self, session: "Session") -> ExecutionResult:
+        """Start a new session — runs the first turn with no prior context."""
+        pass
+
+    @abstractmethod
+    def resume_session(self, session: "Session", message: str) -> ExecutionResult:
+        """Continue an existing session using the backend's native resume mechanism."""
+        pass
+
+    @abstractmethod
+    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
+        """Run a single stateless turn with no session tracking."""
+        pass
+
+    @abstractmethod
+    def cancel(self, session: "Session") -> None:
+        """Best-effort cancellation of a running backend session."""
+        pass
+
+    @abstractmethod
+    def close(self, session: "Session") -> None:
+        """Mark the session closed on the backend side (cleanup if needed)."""
+        pass
+
+
 class ITaskOrchestrator(ABC):
     """Main orchestrator interface"""
     

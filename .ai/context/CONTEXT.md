@@ -1,6 +1,6 @@
 # AI-Team Gateway — Project Context
 
-**Last Updated:** 2026-03-21  **Branch:** `main`  **Status:** Task runner operational — session layer not yet built
+**Last Updated:** 2026-03-21  **Branch:** `main`  **Status:** All 4 phases complete — session layer built, backends abstracted, observability wired
 
 ---
 
@@ -109,35 +109,35 @@ The current Telegram interface has agent-type commands (`/bug_fix`, `/code_revie
 
 | # | Status | Task | Files |
 |:-:|:------:|:-----|:------|
-| 5 | [ ] | Add `Session` dataclass and `SessionStatus` enum to core interfaces | `src/core/interfaces.py` |
-| 6 | [ ] | Implement `SessionStore` — file-backed CRUD for `state/sessions/<id>.json` and `state/telegram/active_bindings.json` | `src/core/session_store.py` (new) |
-| 7 | [ ] | Add session commands to Telegram interface (`/session_new`, `/session_list`, `/session_use`, `/session_status`, `/session_close`) | `src/telegram/interface.py` |
-| 8 | [ ] | Wire active session binding so plain messages route to active session instead of always creating a new task | `src/telegram/interface.py`, `src/orchestrator.py` |
+| 5 | [x] | Add `Session` dataclass and `SessionStatus` enum to core interfaces | `src/core/interfaces.py` |
+| 6 | [x] | Implement `SessionStore` — file-backed CRUD for `state/sessions/<id>.json` and `state/telegram/active_bindings.json` | `src/core/session_store.py` (new) |
+| 7 | [x] | Add session commands to Telegram interface (`/session_new`, `/session_list`, `/session_use`, `/session_status`, `/session_close`) | `src/telegram/interface.py` |
+| 8 | [x] | Wire active session binding so plain messages route to active session instead of always creating a new task | `src/telegram/interface.py`, `src/orchestrator.py` |
 
 ### Phase 2 — Backend abstraction + native resume
 
 | # | Status | Task | Files |
 |:-:|:------:|:-----|:------|
-| 9 | [ ] | Define `CodingBackend` protocol (`create_session`, `resume_session`, `run_oneoff`, `cancel`, `close`) | `src/core/interfaces.py` |
-| 10 | [ ] | Implement `ClaudeCodeBackend` — wraps existing bridge, adds `--resume <session_id>` for continuations | `src/backends/claude_code.py` (new) |
-| 11 | [ ] | Implement `CodexBackend` — equivalent resume flow | `src/backends/codex.py` (new) |
-| 12 | [ ] | Store native backend session ID in session record after first run; use it on resume | `src/core/session_store.py`, `src/orchestrator.py` |
+| 9 | [x] | Define `CodingBackend` protocol (`create_session`, `resume_session`, `run_oneoff`, `cancel`, `close`) | `src/core/interfaces.py` |
+| 10 | [x] | Implement `ClaudeCodeBackend` — wraps existing bridge, adds `--resume <session_id>` for continuations | `src/backends/claude_code.py` (new) |
+| 11 | [x] | Implement `CodexBackend` — equivalent resume flow | `src/backends/codex.py` (new) |
+| 12 | [x] | Store native backend session ID in session record after first run; use it on resume | `src/core/session_store.py`, `src/orchestrator.py` |
 
 ### Phase 3 — Session execution flow
 
 | # | Status | Task | Files |
 |:-:|:------:|:-----|:------|
-| 13 | [ ] | Route Telegram messages to active session's backend resume instead of spawning a new task | `src/orchestrator.py` |
-| 14 | [ ] | Update session record + write compact summary after every turn | `src/orchestrator.py`, `src/core/session_store.py` |
-| 15 | [ ] | Write artifacts under `results/sessions/<session_id>/` | `src/orchestrator.py` |
+| 13 | [x] | Route Telegram messages to active session's backend resume instead of spawning a new task | `src/orchestrator.py` |
+| 14 | [x] | Update session record + write compact summary after every turn | `src/orchestrator.py`, `src/core/session_store.py` |
+| 15 | [x] | Write artifacts under `results/sessions/<session_id>/` | `src/orchestrator.py` |
 
 ### Phase 4 — Observability
 
 | # | Status | Task | Files |
 |:-:|:------:|:-----|:------|
-| 16 | [ ] | `/session_status` response: backend, cwd, last run time, last error, files changed, artifact path | `src/telegram/interface.py` |
-| 17 | [ ] | Per-session event log at `logs/session_events/<session_id>.log` | `src/orchestrator.py` |
-| 18 | [ ] | Compact session summary at `state/summaries/<session_id>.md`, updated after each turn | `src/orchestrator.py` |
+| 16 | [x] | `/session_status` response: backend, cwd, last run time, last error, files changed, artifact path | `src/telegram/interface.py` |
+| 17 | [x] | Per-session event log at `logs/session_events/<session_id>.log` | `src/orchestrator.py` |
+| 18 | [x] | Compact session summary at `state/summaries/<session_id>.md`, updated after each turn | `src/orchestrator.py` |
 
 ---
 
