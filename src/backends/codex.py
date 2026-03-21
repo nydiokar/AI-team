@@ -3,11 +3,13 @@ CodexBackend — wraps the OpenAI Codex CLI (`codex`).
 
 Resume uses `codex --session <backend_session_id>` if available.
 Falls back to stateless run when no session ID is stored.
+
+Synchronous — called via asyncio.to_thread() by the orchestrator.
 """
-import asyncio
 import json
 import logging
 import shutil
+import subprocess
 import time
 from typing import List, Optional
 
@@ -22,19 +24,13 @@ class CodexBackend(CodingBackend):
         self._exe = shutil.which("codex") or "codex"
 
     def create_session(self, session: Session) -> ExecutionResult:
-        return asyncio.get_event_loop().run_until_complete(
-            self._run(session.repo_path, session.last_user_message, resume_id=None)
-        )
+        return self._run(session.repo_path, session.last_user_message, resume_id=None)
 
     def resume_session(self, session: Session, message: str) -> ExecutionResult:
-        return asyncio.get_event_loop().run_until_complete(
-            self._run(session.repo_path, message, resume_id=session.backend_session_id or None)
-        )
+        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None)
 
     def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
-        return asyncio.get_event_loop().run_until_complete(
-            self._run(cwd, message, resume_id=None)
-        )
+        return self._run(cwd, message, resume_id=None)
 
     def cancel(self, session: Session) -> None:
         pass
@@ -42,20 +38,18 @@ class CodexBackend(CodingBackend):
     def close(self, session: Session) -> None:
         pass
 
-    async def _run(self, cwd: str, message: str, resume_id: Optional[str]) -> ExecutionResult:
+    def _run(self, cwd: str, message: str, resume_id: Optional[str]) -> ExecutionResult:
         start = time.time()
         cmd = self._build_cmd(resume_id)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc = subprocess.run(
+                cmd,
+                input=message.encode(),
+                capture_output=True,
                 cwd=cwd or None,
             )
-            stdout_b, stderr_b = await proc.communicate(message.encode())
-            stdout = stdout_b.decode(errors="replace")
-            stderr = stderr_b.decode(errors="replace")
+            stdout = proc.stdout.decode(errors="replace")
+            stderr = proc.stderr.decode(errors="replace")
             elapsed = time.time() - start
             return self._parse(stdout, stderr, proc.returncode, elapsed)
         except Exception as e:
