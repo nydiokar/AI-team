@@ -8,6 +8,7 @@ tasks/
 results/
 summaries/
 tasks_done/
+state/ 
 
 # C extensions
 *.so
