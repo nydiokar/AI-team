@@ -94,6 +94,53 @@ The current Telegram interface has agent-type commands (`/bug_fix`, `/code_revie
 
 ---
 
+## Task List
+
+### Phase 1a — Strip agent/prompt layer
+
+| # | Status | Task | Files |
+|:-:|:------:|:-----|:------|
+| 1 | [x] | Remove agent commands from Telegram interface (`/bug_fix`, `/code_review`, `/analyze`, `/documentation`, `_handle_agent_command`) | `src/telegram/interface.py` |
+| 2 | [x] | Strip `_build_prompt()` to minimal context (user message + cwd only, no role injection, no step list) | `src/bridges/claude_bridge.py` |
+| 3 | [x] | Collapse `_get_allowed_tools_for_task()` to a single safe default toolset; remove TaskType-based branching | `src/bridges/claude_bridge.py` |
+| 4 | [x] | Remove `TaskType` values that only existed for agent commands (`DOCUMENTATION`, `BUG_FIX`); update help text to reflect plain `/run` or message flow | `src/core/interfaces.py`, `src/telegram/interface.py` |
+
+### Phase 1b — Session model
+
+| # | Status | Task | Files |
+|:-:|:------:|:-----|:------|
+| 5 | [ ] | Add `Session` dataclass and `SessionStatus` enum to core interfaces | `src/core/interfaces.py` |
+| 6 | [ ] | Implement `SessionStore` — file-backed CRUD for `state/sessions/<id>.json` and `state/telegram/active_bindings.json` | `src/core/session_store.py` (new) |
+| 7 | [ ] | Add session commands to Telegram interface (`/session_new`, `/session_list`, `/session_use`, `/session_status`, `/session_close`) | `src/telegram/interface.py` |
+| 8 | [ ] | Wire active session binding so plain messages route to active session instead of always creating a new task | `src/telegram/interface.py`, `src/orchestrator.py` |
+
+### Phase 2 — Backend abstraction + native resume
+
+| # | Status | Task | Files |
+|:-:|:------:|:-----|:------|
+| 9 | [ ] | Define `CodingBackend` protocol (`create_session`, `resume_session`, `run_oneoff`, `cancel`, `close`) | `src/core/interfaces.py` |
+| 10 | [ ] | Implement `ClaudeCodeBackend` — wraps existing bridge, adds `--resume <session_id>` for continuations | `src/backends/claude_code.py` (new) |
+| 11 | [ ] | Implement `CodexBackend` — equivalent resume flow | `src/backends/codex.py` (new) |
+| 12 | [ ] | Store native backend session ID in session record after first run; use it on resume | `src/core/session_store.py`, `src/orchestrator.py` |
+
+### Phase 3 — Session execution flow
+
+| # | Status | Task | Files |
+|:-:|:------:|:-----|:------|
+| 13 | [ ] | Route Telegram messages to active session's backend resume instead of spawning a new task | `src/orchestrator.py` |
+| 14 | [ ] | Update session record + write compact summary after every turn | `src/orchestrator.py`, `src/core/session_store.py` |
+| 15 | [ ] | Write artifacts under `results/sessions/<session_id>/` | `src/orchestrator.py` |
+
+### Phase 4 — Observability
+
+| # | Status | Task | Files |
+|:-:|:------:|:-----|:------|
+| 16 | [ ] | `/session_status` response: backend, cwd, last run time, last error, files changed, artifact path | `src/telegram/interface.py` |
+| 17 | [ ] | Per-session event log at `logs/session_events/<session_id>.log` | `src/orchestrator.py` |
+| 18 | [ ] | Compact session summary at `state/summaries/<session_id>.md`, updated after each turn | `src/orchestrator.py` |
+
+---
+
 ## Key files
 
 | Path | Purpose |

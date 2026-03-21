@@ -121,7 +121,8 @@ class TaskParser(ITaskParser):
             'summarize': TaskType.SUMMARIZE,
             'fix': TaskType.FIX,
             'analyze': TaskType.ANALYZE,
-            'documentation': TaskType.DOCUMENTATION
+            'bug_fix': TaskType.FIX,
+            'documentation': TaskType.ANALYZE,
         }
         
         if type_str not in type_map:

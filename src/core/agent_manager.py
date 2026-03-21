@@ -117,10 +117,8 @@ class AgentManager:
         type_to_agent = {
             TaskType.ANALYZE: "analyze",
             TaskType.FIX: "bug_fix",
-            TaskType.BUG_FIX: "bug_fix",
             TaskType.CODE_REVIEW: "code_review",
-            TaskType.DOCUMENTATION: "documentation",
-            TaskType.SUMMARIZE: "analyze"  # Summarize uses analyze agent
+            TaskType.SUMMARIZE: "analyze",
         }
         
         agent_name = type_to_agent.get(task_type)

@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime
 import logging
 
-from src.core import IClaudeBridge, Task, TaskResult, TaskStatus, TaskType
+from src.core import IClaudeBridge, Task, TaskResult, TaskStatus
 from config import config
 from src.core.git_file_detector import GitFileDetector
 
@@ -64,7 +64,7 @@ class ClaudeBridge(IClaudeBridge):
             if getattr(config.system, "guarded_write", False):
                 allowed_tools = ["Read", "LS", "Grep", "Glob"]
             else:
-                allowed_tools = self._get_allowed_tools_for_task(task.type)
+                allowed_tools = self._get_allowed_tools()
             if allowed_tools:
                 command.extend(["--allowedTools", ",".join(allowed_tools)])
 
@@ -147,63 +147,17 @@ class ClaudeBridge(IClaudeBridge):
             return []
     
     def _build_prompt(self, task: Task) -> str:
-        """Build a comprehensive prompt for Claude."""
-        prompt_parts = [
-            f"Task Type: {task.type.value.upper()}",
-            f"Task: {task.title}",
-            "",
-            "Description:",
-            task.prompt,
-            ""
-        ]
-        
+        """Build a minimal prompt — just the user's instruction with optional file hints."""
+        parts = [task.prompt]
+
         if task.target_files:
-            prompt_parts.extend([
-                "Target Files:",
-                *[f"- {file}" for file in task.target_files],
-                ""
-            ])
-        
-        if task.success_criteria:
-            prompt_parts.extend([
-                "Success Criteria:",
-                *[f"- {criteria}" for criteria in task.success_criteria],
-                ""
-            ])
-        
-        if task.context:
-            prompt_parts.extend([
-                "Context:",
-                task.context,
-                ""
-            ])
-        
-        prompt_parts.extend([
-            "Please:",
-            "1. Analyze the current state of the specified files",
-            "2. Implement the requested changes",
-            "3. Provide a clear summary of what was accomplished",
-            "4. Note any issues or limitations encountered"
-        ])
-        
-        return "\n".join(prompt_parts)
+            parts.append("\nFiles:\n" + "\n".join(f"- {f}" for f in task.target_files))
+
+        return "\n".join(parts)
     
-    def _get_allowed_tools_for_task(self, task_type) -> List[str]:
-        """Get allowed tools based on task type for Claude."""
-        # Claude tool permissions based on task type, not agent manager
-        if task_type == TaskType.CODE_REVIEW:
-            return ["Read", "LS", "Grep", "Glob"]  # Read-only tools
-        elif task_type == TaskType.SUMMARIZE:
-            return ["Read", "LS", "Grep", "Glob"]  # Read-only tools
-        elif task_type == TaskType.DOCUMENTATION:
-            return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob"]  # Can edit for docs
-        elif task_type in (TaskType.FIX, TaskType.BUG_FIX):
-            return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]  # Full edit + bash
-        elif task_type == TaskType.ANALYZE:
-            return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]  # Full edit + bash
-        else:
-            # Default: read-only for safety
-            return ["Read", "LS", "Grep", "Glob"]
+    def _get_allowed_tools(self) -> List[str]:
+        """Return the default allowed toolset for all tasks."""
+        return ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]
     
     async def _execute_command(self, command: List[str], target_files: List[str], 
                               cwd_override: Optional[str] = None, stdin_input: Optional[str] = None) -> Dict[str, Any]:
