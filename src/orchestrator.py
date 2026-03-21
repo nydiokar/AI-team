@@ -123,10 +123,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             return
         
         logger.info("Starting AI Task Orchestrator...")
-        
-        # Check component availability
-        await self._check_component_status()
-        
+
         # Mark running BEFORE starting workers so they don't immediately exit
         self.running = True
 
@@ -151,6 +148,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Start file watcher after resuming pending
         await self.file_watcher.start_async(self._handle_new_task_file)
         self.component_status["file_watcher_running"] = True
+
+        # Check component availability now that all components are up
+        await self._check_component_status()
         
         # Start Telegram interface if available
         if self.telegram_interface:
@@ -465,27 +465,31 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._emit_event("claude_finished", task, {"status": status, "duration_s": result.execution_time, "error_class": getattr(result, "error_class", "")})
                 
                 # Send Telegram notification if available
-                if self.telegram_interface and result.success:
+                if self.telegram_interface:
                     try:
-                        # Read the summary file directly to get the LLAMA-generated summary
-                        summary_file = Path(config.system.summaries_dir) / f"{task.id}_summary.txt"
-                        if summary_file.exists():
-                            summary = summary_file.read_text(encoding='utf-8').strip()
-                            if not summary:
-                                summary = "Task completed successfully"
+                        session_id_for_notify = (task.metadata or {}).get("session_id", "").strip()
+                        notify_chat_id: Optional[int] = None
+                        if session_id_for_notify:
+                            _s = self.session_store.get(session_id_for_notify)
+                            if _s:
+                                notify_chat_id = _s.telegram_chat_id
+
+                        if result.success:
+                            # For session tasks use Claude's raw output; for standalone use LLAMA summary
+                            if session_id_for_notify:
+                                content = result.output.strip() if result.output else "Done."
+                            else:
+                                summary_file = Path(config.system.summaries_dir) / f"{task.id}_summary.txt"
+                                if summary_file.exists():
+                                    content = summary_file.read_text(encoding='utf-8').strip() or "Task completed successfully"
+                                else:
+                                    content = result.output.split('\n\n', 1)[0] if result.output else "Task completed successfully"
+                            await self.telegram_interface.notify_completion(task.id, content, success=True, chat_id=notify_chat_id)
                         else:
-                            # Fallback to result output if summary file doesn't exist yet
-                            summary = result.output.split('\n\n', 1)[0] if result.output else "Task completed successfully"
-                        
-                        await self.telegram_interface.notify_completion(task.id, summary, success=True)
+                            error_summary = f"Task failed: {'; '.join(result.errors[:2])}" if result.errors else "Task failed"
+                            await self.telegram_interface.notify_completion(task.id, error_summary, success=False, chat_id=notify_chat_id)
                     except Exception as e:
                         logger.warning(f"Failed to send Telegram completion notification: {e}")
-                elif self.telegram_interface and not result.success:
-                    try:
-                        error_summary = f"Task failed with errors: {'; '.join(result.errors[:2])}" if result.errors else "Task failed"
-                        await self.telegram_interface.notify_completion(task.id, error_summary, success=False)
-                    except Exception as e:
-                        logger.warning(f"Failed to send Telegram failure notification: {e}")
                 
                 # Write artifacts
                 try:
@@ -721,12 +725,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 last_result = result
                 break
             
-            # Step 4: Summarize results with LLAMA
-            logger.debug(f"Step 4: Summarizing results for task {task.id}")
-            summary = self.llama_mediator.summarize_result(last_result, task)
-            last_result.output = summary + "\n\n" + last_result.output
-            logger.info(f"event=summarized task_id={task.id}")
-            self._emit_event("summarized", task)
+            # Step 4: Summarize results with LLAMA — skip for session tasks so
+            # Claude's actual response is preserved unmodified in output.
+            if not _session_id_check:
+                logger.debug(f"Step 4: Summarizing results for task {task.id}")
+                summary = self.llama_mediator.summarize_result(last_result, task)
+                last_result.output = summary + "\n\n" + last_result.output
+                logger.info(f"event=summarized task_id={task.id}")
+                self._emit_event("summarized", task)
+            else:
+                logger.debug(f"Step 4: Skipping LLAMA summarization for session task {task.id}")
             
             # Step 5: Validation pass (MVP)
             try:

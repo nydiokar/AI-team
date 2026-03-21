@@ -74,8 +74,8 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("session_close", self._handle_session_close))
         # Git automation command handlers
         self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
-        self.app.add_handler(CommandHandler("commit-all", self._handle_git_commit_all))
-        self.app.add_handler(CommandHandler("git-status", self._handle_git_status))
+        self.app.add_handler(CommandHandler("commit_all", self._handle_git_commit_all))
+        self.app.add_handler(CommandHandler("git_status", self._handle_git_status))
         
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -180,8 +180,8 @@ You can also just send me a message describing what you want to do!
 
 **Git Automation:**
 • `/commit <task_id> [--no-branch] [--push]` - Commit task changes safely
-• `/commit-all <task_id> [--no-branch] [--push]` - Commit all staged changes
-• `/git-status` - Show git repository status and safety info
+• `/commit_all <task_id> [--no-branch] [--push]` - Commit all staged changes
+• `/git_status` - Show git repository status and safety info
 
 **Examples:**
 • `/task Review the authentication code in /auth-system`
@@ -623,44 +623,49 @@ The system will now process this task automatically. You'll receive a notificati
         self.session_store.unbind(update.effective_chat.id)
         await update.message.reply_text(f"Session `{session.session_id}` closed.")
 
-    async def notify_completion(self, task_id: str, summary: str, success: bool = True):
-        """Notify users of task completion"""
+    async def notify_completion(self, task_id: str, summary: str, success: bool = True, chat_id: Optional[int] = None):
+        """Notify of task completion.
+
+        If chat_id is given (session tasks), send only to that chat.
+        Otherwise broadcast to allowed_users or notification_chat_id.
+        """
         if not self.app or not self.is_running:
             return
-            
+
         try:
             status_icon = "✅" if success else "❌"
             status_text = "COMPLETED" if success else "FAILED"
-            
-            message = f"""
-{status_icon} Task {task_id} {status_text}
-
-**Summary:**
-{summary[:500]}{'...' if len(summary) > 500 else ''}
-
-**Next Steps:**
-Check the results in `results/{task_id}.json` and summary in `summaries/{task_id}_summary.txt`
-            """.strip()
-            
-            # Preferred: send to allowed users
-            if self.allowed_users:
-                for user_id in self.allowed_users:
-                    try:
-                        await self.app.bot.send_message(chat_id=user_id, text=message)
-                    except Exception as e:
-                        logger.warning(f"Failed to notify user {user_id}: {e}")
+            # For session tasks send the raw output directly; for standalone wrap it.
+            if chat_id:
+                message = f"{status_icon} {summary[:4000]}"
             else:
-                # Fallback: use configured notification chat id when allowlist is empty
+                message = (
+                    f"{status_icon} Task {task_id} {status_text}\n\n"
+                    f"{summary[:500]}{'...' if len(summary) > 500 else ''}"
+                )
+
+            if chat_id:
+                try:
+                    await self.app.bot.send_message(chat_id=chat_id, text=message)
+                except Exception as e:
+                    logger.warning(f"Failed to notify chat {chat_id}: {e}")
+            elif self.allowed_users:
+                for uid in self.allowed_users:
+                    try:
+                        await self.app.bot.send_message(chat_id=uid, text=message)
+                    except Exception as e:
+                        logger.warning(f"Failed to notify user {uid}: {e}")
+            else:
                 try:
                     from config import config as app_config
-                    chat_id = getattr(app_config.telegram, "notification_chat_id", None)
-                    if chat_id:
-                        await self.app.bot.send_message(chat_id=chat_id, text=message)
+                    fallback_chat = getattr(app_config.telegram, "notification_chat_id", None)
+                    if fallback_chat:
+                        await self.app.bot.send_message(chat_id=fallback_chat, text=message)
                     else:
-                        logger.info(f"Task {task_id} completed, but no notification target configured")
+                        logger.info(f"Task {task_id} completed, no notification target configured")
                 except Exception as e:
-                    logger.warning(f"Failed to notify default chat: {e}")
-                
+                    logger.warning(f"Failed to notify fallback chat: {e}")
+
         except Exception as e:
             logger.error(f"Failed to send completion notification for task {task_id}: {e}")
     
@@ -774,7 +779,7 @@ Please check the system logs for more details.
             logger.error(f"Git commit command failed: {e}")
     
     async def _handle_git_commit_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /commit-all command for committing all staged changes"""
+        """Handle /commit_all command for committing all staged changes"""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
@@ -784,7 +789,7 @@ Please check the system logs for more details.
             args = context.args if context.args else []
             if len(args) < 1:
                 await update.message.reply_text(
-                    "❌ Usage: `/commit-all <task_id> [--no-branch] [--push]`\n"
+                    "❌ Usage: `/commit_all <task_id> [--no-branch] [--push]`\n"
                     "⚠️  This commits ALL staged changes - use with caution!"
                 )
                 return
@@ -838,11 +843,11 @@ Please check the system logs for more details.
                 await update.message.reply_text(error_msg)
                 
         except Exception as e:
-            await update.message.reply_text(f"❌ Error processing commit-all command: {e}")
-            logger.error(f"Git commit-all command failed: {e}")
+            await update.message.reply_text(f"❌ Error processing commit_all command: {e}")
+            logger.error(f"Git commit_all command failed: {e}")
     
     async def _handle_git_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /git-status command for showing git repository status"""
+        """Handle /git_status command for showing git repository status"""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
