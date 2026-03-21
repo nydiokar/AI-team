@@ -11,8 +11,6 @@ class TaskType(Enum):
     SUMMARIZE = "summarize"
     FIX = "fix"
     ANALYZE = "analyze"
-    DOCUMENTATION = "documentation"
-    BUG_FIX = "bug_fix"  # Alias for FIX to match agent names
 
 class TaskPriority(Enum):
     HIGH = "high"

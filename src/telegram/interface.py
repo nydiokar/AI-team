@@ -62,12 +62,6 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("status", self._handle_status_command))
         self.app.add_handler(CommandHandler("progress", self._handle_progress_command))
         self.app.add_handler(CommandHandler("cancel", self._handle_cancel_command))
-        # Agent command handlers (explicit)
-        self.app.add_handler(CommandHandler("documentation", self._handle_agent_documentation))
-        self.app.add_handler(CommandHandler("code_review", self._handle_agent_code_review))
-        self.app.add_handler(CommandHandler("bug_fix", self._handle_agent_bug_fix))
-        self.app.add_handler(CommandHandler("analyze", self._handle_agent_analyze))
-        
         # Git automation command handlers
         self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
         self.app.add_handler(CommandHandler("commit-all", self._handle_git_commit_all))
@@ -169,14 +163,10 @@ You can also just send me a message describing what you want to do!
 📚 AI Task Orchestrator Help
 
 **Commands:**
-• `/task <description>` - Create a new AI task
+• `/task <description>` - Create a new task (just describe what you want)
 • `/status` - Show current system status
 • `/progress <task_id>` - Show recent events for a task
 • `/cancel <task_id>` - Cancel a running task
-• `/documentation <intent>` - Create a documentation task (attach files optionally)
-• `/code_review <intent>` - Create a code review task
-• `/bug_fix <intent>` - Create a bug fix task
-• `/analyze <intent>` - Create an analysis task
 
 **Git Automation:**
 • `/commit <task_id> [--no-branch] [--push]` - Commit task changes safely
@@ -185,19 +175,13 @@ You can also just send me a message describing what you want to do!
 
 **Examples:**
 • `/task Review the authentication code in /auth-system`
-• `/task Create a new pijama directory and set up a Python project there`
 • `/task Fix the database connection timeout in /backend`
+• Or just send a plain message describing what you want done
 
 **Working Directories:**
 • Use "in /project-name" to specify where to work
 • Use "in C:\\path\\to\\project" for absolute paths
-• If no path specified, Claude starts in Projects root
-
-**Task Types:**
-• `fix` - Bug fixes and error corrections
-• `analyze` - Code analysis and improvements  
-• `code_review` - Code review and feedback
-• `summarize` - Code summarization and documentation
+• If no path specified, Claude starts in the configured base directory
         """.strip()
         
         await update.message.reply_text(help_text)
@@ -513,73 +497,6 @@ The system will now process this task automatically. You'll receive a notificati
             await update.message.reply_text(error_msg)
             logger.error(f"Telegram message-to-task creation failed: {e}")
 
-    # --- Agent commands ---
-    async def _handle_agent_command(self, agent: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._check_user_permission(update.effective_user.id):
-            await update.message.reply_text("❌ Access denied.")
-            return
-            
-        # Check rate limiting for task creation
-        if not self._check_rate_limit(update.effective_user.id):
-            try:
-                from config import config as app_config
-                window_sec = app_config.system.telegram_rate_limit_window_sec
-                max_req = app_config.system.telegram_rate_limit_requests
-            except Exception:
-                window_sec = 60
-                max_req = 5
-            await update.message.reply_text(
-                f"🚫 Rate limit exceeded. Maximum {max_req} task requests per {window_sec} seconds."
-            )
-            return
-        intent_text = " ".join(context.args).strip()
-        if not intent_text:
-            await update.message.reply_text("❌ Please provide a brief intent or description.")
-            return
-        try:
-            # Download attached documents (if any) to a safe location under tasks/
-            files: list[str] = []
-            try:
-                if update.message and update.message.document:
-                    doc = update.message.document
-                    tg_file = await context.bot.get_file(doc.file_id)
-                    from config import config as app_config
-                    attachments_dir = Path(app_config.system.tasks_dir) / "attachments"
-                    attachments_dir.mkdir(parents=True, exist_ok=True)
-                    safe_name = doc.file_name or f"file_{doc.file_id}"
-                    target_path = attachments_dir / safe_name
-                    await tg_file.download_to_drive(custom_path=str(target_path))
-                    files.append(str(target_path))
-            except Exception as e:
-                logger.warning(f"Attachment download failed or none present: {e}")
-
-            # Create simple task directly (no LLAMA expansion)
-            task_id = self.orchestrator.create_task_from_description(
-                f"{agent.replace('_', ' ').title()}: {intent_text}",
-                task_type=agent,
-                target_files=files
-            )
-
-            await update.message.reply_text(
-                f"✅ {agent.replace('_',' ').title()} task created: `{task_id}`\n"
-                f"Description: {intent_text}"
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Failed to create {agent} task: {e}")
-            logger.error(f"Agent command failed ({agent}): {e}")
-
-    async def _handle_agent_documentation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self._handle_agent_command("documentation", update, context)
-
-    async def _handle_agent_code_review(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self._handle_agent_command("code_review", update, context)
-
-    async def _handle_agent_bug_fix(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self._handle_agent_command("bug_fix", update, context)
-
-    async def _handle_agent_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self._handle_agent_command("analyze", update, context)
-    
     async def notify_completion(self, task_id: str, summary: str, success: bool = True):
         """Notify users of task completion"""
         if not self.app or not self.is_running:
