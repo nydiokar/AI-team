@@ -2,17 +2,19 @@
 ClaudeCodeBackend — wraps the Claude Code CLI.
 
 First turn:  claude -p "<message>" --output-format json ...
-Resume turn: claude --resume <backend_session_id> -p "<message>" --output-format json ...
+Resume turn: claude --resume <backend_session_id> --output-format json -p "<message>"
+
+These methods are synchronous and are called via asyncio.to_thread() by the
+orchestrator, so they must NOT use asyncio internally.
 
 The backend_session_id is extracted from Claude's JSON output field `session_id`
 and stored in the gateway Session record for subsequent resumes.
 """
-import asyncio
 import json
 import logging
 import shutil
+import subprocess
 import time
-from pathlib import Path
 from typing import List, Optional
 
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
@@ -28,30 +30,23 @@ class ClaudeCodeBackend(CodingBackend):
         self._exe = shutil.which("claude") or "claude"
 
     # ------------------------------------------------------------------
-    # CodingBackend interface
+    # CodingBackend interface  (all sync — called via asyncio.to_thread)
     # ------------------------------------------------------------------
 
     def create_session(self, session: Session) -> ExecutionResult:
         """First turn — no resume flag, capture the native session ID from output."""
-        return asyncio.get_event_loop().run_until_complete(
-            self._run(session.repo_path, session.last_user_message, resume_id=None)
-        )
+        return self._run(session.repo_path, session.last_user_message, resume_id=None)
 
     def resume_session(self, session: Session, message: str) -> ExecutionResult:
         """Continue an existing session via --resume."""
-        return asyncio.get_event_loop().run_until_complete(
-            self._run(session.repo_path, message, resume_id=session.backend_session_id or None)
-        )
+        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None)
 
     def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
         """Stateless single turn."""
-        return asyncio.get_event_loop().run_until_complete(
-            self._run(cwd, message, resume_id=None)
-        )
+        return self._run(cwd, message, resume_id=None)
 
     def cancel(self, session: Session) -> None:
-        # Claude Code has no remote cancel API; subprocess cancellation is
-        # handled by the orchestrator via asyncio task cancellation.
+        # Subprocess cancellation is handled by the orchestrator via asyncio task cancellation.
         pass
 
     def close(self, session: Session) -> None:
@@ -62,20 +57,18 @@ class ClaudeCodeBackend(CodingBackend):
     # Internal
     # ------------------------------------------------------------------
 
-    async def _run(self, cwd: str, message: str, resume_id: Optional[str]) -> ExecutionResult:
+    def _run(self, cwd: str, message: str, resume_id: Optional[str]) -> ExecutionResult:
         start = time.time()
-        cmd = self._build_cmd(message, resume_id)
+        cmd = self._build_cmd(resume_id)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc = subprocess.run(
+                cmd,
+                input=message.encode(),
+                capture_output=True,
                 cwd=cwd or None,
             )
-            stdout_b, stderr_b = await proc.communicate(message.encode())
-            stdout = stdout_b.decode(errors="replace")
-            stderr = stderr_b.decode(errors="replace")
+            stdout = proc.stdout.decode(errors="replace")
+            stderr = proc.stderr.decode(errors="replace")
             elapsed = time.time() - start
             return self._parse(stdout, stderr, proc.returncode, elapsed)
         except Exception as e:
@@ -86,10 +79,11 @@ class ClaudeCodeBackend(CodingBackend):
                 execution_time=time.time() - start,
             )
 
-    def _build_cmd(self, message: str, resume_id: Optional[str]) -> List[str]:
-        cmd = [self._exe, "--output-format", "json", "-p"]
+    def _build_cmd(self, resume_id: Optional[str]) -> List[str]:
         if resume_id:
             cmd = [self._exe, "--resume", resume_id, "--output-format", "json", "-p"]
+        else:
+            cmd = [self._exe, "--output-format", "json", "-p"]
         cmd.extend(["--allowedTools", ",".join(_DEFAULT_TOOLS)])
         return cmd
 

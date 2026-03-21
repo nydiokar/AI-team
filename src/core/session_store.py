@@ -17,8 +17,10 @@ from .interfaces import Session, SessionStatus
 
 logger = logging.getLogger(__name__)
 
-_SESSIONS_DIR = Path("state/sessions")
-_BINDINGS_FILE = Path("state/telegram/active_bindings.json")
+# Anchor to the project root (three levels up from this file: src/core/session_store.py)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_SESSIONS_DIR = _PROJECT_ROOT / "state" / "sessions"
+_BINDINGS_FILE = _PROJECT_ROOT / "state" / "telegram" / "active_bindings.json"
 
 
 class SessionStore:
@@ -95,7 +97,12 @@ class SessionStore:
         session_id = bindings.get(str(chat_id))
         if not session_id:
             return None
-        return self.get(session_id)
+        session = self.get(session_id)
+        if session and session.status == SessionStatus.CLOSED:
+            # Stale binding — clean it up and treat as no active session
+            self.unbind(chat_id)
+            return None
+        return session
 
     # ------------------------------------------------------------------
     # Internal helpers

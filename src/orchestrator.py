@@ -584,15 +584,18 @@ class TaskOrchestrator(ITaskOrchestrator):
         try:
             task.status = TaskStatus.PROCESSING
             
-            # Step 1: Use LLAMA to parse and optimize the task (or fallback)
-            logger.debug(f"Step 1: Parsing task {task.id} with LLAMA mediator")
-            task_content = self._reconstruct_task_content(task)
-            parsed_task = self.llama_mediator.parse_task(task_content)
-            
-            # Step 2: Create optimized Claude prompt
-            logger.debug(f"Step 2: Creating Claude prompt for task {task.id}")
-            claude_prompt = self.llama_mediator.create_claude_prompt(parsed_task)
-            task.prompt = claude_prompt
+            # Step 1 & 2: LLAMA prompt shaping — skip for session tasks so the
+            # user's message reaches the backend unmodified.
+            _session_id_check = (task.metadata or {}).get("session_id", "").strip()
+            if not _session_id_check:
+                logger.debug(f"Step 1: Parsing task {task.id} with LLAMA mediator")
+                task_content = self._reconstruct_task_content(task)
+                parsed_task = self.llama_mediator.parse_task(task_content)
+                logger.debug(f"Step 2: Creating Claude prompt for task {task.id}")
+                claude_prompt = self.llama_mediator.create_claude_prompt(parsed_task)
+                task.prompt = claude_prompt
+            else:
+                logger.debug(f"Step 1-2: Skipping LLAMA rewrite for session task {task.id}")
             
             # Step 3: Execute via session backend (resume) or Claude bridge (stateless)
             logger.debug(f"Step 3: Executing task {task.id}")
@@ -1074,8 +1077,6 @@ created: {task.created}
         # Override task type if provided
         if task_type:
             parsed["type"] = task_type
-            # Mark this as a manually selected agent for bypass logic
-            parsed.setdefault("metadata", {})["agent_type"] = task_type
         
         # Override target files if provided
         if target_files:
@@ -1107,7 +1108,7 @@ type: {parsed.get('type', 'analyze')}
 priority: {parsed.get('priority', 'medium')}
 created: {datetime.now().isoformat()}
 cwd: {parsed.get('metadata', {}).get('cwd', '')}
-session_id: {session_id or ''}
+session_id: {session_id or ""}
 ---
 
 # {parsed.get('title', 'Auto-generated Task')}
@@ -1274,8 +1275,9 @@ Generated from agent expansion with attachments copied to working directory
     def _write_session_summary(self, session, result: TaskResult) -> None:
         """Write/overwrite a compact human-readable summary for a session."""
         try:
-            import json as _json
-            summaries_dir = Path("state/summaries")
+            # Same project-root anchor as SessionStore
+            project_root = Path(__file__).resolve().parent.parent
+            summaries_dir = project_root / "state" / "summaries"
             summaries_dir.mkdir(parents=True, exist_ok=True)
             lines = [
                 f"# Session {session.session_id}",
