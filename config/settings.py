@@ -83,7 +83,6 @@ class SystemConfig:
     max_queue_size: int = 50
     telegram_rate_limit_requests: int = 5
     telegram_rate_limit_window_sec: int = 60
-    agents_enabled: bool = True # Default to True
     
 class Config:
     """Main configuration class"""
@@ -228,14 +227,6 @@ class Config:
                 self.system.telegram_rate_limit_window_sec = max(1, int(tg_window))
         except Exception:
             pass
-        # Agent system control
-        try:
-            agents_enabled = os.getenv("AGENTS_ENABLED")
-            if agents_enabled is not None:
-                self.system.agents_enabled = agents_enabled.lower() == "true"
-        except Exception:
-            pass
-
     def reload_from_env(self) -> None:
         """Reload environment-derived configuration fields at runtime.
 

@@ -91,8 +91,8 @@ class OrchestratorCLI:
             signal.signal(sig, self._signal_handler)
         
         try:
-            print("AI Task Orchestrator")
-            print("===================")
+            print("Telegram Coding Gateway")
+            print("=======================")
             print()
             
             # Start orchestrator
@@ -177,8 +177,8 @@ async def show_status():
     
     status = orchestrator.get_status()
     
-    print("AI Task Orchestrator Status")
-    print("===========================")
+    print("Telegram Coding Gateway Status")
+    print("==============================")
     print()
     
     cli = OrchestratorCLI()
@@ -209,7 +209,7 @@ async def test_telegram_interface():
         await orchestrator.telegram_interface.start()
         await orchestrator.telegram_interface.notify_completion(
             "test_task",
-            "This is a test notification from the AI Task Orchestrator",
+            "This is a test notification from the Telegram Coding Gateway",
             success=True,
         )
         # Give Telegram API a brief moment
@@ -278,10 +278,10 @@ def main():
 
 def print_help():
     """Print help information"""
-    print("""AI Task Orchestrator
+    print("""Telegram Coding Gateway
 
 Usage:
-    python main.py                 Start the orchestrator
+    python main.py                 Start the gateway
     python main.py status          Show component status
     python main.py stats           Show metrics from logs/events.ndjson
     python main.py create-sample   Create a sample task for testing
@@ -303,7 +303,7 @@ Environment Setup:
     - TELEGRAM_BOT_TOKEN (optional for Telegram integration)
     - TELEGRAM_ALLOWED_USERS (optional)
     - TELEGRAM_CHAT_ID (optional)
-    - AGENTS_ENABLED (optional, default: true) - Set to "false" to disable agent system
+    - CLAUDE_BASE_CWD / CLAUDE_ALLOWED_ROOT (recommended for bounded workspace scope)
 
 Directory Structure:
     tasks/      - Drop .task.md files here
@@ -311,7 +311,7 @@ Directory Structure:
     summaries/  - Task result summaries
     logs/       - System logs
 
-For full functionality, ensure Claude Code CLI is installed and accessible.
+For full functionality, ensure Claude Code CLI or Codex CLI is installed and accessible.
 """)
 
 def _handle_clean(args):
@@ -703,9 +703,10 @@ def _doctor():
         print(f"  Guarded write    : {getattr(config.system, 'guarded_write', False)}")
     except Exception:
         pass
-    print(f"  Agents enabled    : {config.system.agents_enabled}")
     print(f"  Base CWD          : {config.claude.base_cwd}")
     print(f"  Allowed root      : {config.claude.allowed_root}")
+    if not config.claude.base_cwd or not config.claude.allowed_root:
+        print("  Scope warning     : CLAUDE_BASE_CWD / CLAUDE_ALLOWED_ROOT are unset; path safety is weaker")
 
     # Basic directory diagnostics (existence and readability)
     print("\nDirectory diagnostics:")

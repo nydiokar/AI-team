@@ -252,7 +252,11 @@ class ITaskOrchestrator(ABC):
         pass
 
 class IAgent(ABC):
-    """Interface for modular task agents"""
+    """Interface for the dormant local-agent layer.
+
+    This is retained for possible future opt-in local operations, not for the
+    current primary product path.
+    """
     
     @abstractmethod
     def get_agent_name(self) -> str:

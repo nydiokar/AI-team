@@ -1,5 +1,19 @@
 """
-LLAMA mediator with intelligent fallback modes
+LLAMA mediator.
+
+Important status note:
+- This module is intentionally kept in the repo as a future local operational layer.
+- It is NOT the primary execution path for the current product.
+- The current product path is session-first and backend-native:
+  Telegram -> gateway session -> Claude Code / Codex native resume.
+
+What remains active here today:
+- result summarization
+- optional helper utilities that are safe to keep around
+
+What is intentionally not on the hot path anymore:
+- local prompt "smartening"
+- local agent-template orchestration for Claude/Codex turns
 """
 import json
 import re
@@ -23,12 +37,11 @@ from config import config
 logger = logging.getLogger(__name__)
 
 class LlamaMediator(ILlamaMediator):
-    """LLAMA mediator with automatic fallback to simple parsing.
+    """Optional local helper layer.
 
-    Provides three roles when available:
-    - Parse task files into normalized fields (type, targets, main request)
-    - Create optimized Claude prompts (task-type aware)
-    - Summarize results into concise human-readable summaries
+    Keep this module for future local-agent experiments, but do not treat it as
+    the product's main decision-maker. The live product should prefer the native
+    backend runtime of Claude Code / Codex over local prompt engineering.
     """
     
     def __init__(self):
@@ -212,7 +225,12 @@ class LlamaMediator(ILlamaMediator):
             }
     
     def create_claude_prompt(self, parsed_task: Dict[str, Any]) -> str:
-        """Create Claude-optimized prompt."""
+        """Create a Claude-oriented prompt template.
+
+        Dormant path:
+        - kept for possible future local-agent operational mode
+        - not used by the current session-first execution flow
+        """
         
         # Load general principles
         try:

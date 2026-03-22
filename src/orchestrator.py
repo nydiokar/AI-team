@@ -22,7 +22,6 @@ from src.bridges import ClaudeBridge, LlamaMediator
 from src.backends import ClaudeCodeBackend, CodexBackend
 from config import config
 from src.validation.engine import ValidationEngine
-from src.core.agent_manager import AgentManager
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.file_watcher = AsyncFileWatcher(config.system.tasks_dir)
         self.claude_bridge = ClaudeBridge()
         self.llama_mediator = LlamaMediator()
-        self.agent_manager = AgentManager()
         self.session_store = SessionStore()
         self._backends = {
             "claude": ClaudeCodeBackend(),
@@ -583,7 +581,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """Process a single task through the complete pipeline.
 
         Steps:
-        1) Build Claude prompt (LLAMA-assisted if enabled) and execute via CLI
+        1) Execute the task via backend-native session resume or stateless Claude bridge
         2) Summarize results with LLAMA (or fallback) for `summaries/*.txt`
         3) Run validation engine and attach metadata
         4) Persist `results/*.json` and emit events
@@ -593,21 +591,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         try:
             task.status = TaskStatus.PROCESSING
             
-            # Step 1 & 2: LLAMA prompt shaping — skip for session tasks so the
-            # user's message reaches the backend unmodified.
-            _session_id_check = (task.metadata or {}).get("session_id", "").strip()
-            if not _session_id_check:
-                logger.debug(f"Step 1: Parsing task {task.id} with LLAMA mediator")
-                task_content = self._reconstruct_task_content(task)
-                parsed_task = self.llama_mediator.parse_task(task_content)
-                logger.debug(f"Step 2: Creating Claude prompt for task {task.id}")
-                claude_prompt = self.llama_mediator.create_claude_prompt(parsed_task)
-                task.prompt = claude_prompt
-            else:
-                logger.debug(f"Step 1-2: Skipping LLAMA rewrite for session task {task.id}")
-            
-            # Step 3: Execute via session backend (resume) or Claude bridge (stateless)
-            logger.debug(f"Step 3: Executing task {task.id}")
+            # Keep the user's prompt intact. Native Claude/Codex runtime should decide
+            # how to approach the task rather than our local prompt-rewrite layer.
+            logger.debug(f"Executing task {task.id}")
             max_retries = getattr(config.validation, "max_retries", 2)
             retry_delay = 1.0
             backoff_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
@@ -1267,26 +1253,9 @@ Generated from agent expansion with attachments copied to working directory
         return task_id
     
     def _parse_description_simple(self, description: str) -> Dict[str, Any]:
-        """Simple parsing of task description"""
-        
-        # Basic keyword detection
-        text = description.lower()
-        task_type = "analyze"
-        # Treat action verbs as edit intent (fix) so Claude will make changes
-        edit_verbs = [
-            "fix", "bug", "error", "implement", "add", "create", "build",
-            "write", "generate", "apply", "refactor", "enforce", "replace",
-            "wire", "integrate"
-        ]
-        if any(word in text for word in edit_verbs):
-            task_type = "fix"
-        elif any(word in text for word in ["review", "check", "audit"]):
-            task_type = "code_review"
-        elif any(word in text for word in ["summary", "summarize", "outline", "overview"]):
-            task_type = "summarize"
-        
+        """Minimal task wrapper around a raw user instruction."""
         return {
-            "type": task_type,
+            "type": "analyze",
             "title": f"Task: {description[:50]}...",
             "prompt": description,
             "priority": "medium",
