@@ -137,9 +137,10 @@ class OrchestratorCLI:
         
         print(f"  File Watcher: {'[OK] Running' if components['file_watcher_running'] else '[--] Stopped'}")
         
-        # Show Telegram status
-        if hasattr(status, 'telegram_interface') and status.get('telegram_interface'):
-            print(f"  Telegram Bot: [OK] Available")
+        telegram_status = status.get("telegram", {})
+        if telegram_status.get("configured"):
+            label = "[OK] Running" if telegram_status.get("running") else "[--] Configured but stopped"
+            print(f"  Telegram Bot: {label}")
         else:
             print(f"  Telegram Bot: [--] Not configured (set TELEGRAM_BOT_TOKEN)")
         

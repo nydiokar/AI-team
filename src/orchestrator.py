@@ -16,7 +16,7 @@ import os
 
 from src.core import (
     ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskParser,
-    AsyncFileWatcher, SessionStore, SessionStatus
+    AsyncFileWatcher, SessionStore, SessionStatus, PathResolver
 )
 from src.bridges import ClaudeBridge, LlamaMediator
 from src.backends import ClaudeCodeBackend, CodexBackend
@@ -510,7 +510,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                             session.last_result_summary = (result.errors[0] if result.errors else result.output[:200]) if not result.success else result.output[:200]
                             artifact_path = str(Path(config.system.results_dir) / f"{task.id}.json")
                             session.last_artifact_path = artifact_path
-                            session.status = SessionStatus.IDLE if result.success else SessionStatus.ERROR
+                            if result.success:
+                                session.status = SessionStatus.AWAITING_INPUT
+                            elif "cancelled" in [str(err).lower() for err in (result.errors or [])]:
+                                session.status = SessionStatus.CANCELLED
+                            else:
+                                session.status = SessionStatus.ERROR
                             self.session_store.save(session)
 
                             # Compact summary  state/summaries/<session_id>.md
@@ -621,6 +626,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 session_id = (task.metadata or {}).get("session_id", "").strip()
                 session = self.session_store.get(session_id) if session_id else None
                 if session:
+                    session.status = SessionStatus.BUSY
+                    self.session_store.save(session)
                     backend = self._backends.get(session.backend, self._backends["claude"])
                     session.last_user_message = task.prompt
                     if session.backend_session_id:
@@ -673,6 +680,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                             await exec_task
                         execution_time = time.time() - start_time
                         self._emit_event("cancelled", task, {"when": "during_execution"})
+                        if session:
+                            session.status = SessionStatus.CANCELLED
+                            self.session_store.save(session)
                         return TaskResult(
                             task_id=task.id,
                             success=False,
@@ -689,6 +699,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                             await exec_task
                         execution_time = time.time() - start_time
                         self._emit_event("timeout", task, {"timeout_s": timeout_s})
+                        if session:
+                            session.status = SessionStatus.ERROR
+                            self.session_store.save(session)
                         return TaskResult(
                             task_id=task.id,
                             success=False,
@@ -1070,7 +1083,14 @@ created: {task.created}
     
     # Simulation execution removed: system now always runs real Claude Code CLI
     
-    def create_task_from_description(self, description: str, task_type: Optional[str] = None, target_files: Optional[List[str]] = None, session_id: Optional[str] = None) -> str:
+    def create_task_from_description(
+        self,
+        description: str,
+        task_type: Optional[str] = None,
+        target_files: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
+        cwd: Optional[str] = None,
+    ) -> str:
         """Create and persist a `.task.md` task from a natural language description.
 
         May use LLAMA to expand metadata; heuristically extracts `cwd` hints.
@@ -1091,7 +1111,7 @@ created: {task.created}
             parsed["target_files"] = target_files
         
         # Heuristic: detect inline path hints like "in C:\\Users\\..." or "in /path/..."
-        # and inject into frontmatter as `cwd` if allowed by config
+        # and inject into frontmatter as `cwd` if allowed by config.
         try:
             import re
             path_hint = None
@@ -1108,7 +1128,15 @@ created: {task.created}
                 parsed.setdefault("metadata", {})["cwd"] = path_hint
         except Exception:
             pass
-        
+
+        explicit_cwd = (cwd or parsed.get("metadata", {}).get("cwd") or "").strip()
+        if explicit_cwd:
+            resolved_cwd = PathResolver.from_config().resolve_execution_path(explicit_cwd)
+            if resolved_cwd:
+                parsed.setdefault("metadata", {})["cwd"] = resolved_cwd
+            else:
+                parsed.setdefault("metadata", {})["cwd"] = ""
+
         # Create task file
         task_content = f"""---
 id: {task_id}
@@ -1267,6 +1295,7 @@ Generated from agent expansion with attachments copied to working directory
     
     def get_status(self) -> Dict[str, Any]:
         """Get comprehensive orchestrator status"""
+        resolver = PathResolver.from_config()
         return {
             "running": self.running,
             "components": self.component_status,
@@ -1276,7 +1305,16 @@ Generated from agent expansion with attachments copied to working directory
                 "completed": len(self.task_results),
                 "workers": len(self.worker_tasks)
             },
-            "llama_status": self.llama_mediator.get_status()
+            "llama_status": self.llama_mediator.get_status(),
+            "telegram": {
+                "configured": bool(self.telegram_interface),
+                "running": bool(self.telegram_interface and self.telegram_interface.is_running),
+            },
+            "scope": {
+                "base_cwd": getattr(config.claude, "base_cwd", None),
+                "allowed_root": getattr(config.claude, "allowed_root", None),
+                "root_dirs": resolver.list_root_directories(limit=10),
+            },
         }
 
 

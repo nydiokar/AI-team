@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime
 import logging
 
-from src.core import IClaudeBridge, Task, TaskResult, TaskStatus
+from src.core import IClaudeBridge, Task, TaskResult, TaskStatus, PathResolver
 from config import config
 from src.core.git_file_detector import GitFileDetector
 
@@ -260,90 +260,13 @@ class ClaudeBridge(IClaudeBridge):
     def _resolve_cwd(self, task: Task) -> Optional[str]:
         """Resolve working directory for task execution."""
         try:
-            # Check for per-task cwd override in metadata
-            if hasattr(task, 'metadata') and task.metadata:
-                cwd_override = task.metadata.get('cwd')
-                if cwd_override and cwd_override.strip():
-                    cwd_override = cwd_override.strip()
-                    
-                    # Handle absolute paths
-                    if Path(cwd_override).is_absolute():
-                        candidate = Path(cwd_override)
-                        if candidate.exists() and candidate.is_dir():
-                            # Check if it's within allowed root
-                            allowed_root = getattr(config.claude, 'allowed_root', None)
-                            if allowed_root:
-                                try:
-                                    allowed_root_path = Path(allowed_root).resolve()
-                                    if not str(candidate).startswith(str(allowed_root_path)):
-                                        logger.warning(f"Absolute path {candidate} is outside allowed root {allowed_root_path}, falling back to base")
-                                        # Fall back to base directory instead of rejecting
-                                        base_cwd = getattr(config.claude, 'base_cwd', None)
-                                        if base_cwd:
-                                            try:
-                                                base = Path(base_cwd).resolve()
-                                                return str(base)
-                                            except Exception:
-                                                pass
-                                    else:
-                                        return str(candidate)
-                                except Exception:
-                                    # If check fails, allow the path
-                                    return str(candidate)
-                            else:
-                                return str(candidate)
-                    
-                    # Handle relative paths by appending to base_cwd
-                    base_cwd = getattr(config.claude, 'base_cwd', None)
-                    if base_cwd:
-                        try:
-                            # Handle POSIX-style paths on Windows (e.g., "/pijama" -> "pijama")
-                            if cwd_override.startswith('/') and cwd_override != '/':
-                                cwd_override = cwd_override[1:]  # Remove leading slash
-                            
-                            # Handle Windows backslash-relative paths (e.g., "\AI-team" -> "AI-team")
-                            if cwd_override.startswith('\\') and cwd_override != '\\':
-                                cwd_override = cwd_override[1:]  # Remove leading backslash
-                            
-                            # Combine base_cwd with relative path
-                            combined_path = Path(base_cwd) / cwd_override
-                            resolved_path = combined_path.resolve()
-                            
-                            # Verify the resolved path is within the allowed root
-                            allowed_root = getattr(config.claude, 'allowed_root', None)
-                            if allowed_root:
-                                try:
-                                    allowed_root_path = Path(allowed_root).resolve()
-                                    if not str(resolved_path).startswith(str(allowed_root_path)):
-                                        logger.warning(f"Resolved path {resolved_path} is outside allowed root {allowed_root_path}, falling back to base")
-                                        # Fall back to base directory instead of rejecting
-                                        try:
-                                            base = Path(base_cwd).resolve()
-                                            return str(base)
-                                        except Exception:
-                                            pass
-                                    else:
-                                        return str(resolved_path)
-                                except Exception:
-                                    # If check fails, allow the resolved path
-                                    return str(resolved_path)
-                            else:
-                                return str(resolved_path)
-                        except Exception as e:
-                            logger.debug(f"Error resolving relative path {cwd_override}: {e}")
-            
-            # Use base_cwd from config if set (fallback)
-            base_cwd = getattr(config.claude, 'base_cwd', None)
-            if base_cwd:
-                try:
-                    base = Path(base_cwd).resolve()
-                    return str(base)
-                except Exception:
-                    pass
-            
-            # No fallback - return None
-            return None
-            
+            cwd_override = ""
+            if hasattr(task, "metadata") and task.metadata:
+                cwd_override = str(task.metadata.get("cwd") or "").strip()
+            resolved = PathResolver.from_config().resolve_execution_path(cwd_override)
+            if cwd_override and resolved is None:
+                logger.warning("Unable to resolve task cwd=%s; falling back to default", cwd_override)
+            return resolved
         except Exception:
             return None
     
