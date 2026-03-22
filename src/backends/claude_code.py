@@ -81,9 +81,9 @@ class ClaudeCodeBackend(CodingBackend):
 
     def _build_cmd(self, resume_id: Optional[str]) -> List[str]:
         if resume_id:
-            cmd = [self._exe, "--resume", resume_id, "--output-format", "json", "-p"]
+            cmd = [self._exe, "--resume", resume_id, "--output-format", "json", "--dangerously-skip-permissions", "-p"]
         else:
-            cmd = [self._exe, "--output-format", "json", "-p"]
+            cmd = [self._exe, "--output-format", "json", "--dangerously-skip-permissions", "-p"]
         cmd.extend(["--allowedTools", ",".join(_DEFAULT_TOOLS)])
         return cmd
 
