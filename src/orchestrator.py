@@ -486,6 +486,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                                     content = summary_file.read_text(encoding='utf-8').strip() or "Task completed successfully"
                                 else:
                                     content = result.output.split('\n\n', 1)[0] if result.output else "Task completed successfully"
+                            # Append changed-file list if any were detected
+                            files = result.files_modified or []
+                            if files:
+                                lines = [f"  `{f}`" for f in files[:20]]
+                                if len(files) > 20:
+                                    lines.append(f"  _...and {len(files) - 20} more_")
+                                content = content + "\n\n**Changed files:**\n" + "\n".join(lines)
                             await self.telegram_interface.notify_completion(task.id, content, success=True, chat_id=notify_chat_id)
                         else:
                             error_summary = f"Task failed: {'; '.join(result.errors[:2])}" if result.errors else "Task failed"
@@ -516,6 +523,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 # the first 200 (always mid-explanation for session turns).
                                 out = (result.output or "").strip()
                                 session.last_result_summary = out[-400:] if len(out) > 400 else out
+                            session.last_files_modified = result.files_modified or []
                             artifact_path = str(Path(config.system.results_dir) / f"{task.id}.json")
                             session.last_artifact_path = artifact_path
                             if result.success:
@@ -1235,6 +1243,8 @@ Generated from user description: {description}
             project_root = Path(__file__).resolve().parent.parent
             summaries_dir = project_root / "state" / "summaries"
             summaries_dir.mkdir(parents=True, exist_ok=True)
+            files = result.files_modified or []
+            files_section = "\n".join(f"- {f}" for f in files[:30]) if files else "(none)"
             lines = [
                 f"# Session {session.session_id}",
                 f"Backend: {session.backend}  |  Status: {session.status.value}",
@@ -1247,6 +1257,9 @@ Generated from user description: {description}
                 "",
                 f"## Last result (tail)",
                 session.last_result_summary or "(none)",
+                "",
+                f"## Changed files",
+                files_section,
                 "",
                 f"## Last artifact",
                 session.last_artifact_path or "(none)",

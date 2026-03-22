@@ -177,9 +177,14 @@ class Session:
     last_summary: str = ""
     last_user_message: str = ""
     last_result_summary: str = ""
+    last_files_modified: List[str] = None
     telegram_chat_id: Optional[int] = None
     telegram_thread_id: Optional[int] = None
     owner_user_id: Optional[int] = None
+
+    def __post_init__(self):
+        if self.last_files_modified is None:
+            self.last_files_modified = []
 
 
 @dataclass
