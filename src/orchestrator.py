@@ -326,8 +326,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         and enqueues for processing.
         """
         try:
-            # Acquire per-file lock; skip if already processing
-            path_key = str(file_path)
+            # Normalize to absolute path so relative vs absolute variants
+            # of the same file don't bypass the inflight dedup check.
+            path_key = str(Path(file_path).resolve())
             if path_key in self._inflight_paths:
                 logger.info(f"event=task_skipped reason=already_inflight file={file_path}")
                 return
@@ -508,7 +509,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                         session = self.session_store.get(session_id)
                         if session:
                             session.last_task_id = task.id
-                            session.last_result_summary = (result.errors[0] if result.errors else result.output[:200]) if not result.success else result.output[:200]
+                            if not result.success:
+                                session.last_result_summary = result.errors[0] if result.errors else "(failed)"
+                            else:
+                                # Take the last ~400 chars (the conclusion) rather than
+                                # the first 200 (always mid-explanation for session turns).
+                                out = (result.output or "").strip()
+                                session.last_result_summary = out[-400:] if len(out) > 400 else out
                             artifact_path = str(Path(config.system.results_dir) / f"{task.id}.json")
                             session.last_artifact_path = artifact_path
                             if result.success:
@@ -729,7 +736,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             
             # Step 4: Summarize results with LLAMA — skip for session tasks so
             # Claude's actual response is preserved unmodified in output.
-            if not _session_id_check:
+            if not session_id:
                 logger.debug(f"Step 4: Summarizing results for task {task.id}")
                 summary = self.llama_mediator.summarize_result(last_result, task)
                 last_result.output = summary + "\n\n" + last_result.output
@@ -738,20 +745,30 @@ class TaskOrchestrator(ITaskOrchestrator):
             else:
                 logger.debug(f"Step 4: Skipping LLAMA summarization for session task {task.id}")
             
-            # Step 5: Validation pass (MVP)
+            # Step 5: Validation pass (MVP) — skip sentence-transformer similarity
+            # for session tasks; the llama check is meaningless there and triggers
+            # the expensive SentenceTransformer encode on every turn.
             try:
-                validation_summary = {
-                    "llama": self.validation_engine.validate_llama_output(
-                        input_text=task.prompt or "",
-                        output=last_result.output or "",
-                        task_type=task.type,
-                    ).__dict__,
-                    "result": self.validation_engine.validate_task_result(
+                if session_id:
+                    llama_validation = self.validation_engine.validate_task_result(
                         result=last_result,
                         expected_files=task.target_files or [],
                         task_type=task.type,
-                    ).__dict__,
-                }
+                    ).__dict__
+                    validation_summary = {"llama": {"valid": True, "skipped": True}, "result": llama_validation}
+                else:
+                    validation_summary = {
+                        "llama": self.validation_engine.validate_llama_output(
+                            input_text=task.prompt or "",
+                            output=last_result.output or "",
+                            task_type=task.type,
+                        ).__dict__,
+                        "result": self.validation_engine.validate_task_result(
+                            result=last_result,
+                            expected_files=task.target_files or [],
+                            task_type=task.type,
+                        ).__dict__,
+                    }
                 # Attach lightweight validation data into parsed_output for artifacts
                 if isinstance(last_result.parsed_output, dict):
                     last_result.parsed_output.setdefault("validation", validation_summary)
@@ -1166,6 +1183,14 @@ Generated from user description: {description}
             task_file.write_text(task_content, encoding='utf-8')
         
         logger.info(f"Created task file: {task_file}")
+
+        # Directly trigger processing so we don't rely solely on the file watcher.
+        # On Windows, watchdog can miss the atomic rename event. Calling
+        # _handle_new_task_file here ensures the task is always picked up even
+        # if the watcher fires late or not at all.
+        if self.running:
+            asyncio.ensure_future(self._handle_new_task_file(str(task_file)))
+
         return task_id
 
     def _parse_description_simple(self, description: str) -> Dict[str, Any]:
@@ -1215,11 +1240,12 @@ Generated from user description: {description}
                 f"Backend: {session.backend}  |  Status: {session.status.value}",
                 f"Path: {session.repo_path}",
                 f"Updated: {session.updated_at}",
+                f"Backend session: {session.backend_session_id or '(not yet captured)'}",
                 "",
                 f"## Last instruction",
                 session.last_user_message or "(none)",
                 "",
-                f"## Last result",
+                f"## Last result (tail)",
                 session.last_result_summary or "(none)",
                 "",
                 f"## Last artifact",
