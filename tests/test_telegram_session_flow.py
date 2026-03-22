@@ -163,3 +163,28 @@ async def test_run_routes_to_active_session_with_bound_cwd(monkeypatch, isolated
         assert "Running in session" in update.message.replies[-1]
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_help_lists_current_command_set(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+
+        update = _DummyUpdate()
+        await bot._handle_help(update, _DummyContext())
+
+        text = update.message.replies[-1]
+        assert "/session_new <backend> <path>" in text
+        assert "/session_dirs [path]" in text
+        assert "/session_cancel [session_id]" in text
+        assert "/run <instruction>" in text
+        assert "/say <instruction>" in text
+        assert "/documentation" not in text
+        assert "/code_review" not in text
+        assert "/bug_fix" not in text
+        assert "/analyze" not in text
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)

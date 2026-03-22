@@ -25,12 +25,6 @@ if TYPE_CHECKING:
         import ollama
     except ImportError:
         pass
-from datetime import datetime
-from pathlib import Path
-
-import sys
-import os
-
 from src.core import ILlamaMediator, Task, TaskResult, TaskType
 from config import config
 
@@ -231,113 +225,19 @@ class LlamaMediator(ILlamaMediator):
         - kept for possible future local-agent operational mode
         - not used by the current session-first execution flow
         """
-        
-        # Load general principles
-        try:
-            root = Path(__file__).resolve().parents[2]
-            general_principles_path = root / "prompts" / "general_prompt_coding.md"
-            general_principles = general_principles_path.read_text(encoding="utf-8") if general_principles_path.exists() else "Follow best coding practices and maintain code quality."
-        except Exception as e:
-            logger.warning(f"Could not load general principles: {e}")
-            general_principles = "Follow best coding practices and maintain code quality."
-        
-        # Get agent instructions (from file or hardcoded fallback)
-        agent_type = parsed_task.get('metadata', {}).get('agent_type') or parsed_task.get('type', 'analyze')
-        agent_instructions = self._get_agent_instructions(agent_type)
-        
-        # TODO: ARCHITECTURAL DECISION - Remove LLAMA from prompt generation
-        # Current: Use LLAMA to "enhance" prompt, but this adds complexity and unpredictability
-        # Better: Use mechanical template assembly directly - it's faster, reliable, and uses curated agent content
-        # 
-        # CHANGE TO MAKE: Replace this entire if/else block with just:
-        # return self._build_prompt_template(parsed_task, general_principles, agent_instructions)
-        # 
-        # REASON: Agent files already contain crafted instructions. LLAMA rewriting them adds:
-        # - Unpredictable output format
-        # - Latency and resource usage  
-        # - Potential hallucination/degradation of carefully crafted prompts
-        # - External dependency that can fail
-        #
-        # KEEP LLAMA FOR: Task parsing, result summarization, agent expansion (where it adds clear value)
-        # REMOVE LLAMA FROM: Prompt generation (where templates work better)
-        
-        if self.ollama_available and self.client and self.model_installed:
-            return self._build_prompt_with_llama(parsed_task, general_principles, agent_instructions)
-        else:
-            return self._build_prompt_template(parsed_task, general_principles, agent_instructions)
-    
-    def _build_prompt_with_llama(self, parsed_task: Dict[str, Any], general_principles: str, agent_instructions: str) -> str:
-        """Use LLAMA to generate enhanced Claude prompt.
-        
-        TODO: CONSIDER REMOVING - This method asks LLAMA to rewrite already-crafted agent instructions.
-        The mechanical template assembly in _build_prompt_template() is likely better because:
-        - Uses curated agent content directly (no rewriting/degradation)  
-        - 100% predictable output format
-        - Faster (no LLM call)
-        - More reliable (no hallucination risk)
-        """
-        try:
-            task_type = (parsed_task.get('type') or 'analyze').lower()
-            user_intent = parsed_task.get('main_request', 'Complete the requested task')
-            
-            meta_prompt = f"""
-Create an optimized Claude prompt using this structure:
-"Our task today consists of {user_intent} for {task_type.replace('_', ' ')}.
-
-Following these core principles:
-{general_principles}
-
-For this specific {task_type.replace('_', ' ')} task:
-{agent_instructions}
-
-Task Details:
-- Title: {parsed_task.get('title', 'Auto-selected Task')}
-- Type: {task_type.replace('_', ' ').title()}
-- Priority: {parsed_task.get('priority', 'medium').title()}
-- Target Files: {', '.join(parsed_task.get('target_files', [])) or 'To be discovered'}
-
-Let's begin: {user_intent}
-
-Please provide a comprehensive approach following both principles and guidelines above."
-
-Return only the final prompt text:"""
-            
-            if not self.client:
-                raise RuntimeError("Ollama client not available")
-            response = self.client.generate(
-                model=config.llama.model,
-                prompt=meta_prompt,
-                options={'temperature': 0.3}
-            )
-            return response['response'].strip()
-            
-        except Exception as e:
-            logger.warning(f"LLAMA prompt creation failed, using template: {e}")
-            return self._build_prompt_template(parsed_task, general_principles, agent_instructions)
-    
-    def _build_prompt_template(self, parsed_task: Dict[str, Any], general_principles: str, agent_instructions: str) -> str:
-        """Create prompt using template structure."""
+        # Keep this intentionally simple and self-contained. We no longer read
+        # prompt templates from disk or try to orchestrate backend behavior via
+        # local agent files.
         task_type = (parsed_task.get('type') or 'analyze').lower()
         user_intent = parsed_task.get('main_request', 'Complete the requested task')
         target_files = parsed_task.get('target_files', [])
-        
-        prompt = f"""Our task today consists of {user_intent} for {task_type.replace('_', ' ')}.
-
-Following these core principles:
-{general_principles}
-
-For this specific {task_type.replace('_', ' ')} task, here are the specialized instructions:
-{agent_instructions}
-
-Task Details:
-- Title: {parsed_task.get('title', 'Auto-selected Task')}
-- Type: {task_type.replace('_', ' ').title()}
-- Priority: {parsed_task.get('priority', 'medium').title()}
-- Target Files: {', '.join(target_files) if target_files else 'To be discovered'}
-
-Let's begin: {user_intent}
-
-Please provide a comprehensive approach that follows both the general principles above and the specific {task_type.replace('_', ' ')} guidelines. Focus on quality, maintainability, and clear communication of what you accomplish."""
+        prompt = (
+            f"{user_intent}\n\n"
+            f"Task type: {task_type}\n"
+            f"Title: {parsed_task.get('title', 'Auto-selected Task')}\n"
+            f"Priority: {parsed_task.get('priority', 'medium')}\n"
+            f"Target Files: {', '.join(target_files) if target_files else 'To be discovered'}"
+        )
 
         # Cap prompt size to keep Claude requests reliable
         max_chars = getattr(config.llama, "max_prompt_chars", 32_000)
@@ -345,30 +245,6 @@ Please provide a comprehensive approach that follows both the general principles
             logger.info(f"event=truncate_prompt before_chars={len(prompt)} after_chars={max_chars}")
             prompt = prompt[:max_chars]
         return prompt
-    
-    def _get_agent_instructions(self, agent_type: str) -> str:
-        """Get agent instructions from file or fallback to hardcoded."""
-        # Try to load from agent file first
-        try:
-            root = Path(__file__).resolve().parents[2]
-            agent_file = root / "prompts" / "agents" / f"{agent_type}.md"
-            if agent_file.exists():
-                content = agent_file.read_text(encoding="utf-8")
-                # Extract actual instructions (skip template boilerplate)
-                if "Guidelines:" in content:
-                    return content.split("Guidelines:")[1].split("Few-shot examples:")[0].strip()
-                return content[:500]  # First part as fallback
-        except Exception as e:
-            logger.debug(f"Could not load agent file {agent_type}: {e}")
-        
-        # Hardcoded fallback (simplified)
-        fallbacks = {
-            'documentation': "Create comprehensive, well-structured documentation with examples",
-            'code_review': "Focus on security, correctness, performance, and maintainability", 
-            'bug_fix': "Reproduce issue, write tests, implement minimal fix, verify solution",
-            'analyze': "Examine code structure, identify improvements, propose actionable recommendations"
-        }
-        return fallbacks.get(agent_type, f"Perform {agent_type.replace('_', ' ')} task with attention to quality and best practices.")
     
     
     def summarize_result(self, result: TaskResult, original_task: Task) -> str:
@@ -455,100 +331,3 @@ Duration: {result.execution_time:.1f}s
             "model": config.llama.model if self.ollama_available else "fallback",
             "mode": "LLAMA" if self.ollama_available else "FALLBACK"
         }
-
-    # --- Agent expansion (command-driven) ---
-    def expand_agent_intent(self, agent: str, intent_text: str, files: Optional[List[str]] = None) -> Dict[str, Any]:
-        """Expand an agent command + brief intent into a structured enriched task using few-shot templates.
-
-        Returns a dict with keys: type, title, prompt, target_files, metadata.cwd (optional).
-        """
-        agent_norm = (agent or "").strip().lower().replace("-", "_")
-        files = files or []
-
-        # Resolve safe working directory hint from phrases like: new directory called "name"
-        cwd_hint: Optional[str] = None
-        try:
-            m = re.search(r"new\s+directory\s+called\s+\"?([^\"\n]+)\"?", intent_text, re.IGNORECASE)
-            if m:
-                safe_name = re.sub(r"[^A-Za-z0-9 _.-]", "", m.group(1)).strip().strip(". ")
-                base = config.claude.base_cwd
-                if base:
-                    sep = "\\" if "\\" in base else "/"
-                    cwd_hint = f"{base.rstrip(sep)}{sep}{safe_name}"
-        except Exception:
-            cwd_hint = None
-
-        # Build target files list from provided paths (sanitized, capped)
-        target_files: List[str] = []
-        for p in files[:20]:
-            try:
-                target_files.append(str(p))
-            except Exception:
-                continue
-
-        # Enforce template-driven expansion via LLAMA
-        if not self._load_agent_template(agent_norm):
-            available = ", ".join(self.list_available_agents())
-            raise ValueError(f"Unknown agent '{agent_norm}'. Available: {available}")
-        if not (self.ollama_available and self.client and self.model_installed):
-            raise RuntimeError("LLAMA (Ollama) is not available; cannot expand agent template")
-        return self._expand_with_llama_template(agent_norm, intent_text, target_files, cwd_hint)
-
-    def _load_agent_template(self, agent: str) -> Optional[str]:
-        try:
-            # Project root = .../AI-team; this file lives under src/bridges/
-            root = Path(__file__).resolve().parents[2]
-            path = root / "prompts" / "agents" / f"{agent}.md"
-            if path.exists():
-                return path.read_text(encoding="utf-8")
-        except Exception:
-            pass
-        return None
-
-    def list_available_agents(self) -> List[str]:
-        try:
-            root = Path(__file__).resolve().parents[2]
-            glob = (root / "prompts" / "agents").glob("*.md")
-            return sorted(p.stem for p in glob)
-        except Exception:
-            return []
-
-    def _expand_with_llama_template(self, agent: str, intent_text: str, target_files: List[str], cwd_hint: Optional[str]) -> Dict[str, Any]:
-        """Use few-shot prompt template to expand into a structured enriched task (JSON)."""
-        template = self._load_agent_template(agent)
-        if not template:
-            raise RuntimeError(f"Template not found for agent: {agent}")
-        # Build context payload
-        payload = {
-            "agent": agent,
-            "intent": intent_text,
-            "target_files": target_files,
-            "cwd_hint": cwd_hint or "",
-            "template_id": f"{agent}-v1"
-        }
-        prompt = (
-            template.strip()
-            + "\n\n" 
-            + "Context:" 
-            + "\n" 
-            + json.dumps(payload, ensure_ascii=False)
-            + "\n\n"
-            + "Respond with only a single JSON object with keys: type, title, prompt, target_files, metadata."
-        )
-        if not self.client:
-            raise RuntimeError("Ollama client not available")
-        response = self.client.generate(
-            model=config.llama.model,
-            prompt=prompt,
-            format='json',
-            options={'temperature': 0.2}
-        )
-        enriched = json.loads(response['response'])
-        # Basic normalization
-        enriched.setdefault("type", "analyze")
-        enriched.setdefault("title", "Enriched Task")
-        enriched.setdefault("target_files", target_files)
-        meta = enriched.setdefault("metadata", {})
-        if cwd_hint and not meta.get("cwd"):
-            meta["cwd"] = cwd_hint
-        return enriched

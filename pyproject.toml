@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ai-task-orchestrator"
 version = "0.1.0"
-description = "AI Task Orchestrator with LLAMA mediation and Claude Code bridge"
+description = "Telegram-controlled gateway for local coding agents with native Claude Code and Codex session resume"
 readme = "docs/README.md"
 requires-python = ">=3.11"
 authors = [{ name = "AI-team" }]
