@@ -221,10 +221,7 @@ class TelegramInterface:
             )
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
-            await update.message.reply_text(
-                f"Running in session `{active_session.session_id}` [{active_session.backend}]\n"
-                f"Task: `{task_id}`"
-            )
+            await update.message.reply_text("⏳ Working...")
             logger.info(
                 "user=%s chat=%s task=%s session=%s",
                 update.effective_user.id,
@@ -778,12 +775,13 @@ class TelegramInterface:
             return
 
         try:
-            status_icon = "✅" if success else "❌"
-            status_text = "COMPLETED" if success else "FAILED"
-            # For session tasks send the raw output directly; for standalone wrap it.
+            # Session tasks: send Claude's output directly, no task-runner framing.
+            # Standalone tasks: wrap with status header.
             if chat_id:
-                message = f"{status_icon} {summary[:4000]}"
+                message = summary[:4000] if success else f"❌ {summary[:4000]}"
             else:
+                status_icon = "✅" if success else "❌"
+                status_text = "completed" if success else "failed"
                 message = (
                     f"{status_icon} Task {task_id} {status_text}\n\n"
                     f"{summary[:500]}{'...' if len(summary) > 500 else ''}"
