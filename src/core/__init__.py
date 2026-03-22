@@ -8,6 +8,7 @@ from .interfaces import (
 )
 from .task_parser import TaskParser
 from .file_watcher import FileWatcher, AsyncFileWatcher
+from .path_resolver import PathResolver, PathResolution
 from .session_store import SessionStore
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "ITaskParser", "IClaudeBridge", "ILlamaMediator", "IValidationEngine",
     "ITelegramInterface", "IFileWatcher", "ITaskOrchestrator",
     "TaskParser", "FileWatcher", "AsyncFileWatcher",
+    "PathResolver", "PathResolution",
     "SessionStore",
 ]
