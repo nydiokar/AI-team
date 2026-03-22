@@ -19,6 +19,28 @@ from typing import List, Optional
 
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
+
+def _detect_changed_files(cwd: str) -> List[str]:
+    """Return list of modified/added/deleted files via git status --porcelain."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+        files = []
+        for line in result.stdout.splitlines():
+            if line.strip():
+                # porcelain format: "XY filename" — filename starts at col 3
+                files.append(line[3:].strip())
+        return files
+    except Exception:
+        return []
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TOOLS = ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]
@@ -70,7 +92,10 @@ class ClaudeCodeBackend(CodingBackend):
             stdout = proc.stdout.decode(errors="replace")
             stderr = proc.stderr.decode(errors="replace")
             elapsed = time.time() - start
-            return self._parse(stdout, stderr, proc.returncode, elapsed)
+            result = self._parse(stdout, stderr, proc.returncode, elapsed)
+            if cwd:
+                result.files_modified = _detect_changed_files(cwd)
+            return result
         except Exception as e:
             return ExecutionResult(
                 success=False,
