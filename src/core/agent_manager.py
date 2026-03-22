@@ -1,13 +1,21 @@
 """
-Agent Manager - Loads and manages modular task agents
+Dormant local-agent manager.
+
+Important status note:
+- This file is kept only as a future local operational layer.
+- It is not part of the current session-first gateway runtime.
+- The live path should rely on Claude Code / Codex native runtime behavior,
+  not local prompt-template agent selection.
+
+If this layer is revived later, it should be explicitly opt-in.
 """
 import logging
+import os
 from pathlib import Path
-from typing import Dict, Optional, Type
+from typing import Dict, Optional
 from abc import ABC
 
 from .interfaces import IAgent, TaskType
-from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +46,7 @@ class BaseAgent(ABC):
         return self._validation_thresholds
 
 class AgentManager:
-    """Manages loading and configuration of modular task agents"""
+    """Optional, opt-in local-agent loader for future experiments."""
     
     def __init__(self, agents_dir: str = "prompts/agents"):
         self.agents_dir = Path(agents_dir)
@@ -47,9 +55,9 @@ class AgentManager:
     
     def _load_agents(self):
         """Load all available agents from the agents directory"""
-        # Check if agents are enabled via configuration
-        if not config.system.agents_enabled:
-            logger.info("Agents disabled via configuration (AGENTS_ENABLED=false)")
+        # This layer is dormant unless explicitly enabled.
+        if os.getenv("LOCAL_AGENT_LAYER_ENABLED", "false").lower() != "true":
+            logger.info("Local agent layer dormant (set LOCAL_AGENT_LAYER_ENABLED=true to opt in)")
             return
             
         if not self.agents_dir.exists():
