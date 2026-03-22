@@ -1,53 +1,80 @@
-# Quick Start - Test the AI Task Orchestrator
+# Quick Start
 
-## 1. Start the System
-```bash
-cd orchestrator
-# Optional: allow non-interactive permissions for CI
-# On Windows PowerShell:
-#   $env:CLAUDE_SKIP_PERMISSIONS="true"  # only for unattended runs
+## 1. Install
+
+```powershell
+python -m venv .venv
+. .venv\Scripts\Activate.ps1
+pip install -e ".[dev,test,telegram]"
+```
+
+Optional:
+
+```powershell
+pip install -e ".[llama]"
+```
+
+## 2. Configure
+
+Copy `.env.example` to `.env` and set at least:
+
+```env
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_USERS=123456789
+
+CLAUDE_BASE_CWD=C:\Users\you\Projects
+CLAUDE_ALLOWED_ROOT=C:\Users\you\Projects
+```
+
+Recommended rule:
+- point both workspace values at the parent directory containing all repos the gateway may edit
+
+## 3. Check Environment
+
+```powershell
+python main.py doctor
+python main.py status
+```
+
+You want `doctor` to show:
+- Claude executable found
+- `Base CWD` set
+- `Allowed root` set
+
+## 4. Start The Gateway
+
+```powershell
 python main.py
 ```
 
-**Expected Output:**
-```
-AI Task Orchestrator
-===================
+Expected shape:
+- Telegram bot initializes
+- file watcher starts
+- workers start
+- the gateway waits for Telegram commands
 
-Component Status:
-  Claude Code CLI: [OK] Available
-  LLAMA/Ollama: [OK] Available (llama3.2:latest)
-  File Watcher: [OK] Running
+## 5. First Live Validation
 
-Orchestrator is running. Press Ctrl+C to stop.
-Watching for task files in: C:\Users\...\orchestrator\tasks
-```
+From Telegram:
 
-## 2. Watch the Magic Happen
+1. `/session_new claude <repo>`
+2. send a plain message like `inspect the repo and summarize current issues`
+3. check `state/sessions/<session_id>.json`
+4. send a second message
+5. verify the backend session id is reused and the conversation continues
 
-The system will automatically:
-1. 🔍 **Detect** the test task file
-2. 🦙 **LLAMA parses** the task intelligently (or fallback parser)
-3. 🤖 **Claude Code** executes the task (least-privilege tools)
-4. 🦙 **LLAMA summarizes** the results
-5. ✅ **Validation** checks (lightweight sanity/structure)
-6. 📁 **Saves** results and summaries, archives the task
+## Useful Files
 
-## 3. Check Results (after ~30-60 seconds)
+- `state/sessions/`
+- `state/summaries/`
+- `logs/events.ndjson`
+- `logs/session_events/`
+- `results/`
 
-**Files Created:**
-- `results/{task_id}.json`
-- `summaries/{task_id}_summary.txt`
+## If Something Looks Wrong
 
-**Events (NDJSON):**
-- `logs/events.ndjson` appends one line per event (e.g., `task_received`, `parsed`, `claude_started`, `summarized`, `validated`, `artifacts_written`, `task_archived`).
+- `python main.py doctor`
+- `python main.py status`
+- `python main.py tail-events`
 
-## 4. Verify Success
-
-Read `VERIFICATION_CONTEXT.md` for detailed verification steps.
-
-**Quick Check**: If both result files exist, the summary is non-empty, and `logs/events.ndjson` contains recent events, the system is working.
-
----
-
-**This is your complete AI-powered coding automation system!** 🚀
+If path creation fails from Telegram, the gateway now returns close directory matches and available nearby directories.

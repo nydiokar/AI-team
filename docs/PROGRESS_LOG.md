@@ -1,16 +1,23 @@
 # Progress Log
 
-## 2025-10-21
+## 2026-03-22
 
 ### Completed
-- Removed the Windows-specific default paths from `config/settings.py`, relying on environment overrides instead.
-- Refreshed `.env.example` with cross-platform defaults and Time-Lab placeholders.
-- Updated `docs/README.md` to explain environment setup and point to `docs/IMPLEMENTATION_ROADMAP.md` for detailed platform guidance.
 
-### Next Up
-- Finish Phase 0 of `docs/IMPLEMENTATION_ROADMAP.md`: validate a Linux/Nix run, capture sample artifacts, and confirm the orchestrator respects the injected paths.
-- Prepare for Time-Lab Phase 1 by sketching the artifact hand-off schema that the adapter will write.
+- Re-centered the repo around the actual product: a Telegram session-first coding gateway
+- Added shared path validation and path suggestions for session creation
+- Added Telegram commands for session directory listing, session cancellation, `/run`, and `/say`
+- Tightened session ownership checks and session state transitions
+- Removed prompt rewriting from the active execution path so Claude Code / Codex stay in control of their own runtime
+- Stopped surfacing the old local agent-layer as if it were active product behavior
+- Added focused tests for path resolution and Telegram session flow
+- Removed several stale tests and docs that described the older agent-template/orchestrator product
 
-### References
-- `docs/IMPLEMENTATION_ROADMAP.md`
-- `docs/ROADMAP.md`
+### Current Gate
+
+- Run a live end-to-end Telegram session resume test against Claude Code
+
+### Notes
+
+- LLAMA mediator is still present, but now explicitly treated as a dormant future layer rather than the active product path
+- The docs set was reduced to a small canonical publish-facing surface

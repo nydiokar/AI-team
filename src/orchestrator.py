@@ -1,5 +1,8 @@
 """
-Main AI Task Orchestrator - Coordinates all components
+Main gateway orchestrator.
+
+The current intended product path is session-first:
+Telegram -> gateway session -> Claude Code / Codex native resume.
 """
 import asyncio
 import logging
@@ -26,13 +29,13 @@ from src.validation.engine import ValidationEngine
 logger = logging.getLogger(__name__)
 
 class TaskOrchestrator(ITaskOrchestrator):
-    """Main orchestrator that coordinates all AI task processing.
+    """Main gateway coordinator.
 
     Responsibilities:
     - Watch `tasks/` for new `.task.md` files and parse them into `Task` objects
     - Queue and execute tasks concurrently with bounded worker pool
-    - Build prompts and invoke Claude Code via `ClaudeBridge`
-    - Optionally leverage LLAMA via `LlamaMediator` for parsing/summarization
+    - Route session tasks into backend-native Claude/Codex resume flows
+    - Keep LLAMA limited to optional helper duties such as summarization
     - Persist artifacts (`results/*.json`, `summaries/*.txt`) and maintain a lightweight index
     - Emit structured events to `logs/events.ndjson` for observability
 
@@ -120,7 +123,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.warning("Orchestrator is already running")
             return
         
-        logger.info("Starting AI Task Orchestrator...")
+        logger.info("Starting Telegram Coding Gateway...")
 
         # Mark running BEFORE starting workers so they don't immediately exit
         self.running = True
@@ -161,7 +164,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Log startup status
         self._log_startup_status()
         
-        logger.info("AI Task Orchestrator started successfully!")
+        logger.info("Telegram Coding Gateway started successfully!")
     
     async def stop(self):
         """Stop orchestrator and all workers.
@@ -171,7 +174,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         if not self.running:
             return
         
-        logger.info("Stopping AI Task Orchestrator...")
+        logger.info("Stopping Telegram Coding Gateway...")
         
         self.running = False
         
@@ -195,7 +198,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         await asyncio.gather(*self.worker_tasks, return_exceptions=True)
         self.worker_tasks.clear()
         
-        logger.info("AI Task Orchestrator stopped")
+        logger.info("Telegram Coding Gateway stopped")
     
     async def reload_worker_pool(self):
         """Reload worker pool size from environment configuration at runtime"""
@@ -253,7 +256,7 @@ class TaskOrchestrator(ITaskOrchestrator):
     def _log_startup_status(self):
         """Log detailed startup status"""
         status_lines = [
-            "=== AI Task Orchestrator Status ===",
+            "=== Telegram Coding Gateway Status ===",
             f"Claude Code CLI: {'[OK] Available' if self.component_status['claude_available'] else '[--] Not found'}",
             f"LLAMA/Ollama: {'[OK] Available' if self.component_status['llama_available'] else '[--] Using fallback'}",
             f"File Watcher: {'[OK] Running' if self.component_status['file_watcher_running'] else '[--] Stopped'}",
@@ -1165,93 +1168,6 @@ Generated from user description: {description}
         logger.info(f"Created task file: {task_file}")
         return task_id
 
-    def create_task_from_expanded(self, expanded: Dict[str, Any]) -> str:
-        """Create a task file from an expanded agent intent (preserves target_files and cwd)."""
-
-        task_id = f"task_{uuid.uuid4().hex[:8]}"
-
-        # Normalize fields with sensible defaults
-        task_type = (expanded.get("type") or "analyze")
-        priority = (expanded.get("priority") or "medium")
-        title = (expanded.get("title") or f"Task {task_id}")
-        prompt_text = (expanded.get("prompt") or "")
-        target_files = list(expanded.get("target_files") or [])
-        cwd_value = ""
-        try:
-            meta = expanded.get("metadata") or {}
-            cwd_value = str(meta.get("cwd") or "")
-        except Exception:
-            cwd_value = ""
-
-        # If cwd specified, create directory and copy attachments there
-        if cwd_value:
-            target_dir = Path(cwd_value)
-            target_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Created/ensured target directory: {target_dir}")
-            
-            # Copy attachments to working directory so Claude can access them
-            updated_target_files = []
-            for file_path in target_files:
-                try:
-                    source_path = Path(file_path)
-                    if source_path.exists():
-                        # Copy to {cwd}/attachments/filename
-                        dest = target_dir / "attachments" / source_path.name
-                        dest.parent.mkdir(exist_ok=True)
-                        import shutil
-                        shutil.copy2(source_path, dest)
-                        logger.info(f"Copied attachment: {source_path} -> {dest}")
-                        # Update target_files to be relative to working directory
-                        updated_target_files.append(f"attachments/{source_path.name}")
-                    else:
-                        logger.warning(f"Attachment not found: {file_path}")
-                        updated_target_files.append(file_path)
-                except Exception as e:
-                    logger.error(f"Failed to copy attachment {file_path}: {e}")
-                    updated_target_files.append(file_path)
-            
-            target_files = updated_target_files
-
-        # Create task file content
-        task_content = f"""---
-id: {task_id}
-type: {task_type}
-priority: {priority}
-created: {datetime.now().isoformat()}
-cwd: {cwd_value}
-template_id: {expanded.get('template_id', 'unknown')}
----
-
-# {title}
-
-**Target Files:**
-{chr(10).join('- ' + f for f in target_files)}
-
-**Prompt:**
-{prompt_text}
-
-**Success Criteria:**
-- [ ] Task completed successfully
-- [ ] Results validated
-- [ ] Documentation updated if needed
-
-**Context:**
-Generated from agent expansion with attachments copied to working directory
-"""
-
-        tasks_dir = Path(config.system.tasks_dir)
-        tasks_dir.mkdir(parents=True, exist_ok=True)
-        task_file = tasks_dir / f"{task_id}.task.md"
-        tmp_file = tasks_dir / f".{task_id}.task.tmp"
-        tmp_file.write_text(task_content, encoding='utf-8')
-        try:
-            tmp_file.replace(task_file)
-        except Exception:
-            task_file.write_text(task_content, encoding='utf-8')
-
-        logger.info(f"Created task file from agent: {task_file}")
-        return task_id
-    
     def _parse_description_simple(self, description: str) -> Dict[str, Any]:
         """Minimal task wrapper around a raw user instruction."""
         return {

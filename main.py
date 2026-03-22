@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for the AI Task Orchestrator
+Main entry point for the Telegram Coding Gateway.
 """
 import asyncio
 import signal

@@ -69,6 +69,10 @@ On the same date, the active execution path was also aligned further with the ne
   - fixed the old Telegram display bug in `status`
   - stopped surfacing `agents_enabled` as if it were still a product-level switch
 - Added focused tests in [tests/test_path_resolver.py](C:/Users/Cicada38/Projects/AI-team/tests/test_path_resolver.py)
+- Added focused Telegram command-surface tests in [tests/test_telegram_session_flow.py](C:/Users/Cicada38/Projects/AI-team/tests/test_telegram_session_flow.py)
+- Reduced and rewrote the publish-facing docs set
+  - kept `docs/README.md`, `docs/QUICK_START.md`, `docs/ROADMAP.md`, `docs/PROGRESS_LOG.md`
+  - removed historical docs that described the older orchestrator / agent-template product
 
 ### What exists and works
 
@@ -155,23 +159,12 @@ In short: yes, these should be shown by `doctor`; no, they should not be set so 
 
 ### 3. Full test suite reconciliation
 
-There are still stale tests from the older architecture.
-
-Known example:
-- [tests/test_permissions.py](C:/Users/Cicada38/Projects/AI-team/tests/test_permissions.py) still expects per-task tool routing that no longer exists
-
 Production requires:
-- remove or rewrite stale tests
-- add focused tests for session commands and session ownership
-- add tests for `/session_new` path correction and suggestion behavior
+- continue removing or rewriting stale tests that target removed legacy paths
+- keep focused tests for session commands, session ownership, and path correction
 
 ### 4. Remaining cleanup
 
-- Decide whether to remove `create_task_from_expanded` in [src/orchestrator.py](C:/Users/Cicada38/Projects/AI-team/src/orchestrator.py)
-- Decide how much dormant local-agent scaffolding to publish
-  - keep `src/bridges/llama_mediator.py` as future local operational layer
-  - keep `src/core/agent_manager.py` only as clearly marked dormant code
-  - keep `prompts/agents/*` only if they are explicitly described as dormant / future-facing
 - Review Telegram output strings for consistency and remove remaining old task-runner wording
 - Validate git command UX against real completed tasks and real repos
 
@@ -193,14 +186,13 @@ Production requires:
 #### Keep, but mark clearly as dormant / future layer
 
 - `src/bridges/llama_mediator.py`
-- `src/core/agent_manager.py`
-- `prompts/general_prompt_coding.md`
-- `prompts/agents/*`
 
-These should not be described as active product behavior in public docs.
+This should not be described as active product behavior in public docs.
 
 #### Already removed because they described the wrong product
 
+- `src/core/agent_manager.py`
+- `prompts/`
 - `tests/test_agent_disable.py`
 - `tests/test_agent_system.py`
 - `tests/test_unified_prompts.py`
@@ -208,21 +200,14 @@ These should not be described as active product behavior in public docs.
 - `tests/full_prompt_test.py`
 - `tests/debug_test.py`
 
-#### Likely archive or replace before publish
+#### Removed from the publish-facing surface
 
-The following docs are likely to confuse users unless rewritten:
-- `docs/README.md`
-- `docs/QUICK_START.md`
-- `docs/ROADMAP.md`
-- `docs/PROMPT_COMPARISON.md`
-- `docs/structure/*`
-- `docs/where we left off/*`
-- `docs/archive/*`
-- `docs/features/*`
-- `docs/IMPLEMENTATION_ROADMAP.md`
+- historical roadmap / archive / structure docs
+- old prompt-comparison and agent-template docs
+- old feature writeups for the previous orchestrator framing
 
 Reason:
-- they describe the old orchestrator / agent-template / roadmap history rather than the current session-first gateway
+- they described the wrong product and would confuse new users
 
 ---
 

@@ -1,5 +1,5 @@
 """
-Telegram bot interface for AI Task Orchestrator
+Telegram bot interface for the Telegram Coding Gateway.
 """
 import asyncio
 import logging
