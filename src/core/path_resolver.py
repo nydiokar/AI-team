@@ -112,19 +112,28 @@ class PathResolver:
         root = self.allowed_root or self.base_cwd
         if root is None:
             return []
-        return self.list_child_directories(root, limit=limit)
+        return self.list_child_directories(root, limit=limit, include_hidden=False)
 
-    def list_child_directories(self, raw_path: Path | str, limit: int = 12) -> List[str]:
+    def list_child_directories(
+        self,
+        raw_path: Path | str,
+        limit: int = 12,
+        include_hidden: bool = False,
+        sort_by_recent: bool = False,
+    ) -> List[str]:
         try:
             path = raw_path if isinstance(raw_path, Path) else Path(raw_path)
             path = path.resolve()
             if not path.exists() or not path.is_dir():
                 return []
-            items = sorted(
-                [child.name for child in path.iterdir() if child.is_dir()],
-                key=str.lower,
-            )
-            return items[:limit]
+            children = [child for child in path.iterdir() if child.is_dir()]
+            if not include_hidden:
+                children = [child for child in children if not child.name.startswith(".")]
+            if sort_by_recent:
+                children = sorted(children, key=lambda child: child.stat().st_mtime, reverse=True)
+            else:
+                children = sorted(children, key=lambda child: child.name.lower())
+            return [child.name for child in children[:limit]]
         except Exception:
             return []
 

@@ -191,6 +191,17 @@ class TaskOrchestrator(ITaskOrchestrator):
         if len(files) > limit:
             lines.append(f"  _...and {len(files) - limit} more_")
         return lines
+
+    @staticmethod
+    def _is_missing_backend_conversation(result: TaskResult) -> bool:
+        texts = list(result.errors or [])
+        po = getattr(result, "parsed_output", None)
+        if isinstance(po, dict):
+            maybe_errors = po.get("errors")
+            if isinstance(maybe_errors, list):
+                texts.extend(str(item) for item in maybe_errors)
+        haystack = "\n".join(str(item) for item in texts).lower()
+        return "no conversation found with session id" in haystack
     
     async def start(self):
         """Start all system components.
@@ -781,6 +792,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             backoff_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
             attempt = 0
             last_result: Optional[TaskResult] = None
+            session_recreated = False
             # Per-task timeout override via frontmatter metadata `timeout_sec`, else system default
             try:
                 timeout_s = int(task.metadata.get("timeout_sec", config.system.task_timeout)) if getattr(task, "metadata", None) else config.system.task_timeout
@@ -903,6 +915,25 @@ class TaskOrchestrator(ITaskOrchestrator):
                 error_class = self._classify_error(result)
                 result.error_class = error_class
                 result.retries = attempt - 1
+
+                if session and not result.success and not session_recreated and self._is_missing_backend_conversation(result):
+                    stale_id = session.backend_session_id
+                    session.backend_session_id = ""
+                    session.status = SessionStatus.BUSY
+                    self.session_store.save(session)
+                    session_recreated = True
+                    logger.warning(
+                        "event=session_recreated task_id=%s stale_backend_session_id=%s reason=missing_conversation",
+                        task.id,
+                        stale_id,
+                    )
+                    self._emit_event(
+                        "session_recreated",
+                        task,
+                        {"stale_backend_session_id": stale_id, "reason": "missing_conversation"},
+                    )
+                    last_result = result
+                    continue
 
                 # Determine retry strategy per error class
                 strategy = self._get_retry_strategy(error_class)

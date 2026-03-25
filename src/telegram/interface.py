@@ -3,6 +3,7 @@ Telegram bot interface for the Telegram Coding Gateway.
 """
 import asyncio
 import logging
+import re
 from typing import Dict, Any, Optional
 from pathlib import Path
 
@@ -195,10 +196,118 @@ class TelegramInterface:
         if session.last_result_summary:
             lines.append(f"Last result: {session.last_result_summary[:200]}")
         if include_dirs:
-            dirs = self._path_resolver().list_child_directories(session.repo_path, limit=8)
+            dirs = self._path_resolver().list_child_directories(session.repo_path, limit=8, include_hidden=False)
             if dirs:
-                lines.append("Top directories: " + ", ".join(f"`{item}`" for item in dirs))
+                lines.append("Directories: " + ", ".join(f"`{item}`" for item in dirs))
         return "\n".join(lines)
+
+    def _get_accessible_session(
+        self,
+        update: Update,
+        session_id: Optional[str] = None,
+        require_active: bool = True,
+    ) -> tuple[Optional[Session], Optional[str]]:
+        if session_id:
+            session = self.session_store.get(session_id)
+            if not session:
+                return None, f"❌ Session `{session_id}` not found."
+        else:
+            session = self.session_store.get_active(update.effective_chat.id)
+            if not session:
+                if require_active:
+                    return None, "❌ No active session. Use /session_new or /session_use."
+                return None, None
+
+        if not self._user_can_access_session(update.effective_user.id, session):
+            return None, "❌ You do not own that session."
+        if session.status == SessionStatus.CLOSED:
+            return None, f"❌ Session `{session.session_id}` is closed."
+        return session, None
+
+    @staticmethod
+    def _split_git_args(args: list[str]) -> tuple[Optional[str], bool, bool]:
+        session_id = None
+        create_branch = True
+        push_branch = False
+        for arg in args:
+            if arg == "--no-branch":
+                create_branch = False
+            elif arg == "--push":
+                push_branch = True
+            elif session_id is None and re.fullmatch(r"[0-9a-f]{12}", arg):
+                session_id = arg
+        return session_id, create_branch, push_branch
+
+    def _build_git_commit_context(self, session: Session) -> tuple[str, str]:
+        commit_key = session.last_task_id or f"session_{session.session_id}"
+        description = (session.last_user_message or "").strip()
+        if not description:
+            description = f"Session {session.session_id} changes"
+        return commit_key, description
+
+    def _format_git_result(self, header: str, result: Dict[str, Any], push_branch: bool = False) -> str:
+        if not result.get("success"):
+            lines = [header]
+            for error in result.get("errors", []):
+                lines.append(f"• {error}")
+            return "\n".join(lines)
+
+        lines = [header.replace("❌ Failed to", "✅")]
+        branch_name = result.get("branch_name")
+        if branch_name:
+            lines.append(f"Branch: `{branch_name}`")
+        files_committed = result.get("files_committed") or []
+        if files_committed:
+            lines.append(f"Files committed: {len(files_committed)}")
+            for file_path in files_committed[:5]:
+                lines.append(f"• `{file_path}`")
+            if len(files_committed) > 5:
+                lines.append(f"• ... and {len(files_committed) - 5} more")
+        blocked = result.get("sensitive_files_blocked") or []
+        if blocked:
+            lines.append(f"Sensitive files blocked: {len(blocked)}")
+        if push_branch and branch_name:
+            lines.append("Branch pushed to remote.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _git_usage(command: str) -> str:
+        return (
+            f"Usage: /{command} [session_id] [--no-branch] [--push]\n"
+            "If omitted, `session_id` defaults to the active session."
+        )
+
+    def _resolve_task_scope(
+        self,
+        update: Update,
+        args: list[str],
+        require_task: bool = True,
+    ) -> tuple[Optional[str], Optional[Session], Optional[str]]:
+        session = None
+        task_id = None
+
+        if args:
+            candidate = str(args[0]).strip()
+            if re.fullmatch(r"[0-9a-f]{12}", candidate):
+                session, error = self._get_accessible_session(update, session_id=candidate)
+                if error:
+                    return None, None, error
+                task_id = session.last_task_id or None
+            else:
+                task_id = candidate
+        else:
+            session, error = self._get_accessible_session(update, require_active=False)
+            if error:
+                return None, None, error
+            if session is not None:
+                task_id = session.last_task_id or None
+
+        if require_task and not task_id:
+            if session is not None:
+                return None, session, f"❌ Session `{session.session_id}` has no active or recent task."
+            return None, None, "❌ No active session task found. Use `/session_cancel`, `/session_status`, or pass a task ID explicitly."
+
+        return task_id, session, None
 
     async def _queue_instruction(
         self,
@@ -266,7 +375,8 @@ class TelegramInterface:
             "Primary flow:\n"
             "• `/session_new claude <path>` opens a persistent coding session\n"
             "• plain messages continue the active session\n"
-            "• `/task <instruction>` runs a one-off task\n\n"
+            "• `/task <instruction>` runs a one-off task outside any session\n"
+            "• `/session_dirs` shows likely project folders when you need to browse\n\n"
             "Use `/help` for the full command set."
         )
     
@@ -280,28 +390,24 @@ class TelegramInterface:
             "Telegram Coding Gateway\n\n"
             "Sessions:\n"
             "• `/session_new <backend> <path>` open a session in a bounded repo path\n"
-            "• `/session_list` list recent sessions\n"
+            "• `/session_list [all]` list open sessions; pass `all` to include closed ones\n"
             "• `/session_use <session_id>` switch the active session\n"
             "• `/session_status [session_id]` inspect session state\n"
-            "• `/session_dirs [path]` list child directories for the active session or a path\n"
+            "• `/session_dirs [path]` list useful child directories for the active session or a path\n"
             "• `/session_cancel [session_id]` cancel the last queued or running task for a session\n"
             "• `/session_close [session_id]` close a session\n\n"
             "Execution:\n"
             "• plain text continues the active session\n"
-            "• `/say <instruction>` same as plain text but session-only\n"
-            "• `/run <instruction>` route to the active session or create a one-off task\n"
             "• `/task <instruction>` create a one-off task only\n"
-            "• `/progress <task_id>` show recent task events\n"
-            "• `/cancel <task_id>` cancel a task by id\n"
             "• `/status` show gateway status and configured scope\n\n"
             "Git:\n"
-            "• `/git_status`\n"
-            "• `/commit <task_id> [--no-branch] [--push]`\n"
-            "• `/commit_all <task_id> [--no-branch] [--push]`\n\n"
+            "• `/git_status [session_id]`\n"
+            "• `/commit [session_id] [--no-branch] [--push]`\n"
+            "• `/commit_all [session_id] [--no-branch] [--push]`\n\n"
             "Path handling:\n"
             "• relative paths resolve under your configured base workspace\n"
             "• invalid paths return close matches and nearby directories\n"
-            "• successful `/session_new` replies include top directories in that repo"
+            "• `/session_dirs` without an active session shows likely project folders under the workspace"
         )
     
     async def _handle_task_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -386,15 +492,14 @@ class TelegramInterface:
             logger.error(f"Telegram status request failed: {e}")
 
     async def _handle_progress_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /progress <task_id> command to show recent events"""
+        """Compatibility progress view for the active session or an explicit task."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
-        if not context.args:
-            await update.message.reply_text("❌ Please provide a task ID. Example: /progress task_abc123")
+        task_id, session, error = self._resolve_task_scope(update, context.args or [])
+        if error:
+            await update.message.reply_text(error)
             return
-        task_id = context.args[0]
-        # Read recent events from NDJSON
         try:
             from config import config as app_config
             events_path = Path(app_config.system.logs_dir) / "events.ndjson"
@@ -416,10 +521,12 @@ class TelegramInterface:
                     if ev.get("task_id") == task_id:
                         buf.append(ev)
             if not buf:
-                await update.message.reply_text(f"No recent events for `{task_id}`.")
+                label = f"session `{session.session_id}`" if session else f"task `{task_id}`"
+                await update.message.reply_text(f"No recent events for {label}.")
                 return
             lines = [self._format_progress_line(ev) for ev in list(buf)[-10:]]
-            header = f"📈 Progress for `{task_id}` (last {len(lines)} events)"
+            header_target = f"session `{session.session_id}` / task `{task_id}`" if session else f"task `{task_id}`"
+            header = f"📈 Progress for {header_target} (last {len(lines)} events)"
             await update.message.reply_text("\n".join([header, *lines]))
         except Exception as e:
             await update.message.reply_text(f"❌ Failed to load progress: {e}")
@@ -498,20 +605,16 @@ class TelegramInterface:
         return f"{tshort} {icon} {pretty}{tail}"
     
     async def _handle_cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /cancel command"""
+        """Compatibility cancellation path for the active session or an explicit task."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
-            
-        if not context.args:
-            await update.message.reply_text(
-                "❌ Please provide a task ID to cancel.\n"
-                "Example: /cancel task_abc123"
-            )
+
+        task_id, session, error = self._resolve_task_scope(update, context.args or [])
+        if error:
+            await update.message.reply_text(error)
             return
-        
-        task_id = context.args[0]
-        
+
         try:
             ok = False
             try:
@@ -519,12 +622,21 @@ class TelegramInterface:
             except Exception:
                 ok = False
             if ok:
-                response = f"🔄 Cancellation requested for task `{task_id}`."
+                response = (
+                    f"🔄 Cancellation requested for session `{session.session_id}` task `{task_id}`."
+                    if session else
+                    f"🔄 Cancellation requested for task `{task_id}`."
+                )
                 await update.message.reply_text(response)
                 logger.info(f"Telegram user requested cancellation of task {task_id}")
             else:
-                await update.message.reply_text(f"❌ Task `{task_id}` not found or already finished.")
-                
+                response = (
+                    f"❌ Task `{task_id}` from session `{session.session_id}` is not cancellable."
+                    if session else
+                    f"❌ Task `{task_id}` not found or already finished."
+                )
+                await update.message.reply_text(response)
+
         except Exception as e:
             error_msg = f"❌ Failed to cancel task: {str(e)}"
             await update.message.reply_text(error_msg)
@@ -568,25 +680,27 @@ class TelegramInterface:
             logger.error(f"message handler failed: {e}")
 
     async def _handle_run_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Route instruction to active session or one-off task."""
+        """Compatibility alias for the older task-runner UX."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
         if not context.args:
-            await update.message.reply_text("Usage: /run <instruction>")
+            await update.message.reply_text("Use a plain message for the active session, or `/task <instruction>` for a one-off task.")
             return
         active_session = self.session_store.get_active(update.effective_chat.id)
+        await update.message.reply_text("`/run` is kept for compatibility. Plain messages are the primary session flow.")
         await self._queue_instruction(update, " ".join(context.args), active_session, session_only=False)
 
     async def _handle_say_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Route instruction to the active session only."""
+        """Compatibility alias for the older task-runner UX."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
         if not context.args:
-            await update.message.reply_text("Usage: /say <instruction>")
+            await update.message.reply_text("Use a plain message for the active session.")
             return
         active_session = self.session_store.get_active(update.effective_chat.id)
+        await update.message.reply_text("`/say` is kept for compatibility. Plain messages are the primary session flow.")
         await self._queue_instruction(update, " ".join(context.args), active_session, session_only=True)
 
     # ------------------------------------------------------------------
@@ -627,9 +741,9 @@ class TelegramInterface:
             f"ID: `{session.session_id}`",
             f"Backend: {backend}",
             f"Path: `{session.repo_path}`",
+            "Send a plain message to continue in this session.",
+            "Use `/session_dirs` to browse directories under this repo.",
         ]
-        if resolution.available_dirs:
-            lines.append("Top directories: " + ", ".join(f"`{item}`" for item in resolution.available_dirs[:8]))
         await update.message.reply_text("\n".join(lines))
 
     async def _handle_session_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -637,9 +751,12 @@ class TelegramInterface:
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
+        include_closed = any(str(arg).strip().lower() == "all" for arg in (context.args or []))
         sessions = [s for s in self.session_store.list_all() if self._user_can_access_session(update.effective_user.id, s)]
+        if not include_closed:
+            sessions = [s for s in sessions if s.status != SessionStatus.CLOSED]
         if not sessions:
-            await update.message.reply_text("No sessions found.")
+            await update.message.reply_text("No open sessions found." if not include_closed else "No sessions found.")
             return
         active = self.session_store.get_active(update.effective_chat.id)
         active_id = active.session_id if active else None
@@ -647,7 +764,10 @@ class TelegramInterface:
         for s in sessions[:10]:
             marker = " <-- active" if s.session_id == active_id else ""
             lines.append(f"`{s.session_id}` [{s.backend}] {s.status.value} — {s.repo_path}{marker}")
-        await update.message.reply_text("Sessions:\n" + "\n".join(lines))
+        header = "Sessions:" if include_closed else "Open sessions:"
+        if not include_closed:
+            header += "\nUse `/session_list all` to include closed sessions."
+        await update.message.reply_text(header + "\n" + "\n".join(lines))
 
     async def _handle_session_use(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_use <session_id>"""
@@ -686,17 +806,19 @@ class TelegramInterface:
                 await update.message.reply_text(self._format_path_resolution_error(resolution))
                 return
             path = resolution.resolved_path
-            dirs = resolution.available_dirs
+            dirs = self._path_resolver().list_child_directories(path, limit=12, include_hidden=False, sort_by_recent=True)
         else:
             session = self.session_store.get_active(update.effective_chat.id)
-            if not session:
-                await update.message.reply_text("No active session. Use /session_new, /session_use, or pass a path.")
-                return
-            if not self._user_can_access_session(update.effective_user.id, session):
-                await update.message.reply_text("❌ You do not own the active session.")
-                return
-            path = session.repo_path
-            dirs = self._path_resolver().list_child_directories(path, limit=12)
+            if session and self._user_can_access_session(update.effective_user.id, session):
+                path = session.repo_path
+                dirs = self._path_resolver().list_child_directories(path, limit=12, include_hidden=False, sort_by_recent=True)
+            else:
+                resolver = self._path_resolver()
+                path = str(resolver.base_cwd or resolver.allowed_root or "")
+                dirs = resolver.list_child_directories(path, limit=12, include_hidden=False, sort_by_recent=True) if path else []
+                if not path:
+                    await update.message.reply_text("No active session and no workspace root configured.")
+                    return
 
         if not dirs:
             await update.message.reply_text(f"No child directories found under `{path}`.")
@@ -850,213 +972,148 @@ Please check the system logs for more details.
         return TELEGRAM_AVAILABLE and self.app is not None and bool(self.bot_token)
     
     async def _handle_git_commit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /commit command for committing task-specific changes"""
+        """Handle /commit command for committing active-session changes."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
-        
+
         try:
-            # Parse command arguments
-            args = context.args if context.args else []
-            if len(args) < 1:
-                await update.message.reply_text(
-                    "❌ Usage: `/commit <task_id> [--no-branch] [--push]`\n"
-                    "Example: `/commit abc123` or `/commit abc123 --push`"
-                )
+            session_id, create_branch, push_branch = self._split_git_args(context.args or [])
+            session, error = self._get_accessible_session(update, session_id=session_id)
+            if error:
+                if not context.args:
+                    error = f"{error}\n{self._git_usage('commit')}"
+                await update.message.reply_text(error)
                 return
-            
-            task_id = args[0]
-            create_branch = "--no-branch" not in args
-            push_branch = "--push" in args
-            
-            # Get task information from orchestrator
-            task_result = self.orchestrator.task_results.get(task_id)
-            if not task_result:
-                await update.message.reply_text(f"❌ Task {task_id} not found or not completed")
-                return
-            
-            # Import git automation service
-            try:
-                from src.core.git_automation import GitAutomationService
-                git_service = GitAutomationService()
-            except ImportError as e:
-                await update.message.reply_text(f"❌ Git automation service not available: {e}")
-                return
-            
-            # Get task description for commit message
-            task_description = f"Task {task_id} changes"
-            
-            # Perform safe commit
+
+            from src.core.git_automation import GitAutomationService
+
+            git_service = GitAutomationService(session.repo_path)
+            commit_key, task_description = self._build_git_commit_context(session)
             result = git_service.safe_commit_task(
-                task_id=task_id,
+                task_id=commit_key,
                 task_description=task_description,
                 create_branch=create_branch,
-                push_branch=push_branch
+                push_branch=push_branch,
             )
-            
-            if result["success"]:
-                # Success message
-                message_parts = [f"✅ Successfully committed task {task_id}"]
-                
-                if result["branch_name"]:
-                    message_parts.append(f"📁 Branch: `{result['branch_name']}`")
-                
-                if result["files_committed"]:
-                    file_count = len(result["files_committed"])
-                    message_parts.append(f"📄 Files committed: {file_count}")
-                    if file_count <= 5:
-                        for file_path in result["files_committed"][:5]:
-                            message_parts.append(f"  • {file_path}")
-                    else:
-                        message_parts.append(f"  • ... and {file_count - 5} more files")
-                
-                if result["sensitive_files_blocked"]:
-                    blocked_count = len(result["sensitive_files_blocked"])
-                    message_parts.append(f"🚫 Sensitive files blocked: {blocked_count}")
-                
-                if push_branch and result["branch_name"]:
-                    message_parts.append(f"🚀 Branch pushed to remote")
-                
-                await update.message.reply_text("\n".join(message_parts))
-            else:
-                # Error message
-                error_msg = f"❌ Failed to commit task {task_id}:\n"
-                for error in result["errors"]:
-                    error_msg += f"• {error}\n"
-                await update.message.reply_text(error_msg)
-                
+            await update.message.reply_text(
+                self._format_git_result(
+                    f"❌ Failed to commit changes in session `{session.session_id}`.",
+                    result,
+                    push_branch=push_branch,
+                )
+            )
+
         except Exception as e:
             await update.message.reply_text(f"❌ Error processing commit command: {e}")
             logger.error(f"Git commit command failed: {e}")
     
     async def _handle_git_commit_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /commit_all command for committing all staged changes"""
+        """Handle /commit_all command for committing staged changes in a session repo."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
-        
+
         try:
-            # Parse command arguments
-            args = context.args if context.args else []
-            if len(args) < 1:
-                await update.message.reply_text(
-                    "❌ Usage: `/commit_all <task_id> [--no-branch] [--push]`\n"
-                    "⚠️  This commits ALL staged changes - use with caution!"
-                )
+            session_id, create_branch, push_branch = self._split_git_args(context.args or [])
+            session, error = self._get_accessible_session(update, session_id=session_id)
+            if error:
+                if not context.args:
+                    error = f"{error}\n{self._git_usage('commit_all')}"
+                await update.message.reply_text(error)
                 return
-            
-            task_id = args[0]
-            create_branch = "--no-branch" not in args
-            push_branch = "--push" in args
-            
-            # Import git automation service
-            try:
-                from src.core.git_automation import GitAutomationService
-                git_service = GitAutomationService()
-            except ImportError as e:
-                await update.message.reply_text(f"❌ Git automation service not available: {e}")
-                return
-            
-            # Get task information from orchestrator
-            task_result = self.orchestrator.task_results.get(task_id)
-            if not task_result:
-                await update.message.reply_text(f"❌ Task {task_id} not found or not completed")
-                return
-            
-            task_description = f"Task {task_id} changes"
-            
-            # Perform commit all staged
+
+            from src.core.git_automation import GitAutomationService
+
+            git_service = GitAutomationService(session.repo_path)
+            commit_key, task_description = self._build_git_commit_context(session)
             result = git_service.commit_all_staged(
-                task_id=task_id,
+                task_id=commit_key,
                 task_description=task_description,
                 create_branch=create_branch,
-                push_branch=push_branch
+                push_branch=push_branch,
             )
-            
-            if result["success"]:
-                message_parts = [f"✅ Successfully committed all staged changes for task {task_id}"]
-                
-                if result["branch_name"]:
-                    message_parts.append(f"📁 Branch: `{result['branch_name']}`")
-                
-                if result["files_committed"]:
-                    file_count = len(result["files_committed"])
-                    message_parts.append(f"📄 Files committed: {file_count}")
-                
-                if push_branch and result["branch_name"]:
-                    message_parts.append(f"🚀 Branch pushed to remote")
-                
-                await update.message.reply_text("\n".join(message_parts))
-            else:
-                error_msg = f"❌ Failed to commit staged changes for task {task_id}:\n"
-                for error in result["errors"]:
-                    error_msg += f"• {error}\n"
-                await update.message.reply_text(error_msg)
-                
+            await update.message.reply_text(
+                self._format_git_result(
+                    f"❌ Failed to commit staged changes in session `{session.session_id}`.",
+                    result,
+                    push_branch=push_branch,
+                )
+            )
+
         except Exception as e:
             await update.message.reply_text(f"❌ Error processing commit_all command: {e}")
             logger.error(f"Git commit_all command failed: {e}")
     
     async def _handle_git_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /git_status command for showing git repository status"""
+        """Handle /git_status command for the active or specified session repo."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
-        
+
         try:
-            # Import git automation service
-            try:
-                from src.core.git_automation import GitAutomationService
-                git_service = GitAutomationService()
-            except ImportError as e:
-                await update.message.reply_text(f"❌ Git automation service not available: {e}")
+            args = context.args or []
+            session_id = args[0] if args and re.fullmatch(r"[0-9a-f]{12}", args[0]) else None
+            session, error = self._get_accessible_session(update, session_id=session_id)
+            if error:
+                if not args:
+                    error = f"{error}\nUsage: /git_status [session_id]"
+                await update.message.reply_text(error)
                 return
-            
-            # Get git status summary
+
+            from src.core.git_automation import GitAutomationService
+
+            git_service = GitAutomationService(session.repo_path)
             status = git_service.get_git_status_summary()
-            
+
             if "error" in status:
                 await update.message.reply_text(f"❌ {status['error']}")
                 return
-            
-            # Format status message
-            message_parts = ["📊 Git Repository Status"]
-            message_parts.append(f"🌿 Branch: `{status['current_branch']}`")
-            message_parts.append(f"🧹 Working directory: {'✅ Clean' if status['working_directory_clean'] else '⚠️  Has changes'}")
-            
-            if not status['working_directory_clean']:
-                changes = status['changes']
-                message_parts.append(f"\n📝 Changes:")
-                message_parts.append(f"  • Modified: {changes['modified']}")
-                message_parts.append(f"  • Created: {changes['created']}")
-                message_parts.append(f"  • Deleted: {changes['deleted']}")
-                message_parts.append(f"  • Total: {changes['total']}")
-                
-                if status['staged_files']:
-                    message_parts.append(f"\n📦 Staged files: {len(status['staged_files'])}")
-                    for file_path in status['staged_files'][:3]:
-                        message_parts.append(f"  • {file_path}")
-                    if len(status['staged_files']) > 3:
-                        message_parts.append(f"  • ... and {len(status['staged_files']) - 3} more")
-                
-                if status['unstaged_files']:
-                    message_parts.append(f"\n📋 Unstaged files: {len(status['unstaged_files'])}")
-                    for file_path in status['unstaged_files'][:3]:
-                        message_parts.append(f"  • {file_path}")
-                    if len(status['unstaged_files']) > 3:
-                        message_parts.append(f"  • ... and {len(status['unstaged_files']) - 3} more")
-                
-                # Safety information
-                safety = status['safety']
-                if safety['has_sensitive_files']:
-                    message_parts.append(f"\n🚫 Sensitive files detected: {len(safety['sensitive_files'])}")
-                    for file_path in safety['sensitive_files'][:3]:
-                        message_parts.append(f"  • {file_path}")
-                    if len(safety['sensitive_files']) > 3:
-                        message_parts.append(f"  • ... and {len(safety['sensitive_files']) - 3} more")
-            
+
+            changes = status["changes"]
+            message_parts = [
+                "Git Repository Status",
+                f"Session: `{session.session_id}`",
+                f"Path: `{session.repo_path}`",
+                f"Branch: `{status['current_branch']}`",
+                f"Working directory: {'✅ Clean' if status['working_directory_clean'] else '⚠️ Has changes'}",
+            ]
+
+            if not status["working_directory_clean"]:
+                message_parts.append("")
+                message_parts.append("Changes:")
+                message_parts.append(f"• Modified: {len(changes['modified'])}")
+                message_parts.append(f"• Created: {len(changes['created'])}")
+                message_parts.append(f"• Deleted: {len(changes['deleted'])}")
+                message_parts.append(f"• Total: {changes['total']}")
+
+                if status["staged_files"]:
+                    message_parts.append("")
+                    message_parts.append(f"Staged files: {len(status['staged_files'])}")
+                    for file_path in status["staged_files"][:3]:
+                        message_parts.append(f"• `{file_path}`")
+                    if len(status["staged_files"]) > 3:
+                        message_parts.append(f"• ... and {len(status['staged_files']) - 3} more")
+
+                if status["unstaged_files"]:
+                    message_parts.append("")
+                    message_parts.append(f"Unstaged files: {len(status['unstaged_files'])}")
+                    for file_path in status["unstaged_files"][:3]:
+                        message_parts.append(f"• `{file_path}`")
+                    if len(status["unstaged_files"]) > 3:
+                        message_parts.append(f"• ... and {len(status['unstaged_files']) - 3} more")
+
+                safety = status["safety"]
+                if safety["has_sensitive_files"]:
+                    message_parts.append("")
+                    message_parts.append(f"Sensitive files detected: {len(safety['sensitive_files'])}")
+                    for file_path in safety["sensitive_files"][:3]:
+                        message_parts.append(f"• `{file_path}`")
+                    if len(safety["sensitive_files"]) > 3:
+                        message_parts.append(f"• ... and {len(safety['sensitive_files']) - 3} more")
+
             await update.message.reply_text("\n".join(message_parts))
-            
+
         except Exception as e:
             await update.message.reply_text(f"❌ Error getting git status: {e}")
             logger.error(f"Git status command failed: {e}")
