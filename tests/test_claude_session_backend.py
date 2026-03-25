@@ -316,11 +316,11 @@ def test_failed_backend_result_does_not_overwrite_session_id(monkeypatch):
             success=False,
             output="",
             backend_session_id="bad-new-session-id",
-            errors=["No conversation found with session ID: stable-session-id"],
+            errors=["Claude exited with code 1"],
             execution_time=0.01,
             raw_stdout="",
             raw_stderr="",
-            parsed_output={"errors": ["No conversation found with session ID: stable-session-id"]},
+            parsed_output={"errors": ["Claude exited with code 1"]},
             return_code=1,
         )
 
@@ -333,8 +333,88 @@ def test_failed_backend_result_does_not_overwrite_session_id(monkeypatch):
 
         reloaded = orch.session_store.get(session.session_id)
         assert result.success is False
-        assert result.errors == ["No conversation found with session ID: stable-session-id"]
+        assert result.errors == ["Claude exited with code 1"]
         assert reloaded is not None
         assert reloaded.backend_session_id == "stable-session-id"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_missing_backend_conversation_recreates_session_and_retries(monkeypatch):
+    root = Path.cwd() / ".test_session_artifacts" / uuid.uuid4().hex[:8]
+    from config import config
+    try:
+        results_dir = root / "results"
+        summaries_dir = root / "summaries"
+        logs_dir = root / "logs"
+        state_dir = root / "state"
+        for path in (results_dir, summaries_dir, logs_dir, state_dir):
+            path.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(config.system, "results_dir", str(results_dir), raising=False)
+        monkeypatch.setattr(config.system, "summaries_dir", str(summaries_dir), raising=False)
+        monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
+
+        import src.core.session_store as session_store_module
+        monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", state_dir / "sessions", raising=False)
+        monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", state_dir / "telegram" / "active_bindings.json", raising=False)
+
+        orch = TaskOrchestrator()
+        session = orch.session_store.create("claude", str(root), telegram_chat_id=1, owner_user_id=2)
+        session.backend_session_id = "stale-session-id"
+        orch.session_store.save(session)
+
+        task = Task(
+            id="task_session_recreate",
+            type=TaskType.ANALYZE,
+            priority=TaskPriority.MEDIUM,
+            status=TaskStatus.PENDING,
+            created=datetime.now().isoformat(),
+            title="Test",
+            target_files=[],
+            prompt="Inspect",
+            success_criteria=[],
+            context="",
+            metadata={"session_id": session.session_id, "cwd": str(root), "source": "telegram_session"},
+        )
+
+        attempts = {"count": 0}
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return ExecutionResult(
+                    success=False,
+                    output="",
+                    backend_session_id="bad-replacement-id",
+                    errors=["No conversation found with session ID: stale-session-id"],
+                    execution_time=0.01,
+                    raw_stdout="",
+                    raw_stderr="",
+                    parsed_output={"errors": ["No conversation found with session ID: stale-session-id"]},
+                    return_code=1,
+                )
+            return ExecutionResult(
+                success=True,
+                output="Recovered session reply",
+                backend_session_id="fresh-session-id",
+                errors=[],
+                execution_time=0.01,
+                raw_stdout="Recovered session reply",
+                raw_stderr="",
+                parsed_output={"content": "Recovered session reply"},
+                return_code=0,
+            )
+
+        monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+
+        result = asyncio.run(orch.process_task(task))
+
+        reloaded = orch.session_store.get(session.session_id)
+        assert result.success is True
+        assert result.output == "Recovered session reply"
+        assert attempts["count"] == 2
+        assert reloaded is not None
+        assert reloaded.backend_session_id == "fresh-session-id"
     finally:
         shutil.rmtree(root, ignore_errors=True)

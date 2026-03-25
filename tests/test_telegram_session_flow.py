@@ -1,6 +1,8 @@
 import shutil
 import uuid
 from pathlib import Path
+from unittest.mock import patch
+import json
 
 import pytest
 
@@ -120,7 +122,7 @@ async def test_session_new_rejects_bad_path_with_suggestion(monkeypatch, isolate
 
 
 @pytest.mark.asyncio
-async def test_session_new_creates_session_and_lists_dirs(monkeypatch, isolated_session_store):
+async def test_session_new_creates_session_and_guides_next_step(monkeypatch, isolated_session_store):
     workspace = _make_workspace()
     try:
         monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
@@ -134,8 +136,8 @@ async def test_session_new_creates_session_and_lists_dirs(monkeypatch, isolated_
         active = SessionStore().get_active(update.effective_chat.id)
         assert active is not None
         assert active.repo_path == str((workspace / "repo-alpha").resolve())
-        assert "Top directories:" in update.message.replies[-1]
-        assert "src" in update.message.replies[-1]
+        assert "Send a plain message to continue in this session." in update.message.replies[-1]
+        assert "/session_dirs" in update.message.replies[-1]
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
@@ -181,11 +183,201 @@ async def test_help_lists_current_command_set(monkeypatch, isolated_session_stor
         assert "/session_new <backend> <path>" in text
         assert "/session_dirs [path]" in text
         assert "/session_cancel [session_id]" in text
-        assert "/run <instruction>" in text
-        assert "/say <instruction>" in text
+        assert "/git_status [session_id]" in text
+        assert "/commit [session_id] [--no-branch] [--push]" in text
+        assert "/run <instruction>" not in text
+        assert "/say <instruction>" not in text
         assert "/documentation" not in text
         assert "/code_review" not in text
         assert "/bug_fix" not in text
         assert "/analyze" not in text
     finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_session_list_hides_closed_by_default(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+        store = SessionStore()
+
+        open_session = store.create("claude", str((workspace / "repo-alpha").resolve()), telegram_chat_id=100, owner_user_id=1)
+        closed_session = store.create("claude", str((workspace / "repo-beta").resolve()), telegram_chat_id=100, owner_user_id=1)
+        closed_session.status = session_store_module.SessionStatus.CLOSED
+        store.save(closed_session)
+        store.bind(100, open_session.session_id)
+
+        update = _DummyUpdate()
+        await bot._handle_session_list(update, _DummyContext())
+        text = update.message.replies[-1]
+
+        assert "Open sessions:" in text
+        assert open_session.session_id in text
+        assert closed_session.session_id not in text
+        assert "/session_list all" in text
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_git_status_uses_active_session_repo(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        repo_path = str((workspace / "repo-alpha").resolve())
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+        store = SessionStore()
+        session = store.create("claude", repo_path, telegram_chat_id=100, owner_user_id=1)
+        store.bind(100, session.session_id)
+
+        captured = {}
+
+        class _FakeGitService:
+            def __init__(self, repo_path=None):
+                captured["repo_path"] = repo_path
+
+            def get_git_status_summary(self):
+                return {
+                    "current_branch": "main",
+                    "working_directory_clean": False,
+                    "changes": {
+                        "modified": ["src/app.py"],
+                        "created": ["src/new.py"],
+                        "deleted": [],
+                        "total": 2,
+                    },
+                    "staged_files": ["src/app.py"],
+                    "unstaged_files": ["src/new.py"],
+                    "safety": {
+                        "safe_files": ["src/app.py", "src/new.py"],
+                        "sensitive_files": [],
+                        "has_sensitive_files": False,
+                    },
+                }
+
+        update = _DummyUpdate()
+        with patch("src.core.git_automation.GitAutomationService", _FakeGitService):
+            await bot._handle_git_status(update, _DummyContext())
+
+        text = update.message.replies[-1]
+        assert captured["repo_path"] == repo_path
+        assert f"Session: `{session.session_id}`" in text
+        assert "• Modified: 1" in text
+        assert "• Created: 1" in text
+        assert "• Deleted: 0" in text
+        assert "• `src/app.py`" in text
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_commit_uses_active_session_context_not_task_id(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        repo_path = str((workspace / "repo-alpha").resolve())
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+        store = SessionStore()
+        session = store.create("claude", repo_path, telegram_chat_id=100, owner_user_id=1)
+        session.last_task_id = "task_123"
+        session.last_user_message = "Fix the flaky Telegram session recovery path"
+        store.save(session)
+        store.bind(100, session.session_id)
+
+        captured = {}
+
+        class _FakeGitService:
+            def __init__(self, repo_path=None):
+                captured["repo_path"] = repo_path
+
+            def safe_commit_task(self, task_id, task_description, create_branch=True, push_branch=False):
+                captured["task_id"] = task_id
+                captured["task_description"] = task_description
+                captured["create_branch"] = create_branch
+                captured["push_branch"] = push_branch
+                return {
+                    "success": True,
+                    "branch_name": "feature/task-123-fix-session-recovery",
+                    "files_committed": ["src/telegram/interface.py"],
+                    "sensitive_files_blocked": [],
+                    "errors": [],
+                }
+
+        update = _DummyUpdate()
+        with patch("src.core.git_automation.GitAutomationService", _FakeGitService):
+            await bot._handle_git_commit(update, _DummyContext(["--push"]))
+
+        text = update.message.replies[-1]
+        assert captured["repo_path"] == repo_path
+        assert captured["task_id"] == "task_123"
+        assert captured["task_description"] == "Fix the flaky Telegram session recovery path"
+        assert captured["create_branch"] is True
+        assert captured["push_branch"] is True
+        assert f"session `{session.session_id}`" in text
+        assert "Files committed: 1" in text
+        assert "Branch pushed to remote." in text
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_args_uses_active_session_last_task(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        orchestrator = _DummyOrchestrator()
+        bot = TelegramInterface("", orchestrator, allowed_users=[1])
+        store = SessionStore()
+        session = store.create("claude", str((workspace / "repo-alpha").resolve()), telegram_chat_id=100, owner_user_id=1)
+        session.last_task_id = "task_777"
+        store.save(session)
+        store.bind(100, session.session_id)
+
+        update = _DummyUpdate()
+        await bot._handle_cancel_command(update, _DummyContext())
+
+        assert orchestrator.cancelled_tasks == ["task_777"]
+        assert f"session `{session.session_id}` task `task_777`" in update.message.replies[-1]
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_progress_without_args_uses_active_session_last_task(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        logs_dir = Path.cwd() / ".test_telegram_logs" / uuid.uuid4().hex[:8]
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+        store = SessionStore()
+        session = store.create("claude", str((workspace / "repo-alpha").resolve()), telegram_chat_id=100, owner_user_id=1)
+        session.last_task_id = "task_888"
+        store.save(session)
+        store.bind(100, session.session_id)
+
+        events_path = logs_dir / "events.ndjson"
+        events = [
+            {"timestamp": "2026-03-26T10:00:00", "event": "claude_started", "task_id": "task_888", "worker": "w1"},
+            {"timestamp": "2026-03-26T10:00:02", "event": "claude_finished", "task_id": "task_888", "status": "success", "duration_s": 2.0},
+        ]
+        events_path.write_text("\n".join(json.dumps(item) for item in events), encoding="utf-8")
+
+        update = _DummyUpdate()
+        await bot._handle_progress_command(update, _DummyContext())
+
+        text = update.message.replies[-1]
+        assert f"session `{session.session_id}` / task `task_888`" in text
+        assert "started" in text
+        assert "finished" in text
+    finally:
+        shutil.rmtree(Path.cwd() / ".test_telegram_logs", ignore_errors=True)
         shutil.rmtree(workspace.parent, ignore_errors=True)
