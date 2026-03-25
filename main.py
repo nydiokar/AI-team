@@ -104,7 +104,7 @@ class OrchestratorCLI:
             
             print()
             print("Orchestrator is running. Press Ctrl+C to stop.")
-            print(f"Watching for task files in: {Path(config.system.tasks_dir).resolve()}")
+            print(f"Compatibility watcher directory: {Path(config.system.tasks_dir).resolve()}")
             print()
             
             # Wait for shutdown signal

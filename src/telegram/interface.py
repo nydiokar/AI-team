@@ -362,7 +362,7 @@ class TelegramInterface:
                 "Components:",
                 f"• Claude Code CLI: {'✅ Available' if status['components']['claude_available'] else '❌ Not available'}",
                 f"• Ollama helpers: {'✅ Available' if status['components']['llama_available'] else '➖ Optional / disabled'}",
-                f"• File Watcher: {'✅ Running' if status['components']['file_watcher_running'] else '❌ Stopped'}",
+                f"• External task watcher: {'✅ Running' if status['components']['file_watcher_running'] else '❌ Stopped'}",
                 f"• Telegram Bot: {'✅ Running' if telegram.get('running') else ('⚠️ Configured but stopped' if telegram.get('configured') else '❌ Not configured')}",
                 "",
                 "Tasks:",

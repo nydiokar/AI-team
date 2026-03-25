@@ -587,7 +587,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 
                 # Write artifacts
                 try:
-                    self._write_artifacts(task.id, result)
+                    self._write_artifacts(task.id, result, task=task)
                     logger.info(f"event=artifacts_written task_id={task.id}")
                     self._emit_event("artifacts_written", task)
                 except Exception as e:
@@ -940,7 +940,7 @@ created: {task.created}
 """
         return content
 
-    def _write_artifacts(self, task_id: str, result: TaskResult):
+    def _write_artifacts(self, task_id: str, result: TaskResult, task: Optional[Task] = None):
         """Persist results and summaries to disk"""
         results_dir = Path(config.system.results_dir)
         summaries_dir = Path(config.system.summaries_dir)
@@ -996,6 +996,26 @@ created: {task.created}
             },
             "llama": self.llama_mediator.get_status(),
         }
+        if task is not None:
+            artifact["task"] = {
+                "type": getattr(task.type, "value", str(task.type)),
+                "priority": getattr(task.priority, "value", str(task.priority)),
+                "title": task.title,
+                "target_files": list(task.target_files or []),
+                "source": str((task.metadata or {}).get("source") or "runtime"),
+                "cwd": str((task.metadata or {}).get("cwd") or ""),
+            }
+            session_id = str((task.metadata or {}).get("session_id") or "").strip()
+            if session_id:
+                session = self.session_store.get(session_id)
+                artifact["session"] = {
+                    "session_id": session_id,
+                    "backend": session.backend if session else getattr(result, "backend_name", "claude"),
+                    "backend_session_id": session.backend_session_id if session else "",
+                    "repo_path": session.repo_path if session else str((task.metadata or {}).get("cwd") or ""),
+                    "owner_user_id": session.owner_user_id if session else None,
+                    "telegram_chat_id": session.telegram_chat_id if session else None,
+                }
 
         import json
         # Allowlist enforcement on files_modified (telemetry + artifact note)
@@ -1024,15 +1044,31 @@ created: {task.created}
         except Exception:
             pass
 
-        (results_dir / f"{task_id}.json").write_text(
+        flat_artifact_path = results_dir / f"{task_id}.json"
+        flat_artifact_path.write_text(
             json.dumps(artifact, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
         # Update artifact index (best-effort)
         try:
-            self._update_artifact_index(task_id, results_dir / f"{task_id}.json")
+            self._update_artifact_index(task_id, flat_artifact_path)
         except Exception:
             pass
+
+        # Write a per-session archival copy for compliance/audit traceability.
+        try:
+            session_block = artifact.get("session")
+            if isinstance(session_block, dict) and session_block.get("session_id"):
+                session_dir = results_dir / "sessions" / str(session_block["session_id"])
+                session_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                session_artifact_path = session_dir / f"{ts}_{task_id}.json"
+                session_artifact_path.write_text(
+                    json.dumps(artifact, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        except Exception as e:
+            logger.warning(f"session_artifact_write_failed task_id={task_id} error={e}")
 
         # Write human readable summary (extract the LLAMA-generated summary)
         # LLAMA generates a summary and prepends it to result.output
