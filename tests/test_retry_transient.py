@@ -53,39 +53,27 @@ async def test_retry_on_transient_then_success(monkeypatch):
 
     calls: list[int] = []
 
-    async def fake_execute_task(task: Task) -> TaskResult:
+    def fake_run_oneoff(cwd: str, message: str):
         calls.append(1)
         if len(calls) == 1:
             # First call: transient failure
-            return TaskResult(
-                task_id=task.id,
-                success=False,
-                output="",
-                errors=["HTTP 429 Too Many Requests"],
-                files_modified=[],
-                execution_time=0.01,
-                timestamp=datetime.now().isoformat(),
-                raw_stdout="",
-                raw_stderr="Rate limit exceeded. Please retry later.",
-                parsed_output=None,
-                return_code=1,
+            return orch._backends["claude"]._parse(  # type: ignore[attr-defined]
+                stdout="",
+                stderr="Rate limit exceeded. Please retry later.",
+                returncode=1,
+                elapsed=0.01,
+                known_session_id="",
             )
         # Second call: success
-        return TaskResult(
-            task_id=task.id,
-            success=True,
-            output="OK",
-            errors=[],
-            files_modified=[],
-            execution_time=0.01,
-            timestamp=datetime.now().isoformat(),
-            raw_stdout="",
-            raw_stderr="",
-            parsed_output={"content": "ok"},
-            return_code=0,
+        return orch._backends["claude"]._parse(  # type: ignore[attr-defined]
+            stdout="OK",
+            stderr="",
+            returncode=0,
+            elapsed=0.01,
+            known_session_id="",
         )
 
-    monkeypatch.setattr(orch.claude_bridge, "execute_task", fake_execute_task)
+    monkeypatch.setattr(orch._backends["claude"], "run_oneoff", fake_run_oneoff)
 
     task = _make_task()
     result = await orch.process_task(task)
@@ -113,23 +101,17 @@ async def test_no_retry_on_fatal(monkeypatch):
                 return "summary"
         orch.llama_mediator = _DummyLlama()
 
-    async def fake_execute_task(task: Task) -> TaskResult:
+    def fake_run_oneoff(cwd: str, message: str):
         # Fatal failure (no transient markers)
-        return TaskResult(
-            task_id=task.id,
-            success=False,
-            output="",
-            errors=["fatal error"],
-            files_modified=[],
-            execution_time=0.01,
-            timestamp=datetime.now().isoformat(),
-            raw_stdout="",
-            raw_stderr="Compilation failed",
-            parsed_output=None,
-            return_code=1,
+        return orch._backends["claude"]._parse(  # type: ignore[attr-defined]
+            stdout="",
+            stderr="Compilation failed",
+            returncode=1,
+            elapsed=0.01,
+            known_session_id="",
         )
 
-    monkeypatch.setattr(orch.claude_bridge, "execute_task", fake_execute_task)
+    monkeypatch.setattr(orch._backends["claude"], "run_oneoff", fake_run_oneoff)
 
     task = _make_task("fatal_test")
     result = await orch.process_task(task)

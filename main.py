@@ -130,12 +130,12 @@ class OrchestratorCLI:
         print(f"  Claude Code CLI: {'[OK] Available' if components['claude_available'] else '[--] Not available'}")
         
         llama_status = status["llama_status"]
-        if llama_status["ollama_available"]:
-            print(f"  LLAMA/Ollama: [OK] Available ({llama_status['model']})")
+        if llama_status.get("helpers_enabled"):
+            print(f"  Ollama helpers: [OK] Available ({llama_status['model']})")
         else:
-            print(f"  LLAMA/Ollama: [--] Not available (using fallback parser)")
+            print("  Ollama helpers: [--] Optional helper disabled")
         
-        print(f"  File Watcher: {'[OK] Running' if components['file_watcher_running'] else '[--] Stopped'}")
+        print(f"  External task watcher: {'[OK] Running' if components['file_watcher_running'] else '[--] Stopped'}")
         
         telegram_status = status.get("telegram", {})
         if telegram_status.get("configured"):
@@ -157,7 +157,7 @@ async def create_sample_task():
     
     orchestrator = TaskOrchestrator()
     
-    print("Creating sample task...")
+    print("Creating sample compatibility task file...")
     
     sample_description = """
     Review the database connection code in our application and identify any 
@@ -167,7 +167,7 @@ async def create_sample_task():
     
     task_id = orchestrator.create_task_from_description(sample_description)
     print(f"Created sample task: {task_id}")
-    print(f"Task file location: {Path(config.system.tasks_dir) / f'{task_id}.task.md'}")
+    print(f"Compatibility task file: {Path(config.system.tasks_dir) / f'{task_id}.task.md'}")
 
 async def show_status():
     """Show current orchestrator status"""
@@ -306,7 +306,7 @@ Environment Setup:
     - CLAUDE_BASE_CWD / CLAUDE_ALLOWED_ROOT (recommended for bounded workspace scope)
 
 Directory Structure:
-    tasks/      - Drop .task.md files here
+    tasks/      - Optional compatibility drop-folder for .task.md files
     results/    - Task execution results
     summaries/  - Task result summaries
     logs/       - System logs

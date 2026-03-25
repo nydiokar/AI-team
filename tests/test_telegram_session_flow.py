@@ -46,7 +46,7 @@ class _DummyOrchestrator:
         self.created_tasks = []
         self.cancelled_tasks = []
 
-    def create_task_from_description(self, description, task_type=None, target_files=None, session_id=None, cwd=None):
+    async def submit_instruction(self, description, task_type=None, target_files=None, session_id=None, cwd=None, source="runtime"):
         task_id = f"task_{len(self.created_tasks) + 1}"
         self.created_tasks.append(
             {
@@ -56,6 +56,7 @@ class _DummyOrchestrator:
                 "target_files": target_files,
                 "session_id": session_id,
                 "cwd": cwd,
+                "source": source,
             }
         )
         return task_id
@@ -160,7 +161,7 @@ async def test_run_routes_to_active_session_with_bound_cwd(monkeypatch, isolated
         created = orchestrator.created_tasks[-1]
         assert created["session_id"] == session.session_id
         assert created["cwd"] == str((workspace / "repo-alpha").resolve())
-        assert "Running in session" in update.message.replies[-1]
+        assert "Working" in update.message.replies[-1]
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 

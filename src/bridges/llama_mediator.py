@@ -325,9 +325,12 @@ Duration: {result.execution_time:.1f}s
     
     def get_status(self) -> Dict[str, Any]:
         """Get mediator status for debugging"""
+        helpers_enabled = bool(self.ollama_available and self.client and self.model_installed)
         return {
             "ollama_available": self.ollama_available,
             "client_initialized": self.client is not None,
+            "model_installed": self.model_installed,
+            "helpers_enabled": helpers_enabled,
             "model": config.llama.model if self.ollama_available else "fallback",
-            "mode": "LLAMA" if self.ollama_available else "FALLBACK"
+            "mode": "OLLAMA_HELPERS" if helpers_enabled else "FALLBACK_HELPERS"
         }

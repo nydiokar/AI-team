@@ -196,6 +196,10 @@ class ExecutionResult:
     files_modified: List[str] = None
     errors: List[str] = None
     execution_time: float = 0.0
+    raw_stdout: str = ""
+    raw_stderr: str = ""
+    parsed_output: Any = None
+    return_code: int = 0
 
     def __post_init__(self):
         if self.files_modified is None:
@@ -250,8 +254,21 @@ class ITaskOrchestrator(ABC):
     async def process_task(self, task: Task) -> TaskResult:
         """Process a single task through the complete pipeline"""
         pass
+
+    @abstractmethod
+    async def submit_instruction(
+        self,
+        description: str,
+        task_type: Optional[str] = None,
+        target_files: List[str] = None,
+        session_id: Optional[str] = None,
+        cwd: Optional[str] = None,
+        source: str = "runtime",
+    ) -> str:
+        """Queue an instruction directly without writing a compatibility task file."""
+        pass
     
     @abstractmethod
     def create_task_from_description(self, description: str, task_type: str = None, target_files: List[str] = None) -> str:
-        """Create a task file from natural language description"""
+        """Compatibility helper that writes a .task.md file for external ingestion."""
         pass

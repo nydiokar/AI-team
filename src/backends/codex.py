@@ -71,10 +71,12 @@ class CodexBackend(CodingBackend):
         success = returncode == 0
         backend_session_id = ""
         output = stdout
+        parsed_output = None
 
         if stdout:
             try:
                 data = json.loads(stdout)
+                parsed_output = data
                 backend_session_id = data.get("session_id", "")
                 output = data.get("output") or data.get("content") or stdout
             except Exception:
@@ -87,4 +89,8 @@ class CodexBackend(CodingBackend):
             backend_session_id=backend_session_id,
             errors=errors,
             execution_time=elapsed,
+            raw_stdout=stdout,
+            raw_stderr=stderr,
+            parsed_output=parsed_output,
+            return_code=returncode,
         )
