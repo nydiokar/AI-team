@@ -42,6 +42,10 @@ class TelegramInterface:
         self.session_store = SessionStore()
         # Rate limiting for task creation
         self._rate_limit_state: Dict[int, list[float]] = {}
+
+        if not self.bot_token:
+            logger.info("Telegram bot token not configured. Command interface available without live bot app.")
+            return
         
         if not TELEGRAM_AVAILABLE:
             logger.warning("python-telegram-bot not available. Telegram interface disabled.")
@@ -214,10 +218,11 @@ class TelegramInterface:
                 return
             active_session.last_user_message = message_text
             active_session.status = SessionStatus.BUSY
-            task_id = self.orchestrator.create_task_from_description(
-                message_text,
+            task_id = await self.orchestrator.submit_instruction(
+                description=message_text,
                 session_id=active_session.session_id,
                 cwd=active_session.repo_path,
+                source="telegram_session",
             )
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
@@ -235,7 +240,10 @@ class TelegramInterface:
             await update.message.reply_text("❌ No active session. Use /session_new first.")
             return
 
-        task_id = self.orchestrator.create_task_from_description(message_text)
+        task_id = await self.orchestrator.submit_instruction(
+            description=message_text,
+            source="telegram_oneoff",
+        )
         await update.message.reply_text(
             f"One-off task created: `{task_id}`\n"
             f"Tip: use /session_new to open a persistent coding session."
@@ -353,7 +361,7 @@ class TelegramInterface:
                 "",
                 "Components:",
                 f"• Claude Code CLI: {'✅ Available' if status['components']['claude_available'] else '❌ Not available'}",
-                f"• LLAMA/Ollama: {'✅ Available' if status['components']['llama_available'] else '❌ Not available'}",
+                f"• Ollama helpers: {'✅ Available' if status['components']['llama_available'] else '➖ Optional / disabled'}",
                 f"• File Watcher: {'✅ Running' if status['components']['file_watcher_running'] else '❌ Stopped'}",
                 f"• Telegram Bot: {'✅ Running' if telegram.get('running') else ('⚠️ Configured but stopped' if telegram.get('configured') else '❌ Not configured')}",
                 "",

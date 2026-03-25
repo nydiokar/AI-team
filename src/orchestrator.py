@@ -7,6 +7,8 @@ Telegram -> gateway session -> Claude Code / Codex native resume.
 import asyncio
 import logging
 import time
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -18,10 +20,10 @@ import sys
 import os
 
 from src.core import (
-    ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskParser,
+    ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskType, TaskPriority, TaskParser,
     AsyncFileWatcher, SessionStore, SessionStatus, PathResolver
 )
-from src.bridges import ClaudeBridge, LlamaMediator
+from src.bridges import LlamaMediator
 from src.backends import ClaudeCodeBackend, CodexBackend
 from config import config
 from src.validation.engine import ValidationEngine
@@ -48,7 +50,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Initialize core components
         self.task_parser = TaskParser()
         self.file_watcher = AsyncFileWatcher(config.system.tasks_dir)
-        self.claude_bridge = ClaudeBridge()
         self.llama_mediator = LlamaMediator()
         self.session_store = SessionStore()
         self._backends = {
@@ -240,16 +241,16 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         Populates `self.component_status` with:
         - claude_available: Claude CLI detected and responsive
-        - llama_available: Ollama client reachable and model installed
+        - llama_available: optional Ollama helper path is fully usable
         - file_watcher_running: based on watcher state
         """
         
         # Check Claude Code CLI
-        self.component_status["claude_available"] = self.claude_bridge.test_connection()
+        self.component_status["claude_available"] = self._check_claude_cli_available()
         
         # Check LLAMA availability
         llama_status = self.llama_mediator.get_status()
-        self.component_status["llama_available"] = llama_status["ollama_available"]
+        self.component_status["llama_available"] = bool(llama_status.get("helpers_enabled"))
         
         logger.info(f"Component status: {self.component_status}")
     
@@ -258,8 +259,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         status_lines = [
             "=== Telegram Coding Gateway Status ===",
             f"Claude Code CLI: {'[OK] Available' if self.component_status['claude_available'] else '[--] Not found'}",
-            f"LLAMA/Ollama: {'[OK] Available' if self.component_status['llama_available'] else '[--] Using fallback'}",
-            f"File Watcher: {'[OK] Running' if self.component_status['file_watcher_running'] else '[--] Stopped'}",
+            f"Ollama helpers: {'[OK] Available' if self.component_status['llama_available'] else '[--] Optional helper disabled'}",
+            f"External task watcher: {'[OK] Running' if self.component_status['file_watcher_running'] else '[--] Stopped'}",
             f"Task Workers: {len(self.worker_tasks)} active",
             f"Watch Directory: {Path(config.system.tasks_dir).resolve()}",
             "===================================="
@@ -307,6 +308,119 @@ class TaskOrchestrator(ITaskOrchestrator):
             self._artifact_index_path.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             logger.warning(f"event=artifact_index_save_failed task_id={task_id} error={e}")
+
+    def _check_claude_cli_available(self) -> bool:
+        """Best-effort check that Claude CLI exists and is authenticated."""
+        exe = shutil.which("claude") or "claude"
+        try:
+            result = subprocess.run(
+                [exe, "auth", "status"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _make_task(
+        self,
+        description: str,
+        task_type: Optional[str] = None,
+        target_files: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
+        cwd: Optional[str] = None,
+        source: str = "runtime",
+    ) -> Task:
+        """Create an in-memory task object for direct queueing."""
+        task_id = f"task_{uuid.uuid4().hex[:8]}"
+        parsed = self._parse_description_simple(description)
+
+        if task_type:
+            parsed["type"] = task_type
+        if target_files:
+            parsed["target_files"] = target_files
+
+        explicit_cwd = (cwd or "").strip()
+        resolved_cwd = ""
+        if explicit_cwd:
+            resolved = PathResolver.from_config().resolve_execution_path(explicit_cwd)
+            resolved_cwd = resolved or ""
+
+        task_type_enum = TaskType.ANALYZE
+        raw_type = str(parsed.get("type", "analyze")).strip().lower()
+        for candidate in TaskType:
+            if candidate.value == raw_type:
+                task_type_enum = candidate
+                break
+
+        task = Task(
+            id=task_id,
+            type=task_type_enum,
+            priority=TaskPriority.MEDIUM,
+            status=TaskStatus.PENDING,
+            created=datetime.now().isoformat(),
+            title=parsed.get("title", "Runtime task"),
+            target_files=list(parsed.get("target_files", []) or []),
+            prompt=parsed.get("prompt", description),
+            success_criteria=["Task completed successfully", "Results validated"],
+            context=f"Generated from {source}: {description}",
+            metadata={
+                "session_id": session_id or "",
+                "cwd": resolved_cwd,
+                "source": source,
+                "task_origin": "runtime",
+            },
+        )
+        return task
+
+    async def _enqueue_task(self, task: Task) -> str:
+        """Queue a task object directly without writing a task file."""
+        logger.info(f"event=task_created task_id={task.id} source={(task.metadata or {}).get('source', 'runtime')}")
+        self._emit_event("task_created", task, {"source": (task.metadata or {}).get("source", "runtime")})
+        self._emit_event("parsed", task)
+
+        try:
+            self.task_queue.put_nowait(task)
+            self.active_tasks[task.id] = task
+            logger.info(f"Queued runtime task: {task.id} ({task.type.value}, {task.priority.value})")
+        except asyncio.QueueFull:
+            priority_val = getattr(task.priority, "value", str(task.priority))
+            if priority_val == "low":
+                logger.warning(f"event=dropped_low_priority task_id={task.id} reason=queue_full")
+                self._emit_event("dropped_low_priority", task, {"reason": "queue_full"})
+                raise RuntimeError("Task queue is full")
+            logger.warning(f"event=throttled task_id={task.id} reason=queue_full priority={priority_val}")
+            self._emit_event("throttled", task, {"reason": "queue_full", "priority": priority_val})
+            try:
+                await asyncio.wait_for(self.task_queue.put(task), timeout=5.0)
+                self.active_tasks[task.id] = task
+                logger.info(f"Queued throttled runtime task: {task.id} ({task.type.value}, {priority_val})")
+            except asyncio.TimeoutError as exc:
+                logger.error(f"event=dropped_after_throttle task_id={task.id}")
+                self._emit_event("dropped_after_throttle", task, {"timeout": 5.0})
+                raise RuntimeError("Task queue is full") from exc
+        return task.id
+
+    async def submit_instruction(
+        self,
+        description: str,
+        task_type: Optional[str] = None,
+        target_files: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
+        cwd: Optional[str] = None,
+        source: str = "telegram",
+    ) -> str:
+        """Direct runtime entrypoint for Telegram/CLI instructions."""
+        task = self._make_task(
+            description=description,
+            task_type=task_type,
+            target_files=target_files,
+            session_id=session_id,
+            cwd=cwd,
+            source=source,
+        )
+        return await self._enqueue_task(task)
 
     def load_compact_context(self, task_id: str) -> Dict[str, Any]:
         """Load compact, prompt-ready context for a given task_id.
@@ -365,41 +479,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                 if getattr(task, "metadata", None) is None:
                     task.metadata = {}
                 task.metadata["__file_path"] = file_path
+                task.metadata.setdefault("source", "task_file")
+                task.metadata.setdefault("task_origin", "file")
             except Exception:
                 pass
             logger.info(f"event=parsed task_id={task.id} type={task.type.value} priority={task.priority.value}")
-            self._emit_event("parsed", task)
-            
-            # Add to queue with backpressure handling
-            try:
-                # Try to add immediately (non-blocking)
-                self.task_queue.put_nowait(task)
-                self.active_tasks[task.id] = task
-                logger.info(f"Queued task: {task.id} ({task.type.value}, {task.priority.value})")
-            except asyncio.QueueFull:
-                # Queue is full - apply backpressure based on priority
-                if hasattr(task.priority, 'value'):
-                    priority_val = task.priority.value
-                else:
-                    priority_val = str(task.priority)
-                
-                if priority_val == 'low':
-                    # Drop low priority tasks when queue is full
-                    logger.warning(f"event=dropped_low_priority task_id={task.id} reason=queue_full")
-                    self._emit_event("dropped_low_priority", task, {"reason": "queue_full"})
-                else:
-                    # Throttle medium/high priority tasks
-                    logger.warning(f"event=throttled task_id={task.id} reason=queue_full priority={priority_val}")
-                    self._emit_event("throttled", task, {"reason": "queue_full", "priority": priority_val})
-                    # Try with a short timeout
-                    try:
-                        await asyncio.wait_for(self.task_queue.put(task), timeout=5.0)
-                        self.active_tasks[task.id] = task
-                        logger.info(f"Queued throttled task: {task.id} ({task.type.value}, {priority_val})")
-                    except asyncio.TimeoutError:
-                        # Still couldn't queue after throttling - drop it
-                        logger.error(f"event=dropped_after_throttle task_id={task.id}")
-                        self._emit_event("dropped_after_throttle", task, {"timeout": 5.0})
+            await self._enqueue_task(task)
             
         except Exception as e:
             logger.error(f"Error processing task file {file_path}: {e}")
@@ -626,13 +711,16 @@ class TaskOrchestrator(ITaskOrchestrator):
             while True:
                 attempt += 1
                 # Run execution as a task to allow timeout/cancel
-                # Use session backend (with native resume) when task belongs to a session
+                # Use session backend (with native resume) when task belongs to a session.
+                # For non-session tasks, use the native backend directly instead of
+                # the legacy Claude bridge/task-file execution path.
                 session_id = (task.metadata or {}).get("session_id", "").strip()
                 session = self.session_store.get(session_id) if session_id else None
                 if session:
                     session.status = SessionStatus.BUSY
                     self.session_store.save(session)
-                    backend = self._backends.get(session.backend, self._backends["claude"])
+                    backend_name = session.backend
+                    backend = self._backends.get(backend_name, self._backends["claude"])
                     session.last_user_message = task.prompt
                     if session.backend_session_id:
                         exec_task = asyncio.create_task(
@@ -643,7 +731,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                             asyncio.to_thread(backend.create_session, session)
                         )
                 else:
-                    exec_task = asyncio.create_task(self.claude_bridge.execute_task(task))
+                    backend_name = str((task.metadata or {}).get("backend") or "claude").strip().lower()
+                    backend = self._backends.get(backend_name, self._backends["claude"])
+                    cwd_override = str((task.metadata or {}).get("cwd") or "").strip()
+                    if not cwd_override:
+                        cwd_override = str(getattr(config.claude, "base_cwd", "") or "").strip()
+                    exec_task = asyncio.create_task(
+                        asyncio.to_thread(backend.run_oneoff, cwd_override, task.prompt)
+                    )
                 self._running_exec_tasks[task.id] = exec_task
                 # Wait for whichever happens first
                 wait_set = {exec_task}
@@ -674,7 +769,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 files_modified=raw.files_modified,
                                 execution_time=raw.execution_time,
                                 timestamp=datetime.now().isoformat(),
+                                raw_stdout=getattr(raw, "raw_stdout", ""),
+                                raw_stderr=getattr(raw, "raw_stderr", ""),
+                                parsed_output=getattr(raw, "parsed_output", None),
+                                return_code=getattr(raw, "return_code", 0),
                             )
+                            setattr(result, "backend_name", backend_name)
                         else:
                             result = raw
                     elif cancel_waiter and cancel_waiter in done:
@@ -886,9 +986,10 @@ created: {task.created}
                 "components": self.component_status,
                 "workers": len(self.worker_tasks),
             },
-            "bridge": {
-                "available": bool(self.component_status.get("claude_available")),
-                "claude_executable": getattr(self.claude_bridge, "claude_executable", "claude"),
+            "runtime": {
+                "backend": getattr(result, "backend_name", "claude"),
+                "claude_executable": shutil.which("claude") or "claude",
+                "codex_executable": shutil.which("codex") or "codex",
                 "max_turns": getattr(config.claude, "max_turns", 3),
                 "timeout": getattr(config.claude, "timeout", 600),
                 "skip_permissions": bool(getattr(config.claude, "skip_permissions", True)),

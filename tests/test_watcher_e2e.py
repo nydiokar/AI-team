@@ -23,22 +23,15 @@ async def run_e2e_watcher_test():
     # Check Claude availability; if not available, stub execute_task so we still produce events
     await orchestrator._check_component_status()
     if not orchestrator.component_status.get("claude_available", False):
-        async def _fake_execute_task(task):
-            # Minimal successful result to drive pipeline and events
-            return TaskResult(
-                task_id=task.id,
-                success=True,
-                output="OK",
-                errors=[],
-                files_modified=[],
-                execution_time=0.05,
-                timestamp=datetime.now().isoformat(),
-                raw_stdout="",
-                raw_stderr="",
-                parsed_output={"content": "ok"},
-                return_code=0,
+        def _fake_run_oneoff(cwd, message):
+            return orchestrator._backends["claude"]._parse(  # type: ignore[attr-defined]
+                stdout="OK",
+                stderr="",
+                returncode=0,
+                elapsed=0.05,
+                known_session_id="",
             )
-        orchestrator.claude_bridge.execute_task = _fake_execute_task  # type: ignore
+        orchestrator._backends["claude"].run_oneoff = _fake_run_oneoff  # type: ignore
 
     # Prepare temp task file (read-only)
     tasks_dir = Path(orchestrator.file_watcher.watch_directory)

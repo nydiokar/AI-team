@@ -47,22 +47,16 @@ async def test_resume_pending_task(tmp_path, monkeypatch):
 
     orch = TaskOrchestrator()
 
-    # Stub execute_task to succeed fast so we don't require Claude
-    async def _fake_execute_task(task):
-        return TaskResult(
-            task_id=task.id,
-            success=True,
-            output="OK",
-            errors=[],
-            files_modified=[],
-            execution_time=0.01,
-            timestamp=datetime.now().isoformat(),
-            raw_stdout="",
-            raw_stderr="",
-            parsed_output={"content": "ok"},
-            return_code=0,
+    # Stub backend one-off execution to succeed fast so we don't require Claude
+    def _fake_run_oneoff(cwd, message):
+        return orch._backends["claude"]._parse(  # type: ignore[attr-defined]
+            stdout="OK",
+            stderr="",
+            returncode=0,
+            elapsed=0.01,
+            known_session_id="",
         )
-    monkeypatch.setattr(orch.claude_bridge, "execute_task", _fake_execute_task)
+    monkeypatch.setattr(orch._backends["claude"], "run_oneoff", _fake_run_oneoff)
 
     await orch.start()
 
