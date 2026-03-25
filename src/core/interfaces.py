@@ -48,6 +48,7 @@ class TaskResult:
     files_modified: List[str]
     execution_time: float
     timestamp: str
+    file_changes: List[Dict[str, Any]] = None
     # Raw process data for artifact persistence and diagnostics
     raw_stdout: str = ""
     raw_stderr: str = ""
@@ -56,6 +57,10 @@ class TaskResult:
     # Retry metadata (filled by orchestrator)
     retries: int = 0
     error_class: str = ""
+
+    def __post_init__(self):
+        if self.file_changes is None:
+            self.file_changes = []
 
 @dataclass
 class ValidationResult:
@@ -187,10 +192,13 @@ class ExecutionResult:
     raw_stderr: str = ""
     parsed_output: Any = None
     return_code: int = 0
+    file_changes: List[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.files_modified is None:
             self.files_modified = []
+        if self.file_changes is None:
+            self.file_changes = []
         if self.errors is None:
             self.errors = []
 
