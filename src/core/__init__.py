@@ -3,7 +3,7 @@ from .interfaces import (
     Session, SessionStatus,
     ExecutionResult, CodingBackend,
     ValidationResult,
-    ITaskParser, IClaudeBridge, ILlamaMediator, IValidationEngine,
+    ITaskParser, ILlamaMediator, IValidationEngine,
     ITelegramInterface, IFileWatcher, ITaskOrchestrator
 )
 from .task_parser import TaskParser
@@ -16,7 +16,7 @@ __all__ = [
     "Session", "SessionStatus",
     "ExecutionResult", "CodingBackend",
     "ValidationResult",
-    "ITaskParser", "IClaudeBridge", "ILlamaMediator", "IValidationEngine",
+    "ITaskParser", "ILlamaMediator", "IValidationEngine",
     "ITelegramInterface", "IFileWatcher", "ITaskOrchestrator",
     "TaskParser", "FileWatcher", "AsyncFileWatcher",
     "PathResolver", "PathResolution",

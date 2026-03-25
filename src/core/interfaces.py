@@ -78,19 +78,6 @@ class ITaskParser(ABC):
         """Validate task file format and return errors"""
         pass
 
-class IClaudeBridge(ABC):
-    """Interface for Claude Code integration"""
-    
-    @abstractmethod
-    async def execute_task(self, task: Task) -> TaskResult:
-        """Execute a task using Claude Code"""
-        pass
-    
-    @abstractmethod
-    def test_connection(self) -> bool:
-        """Test if Claude Code is available and working"""
-        pass
-
 class ILlamaMediator(ABC):
     """Interface for local LLAMA integration"""
     
