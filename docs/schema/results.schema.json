@@ -30,6 +30,21 @@
     "execution_time": { "type": "number", "minimum": 0 },
     "errors": { "type": "array", "items": { "type": "string" } },
     "files_modified": { "type": "array", "items": { "type": "string" } },
+    "file_changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "git_status": { "type": "string" },
+          "change_type": { "type": "string" },
+          "added_lines": { "type": ["integer", "null"] },
+          "deleted_lines": { "type": ["integer", "null"] }
+        },
+        "required": ["path", "change_type"],
+        "additionalProperties": true
+      }
+    },
     "raw_stdout": { "type": "string" },
     "raw_stderr": { "type": "string" },
     "triage": {

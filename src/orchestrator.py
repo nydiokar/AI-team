@@ -5,6 +5,7 @@ The current intended product path is session-first:
 Telegram -> gateway session -> Claude Code / Codex native resume.
 """
 import asyncio
+import json
 import logging
 import time
 import shutil
@@ -110,6 +111,86 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self.telegram_interface = None
         else:
             logger.info("Telegram interface not configured (no bot token)")
+
+    @staticmethod
+    def _extract_text_from_payload(payload: Any) -> str:
+        """Best-effort extraction of a user-visible answer from structured payloads."""
+        if isinstance(payload, str):
+            text = payload.strip()
+            if not text:
+                return ""
+            if text.startswith("{") or text.startswith("["):
+                try:
+                    return TaskOrchestrator._extract_text_from_payload(json.loads(text))
+                except Exception:
+                    return text
+            return text
+
+        if isinstance(payload, list):
+            for item in reversed(payload):
+                text = TaskOrchestrator._extract_text_from_payload(item)
+                if text:
+                    return text
+            return ""
+
+        if not isinstance(payload, dict):
+            return ""
+
+        for key in ("result", "content", "output", "message", "text"):
+            value = payload.get(key)
+            text = TaskOrchestrator._extract_text_from_payload(value)
+            if text:
+                return text
+
+        for key in ("messages", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                text = TaskOrchestrator._extract_text_from_payload(value)
+                if text:
+                    return text
+
+        return ""
+
+    @classmethod
+    def _session_reply_text(cls, result: TaskResult) -> str:
+        """User-facing text for Telegram session completions."""
+        for candidate in (
+            result.output,
+            cls._extract_text_from_payload(result.parsed_output),
+            result.raw_stdout,
+        ):
+            text = cls._extract_text_from_payload(candidate)
+            if text:
+                return text
+
+        return (
+            "Claude completed the run but returned no final reply text.\n\n"
+            "Check the artifact JSON for raw stdout/stderr and backend metadata."
+        )
+
+    @staticmethod
+    def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:
+        changes = list(getattr(result, "file_changes", None) or [])
+        if changes:
+            lines: List[str] = []
+            for item in changes[:limit]:
+                path = item.get("path", "")
+                change_type = str(item.get("change_type", "modified")).capitalize()
+                added = item.get("added_lines")
+                deleted = item.get("deleted_lines")
+                stats = ""
+                if added is not None or deleted is not None:
+                    stats = f" (+{added if added is not None else '?'}/-{deleted if deleted is not None else '?'})"
+                lines.append(f"  `{path}` [{change_type}{stats}]")
+            if len(changes) > limit:
+                lines.append(f"  _...and {len(changes) - limit} more_")
+            return lines
+
+        files = result.files_modified or []
+        lines = [f"  `{f}`" for f in files[:limit]]
+        if len(files) > limit:
+            lines.append(f"  _...and {len(files) - limit} more_")
+        return lines
     
     async def start(self):
         """Start all system components.
@@ -564,7 +645,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                         if result.success:
                             # For session tasks use Claude's raw output; for standalone use LLAMA summary
                             if session_id_for_notify:
-                                content = result.output.strip() if result.output else "Done."
+                                content = self._session_reply_text(result)
                             else:
                                 summary_file = Path(config.system.summaries_dir) / f"{task.id}_summary.txt"
                                 if summary_file.exists():
@@ -574,9 +655,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                             # Append changed-file list if any were detected
                             files = result.files_modified or []
                             if files:
-                                lines = [f"  `{f}`" for f in files[:20]]
-                                if len(files) > 20:
-                                    lines.append(f"  _...and {len(files) - 20} more_")
+                                lines = self._format_file_change_lines(result, limit=20)
                                 content = content + "\n\n**Changed files:**\n" + "\n".join(lines)
                             await self.telegram_interface.notify_completion(task.id, content, success=True, chat_id=notify_chat_id)
                         else:
@@ -758,7 +837,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                         from src.core.interfaces import ExecutionResult as _ER
                         if isinstance(raw, _ER):
                             # Persist backend session ID back onto the session record
-                            if session and raw.backend_session_id:
+                            if session and raw.success and raw.backend_session_id:
                                 session.backend_session_id = raw.backend_session_id
                                 self.session_store.save(session)
                             result = TaskResult(
@@ -769,6 +848,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 files_modified=raw.files_modified,
                                 execution_time=raw.execution_time,
                                 timestamp=datetime.now().isoformat(),
+                                file_changes=getattr(raw, "file_changes", []),
                                 raw_stdout=getattr(raw, "raw_stdout", ""),
                                 raw_stderr=getattr(raw, "raw_stderr", ""),
                                 parsed_output=getattr(raw, "parsed_output", None),
@@ -957,6 +1037,7 @@ created: {task.created}
             "execution_time": result.execution_time,
             "errors": result.errors,
             "files_modified": result.files_modified,
+            "file_changes": getattr(result, "file_changes", []),
             # Linkage for multi-turn/threaded contexts (optional)
             "parent_task_id": getattr(result, "parent_task_id", None),
             "turn_of": getattr(result, "turn_of", None),
