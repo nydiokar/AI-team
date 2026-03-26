@@ -1,8 +1,8 @@
 # AI-Team Gateway - Project Context
 
-**Last Updated:** 2026-03-25
+**Last Updated:** 2026-03-26
 **Branch:** `main`
-**Status:** Session-first runtime is now direct; external `.task.md` ingestion remains as a compatibility lane
+**Status:** Session-first runtime is direct and usable; Telegram UX and Claude session recovery were cleaned up, while external `.task.md` ingestion remains as a compatibility lane
 
 ---
 
@@ -43,7 +43,7 @@ Canonical intent lives in `.ai/context/production_vision.md`.
 
 ### Phase 3 - Session execution flow
 - Done for the live runtime path.
-- Telegram plain text, `/say`, `/run`, and `/task` now queue runtime tasks directly.
+- Telegram plain text and `/task` queue runtime tasks directly.
 - Active sessions no longer create `.task.md` wrappers to execute a turn.
 - One-off non-session execution also uses the native backend path directly.
 - Artifacts are still written for every completed task/session turn.
@@ -57,38 +57,48 @@ Canonical intent lives in `.ai/context/production_vision.md`.
 - Path resolver exists in `src/core/path_resolver.py`.
 
 ### Phase 5 - Compatibility and cleanup
-- In progress.
+- Mostly done.
 - External `.task.md` watcher ingestion still exists as a compatibility lane.
 - `src/bridges/claude_bridge.py` still exists in the repo as legacy code, but it is no longer on the primary Telegram/runtime execution path.
 - Old bridge-era tests still need pruning or isolation.
+- Telegram no longer advertises task-runner-only commands, and the registered public command set is now session-first.
+- Claude dead-session recovery now recreates the backend conversation inside the same gateway session instead of poisoning session state.
+- Git commands now target the active session repo by default instead of requiring opaque task IDs.
 
 ---
 
 ## Production gaps that remain
 
-### 1. Live end-to-end validation
+### 1. Real Codex validation
 
 Still required:
-1. `/session_new claude <repo_path>`
+1. `/session_new codex <repo_path>`
 2. send first message
 3. verify `backend_session_id` is captured in `state/sessions/<id>.json`
 4. send second message
-5. verify backend resumes the existing conversation
+5. verify backend resumes the existing Codex conversation and returns clean session output
 
 ### 2. Workspace scope confirmation
 
 `CLAUDE_BASE_CWD` and `CLAUDE_ALLOWED_ROOT` must be explicitly confirmed in `.env`.
 
-### 3. Legacy code removal decision
+### 3. Telegram command polish
+
+- Add prettier, more compact Telegram replies for session status, git status, and errors.
+- Decide whether `/commit_all` should remain public.
+- Decide whether to keep compatibility-only handler methods for `/run`, `/say`, `/progress`, and `/cancel` in code at all now that they are no longer registered.
+
+### 4. Legacy code removal decision
 
 - Decide whether external `.task.md` ingestion stays supported long-term.
 - If not, delete watcher/bridge-era code and associated tests.
 - If yes, keep it clearly labeled as compatibility-only, not part of the main runtime path.
 
-### 4. Telegram UX cleanup
+### 5. Deployment hardening
 
-- Review bot output strings for consistency.
-- Remove remaining bridge/task-runner wording where it implies the old runtime path.
+- Pin Claude Code and Codex CLI versions or add startup smoke checks so CLI contract shifts are caught immediately.
+- Add one real backend smoke path per supported backend.
+- Confirm operator-facing failure messages stay backend-specific and actionable.
 
 ---
 
@@ -112,7 +122,7 @@ Still required:
 
 ### Session commands
 - `/session_new <backend> <path>`
-- `/session_list`
+- `/session_list [all]`
 - `/session_use <session_id>`
 - `/session_status [session_id]`
 - `/session_dirs [path]`
@@ -121,11 +131,7 @@ Still required:
 
 ### Execution commands
 - plain text -> continue active session if one exists
-- `/say <instruction>` -> session-only execution
-- `/run <instruction>` -> active session if present, otherwise one-off task
 - `/task <instruction>` -> one-off task only
-- `/progress <task_id>`
-- `/cancel <task_id>`
 - `/status`
 
 Runtime note:
@@ -136,10 +142,10 @@ Runtime note:
 
 ## Recommended next moves
 
-1. Run a live Telegram E2E validation against Claude with two turns.
-2. Confirm workspace scope values in `.env` and re-run `python main.py doctor`.
-3. Delete or isolate bridge-era tests and any dead `ClaudeBridge` call sites.
-4. Decide whether the compatibility watcher remains a supported feature.
+1. Validate Codex sessions end-to-end with the same rigor already applied to Claude.
+2. Polish Telegram replies so the command surface feels intentionally productized rather than debug-oriented.
+3. Pin or smoke-test backend CLI versions at startup to catch contract regressions early.
+4. Decide whether the compatibility watcher remains a supported feature and prune legacy code accordingly.
 
 ---
 
