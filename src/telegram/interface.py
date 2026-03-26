@@ -70,8 +70,6 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("help", self._handle_help))
         self.app.add_handler(CommandHandler("task", self._handle_task_command))
         self.app.add_handler(CommandHandler("status", self._handle_status_command))
-        self.app.add_handler(CommandHandler("progress", self._handle_progress_command))
-        self.app.add_handler(CommandHandler("cancel", self._handle_cancel_command))
         # Session command handlers
         self.app.add_handler(CommandHandler("session_new", self._handle_session_new))
         self.app.add_handler(CommandHandler("session_list", self._handle_session_list))
@@ -80,8 +78,6 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("session_status", self._handle_session_status))
         self.app.add_handler(CommandHandler("session_cancel", self._handle_session_cancel))
         self.app.add_handler(CommandHandler("session_close", self._handle_session_close))
-        self.app.add_handler(CommandHandler("run", self._handle_run_command))
-        self.app.add_handler(CommandHandler("say", self._handle_say_command))
         # Git automation command handlers
         self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
         self.app.add_handler(CommandHandler("commit_all", self._handle_git_commit_all))
