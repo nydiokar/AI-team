@@ -1,8 +1,8 @@
 # AI-Team Gateway - Project Context
 
-**Last Updated:** 2026-03-26
+**Last Updated:** 2026-03-29
 **Branch:** `main`
-**Status:** Session-first runtime is direct and usable; Telegram UX and Claude session recovery were cleaned up, while external `.task.md` ingestion remains as a compatibility lane
+**Status:** Codex backend is validated and corrected against the real CLI contract (v0.115.0); startup no longer blocks on SentenceTransformer eager load
 
 ---
 
@@ -38,8 +38,9 @@ Canonical intent lives in `.ai/context/production_vision.md`.
 ### Phase 2 - Backend session support
 - Done.
 - Claude backend uses native `--resume` in `src/backends/claude_code.py`.
-- Codex backend uses native session resume in `src/backends/codex.py`.
-- `backend_session_id` is stored in the session record.
+- Codex backend rewritten against real CLI contract (`codex exec` / `codex exec resume`) in `src/backends/codex.py`.
+- Session ID is the `thread_id` from the `thread.started` NDJSON event.
+- `backend_session_id` is stored in the session record and used for resume.
 
 ### Phase 3 - Session execution flow
 - Done for the live runtime path.
@@ -69,14 +70,12 @@ Canonical intent lives in `.ai/context/production_vision.md`.
 
 ## Production gaps that remain
 
-### 1. Real Codex validation
+### 1. Real Codex end-to-end validation
 
-Still required:
+Codex backend is now correct at the code level. Still requires a live two-turn Telegram test:
 1. `/session_new codex <repo_path>`
-2. send first message
-3. verify `backend_session_id` is captured in `state/sessions/<id>.json`
-4. send second message
-5. verify backend resumes the existing Codex conversation and returns clean session output
+2. send first message — verify `backend_session_id` (thread_id) is captured in `state/sessions/<id>.json`
+3. send second message — verify Codex resumes the same thread
 
 ### 2. Workspace scope confirmation
 
@@ -96,7 +95,7 @@ Still required:
 
 ### 5. Deployment hardening
 
-- Pin Claude Code and Codex CLI versions or add startup smoke checks so CLI contract shifts are caught immediately.
+- Pin Claude Code and Codex CLI versions or add startup smoke checks so CLI contract shifts are caught immediately (Codex is currently at v0.115.0).
 - Add one real backend smoke path per supported backend.
 - Confirm operator-facing failure messages stay backend-specific and actionable.
 

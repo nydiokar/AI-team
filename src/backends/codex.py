@@ -1,8 +1,11 @@
 """
 CodexBackend — wraps the OpenAI Codex CLI (`codex`).
 
-Resume uses `codex --session <backend_session_id>` if available.
-Falls back to stateless run when no session ID is stored.
+First turn:  codex exec --json --dangerously-bypass-approvals-and-sandbox [-C <dir>] -
+Resume turn: codex exec resume <thread_id> --json --dangerously-bypass-approvals-and-sandbox -
+
+Prompt is passed via stdin (the trailing `-` argument).
+Session ID is extracted from the `thread_id` field in the `thread.started` NDJSON event.
 
 Synchronous — called via asyncio.to_thread() by the orchestrator.
 """
@@ -40,7 +43,7 @@ class CodexBackend(CodingBackend):
 
     def _run(self, cwd: str, message: str, resume_id: Optional[str]) -> ExecutionResult:
         start = time.time()
-        cmd = self._build_cmd(resume_id)
+        cmd = self._build_cmd(resume_id, cwd)
         try:
             proc = subprocess.run(
                 cmd,
@@ -60,29 +63,67 @@ class CodexBackend(CodingBackend):
                 execution_time=time.time() - start,
             )
 
-    def _build_cmd(self, resume_id: Optional[str]) -> List[str]:
-        cmd = [self._exe, "--approval-mode", "auto-edit", "-q"]
+    def _build_cmd(self, resume_id: Optional[str], cwd: Optional[str]) -> List[str]:
         if resume_id:
-            cmd += ["--session", resume_id]
+            return [
+                self._exe, "exec", "resume", resume_id,
+                "--json",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-",
+            ]
+        cmd = [
+            self._exe, "exec",
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+        if cwd:
+            cmd += ["-C", cwd]
+        cmd.append("-")
         return cmd
 
     @staticmethod
     def _parse(stdout: str, stderr: str, returncode: int, elapsed: float) -> ExecutionResult:
         success = returncode == 0
         backend_session_id = ""
-        output = stdout
-        parsed_output = None
+        output_parts: List[str] = []
+        parsed_output: Optional[dict] = None
 
-        if stdout:
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
             try:
-                data = json.loads(stdout)
-                parsed_output = data
-                backend_session_id = data.get("session_id", "")
-                output = data.get("output") or data.get("content") or stdout
+                event = json.loads(line)
             except Exception:
-                pass
+                continue
 
-        errors = [stderr] if stderr and not success else []
+            event_type = event.get("type", "")
+
+            if event_type == "thread.started":
+                backend_session_id = event.get("thread_id", "")
+                parsed_output = event
+
+            elif event_type == "item.completed":
+                item = event.get("item", {})
+                if item.get("type") == "agent_message":
+                    text = item.get("text", "")
+                    if text:
+                        output_parts.append(text)
+
+            elif event_type == "turn.completed":
+                parsed_output = event
+
+        output = "\n".join(output_parts).strip()
+        if not output:
+            output = stdout.strip()
+
+        errors: List[str] = []
+        if not success:
+            if stderr:
+                errors.append(stderr.strip())
+            if not errors:
+                errors.append(f"codex exited with code {returncode}")
+
         return ExecutionResult(
             success=success,
             output=output,

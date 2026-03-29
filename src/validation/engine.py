@@ -75,10 +75,15 @@ class ValidationEngine(IValidationEngine):
 
     def __init__(self, config: ValidationConfig | None = None):
         self.config = config or ValidationConfig()
-        self._model = None
+        self._model = None          # loaded lazily on first _similarity call
+        self._model_loaded = False  # guard so we only attempt once
+
+    def _load_model(self) -> None:
+        if self._model_loaded:
+            return
+        self._model_loaded = True
         if _ST_AVAILABLE:
             try:
-                # Use a small, commonly available model name; if missing, we skip silently
                 self._model = SentenceTransformer("all-MiniLM-L6-v2")
             except Exception:
                 self._model = None
@@ -88,6 +93,7 @@ class ValidationEngine(IValidationEngine):
         b = (b or "").strip()
         if not a or not b:
             return 0.0
+        self._load_model()
         if self._model is not None:
             try:
                 emb = self._model.encode([a, b])  # type: ignore[attr-defined]
