@@ -100,3 +100,4 @@ The main production gate that still matters is a live end-to-end validation:
 - [.ai/context/production_vision.md](C:/Users/Cicada38/Projects/AI-team/.ai/context/production_vision.md)
 - [QUICK_START.md](C:/Users/Cicada38/Projects/AI-team/docs/QUICK_START.md)
 - [ROADMAP.md](C:/Users/Cicada38/Projects/AI-team/docs/ROADMAP.md)
+- [CLAUDE_HOOK_IDEAS.md](C:/Users/Cicada38/Projects/AI-team/docs/CLAUDE_HOOK_IDEAS.md)
