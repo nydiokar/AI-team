@@ -3,7 +3,6 @@
 Main entry point for the Telegram Coding Gateway.
 """
 import asyncio
-import contextlib
 import json
 import os
 import signal
@@ -18,6 +17,12 @@ if str(src_path) not in sys.path:
     sys.path.append(str(src_path))
 
 from src.orchestrator import TaskOrchestrator
+from src.core.process_utils import (
+    current_process_create_time,
+    pid_exists,
+    process_matches_entrypoint,
+    terminate_process_tree,
+)
 from config import config
 
 # Configure logging with rotation for file handler
@@ -79,12 +84,6 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-try:
-    import psutil
-except ImportError:  # pragma: no cover
-    psutil = None
-
-
 class _GatewayInstanceLock:
     """Single-instance guard with takeover for the same gateway process."""
 
@@ -99,10 +98,15 @@ class _GatewayInstanceLock:
         if existing:
             pid = int(existing.get("pid") or 0)
             started = float(existing.get("create_time") or 0)
-            if pid and self._pid_matches_gateway(pid, started):
+            if pid and process_matches_entrypoint(
+                pid,
+                started=started,
+                app_root=self.app_root,
+                entrypoint=self.app_root / "main.py",
+            ):
                 logger.warning(f"Existing gateway instance detected (pid={pid}); terminating it before restart")
-                self._terminate_process_tree(pid)
-            elif pid and self._pid_exists(pid):
+                terminate_process_tree(pid)
+            elif pid and pid_exists(pid):
                 raise RuntimeError(
                     f"Lock file points to live PID {pid}, but it does not look like this gateway process. "
                     "Refusing to replace it automatically."
@@ -111,7 +115,7 @@ class _GatewayInstanceLock:
 
         payload = {
             "pid": os.getpid(),
-            "create_time": self._current_create_time(),
+            "create_time": current_process_create_time(),
             "root": str(self.app_root),
             "entrypoint": str((self.app_root / "main.py").resolve()),
         }
@@ -142,70 +146,6 @@ class _GatewayInstanceLock:
             return {"pid": int(raw)}
         except Exception:
             return None
-
-    def _pid_matches_gateway(self, pid: int, started: float) -> bool:
-        if not psutil:
-            return self._pid_exists(pid)
-        try:
-            proc = psutil.Process(pid)
-            if started and abs(proc.create_time() - started) > 2:
-                return False
-            cmdline = [str(part).lower() for part in proc.cmdline()]
-            main_path = str((self.app_root / "main.py").resolve()).lower()
-            root_path = str(self.app_root).lower()
-            try:
-                proc_cwd = str(Path(proc.cwd()).resolve()).lower()
-            except Exception:
-                proc_cwd = ""
-            return (
-                any("main.py" in part or main_path in part for part in cmdline)
-                and (proc_cwd == root_path or any(root_path in part for part in cmdline))
-            )
-        except Exception:
-            return False
-
-    @staticmethod
-    def _pid_exists(pid: int) -> bool:
-        if psutil:
-            try:
-                return psutil.pid_exists(pid)
-            except Exception:
-                return False
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        except Exception:
-            return True
-        return True
-
-    @staticmethod
-    def _terminate_process_tree(pid: int) -> None:
-        if psutil:
-            try:
-                proc = psutil.Process(pid)
-                children = proc.children(recursive=True)
-                for child in children:
-                    with contextlib.suppress(Exception):
-                        child.terminate()
-                proc.terminate()
-                _, alive = psutil.wait_procs([proc, *children], timeout=8)
-                for item in alive:
-                    with contextlib.suppress(Exception):
-                        item.kill()
-                return
-            except Exception:
-                pass
-        os.kill(pid, signal.SIGTERM)
-
-    @staticmethod
-    def _current_create_time() -> float:
-        if psutil:
-            try:
-                return psutil.Process(os.getpid()).create_time()
-            except Exception:
-                return 0.0
-        return 0.0
 
 class OrchestratorCLI:
     """Command-line interface for the orchestrator"""
