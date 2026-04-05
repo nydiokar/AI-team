@@ -53,6 +53,8 @@ class TelegramInterface:
         self._app_root = Path(__file__).resolve().parents[2]
         # Rate limiting for task creation
         self._rate_limit_state: Dict[int, list[float]] = {}
+        # Per-chat plain-text debounce buffer to merge split Telegram messages
+        self._message_buffers: Dict[int, Dict[str, Any]] = {}
 
         if not self.bot_token:
             logger.info("Telegram bot token not configured. Command interface available without live bot app.")
@@ -74,7 +76,8 @@ class TelegramInterface:
         """Set up command and message handlers"""
         if not self.app:
             return
-            
+        self.app.add_handler(MessageHandler(filters.COMMAND, self._flush_pending_buffer_on_command), group=-1)
+
         # Command handlers
         self.app.add_handler(CommandHandler("start", self._handle_start))
         self.app.add_handler(CommandHandler("help", self._handle_help))
@@ -115,6 +118,7 @@ class TelegramInterface:
     
     async def stop(self):
         """Stop the Telegram bot"""
+        await self._drop_all_pending_buffers()
         if not self.app or not self.is_running:
             self._release_instance_lock()
             return
@@ -129,6 +133,151 @@ class TelegramInterface:
         except Exception as e:
             self._release_instance_lock()
             logger.error(f"Error stopping Telegram bot: {e}")
+
+    async def _flush_pending_buffer_on_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Ensure pending plain-text intent is submitted before command handling."""
+        if not update.effective_chat:
+            return
+        await self._flush_buffer(update.effective_chat.id)
+
+    async def _drop_all_pending_buffers(self) -> None:
+        for chat_id in list(self._message_buffers.keys()):
+            entry = self._message_buffers.pop(chat_id, None)
+            if not entry:
+                continue
+            task = entry.get("task")
+            if task and not task.done():
+                task.cancel()
+
+    async def _buffer_message(self, update: Update, message_text: str) -> None:
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        message_text = (message_text or "").strip()
+        if not message_text:
+            return
+
+        try:
+            from config import config as app_config
+            debounce_sec = float(getattr(app_config.system, "telegram_message_buffer_sec", 3.0))
+        except Exception:
+            debounce_sec = 3.0
+
+        entry = self._message_buffers.get(chat_id)
+        if entry is None:
+            entry = {
+                "parts": [],
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "task": None,
+            }
+            self._message_buffers[chat_id] = entry
+
+        parts = entry["parts"]
+        if not parts or parts[-1] != message_text:
+            parts.append(message_text)
+
+        task = entry.get("task")
+        if task and not task.done():
+            task.cancel()
+
+        if debounce_sec <= 0:
+            await self._flush_buffer(chat_id)
+            return
+
+        entry["task"] = asyncio.create_task(self._debounced_flush(chat_id, debounce_sec))
+
+    async def _debounced_flush(self, chat_id: int, delay_s: float) -> None:
+        try:
+            await asyncio.sleep(delay_s)
+            await self._flush_buffer(chat_id)
+        except asyncio.CancelledError:
+            return
+
+    async def _flush_buffer(self, chat_id: int) -> None:
+        entry = self._message_buffers.pop(chat_id, None)
+        if not entry:
+            return
+
+        task = entry.get("task")
+        current = asyncio.current_task()
+        if task and task is not current and not task.done():
+            task.cancel()
+
+        parts = [str(part).strip() for part in entry.get("parts", []) if str(part).strip()]
+        if not parts:
+            return
+
+        combined = "\n".join(parts)
+        await self._submit_buffered_instruction(
+            chat_id=entry["chat_id"],
+            user_id=entry["user_id"],
+            message_text=combined,
+            session_only=False,
+        )
+
+    async def _submit_buffered_instruction(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        message_text: str,
+        session_only: bool = False,
+    ) -> None:
+        if not self.app:
+            return
+
+        message_text = (message_text or "").strip()
+        if len(message_text) < 3:
+            await self.app.bot.send_message(chat_id=chat_id, text="❌ Message is too short.")
+            return
+
+        active_session = self.session_store.get_active(chat_id)
+        if active_session:
+            if not self._user_can_access_session(user_id, active_session):
+                await self.app.bot.send_message(chat_id=chat_id, text="❌ You do not own the active session.")
+                return
+            active_session.last_user_message = message_text
+            active_session.status = SessionStatus.BUSY
+            task_id = await self.orchestrator.submit_instruction(
+                description=message_text,
+                session_id=active_session.session_id,
+                cwd=active_session.repo_path,
+                source="telegram_session",
+            )
+            active_session.last_task_id = task_id
+            self.session_store.save(active_session)
+            await self.app.bot.send_message(chat_id=chat_id, text="⏳ Working...")
+            logger.info(
+                "user=%s chat=%s task=%s session=%s",
+                user_id,
+                chat_id,
+                task_id,
+                active_session.session_id,
+            )
+            return
+
+        if session_only:
+            await self.app.bot.send_message(chat_id=chat_id, text="❌ No active session. Use /session_new first.")
+            return
+
+        task_id = await self.orchestrator.submit_instruction(
+            description=message_text,
+            source="telegram_oneoff",
+        )
+        await self.app.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"One-off task created: `{task_id}`\n"
+                f"Tip: use /session_new to open a persistent coding session."
+            ),
+            parse_mode="Markdown",
+        )
+        logger.info(
+            "user=%s chat=%s task=%s session=none",
+            user_id,
+            chat_id,
+            task_id,
+        )
 
     def _acquire_instance_lock(self) -> None:
         """Prevent multiple local polling instances from using the same bot token."""
@@ -717,8 +866,11 @@ class TelegramInterface:
             await update.message.reply_text("❌ Access denied.")
             return
             
-        # Check rate limiting for task creation
-        if not self._check_rate_limit(update.effective_user.id):
+        chat_id = update.effective_chat.id
+        is_new_buffer = chat_id not in self._message_buffers
+
+        # Check rate limiting only once per buffered intent.
+        if is_new_buffer and not self._check_rate_limit(update.effective_user.id):
             try:
                 from config import config as app_config
                 window_sec = app_config.system.telegram_rate_limit_window_sec
@@ -732,7 +884,6 @@ class TelegramInterface:
             return
             
         message_text = update.message.text.strip()
-        chat_id = update.effective_chat.id
 
         # Skip very short messages
         if len(message_text) < 10:
@@ -742,8 +893,7 @@ class TelegramInterface:
             return
 
         try:
-            active_session = self.session_store.get_active(chat_id)
-            await self._queue_instruction(update, message_text, active_session, session_only=False)
+            await self._buffer_message(update, message_text)
         except Exception as e:
             await update.message.reply_text(f"❌ Failed to create task: {e}")
             logger.error(f"message handler failed: {e}")

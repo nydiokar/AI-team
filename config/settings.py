@@ -83,6 +83,7 @@ class SystemConfig:
     max_queue_size: int = 50
     telegram_rate_limit_requests: int = 5
     telegram_rate_limit_window_sec: int = 60
+    telegram_message_buffer_sec: float = 3.0
     
 class Config:
     """Main configuration class"""
@@ -225,6 +226,12 @@ class Config:
             tg_window = os.getenv("TELEGRAM_RATE_LIMIT_WINDOW_SEC")
             if tg_window is not None:
                 self.system.telegram_rate_limit_window_sec = max(1, int(tg_window))
+        except Exception:
+            pass
+        try:
+            tg_buffer = os.getenv("TELEGRAM_MESSAGE_BUFFER_SEC")
+            if tg_buffer is not None:
+                self.system.telegram_message_buffer_sec = max(0.0, float(tg_buffer))
         except Exception:
             pass
     def reload_from_env(self) -> None:
