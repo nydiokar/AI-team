@@ -20,8 +20,8 @@ from src.core.interfaces import Session, SessionStatus
 from src.core.path_resolver import PathResolver, PathResolution
 
 try:
-    from telegram import Update
-    from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+    from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, ContextTypes
     TELEGRAM_AVAILABLE = True
 except ImportError:
     TELEGRAM_AVAILABLE = False
@@ -95,6 +95,7 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
         self.app.add_handler(CommandHandler("commit_all", self._handle_git_commit_all))
         self.app.add_handler(CommandHandler("git_status", self._handle_git_status))
+        self.app.add_handler(CallbackQueryHandler(self._handle_session_picker_callback, pattern=r"^session_use:"))
         
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -418,6 +419,23 @@ class TelegramInterface:
             if dirs:
                 lines.append("Directories: " + ", ".join(f"`{item}`" for item in dirs))
         return "\n".join(lines)
+
+    def _build_session_picker_markup(self, sessions: list[Session], active_id: Optional[str]) -> Optional["InlineKeyboardMarkup"]:
+        if not TELEGRAM_AVAILABLE or not sessions:
+            return None
+        rows = []
+        for session in sessions[:10]:
+            name = Path(session.repo_path).name or session.repo_path
+            label = f"{session.backend}: {name}"
+            if session.session_id == active_id:
+                label = f"* {label}"
+            rows.append([
+                InlineKeyboardButton(
+                    text=label[:64],
+                    callback_data=f"session_use:{session.session_id}",
+                )
+            ])
+        return InlineKeyboardMarkup(rows)
 
     def _get_accessible_session(
         self,
@@ -983,10 +1001,14 @@ class TelegramInterface:
         for s in sessions[:10]:
             marker = " <-- active" if s.session_id == active_id else ""
             lines.append(f"`{s.session_id}` [{s.backend}] {s.status.value} — {s.repo_path}{marker}")
+        picker_sessions = [s for s in sessions if s.status != SessionStatus.CLOSED]
         header = "Sessions:" if include_closed else "Open sessions:"
         if not include_closed:
             header += "\nUse `/session_list all` to include closed sessions."
-        await update.message.reply_text(header + "\n" + "\n".join(lines))
+        await update.message.reply_text(
+            header + "\n" + "\n".join(lines),
+            reply_markup=self._build_session_picker_markup(picker_sessions, active_id),
+        )
 
     async def _handle_session_use(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_use <session_id>"""
@@ -995,7 +1017,19 @@ class TelegramInterface:
             return
         args = context.args or []
         if not args:
-            await update.message.reply_text("Usage: /session_use <session_id>")
+            sessions = [
+                s for s in self.session_store.list_all()
+                if s.status != SessionStatus.CLOSED and self._user_can_access_session(update.effective_user.id, s)
+            ]
+            if not sessions:
+                await update.message.reply_text("No open sessions found.")
+                return
+            active = self.session_store.get_active(update.effective_chat.id)
+            active_id = active.session_id if active else None
+            await update.message.reply_text(
+                "Choose the session to make active:",
+                reply_markup=self._build_session_picker_markup(sessions, active_id),
+            )
             return
         session_id = args[0]
         session = self.session_store.get(session_id)
@@ -1011,6 +1045,34 @@ class TelegramInterface:
         self.session_store.bind(update.effective_chat.id, session_id)
         await update.message.reply_text(
             f"✅ Active session set to `{session_id}` [{session.backend}] — {session.repo_path}"
+        )
+
+    async def _handle_session_picker_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if not query:
+            return
+        await query.answer()
+
+        if not self._check_user_permission(update.effective_user.id):
+            await query.edit_message_text("âŒ Access denied.")
+            return
+
+        data = query.data or ""
+        session_id = data.split(":", 1)[1] if ":" in data else ""
+        session = self.session_store.get(session_id)
+        if not session:
+            await query.edit_message_text(f"âŒ Session `{session_id}` not found.")
+            return
+        if not self._user_can_access_session(update.effective_user.id, session):
+            await query.edit_message_text("âŒ You do not own that session.")
+            return
+        if session.status == SessionStatus.CLOSED:
+            await query.edit_message_text(f"âŒ Session `{session_id}` is closed.")
+            return
+
+        self.session_store.bind(update.effective_chat.id, session_id)
+        await query.edit_message_text(
+            f"âœ… Active session set to `{session_id}` [{session.backend}] â€” {session.repo_path}"
         )
 
     async def _handle_session_dirs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
