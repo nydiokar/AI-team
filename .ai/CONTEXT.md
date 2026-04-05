@@ -1,8 +1,8 @@
 # AI-Team Gateway - Project Context
 
-**Last Updated:** 2026-03-29
+**Last Updated:** 2026-04-05
 **Branch:** `main`
-**Status:** Codex backend is validated and corrected against the real CLI contract (v0.115.0); startup no longer blocks on SentenceTransformer eager load
+**Status:** Runtime lifecycle is hardened for Windows+Linux operation; PM2 supervision, local health checks, Telegram session picker UX, and split-message buffering are now in place
 
 ---
 
@@ -65,6 +65,17 @@ Canonical intent lives in `.ai/context/production_vision.md`.
 - Telegram no longer advertises task-runner-only commands, and the registered public command set is now session-first.
 - Claude dead-session recovery now recreates the backend conversation inside the same gateway session instead of poisoning session state.
 - Git commands now target the active session repo by default instead of requiring opaque task IDs.
+- Telegram plain-text buffering now merges split messages into a single queued instruction with a short debounce window.
+- Session switching is now available through inline Telegram buttons, not just manual ID copy/paste.
+- Gateway/process lifecycle is now guarded by single-instance takeover logic instead of best-effort manual restarts.
+
+### Phase 6 - Operations and persistence
+- Done for the current deployment model.
+- PM2 supervision config exists in `ecosystem.config.js`.
+- Operator runbook exists in `docs/OPERATIONS_PM2.md`.
+- `python main.py health [--json]` exists for local/supervisor health checks.
+- Gateway startup now safely replaces an older local gateway process instead of spawning duplicate Telegram pollers.
+- Backend child process termination is now managed through shared cross-platform process utilities.
 
 ---
 
@@ -86,6 +97,7 @@ Codex backend is now correct at the code level. Still requires a live two-turn T
 - Add prettier, more compact Telegram replies for session status, git status, and errors.
 - Decide whether `/commit_all` should remain public.
 - Decide whether to keep compatibility-only handler methods for `/run`, `/say`, `/progress`, and `/cancel` in code at all now that they are no longer registered.
+- Decide whether session-completion replies should explicitly include the session ID/header when multiple sessions are active in the same chat.
 
 ### 4. Legacy code removal decision
 
@@ -98,6 +110,7 @@ Codex backend is now correct at the code level. Still requires a live two-turn T
 - Pin Claude Code and Codex CLI versions or add startup smoke checks so CLI contract shifts are caught immediately (Codex is currently at v0.115.0).
 - Add one real backend smoke path per supported backend.
 - Confirm operator-facing failure messages stay backend-specific and actionable.
+- Validate the full PM2 lifecycle on both Windows and Linux: start, Telegram traffic, restart, boot persistence, and recovery after crash.
 
 ---
 
@@ -109,6 +122,7 @@ Codex backend is now correct at the code level. Still requires a live two-turn T
 | Telegram interface | `src/telegram/interface.py` | Session commands and direct runtime submission |
 | Session store | `src/core/session_store.py` | File-backed session CRUD and Telegram bindings |
 | Path resolver | `src/core/path_resolver.py` | Safe path resolution and suggestions |
+| Process utilities | `src/core/process_utils.py` | Cross-platform PID checks, takeover matching, and process-tree termination |
 | Claude backend | `src/backends/claude_code.py` | Native session create/resume and one-off execution |
 | Codex backend | `src/backends/codex.py` | Native session resume and one-off execution |
 | Llama helper | `src/bridges/llama_mediator.py` | Optional helper only, not a primary runtime dependency |
@@ -122,7 +136,7 @@ Codex backend is now correct at the code level. Still requires a live two-turn T
 ### Session commands
 - `/session_new <backend> <path>`
 - `/session_list [all]`
-- `/session_use <session_id>`
+- `/session_use <session_id>` or `/session_use` with Telegram picker buttons
 - `/session_status [session_id]`
 - `/session_dirs [path]`
 - `/session_cancel [session_id]`
@@ -136,21 +150,32 @@ Codex backend is now correct at the code level. Still requires a live two-turn T
 Runtime note:
 - Telegram/runtime commands now queue tasks directly in memory.
 - `.task.md` files are compatibility input, not the primary runtime entrypoint.
+- Plain Telegram messages are buffered briefly so split multi-part thoughts become one task instead of multiple accidental tasks.
+
+### Operations
+- `python main.py health [--json]`
+- `pm2 start ecosystem.config.js --only ai-team-gateway --update-env`
+- `pm2 restart ai-team-gateway --update-env`
+- `pm2 logs ai-team-gateway`
+- `pm2 save`
+- `pm2 startup`
 
 ---
 
 ## Recommended next moves
 
-1. Validate Codex sessions end-to-end with the same rigor already applied to Claude.
-2. Polish Telegram replies so the command surface feels intentionally productized rather than debug-oriented.
-3. Pin or smoke-test backend CLI versions at startup to catch contract regressions early.
-4. Decide whether the compatibility watcher remains a supported feature and prune legacy code accordingly.
+1. Validate PM2-managed operation end-to-end on both Windows and Linux, including reboot persistence.
+2. Validate Codex sessions end-to-end with the same rigor already applied to Claude.
+3. Polish Telegram replies so the command surface feels intentionally productized rather than debug-oriented.
+4. Pin or smoke-test backend CLI versions at startup to catch contract regressions early.
+5. Decide whether the compatibility watcher remains a supported feature and prune legacy code accordingly.
 
 ---
 
 ## Architecture rules
 
 - Session continuity uses native backend resume, not terminal persistence.
+- External supervision should own restart behavior; the Python app should remain a single foreground worker.
 - State stays file-backed.
 - Artifacts remain mandatory for audit/compliance purposes.
 - Ollama remains optional and helper-only.
@@ -167,9 +192,12 @@ Runtime note:
 | `src/telegram/interface.py` | Telegram command surface |
 | `src/core/path_resolver.py` | Shared path validation and suggestions |
 | `src/core/session_store.py` | File-backed session store |
+| `src/core/process_utils.py` | Cross-platform process lifecycle helpers |
 | `src/core/interfaces.py` | Session/task/backend dataclasses and interfaces |
 | `src/backends/claude_code.py` | Claude native session create/resume/one-off |
 | `src/backends/codex.py` | Codex native session create/resume/one-off |
 | `src/core/file_watcher.py` | Compatibility file watcher |
 | `src/bridges/claude_bridge.py` | Legacy compatibility code |
 | `main.py` | CLI entrypoints and status/doctor display |
+| `ecosystem.config.js` | PM2 single-instance supervisor config |
+| `docs/OPERATIONS_PM2.md` | PM2 operator runbook |
