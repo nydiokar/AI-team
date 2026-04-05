@@ -2,15 +2,19 @@
 Telegram bot interface for the Telegram Coding Gateway.
 """
 import asyncio
-import contextlib
 import json
 import logging
 import os
 import re
-import signal
 from typing import Dict, Any, Optional
 from pathlib import Path
 
+from src.core.process_utils import (
+    current_process_create_time,
+    pid_exists,
+    process_matches_entrypoint,
+    terminate_process_tree,
+)
 from src.core.session_store import SessionStore
 from src.core.interfaces import Session, SessionStatus
 from src.core.path_resolver import PathResolver, PathResolution
@@ -33,12 +37,6 @@ except ImportError:
                 self.args = []
 
 logger = logging.getLogger(__name__)
-
-try:
-    import psutil
-except ImportError:  # pragma: no cover
-    psutil = None
-
 
 class TelegramInterface:
     """Telegram bot interface for task management and notifications"""
@@ -141,10 +139,15 @@ class TelegramInterface:
         if existing:
             existing_pid = int(existing.get("pid") or 0)
             existing_started = float(existing.get("create_time") or 0)
-            if existing_pid and self._pid_matches_gateway(existing_pid, existing_started):
+            if existing_pid and process_matches_entrypoint(
+                existing_pid,
+                started=existing_started,
+                app_root=self._app_root,
+                entrypoint=self._app_root / "main.py",
+            ):
                 logger.warning(f"Existing Telegram poller detected (pid={existing_pid}); terminating it before restart")
-                self._terminate_process_tree(existing_pid)
-            elif existing_pid and self._pid_exists(existing_pid):
+                terminate_process_tree(existing_pid)
+            elif existing_pid and pid_exists(existing_pid):
                 raise RuntimeError(
                     f"Telegram bot lock is already held by PID {existing_pid}. "
                     "Stop the other gateway instance before starting a new one."
@@ -153,7 +156,7 @@ class TelegramInterface:
 
         payload = {
             "pid": pid,
-            "create_time": self._current_create_time(),
+            "create_time": current_process_create_time(),
             "root": str(self._app_root),
         }
         self._lock_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -184,71 +187,6 @@ class TelegramInterface:
         except Exception:
             return None
 
-    @staticmethod
-    def _pid_exists(pid: int) -> bool:
-        if psutil:
-            try:
-                return psutil.pid_exists(pid)
-            except Exception:
-                return False
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        except Exception:
-            return True
-        return True
-
-    def _pid_matches_gateway(self, pid: int, started: float) -> bool:
-        if not psutil:
-            return self._pid_exists(pid)
-        try:
-            proc = psutil.Process(pid)
-            if started and abs(proc.create_time() - started) > 2:
-                return False
-            cmdline = [str(part).lower() for part in proc.cmdline()]
-            main_path = str((self._app_root / "main.py").resolve()).lower()
-            root_path = str(self._app_root).lower()
-            try:
-                proc_cwd = str(Path(proc.cwd()).resolve()).lower()
-            except Exception:
-                proc_cwd = ""
-            return (
-                any("main.py" in part or main_path in part for part in cmdline)
-                and (proc_cwd == root_path or any(root_path in part for part in cmdline))
-            )
-        except Exception:
-            return False
-
-    @staticmethod
-    def _terminate_process_tree(pid: int) -> None:
-        if psutil:
-            try:
-                proc = psutil.Process(pid)
-                children = proc.children(recursive=True)
-                for child in children:
-                    with contextlib.suppress(Exception):
-                        child.terminate()
-                proc.terminate()
-                _, alive = psutil.wait_procs([proc, *children], timeout=8)
-                for item in alive:
-                    with contextlib.suppress(Exception):
-                        item.kill()
-                return
-            except Exception:
-                pass
-        with contextlib.suppress(Exception):
-            os.kill(pid, signal.SIGTERM)
-
-    @staticmethod
-    def _current_create_time() -> float:
-        if psutil:
-            try:
-                return psutil.Process(os.getpid()).create_time()
-            except Exception:
-                return 0.0
-        return 0.0
-    
     def _check_user_permission(self, user_id: int) -> bool:
         """Check if user is allowed to use the bot"""
         if not self.allowed_users:

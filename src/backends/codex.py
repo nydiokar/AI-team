@@ -11,13 +11,13 @@ Synchronous — called via asyncio.to_thread() by the orchestrator.
 """
 import json
 import logging
-import os
 import shutil
 import subprocess
 import threading
 import time
 from typing import List, Optional
 
+from src.core.process_utils import terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
 logger = logging.getLogger(__name__)
@@ -48,8 +48,7 @@ class CodexBackend(CodingBackend):
     def terminate_active_processes(self) -> None:
         with self._proc_lock:
             procs = list(self._active_procs)
-        for proc in procs:
-            self._terminate_process(proc)
+        terminate_many_popen(procs)
 
     def _run(self, cwd: str, message: str, resume_id: Optional[str]) -> ExecutionResult:
         start = time.time()
@@ -104,26 +103,6 @@ class CodexBackend(CodingBackend):
     def _unregister_process(self, proc: subprocess.Popen) -> None:
         with self._proc_lock:
             self._active_procs.discard(proc)
-
-    @staticmethod
-    def _terminate_process(proc: subprocess.Popen) -> None:
-        if proc.poll() is not None:
-            return
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                    capture_output=True,
-                    timeout=5,
-                )
-            else:
-                proc.terminate()
-                proc.wait(timeout=5)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
 
     @staticmethod
     def _parse(stdout: str, stderr: str, returncode: int, elapsed: float) -> ExecutionResult:
