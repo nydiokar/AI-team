@@ -63,8 +63,11 @@ Telegram -> active chat binding -> gateway session -> Claude Code / Codex native
 - `python main.py`
 - `python main.py status`
 - `python main.py doctor`
+- `python main.py health`
 - `python main.py tail-events`
 - `python main.py stats`
+- `pm2 start ecosystem.config.js --only ai-team-gateway --update-env`
+- `pm2 restart ai-team-gateway --update-env`
 
 ## Configuration
 
@@ -99,5 +102,6 @@ The main production gate that still matters is a live end-to-end validation:
 - [.ai/CONTEXT.md](C:/Users/Cicada38/Projects/AI-team/.ai/CONTEXT.md)
 - [.ai/context/production_vision.md](C:/Users/Cicada38/Projects/AI-team/.ai/context/production_vision.md)
 - [QUICK_START.md](C:/Users/Cicada38/Projects/AI-team/docs/QUICK_START.md)
+- [OPERATIONS_PM2.md](C:/Users/Cicada38/Projects/AI-team/docs/OPERATIONS_PM2.md)
 - [ROADMAP.md](C:/Users/Cicada38/Projects/AI-team/docs/ROADMAP.md)
 - [CLAUDE_HOOK_IDEAS.md](C:/Users/Cicada38/Projects/AI-team/docs/CLAUDE_HOOK_IDEAS.md)
