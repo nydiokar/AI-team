@@ -323,6 +323,9 @@ def main():
         if command == "doctor":
             _doctor()
             return
+        if command == "health":
+            _health(sys.argv[2:])
+            return
         if command == "status":
             asyncio.run(show_status())
             return
@@ -376,6 +379,7 @@ Usage:
     python main.py validate-artifacts        Validate results/*.json against schema
     python main.py create-sample-artifact    Generate a sample artifact (new schema)
     python main.py doctor                    Print effective config and CLI availability
+    python main.py health [--json]          Print machine-readable local health and exit non-zero on failure
     python main.py tail-events [--task TASK_ID] [--lines N]   Show recent NDJSON events
     python main.py reload-workers  Reload worker pool from environment
     python main.py git-commit <task_id> [--no-branch] [--push]  Commit task changes safely
@@ -843,6 +847,64 @@ def _doctor():
         print(f"  auth status rc={r2.returncode} out={(r2.stdout or r2.stderr).strip()[:120]}")
     except Exception as e:
         print(f"  Auth check failed: {e}")
+
+def _health(args=None):
+    """Local operability check with exit code for supervisors."""
+    import json as _json
+    import sys as _sys
+    from shutil import which as _which
+    from pathlib import Path as _Path
+
+    args = args or []
+    as_json = "--json" in args
+
+    checks = {}
+
+    dirs = {
+        "tasks_dir": _Path(config.system.tasks_dir),
+        "results_dir": _Path(config.system.results_dir),
+        "summaries_dir": _Path(config.system.summaries_dir),
+        "logs_dir": _Path(config.system.logs_dir),
+    }
+    dir_errors = {}
+    for name, path in dirs.items():
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            checks[name] = True
+        except Exception as e:
+            checks[name] = False
+            dir_errors[name] = str(e)
+
+    checks["telegram_configured"] = bool(config.telegram.bot_token)
+    checks["claude_cli"] = bool(_which("claude"))
+    checks["codex_cli"] = bool(_which("codex"))
+    checks["backend_available"] = bool(checks["claude_cli"] or checks["codex_cli"])
+
+    payload = {
+        "ok": all([
+            checks["tasks_dir"],
+            checks["results_dir"],
+            checks["summaries_dir"],
+            checks["logs_dir"],
+            checks["telegram_configured"],
+            checks["backend_available"],
+        ]),
+        "checks": checks,
+        "errors": dir_errors,
+    }
+
+    if as_json:
+        print(_json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"Health: {'OK' if payload['ok'] else 'FAIL'}")
+        for key, value in checks.items():
+            print(f"  {key:20s}: {'OK' if value else 'FAIL'}")
+        for key, value in dir_errors.items():
+            print(f"  {key:20s}: {value}")
+
+    if not payload["ok"]:
+        _sys.exit(1)
+    return
 
 def _handle_git_commit(args):
     """Handle git-commit command"""
