@@ -18,6 +18,7 @@ What is intentionally not on the hot path anymore:
 import json
 import re
 import logging
+import threading
 from typing import Dict, List, Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -39,11 +40,28 @@ class LlamaMediator(ILlamaMediator):
     """
     
     def __init__(self):
-        self.ollama_available = self._check_ollama_availability()
         self.client: Optional[Any] = None  # ollama.Client when available
+        self.ollama_available = False
         self.model_installed = False
-        
-        if self.ollama_available:
+        self._probe_attempted = False
+        self._init_lock = threading.Lock()
+
+    def _ensure_initialized(self) -> None:
+        """Probe Ollama lazily so app startup never blocks on first-run init."""
+        if self._probe_attempted:
+            return
+
+        with self._init_lock:
+            if self._probe_attempted:
+                return
+
+            self._probe_attempted = True
+            self.ollama_available = self._check_ollama_availability()
+
+            if not self.ollama_available:
+                logger.info("LLAMA not available, using built-in parsing fallback")
+                return
+
             try:
                 import ollama
                 self.client = ollama.Client(host=f"http://{config.llama.host}:{config.llama.port}")
@@ -55,8 +73,6 @@ class LlamaMediator(ILlamaMediator):
             except Exception as e:
                 logger.warning(f"Failed to initialize Ollama client: {e}")
                 self.ollama_available = False
-        else:
-            logger.info("LLAMA not available, using built-in parsing fallback")
     
     def _check_ollama_availability(self) -> bool:
         """Check if Ollama is running and accessible."""
@@ -90,6 +106,7 @@ class LlamaMediator(ILlamaMediator):
     
     def parse_task(self, task_content: str) -> Dict[str, Any]:
         """Parse task content using LLAMA or fallback to simple parsing."""
+        self._ensure_initialized()
         # Enforce content size cap to avoid timeouts/memory pressure
         max_chars = getattr(config.llama, "max_parse_chars", 200_000)
         if len(task_content) > max_chars:
@@ -249,7 +266,7 @@ class LlamaMediator(ILlamaMediator):
     
     def summarize_result(self, result: TaskResult, original_task: Task) -> str:
         """Create concise summary for user notification"""
-        
+        self._ensure_initialized()
         if self.ollama_available and self.client and self.model_installed:
             return self._summarize_with_llama(result, original_task)
         else:
@@ -323,8 +340,10 @@ Duration: {result.execution_time:.1f}s
         
         return summary
     
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self, probe: bool = True) -> Dict[str, Any]:
         """Get mediator status for debugging"""
+        if probe:
+            self._ensure_initialized()
         helpers_enabled = bool(self.ollama_available and self.client and self.model_installed)
         return {
             "ollama_available": self.ollama_available,
@@ -332,5 +351,6 @@ Duration: {result.execution_time:.1f}s
             "model_installed": self.model_installed,
             "helpers_enabled": helpers_enabled,
             "model": config.llama.model if self.ollama_available else "fallback",
-            "mode": "OLLAMA_HELPERS" if helpers_enabled else "FALLBACK_HELPERS"
+            "mode": "OLLAMA_HELPERS" if helpers_enabled else "FALLBACK_HELPERS",
+            "probe_attempted": self._probe_attempted,
         }
