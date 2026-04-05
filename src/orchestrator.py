@@ -245,6 +245,7 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         # Check component availability now that all components are up
         await self._check_component_status()
+        asyncio.create_task(self._warm_llama_helpers())
         
         # Start Telegram interface if available
         if self.telegram_interface:
@@ -253,6 +254,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 logger.info("Telegram interface started")
             except Exception as e:
                 logger.error(f"Failed to start Telegram interface: {e}")
+                await self.stop()
+                raise
         
         # Log startup status
         self._log_startup_status()
@@ -270,6 +273,15 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info("Stopping Telegram Coding Gateway...")
         
         self.running = False
+
+        # Terminate any live backend child processes before worker cancellation.
+        for backend in self._backends.values():
+            terminate = getattr(backend, "terminate_active_processes", None)
+            if callable(terminate):
+                try:
+                    terminate()
+                except Exception as e:
+                    logger.warning(f"Failed to terminate backend processes: {e}")
         
         # Stop Telegram interface if available
         if self.telegram_interface:
@@ -341,10 +353,23 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.component_status["claude_available"] = self._check_claude_cli_available()
         
         # Check LLAMA availability
-        llama_status = self.llama_mediator.get_status()
+        llama_status = self.llama_mediator.get_status(probe=False)
         self.component_status["llama_available"] = bool(llama_status.get("helpers_enabled"))
         
         logger.info(f"Component status: {self.component_status}")
+
+    async def _warm_llama_helpers(self) -> None:
+        """Initialize optional Ollama helpers off the startup hot path."""
+        try:
+            llama_status = await asyncio.to_thread(self.llama_mediator.get_status, True)
+            self.component_status["llama_available"] = bool(llama_status.get("helpers_enabled"))
+            logger.info(
+                "LLAMA helper warm-up finished: "
+                f"helpers_enabled={self.component_status['llama_available']} "
+                f"probe_attempted={llama_status.get('probe_attempted')}"
+            )
+        except Exception as e:
+            logger.warning(f"LLAMA helper warm-up failed: {e}")
     
     def _log_startup_status(self):
         """Log detailed startup status"""
@@ -1106,7 +1131,7 @@ created: {task.created}
                 "timeout": getattr(config.claude, "timeout", 600),
                 "skip_permissions": bool(getattr(config.claude, "skip_permissions", True)),
             },
-            "llama": self.llama_mediator.get_status(),
+            "llama": self.llama_mediator.get_status(probe=False),
         }
         if task is not None:
             artifact["task"] = {
@@ -1472,7 +1497,7 @@ Generated from user description: {description}
                 "completed": len(self.task_results),
                 "workers": len(self.worker_tasks)
             },
-            "llama_status": self.llama_mediator.get_status(),
+            "llama_status": self.llama_mediator.get_status(probe=False),
             "telegram": {
                 "configured": bool(self.telegram_interface),
                 "running": bool(self.telegram_interface and self.telegram_interface.is_running),

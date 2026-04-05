@@ -13,8 +13,10 @@ and stored in the gateway Session record for subsequent resumes.
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -214,6 +216,8 @@ class ClaudeCodeBackend(CodingBackend):
 
     def __init__(self):
         self._exe = shutil.which("claude") or "claude"
+        self._active_procs: set[subprocess.Popen] = set()
+        self._proc_lock = threading.Lock()
 
     def create_session(self, session: Session) -> ExecutionResult:
         session_id = session.backend_session_id or str(uuid.uuid4())
@@ -226,24 +230,33 @@ class ClaudeCodeBackend(CodingBackend):
         return self._run(cwd, message, resume_id=None)
 
     def cancel(self, session: Session) -> None:
-        pass
+        self.terminate_active_processes()
 
     def close(self, session: Session) -> None:
         pass
+
+    def terminate_active_processes(self) -> None:
+        with self._proc_lock:
+            procs = list(self._active_procs)
+        for proc in procs:
+            self._terminate_process(proc)
 
     def _run(self, cwd: str, message: str, resume_id: Optional[str], session_id: Optional[str]) -> ExecutionResult:
         start = time.time()
         cmd = self._build_cmd(resume_id, session_id)
         before_snapshot = _snapshot_worktree(cwd) if cwd else {}
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                input=message.encode(),
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd=cwd or None,
             )
-            stdout = proc.stdout.decode(errors="replace")
-            stderr = proc.stderr.decode(errors="replace")
+            self._register_process(proc)
+            stdout_bytes, stderr_bytes = proc.communicate(input=message.encode())
+            stdout = stdout_bytes.decode(errors="replace")
+            stderr = stderr_bytes.decode(errors="replace")
             elapsed = time.time() - start
             result = self._parse(stdout, stderr, proc.returncode, elapsed, known_session_id=session_id or resume_id or "")
             if cwd:
@@ -258,6 +271,9 @@ class ClaudeCodeBackend(CodingBackend):
                 errors=[str(e)],
                 execution_time=time.time() - start,
             )
+        finally:
+            if "proc" in locals():
+                self._unregister_process(proc)
 
     def _build_cmd(self, resume_id: Optional[str], session_id: Optional[str]) -> List[str]:
         if resume_id:
@@ -286,6 +302,34 @@ class ClaudeCodeBackend(CodingBackend):
                 cmd.extend(["--session-id", session_id])
         cmd.extend(["--allowedTools", ",".join(_DEFAULT_TOOLS)])
         return cmd
+
+    def _register_process(self, proc: subprocess.Popen) -> None:
+        with self._proc_lock:
+            self._active_procs.add(proc)
+
+    def _unregister_process(self, proc: subprocess.Popen) -> None:
+        with self._proc_lock:
+            self._active_procs.discard(proc)
+
+    @staticmethod
+    def _terminate_process(proc: subprocess.Popen) -> None:
+        if proc.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=5,
+                )
+            else:
+                proc.terminate()
+                proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     @staticmethod
     def _parse(stdout: str, stderr: str, returncode: int, elapsed: float, known_session_id: str = "") -> ExecutionResult:

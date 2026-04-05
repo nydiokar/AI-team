@@ -3,6 +3,9 @@
 Main entry point for the Telegram Coding Gateway.
 """
 import asyncio
+import contextlib
+import json
+import os
 import signal
 import sys
 import logging
@@ -76,12 +79,150 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover
+    psutil = None
+
+
+class _GatewayInstanceLock:
+    """Single-instance guard with takeover for the same gateway process."""
+
+    def __init__(self, lock_path: Path, app_root: Path):
+        self.lock_path = lock_path
+        self.app_root = app_root.resolve()
+        self.acquired = False
+
+    def acquire(self) -> None:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = self._read_lock()
+        if existing:
+            pid = int(existing.get("pid") or 0)
+            started = float(existing.get("create_time") or 0)
+            if pid and self._pid_matches_gateway(pid, started):
+                logger.warning(f"Existing gateway instance detected (pid={pid}); terminating it before restart")
+                self._terminate_process_tree(pid)
+            elif pid and self._pid_exists(pid):
+                raise RuntimeError(
+                    f"Lock file points to live PID {pid}, but it does not look like this gateway process. "
+                    "Refusing to replace it automatically."
+                )
+            self.lock_path.unlink(missing_ok=True)
+
+        payload = {
+            "pid": os.getpid(),
+            "create_time": self._current_create_time(),
+            "root": str(self.app_root),
+            "entrypoint": str((self.app_root / "main.py").resolve()),
+        }
+        self.lock_path.write_text(json.dumps(payload), encoding="utf-8")
+        self.acquired = True
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        try:
+            current = self._read_lock()
+            if current and int(current.get("pid") or 0) == os.getpid():
+                self.lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self.acquired = False
+
+    def _read_lock(self) -> dict | None:
+        if not self.lock_path.exists():
+            return None
+        try:
+            raw = self.lock_path.read_text(encoding="utf-8").strip()
+            if not raw:
+                return None
+            if raw.startswith("{"):
+                data = json.loads(raw)
+                return data if isinstance(data, dict) else None
+            return {"pid": int(raw)}
+        except Exception:
+            return None
+
+    def _pid_matches_gateway(self, pid: int, started: float) -> bool:
+        if not psutil:
+            return self._pid_exists(pid)
+        try:
+            proc = psutil.Process(pid)
+            if started and abs(proc.create_time() - started) > 2:
+                return False
+            cmdline = [str(part).lower() for part in proc.cmdline()]
+            main_path = str((self.app_root / "main.py").resolve()).lower()
+            root_path = str(self.app_root).lower()
+            try:
+                proc_cwd = str(Path(proc.cwd()).resolve()).lower()
+            except Exception:
+                proc_cwd = ""
+            return (
+                any("main.py" in part or main_path in part for part in cmdline)
+                and (proc_cwd == root_path or any(root_path in part for part in cmdline))
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _pid_exists(pid: int) -> bool:
+        if psutil:
+            try:
+                return psutil.pid_exists(pid)
+            except Exception:
+                return False
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        except Exception:
+            return True
+        return True
+
+    @staticmethod
+    def _terminate_process_tree(pid: int) -> None:
+        if psutil:
+            try:
+                proc = psutil.Process(pid)
+                children = proc.children(recursive=True)
+                for child in children:
+                    with contextlib.suppress(Exception):
+                        child.terminate()
+                proc.terminate()
+                _, alive = psutil.wait_procs([proc, *children], timeout=8)
+                for item in alive:
+                    with contextlib.suppress(Exception):
+                        item.kill()
+                return
+            except Exception:
+                pass
+        os.kill(pid, signal.SIGTERM)
+
+    @staticmethod
+    def _current_create_time() -> float:
+        if psutil:
+            try:
+                return psutil.Process(os.getpid()).create_time()
+            except Exception:
+                return 0.0
+        return 0.0
+
 class OrchestratorCLI:
     """Command-line interface for the orchestrator"""
     
     def __init__(self):
-        self.orchestrator = TaskOrchestrator()
+        self._instance_lock = _GatewayInstanceLock(
+            logs_dir / "gateway.lock",
+            Path(__file__).parent,
+        )
+        self._instance_lock.acquire()
+        try:
+            self.orchestrator = TaskOrchestrator()
+        except Exception:
+            self._instance_lock.release()
+            raise
         self.shutdown_event = asyncio.Event()
+        self._shutdown_requested = False
     
     async def start(self):
         """Start the orchestrator"""
@@ -115,10 +256,14 @@ class OrchestratorCLI:
         finally:
             print("\nShutting down...")
             await self.orchestrator.stop()
+            self._instance_lock.release()
             print("Shutdown complete.")
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals"""
+        if self._shutdown_requested:
+            return
+        self._shutdown_requested = True
         logger.info(f"Received signal {signum}, initiating shutdown")
         self.shutdown_event.set()
     
