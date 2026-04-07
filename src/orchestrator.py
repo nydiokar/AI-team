@@ -10,6 +10,7 @@ import logging
 import time
 import shutil
 import subprocess
+import re
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -167,6 +168,67 @@ class TaskOrchestrator(ITaskOrchestrator):
             "Claude completed the run but returned no final reply text.\n\n"
             "Check the artifact JSON for raw stdout/stderr and backend metadata."
         )
+
+    @classmethod
+    def _failure_text(cls, result: TaskResult) -> str:
+        """Aggregate likely error-bearing text from the result payload."""
+        parts: List[str] = []
+
+        def _append(value: Any) -> None:
+            if value is None:
+                return
+            text = cls._extract_text_from_payload(value)
+            if text:
+                parts.append(text)
+            elif isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+
+        for err in (result.errors or []):
+            _append(err)
+        _append(getattr(result, "raw_stderr", ""))
+        _append(getattr(result, "raw_stdout", ""))
+        _append(getattr(result, "parsed_output", None))
+        _append(getattr(result, "output", ""))
+        return "\n".join(parts)
+
+    @classmethod
+    def _short_failure_reason(cls, result: TaskResult) -> str:
+        """Return a concise, user-facing failure reason."""
+        if result.success:
+            return ""
+
+        texts: List[str] = [str(err).strip() for err in (result.errors or []) if str(err).strip()]
+        haystack = cls._failure_text(result)
+        haystack_lower = haystack.lower()
+
+        if "cancelled" in haystack_lower:
+            return "Task cancelled"
+        if cls._is_missing_backend_conversation(result):
+            return "Claude session expired"
+        if any(s in haystack_lower for s in ("rate_limit_event", "rate limit", "rate-limit", "too many requests", "hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
+            reset_match = re.search(r"resets?\s+([^\n\"}]{1,60})", haystack, flags=re.IGNORECASE)
+            if reset_match:
+                reset_hint = reset_match.group(1).strip(" .:")
+                return f"Claude rate limit (resets {reset_hint})"
+            return "Claude rate limit"
+        if any(s in haystack_lower for s in ("not logged in", "authentication", "unauthorized", "forbidden")):
+            return "Claude authentication error"
+        if any(s in haystack_lower for s in ("timeout", "timed out")):
+            return "Claude timeout"
+        if any(s in haystack_lower for s in ("connection reset", "connection aborted", "network error", "temporarily unavailable", "service unavailable")):
+            return "Claude network error"
+        if any(isinstance(e, str) and "interactive_prompt_detected" in e for e in (result.errors or [])):
+            return "Claude needs interactive approval"
+
+        for text in texts:
+            low = text.lower()
+            if low.startswith("claude exited with code "):
+                continue
+            compact = " ".join(text.split())
+            if compact:
+                return compact[:120]
+
+        return "Claude failed"
 
     @staticmethod
     def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:
@@ -695,7 +757,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 content = content + "\n\n**Changed files:**\n" + "\n".join(lines)
                             await self.telegram_interface.notify_completion(task.id, content, success=True, chat_id=notify_chat_id)
                         else:
-                            error_summary = f"Task failed: {'; '.join(result.errors[:2])}" if result.errors else "Task failed"
+                            short_reason = self._short_failure_reason(result)
+                            error_summary = f"Task failed: {short_reason}" if short_reason else "Task failed"
                             await self.telegram_interface.notify_completion(task.id, error_summary, success=False, chat_id=notify_chat_id)
                     except Exception as e:
                         logger.warning(f"Failed to send Telegram completion notification: {e}")
@@ -717,7 +780,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                         if session:
                             session.last_task_id = task.id
                             if not result.success:
-                                session.last_result_summary = result.errors[0] if result.errors else "(failed)"
+                                session.last_result_summary = self._short_failure_reason(result) or "(failed)"
                             else:
                                 # Take the last ~400 chars (the conclusion) rather than
                                 # the first 200 (always mid-explanation for session turns).
@@ -1308,9 +1371,9 @@ created: {task.created}
                 return "interactive"
         except Exception:
             pass
-        text = (result.raw_stderr or "") + "\n" + (result.raw_stdout or "")
+        text = self._failure_text(result)
         text_lower = text.lower()
-        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests")):
+        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "rate_limit_event", "hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
             return "rate_limit"
         if any(s in text_lower for s in ("timeout", "timed out")):
             return "timeout"

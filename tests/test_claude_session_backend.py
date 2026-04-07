@@ -155,6 +155,48 @@ def test_session_reply_surfaces_empty_backend_output_explicitly():
     assert "returned no final reply text" in reply
 
 
+def test_short_failure_reason_distills_rate_limit_from_stream_json():
+    result = TaskResult(
+        task_id="task_rate_limit",
+        success=False,
+        output="You've hit your limit",
+        errors=["Claude exited with code 1"],
+        files_modified=[],
+        execution_time=0.01,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout="\n".join(
+            [
+                '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}',
+                '{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"You\\u0027ve hit your limit · resets 11pm (Europe/Kiev)"}]}}',
+            ]
+        ),
+        raw_stderr="",
+        parsed_output={"result": "You've hit your limit · resets 11pm (Europe/Kiev)"},
+        return_code=1,
+    )
+
+    assert TaskOrchestrator._short_failure_reason(result) == "Claude rate limit (resets 11pm (Europe/Kiev))"
+
+
+def test_classify_error_detects_rate_limit_event_from_stream_json():
+    orch = TaskOrchestrator()
+    result = TaskResult(
+        task_id="task_rate_limit_classify",
+        success=False,
+        output="",
+        errors=["Claude exited with code 1"],
+        files_modified=[],
+        execution_time=0.01,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}',
+        raw_stderr="",
+        parsed_output={"result": "You've hit your limit"},
+        return_code=1,
+    )
+
+    assert orch._classify_error(result) == "rate_limit"
+
+
 def test_compute_turn_changes_filters_unchanged_dirty_files(monkeypatch):
     before = {
         "old.ts": {"status": " M", "fingerprint": "same"},

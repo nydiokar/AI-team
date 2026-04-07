@@ -20,12 +20,17 @@ from src.core.interfaces import Session, SessionStatus
 from src.core.path_resolver import PathResolver, PathResolution
 
 try:
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+    from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
     from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, ContextTypes
     TELEGRAM_AVAILABLE = True
 except ImportError:
     TELEGRAM_AVAILABLE = False
     # Mock classes for when telegram is not available
+    class BotCommand:
+        def __init__(self, command: str, description: str):
+            self.command = command
+            self.description = description
+
     class Update:
         def __init__(self):
             self.message = None
@@ -99,7 +104,28 @@ class TelegramInterface:
         
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
-    
+
+    @staticmethod
+    def _bot_commands() -> list[BotCommand]:
+        """Commands exposed to Telegram clients via the slash-command chooser."""
+        entries = [
+            ("start", "Show welcome text"),
+            ("help", "Show command help"),
+            ("task", "Create a one-off task"),
+            ("status", "Show gateway status"),
+            ("session_new", "Create a new coding session"),
+            ("session_list", "List your sessions"),
+            ("session_use", "Switch the active session"),
+            ("session_dirs", "List allowed session roots"),
+            ("session_status", "Show active session details"),
+            ("session_cancel", "Cancel the active session task"),
+            ("session_close", "Close the active session"),
+            ("commit", "Commit safe session changes"),
+            ("commit_all", "Commit all staged session changes"),
+            ("git_status", "Show repository git status"),
+        ]
+        return [BotCommand(command, description) for command, description in entries]
+
     async def start(self):
         """Start the Telegram bot"""
         if not self.app or self.is_running:
@@ -108,6 +134,7 @@ class TelegramInterface:
         try:
             self._acquire_instance_lock()
             await self.app.initialize()
+            await self.app.bot.set_my_commands(self._bot_commands())
             await self.app.start()
             await self.app.updater.start_polling()
             self.is_running = True
