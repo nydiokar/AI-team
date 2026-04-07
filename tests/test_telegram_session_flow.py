@@ -16,9 +16,11 @@ class _DummyMessage:
     def __init__(self, text: str = ""):
         self.text = text
         self.replies: list[str] = []
+        self.reply_kwargs: list[dict] = []
 
-    async def reply_text(self, text: str):
+    async def reply_text(self, text: str, **kwargs):
         self.replies.append(text)
+        self.reply_kwargs.append(kwargs)
 
 
 class _DummyUser:
@@ -119,6 +121,42 @@ async def test_session_new_rejects_bad_path_with_suggestion(monkeypatch, isolate
         assert "repo-alpha" in update.message.replies[-1]
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_start_registers_bot_commands(monkeypatch, isolated_session_store):
+    class _FakeBot:
+        def __init__(self):
+            self.commands = None
+
+        async def set_my_commands(self, commands):
+            self.commands = commands
+
+    class _FakeUpdater:
+        async def start_polling(self):
+            return None
+
+    class _FakeApp:
+        def __init__(self):
+            self.bot = _FakeBot()
+            self.updater = _FakeUpdater()
+
+        async def initialize(self):
+            return None
+
+        async def start(self):
+            return None
+
+    bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+    bot.app = _FakeApp()
+    monkeypatch.setattr(bot, "_acquire_instance_lock", lambda: None)
+
+    await bot.start()
+
+    names = [item.command for item in bot.app.bot.commands]
+    assert "start" in names
+    assert "session_new" in names
+    assert "git_status" in names
 
 
 @pytest.mark.asyncio
