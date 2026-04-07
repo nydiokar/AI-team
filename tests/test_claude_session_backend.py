@@ -1,7 +1,7 @@
 from src.backends import claude_code
 from src.backends.claude_code import ClaudeCodeBackend
 from src.orchestrator import TaskOrchestrator
-from src.core.interfaces import ExecutionResult, Task, TaskType, TaskPriority, TaskStatus, TaskResult
+from src.core.interfaces import ExecutionResult, Task, TaskType, TaskPriority, TaskStatus, TaskResult, SessionStatus
 import asyncio
 from datetime import datetime
 from pathlib import Path
@@ -195,6 +195,57 @@ def test_classify_error_detects_rate_limit_event_from_stream_json():
     )
 
     assert orch._classify_error(result) == "rate_limit"
+
+
+def test_recover_stale_busy_session_marks_error_and_notifies(monkeypatch):
+    root = Path.cwd() / ".test_session_artifacts" / uuid.uuid4().hex[:8]
+    from config import config
+    try:
+        results_dir = root / "results"
+        summaries_dir = root / "summaries"
+        logs_dir = root / "logs"
+        state_dir = root / "state"
+        for path in (results_dir, summaries_dir, logs_dir, state_dir):
+            path.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(config.system, "results_dir", str(results_dir), raising=False)
+        monkeypatch.setattr(config.system, "summaries_dir", str(summaries_dir), raising=False)
+        monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
+
+        import src.core.session_store as session_store_module
+        monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", state_dir / "sessions", raising=False)
+        monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", state_dir / "telegram" / "active_bindings.json", raising=False)
+
+        orch = TaskOrchestrator()
+        session = orch.session_store.create("codex", str(root), telegram_chat_id=1, owner_user_id=2)
+        session.status = SessionStatus.BUSY
+        session.last_task_id = "task_interrupted"
+        orch.session_store.save(session)
+
+        captured = []
+
+        class _FakeTelegram:
+            async def notify_completion(self, task_id, summary, success=True, chat_id=None):
+                captured.append({"task_id": task_id, "summary": summary, "success": success, "chat_id": chat_id})
+
+        orch.telegram_interface = _FakeTelegram()
+
+        asyncio.run(orch._recover_stale_busy_sessions())
+
+        reloaded = orch.session_store.get(session.session_id)
+        assert reloaded is not None
+        assert reloaded.status == SessionStatus.ERROR
+        assert "Interrupted by gateway restart" in reloaded.last_result_summary
+        assert captured == [
+            {
+                "task_id": "task_interrupted",
+                "summary": "Task interrupted by gateway restart",
+                "success": False,
+                "chat_id": 1,
+            }
+        ]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_compute_turn_changes_filters_unchanged_dirty_files(monkeypatch):
