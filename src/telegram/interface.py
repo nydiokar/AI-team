@@ -804,6 +804,7 @@ class TelegramInterface:
         except Exception:
             tshort = ts
         name = ev.get("event", "")
+        backend = str(ev.get("backend") or "").strip().lower()
         pretty = name
         icon = "•"
         details = ""
@@ -813,10 +814,12 @@ class TelegramInterface:
             details = f"from {Path(src).name}" if src else ""
         elif name == "parsed":
             icon = "🧩"
-        elif name == "claude_started":
+        elif name.endswith("_started"):
             icon = "🚀"
             worker = ev.get("worker")
-            details = f"worker {worker}" if worker else ""
+            if not backend and "_" in name:
+                backend = name.split("_", 1)[0]
+            details = f"{backend} on {worker}" if worker and backend else (f"worker {worker}" if worker else backend)
         elif name == "summarized":
             icon = "📝"
         elif name == "validated":
@@ -835,11 +838,14 @@ class TelegramInterface:
             icon = "⏱️"
             to = ev.get("timeout_s")
             details = f"after {to}s" if to is not None else ""
-        elif name == "claude_finished":
+        elif name.endswith("_finished"):
             icon = "🏁"
             status = ev.get("status")
             dur = ev.get("duration_s")
-            details = f"{status} in {dur:.2f}s" if isinstance(dur, (int, float)) else f"{status}"
+            if not backend and "_" in name:
+                backend = name.split("_", 1)[0]
+            summary = f"{status} in {dur:.2f}s" if isinstance(dur, (int, float)) else f"{status}"
+            details = f"{backend} {summary}".strip() if backend else summary
         elif name == "artifacts_written":
             icon = "💾"
         elif name == "task_archived":
@@ -854,11 +860,13 @@ class TelegramInterface:
             "task_received": "received",
             "parsed": "parsed",
             "claude_started": "started",
+            "codex_started": "started",
             "summarized": "summarized",
             "validated": "validated",
             "retry": "retry",
             "timeout": "timeout",
             "claude_finished": "finished",
+            "codex_finished": "finished",
             "artifacts_written": "artifacts",
             "artifacts_error": "artifacts error",
             "task_archived": "archived",

@@ -419,3 +419,19 @@ async def test_progress_without_args_uses_active_session_last_task(monkeypatch, 
     finally:
         shutil.rmtree(Path.cwd() / ".test_telegram_logs", ignore_errors=True)
         shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+def test_format_progress_line_shows_codex_backend():
+    bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+
+    started = bot._format_progress_line(
+        {"timestamp": "2026-03-26T10:00:00", "event": "codex_started", "task_id": "task_1", "worker": "w1", "backend": "codex"}
+    )
+    finished = bot._format_progress_line(
+        {"timestamp": "2026-03-26T10:00:02", "event": "codex_finished", "task_id": "task_1", "status": "SUCCESS", "duration_s": 2.0, "backend": "codex"}
+    )
+
+    assert "started" in started
+    assert "codex" in started
+    assert "finished" in finished
+    assert "codex" in finished

@@ -11,6 +11,7 @@ import time
 import shutil
 import subprocess
 import re
+import socket
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -95,6 +96,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Cancellation and runtime tracking
         self._task_cancel_events: Dict[str, asyncio.Event] = {}
         self._running_exec_tasks: Dict[str, asyncio.Task] = {}
+        self._shutdown_interrupted_tasks: set[str] = set()
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -230,6 +232,68 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         return "Claude failed"
 
+    def _resolve_task_backend(self, task: Task) -> str:
+        """Resolve the backend associated with a task before it finishes."""
+        session_id = (task.metadata or {}).get("session_id", "").strip()
+        if session_id:
+            session = self.session_store.get(session_id)
+            if session and session.backend:
+                return str(session.backend).strip().lower()
+        backend_name = str((task.metadata or {}).get("backend") or "claude").strip().lower()
+        return backend_name or "claude"
+
+    @staticmethod
+    def _backend_event_name(backend_name: str, phase: str) -> str:
+        backend = (backend_name or "claude").strip().lower() or "claude"
+        return f"{backend}_{phase}"
+
+    async def _recover_stale_busy_sessions(self) -> None:
+        """Convert BUSY sessions left behind by a previous restart into a stable error state."""
+        stale_sessions: List[Any] = []
+        host = socket.gethostname()
+        active_task_ids = set(self.active_tasks.keys())
+
+        for session in self.session_store.list_all():
+            if session.status != SessionStatus.BUSY:
+                continue
+            if session.machine_id and session.machine_id != host:
+                continue
+            if session.last_task_id and session.last_task_id in active_task_ids:
+                continue
+            stale_sessions.append(session)
+
+        for session in stale_sessions:
+            session.status = SessionStatus.ERROR
+            session.last_result_summary = "Interrupted by gateway restart; partial changes may exist."
+            self.session_store.save(session)
+            result = TaskResult(
+                task_id=session.last_task_id or f"session_{session.session_id}",
+                success=False,
+                output="",
+                errors=["interrupted by gateway restart"],
+                files_modified=[],
+                execution_time=0.0,
+                timestamp=datetime.now().isoformat(),
+            )
+            setattr(result, "backend_name", session.backend or "claude")
+            self._write_session_summary(session, result)
+            self._append_session_event(session.session_id, session.last_task_id or "", result)
+            self._emit_event(
+                "session_interrupted_recovered",
+                None,
+                {"session_id": session.session_id, "task_id": session.last_task_id, "backend": session.backend},
+            )
+            if self.telegram_interface and session.telegram_chat_id:
+                try:
+                    await self.telegram_interface.notify_completion(
+                        session.last_task_id or session.session_id,
+                        "Task interrupted by gateway restart",
+                        success=False,
+                        chat_id=session.telegram_chat_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to notify interrupted session recovery: {e}")
+
     @staticmethod
     def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:
         changes = list(getattr(result, "file_changes", None) or [])
@@ -318,6 +382,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 logger.error(f"Failed to start Telegram interface: {e}")
                 await self.stop()
                 raise
+        await self._recover_stale_busy_sessions()
         
         # Log startup status
         self._log_startup_status()
@@ -335,6 +400,25 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info("Stopping Telegram Coding Gateway...")
         
         self.running = False
+
+        interrupted_ids = list(self.active_tasks.keys())
+        for task_id in interrupted_ids:
+            self._shutdown_interrupted_tasks.add(task_id)
+            ev = self._task_cancel_events.get(task_id)
+            if ev is None:
+                ev = asyncio.Event()
+                self._task_cancel_events[task_id] = ev
+            ev.set()
+            exec_task = self._running_exec_tasks.get(task_id)
+            if exec_task is not None and not exec_task.done():
+                exec_task.cancel()
+
+        if interrupted_ids:
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                if not any(task_id in self.active_tasks for task_id in interrupted_ids):
+                    break
+                await asyncio.sleep(0.1)
 
         # Terminate any live backend child processes before worker cancellation.
         for backend in self._backends.values():
@@ -713,8 +797,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                         pass
                     continue
 
-                logger.info(f"event=claude_started worker={worker_name} task_id={task.id}")
-                self._emit_event("claude_started", task, {"worker": worker_name})
+                backend_name = self._resolve_task_backend(task)
+                start_event = self._backend_event_name(backend_name, "started")
+                logger.info(f"event={start_event} worker={worker_name} task_id={task.id}")
+                self._emit_event(start_event, task, {"worker": worker_name, "backend": backend_name})
                 
                 # Process the task
                 result = await self.process_task(task)
@@ -727,8 +813,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                 
                 # Log completion
                 status = "SUCCESS" if result.success else "FAILED"
-                logger.info(f"event=claude_finished task_id={task.id} status={status} duration_s={result.execution_time:.2f} class={getattr(result,'error_class','')}")
-                self._emit_event("claude_finished", task, {"status": status, "duration_s": result.execution_time, "error_class": getattr(result, "error_class", "")})
+                finish_backend = getattr(result, "backend_name", backend_name)
+                finish_event = self._backend_event_name(finish_backend, "finished")
+                logger.info(f"event={finish_event} task_id={task.id} status={status} duration_s={result.execution_time:.2f} class={getattr(result,'error_class','')}")
+                self._emit_event(
+                    finish_event,
+                    task,
+                    {"status": status, "duration_s": result.execution_time, "error_class": getattr(result, "error_class", ""), "backend": finish_backend},
+                )
                 
                 # Send Telegram notification if available
                 if self.telegram_interface:
@@ -839,6 +931,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 try:
                     self._task_cancel_events.pop(task.id, None)
                     self._running_exec_tasks.pop(task.id, None)
+                    self._shutdown_interrupted_tasks.discard(task.id)
                     self.active_tasks.pop(task.id, None)
                 except Exception:
                     pass
@@ -964,18 +1057,21 @@ class TaskOrchestrator(ITaskOrchestrator):
                             await exec_task
                         execution_time = time.time() - start_time
                         self._emit_event("cancelled", task, {"when": "during_execution"})
+                        interrupted = task.id in self._shutdown_interrupted_tasks
                         if session:
-                            session.status = SessionStatus.CANCELLED
+                            session.status = SessionStatus.ERROR if interrupted else SessionStatus.CANCELLED
                             self.session_store.save(session)
-                        return TaskResult(
+                        result = TaskResult(
                             task_id=task.id,
                             success=False,
                             output="",
-                            errors=["cancelled"],
+                            errors=["interrupted by gateway restart" if interrupted else "cancelled"],
                             files_modified=[],
                             execution_time=execution_time,
                             timestamp=datetime.now().isoformat(),
                         )
+                        setattr(result, "backend_name", backend_name)
+                        return result
                     else:
                         # Timeout
                         exec_task.cancel()
@@ -986,7 +1082,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                         if session:
                             session.status = SessionStatus.ERROR
                             self.session_store.save(session)
-                        return TaskResult(
+                        result = TaskResult(
                             task_id=task.id,
                             success=False,
                             output="",
@@ -995,6 +1091,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                             execution_time=execution_time,
                             timestamp=datetime.now().isoformat(),
                         )
+                        setattr(result, "backend_name", backend_name)
+                        return result
                 finally:
                     # Cancel any pending helper waiters
                     for w in (cancel_waiter, timeout_waiter):
