@@ -27,30 +27,34 @@ class CodexBackend(CodingBackend):
 
     def __init__(self):
         self._exe = shutil.which("codex") or "codex"
-        self._active_procs: set[subprocess.Popen] = set()
+        self._session_procs: dict[str, subprocess.Popen] = {}
+        self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
 
     def create_session(self, session: Session) -> ExecutionResult:
-        return self._run(session.repo_path, session.last_user_message, resume_id=None)
+        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_key=session.session_id)
 
     def resume_session(self, session: Session, message: str) -> ExecutionResult:
-        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None)
+        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_key=session.session_id)
 
     def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
-        return self._run(cwd, message, resume_id=None)
+        return self._run(cwd, message, resume_id=None, session_key=None)
 
     def cancel(self, session: Session) -> None:
-        self.terminate_active_processes()
+        with self._proc_lock:
+            proc = self._session_procs.get(session.session_id)
+        if proc is not None:
+            terminate_many_popen([proc])
 
     def close(self, session: Session) -> None:
         pass
 
     def terminate_active_processes(self) -> None:
         with self._proc_lock:
-            procs = list(self._active_procs)
+            procs = list(self._session_procs.values()) + list(self._oneoff_procs)
         terminate_many_popen(procs)
 
-    def _run(self, cwd: str, message: str, resume_id: Optional[str]) -> ExecutionResult:
+    def _run(self, cwd: str, message: str, resume_id: Optional[str], session_key: Optional[str]) -> ExecutionResult:
         start = time.time()
         cmd = self._build_cmd(resume_id, cwd)
         try:
@@ -61,7 +65,7 @@ class CodexBackend(CodingBackend):
                 stderr=subprocess.PIPE,
                 cwd=cwd or None,
             )
-            self._register_process(proc)
+            self._register_process(proc, session_key)
             stdout_bytes, stderr_bytes = proc.communicate(input=message.encode())
             stdout = stdout_bytes.decode(errors="replace")
             stderr = stderr_bytes.decode(errors="replace")
@@ -76,7 +80,7 @@ class CodexBackend(CodingBackend):
             )
         finally:
             if "proc" in locals():
-                self._unregister_process(proc)
+                self._unregister_process(proc, session_key)
 
     def _build_cmd(self, resume_id: Optional[str], cwd: Optional[str]) -> List[str]:
         if resume_id:
@@ -96,13 +100,25 @@ class CodexBackend(CodingBackend):
         cmd.append("-")
         return cmd
 
-    def _register_process(self, proc: subprocess.Popen) -> None:
+    def _register_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
+        stale_proc: Optional[subprocess.Popen] = None
         with self._proc_lock:
-            self._active_procs.add(proc)
+            if session_key:
+                stale_proc = self._session_procs.get(session_key)
+                self._session_procs[session_key] = proc
+            else:
+                self._oneoff_procs.add(proc)
+        if stale_proc is not None and stale_proc is not proc:
+            terminate_many_popen([stale_proc])
 
-    def _unregister_process(self, proc: subprocess.Popen) -> None:
+    def _unregister_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
         with self._proc_lock:
-            self._active_procs.discard(proc)
+            if session_key:
+                current = self._session_procs.get(session_key)
+                if current is proc:
+                    self._session_procs.pop(session_key, None)
+            else:
+                self._oneoff_procs.discard(proc)
 
     @staticmethod
     def _parse(stdout: str, stderr: str, returncode: int, elapsed: float) -> ExecutionResult:
