@@ -118,3 +118,40 @@ def test_parse_skips_non_json_lines_gracefully():
     result = CodexBackend._parse(ndjson, "", 0, 1.0)
     assert result.output == "OK."
     assert result.backend_session_id == "019d4444-0000-0000-0000-000000000004"
+
+
+class _FakeProc:
+    def __init__(self, pid: int):
+        self.pid = pid
+
+
+def test_cancel_targets_only_requested_session(monkeypatch):
+    backend = CodexBackend()
+    killed = []
+
+    monkeypatch.setattr("src.backends.codex.terminate_many_popen", lambda procs: killed.extend(p.pid for p in procs))
+
+    proc_a = _FakeProc(101)
+    proc_b = _FakeProc(202)
+    backend._register_process(proc_a, "session-a")
+    backend._register_process(proc_b, "session-b")
+
+    session = type("SessionStub", (), {"session_id": "session-a"})()
+    backend.cancel(session)
+
+    assert killed == [101]
+
+
+def test_register_replaces_existing_session_process(monkeypatch):
+    backend = CodexBackend()
+    killed = []
+
+    monkeypatch.setattr("src.backends.codex.terminate_many_popen", lambda procs: killed.extend(p.pid for p in procs))
+
+    first = _FakeProc(11)
+    second = _FakeProc(22)
+    backend._register_process(first, "session-a")
+    backend._register_process(second, "session-a")
+
+    assert killed == [11]
+    assert backend._session_procs["session-a"] is second

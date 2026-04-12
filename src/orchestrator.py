@@ -1052,8 +1052,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                             result = raw
                     elif cancel_waiter and cancel_waiter in done:
                         # Cooperative cancellation
+                        if session:
+                            with contextlib.suppress(Exception):
+                                backend.cancel(session)
                         exec_task.cancel()
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(asyncio.CancelledError):
                             await exec_task
                         execution_time = time.time() - start_time
                         self._emit_event("cancelled", task, {"when": "during_execution"})
@@ -1074,8 +1077,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                         return result
                     else:
                         # Timeout
+                        if session:
+                            with contextlib.suppress(Exception):
+                                backend.cancel(session)
                         exec_task.cancel()
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(asyncio.CancelledError):
                             await exec_task
                         execution_time = time.time() - start_time
                         self._emit_event("timeout", task, {"timeout_s": timeout_s})
