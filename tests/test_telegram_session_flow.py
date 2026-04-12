@@ -1,5 +1,6 @@
 import shutil
 import uuid
+import os
 from pathlib import Path
 from unittest.mock import patch
 import json
@@ -43,6 +44,21 @@ class _DummyUpdate:
 class _DummyContext:
     def __init__(self, args=None):
         self.args = args or []
+
+
+class _DummyCallbackQuery:
+    def __init__(self, data: str):
+        self.data = data
+        self.answers = 0
+        self.edits: list[str] = []
+        self.edit_kwargs: list[dict] = []
+
+    async def answer(self):
+        self.answers += 1
+
+    async def edit_message_text(self, text: str, **kwargs):
+        self.edits.append(text)
+        self.edit_kwargs.append(kwargs)
 
 
 class _DummyOrchestrator:
@@ -176,6 +192,80 @@ async def test_session_new_creates_session_and_guides_next_step(monkeypatch, iso
         assert active.repo_path == str((workspace / "repo-alpha").resolve())
         assert "Send a plain message to continue in this session." in update.message.replies[-1]
         assert "/session_dirs" in update.message.replies[-1]
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_session_new_without_args_shows_backend_picker(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+
+        update = _DummyUpdate()
+        await bot._handle_session_new(update, _DummyContext())
+
+        assert update.message.replies
+        assert "Choose the backend" in update.message.replies[-1]
+        markup = update.message.reply_kwargs[-1]["reply_markup"]
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        assert labels == ["Codex", "Claude"]
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_session_new_backend_callback_shows_recent_repos(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        repo_alpha = workspace / "repo-alpha"
+        repo_beta = workspace / "repo-beta"
+        (repo_alpha / ".git").mkdir(exist_ok=True)
+        (repo_beta / ".git").mkdir(exist_ok=True)
+        repo_alpha.touch()
+        repo_beta.touch()
+        os.utime(repo_alpha, (1_700_000_000, 1_700_000_000))
+        os.utime(repo_beta, (1_800_000_000, 1_800_000_000))
+
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+
+        update = _DummyUpdate()
+        update.callback_query = _DummyCallbackQuery("session_new_backend:codex")
+        await bot._handle_session_new_callback(update, _DummyContext())
+
+        assert update.callback_query.answers == 1
+        assert "Choose the repository" in update.callback_query.edits[-1]
+        markup = update.callback_query.edit_kwargs[-1]["reply_markup"]
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        assert labels[:2] == ["repo-beta", "repo-alpha"]
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_session_new_repo_callback_creates_session(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        repo_alpha = workspace / "repo-alpha"
+        (repo_alpha / ".git").mkdir(exist_ok=True)
+
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+
+        update = _DummyUpdate()
+        update.callback_query = _DummyCallbackQuery("session_new_repo:codex:0")
+        await bot._handle_session_new_callback(update, _DummyContext())
+
+        active = SessionStore().get_active(update.effective_chat.id)
+        assert active is not None
+        assert active.backend == "codex"
+        assert active.repo_path == str(repo_alpha.resolve())
+        assert "Session created and set as active" in update.callback_query.edits[-1]
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
