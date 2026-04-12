@@ -101,6 +101,7 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("commit_all", self._handle_git_commit_all))
         self.app.add_handler(CommandHandler("git_status", self._handle_git_status))
         self.app.add_handler(CallbackQueryHandler(self._handle_session_picker_callback, pattern=r"^session_use:"))
+        self.app.add_handler(CallbackQueryHandler(self._handle_session_new_callback, pattern=r"^session_new_"))
         
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -463,6 +464,78 @@ class TelegramInterface:
                 )
             ])
         return InlineKeyboardMarkup(rows)
+
+    def _build_session_backend_markup(self) -> Optional["InlineKeyboardMarkup"]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(text="Codex", callback_data="session_new_backend:codex")],
+                [InlineKeyboardButton(text="Claude", callback_data="session_new_backend:claude")],
+            ]
+        )
+
+    def _recent_session_repo_choices(self, limit: int = 10) -> list[tuple[str, str]]:
+        resolver = self._path_resolver()
+        root = resolver.base_cwd or resolver.allowed_root
+        if not root:
+            return []
+
+        try:
+            root_path = Path(root).resolve()
+            children = [child for child in root_path.iterdir() if child.is_dir() and not child.name.startswith(".")]
+            children.sort(key=lambda child: child.stat().st_mtime, reverse=True)
+        except Exception:
+            return []
+
+        repos = [child for child in children if (child / ".git").exists()]
+        if len(repos) < limit:
+            seen = {item.resolve() for item in repos}
+            for child in children:
+                resolved = child.resolve()
+                if resolved in seen:
+                    continue
+                repos.append(child)
+                seen.add(resolved)
+                if len(repos) >= limit:
+                    break
+
+        return [(child.name, str(child.resolve())) for child in repos[:limit]]
+
+    def _build_session_repo_markup(self, backend: str) -> Optional["InlineKeyboardMarkup"]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        choices = self._recent_session_repo_choices(limit=10)
+        if not choices:
+            return None
+        rows = []
+        for idx, (name, _repo_path) in enumerate(choices):
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=name[:64],
+                        callback_data=f"session_new_repo:{backend}:{idx}",
+                    )
+                ]
+            )
+        return InlineKeyboardMarkup(rows)
+
+    async def _create_and_bind_session(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        backend: str,
+        repo_path: str,
+    ) -> Session:
+        session = self.session_store.create(
+            backend=backend,
+            repo_path=repo_path,
+            telegram_chat_id=chat_id,
+            owner_user_id=user_id,
+        )
+        self.session_store.bind(chat_id, session.session_id)
+        return session
 
     def _get_accessible_session(
         self,
@@ -979,7 +1052,7 @@ class TelegramInterface:
     # Session commands
     # ------------------------------------------------------------------
 
-    async def _handle_session_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _handle_session_new_legacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_new <backend> <path>"""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
@@ -1001,13 +1074,12 @@ class TelegramInterface:
             return
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
-        session = self.session_store.create(
+        session = await self._create_and_bind_session(
+            chat_id=chat_id,
+            user_id=user_id,
             backend=backend,
             repo_path=resolution.resolved_path,
-            telegram_chat_id=chat_id,
-            owner_user_id=user_id,
         )
-        self.session_store.bind(chat_id, session.session_id)
         lines = [
             "✅ Session created and set as active.",
             f"ID: `{session.session_id}`",
@@ -1045,12 +1117,22 @@ class TelegramInterface:
             reply_markup=self._build_session_picker_markup(picker_sessions, active_id),
         )
 
-    async def _handle_session_use(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _handle_session_use_legacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_use <session_id>"""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
         args = context.args or []
+        if not args:
+            markup = self._build_session_backend_markup()
+            if markup is None:
+                await update.message.reply_text("âŒ Telegram inline buttons are unavailable.")
+                return
+            await update.message.reply_text(
+                "Choose the backend for the new session:",
+                reply_markup=markup,
+            )
+            return
         if not args:
             sessions = [
                 s for s in self.session_store.list_all()
@@ -1082,6 +1164,91 @@ class TelegramInterface:
             f"✅ Active session set to `{session_id}` [{session.backend}] — {session.repo_path}"
         )
 
+    async def _handle_session_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_new <backend> <path>"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("âŒ Access denied.")
+            return
+        args = context.args or []
+        if not args:
+            markup = self._build_session_backend_markup()
+            if markup is None:
+                await update.message.reply_text("âŒ Telegram inline buttons are unavailable.")
+                return
+            await update.message.reply_text(
+                "Choose the backend for the new session:",
+                reply_markup=markup,
+            )
+            return
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: /session_new <backend> <path>\n"
+                "Example: /session_new claude myrepo"
+            )
+            return
+        backend, repo_path = args[0].lower(), " ".join(args[1:])
+        if backend not in ("claude", "codex"):
+            await update.message.reply_text("âŒ Backend must be 'claude' or 'codex'.")
+            return
+        resolution = self._path_resolver().resolve_session_path(repo_path)
+        if not resolution.ok or not resolution.resolved_path:
+            await update.message.reply_text(self._format_path_resolution_error(resolution))
+            return
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        session = await self._create_and_bind_session(
+            chat_id=chat_id,
+            user_id=user_id,
+            backend=backend,
+            repo_path=resolution.resolved_path,
+        )
+        lines = [
+            "âœ… Session created and set as active.",
+            f"ID: `{session.session_id}`",
+            f"Backend: {backend}",
+            f"Path: `{session.repo_path}`",
+            "Send a plain message to continue in this session.",
+            "Use `/session_dirs` to browse directories under this repo.",
+        ]
+        await update.message.reply_text("\n".join(lines))
+
+    async def _handle_session_use(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_use <session_id>"""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("âŒ Access denied.")
+            return
+        args = context.args or []
+        if not args:
+            sessions = [
+                s for s in self.session_store.list_all()
+                if s.status != SessionStatus.CLOSED and self._user_can_access_session(update.effective_user.id, s)
+            ]
+            if not sessions:
+                await update.message.reply_text("No open sessions found.")
+                return
+            active = self.session_store.get_active(update.effective_chat.id)
+            active_id = active.session_id if active else None
+            await update.message.reply_text(
+                "Choose the session to make active:",
+                reply_markup=self._build_session_picker_markup(sessions, active_id),
+            )
+            return
+        session_id = args[0]
+        session = self.session_store.get(session_id)
+        if not session:
+            await update.message.reply_text(f"âŒ Session `{session_id}` not found.")
+            return
+        if not self._user_can_access_session(update.effective_user.id, session):
+            await update.message.reply_text("âŒ You do not own that session.")
+            return
+        if session.status == SessionStatus.CLOSED:
+            await update.message.reply_text(f"âŒ Session `{session_id}` is closed.")
+            return
+        self.session_store.bind(update.effective_chat.id, session_id)
+        await update.message.reply_text(
+            f"âœ… Active session set to `{session_id}` [{session.backend}] â€” {session.repo_path}"
+        )
+
     async def _handle_session_picker_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         if not query:
@@ -1109,6 +1276,77 @@ class TelegramInterface:
         await query.edit_message_text(
             f"âœ… Active session set to `{session_id}` [{session.backend}] â€” {session.repo_path}"
         )
+
+    async def _handle_session_new_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if not query:
+            return
+        await query.answer()
+
+        if not self._check_user_permission(update.effective_user.id):
+            await query.edit_message_text("âŒ Access denied.")
+            return
+
+        data = query.data or ""
+        if data.startswith("session_new_backend:"):
+            backend = data.split(":", 1)[1].strip().lower()
+            if backend not in ("claude", "codex"):
+                await query.edit_message_text("âŒ Unknown backend.")
+                return
+            markup = self._build_session_repo_markup(backend)
+            if markup is None:
+                await query.edit_message_text(
+                    "âŒ No recent repositories found. Use `/session_new <backend> <path>`.",
+                    parse_mode="Markdown",
+                )
+                return
+            await query.edit_message_text(
+                f"Choose the repository for `{backend}`:",
+                reply_markup=markup,
+                parse_mode="Markdown",
+            )
+            return
+
+        if data.startswith("session_new_repo:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                await query.edit_message_text("âŒ Invalid repository selection.")
+                return
+            backend = parts[1].strip().lower()
+            try:
+                repo_index = int(parts[2])
+            except ValueError:
+                await query.edit_message_text("âŒ Invalid repository selection.")
+                return
+            if backend not in ("claude", "codex"):
+                await query.edit_message_text("âŒ Unknown backend.")
+                return
+            choices = self._recent_session_repo_choices(limit=10)
+            if repo_index < 0 or repo_index >= len(choices):
+                await query.edit_message_text("âŒ Repository choice expired. Run /session_new again.")
+                return
+            _label, repo_path = choices[repo_index]
+            session = await self._create_and_bind_session(
+                chat_id=update.effective_chat.id,
+                user_id=update.effective_user.id,
+                backend=backend,
+                repo_path=repo_path,
+            )
+            await query.edit_message_text(
+                "\n".join(
+                    [
+                        "âœ… Session created and set as active.",
+                        f"ID: `{session.session_id}`",
+                        f"Backend: {backend}",
+                        f"Path: `{session.repo_path}`",
+                        "Send a plain message to continue in this session.",
+                    ]
+                ),
+                parse_mode="Markdown",
+            )
+            return
+
+        await query.edit_message_text("âŒ Unknown session_new action.")
 
     async def _handle_session_dirs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_dirs [path]"""
