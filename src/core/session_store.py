@@ -143,6 +143,7 @@ class SessionStore:
             "telegram_chat_id": s.telegram_chat_id,
             "telegram_thread_id": s.telegram_thread_id,
             "owner_user_id": s.owner_user_id,
+            "task_history": s.task_history or [],
         }
 
     @staticmethod
@@ -165,4 +166,5 @@ class SessionStore:
             telegram_chat_id=d.get("telegram_chat_id"),
             telegram_thread_id=d.get("telegram_thread_id"),
             owner_user_id=d.get("owner_user_id"),
+            task_history=d.get("task_history", []),
         )
