@@ -1,0 +1,6 @@
+# Python virtual environments (also in global, belt-and-suspenders)
+.venv/
+
+# Compiled / cache
+__pycache__/
+*.pyc
