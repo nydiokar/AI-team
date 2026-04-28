@@ -1342,6 +1342,7 @@ created: {task.created}
                 "skip_permissions": bool(getattr(config.claude, "skip_permissions", True)),
             },
             "llama": self.llama_mediator.get_status(probe=False),
+            "tool_summary": self._extract_tool_summary(result.raw_stdout or ""),
         }
         if task is not None:
             artifact["task"] = {
@@ -1771,6 +1772,35 @@ Generated from user description: {description}
                 f.write(entry + "\n")
         except Exception as e:
             logger.warning(f"session_event_log_failed id={session_id} error={e}")
+
+    @staticmethod
+    def _extract_tool_summary(raw_stdout: str) -> dict:
+        """Count tool calls by name and collect Bash commands from Claude Code's JSONL stdout."""
+        counts: dict = {}
+        bash_commands: list = []
+        for line in raw_stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+                blocks = []
+                if ev.get("type") == "assistant":
+                    blocks = ev.get("message", {}).get("content") or []
+                elif ev.get("type") == "tool_use":
+                    blocks = [ev]
+                for block in blocks:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    name = block.get("name", "unknown")
+                    counts[name] = counts.get(name, 0) + 1
+                    if name == "Bash":
+                        cmd = (block.get("input") or {}).get("command", "")
+                        if cmd:
+                            bash_commands.append(cmd)
+            except Exception:
+                pass
+        return {"calls": counts, "total": sum(counts.values()), "bash_commands": bash_commands}
 
 
 class _ContextLoader:
