@@ -34,7 +34,7 @@ file_handler = RotatingFileHandler(
     backupCount=3,
     encoding="utf-8"
 )
-stream_handler = logging.StreamHandler()
+stream_handler = logging.StreamHandler(sys.stdout)
 logging.basicConfig(
     level=getattr(logging, config.system.log_level),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
