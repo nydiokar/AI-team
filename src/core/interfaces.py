@@ -173,10 +173,13 @@ class Session:
     telegram_chat_id: Optional[int] = None
     telegram_thread_id: Optional[int] = None
     owner_user_id: Optional[int] = None
+    task_history: List[Dict[str, Any]] = None  # [{task_id, timestamp, success, execution_time}]
 
     def __post_init__(self):
         if self.last_files_modified is None:
             self.last_files_modified = []
+        if self.task_history is None:
+            self.task_history = []
 
 
 @dataclass

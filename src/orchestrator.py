@@ -918,6 +918,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                             session.last_files_modified = result.files_modified or []
                             artifact_path = str(Path(config.system.results_dir) / f"{task.id}.json")
                             session.last_artifact_path = artifact_path
+                            session.task_history.append({
+                                "task_id": task.id,
+                                "timestamp": result.timestamp,
+                                "success": result.success,
+                                "execution_time": round(result.execution_time or 0.0, 2),
+                            })
                             if result.success:
                                 session.status = SessionStatus.AWAITING_INPUT
                             elif "cancelled" in [str(err).lower() for err in (result.errors or [])]:
@@ -1396,19 +1402,6 @@ created: {task.created}
         except Exception:
             pass
 
-        # Append lightweight task reference to the session's history.
-        try:
-            session_block = artifact.get("session")
-            if isinstance(session_block, dict) and session_block.get("session_id"):
-                self.session_store.append_task_to_history(
-                    session_id=session_block["session_id"],
-                    task_id=task_id,
-                    success=result.success,
-                    execution_time=result.execution_time,
-                    timestamp=result.timestamp,
-                )
-        except Exception as e:
-            logger.warning(f"session_task_history_append_failed task_id={task_id} error={e}")
 
         # Write human readable summary (extract the LLAMA-generated summary)
         # LLAMA generates a summary and prepends it to result.output
