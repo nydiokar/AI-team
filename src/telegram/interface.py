@@ -96,12 +96,14 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("session_status", self._handle_session_status))
         self.app.add_handler(CommandHandler("session_cancel", self._handle_session_cancel))
         self.app.add_handler(CommandHandler("session_close", self._handle_session_close))
+        self.app.add_handler(CommandHandler("session_restore", self._handle_session_restore))
         # Git automation command handlers
         self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
         self.app.add_handler(CommandHandler("commit_all", self._handle_git_commit_all))
         self.app.add_handler(CommandHandler("git_status", self._handle_git_status))
         self.app.add_handler(CallbackQueryHandler(self._handle_session_picker_callback, pattern=r"^session_use:"))
         self.app.add_handler(CallbackQueryHandler(self._handle_session_new_callback, pattern=r"^session_new_"))
+        self.app.add_handler(CallbackQueryHandler(self._handle_session_restore_callback, pattern=r"^session_restore:"))
         
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -121,6 +123,7 @@ class TelegramInterface:
             ("session_status", "Show active session details"),
             ("session_cancel", "Cancel the active session task"),
             ("session_close", "Close the active session"),
+            ("session_restore", "Restore a recently closed session"),
             ("commit", "Commit safe session changes"),
             ("commit_all", "Commit all staged session changes"),
             ("git_status", "Show repository git status"),
@@ -448,6 +451,28 @@ class TelegramInterface:
                 lines.append("Directories: " + ", ".join(f"`{item}`" for item in dirs))
         return "\n".join(lines)
 
+    @staticmethod
+    def _split_message(text: str, limit: int = 4096) -> list[str]:
+        """Split text into chunks that fit within Telegram's character limit."""
+        if len(text) <= limit:
+            return [text]
+        chunks = []
+        while text:
+            if len(text) <= limit:
+                chunks.append(text)
+                break
+            split_at = text.rfind("\n", 0, limit)
+            if split_at <= 0:
+                split_at = limit
+            chunks.append(text[:split_at])
+            text = text[split_at:].lstrip("\n")
+        return chunks
+
+    async def _send_long_message(self, chat_id: int, text: str) -> None:
+        """Send a message, splitting it into multiple parts if it exceeds Telegram's limit."""
+        for chunk in self._split_message(text):
+            await self.app.bot.send_message(chat_id=chat_id, text=chunk)
+
     def _build_session_picker_markup(self, sessions: list[Session], active_id: Optional[str]) -> Optional["InlineKeyboardMarkup"]:
         if not TELEGRAM_AVAILABLE or not sessions:
             return None
@@ -461,6 +486,23 @@ class TelegramInterface:
                 InlineKeyboardButton(
                     text=label[:64],
                     callback_data=f"session_use:{session.session_id}",
+                )
+            ])
+        return InlineKeyboardMarkup(rows)
+
+    def _build_closed_session_picker_markup(self, sessions: list[Session]) -> Optional["InlineKeyboardMarkup"]:
+        """Inline keyboard for restoring closed sessions."""
+        if not TELEGRAM_AVAILABLE or not sessions:
+            return None
+        rows = []
+        for session in sessions[:5]:
+            name = Path(session.repo_path).name or session.repo_path
+            updated = session.updated_at[:10] if session.updated_at else "?"
+            label = f"↩ {session.backend}: {name} ({updated})"
+            rows.append([
+                InlineKeyboardButton(
+                    text=label[:64],
+                    callback_data=f"session_restore:{session.session_id}",
                 )
             ])
         return InlineKeyboardMarkup(rows)
@@ -1091,31 +1133,42 @@ class TelegramInterface:
         await update.message.reply_text("\n".join(lines))
 
     async def _handle_session_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/session_list"""
+        """/session_list — shows open sessions with a switch picker, then recently closed with restore buttons."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
-        include_closed = any(str(arg).strip().lower() == "all" for arg in (context.args or []))
-        sessions = [s for s in self.session_store.list_all() if self._user_can_access_session(update.effective_user.id, s)]
-        if not include_closed:
-            sessions = [s for s in sessions if s.status != SessionStatus.CLOSED]
-        if not sessions:
-            await update.message.reply_text("No open sessions found." if not include_closed else "No sessions found.")
-            return
+
+        all_sessions = [s for s in self.session_store.list_all() if self._user_can_access_session(update.effective_user.id, s)]
+        open_sessions = [s for s in all_sessions if s.status != SessionStatus.CLOSED]
+        closed_sessions = [s for s in all_sessions if s.status == SessionStatus.CLOSED]
+
         active = self.session_store.get_active(update.effective_chat.id)
         active_id = active.session_id if active else None
-        lines = []
-        for s in sessions[:10]:
-            marker = " <-- active" if s.session_id == active_id else ""
-            lines.append(f"`{s.session_id}` [{s.backend}] {s.status.value} — {s.repo_path}{marker}")
-        picker_sessions = [s for s in sessions if s.status != SessionStatus.CLOSED]
-        header = "Sessions:" if include_closed else "Open sessions:"
-        if not include_closed:
-            header += "\nUse `/session_list all` to include closed sessions."
-        await update.message.reply_text(
-            header + "\n" + "\n".join(lines),
-            reply_markup=self._build_session_picker_markup(picker_sessions, active_id),
-        )
+
+        # --- Open sessions block ---
+        if open_sessions:
+            lines = []
+            for s in open_sessions[:10]:
+                marker = " ◀ active" if s.session_id == active_id else ""
+                lines.append(f"`{s.session_id}` [{s.backend}] {s.status.value} — {s.repo_path}{marker}")
+            await update.message.reply_text(
+                "Open sessions — tap to switch:\n" + "\n".join(lines),
+                reply_markup=self._build_session_picker_markup(open_sessions, active_id),
+            )
+        else:
+            await update.message.reply_text("No open sessions. Use /session_new to create one.")
+
+        # --- Recently closed sessions block ---
+        if closed_sessions:
+            recent_closed = closed_sessions[:5]
+            lines = []
+            for s in recent_closed:
+                updated = s.updated_at[:10] if s.updated_at else "?"
+                lines.append(f"`{s.session_id}` [{s.backend}] closed {updated} — {s.repo_path}")
+            await update.message.reply_text(
+                "Recently closed — tap to restore:\n" + "\n".join(lines),
+                reply_markup=self._build_closed_session_picker_markup(recent_closed),
+            )
 
     async def _handle_session_use_legacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_use <session_id>"""
@@ -1449,6 +1502,80 @@ class TelegramInterface:
             self.session_store.unbind(update.effective_chat.id)
         await update.message.reply_text(f"Session `{session.session_id}` closed.")
 
+    async def _handle_session_restore(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_restore [session_id] — reopen a closed session and make it active."""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        args = context.args or []
+        if args:
+            session = self.session_store.get(args[0])
+            if not session:
+                await update.message.reply_text(f"❌ Session `{args[0]}` not found.")
+                return
+            if not self._user_can_access_session(update.effective_user.id, session):
+                await update.message.reply_text("❌ You do not own that session.")
+                return
+            if session.status != SessionStatus.CLOSED:
+                await update.message.reply_text(f"Session `{session.session_id}` is already open ({session.status.value}).")
+                return
+            session.status = SessionStatus.IDLE
+            self.session_store.save(session)
+            self.session_store.bind(update.effective_chat.id, session.session_id)
+            await update.message.reply_text(
+                f"✅ Session `{session.session_id}` restored and set as active.\n"
+                f"Backend: {session.backend} — {session.repo_path}"
+            )
+        else:
+            all_sessions = [s for s in self.session_store.list_all() if self._user_can_access_session(update.effective_user.id, s)]
+            closed = [s for s in all_sessions if s.status == SessionStatus.CLOSED]
+            if not closed:
+                await update.message.reply_text("No closed sessions to restore.")
+                return
+            recent = closed[:5]
+            lines = []
+            for s in recent:
+                updated = s.updated_at[:10] if s.updated_at else "?"
+                lines.append(f"`{s.session_id}` [{s.backend}] closed {updated} — {s.repo_path}")
+            await update.message.reply_text(
+                "Recently closed sessions — tap to restore:\n" + "\n".join(lines),
+                reply_markup=self._build_closed_session_picker_markup(recent),
+            )
+
+    async def _handle_session_restore_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Callback for restore buttons in the closed-session picker."""
+        query = update.callback_query
+        if not query:
+            return
+        await query.answer()
+
+        if not self._check_user_permission(update.effective_user.id):
+            await query.edit_message_text("❌ Access denied.")
+            return
+
+        data = query.data or ""
+        session_id = data.split(":", 1)[1] if ":" in data else ""
+        session = self.session_store.get(session_id)
+        if not session:
+            await query.edit_message_text(f"❌ Session `{session_id}` not found.")
+            return
+        if not self._user_can_access_session(update.effective_user.id, session):
+            await query.edit_message_text("❌ You do not own that session.")
+            return
+        if session.status != SessionStatus.CLOSED:
+            await query.edit_message_text(
+                f"Session `{session_id}` is already open ({session.status.value}). Use /session_use to switch."
+            )
+            return
+
+        session.status = SessionStatus.IDLE
+        self.session_store.save(session)
+        self.session_store.bind(update.effective_chat.id, session.session_id)
+        await query.edit_message_text(
+            f"✅ Session `{session.session_id}` restored and set as active.\n"
+            f"Backend: {session.backend} — {session.repo_path}"
+        )
+
     async def notify_completion(self, task_id: str, summary: str, success: bool = True, chat_id: Optional[int] = None):
         """Notify of task completion.
 
@@ -1462,24 +1589,21 @@ class TelegramInterface:
             # Session tasks: send Claude's output directly, no task-runner framing.
             # Standalone tasks: wrap with status header.
             if chat_id:
-                message = summary[:4000] if success else f"❌ {summary[:4000]}"
+                message = summary if success else f"❌ {summary}"
             else:
                 status_icon = "✅" if success else "❌"
                 status_text = "completed" if success else "failed"
-                message = (
-                    f"{status_icon} Task {task_id} {status_text}\n\n"
-                    f"{summary[:500]}{'...' if len(summary) > 500 else ''}"
-                )
+                message = f"{status_icon} Task {task_id} {status_text}\n\n{summary}"
 
             if chat_id:
                 try:
-                    await self.app.bot.send_message(chat_id=chat_id, text=message)
+                    await self._send_long_message(chat_id=chat_id, text=message)
                 except Exception as e:
                     logger.warning(f"Failed to notify chat {chat_id}: {e}")
             elif self.allowed_users:
                 for uid in self.allowed_users:
                     try:
-                        await self.app.bot.send_message(chat_id=uid, text=message)
+                        await self._send_long_message(chat_id=uid, text=message)
                     except Exception as e:
                         logger.warning(f"Failed to notify user {uid}: {e}")
             else:
@@ -1487,7 +1611,7 @@ class TelegramInterface:
                     from config import config as app_config
                     fallback_chat = getattr(app_config.telegram, "notification_chat_id", None)
                     if fallback_chat:
-                        await self.app.bot.send_message(chat_id=fallback_chat, text=message)
+                        await self._send_long_message(chat_id=fallback_chat, text=message)
                     else:
                         logger.info(f"Task {task_id} completed, no notification target configured")
                 except Exception as e:

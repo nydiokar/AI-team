@@ -155,6 +155,25 @@ class TaskOrchestrator(ITaskOrchestrator):
         return ""
 
     @classmethod
+    def _extract_rate_limit_info(cls, result: TaskResult) -> Optional[Dict[str, Any]]:
+        """Parse the first rejected rate_limit_event from raw_stdout NDJSON, or None."""
+        stdout = getattr(result, "raw_stdout", "") or ""
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line or "rate_limit_event" not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("type") != "rate_limit_event":
+                continue
+            info = obj.get("rate_limit_info", {})
+            if info.get("status") == "rejected":
+                return info
+        return None
+
+    @classmethod
     def _session_reply_text(cls, result: TaskResult) -> str:
         """User-facing text for Telegram session completions."""
         for candidate in (
@@ -208,11 +227,29 @@ class TaskOrchestrator(ITaskOrchestrator):
         if cls._is_missing_backend_conversation(result):
             return "Claude session expired"
         if any(s in haystack_lower for s in ("rate_limit_event", "rate limit", "rate-limit", "too many requests", "hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
-            reset_match = re.search(r"resets?\s+([^\n\"}]{1,60})", haystack, flags=re.IGNORECASE)
+            info = cls._extract_rate_limit_info(result)
+            if info:
+                limit_type = info.get("rateLimitType", "")
+                resets_at = info.get("resetsAt")
+                type_label = {"five_hour": "5-hour", "hourly": "hourly", "daily": "daily"}.get(limit_type, limit_type.replace("_", "-") if limit_type else "")
+                prefix = f"Claude {type_label} usage limit reached" if type_label else "Claude usage limit reached"
+                if resets_at:
+                    try:
+                        reset_dt = datetime.fromtimestamp(int(resets_at))
+                        reset_str = reset_dt.strftime("%H:%M")
+                        return f"{prefix} — resets at {reset_str}"
+                    except Exception:
+                        pass
+                reset_match = re.search(r"resets?\s+([^\n\"\}·]{1,50})", haystack, flags=re.IGNORECASE)
+                if reset_match:
+                    return f"{prefix} — resets {reset_match.group(1).strip()}"
+                return prefix
+            reset_match = re.search(r"resets?\s+([^\n\"\}·]{1,50})", haystack, flags=re.IGNORECASE)
             if reset_match:
-                reset_hint = reset_match.group(1).strip(" .:")
-                return f"Claude rate limit (resets {reset_hint})"
-            return "Claude rate limit"
+                return f"Claude usage limit reached — resets {reset_match.group(1).strip()}"
+            return "Claude usage limit reached"
+        if any(s in haystack_lower for s in ("prompt is too long", "blocking_limit", "context_window", "context window")):
+            return "Session context full — use /compact or start a new session"
         if any(s in haystack_lower for s in ("not logged in", "authentication", "unauthorized", "forbidden")):
             return "Claude authentication error"
         if any(s in haystack_lower for s in ("timeout", "timed out")):
@@ -1359,20 +1396,19 @@ created: {task.created}
         except Exception:
             pass
 
-        # Write a per-session archival copy for compliance/audit traceability.
+        # Append lightweight task reference to the session's history.
         try:
             session_block = artifact.get("session")
             if isinstance(session_block, dict) and session_block.get("session_id"):
-                session_dir = results_dir / "sessions" / str(session_block["session_id"])
-                session_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                session_artifact_path = session_dir / f"{ts}_{task_id}.json"
-                session_artifact_path.write_text(
-                    json.dumps(artifact, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
+                self.session_store.append_task_to_history(
+                    session_id=session_block["session_id"],
+                    task_id=task_id,
+                    success=result.success,
+                    execution_time=result.execution_time,
+                    timestamp=result.timestamp,
                 )
         except Exception as e:
-            logger.warning(f"session_artifact_write_failed task_id={task_id} error={e}")
+            logger.warning(f"session_task_history_append_failed task_id={task_id} error={e}")
 
         # Write human readable summary (extract the LLAMA-generated summary)
         # LLAMA generates a summary and prepends it to result.output
@@ -1409,7 +1445,7 @@ created: {task.created}
         """
         default_max = max(0, getattr(config.validation, "max_retries", 2))
         default_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
-        if error_class in ("none", "interactive", "auth", "fatal"):
+        if error_class in ("none", "interactive", "auth", "fatal", "context_overflow"):
             return {"max_retries": 0, "initial_delay": 0.0, "backoff_multiplier": 1}
         if error_class == "timeout":
             return {"max_retries": min(1, default_max), "initial_delay": 1.0, "backoff_multiplier": 1}
@@ -1426,11 +1462,21 @@ created: {task.created}
         if ec == "interactive":
             actions.append("Enable skip-permissions or trust the folder; ensure non-interactive flags.")
         elif ec == "rate_limit":
-            actions.append("Retry later; lower concurrency; check API/service quotas.")
+            info = self._extract_rate_limit_info(result)
+            if info and info.get("resetsAt"):
+                try:
+                    reset_dt = datetime.fromtimestamp(int(info["resetsAt"]))
+                    actions.append(f"Usage limit active. Tasks will resume automatically after {reset_dt.strftime('%H:%M')}.")
+                except Exception:
+                    actions.append("Usage limit active. Tasks will resume when the limit resets.")
+            else:
+                actions.append("Usage limit active. Tasks will resume when the limit resets.")
         elif ec == "timeout":
             actions.append("Increase CLAUDE_TIMEOUT_SEC or reduce task scope.")
         elif ec == "network":
             actions.append("Check connectivity/VPN; retry with backoff.")
+        elif ec == "context_overflow":
+            actions.append("Session context is full. Run /compact on the session or start a new session.")
         elif ec == "auth":
             actions.append("Run 'claude auth status' and re-authenticate if needed.")
         elif ec == "fatal":
@@ -1475,14 +1521,18 @@ created: {task.created}
                 return "interactive"
         except Exception:
             pass
+        if self._extract_rate_limit_info(result) is not None:
+            return "rate_limit"
         text = self._failure_text(result)
         text_lower = text.lower()
-        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "rate_limit_event", "hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
+        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "hit your limit", "you've hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
             return "rate_limit"
         if any(s in text_lower for s in ("timeout", "timed out")):
             return "timeout"
         if any(s in text_lower for s in ("connection reset", "connection aborted", "network error", "503", "504", "temporarily unavailable")):
             return "network"
+        if any(s in text_lower for s in ("prompt is too long", "blocking_limit", "context_window", "context window")):
+            return "context_overflow"
         if any(s in text_lower for s in ("unauthorized", "forbidden", "permission denied", "not logged in", "authentication")):
             return "auth"
         return "fatal"
