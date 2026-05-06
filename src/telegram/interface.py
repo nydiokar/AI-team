@@ -41,6 +41,7 @@ except ImportError:
         class Context:
             def __init__(self):
                 self.args = []
+        DEFAULT_TYPE = Context
 
 logger = logging.getLogger(__name__)
 
