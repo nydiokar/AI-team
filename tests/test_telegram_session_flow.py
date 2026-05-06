@@ -9,6 +9,7 @@ import pytest
 
 from config import config
 from src.core.session_store import SessionStore
+from src.telegram import interface as telegram_interface_module
 from src.telegram.interface import TelegramInterface
 import src.core.session_store as session_store_module
 
@@ -107,6 +108,10 @@ def _make_workspace() -> Path:
     (root / "repo-alpha" / "src").mkdir(parents=True, exist_ok=True)
     (root / "repo-beta").mkdir(parents=True, exist_ok=True)
     return root
+
+
+def test_telegram_contexttypes_default_type_exists():
+    assert hasattr(telegram_interface_module.ContextTypes, "DEFAULT_TYPE")
 
 
 @pytest.fixture
