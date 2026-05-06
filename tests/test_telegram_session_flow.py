@@ -170,8 +170,7 @@ async def test_start_registers_bot_commands(monkeypatch, isolated_session_store)
     await bot.start()
 
     names = [item.command for item in bot.app.bot.commands]
-    assert "start" in names
-    assert "session_new" in names
+    assert names[:4] == ["session_new", "session_list", "session_close", "status"]
     assert "git_status" in names
 
 
@@ -342,10 +341,66 @@ async def test_session_list_hides_closed_by_default(monkeypatch, isolated_sessio
         await bot._handle_session_list(update, _DummyContext())
         text = update.message.replies[-1]
 
-        assert "Open sessions:" in text
+        assert len(update.message.replies) == 1
+        assert "Open sessions (1) - tap to switch:" in text
+        assert "⭐ ACTIVE" in text
+        assert "🧠 claude / repo-alpha" in text
+        assert "🆔" in text
         assert open_session.session_id in text
         assert closed_session.session_id not in text
-        assert "/session_list all" in text
+        assert str((workspace / "repo-alpha").resolve()) not in text
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_session_restore_lists_closed_sessions(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+        store = SessionStore()
+
+        open_session = store.create("claude", str((workspace / "repo-alpha").resolve()), telegram_chat_id=100, owner_user_id=1)
+        closed_session = store.create("codex", str((workspace / "repo-beta").resolve()), telegram_chat_id=100, owner_user_id=1)
+        closed_session.status = session_store_module.SessionStatus.CLOSED
+        closed_session.last_user_message = "Investigate Telegram session picker formatting"
+        store.save(closed_session)
+
+        update = _DummyUpdate()
+        await bot._handle_session_restore(update, _DummyContext())
+        text = update.message.replies[-1]
+
+        assert "Recently closed sessions - tap to restore:" in text
+        assert "↩️ 🤖 codex / repo-beta" in text
+        assert "📝 Investigate Telegram session picker formatting" in text
+        assert closed_session.session_id in text
+        assert open_session.session_id not in text
+        assert str((workspace / "repo-beta").resolve()) not in text
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_session_picker_callback_uses_compact_switch_message(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+        store = SessionStore()
+        session = store.create("claude", str((workspace / "repo-alpha").resolve()), telegram_chat_id=100, owner_user_id=1)
+
+        update = _DummyUpdate()
+        update.callback_query = _DummyCallbackQuery(f"session_use:{session.session_id}")
+        await bot._handle_session_picker_callback(update, _DummyContext())
+        text = update.callback_query.edits[-1]
+
+        assert "⭐ Active session switched" in text
+        assert "🧠 claude / repo-alpha" in text
+        assert session.session_id in text
+        assert str((workspace / "repo-alpha").resolve()) not in text
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 

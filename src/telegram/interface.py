@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from typing import Dict, Any, Optional
 from pathlib import Path
 
@@ -112,17 +113,17 @@ class TelegramInterface:
     def _bot_commands() -> list[BotCommand]:
         """Commands exposed to Telegram clients via the slash-command chooser."""
         entries = [
+            ("session_new", "Create a new coding session"),
+            ("session_list", "List open sessions"),
+            ("session_close", "Close the active session"),
+            ("status", "Show gateway status"),
             ("start", "Show welcome text"),
             ("help", "Show command help"),
             ("task", "Create a one-off task"),
-            ("status", "Show gateway status"),
-            ("session_new", "Create a new coding session"),
-            ("session_list", "List your sessions"),
             ("session_use", "Switch the active session"),
             ("session_dirs", "List allowed session roots"),
             ("session_status", "Show active session details"),
             ("session_cancel", "Cancel the active session task"),
-            ("session_close", "Close the active session"),
             ("session_restore", "Restore a recently closed session"),
             ("commit", "Commit safe session changes"),
             ("commit_all", "Commit all staged session changes"),
@@ -473,15 +474,89 @@ class TelegramInterface:
         for chunk in self._split_message(text):
             await self.app.bot.send_message(chat_id=chat_id, text=chunk)
 
+    @staticmethod
+    def _session_repo_name(session: Session) -> str:
+        return Path(session.repo_path).name or session.repo_path
+
+    @staticmethod
+    def _format_session_timestamp(value: str) -> str:
+        if not value:
+            return "unknown"
+        try:
+            return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return value[:16]
+
+    @staticmethod
+    def _session_status_label(status: SessionStatus) -> str:
+        labels = {
+            SessionStatus.IDLE: "🟢 idle",
+            SessionStatus.BUSY: "🔵 busy",
+            SessionStatus.AWAITING_INPUT: "🟡 waiting for input",
+            SessionStatus.ERROR: "🔴 needs attention",
+            SessionStatus.CANCELLED: "⚪ cancelled",
+            SessionStatus.CLOSED: "⚫ closed",
+        }
+        return labels.get(status, status.value)
+
+    @staticmethod
+    def _compact_session_note(session: Session, limit: int = 80) -> str:
+        note = (session.last_user_message or session.last_result_summary or "").strip()
+        note = " ".join(note.split())
+        if len(note) > limit:
+            return note[: limit - 1].rstrip() + "..."
+        return note
+
+    def _format_session_list_item(self, session: Session, active_id: Optional[str]) -> str:
+        active = session.session_id == active_id
+        prefix = "⭐ ACTIVE" if active else "💬 open"
+        backend_icon = "🤖" if session.backend == "codex" else "🧠"
+        title = f"{prefix}  {backend_icon} {session.backend} / {self._session_repo_name(session)}"
+        details = (
+            f"  🆔 `{session.session_id}`  •  "
+            f"{self._session_status_label(session.status)} | "
+            f"🕒 {self._format_session_timestamp(session.updated_at)}"
+        )
+        note = self._compact_session_note(session)
+        if note:
+            return "\n".join([title, details, f"  📝 {note}"])
+        return "\n".join([title, details])
+
+    def _format_closed_session_list_item(self, session: Session) -> str:
+        backend_icon = "🤖" if session.backend == "codex" else "🧠"
+        lines = [
+            f"↩️ {backend_icon} {session.backend} / {self._session_repo_name(session)}",
+            f"  🆔 `{session.session_id}`  •  ⚫ closed | 🕒 {self._format_session_timestamp(session.updated_at)}",
+        ]
+        note = self._compact_session_note(session)
+        if note:
+            lines.append(f"  📝 {note}")
+        return "\n".join(lines)
+
+    def _format_session_switched_message(self, session: Session) -> str:
+        backend_icon = "🤖" if session.backend == "codex" else "🧠"
+        lines = [
+            "⭐ Active session switched",
+            "",
+            f"{backend_icon} {session.backend} / {self._session_repo_name(session)}",
+            f"🆔 `{session.session_id}`",
+            f"{self._session_status_label(session.status)}  •  🕒 {self._format_session_timestamp(session.updated_at)}",
+        ]
+        note = self._compact_session_note(session)
+        if note:
+            lines.append(f"📝 {note}")
+        return "\n".join(lines)
+
     def _build_session_picker_markup(self, sessions: list[Session], active_id: Optional[str]) -> Optional["InlineKeyboardMarkup"]:
         if not TELEGRAM_AVAILABLE or not sessions:
             return None
         rows = []
         for session in sessions[:10]:
-            name = Path(session.repo_path).name or session.repo_path
-            label = f"{session.backend}: {name}"
+            name = self._session_repo_name(session)
+            icon = "🤖" if session.backend == "codex" else "🧠"
+            label = f"{icon} {session.backend}: {name}"
             if session.session_id == active_id:
-                label = f"* {label}"
+                label = f"⭐ {label}"
             rows.append([
                 InlineKeyboardButton(
                     text=label[:64],
@@ -496,9 +571,10 @@ class TelegramInterface:
             return None
         rows = []
         for session in sessions[:5]:
-            name = Path(session.repo_path).name or session.repo_path
-            updated = session.updated_at[:10] if session.updated_at else "?"
-            label = f"↩ {session.backend}: {name} ({updated})"
+            name = self._session_repo_name(session)
+            updated = self._format_session_timestamp(session.updated_at)[:10]
+            icon = "🤖" if session.backend == "codex" else "🧠"
+            label = f"↩️ {icon} {session.backend}: {name} ({updated})"
             rows.append([
                 InlineKeyboardButton(
                     text=label[:64],
@@ -768,12 +844,13 @@ class TelegramInterface:
             "Telegram Coding Gateway\n\n"
             "Sessions:\n"
             "• `/session_new <backend> <path>` open a session in a bounded repo path\n"
-            "• `/session_list [all]` list open sessions; pass `all` to include closed ones\n"
+            "• `/session_list` list open sessions\n"
             "• `/session_use <session_id>` switch the active session\n"
             "• `/session_status [session_id]` inspect session state\n"
             "• `/session_dirs [path]` list useful child directories for the active session or a path\n"
             "• `/session_cancel [session_id]` cancel the last queued or running task for a session\n"
-            "• `/session_close [session_id]` close a session\n\n"
+            "• `/session_close [session_id]` close a session\n"
+            "• `/session_restore [session_id]` restore a closed session\n\n"
             "Execution:\n"
             "• plain text continues the active session\n"
             "• `/task <instruction>` create a one-off task only\n"
@@ -1140,35 +1217,21 @@ class TelegramInterface:
 
         all_sessions = [s for s in self.session_store.list_all() if self._user_can_access_session(update.effective_user.id, s)]
         open_sessions = [s for s in all_sessions if s.status != SessionStatus.CLOSED]
-        closed_sessions = [s for s in all_sessions if s.status == SessionStatus.CLOSED]
 
         active = self.session_store.get_active(update.effective_chat.id)
         active_id = active.session_id if active else None
 
         # --- Open sessions block ---
         if open_sessions:
-            lines = []
-            for s in open_sessions[:10]:
-                marker = " ◀ active" if s.session_id == active_id else ""
-                lines.append(f"`{s.session_id}` [{s.backend}] {s.status.value} — {s.repo_path}{marker}")
+            lines = [self._format_session_list_item(s, active_id) for s in open_sessions[:10]]
+            if len(open_sessions) > 10:
+                lines.append(f"...and {len(open_sessions) - 10} more. Use /session_status <session_id> for details.")
             await update.message.reply_text(
-                "Open sessions — tap to switch:\n" + "\n".join(lines),
+                f"Open sessions ({len(open_sessions)}) - tap to switch:\n\n" + "\n\n".join(lines),
                 reply_markup=self._build_session_picker_markup(open_sessions, active_id),
             )
         else:
             await update.message.reply_text("No open sessions. Use /session_new to create one.")
-
-        # --- Recently closed sessions block ---
-        if closed_sessions:
-            recent_closed = closed_sessions[:5]
-            lines = []
-            for s in recent_closed:
-                updated = s.updated_at[:10] if s.updated_at else "?"
-                lines.append(f"`{s.session_id}` [{s.backend}] closed {updated} — {s.repo_path}")
-            await update.message.reply_text(
-                "Recently closed — tap to restore:\n" + "\n".join(lines),
-                reply_markup=self._build_closed_session_picker_markup(recent_closed),
-            )
 
     async def _handle_session_use_legacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_use <session_id>"""
@@ -1213,9 +1276,7 @@ class TelegramInterface:
             await update.message.reply_text(f"❌ Session `{session_id}` is closed.")
             return
         self.session_store.bind(update.effective_chat.id, session_id)
-        await update.message.reply_text(
-            f"✅ Active session set to `{session_id}` [{session.backend}] — {session.repo_path}"
-        )
+        await update.message.reply_text(self._format_session_switched_message(session))
 
     async def _handle_session_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_new <backend> <path>"""
@@ -1298,9 +1359,7 @@ class TelegramInterface:
             await update.message.reply_text(f"âŒ Session `{session_id}` is closed.")
             return
         self.session_store.bind(update.effective_chat.id, session_id)
-        await update.message.reply_text(
-            f"âœ… Active session set to `{session_id}` [{session.backend}] â€” {session.repo_path}"
-        )
+        await update.message.reply_text(self._format_session_switched_message(session))
 
     async def _handle_session_picker_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -1326,9 +1385,7 @@ class TelegramInterface:
             return
 
         self.session_store.bind(update.effective_chat.id, session_id)
-        await query.edit_message_text(
-            f"âœ… Active session set to `{session_id}` [{session.backend}] â€” {session.repo_path}"
-        )
+        await query.edit_message_text(self._format_session_switched_message(session))
 
     async def _handle_session_new_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -1533,12 +1590,9 @@ class TelegramInterface:
                 await update.message.reply_text("No closed sessions to restore.")
                 return
             recent = closed[:5]
-            lines = []
-            for s in recent:
-                updated = s.updated_at[:10] if s.updated_at else "?"
-                lines.append(f"`{s.session_id}` [{s.backend}] closed {updated} — {s.repo_path}")
+            lines = [self._format_closed_session_list_item(s) for s in recent]
             await update.message.reply_text(
-                "Recently closed sessions — tap to restore:\n" + "\n".join(lines),
+                "Recently closed sessions - tap to restore:\n\n" + "\n\n".join(lines),
                 reply_markup=self._build_closed_session_picker_markup(recent),
             )
 
