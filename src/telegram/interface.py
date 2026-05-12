@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 from pathlib import Path
@@ -313,6 +314,8 @@ class TelegramInterface:
             task_id,
         )
 
+    _STALE_LOCK_AGE_SECS = 30
+
     def _acquire_instance_lock(self) -> None:
         """Prevent multiple local polling instances from using the same bot token."""
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -331,9 +334,15 @@ class TelegramInterface:
                 logger.warning(f"Existing Telegram poller detected (pid={existing_pid}); terminating it before restart")
                 terminate_process_tree(existing_pid)
             elif existing_pid and pid_exists(existing_pid):
-                raise RuntimeError(
-                    f"Telegram bot lock is already held by PID {existing_pid}. "
-                    "Stop the other gateway instance before starting a new one."
+                lock_age = time.time() - self._lock_path.stat().st_mtime
+                if lock_age < self._STALE_LOCK_AGE_SECS:
+                    raise RuntimeError(
+                        f"Telegram bot lock is already held by PID {existing_pid}. "
+                        "Stop the other gateway instance before starting a new one."
+                    )
+                logger.warning(
+                    f"Telegram bot lock (age={lock_age:.0f}s) points to PID {existing_pid} which is not the gateway "
+                    "(PID recycled after crash/reboot). Reclaiming lock."
                 )
             self._lock_path.unlink(missing_ok=True)
 

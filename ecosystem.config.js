@@ -20,6 +20,7 @@ module.exports = {
       kill_timeout: 15000,
       env: {
         PYTHONUNBUFFERED: "1",
+        AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
       },
       out_file: path.join(__dirname, "logs", "pm2-out.log"),
       error_file: path.join(__dirname, "logs", "pm2-error.log"),

@@ -9,15 +9,18 @@ from typing import List, Dict, Any, Optional
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
-    # Prefer .env from this project root (AI-team/.env); fallback to CWD
-    project_env = Path(__file__).parent.parent / ".env"
-    cwd_env = Path.cwd() / ".env"
-    if project_env.exists():
-        load_dotenv(project_env)
-        print(f"Loaded environment from: {project_env}")
-    elif cwd_env.exists():
-        load_dotenv(cwd_env)
-        print(f"Loaded environment from: {cwd_env}")
+    # Prefer explicit PM2 env file, then this project root, then CWD.
+    configured_env = os.getenv("AI_TEAM_ENV_FILE")
+    env_candidates = (
+        [Path(configured_env).expanduser()]
+        if configured_env
+        else [Path(__file__).parent.parent / ".env", Path.cwd() / ".env"]
+    )
+    for env_path in env_candidates:
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+            print(f"Loaded environment from: {env_path}")
+            break
     else:
         print("Warning: .env file not found in project or current directory")
 except ImportError:
