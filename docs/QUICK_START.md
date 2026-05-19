@@ -19,8 +19,8 @@ pip install -e ".[llama]"
 Copy `.env.example` to `.env` and set at least:
 
 ```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_USERS=123456789
+GATEWAY_TELEGRAM_BOT_TOKEN=...
+GATEWAY_TELEGRAM_ALLOWED_USERS=123456789
 
 CLAUDE_BASE_CWD=C:\Users\you\Projects
 CLAUDE_ALLOWED_ROOT=C:\Users\you\Projects

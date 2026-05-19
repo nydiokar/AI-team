@@ -74,8 +74,8 @@ Telegram -> active chat binding -> gateway session -> Claude Code / Codex native
 The most important production settings are:
 
 ```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_USERS=123456789
+GATEWAY_TELEGRAM_BOT_TOKEN=...
+GATEWAY_TELEGRAM_ALLOWED_USERS=123456789
 
 CLAUDE_BASE_CWD=C:\Users\you\Projects
 CLAUDE_ALLOWED_ROOT=C:\Users\you\Projects

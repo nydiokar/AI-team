@@ -59,7 +59,7 @@ class _RedactFilter(logging.Filter):
             # Authorization headers
             (_re.compile(r"(Authorization:\s*Bearer\s+)[^\s]+", flags=_re.IGNORECASE), r"\1<REDACTED>"),
             # Generic token key=value appearances (best-effort)
-            (_re.compile(r"(TELEGRAM_BOT_TOKEN=)[^\s]+", flags=_re.IGNORECASE), r"\1<REDACTED>"),
+            (_re.compile(r"(GATEWAY_TELEGRAM_BOT_TOKEN=)[^\s]+", flags=_re.IGNORECASE), r"\1<REDACTED>"),
         ]
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -227,7 +227,7 @@ class OrchestratorCLI:
             label = "[OK] Running" if telegram_status.get("running") else "[--] Configured but stopped"
             print(f"  Telegram Bot: {label}")
         else:
-            print(f"  Telegram Bot: [--] Not configured (set TELEGRAM_BOT_TOKEN)")
+            print(f"  Telegram Bot: [--] Not configured (set GATEWAY_TELEGRAM_BOT_TOKEN)")
         
         print()
         print("Task Status:")
@@ -276,7 +276,7 @@ async def test_telegram_interface():
     
     if not orchestrator.telegram_interface:
         print("❌ Telegram interface not configured")
-        print("Set TELEGRAM_BOT_TOKEN environment variable to enable Telegram")
+        print("Set GATEWAY_TELEGRAM_BOT_TOKEN environment variable to enable Telegram")
         return
     
     if not orchestrator.telegram_interface.is_available():
@@ -389,9 +389,9 @@ Usage:
 
 Environment Setup:
     Copy .env.example to .env and configure:
-    - TELEGRAM_BOT_TOKEN (optional for Telegram integration)
-    - TELEGRAM_ALLOWED_USERS (optional)
-    - TELEGRAM_CHAT_ID (optional)
+    - GATEWAY_TELEGRAM_BOT_TOKEN (optional for Telegram integration)
+    - GATEWAY_TELEGRAM_ALLOWED_USERS (optional)
+    - GATEWAY_TELEGRAM_CHAT_ID (optional)
     - CLAUDE_BASE_CWD / CLAUDE_ALLOWED_ROOT (recommended for bounded workspace scope)
 
 Directory Structure:

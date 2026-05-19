@@ -112,7 +112,7 @@ class Config:
             pass
         self.llama = LlamaConfig()
         self.telegram = TelegramConfig(
-            bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            bot_token=os.getenv("GATEWAY_TELEGRAM_BOT_TOKEN", ""),
             allowed_users=self._parse_allowed_users(),
             notification_chat_id=self._parse_chat_id()
         )
@@ -138,7 +138,7 @@ class Config:
         
     def _parse_allowed_users(self) -> List[int]:
         """Parse allowed Telegram users from environment"""
-        users_str = os.getenv("TELEGRAM_ALLOWED_USERS", "")
+        users_str = os.getenv("GATEWAY_TELEGRAM_ALLOWED_USERS", "")
         if not users_str:
             return []
         
@@ -149,7 +149,7 @@ class Config:
     
     def _parse_chat_id(self) -> Optional[int]:
         """Parse Telegram chat ID from environment"""
-        chat_id_str = os.getenv("TELEGRAM_CHAT_ID", "")
+        chat_id_str = os.getenv("GATEWAY_TELEGRAM_CHAT_ID", "")
         if not chat_id_str:
             return None
         
@@ -163,13 +163,13 @@ class Config:
         errors = []
         
         if not self.telegram.bot_token:
-            errors.append("TELEGRAM_BOT_TOKEN environment variable is required")
+            errors.append("GATEWAY_TELEGRAM_BOT_TOKEN environment variable is required")
             
         if not self.telegram.allowed_users:
-            errors.append("TELEGRAM_ALLOWED_USERS environment variable is required")
+            errors.append("GATEWAY_TELEGRAM_ALLOWED_USERS environment variable is required")
             
         if self.telegram.notification_chat_id == 0:
-            errors.append("TELEGRAM_CHAT_ID environment variable is required")
+            errors.append("GATEWAY_TELEGRAM_CHAT_ID environment variable is required")
             
         return errors
 
