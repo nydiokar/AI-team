@@ -913,8 +913,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                             else:
                                 # Take the last ~400 chars (the conclusion) rather than
                                 # the first 200 (always mid-explanation for session turns).
-                                out = (result.output or "").strip()
+                                out = self._session_reply_text(result).strip()
                                 session.last_result_summary = out[-400:] if len(out) > 400 else out
+                            session.last_summary = session.last_result_summary
                             session.last_files_modified = result.files_modified or []
                             artifact_path = str(Path(config.system.results_dir) / f"{task.id}.json")
                             session.last_artifact_path = artifact_path
@@ -923,7 +924,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 "timestamp": result.timestamp,
                                 "success": result.success,
                                 "execution_time": round(result.execution_time or 0.0, 2),
+                                "user_message": session.last_user_message,
+                                "result_summary": session.last_result_summary,
+                                "files_modified": session.last_files_modified[:20],
                             })
+                            session.task_history = session.task_history[-20:]
                             if result.success:
                                 session.status = SessionStatus.AWAITING_INPUT
                             elif "cancelled" in [str(err).lower() for err in (result.errors or [])]:

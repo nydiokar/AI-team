@@ -281,7 +281,10 @@ class TelegramInterface:
             )
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
-            await self.app.bot.send_message(chat_id=chat_id, text="⏳ Working...")
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏳ Working... {self._session_message_ref(active_session, task_id)}",
+            )
             logger.info(
                 "user=%s chat=%s task=%s session=%s",
                 user_id,
@@ -454,8 +457,8 @@ class TelegramInterface:
             lines.append(f"Backend session ID: `{session.backend_session_id}`")
         if session.last_task_id:
             lines.append(f"Last task: `{session.last_task_id}`")
-        if session.last_result_summary:
-            lines.append(f"Last result: {session.last_result_summary[:200]}")
+        lines.append(f"Ref: {self._session_message_ref(session)}")
+        lines.append(f"Summary: {self._format_session_material_summary(session)}")
         if include_dirs:
             dirs = self._path_resolver().list_child_directories(session.repo_path, limit=8, include_hidden=False)
             if dirs:
@@ -511,11 +514,59 @@ class TelegramInterface:
 
     @staticmethod
     def _compact_session_note(session: Session, limit: int = 80) -> str:
-        note = (session.last_user_message or session.last_result_summary or "").strip()
+        note = (session.last_result_summary or session.last_summary or session.last_user_message or "").strip()
         note = " ".join(note.split())
         if len(note) > limit:
             return note[: limit - 1].rstrip() + "..."
         return note
+
+    @staticmethod
+    def _session_message_ref(session: Session, task_id: Optional[str] = None) -> str:
+        task = task_id or session.last_task_id
+        if task:
+            return f"#s_{session.session_id} #t_{task}"
+        return f"#s_{session.session_id}"
+
+    def _format_session_material_summary(self, session: Session, limit: int = 220) -> str:
+        parts = []
+        result = " ".join((session.last_result_summary or session.last_summary or "").split())
+        request = " ".join((session.last_user_message or "").split())
+        if result:
+            parts.append(f"Last result: {result}")
+        if request and request != result:
+            parts.append(f"Last request: {request}")
+        if session.last_files_modified:
+            files = ", ".join(session.last_files_modified[:3])
+            more = f" +{len(session.last_files_modified) - 3} more" if len(session.last_files_modified) > 3 else ""
+            parts.append(f"Files: {files}{more}")
+        recent = []
+        for item in reversed(session.task_history or []):
+            item_result = " ".join(str(item.get("result_summary", "")).split())
+            if item_result and item_result != result and item_result not in recent:
+                recent.append(item_result)
+            if len(recent) >= 2:
+                break
+        if recent:
+            parts.append("Recent: " + " / ".join(recent))
+        if not parts:
+            return "No completed work recorded yet."
+        text = " | ".join(parts)
+        if len(text) > limit:
+            return text[: limit - 1].rstrip() + "..."
+        return text
+
+    def _find_session_for_task(self, task_id: str, chat_id: Optional[int] = None) -> Optional[Session]:
+        if not task_id:
+            return None
+        for session in self.session_store.list_all():
+            if chat_id is not None and session.telegram_chat_id != chat_id:
+                continue
+            if session.last_task_id == task_id:
+                return session
+            for item in session.task_history or []:
+                if str(item.get("task_id", "")) == task_id:
+                    return session
+        return None
 
     def _format_session_list_item(self, session: Session, active_id: Optional[str]) -> str:
         active = session.session_id == active_id
@@ -529,7 +580,7 @@ class TelegramInterface:
         )
         note = self._compact_session_note(session)
         if note:
-            return "\n".join([title, details, f"  📝 {note}"])
+            return "\n".join([title, details, f"  Summary: {note}"])
         return "\n".join([title, details])
 
     def _format_closed_session_list_item(self, session: Session) -> str:
@@ -540,7 +591,7 @@ class TelegramInterface:
         ]
         note = self._compact_session_note(session)
         if note:
-            lines.append(f"  📝 {note}")
+            lines.append(f"  Summary: {note}")
         return "\n".join(lines)
 
     def _format_session_switched_message(self, session: Session) -> str:
@@ -551,10 +602,9 @@ class TelegramInterface:
             f"{backend_icon} {session.backend} / {self._session_repo_name(session)}",
             f"🆔 `{session.session_id}`",
             f"{self._session_status_label(session.status)}  •  🕒 {self._format_session_timestamp(session.updated_at)}",
+            f"Ref: {self._session_message_ref(session)}",
+            f"Summary: {self._format_session_material_summary(session)}",
         ]
-        note = self._compact_session_note(session)
-        if note:
-            lines.append(f"📝 {note}")
         return "\n".join(lines)
 
     def _build_session_picker_markup(self, sessions: list[Session], active_id: Optional[str]) -> Optional["InlineKeyboardMarkup"]:
@@ -799,7 +849,7 @@ class TelegramInterface:
             )
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
-            await update.message.reply_text("⏳ Working...")
+            await update.message.reply_text(f"⏳ Working... {self._session_message_ref(active_session, task_id)}")
             logger.info(
                 "user=%s chat=%s task=%s session=%s",
                 update.effective_user.id,
@@ -1269,8 +1319,9 @@ class TelegramInterface:
                 return
             active = self.session_store.get_active(update.effective_chat.id)
             active_id = active.session_id if active else None
+            lines = [self._format_session_list_item(s, active_id) for s in sessions[:10]]
             await update.message.reply_text(
-                "Choose the session to make active:",
+                "Choose the session to make active:\n\n" + "\n\n".join(lines),
                 reply_markup=self._build_session_picker_markup(sessions, active_id),
             )
             return
@@ -1567,7 +1618,11 @@ class TelegramInterface:
         active = self.session_store.get_active(update.effective_chat.id)
         if active and active.session_id == session.session_id:
             self.session_store.unbind(update.effective_chat.id)
-        await update.message.reply_text(f"Session `{session.session_id}` closed.")
+        await update.message.reply_text(
+            f"Session `{session.session_id}` closed.\n"
+            f"Ref: {self._session_message_ref(session)}\n"
+            f"Summary: {self._format_session_material_summary(session)}"
+        )
 
     async def _handle_session_restore(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_restore [session_id] — reopen a closed session and make it active."""
@@ -1589,10 +1644,7 @@ class TelegramInterface:
             session.status = SessionStatus.IDLE
             self.session_store.save(session)
             self.session_store.bind(update.effective_chat.id, session.session_id)
-            await update.message.reply_text(
-                f"✅ Session `{session.session_id}` restored and set as active.\n"
-                f"Backend: {session.backend} — {session.repo_path}"
-            )
+            await update.message.reply_text(self._format_session_switched_message(session))
         else:
             all_sessions = [s for s in self.session_store.list_all() if self._user_can_access_session(update.effective_user.id, s)]
             closed = [s for s in all_sessions if s.status == SessionStatus.CLOSED]
@@ -1635,10 +1687,7 @@ class TelegramInterface:
         session.status = SessionStatus.IDLE
         self.session_store.save(session)
         self.session_store.bind(update.effective_chat.id, session.session_id)
-        await query.edit_message_text(
-            f"✅ Session `{session.session_id}` restored and set as active.\n"
-            f"Backend: {session.backend} — {session.repo_path}"
-        )
+        await query.edit_message_text(self._format_session_switched_message(session))
 
     async def notify_completion(self, task_id: str, summary: str, success: bool = True, chat_id: Optional[int] = None):
         """Notify of task completion.
@@ -1653,7 +1702,9 @@ class TelegramInterface:
             # Session tasks: send Claude's output directly, no task-runner framing.
             # Standalone tasks: wrap with status header.
             if chat_id:
-                message = summary if success else f"❌ {summary}"
+                session = self._find_session_for_task(task_id, chat_id=chat_id)
+                ref = f"{self._session_message_ref(session, task_id)}\n" if session else f"#t_{task_id}\n"
+                message = f"{ref}{summary if success else f'❌ {summary}'}"
             else:
                 status_icon = "✅" if success else "❌"
                 status_text = "completed" if success else "failed"
