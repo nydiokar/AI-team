@@ -296,6 +296,8 @@ async def test_run_routes_to_active_session_with_bound_cwd(monkeypatch, isolated
         assert created["session_id"] == session.session_id
         assert created["cwd"] == str((workspace / "repo-alpha").resolve())
         assert "Working" in update.message.replies[-1]
+        assert f"#s_{session.session_id}" in update.message.replies[-1]
+        assert "#t_task_1" in update.message.replies[-1]
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
@@ -337,6 +339,10 @@ async def test_session_list_hides_closed_by_default(monkeypatch, isolated_sessio
         store = SessionStore()
 
         open_session = store.create("claude", str((workspace / "repo-alpha").resolve()), telegram_chat_id=100, owner_user_id=1)
+        open_session.last_user_message = "Please inspect the repo"
+        open_session.last_result_summary = "Added session summaries to the picker"
+        open_session.last_task_id = "task_picker"
+        store.save(open_session)
         closed_session = store.create("claude", str((workspace / "repo-beta").resolve()), telegram_chat_id=100, owner_user_id=1)
         closed_session.status = session_store_module.SessionStatus.CLOSED
         store.save(closed_session)
@@ -350,6 +356,8 @@ async def test_session_list_hides_closed_by_default(monkeypatch, isolated_sessio
         assert "Open sessions (1) - tap to switch:" in text
         assert "⭐ ACTIVE" in text
         assert "🧠 claude / repo-alpha" in text
+        assert "Summary: Added session summaries to the picker" in text
+        assert "Please inspect the repo" not in text
         assert "🆔" in text
         assert open_session.session_id in text
         assert closed_session.session_id not in text
@@ -379,7 +387,7 @@ async def test_session_restore_lists_closed_sessions(monkeypatch, isolated_sessi
 
         assert "Recently closed sessions - tap to restore:" in text
         assert "↩️ 🤖 codex / repo-beta" in text
-        assert "📝 Investigate Telegram session picker formatting" in text
+        assert "Summary: Investigate Telegram session picker formatting" in text
         assert closed_session.session_id in text
         assert open_session.session_id not in text
         assert str((workspace / "repo-beta").resolve()) not in text
@@ -405,7 +413,45 @@ async def test_session_picker_callback_uses_compact_switch_message(monkeypatch, 
         assert "⭐ Active session switched" in text
         assert "🧠 claude / repo-alpha" in text
         assert session.session_id in text
+        assert f"#s_{session.session_id}" in text
+        assert "Summary:" in text
         assert str((workspace / "repo-alpha").resolve()) not in text
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_session_completion_notification_has_searchable_ref(monkeypatch, isolated_session_store):
+    workspace = _make_workspace()
+    try:
+        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
+        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
+        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+        store = SessionStore()
+        session = store.create("claude", str((workspace / "repo-alpha").resolve()), telegram_chat_id=100, owner_user_id=1)
+        session.last_task_id = "task_done"
+        store.save(session)
+
+        class _FakeBot:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, chat_id, text):
+                self.messages.append({"chat_id": chat_id, "text": text})
+
+        class _FakeApp:
+            def __init__(self):
+                self.bot = _FakeBot()
+
+        bot.app = _FakeApp()
+        bot.is_running = True
+
+        await bot.notify_completion("task_done", "Finished the requested change.", success=True, chat_id=100)
+
+        sent = bot.app.bot.messages[-1]
+        assert sent["chat_id"] == 100
+        assert sent["text"].startswith(f"#s_{session.session_id} #t_task_done\n")
+        assert "Finished the requested change." in sent["text"]
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 

@@ -1,8 +1,8 @@
 # AI-Team Gateway - Project Context
 
-**Last Updated:** 2026-04-05
+**Last Updated:** 2026-05-19
 **Branch:** `main`
-**Status:** Runtime lifecycle is hardened for Windows+Linux operation; PM2 supervision, local health checks, Telegram session picker UX, and split-message buffering are now in place
+**Status:** Runtime lifecycle is hardened for Windows+Linux operation; PM2 supervision, local health checks, Telegram session picker UX, split-message buffering, searchable session/task Telegram refs, and material session summaries are now in place
 
 ---
 
@@ -67,6 +67,9 @@ Canonical intent lives in `.ai/context/production_vision.md`.
 - Git commands now target the active session repo by default instead of requiring opaque task IDs.
 - Telegram plain-text buffering now merges split messages into a single queued instruction with a short debounce window.
 - Session switching is now available through inline Telegram buttons, not just manual ID copy/paste.
+- Session lists, switch/restore/close replies, and session status now surface the last material result before the last prompt so closed or inactive sessions are easier to identify.
+- Session task acknowledgements and completion replies now include searchable Telegram refs (`#s_<session_id>` and `#t_<task_id>`) so interleaved session messages can be correlated.
+- Session task history now stores recent user messages, result summaries, and changed-file lists for richer future summaries while keeping history bounded.
 - Gateway/process lifecycle is now guarded by single-instance takeover logic instead of best-effort manual restarts.
 
 ### Phase 6 - Operations and persistence
@@ -97,7 +100,7 @@ Codex backend is now correct at the code level. Still requires a live two-turn T
 - Add prettier, more compact Telegram replies for session status, git status, and errors.
 - Decide whether `/commit_all` should remain public.
 - Decide whether to keep compatibility-only handler methods for `/run`, `/say`, `/progress`, and `/cancel` in code at all now that they are no longer registered.
-- Decide whether session-completion replies should explicitly include the session ID/header when multiple sessions are active in the same chat.
+- Continue tuning how much summary detail belongs in compact session pickers versus `/session_status`.
 
 ### 4. Legacy code removal decision
 
