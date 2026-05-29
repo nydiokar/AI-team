@@ -80,7 +80,9 @@ class SystemConfig:
     logs_dir: str = "logs"
     log_level: str = "INFO"
     max_concurrent_tasks: int = 3
-    task_timeout: int = 1800  # 30 minutes
+    task_timeout: int = 0  # wall-clock kill (0 = disabled; backend inactivity timeout is the primary mechanism)
+    inactivity_timeout_sec: int = 600  # kill backend process after N seconds of no stdout (10 min default)
+    task_heartbeat_interval_sec: int = 300  # send "still working" every 5 min for long tasks
     guarded_write: bool = False
     # Rate limiting and backpressure settings
     max_queue_size: int = 50
@@ -237,6 +239,24 @@ class Config:
                 self.system.telegram_message_buffer_sec = max(0.0, float(tg_buffer))
         except Exception:
             pass
+        try:
+            gtt = os.getenv("GATEWAY_TASK_TIMEOUT_SEC")
+            if gtt is not None:
+                self.system.task_timeout = max(60, int(gtt))
+        except Exception:
+            pass
+        try:
+            ghi = os.getenv("GATEWAY_HEARTBEAT_INTERVAL_SEC")
+            if ghi is not None:
+                self.system.task_heartbeat_interval_sec = max(30, int(ghi))
+        except Exception:
+            pass
+        try:
+            gia = os.getenv("GATEWAY_INACTIVITY_TIMEOUT_SEC")
+            if gia is not None:
+                self.system.inactivity_timeout_sec = max(60, int(gia))
+        except Exception:
+            pass
     def reload_from_env(self) -> None:
         """Reload environment-derived configuration fields at runtime.
 
@@ -247,7 +267,6 @@ class Config:
         # Recompute fields derived from env
         self.claude.skip_permissions = os.getenv("CLAUDE_SKIP_PERMISSIONS", "false").lower() == "true"
         self.claude.base_command = self._get_claude_command()
-        # Re-apply runtime overrides (timeout/max_turns, and optionally base/allowed roots)
         self._apply_env_overrides()
 
 # Global config instance

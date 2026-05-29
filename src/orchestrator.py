@@ -252,7 +252,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             return "Session context full — use /compact or start a new session"
         if any(s in haystack_lower for s in ("not logged in", "authentication", "unauthorized", "forbidden")):
             return "Claude authentication error"
-        if any(s in haystack_lower for s in ("timeout", "timed out")):
+        if any(s in haystack_lower for s in ("timeout", "timed out", "inactivity")):
+            # Pass through the richer error text when it's already actionable
+            for t in texts:
+                tl = t.lower()
+                if "timed out" in tl or "timeout" in tl or "inactivity" in tl:
+                    compact = " ".join(t.split())
+                    if len(compact) > 20:
+                        return compact[:300]
             return "Claude timeout"
         if any(s in haystack_lower for s in ("connection reset", "connection aborted", "network error", "temporarily unavailable", "service unavailable")):
             return "Claude network error"
@@ -722,6 +729,19 @@ class TaskOrchestrator(ITaskOrchestrator):
         )
         return await self._enqueue_task(task)
 
+    async def compact_session(self, session_id: str):
+        """Send /compact to the backend for the given session, collapsing context."""
+        from src.core.interfaces import ExecutionResult
+        session = self.session_store.get(session_id)
+        if not session:
+            return ExecutionResult(success=False, output="", errors=["Session not found"])
+        if not session.backend_session_id:
+            return ExecutionResult(success=False, output="", errors=["Session has no backend context yet"])
+        backend = self._backends.get(session.backend)
+        if not backend:
+            return ExecutionResult(success=False, output="", errors=[f"Unknown backend: {session.backend}"])
+        return await asyncio.to_thread(backend.compact_session, session)
+
     def load_compact_context(self, task_id: str) -> Dict[str, Any]:
         """Load compact, prompt-ready context for a given task_id.
 
@@ -870,15 +890,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 notify_chat_id = _s.telegram_chat_id
 
                         if result.success:
-                            # For session tasks use Claude's raw output; for standalone use LLAMA summary
-                            if session_id_for_notify:
-                                content = self._session_reply_text(result)
-                            else:
-                                summary_file = Path(config.system.summaries_dir) / f"{task.id}_summary.txt"
-                                if summary_file.exists():
-                                    content = summary_file.read_text(encoding='utf-8').strip() or "Task completed successfully"
-                                else:
-                                    content = result.output.split('\n\n', 1)[0] if result.output else "Task completed successfully"
+                            # Use Claude's actual reply text for both session and one-off tasks.
+                            # The LLAMA summary wrapper is only useful for the artifact file, not the notification.
+                            content = self._session_reply_text(result)
                             # Append changed-file list if any were detected
                             files = result.files_modified or []
                             if files:
@@ -1064,6 +1078,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 wait_set = {exec_task}
                 cancel_waiter: Optional[asyncio.Task] = None
                 timeout_waiter: Optional[asyncio.Task] = None
+                heartbeat_task: Optional[asyncio.Task] = None
                 try:
                     if cancel_ev is not None:
                         cancel_waiter = asyncio.create_task(cancel_ev.wait())
@@ -1071,6 +1086,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                     if timeout_s and timeout_s > 0:
                         timeout_waiter = asyncio.create_task(asyncio.sleep(timeout_s))
                         wait_set.add(timeout_waiter)
+                    heartbeat_interval = getattr(config.system, "task_heartbeat_interval_sec", 300)
+                    if self.telegram_interface and heartbeat_interval > 0:
+                        heartbeat_task = asyncio.create_task(
+                            self._send_task_heartbeats(task, session, start_time, heartbeat_interval, timeout_s)
+                        )
                     done, pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
                     if exec_task in done:
                         raw = exec_task.result()
@@ -1136,11 +1156,19 @@ class TaskOrchestrator(ITaskOrchestrator):
                         if session:
                             session.status = SessionStatus.ERROR
                             self.session_store.save(session)
+                        elapsed_min = int(execution_time // 60)
+                        timeout_min = int(timeout_s // 60)
+                        timeout_error = (
+                            f"Task timed out after {elapsed_min}m (limit: {timeout_min}m). "
+                            f"Claude was still running when the gateway cut it off. "
+                            f"To allow more time set GATEWAY_TASK_TIMEOUT_SEC (currently {timeout_s}). "
+                            f"You can retry with a larger scope split or use /session_cancel then resubmit."
+                        )
                         result = TaskResult(
                             task_id=task.id,
                             success=False,
                             output="",
-                            errors=[f"timeout after {timeout_s}s"],
+                            errors=[timeout_error],
                             files_modified=[],
                             execution_time=execution_time,
                             timestamp=datetime.now().isoformat(),
@@ -1149,7 +1177,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                         return result
                 finally:
                     # Cancel any pending helper waiters
-                    for w in (cancel_waiter, timeout_waiter):
+                    for w in (cancel_waiter, timeout_waiter, heartbeat_task):
                         if w and not w.done():
                             w.cancel()
                 error_class = self._classify_error(result)
@@ -1526,7 +1554,7 @@ created: {task.created}
         text_lower = text.lower()
         if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "hit your limit", "you've hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
             return "rate_limit"
-        if any(s in text_lower for s in ("timeout", "timed out")):
+        if any(s in text_lower for s in ("timeout", "timed out", "inactivity")):
             return "timeout"
         if any(s in text_lower for s in ("connection reset", "connection aborted", "network error", "503", "504", "temporarily unavailable")):
             return "network"
@@ -1701,6 +1729,41 @@ Generated from user description: {description}
             "target_files": []
         }
     
+    async def _send_task_heartbeats(
+        self,
+        task: Task,
+        session: Optional[Any],
+        start_time: float,
+        interval_sec: int,
+        timeout_s: int,
+    ) -> None:
+        """Send periodic "still working" messages to Telegram for long-running tasks."""
+        chat_id = session.telegram_chat_id if session else None
+        if not chat_id:
+            return
+        try:
+            await asyncio.sleep(interval_sec)
+            while True:
+                elapsed = time.time() - start_time
+                elapsed_min = int(elapsed // 60)
+                timeout_min = int(timeout_s // 60) if timeout_s else 0
+                remaining = timeout_s - elapsed if timeout_s else 0
+                remaining_min = max(0, int(remaining // 60))
+                session_ref = f"`{session.session_id}`" if session else ""
+                task_ref = f"`{task.id}`"
+                limit_note = f" ({remaining_min}m left before gateway timeout)" if remaining_min > 2 else " (approaching timeout)"
+                msg = (
+                    f"⏳ Still working… {elapsed_min}m elapsed{limit_note}\n"
+                    f"Session {session_ref} / task {task_ref}"
+                )
+                try:
+                    await self.telegram_interface.app.bot.send_message(chat_id=chat_id, text=msg)
+                except Exception as e:
+                    logger.debug(f"heartbeat send failed task={task.id}: {e}")
+                await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            pass
+
     def get_status(self) -> Dict[str, Any]:
         """Get comprehensive orchestrator status"""
         resolver = PathResolver.from_config()

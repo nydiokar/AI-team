@@ -100,6 +100,7 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("session_cancel", self._handle_session_cancel))
         self.app.add_handler(CommandHandler("session_close", self._handle_session_close))
         self.app.add_handler(CommandHandler("session_restore", self._handle_session_restore))
+        self.app.add_handler(CommandHandler("compact", self._handle_compact))
         # Git automation command handlers
         self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
         self.app.add_handler(CommandHandler("commit_all", self._handle_git_commit_all))
@@ -1596,6 +1597,34 @@ class TelegramInterface:
             )
         else:
             await update.message.reply_text(f"Task `{session.last_task_id}` is not cancellable.")
+
+    async def _handle_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/compact [session_id] — collapse the Claude context window for the active (or specified) session."""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        args = context.args or []
+        session = self.session_store.get(args[0]) if args else self.session_store.get_active(update.effective_chat.id)
+        if not session:
+            await update.message.reply_text("No active session. Use /session_new or /session_use first.")
+            return
+        if not self._user_can_access_session(update.effective_user.id, session):
+            await update.message.reply_text("❌ You do not own that session.")
+            return
+        if not session.backend_session_id:
+            await update.message.reply_text("Session has no backend context yet — nothing to compact.")
+            return
+        await update.message.reply_text("Compacting context...")
+        try:
+            result = await self.orchestrator.compact_session(session.session_id)
+            if result.success:
+                await update.message.reply_text("Context compacted. The session will continue with a condensed summary.")
+            else:
+                err = (result.errors or ["unknown error"])[0]
+                await update.message.reply_text(f"Compaction failed: {err}")
+        except Exception as e:
+            logger.error(f"compact_session error: {e}")
+            await update.message.reply_text(f"Error during compaction: {e}")
 
     async def _handle_session_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_close [session_id]"""

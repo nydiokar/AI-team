@@ -234,6 +234,15 @@ class CodingBackend(ABC):
         """Mark the session closed on the backend side (cleanup if needed)."""
         pass
 
+    def compact_session(self, session: "Session") -> ExecutionResult:
+        """Compact the session's context window by sending /compact to the backend.
+
+        Default implementation delegates to resume_session with the /compact
+        slash command. Backends that do not support compaction should override
+        this to raise NotImplementedError or return an error result.
+        """
+        return self.resume_session(session, "/compact")
+
 
 class ITaskOrchestrator(ABC):
     """Main orchestrator interface"""
