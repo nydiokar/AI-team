@@ -1,8 +1,8 @@
 # AI-Team Gateway - Project Context
 
-**Last Updated:** 2026-05-19
+**Last Updated:** 2026-05-29
 **Branch:** `main`
-**Status:** Runtime lifecycle is hardened for Windows+Linux operation; PM2 supervision, local health checks, Telegram session picker UX, split-message buffering, searchable session/task Telegram refs, and material session summaries are now in place
+**Status:** Backend subprocess execution replaced with inactivity-based streaming model; wall-clock task timeout disabled by default; periodic heartbeats added for long-running tasks
 
 ---
 
@@ -79,6 +79,24 @@ Canonical intent lives in `.ai/context/production_vision.md`.
 - `python main.py health [--json]` exists for local/supervisor health checks.
 - Gateway startup now safely replaces an older local gateway process instead of spawning duplicate Telegram pollers.
 - Backend child process termination is now managed through shared cross-platform process utilities.
+
+---
+
+## Recent changes (2026-05-29)
+
+### Inactivity-based subprocess execution (replaces wall-clock timeout)
+
+Both `ClaudeCodeBackend._run()` and `CodexBackend._run()` now stream stdout/stderr via reader threads feeding `queue.Queue`, instead of blocking on `communicate()`. The main thread drains stdout with `queue.get(timeout=inactivity_sec)` — if no output arrives for that window, the process is considered hung and killed. If Claude is actively working it keeps streaming NDJSON and the timer keeps resetting, so a legitimate 2-hour task will complete naturally.
+
+Config:
+- `GATEWAY_INACTIVITY_TIMEOUT_SEC` — how long stdout silence triggers a kill (default 600s / 10 min)
+- `GATEWAY_TASK_TIMEOUT_SEC` — wall-clock absolute limit (default 0 = disabled)
+- `GATEWAY_HEARTBEAT_INTERVAL_SEC` — Telegram "still working" ping interval (default 300s / 5 min)
+
+Self-review bugs fixed during implementation:
+- Used explicit `killed_for_inactivity` flag instead of ambiguous `returncode == -1` check
+- `proc.wait()` TimeoutExpired now caught so a resisting process doesn't crash the call
+- Stderr is always fully drained after an inactivity kill so diagnostic output is preserved in artifacts
 
 ---
 

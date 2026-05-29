@@ -11,6 +11,7 @@ Synchronous — called via asyncio.to_thread() by the orchestrator.
 """
 import json
 import logging
+import queue
 import shutil
 import subprocess
 import threading
@@ -57,6 +58,14 @@ class CodexBackend(CodingBackend):
     def _run(self, cwd: str, message: str, resume_id: Optional[str], session_key: Optional[str]) -> ExecutionResult:
         start = time.time()
         cmd = self._build_cmd(resume_id, cwd)
+
+        try:
+            from config import config as _cfg
+            inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 600)))
+        except Exception:
+            inactivity_sec = 600
+
+        proc: Optional[subprocess.Popen] = None
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -66,11 +75,115 @@ class CodexBackend(CodingBackend):
                 cwd=cwd or None,
             )
             self._register_process(proc, session_key)
-            stdout_bytes, stderr_bytes = proc.communicate(input=message.encode())
-            stdout = stdout_bytes.decode(errors="replace")
-            stderr = stderr_bytes.decode(errors="replace")
+
+            proc.stdin.write(message.encode())
+            proc.stdin.close()
+
+            stdout_q: queue.Queue = queue.Queue()
+            stderr_q: queue.Queue = queue.Queue()
+            _SENTINEL = object()
+
+            def _reader(pipe, q: queue.Queue) -> None:
+                try:
+                    for raw_line in pipe:
+                        q.put(raw_line)
+                finally:
+                    q.put(_SENTINEL)
+
+            stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, stdout_q), daemon=True)
+            stderr_thread = threading.Thread(target=_reader, args=(proc.stderr, stderr_q), daemon=True)
+            stdout_thread.start()
+            stderr_thread.start()
+
+            stdout_lines: List[bytes] = []
+            stderr_lines: List[bytes] = []
+            stdout_done = False
+            stderr_done = False
+            killed_for_inactivity = False
+
+            while not (stdout_done and stderr_done):
+                if not stdout_done:
+                    try:
+                        item = stdout_q.get(timeout=inactivity_sec)
+                        if item is _SENTINEL:
+                            stdout_done = True
+                        else:
+                            stdout_lines.append(item)
+                    except queue.Empty:
+                        logger.warning(
+                            "codex inactivity timeout after %.0fs (no stdout) — terminating pid=%s",
+                            inactivity_sec,
+                            proc.pid,
+                        )
+                        killed_for_inactivity = True
+                        terminate_many_popen([proc])
+                        stdout_done = True
+
+                if not stderr_done:
+                    while True:
+                        try:
+                            item = stderr_q.get_nowait()
+                            if item is _SENTINEL:
+                                stderr_done = True
+                                break
+                            stderr_lines.append(item)
+                        except queue.Empty:
+                            break
+
+            for q_ref, lines_ref, done_flag in (
+                (stdout_q, stdout_lines, True),
+                (stderr_q, stderr_lines, False),
+            ):
+                if done_flag:
+                    while True:
+                        try:
+                            item = q_ref.get_nowait()
+                            if item is not _SENTINEL:
+                                lines_ref.append(item)
+                        except queue.Empty:
+                            break
+                else:
+                    while True:
+                        try:
+                            item = q_ref.get(timeout=5.0)
+                            if item is _SENTINEL:
+                                break
+                            lines_ref.append(item)
+                        except queue.Empty:
+                            break
+
+            stdout_thread.join(timeout=5.0)
+            stderr_thread.join(timeout=5.0)
+
+            try:
+                proc.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                pass
+            returncode = proc.returncode if proc.returncode is not None else -1
+
+            stdout = b"".join(stdout_lines).decode(errors="replace")
+            stderr = b"".join(stderr_lines).decode(errors="replace")
             elapsed = time.time() - start
-            return self._parse(stdout, stderr, proc.returncode, elapsed)
+
+            if killed_for_inactivity:
+                elapsed_min = int(elapsed // 60)
+                inactivity_min = int(inactivity_sec // 60)
+                return ExecutionResult(
+                    success=False,
+                    output="",
+                    errors=[
+                        f"Codex process killed after {inactivity_min}m of inactivity "
+                        f"(total elapsed: {elapsed_min}m). The process produced no output — "
+                        f"it may have been waiting for I/O or hung on a tool call. "
+                        f"Adjust GATEWAY_INACTIVITY_TIMEOUT_SEC (currently {inactivity_sec}) to tune this."
+                    ],
+                    execution_time=elapsed,
+                    raw_stdout=stdout,
+                    raw_stderr=stderr,
+                )
+
+            return self._parse(stdout, stderr, returncode, elapsed)
+
         except Exception as e:
             return ExecutionResult(
                 success=False,
@@ -79,7 +192,7 @@ class CodexBackend(CodingBackend):
                 execution_time=time.time() - start,
             )
         finally:
-            if "proc" in locals():
+            if proc is not None:
                 self._unregister_process(proc, session_key)
 
     def _build_cmd(self, resume_id: Optional[str], cwd: Optional[str]) -> List[str]:
