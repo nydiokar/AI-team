@@ -660,8 +660,9 @@ class TelegramInterface:
             return None
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton(text="Codex", callback_data="session_new_backend:codex")],
                 [InlineKeyboardButton(text="Claude", callback_data="session_new_backend:claude")],
+                [InlineKeyboardButton(text="Codex", callback_data="session_new_backend:codex")],
+                [InlineKeyboardButton(text="OpenCode", callback_data="session_new_backend:opencode")],
             ]
         )
 
@@ -1256,8 +1257,8 @@ class TelegramInterface:
             )
             return
         backend, repo_path = args[0].lower(), " ".join(args[1:])
-        if backend not in ("claude", "codex"):
-            await update.message.reply_text("❌ Backend must be 'claude' or 'codex'.")
+        if backend not in ("claude", "codex", "opencode"):
+            await update.message.reply_text("❌ Backend must be 'claude', 'codex', or 'opencode'.")
             return
         resolution = self._path_resolver().resolve_session_path(repo_path)
         if not resolution.ok or not resolution.resolved_path:
@@ -1374,8 +1375,8 @@ class TelegramInterface:
             )
             return
         backend, repo_path = args[0].lower(), " ".join(args[1:])
-        if backend not in ("claude", "codex"):
-            await update.message.reply_text("âŒ Backend must be 'claude' or 'codex'.")
+        if backend not in ("claude", "codex", "opencode"):
+            await update.message.reply_text("❌ Backend must be 'claude', 'codex', or 'opencode'.")
             return
         resolution = self._path_resolver().resolve_session_path(repo_path)
         if not resolution.ok or not resolution.resolved_path:
@@ -1473,8 +1474,8 @@ class TelegramInterface:
         data = query.data or ""
         if data.startswith("session_new_backend:"):
             backend = data.split(":", 1)[1].strip().lower()
-            if backend not in ("claude", "codex"):
-                await query.edit_message_text("âŒ Unknown backend.")
+            if backend not in ("claude", "codex", "opencode"):
+                await query.edit_message_text("❌ Unknown backend.")
                 return
             markup = self._build_session_repo_markup(backend)
             if markup is None:
@@ -1501,8 +1502,8 @@ class TelegramInterface:
             except ValueError:
                 await query.edit_message_text("âŒ Invalid repository selection.")
                 return
-            if backend not in ("claude", "codex"):
-                await query.edit_message_text("âŒ Unknown backend.")
+            if backend not in ("claude", "codex", "opencode"):
+                await query.edit_message_text("❌ Unknown backend.")
                 return
             choices = self._recent_session_repo_choices(limit=10)
             if repo_index < 0 or repo_index >= len(choices):
