@@ -477,17 +477,24 @@ class OpenCodeBackend(CodingBackend):
 
             event_type = event.get("type", "") or event.get("event", "")
 
-            # Extract final assistant message
-            if event_type in ("message", "assistant", "content"):
+            # Real OpenCode event schema (v1.x):
+            #   type="text"  → part.text contains the assistant text chunk
+            #   type="message"/"assistant"/"content" → legacy/generic shapes
+            part = event.get("part") if isinstance(event.get("part"), dict) else {}
+            if event_type == "text":
+                chunk = part.get("text") or ""
+                if isinstance(chunk, str) and chunk.strip():
+                    output = (output + chunk) if output else chunk
+            elif event_type in ("message", "assistant", "content"):
                 for key in ("content", "text", "message", "output"):
-                    val = event.get(key)
+                    val = event.get(key) or part.get(key)
                     if isinstance(val, str) and val.strip():
                         output = val.strip()
                         break
 
             # Error events
             if event_type in ("error",):
-                msg = event.get("message") or event.get("error") or ""
+                msg = event.get("message") or event.get("error") or part.get("message") or ""
                 if isinstance(msg, str) and msg:
                     parsed_errors.append(msg)
 
