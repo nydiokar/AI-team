@@ -66,7 +66,7 @@ class TelegramConfig:
 @dataclass
 class OpenCodeConfig:
     """OpenCode CLI backend configuration."""
-    default_model: Optional[str] = None
+    default_model: Optional[str] = "opencode/big-pickle"
     default_agent: Optional[str] = None
     timeout_seconds: int = 1800           # 30 min; used as inactivity cap if set lower than system default
     allow_dirty_repo: bool = False
