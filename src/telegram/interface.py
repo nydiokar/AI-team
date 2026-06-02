@@ -484,9 +484,20 @@ class TelegramInterface:
         return chunks
 
     async def _send_long_message(self, chat_id: int, text: str) -> None:
-        """Send a message, splitting it into multiple parts if it exceeds Telegram's limit."""
+        """Send a message, splitting into chunks if needed.
+
+        Tries Markdown first (for bold/code formatting). If Telegram rejects
+        the parse (e.g. unclosed backtick from agent output), retries as plain
+        text so the message always arrives.
+        """
         for chunk in self._split_message(text):
-            await self.app.bot.send_message(chat_id=chat_id, text=chunk)
+            try:
+                await self.app.bot.send_message(
+                    chat_id=chat_id, text=chunk, parse_mode="Markdown"
+                )
+            except Exception:
+                # Strip any partial markdown and send as plain text
+                await self.app.bot.send_message(chat_id=chat_id, text=chunk)
 
     @staticmethod
     def _session_repo_name(session: Session) -> str:
