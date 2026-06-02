@@ -64,6 +64,24 @@ class TelegramConfig:
             self.allowed_users = []
             
 @dataclass
+class OpenCodeConfig:
+    """OpenCode CLI backend configuration."""
+    default_model: Optional[str] = None
+    default_agent: Optional[str] = None
+    timeout_seconds: int = 1800           # 30 min; used as inactivity cap if set lower than system default
+    allow_dirty_repo: bool = False
+    collect_diff: bool = True
+    run_tests_after: bool = False
+    test_command: Optional[str] = None
+    # Server mode (feature flag — disabled by default; CLI mode is the production path)
+    mode: str = "cli"                     # "cli" only today; "server" is gated below
+    server_enabled: bool = False
+    server_host: str = "127.0.0.1"
+    server_port: int = 4096
+    server_username: str = "opencode"
+    server_password_env: str = "OPENCODE_SERVER_PASSWORD"
+
+@dataclass
 class ValidationConfig:
     """Validation engine configuration"""
     similarity_threshold: float = 0.7
@@ -120,6 +138,7 @@ class Config:
         )
         self.validation = ValidationConfig()
         self.system = SystemConfig()
+        self.opencode = OpenCodeConfig()
         # Apply env overrides for selected runtime-tunable settings
         self._apply_env_overrides()
         
@@ -257,6 +276,38 @@ class Config:
                 self.system.inactivity_timeout_sec = max(60, int(gia))
         except Exception:
             pass
+        # OpenCode env overrides
+        try:
+            v = os.getenv("OPENCODE_ALLOW_DIRTY_REPO")
+            if v is not None:
+                self.opencode.allow_dirty_repo = v.lower() == "true"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("OPENCODE_TIMEOUT_SEC")
+            if v is not None:
+                self.opencode.timeout_seconds = max(60, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("OPENCODE_DEFAULT_MODEL")
+            if v:
+                self.opencode.default_model = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("OPENCODE_DEFAULT_AGENT")
+            if v:
+                self.opencode.default_agent = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("OPENCODE_SERVER_ENABLED")
+            if v is not None:
+                self.opencode.server_enabled = v.lower() == "true"
+        except Exception:
+            pass
+
     def reload_from_env(self) -> None:
         """Reload environment-derived configuration fields at runtime.
 

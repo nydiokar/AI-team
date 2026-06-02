@@ -27,7 +27,7 @@ from src.core import (
     AsyncFileWatcher, SessionStore, SessionStatus, PathResolver
 )
 from src.bridges import LlamaMediator
-from src.backends import ClaudeCodeBackend, CodexBackend
+from src.backends import ClaudeCodeBackend, CodexBackend, OpenCodeBackend
 from config import config
 from src.validation.engine import ValidationEngine
 
@@ -58,6 +58,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._backends = {
             "claude": ClaudeCodeBackend(),
             "codex": CodexBackend(),
+            "opencode": OpenCodeBackend(),
         }
         
         # Task management
