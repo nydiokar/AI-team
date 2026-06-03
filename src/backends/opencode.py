@@ -74,10 +74,6 @@ def _git_changed_files(cwd: str) -> List[str]:
     return files
 
 
-def _is_dirty(cwd: str) -> bool:
-    out = _run_git(cwd, ["status", "--porcelain"])
-    return bool(out and out.strip())
-
 
 class OpenCodeBackend(CodingBackend):
     """OpenCode CLI backend."""
@@ -221,26 +217,10 @@ class OpenCodeBackend(CodingBackend):
             from config import config as _cfg
             inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 600)))
             oc_cfg = getattr(_cfg, "opencode", None)
-            allow_dirty = bool(getattr(oc_cfg, "allow_dirty_repo", False)) if oc_cfg else False
             collect_diff = bool(getattr(oc_cfg, "collect_diff", True)) if oc_cfg else True
         except Exception:
             inactivity_sec = 600
-            allow_dirty = False
             collect_diff = True
-
-        # Second dirty check (after acquiring the lock) using the config value.
-        # The first check in _pre_run_git_check uses allow_dirty=False conservatively;
-        # here we re-check with the actual config value so the config is respected.
-        if not allow_dirty and _is_dirty(cwd):
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[
-                    f"Repository at {cwd} has uncommitted changes. "
-                    "OpenCode requires a clean working tree by default. "
-                    "Set OPENCODE_ALLOW_DIRTY_REPO=true to override, or commit/stash your changes."
-                ],
-            )
 
         logger.info(
             "event=opencode_run cmd=%s cwd=%s session_id=%s session_key=%s",
@@ -396,6 +376,13 @@ class OpenCodeBackend(CodingBackend):
                 if isinstance(result.parsed_output, dict):
                     result.parsed_output["git_diff_stat"] = diff_stat
                     result.parsed_output["git_diff"] = diff
+
+            # Auto-commit so the working tree is clean for subsequent runs.
+            # OpenCode enforces a clean tree before each run; without this the
+            # second task in the same session will always fail.
+            if result.success and cwd and _git_changed_files(cwd):
+                commit_label = session_key or title or "opencode-task"
+                self._auto_commit(cwd, commit_label)
 
             return result
 
@@ -586,6 +573,40 @@ class OpenCodeBackend(CodingBackend):
             if isinstance(val, str) and val:
                 return val
         return None
+
+    # ------------------------------------------------------------------
+    # Auto-commit helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _auto_commit(cwd: str, label: str) -> None:
+        """Stage all changes and commit so the working tree is clean for the next run."""
+        try:
+            add = subprocess.run(
+                ["git", "add", "-A"],
+                cwd=cwd,
+                capture_output=True,
+                timeout=30,
+            )
+            if add.returncode != 0:
+                logger.warning("event=opencode_auto_commit_add_failed cwd=%s", cwd)
+                return
+            msg = f"chore(opencode): auto-commit after task [{label}]"
+            commit = subprocess.run(
+                ["git", "commit", "-m", msg],
+                cwd=cwd,
+                capture_output=True,
+                timeout=30,
+            )
+            if commit.returncode == 0:
+                logger.info("event=opencode_auto_committed cwd=%s label=%s", cwd, label)
+            else:
+                # Nothing to commit is fine (returncode 1 with "nothing to commit")
+                stderr = commit.stderr.decode(errors="replace").strip()
+                if "nothing to commit" not in stderr:
+                    logger.warning("event=opencode_auto_commit_failed cwd=%s stderr=%s", cwd, stderr)
+        except Exception as e:
+            logger.warning("event=opencode_auto_commit_exception cwd=%s err=%s", cwd, e)
 
     # ------------------------------------------------------------------
     # Git pre-run check

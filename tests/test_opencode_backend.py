@@ -142,84 +142,6 @@ def test_parse_skips_non_json_lines():
 
 
 # ---------------------------------------------------------------------------
-# Dirty repo rejection
-# ---------------------------------------------------------------------------
-
-def test_dirty_repo_rejected_by_default(tmp_path):
-    b = OpenCodeBackend()
-    # Pre-run check passes (it only checks git repo presence); dirty check
-    # happens inside _run_locked with the config value.  We test _run directly
-    # by mocking git helpers.
-    with (
-        patch.object(b, "_pre_run_git_check", return_value=None),
-        patch("src.backends.opencode._is_dirty", return_value=True),
-        patch("src.backends.opencode._run_git", return_value="M dirty_file.py"),
-        patch("config.config") as mock_cfg,
-    ):
-        mock_cfg.system.inactivity_timeout_sec = 600
-        mock_cfg.opencode.allow_dirty_repo = False
-        mock_cfg.opencode.collect_diff = False
-        result = b._run(
-            cwd=str(tmp_path),
-            message="prompt",
-            session_id=None,
-            title="t",
-            model=None,
-            agent=None,
-            session_key=None,
-        )
-    assert result.success is False
-    assert any("uncommitted" in e or "dirty" in e for e in result.errors)
-
-
-def test_dirty_repo_allowed_when_config_set(tmp_path, monkeypatch):
-    b = OpenCodeBackend()
-
-    captured_cmd = []
-
-    class _FakeProc:
-        pid = 9999
-        returncode = 0
-        stdout = MagicMock()
-        stderr = MagicMock()
-        stdin = MagicMock()
-
-        def wait(self, timeout=None):
-            pass
-
-    def _fake_popen(cmd, **kwargs):
-        captured_cmd.extend(cmd)
-        p = _FakeProc()
-        # Produce no output so threads drain immediately
-        p.stdout.__iter__ = lambda self: iter([])
-        p.stderr.__iter__ = lambda self: iter([])
-        return p
-
-    with (
-        patch.object(b, "_pre_run_git_check", return_value=None),
-        patch("src.backends.opencode._is_dirty", return_value=True),
-        patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
-        patch("src.backends.opencode._run_git", return_value=""),
-        patch("src.backends.opencode._git_changed_files", return_value=[]),
-        patch("config.config") as mock_cfg,
-    ):
-        mock_cfg.system.inactivity_timeout_sec = 600
-        mock_cfg.opencode.allow_dirty_repo = True
-        mock_cfg.opencode.collect_diff = False
-        result = b._run(
-            cwd=str(tmp_path),
-            message="prompt",
-            session_id=None,
-            title="t",
-            model=None,
-            agent=None,
-            session_key=None,
-        )
-    # Shouldn't be rejected for dirty repo — may fail for other reasons (missing session ID)
-    assert not any("uncommitted" in e or "dirty" in e for e in (result.errors or []))
-
-
-# ---------------------------------------------------------------------------
 # Concurrent same-repo lock rejection
 # ---------------------------------------------------------------------------
 
@@ -269,14 +191,12 @@ def test_missing_session_id_marks_needs_manual_attention(tmp_path):
 
     with (
         patch.object(b, "_pre_run_git_check", return_value=None),
-        patch("src.backends.opencode._is_dirty", return_value=False),
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode._git_changed_files", return_value=[]),
         patch.object(b, "_recover_session_id", return_value=None),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
-        mock_cfg.opencode.allow_dirty_repo = False
         mock_cfg.opencode.collect_diff = False
         result = b._run(
             cwd=str(tmp_path),
@@ -327,13 +247,11 @@ def test_resume_session_uses_explicit_session_id():
 
     with (
         patch.object(b, "_pre_run_git_check", return_value=None),
-        patch("src.backends.opencode._is_dirty", return_value=False),
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode._git_changed_files", return_value=[]),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
-        mock_cfg.opencode.allow_dirty_repo = False
         mock_cfg.opencode.collect_diff = False
         b.resume_session(session, "follow up")
 
@@ -368,12 +286,10 @@ def test_nonzero_exit_produces_failure_result(tmp_path):
 
     with (
         patch.object(b, "_pre_run_git_check", return_value=None),
-        patch("src.backends.opencode._is_dirty", return_value=False),
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
-        mock_cfg.opencode.allow_dirty_repo = False
         mock_cfg.opencode.collect_diff = False
         result = b._run(
             cwd=str(tmp_path),
@@ -415,14 +331,13 @@ def test_diff_collected_after_successful_run(tmp_path):
 
     with (
         patch.object(b, "_pre_run_git_check", return_value=None),
-        patch("src.backends.opencode._is_dirty", return_value=False),
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode._git_changed_files", return_value=["src/foo.py"]),
         patch("src.backends.opencode._run_git", side_effect=lambda cwd, args, **kw: "1 file changed" if "--stat" in args else "diff output"),
+        patch.object(b, "_auto_commit"),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
-        mock_cfg.opencode.allow_dirty_repo = False
         mock_cfg.opencode.collect_diff = True
         result = b._run(
             cwd=str(tmp_path),
@@ -475,14 +390,12 @@ def test_session_list_fallback_recovers_session_id(tmp_path):
 
     with (
         patch.object(b, "_pre_run_git_check", return_value=None),
-        patch("src.backends.opencode._is_dirty", return_value=False),
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode.subprocess.run", side_effect=_fake_session_list_run),
         patch("src.backends.opencode._git_changed_files", return_value=[]),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
-        mock_cfg.opencode.allow_dirty_repo = False
         mock_cfg.opencode.collect_diff = False
         result = b._run(
             cwd=str(tmp_path),
@@ -540,14 +453,12 @@ def test_inactivity_timeout_kills_process_and_returns_failure(tmp_path):
 
     with (
         patch.object(b, "_pre_run_git_check", return_value=None),
-        patch("src.backends.opencode._is_dirty", return_value=False),
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode.terminate_many_popen", side_effect=lambda procs: terminated.extend(p.pid for p in procs)),
         patch("src.backends.opencode.queue.Queue.get", _patched_queue_get),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
-        mock_cfg.opencode.allow_dirty_repo = False
         mock_cfg.opencode.collect_diff = False
         result = b._run(
             cwd=str(tmp_path),
@@ -596,14 +507,12 @@ def test_start_task_successfully(tmp_path):
 
     with (
         patch.object(b, "_pre_run_git_check", return_value=None),
-        patch("src.backends.opencode._is_dirty", return_value=False),
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode._git_changed_files", return_value=[]),
         patch("src.backends.opencode._run_git", return_value=""),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
-        mock_cfg.opencode.allow_dirty_repo = False
         mock_cfg.opencode.collect_diff = True
         result = b.create_session(session)
 
