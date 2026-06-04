@@ -69,7 +69,6 @@ class OpenCodeConfig:
     default_model: Optional[str] = "opencode/big-pickle"
     default_agent: Optional[str] = None
     timeout_seconds: int = 1800           # 30 min; used as inactivity cap if set lower than system default
-    allow_dirty_repo: bool = False
     collect_diff: bool = True
     run_tests_after: bool = False
     test_command: Optional[str] = None
@@ -278,12 +277,6 @@ class Config:
             pass
         # OpenCode env overrides
         try:
-            v = os.getenv("OPENCODE_ALLOW_DIRTY_REPO")
-            if v is not None:
-                self.opencode.allow_dirty_repo = v.lower() == "true"
-        except Exception:
-            pass
-        try:
             v = os.getenv("OPENCODE_TIMEOUT_SEC")
             if v is not None:
                 self.opencode.timeout_seconds = max(60, int(v))
@@ -305,6 +298,12 @@ class Config:
             v = os.getenv("OPENCODE_SERVER_ENABLED")
             if v is not None:
                 self.opencode.server_enabled = v.lower() == "true"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("OPENCODE_MODE")
+            if v in ("cli", "server"):
+                self.opencode.mode = v
         except Exception:
             pass
 

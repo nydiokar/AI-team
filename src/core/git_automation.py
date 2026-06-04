@@ -256,7 +256,12 @@ Commit message:
             if not self.git_detector.repo_path:
                 result["errors"].append("Not in a git repository")
                 return result
-            
+
+            # Stage all changes (unstaged + untracked) before committing
+            if not self.git_detector.stage_files():
+                result["errors"].append("Failed to stage changes (git add .)")
+                return result
+
             # Get staged files
             staged_files = self.git_detector.get_staged_files()
             

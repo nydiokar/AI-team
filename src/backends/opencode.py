@@ -1,25 +1,32 @@
 """
-OpenCodeBackend — wraps the OpenCode CLI (opencode).
+OpenCode backends — CLI and server modes.
 
-First turn:  opencode run --dir <repo> --format json --title <title> "<prompt>"
-Resume turn: opencode run --dir <repo> --format json --session <session_id> "<prompt>"
+CLI mode (OpenCodeBackend):
+  First turn:  opencode run --dir <repo> --format json --title <title> "<prompt>"
+  Resume turn: opencode run --dir <repo> --format json --session <session_id> "<prompt>"
 
-Optional flags: --model <provider/model>  --agent <agent_name>
+Server mode (OpenCodeServerBackend):
+  Manages a persistent `opencode serve` subprocess and talks to it via HTTP.
+  POST /session → create session
+  POST /session/{id}/message → blocking send + receive (returns full message with parts)
+  POST /session/{id}/abort  → cancel running generation
+  DELETE /session/{id}      → close session
 
-Session ID is extracted from JSON events in stdout.  If not found there, a
-fallback query (opencode session list --format json) is attempted.  If the
-session ID is still unknown the task is marked needs_manual_attention to
-prevent accidentally continuing the wrong session.
+  Advantages over CLI: no cold-start per turn, no stdout parsing, clean HTTP JSON,
+  token/cost data in responses, `session.diff` events, abort support.
 
-Synchronous — called via asyncio.to_thread() by the orchestrator.
+Both are synchronous — called via asyncio.to_thread() by the orchestrator.
 """
 import json
 import logging
 import queue
 import shutil
+import socket
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -437,6 +444,10 @@ class OpenCodeBackend(CodingBackend):
         output = ""
         parsed_output: Optional[Dict[str, Any]] = None
         parsed_errors: List[str] = []
+        # Track step_finish reasons to detect interrupted/truncated generation.
+        # Normal reasons: "stop" (natural end), "tool-calls" (tool invocation).
+        # "unknown" means the model generation was cut off mid-response.
+        step_finish_reasons: List[str] = []
 
         # OpenCode emits newline-delimited JSON events.
         # Known session ID fields: "sessionID", "session_id", "id" (inside a session object).
@@ -478,6 +489,10 @@ class OpenCodeBackend(CodingBackend):
                     if isinstance(val, str) and val.strip():
                         output = val.strip()
                         break
+            elif event_type == "step_finish":
+                reason = part.get("reason") or event.get("reason") or ""
+                if reason:
+                    step_finish_reasons.append(reason)
 
             # Error events
             if event_type in ("error",):
@@ -489,6 +504,17 @@ class OpenCodeBackend(CodingBackend):
 
         if not output:
             output = stdout.strip()
+
+        # Detect truncated generation: step_finish with reason="unknown" and partial output.
+        # OpenCode exits 0 but the model was interrupted before completing its response.
+        truncated = any(r == "unknown" for r in step_finish_reasons) and bool(output)
+        if truncated:
+            logger.warning(
+                "event=opencode_truncated_output step_finish_reasons=%s output_len=%d",
+                step_finish_reasons,
+                len(output),
+            )
+            output = output + "\n\n_(Note: the response above was cut off — OpenCode reported an interrupted generation. The full reply may be missing.)_"
 
         errors: List[str] = []
         if not success:
@@ -712,3 +738,351 @@ class OpenCodeBackend(CodingBackend):
             return getattr(_cfg.opencode, "default_agent", None) or None
         except Exception:
             return None
+
+
+# ---------------------------------------------------------------------------
+# OpenCode server-mode backend
+# ---------------------------------------------------------------------------
+
+def _find_free_port(preferred: int) -> int:
+    """Return `preferred` if available, otherwise any free port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", preferred))
+            return preferred
+        except OSError:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+
+class OpenCodeServerBackend(CodingBackend):
+    """OpenCode HTTP server backend.
+
+    Starts a single `opencode serve` process on first use and reuses it for all
+    sessions.  Each gateway session maps to one OpenCode server session.
+    """
+
+    def __init__(self) -> None:
+        self._exe = shutil.which("opencode") or "opencode"
+        self._proc: Optional[subprocess.Popen] = None
+        self._base_url: str = ""
+        self._lock = threading.Lock()      # guards _proc / _base_url
+
+    # ------------------------------------------------------------------
+    # CodingBackend interface
+    # ------------------------------------------------------------------
+
+    def create_session(self, session: Session) -> ExecutionResult:
+        start = time.time()
+        err = self._ensure_server()
+        if err:
+            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
+
+        agent = self._session_agent(session) or "build"
+        model_id, provider_id = self._parse_model(self._session_model(session))
+
+        create_body: Dict[str, Any] = {
+            "title": session.session_id,
+            "agent": agent,
+        }
+        if session.repo_path:
+            create_body["directory"] = session.repo_path
+
+        oc_session, err = self._http("POST", "/session", create_body)
+        if err:
+            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
+
+        oc_session_id: str = oc_session.get("id", "")
+        if not oc_session_id:
+            return ExecutionResult(
+                success=False, output="", errors=["Server returned session without ID"],
+                execution_time=time.time() - start,
+            )
+
+        if model_id:
+            self._http("PATCH", f"/session/{oc_session_id}", {
+                "model": {"providerID": provider_id or "opencode", "modelID": model_id}
+            })
+
+        return self._send_message(
+            oc_session_id=oc_session_id,
+            message=session.last_user_message,
+            cwd=session.repo_path,
+            start=start,
+        )
+
+    def resume_session(self, session: Session, message: str) -> ExecutionResult:
+        start = time.time()
+        oc_session_id = session.backend_session_id
+        if not oc_session_id:
+            return ExecutionResult(
+                success=False,
+                output="",
+                errors=["OpenCode server session ID not set — cannot resume. Status: needs_manual_attention"],
+                execution_time=time.time() - start,
+            )
+
+        err = self._ensure_server()
+        if err:
+            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
+
+        # Verify session still exists on the server (server might have restarted).
+        info, sess_err = self._http("GET", f"/session/{oc_session_id}")
+        if sess_err or not info.get("id"):
+            return ExecutionResult(
+                success=False,
+                output="",
+                errors=[f"OpenCode session {oc_session_id} not found on server — it may have been lost after a restart. Status: needs_manual_attention"],
+                execution_time=time.time() - start,
+            )
+
+        return self._send_message(
+            oc_session_id=oc_session_id,
+            message=message,
+            cwd=session.repo_path,
+            start=start,
+        )
+
+    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
+        start = time.time()
+        err = self._ensure_server()
+        if err:
+            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
+
+        oc_session, err = self._http("POST", "/session", {"title": "oneoff", "agent": "build", "directory": cwd})
+        if err:
+            return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
+
+        oc_session_id = oc_session.get("id", "")
+        result = self._send_message(oc_session_id=oc_session_id, message=message, cwd=cwd, start=start)
+        # Clean up oneoff session
+        self._http("DELETE", f"/session/{oc_session_id}")
+        return result
+
+    def cancel(self, session: Session) -> None:
+        oc_id = session.backend_session_id
+        if oc_id and self._base_url:
+            self._http("POST", f"/session/{oc_id}/abort")
+
+    def close(self, session: Session) -> None:
+        oc_id = session.backend_session_id
+        if oc_id and self._base_url:
+            self._http("DELETE", f"/session/{oc_id}")
+
+    def terminate_active_processes(self) -> None:
+        with self._lock:
+            proc = self._proc
+            self._proc = None
+            self._base_url = ""
+        if proc is not None:
+            terminate_many_popen([proc])
+
+    # ------------------------------------------------------------------
+    # Core message send
+    # ------------------------------------------------------------------
+
+    def _send_message(
+        self,
+        oc_session_id: str,
+        message: str,
+        cwd: str,
+        start: float,
+    ) -> ExecutionResult:
+        try:
+            from config import config as _cfg
+            timeout = int(getattr(_cfg.system, "inactivity_timeout_sec", 600))
+        except Exception:
+            timeout = 600
+
+        body = {"parts": [{"type": "text", "text": message}]}
+        response, err = self._http("POST", f"/session/{oc_session_id}/message", body, timeout=timeout + 30)
+
+        elapsed = time.time() - start
+
+        if err:
+            return ExecutionResult(
+                success=False, output="", errors=[err],
+                backend_session_id=oc_session_id,
+                execution_time=elapsed,
+            )
+
+        output, errors, finish = self._parse_message_response(response)
+
+        success = finish in ("stop", "tool-calls", "") and not errors
+        if finish not in ("stop", "tool-calls", ""):
+            errors.append(f"Generation ended with unexpected finish reason: {finish!r}")
+            success = False
+
+        # Collect git diff
+        files_modified: List[str] = []
+        git_diff_stat = ""
+        git_diff = ""
+        if cwd:
+            files_modified = _git_changed_files(cwd)
+            git_diff_stat = _run_git(cwd, ["diff", "--stat", "HEAD"]) or ""
+            git_diff = _run_git(cwd, ["diff", "HEAD"]) or ""
+
+        parsed_output: Dict[str, Any] = {
+            "git_diff_stat": git_diff_stat,
+            "git_diff": git_diff,
+            "tokens": response.get("info", {}).get("tokens"),
+            "cost": response.get("info", {}).get("cost"),
+            "finish": finish,
+        }
+
+        # Auto-commit so the working tree is clean for the next run.
+        if success and cwd and files_modified:
+            OpenCodeBackend._auto_commit(cwd, oc_session_id)
+            files_modified = []  # consumed by the commit
+
+        return ExecutionResult(
+            success=success,
+            output=output,
+            backend_session_id=oc_session_id,
+            errors=errors,
+            execution_time=elapsed,
+            files_modified=files_modified,
+            parsed_output=parsed_output,
+        )
+
+    @staticmethod
+    def _parse_message_response(response: Dict[str, Any]) -> tuple:
+        """Return (output_text, errors, finish_reason) from a message POST response."""
+        parts = response.get("parts") or []
+        text_chunks: List[str] = []
+        errors: List[str] = []
+        finish = ""
+
+        for part in parts:
+            ptype = part.get("type", "")
+            if ptype == "text":
+                chunk = part.get("text") or ""
+                if chunk:
+                    text_chunks.append(chunk)
+            elif ptype == "step-finish":
+                finish = part.get("reason") or ""
+            elif ptype == "error":
+                msg = part.get("message") or part.get("text") or ""
+                if msg:
+                    errors.append(msg)
+
+        output = "".join(text_chunks).strip()
+
+        # Detect truncated generation
+        if finish == "unknown" and output:
+            logger.warning("event=opencode_server_truncated_output finish=%s output_len=%d", finish, len(output))
+            output += "\n\n_(Note: response was cut off — OpenCode reported an interrupted generation.)_"
+
+        return output, errors, finish
+
+    # ------------------------------------------------------------------
+    # Server lifecycle
+    # ------------------------------------------------------------------
+
+    def _ensure_server(self) -> Optional[str]:
+        """Start the server if not running and verify it responds. Returns error string or None."""
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None and self._base_url:
+                return None  # already up
+
+            # (Re)start
+            try:
+                from config import config as _cfg
+                oc_cfg = _cfg.opencode
+                host = getattr(oc_cfg, "server_host", "127.0.0.1")
+                preferred_port = int(getattr(oc_cfg, "server_port", 4096))
+            except Exception:
+                host = "127.0.0.1"
+                preferred_port = 4096
+
+            port = _find_free_port(preferred_port)
+            cmd = [self._exe, "serve", "--hostname", host, "--port", str(port)]
+
+            logger.info("event=opencode_server_start cmd=%s", cmd)
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as e:
+                return f"Failed to start opencode server: {e}"
+
+            base_url = f"http://{host}:{port}"
+
+            # Wait up to 10 seconds for the server to accept connections.
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    return "opencode server process exited immediately"
+                try:
+                    with urllib.request.urlopen(f"{base_url}/session", timeout=1) as resp:
+                        resp.read()
+                    break
+                except Exception:
+                    time.sleep(0.3)
+            else:
+                proc.terminate()
+                return f"opencode server did not start within 10s on {base_url}"
+
+            self._proc = proc
+            self._base_url = base_url
+            logger.info("event=opencode_server_ready url=%s pid=%s", base_url, proc.pid)
+            return None
+
+    # ------------------------------------------------------------------
+    # HTTP helpers
+    # ------------------------------------------------------------------
+
+    def _http(
+        self,
+        method: str,
+        path: str,
+        body: Optional[Dict[str, Any]] = None,
+        timeout: int = 300,
+    ) -> tuple:
+        """Make an HTTP request. Returns (parsed_json, error_str_or_None)."""
+        url = self._base_url + path
+        data = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                if not raw:
+                    return {}, None
+                return json.loads(raw), None
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                err_body = json.loads(raw)
+                msg = err_body.get("data", {}).get("message") or err_body.get("name") or str(e)
+            except Exception:
+                msg = raw.decode(errors="replace") if raw else str(e)
+            return {}, f"HTTP {e.code} from opencode server ({method} {path}): {msg}"
+        except Exception as e:
+            return {}, f"Request failed ({method} {path}): {e}"
+
+    # ------------------------------------------------------------------
+    # Helpers (reuse from CLI backend)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _session_model(session: Session) -> Optional[str]:
+        return OpenCodeBackend._session_model(session)
+
+    @staticmethod
+    def _session_agent(session: Session) -> Optional[str]:
+        return OpenCodeBackend._session_agent(session)
+
+    @staticmethod
+    def _parse_model(model_str: Optional[str]) -> tuple:
+        """Split 'provider/model' into (model_id, provider_id). Falls back to bare model ID."""
+        if not model_str:
+            return None, None
+        if "/" in model_str:
+            parts = model_str.split("/", 1)
+            return parts[1], parts[0]
+        return model_str, None
