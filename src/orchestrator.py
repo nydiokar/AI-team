@@ -1099,8 +1099,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                         # Normalize ExecutionResult (from backends) to TaskResult
                         from src.core.interfaces import ExecutionResult as _ER
                         if isinstance(raw, _ER):
-                            # Persist backend session ID back onto the session record
-                            if session and raw.success and raw.backend_session_id:
+                            # Persist backend session ID back onto the session record.
+                            # Save on both success and failure — if the backend created/
+                            # recreated a session (e.g. after server restart) but the
+                            # first message failed, we still want the new ID persisted so
+                            # the next turn can resume rather than starting fresh again.
+                            if session and raw.backend_session_id:
                                 session.backend_session_id = raw.backend_session_id
                                 self.session_store.save(session)
                             result = TaskResult(
