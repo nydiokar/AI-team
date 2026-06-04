@@ -745,14 +745,23 @@ class OpenCodeBackend(CodingBackend):
 # ---------------------------------------------------------------------------
 
 def _find_free_port(preferred: int) -> int:
-    """Return `preferred` if available, otherwise any free port."""
+    """Return `preferred` if available, otherwise any free port.
+
+    Both checks use SO_REUSEADDR=False (the default) so a port in TIME_WAIT
+    is reported as in-use and we fall back to a kernel-assigned port.
+    The caller must pass the returned port to the child process immediately;
+    there is an inherent TOCTOU window, but it is small for loopback sockets.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             s.bind(("127.0.0.1", preferred))
             return preferred
         except OSError:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
+            pass
+    # Let the OS choose; bind on 0 then read back the assigned port.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 class OpenCodeServerBackend(CodingBackend):
@@ -800,9 +809,11 @@ class OpenCodeServerBackend(CodingBackend):
             )
 
         if model_id:
-            self._http("PATCH", f"/session/{oc_session_id}", {
+            _, patch_err = self._http("PATCH", f"/session/{oc_session_id}", {
                 "model": {"providerID": provider_id or "opencode", "modelID": model_id}
             })
+            if patch_err:
+                logger.warning("event=opencode_model_patch_failed id=%s err=%s", oc_session_id, patch_err)
 
         return self._send_message(
             oc_session_id=oc_session_id,
@@ -814,27 +825,32 @@ class OpenCodeServerBackend(CodingBackend):
     def resume_session(self, session: Session, message: str) -> ExecutionResult:
         start = time.time()
         oc_session_id = session.backend_session_id
+
+        # No session ID at all — treat as a fresh start rather than a dead end.
         if not oc_session_id:
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=["OpenCode server session ID not set — cannot resume. Status: needs_manual_attention"],
-                execution_time=time.time() - start,
+            logger.warning(
+                "event=opencode_server_resume_no_id gateway_session=%s — falling back to create_session",
+                session.session_id,
             )
+            session.last_user_message = message
+            session.backend_session_id = ""
+            return self.create_session(session)
 
         err = self._ensure_server()
         if err:
             return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
 
-        # Verify session still exists on the server (server might have restarted).
+        # Verify the session still exists (server may have restarted and lost it).
         info, sess_err = self._http("GET", f"/session/{oc_session_id}")
         if sess_err or not info.get("id"):
-            return ExecutionResult(
-                success=False,
-                output="",
-                errors=[f"OpenCode session {oc_session_id} not found on server — it may have been lost after a restart. Status: needs_manual_attention"],
-                execution_time=time.time() - start,
+            # Session lost — recreate it transparently and continue.
+            logger.warning(
+                "event=opencode_server_session_lost id=%s gateway_session=%s — recreating",
+                oc_session_id, session.session_id,
             )
+            session.backend_session_id = ""
+            session.last_user_message = message
+            return self.create_session(session)
 
         return self._send_message(
             oc_session_id=oc_session_id,
@@ -849,14 +865,23 @@ class OpenCodeServerBackend(CodingBackend):
         if err:
             return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
 
-        oc_session, err = self._http("POST", "/session", {"title": "oneoff", "agent": "build", "directory": cwd})
+        body: Dict[str, Any] = {"title": "oneoff", "agent": "build"}
+        if cwd:
+            body["directory"] = cwd
+
+        oc_session, err = self._http("POST", "/session", body)
         if err:
             return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
 
         oc_session_id = oc_session.get("id", "")
         result = self._send_message(oc_session_id=oc_session_id, message=message, cwd=cwd, start=start)
-        # Clean up oneoff session
-        self._http("DELETE", f"/session/{oc_session_id}")
+
+        # Only delete on success — on failure the session may hold partial useful state
+        # for diagnostics (e.g. the user can check logs). Either way clear the ID so
+        # no caller mistakenly tries to resume a deleted/unknown session.
+        if result.success:
+            self._http("DELETE", f"/session/{oc_session_id}")
+        result.backend_session_id = ""
         return result
 
     def cancel(self, session: Session) -> None:
@@ -874,8 +899,10 @@ class OpenCodeServerBackend(CodingBackend):
             proc = self._proc
             self._proc = None
             self._base_url = ""
-        if proc is not None:
-            terminate_many_popen([proc])
+            # Kill inside the lock so _ensure_server cannot start a new server
+            # while the old process is still alive and owns its port.
+            if proc is not None:
+                terminate_many_popen([proc])
 
     # ------------------------------------------------------------------
     # Core message send
@@ -908,9 +935,13 @@ class OpenCodeServerBackend(CodingBackend):
 
         output, errors, finish = self._parse_message_response(response)
 
-        success = finish in ("stop", "tool-calls", "") and not errors
-        if finish not in ("stop", "tool-calls", ""):
-            errors.append(f"Generation ended with unexpected finish reason: {finish!r}")
+        if finish in ("stop", "tool-calls"):
+            success = not errors
+        else:
+            # finish="" means no step-finish part at all — malformed/empty response.
+            # finish="unknown" is already annotated with a truncation note inside _parse_message_response.
+            if finish not in ("unknown",):
+                errors.append(f"Generation ended with unexpected finish reason: {finish!r}")
             success = False
 
         # Collect git diff
@@ -985,7 +1016,15 @@ class OpenCodeServerBackend(CodingBackend):
             if self._proc is not None and self._proc.poll() is None and self._base_url:
                 return None  # already up
 
-            # (Re)start
+            # Clean up any dead process reference before restarting.
+            if self._proc is not None:
+                try:
+                    self._proc.wait(timeout=2)
+                except Exception:
+                    pass
+                self._proc = None
+                self._base_url = ""
+
             try:
                 from config import config as _cfg
                 oc_cfg = _cfg.opencode
@@ -1004,18 +1043,31 @@ class OpenCodeServerBackend(CodingBackend):
                     cmd,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,   # capture for diagnostics
                 )
             except Exception as e:
                 return f"Failed to start opencode server: {e}"
 
+            # Register the proc immediately so it is never orphaned if an
+            # exception occurs below (terminate_active_processes will find it).
+            self._proc = proc
+
             base_url = f"http://{host}:{port}"
 
-            # Wait up to 10 seconds for the server to accept connections.
-            deadline = time.time() + 10
+            # Wait up to 15 seconds for the server to accept connections.
+            deadline = time.time() + 15
             while time.time() < deadline:
                 if proc.poll() is not None:
-                    return "opencode server process exited immediately"
+                    stderr_tail = ""
+                    try:
+                        stderr_tail = proc.stderr.read(2000).decode(errors="replace").strip()
+                    except Exception:
+                        pass
+                    self._proc = None
+                    return (
+                        f"opencode server process exited immediately (exit={proc.returncode}). "
+                        + (f"stderr: {stderr_tail}" if stderr_tail else "No stderr captured.")
+                    )
                 try:
                     with urllib.request.urlopen(f"{base_url}/session", timeout=1) as resp:
                         resp.read()
@@ -1023,10 +1075,16 @@ class OpenCodeServerBackend(CodingBackend):
                 except Exception:
                     time.sleep(0.3)
             else:
-                proc.terminate()
-                return f"opencode server did not start within 10s on {base_url}"
+                stderr_tail = ""
+                try:
+                    proc.stderr.close()
+                    stderr_tail = ""
+                except Exception:
+                    pass
+                self._proc = None
+                terminate_many_popen([proc])
+                return f"opencode server did not start within 15s on {base_url}"
 
-            self._proc = proc
             self._base_url = base_url
             logger.info("event=opencode_server_ready url=%s pid=%s", base_url, proc.pid)
             return None
@@ -1042,7 +1100,17 @@ class OpenCodeServerBackend(CodingBackend):
         body: Optional[Dict[str, Any]] = None,
         timeout: int = 300,
     ) -> tuple:
-        """Make an HTTP request. Returns (parsed_json, error_str_or_None)."""
+        """Make an HTTP request. Returns (parsed_json, error_str_or_None).
+
+        `timeout` is the socket idle timeout (seconds with no data received).
+        For long-running message POSTs the server streams nothing until done,
+        so pass a value >= the expected max generation time.
+
+        Connection errors (ECONNREFUSED, timeout on connect) mark the server
+        as gone so _ensure_server will restart it on the next call.
+        """
+        import http.client as _http_client
+
         url = self._base_url + path
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -1062,6 +1130,12 @@ class OpenCodeServerBackend(CodingBackend):
             except Exception:
                 msg = raw.decode(errors="replace") if raw else str(e)
             return {}, f"HTTP {e.code} from opencode server ({method} {path}): {msg}"
+        except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
+            # Server is gone — clear our reference so _ensure_server restarts it.
+            with self._lock:
+                self._proc = None
+                self._base_url = ""
+            return {}, f"opencode server unreachable ({method} {path}): {e} — will restart on next call"
         except Exception as e:
             return {}, f"Request failed ({method} {path}): {e}"
 
