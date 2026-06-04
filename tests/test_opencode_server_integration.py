@@ -266,7 +266,7 @@ async def test_t11_orchestrator_submit(b: OpenCodeServerBackend) -> None:
     _assert("T11SECOND" in raw2.output, f"T11 second turn output: {raw2.output!r}")
 
     orch.session_store.delete(sid)
-    print(f"  T11 OK — create→persist→reload→resume full orchestrator path verified")
+    print("  T11 OK — create->persist->reload->resume full orchestrator path verified")
 
 
 def test_t12_execution_result_fields(b: OpenCodeServerBackend) -> None:
