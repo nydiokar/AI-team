@@ -65,20 +65,26 @@ class TelegramConfig:
             
 @dataclass
 class OpenCodeConfig:
-    """OpenCode CLI backend configuration."""
+    """OpenCode backend configuration.
+
+    mode="cli"    → OpenCodeBackend    (subprocess per turn, env: OPENCODE_MODE=cli)
+    mode="server" → OpenCodeServerBackend (persistent HTTP server, env: OPENCODE_MODE=server)
+
+    The active backend is selected by the gateway session's `backend` field:
+      "opencode"        → CLI mode
+      "opencode-server" → server mode
+    OPENCODE_MODE is reserved for future auto-wiring.
+    """
     default_model: Optional[str] = "opencode/big-pickle"
     default_agent: Optional[str] = None
-    timeout_seconds: int = 1800           # 30 min; used as inactivity cap if set lower than system default
+    timeout_seconds: int = 1800           # 30 min wall-clock cap (inactivity timeout is primary)
     collect_diff: bool = True
     run_tests_after: bool = False
     test_command: Optional[str] = None
-    # Server mode (feature flag — disabled by default; CLI mode is the production path)
-    mode: str = "cli"                     # "cli" only today; "server" is gated below
-    server_enabled: bool = False
-    server_host: str = "127.0.0.1"
-    server_port: int = 4096
-    server_username: str = "opencode"
-    server_password_env: str = "OPENCODE_SERVER_PASSWORD"
+    mode: str = "cli"                     # "cli" | "server" — informational; see docstring
+    server_host: str = "127.0.0.1"        # bind address for opencode serve
+    server_port: int = 4096               # preferred port; falls back to any free port
+    server_enabled: bool = False          # legacy flag — kept for env-compat, not used in logic
 
 @dataclass
 class ValidationConfig:
