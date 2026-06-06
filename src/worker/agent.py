@@ -414,11 +414,23 @@ class WorkerAgent:
         heartbeat = asyncio.create_task(self._heartbeat_loop())
         poller = asyncio.create_task(self._poll_loop())
 
-        # Install SIGTERM handler
+        # Install SIGTERM handler — loop.add_signal_handler is Unix-only.
+        # On Windows fall back to signal.signal; if SIGTERM isn't supported
+        # at all (Windows), skip silently — Ctrl+C (KeyboardInterrupt) is the
+        # shutdown path there.
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGTERM, self._on_sigterm)
+        try:
+            loop.add_signal_handler(signal.SIGTERM, self._on_sigterm)
+        except (NotImplementedError, OSError):
+            try:
+                signal.signal(signal.SIGTERM, lambda *_: self._on_sigterm())
+            except (OSError, ValueError):
+                pass
 
-        await self._shutdown.wait()
+        try:
+            await self._shutdown.wait()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            logger.info("event=keyboard_interrupt node_id=%s", self.cfg.node_id)
 
         # Drain: wait up to 30s for active tasks
         logger.info("event=draining active=%d", len(self._active))
