@@ -261,6 +261,72 @@ check("DB unavailable -> error mentions 'Mesh DB'",
       any("Mesh DB" in e for e in (result_nodb.errors or [])))
 
 # ---------------------------------------------------------------------------
+# 6b. Node not in in-memory registry but online in DB -> dispatch proceeds
+#     (covers: gateway restart wipes in-memory registry, worker still running)
+# ---------------------------------------------------------------------------
+# Insert the node row directly into DB as online
+from datetime import timezone as _tz
+db._conn().execute(
+    "INSERT OR REPLACE INTO nodes (node_id, tailscale_ip, api_port, backends, "
+    "max_concurrent, status, last_heartbeat, registered_at, updated_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ("db-only-node", "127.0.0.1", 9001, '["claude"]', 2, "online",
+     datetime.now(tz=_tz.utc).isoformat(),
+     datetime.now(tz=_tz.utc).isoformat(),
+     datetime.now(tz=_tz.utc).isoformat()),
+)
+db._conn().execute("COMMIT") if db._conn().in_transaction else None
+
+enqueue("task_db_fallback", "sess_db_fallback", machine_id="db-only-node")
+db.claim_task("task_db_fallback", "db-only-node")
+db.complete_task("task_db_fallback", {
+    "success": True, "output": "db fallback works", "errors": [],
+    "files_modified": [], "execution_time": 1.0,
+    "timestamp": datetime.now(tz=_tz.utc).isoformat(),
+    "return_code": 0, "backend_session_id": "bsid-db-fallback",
+}, artifact_path=None)
+
+async def test_db_node_fallback():
+    from src.control.node_registry import NodeRegistry
+
+    fake_session = make_session("sess_db_fallback", machine_id="db-only-node")
+    saves = []
+
+    class StubStore:
+        def get(self, sid): return fake_session
+        def save(self, s): saves.append(s.backend_session_id)
+
+    empty_registry = NodeRegistry.__new__(NodeRegistry)
+    empty_registry._nodes = {}  # node NOT in in-memory registry
+
+    class MinimalOrch:
+        session_store = StubStore()
+        telegram_interface = None
+        _task_cancel_events = {}
+        def _classify_error(self, r): return "none" if r.success else "fatal"
+        def _emit_event(self, *a, **kw): pass
+        def _resolve_task_backend(self, t): return "claude"
+
+    orch = MinimalOrch()
+    from src.orchestrator import TaskOrchestrator
+    orch._dispatch_to_node = TaskOrchestrator._dispatch_to_node.__get__(orch, type(orch))
+    bound = TaskOrchestrator._process_task_remote.__get__(orch, type(orch))
+    task = make_task("task_db_fallback", session_id="sess_db_fallback")
+
+    with patch("src.control.node_registry.get_registry", return_value=empty_registry), \
+         patch("src.control.db.get_db", return_value=db):
+        result = await bound(task, fake_session, start_time=time.time(), timeout_s=60)
+
+    return result, fake_session
+
+result_dbf, sess_dbf = asyncio.run(test_db_node_fallback())
+check("DB-only node (registry empty after restart) -> dispatch succeeds", result_dbf.success is True,
+      str(result_dbf.errors))
+check("DB-only node -> output correct", result_dbf.output == "db fallback works")
+check("DB-only node -> backend_session_id propagated",
+      sess_dbf.backend_session_id == "bsid-db-fallback", f"got {sess_dbf.backend_session_id!r}")
+
+# ---------------------------------------------------------------------------
 # 6. Node offline -> _process_task_remote fails loudly
 # ---------------------------------------------------------------------------
 async def test_node_offline():

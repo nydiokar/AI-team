@@ -1360,7 +1360,21 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         registry = get_registry()
         node = registry.get(session.machine_id)
-        if not node or node.status != "online":
+        node_online = node is not None and node.status == "online"
+
+        # The gateway's in-memory registry is only populated if this process
+        # is also running the task server (co-located deployment). In a split
+        # setup (separate task server process, or after a gateway restart that
+        # wiped the in-memory registry), the node may only exist in the DB.
+        # Fall back to the DB so a gateway restart doesn't kill in-flight sessions.
+        if not node_online:
+            from src.control.db import get_db as _get_db
+            _db = _get_db()
+            if _db is not None:
+                _row = _db.get_node(session.machine_id)
+                node_online = bool(_row and _row.get("status") == "online")
+
+        if not node_online:
             result = _routing_failure(f"Node {session.machine_id!r} is offline; cannot continue session (no local fallback — affinity is required)")
             session.status = SessionStatus.ERROR
             self.session_store.save(session)
