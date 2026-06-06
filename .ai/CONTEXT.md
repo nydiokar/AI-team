@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-06-07
 **Branch:** `main`
-**Status:** Phase 9 Step B complete — routing wired into process_task; 18/18 smoke tests + 24/24 routing integration tests passing; ready for live two-process trial (Step A) and real two-machine test (Step C)
+**Status:** Phase 9 Step B complete + live trial confirmed — full Telegram→DB→worker→result→Telegram cycle working on localhost. Ready for Step C (real two-machine test).
 
 ---
 
