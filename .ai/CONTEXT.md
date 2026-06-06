@@ -1,8 +1,8 @@
 # AI-Team Gateway — Project Context
 
-**Last Updated:** 2026-06-05
+**Last Updated:** 2026-06-07
 **Branch:** `main`
-**Status:** Phase 9 Steps 1–3 complete — task server, worker daemon, and orchestrator mesh routing built; ready for local end-to-end test
+**Status:** Phase 9 Step B complete — routing wired into process_task; 18/18 smoke tests + 24/24 routing integration tests passing; ready for live two-process trial (Step A) and real two-machine test (Step C)
 
 ---
 
@@ -135,6 +135,39 @@ Documented in `docs/OPENCODE_SERVER_CONTEXT.md`.
 **Verified:** `python scripts/test_mesh_local.py` — 18/18 checks pass (register, heartbeat, 404-unknown-node, enqueue, poll, claim, double-claim rejection, claim-mismatch result rejection, completion, deregistration).
 
 **Status:** `MESH_ENABLED=false` (default) → gateway behavior is provably unchanged; shadow-write is safe and self-contained. Ready for a controlled `MESH_ENABLED=true` trial — see NEXT_TASKS.md for the recommended rollout sequence.
+
+---
+
+### Phase 9 Step B — Wire `_dispatch_or_run_local` into `process_task` ✅  ← completed + adversarially reviewed + tested this session
+
+**What was built:**
+
+`process_task` in `src/orchestrator.py` now routes tasks to remote workers when `MESH_ENABLED=true` AND `session.machine_id` is set. Zero behavior change for all other sessions.
+
+**Exact changes:**
+
+1. **`src/orchestrator.py`**
+   - `process_task`: resolves `session`/`session_id` once before the retry loop; sets `route_remote = bool(MESH_ENABLED and session and session.machine_id)`; if True, delegates to new `_process_task_remote` and skips the local retry loop entirely (`while not route_remote:`).
+   - New `_process_task_remote`: sets session BUSY, verifies the pinned node is online (fails loudly — no silent local fallback, which would corrupt `backend_session_id` continuity), runs Telegram heartbeats, calls `_dispatch_to_node`, catches unexpected dispatch exceptions and converts them to failure results (so session never gets stuck as BUSY), sets session status (AWAITING_INPUT / CANCELLED / ERROR), classifies error.
+   - `_mesh_enqueue_task`: skips self-claim when `machine_id` is set — leaves row `pending` so the pinned remote worker can claim it via `get_pending_tasks`. Local tasks (no `machine_id`) still self-claim immediately as before.
+   - `_dispatch_to_node`: fails loudly when DB is unavailable (previously fell back silently to local — wrong for session-affinity tasks); propagates `backend_session_id` from the worker's result dict back to `session.backend_session_id` and saves it, so the next turn can resume the remote-side backend session.
+
+2. **`src/control/task_server.py`**: added `backend_session_id: str = ""` to `ExecutionResultPayload`; included in `result_dict` stored to DB so the gateway can read it back.
+
+3. **`src/worker/agent.py`**: `_execute_task` now includes `backend_session_id` in the result dict it posts to `/tasks/{id}/result`.
+
+**Adversarial review findings — all addressed:**
+- Session stuck as BUSY on unexpected dispatch exception → fixed with try/except in `_process_task_remote` that converts to failure result
+- Silent local fallback in `_dispatch_to_node` when DB unavailable → fixed to fail loudly
+- `backend_session_id` not propagated from worker result → fixed end-to-end (worker → task_server → DB → gateway → session)
+- `_mesh_enqueue_task` self-claim for remote tasks → fixed with `if not machine_id:` guard
+
+**Verified:** `python scripts/test_mesh_local.py` — 18/18; `python scripts/test_routing_integration.py` — 24/24.
+
+**Correctness guarantees:**
+- `MESH_ENABLED=false` (default) → identical to pre-mesh behavior. `route_remote` is always False; `while not route_remote:` runs exactly as the old `while True:` did.
+- Sessions without `machine_id` → local path unchanged even with `MESH_ENABLED=true`.
+- Sessions with `machine_id` + `MESH_ENABLED=true` → remote dispatch only; fail loudly if node offline; no silent local fallback.
 
 ---
 

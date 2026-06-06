@@ -1,8 +1,8 @@
 # Next Tasks
 
-**Current priority:** Phase 9 — Agent mesh worker + task server.
-Tasks 1–3 are **complete, adversarially reviewed, bug-fixed, and smoke-tested**.
-`scripts/test_mesh_local.py` passes 18/18 checks against the real FastAPI app + MeshDB.
+**Current priority:** Phase 9 Step C — live two-machine test.
+Steps 1–3 and Step B are **complete, adversarially reviewed, and fully tested**.
+`scripts/test_mesh_local.py` 18/18; `scripts/test_routing_integration.py` 24/24.
 
 ---
 
@@ -68,12 +68,11 @@ enqueues to `mesh_trial.db`). This proves the daemon lifecycle works without tou
 production state or risking duplicate execution. Stop with Ctrl+C — confirm clean
 deregistration in the logs.
 
-**Step B — Wire `_dispatch_or_run_local` into `process_task` (separate task)**
+**Step B — Wire `_dispatch_or_run_local` into `process_task` ✅ DONE**
 
-Once Step A's mechanics are confirmed solid, do the actual routing integration as its
-own change — ideally on a feature branch / different machine, tested against a
-non-critical repo, with `MESH_ENABLED=true` only for that one trial session
-(`session.machine_id` pins it to a specific node).
+`process_task` now routes to `_process_task_remote` when `MESH_ENABLED=true` and
+`session.machine_id` is set. Zero regression for all other sessions. 24/24 integration
+tests pass. See CONTEXT.md Phase 9 Step B section for full details.
 
 **Step C — Real two-machine test**
 

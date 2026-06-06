@@ -205,6 +205,7 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any]) -> D
                 "execution_time": elapsed,
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "return_code": getattr(raw, "return_code", 0),
+                "backend_session_id": raw.backend_session_id or "",
             }
         # Fallback for legacy return types
         return {

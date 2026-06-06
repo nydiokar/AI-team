@@ -108,6 +108,7 @@ class ExecutionResultPayload(BaseModel):
     timestamp: str = ""
     return_code: int = 0
     artifact_path: Optional[str] = None
+    backend_session_id: str = ""  # worker echoes back the native session ID for affinity continuity
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +271,7 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         "execution_time": payload.execution_time,
         "timestamp": payload.timestamp,
         "return_code": payload.return_code,
+        "backend_session_id": payload.backend_session_id,
     }
     if payload.success:
         db.complete_task(task_id, result_dict, payload.artifact_path)

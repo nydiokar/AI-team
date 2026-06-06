@@ -1048,14 +1048,26 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception:
                 timeout_s = config.system.task_timeout
             cancel_ev = self._task_cancel_events.get(task.id)
-            while True:
+
+            # Resolve session up front so we can decide whether this task is
+            # pinned to a remote mesh node before entering the local retry loop.
+            session_id = (task.metadata or {}).get("session_id", "").strip()
+            session = self.session_store.get(session_id) if session_id else None
+
+            # Mesh routing: only sessions explicitly pinned to a remote node
+            # (`session.machine_id` set) with MESH_ENABLED=true take this path.
+            # Everything else falls through to the untouched local retry loop
+            # below — zero behavior change for ordinary local sessions.
+            route_remote = bool(config.mesh.enabled and session and session.machine_id)
+            if route_remote:
+                last_result = await self._process_task_remote(task, session, start_time, timeout_s)
+
+            while not route_remote:
                 attempt += 1
                 # Run execution as a task to allow timeout/cancel
                 # Use session backend (with native resume) when task belongs to a session.
                 # For non-session tasks, use the native backend directly instead of
                 # the legacy Claude bridge/task-file execution path.
-                session_id = (task.metadata or {}).get("session_id", "").strip()
-                session = self.session_store.get(session_id) if session_id else None
                 if session:
                     session.status = SessionStatus.BUSY
                     self.session_store.save(session)
@@ -1300,7 +1312,95 @@ class TaskOrchestrator(ITaskOrchestrator):
                 execution_time=execution_time,
                 timestamp=datetime.now().isoformat()
             )
-    
+
+    async def _process_task_remote(
+        self,
+        task: "Task",
+        session: Any,
+        start_time: float,
+        timeout_s: int,
+    ) -> "TaskResult":
+        """Execute a mesh-pinned session's task on its assigned remote node.
+
+        Only reachable when `MESH_ENABLED=true` AND `session.machine_id` is
+        set — see the routing check in `process_task`. Mirrors the bookkeeping
+        `process_task`'s local retry loop performs (BUSY status, heartbeats,
+        cancellation, error classification, session error state) around a
+        single call to `_dispatch_to_node`, which enqueues the task, waits for
+        the pinned worker to claim and post a result, and returns a terminal
+        `TaskResult`.
+
+        Session affinity is a hard requirement: if the pinned node is not
+        registered or not online, this fails loudly with no local fallback —
+        silently running on this machine would corrupt `backend_session_id`
+        continuity, since backend sessions are machine-local.
+        """
+        from src.control.node_registry import get_registry
+
+        backend_name = session.backend
+        session.status = SessionStatus.BUSY
+        session.last_user_message = task.prompt
+        self.session_store.save(session)
+
+        def _routing_failure(msg: str) -> "TaskResult":
+            logger.error("event=mesh_routing_failed task_id=%s session_id=%s machine_id=%s reason=%s",
+                         task.id, session.session_id, session.machine_id, msg)
+            self._emit_event("mesh_routing_failed", task, {"machine_id": session.machine_id, "reason": msg})
+            result = TaskResult(
+                task_id=task.id,
+                success=False,
+                output="",
+                errors=[msg],
+                files_modified=[],
+                execution_time=time.time() - start_time,
+                timestamp=datetime.now().isoformat(),
+            )
+            setattr(result, "backend_name", backend_name)
+            return result
+
+        registry = get_registry()
+        node = registry.get(session.machine_id)
+        if not node or node.status != "online":
+            result = _routing_failure(f"Node {session.machine_id!r} is offline; cannot continue session (no local fallback — affinity is required)")
+            session.status = SessionStatus.ERROR
+            self.session_store.save(session)
+            result.error_class = self._classify_error(result)
+            result.retries = 0
+            return result
+
+        cancel_ev = self._task_cancel_events.get(task.id)
+        heartbeat_task: Optional[asyncio.Task] = None
+        heartbeat_interval = getattr(config.system, "task_heartbeat_interval_sec", 300)
+        try:
+            try:
+                if self.telegram_interface and heartbeat_interval > 0:
+                    heartbeat_task = asyncio.create_task(
+                        self._send_task_heartbeats(task, session, start_time, heartbeat_interval, timeout_s)
+                    )
+                result = await self._dispatch_to_node(task, session, node)
+            finally:
+                if heartbeat_task and not heartbeat_task.done():
+                    heartbeat_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await heartbeat_task
+        except Exception as exc:
+            # Unexpected dispatch failure — return a clean error and unblock
+            # the session rather than leaving it stuck as BUSY.
+            result = _routing_failure(f"Unexpected dispatch error: {exc}")
+
+        result.error_class = self._classify_error(result)
+        result.retries = 0
+
+        if result.success:
+            session.status = SessionStatus.AWAITING_INPUT
+        elif cancel_ev is not None and cancel_ev.is_set():
+            session.status = SessionStatus.CANCELLED
+        else:
+            session.status = SessionStatus.ERROR
+        self.session_store.save(session)
+
+        return result
+
     def _reconstruct_task_content(self, task: Task) -> str:
         """Reconstruct a `.task.md` representation for LLAMA processing.
 
@@ -2000,7 +2100,20 @@ Generated from user description: {description}
 
         db = get_db()
         if db is None:
-            return await self._run_backend_local(task, session, self._resolve_task_backend(task))
+            # DB unavailable: cannot dispatch to worker. Fail loudly rather
+            # than silently falling back to local execution, which would break
+            # backend_session_id continuity for machine-pinned sessions.
+            result = TaskResult(
+                task_id=task.id,
+                success=False,
+                output="",
+                errors=["Mesh DB unavailable; cannot dispatch to remote worker"],
+                files_modified=[],
+                execution_time=0.0,
+                timestamp=datetime.now().isoformat(),
+            )
+            setattr(result, "backend_name", self._resolve_task_backend(task))
+            return result
 
         timeout_sec = getattr(config.mesh, "oneoff_queue_timeout_sec", 600)
         deadline = time.time() + timeout_sec
@@ -2016,6 +2129,12 @@ Generated from user description: {description}
                         r = json.loads(result_raw) if isinstance(result_raw, str) else (result_raw or {})
                     except Exception:
                         r = {}
+                    # Propagate the worker's backend_session_id so the next
+                    # turn can resume the remote-side backend session.
+                    new_bsid = r.get("backend_session_id", "")
+                    if session and new_bsid:
+                        session.backend_session_id = new_bsid
+                        self.session_store.save(session)
                     result = TaskResult(
                         task_id=task.id,
                         success=r.get("success", True),
@@ -2179,15 +2298,16 @@ Generated from user description: {description}
                 action=action,
                 payload=payload,
             )
-            # Self-claim immediately — see docstring. Best-effort; if this
-            # fails the row stays 'pending' and a worker could pick it up,
-            # so log loudly if it doesn't succeed.
-            if not db.claim_task(task.id, host):
-                logger.warning(
-                    "event=mesh_self_claim_failed task_id=%s host=%s — "
-                    "row may be claimable by a remote worker",
-                    task.id, host,
-                )
+            # Self-claim only when this task runs locally (no remote machine_id).
+            # When machine_id is set, the row must stay 'pending' so the
+            # pinned remote worker can claim it via get_pending_tasks.
+            if not machine_id:
+                if not db.claim_task(task.id, host):
+                    logger.warning(
+                        "event=mesh_self_claim_failed task_id=%s host=%s — "
+                        "row may be claimable by a remote worker",
+                        task.id, host,
+                    )
         except Exception as e:
             logger.debug("event=mesh_enqueue_failed task_id=%s err=%s", task.id, e)
 

@@ -1,113 +1,120 @@
-# Handoff prompt — next session (Phase 9 Step B: wire mesh routing into process_task)
+# Handoff prompt — next session (Phase 9 Step C: live two-machine test)
 
 ## What this project is
 
 A Telegram-controlled gateway for local coding agents (Claude Code, Codex, OpenCode).
 The user sends messages from their phone, tasks execute on their PC, results come back to Telegram.
 
-Long-term direction: move the control plane to a VPS, with worker nodes (PC, laptop, etc.)
-pulling tasks from a central SQLite task DB. Full spec: `docs/AGENT_MESH_SPEC.md`.
+Long-term direction: control plane on VPS, worker nodes (PC, laptop, etc.) pull tasks from
+a central SQLite task DB. Full spec: `docs/AGENT_MESH_SPEC.md`.
 
-**Read `.ai/CONTEXT.md` (Phase 9 section) and `.ai/NEXT_TASKS.md` before doing anything** —
-they document exactly what's built, what was adversarially reviewed and fixed, and why the
-remaining work is scoped the way it is.
+**Read `.ai/CONTEXT.md` (Phase 9 sections) and `.ai/NEXT_TASKS.md` before doing anything.**
 
 ---
 
-## Where things stand (commit `0debb7a`, all smoke-tested, working tree clean)
+## Where things stand (all smoke-tested, working tree clean after Step B commit)
 
-Phase 9 Steps 1–3 are **done, adversarially reviewed (14 issues found, 9 critical/high fixed),
-and smoke-tested** (`python scripts/test_mesh_local.py` — 18/18 passing):
+Phase 9 Steps 1–3 + Step B are **done, adversarially reviewed, and tested**:
 
-- `src/control/task_server.py` — FastAPI app, 9 endpoints, Bearer auth, MeshDB-backed
-- `src/control/node_registry.py` — NodeRegistry: heartbeat expiry, offline failover, DB persistence
-- `src/worker/{config,agent}.py` — full worker daemon (register/poll/claim/heartbeat/drain/nudge)
-- `src/orchestrator.py` — `_run_backend_local`, `_dispatch_to_node`, `_dispatch_or_run_local` exist
-  and are correct, but **`_dispatch_or_run_local` is NOT called from `process_task` yet** — that's
-  this session's job (see below).
-- `_mesh_enqueue_task` self-claims its own shadow-written rows immediately after insert, so
-  `MESH_ENABLED=false` (default) is **provably** identical to pre-mesh behavior — `process_task`
-  itself is completely untouched. This is load-bearing: don't break this guarantee while you wire
-  routing in.
+- `scripts/test_mesh_local.py` — 18/18 (task server API cycle)
+- `scripts/test_routing_integration.py` — 24/24 (routing wiring: process_task → remote dispatch)
 
----
-
-## Your job this session: Phase 9 Step B — wire `_dispatch_or_run_local` into `process_task`
-
-This is the one piece of real, higher-risk work standing between "mesh exists" and "mesh actually
-routes tasks to remote workers." Read `_dispatch_or_run_local` and `process_task` in
-`src/orchestrator.py` first — understand what `process_task` currently does end-to-end (retries,
-timeouts, heartbeats, artifact writing, session updates, Telegram replies) before changing anything.
-
-**The core design problem you need to solve:**
-`process_task` has retry/timeout/heartbeat machinery built around the assumption that execution is
-local and synchronous-ish. Routing to a remote worker means: enqueue → poll for completion (the
-worker posts results back via `/tasks/{id}/result`, asynchronously, on its own schedule) → resume
-`process_task`'s post-execution flow (artifact writing, session update, Telegram reply) once the
-result lands. You have two honest options, both named in NEXT_TASKS.md:
-
-(a) Duplicate the surrounding machinery (retry/timeout/heartbeat/artifact/reply) inside the
-    remote-dispatch branch, accepting some near-term duplication for lower risk to the local path, or
-(b) Extract that machinery into shared helpers both paths call, which is more work but avoids drift
-    between local and remote behavior over time.
-
-**Recommendation: go with (a) first**, scoped tightly, behind `MESH_ENABLED=true` AND
-`session.machine_id` being set (i.e., routing only activates for sessions explicitly pinned to a
-remote node — never for ordinary local sessions). This keeps blast radius minimal: a bug in the new
-path can only affect sessions someone deliberately pinned to a remote machine for testing. Don't
-attempt the bigger refactor (b) until (a) has proven the approach works in practice.
-
-**Hard correctness requirements — do not regress these:**
-- `MESH_ENABLED=false` (the default) → zero behavior change. Verify by re-running
-  `python scripts/test_mesh_local.py` AND confirming `process_task`'s local path is untouched
-  for sessions without `machine_id`.
-- Session affinity is non-negotiable: a session with `machine_id` set MUST execute on that
-  specific node, or fail loudly — never silently fall back to local execution (that would
-  silently corrupt `backend_session_id` continuity, since backend sessions are machine-local).
-- Don't let a remote-dispatch failure break the local path for other sessions. Isolate it.
+**What Step B delivered:**
+- `process_task` now routes tasks with `session.machine_id` set to the pinned remote node
+  when `MESH_ENABLED=true`. Zero behavior change for sessions without `machine_id`.
+- `_process_task_remote`: full bookkeeping (BUSY status, heartbeats, error classification,
+  session status update). Fails loudly if node offline — no silent local fallback (affinity is hard).
+- `_mesh_enqueue_task`: skips self-claim for machine-pinned tasks, leaving row `pending` for the worker.
+- `backend_session_id` propagated end-to-end: worker result → task_server → DB → gateway → session record.
+- Session never stuck as BUSY on unexpected dispatch exception.
 
 ---
 
-## How to test without a second machine (do this first, before any live trial)
+## Your job this session: Phase 9 Step C — live two-machine test
 
-You don't need Tailscale, a VPS, or a second device to validate the routing wiring:
+The code is complete. This session is about **validation with real processes**, not new code.
+Work through these in order — each step is a gate for the next.
 
-1. Extend `scripts/test_mesh_local.py` (or write a sibling script) to simulate a full
-   create-session → enqueue → worker-claims → worker-posts-result → `process_task` resumes →
-   artifact written → session updated cycle, all in-process against an isolated trial DB.
-2. Only after that passes, try the live two-process trial described in `.ai/NEXT_TASKS.md`
-   "Recommended rollout — safe trial sequence" Step A (task server + worker on localhost,
-   isolated `mesh_trial.db`, different ports — zero risk to the live gateway).
-3. Real two-machine testing (NEXT_TASKS.md Step C) comes LAST, once you're confident in the
-   wiring — at that point send a Telegram message to a session pinned to that node's
-   `machine_id` and watch it route through DB → worker → result → Telegram.
+### Step A — Shadow trial (single machine, two processes, isolated DB)
+
+Proves the daemon lifecycle works without touching production state.
+
+```bash
+# Terminal 1 — trial task server (separate port + DB)
+WORKER_TOKEN=<token> MESH_DB_PATH=state/mesh_trial.db \
+uvicorn src.control.task_server:app --host 127.0.0.1 --port 9099
+
+# Terminal 2 — trial worker daemon pointed at it
+WORKER_NODE_ID=trial-node WORKER_TOKEN=<token> WORKER_TAILSCALE_IP=127.0.0.1 \
+WORKER_API_PORT=9099 CONTROLLER_URL=http://127.0.0.1:9099 WORKER_BACKENDS=claude \
+python -m src.worker.agent
+```
+
+Watch: register → heartbeat every 30s → poll `/tasks/pending` (empty). Stop with Ctrl+C,
+confirm clean deregistration in logs. No tasks will route here — the live gateway is still
+running with `MESH_ENABLED=false`.
+
+### Step B — Single-session live trial (MESH_ENABLED=true, pinned session)
+
+This is the first real end-to-end routing test. Use a **non-critical repo** and a **new session**.
+
+1. Generate a worker token: `openssl rand -hex 32` → set as `WORKER_TOKEN` in both processes.
+2. Start the trial task server on a separate port (e.g. 9099) with `MESH_DB_PATH=state/mesh_trial.db`.
+3. Start the worker daemon pointed at it, with `WORKER_NODE_ID=trial-node`.
+4. Create a new gateway session from Telegram, note its `session_id`.
+5. Manually set `machine_id = "trial-node"` on that session's JSON file
+   (`state/sessions/<session_id>.json`) and restart the gateway (`pm2 restart ai-team-gateway --update-env`)
+   with `MESH_ENABLED=true MESH_DB_PATH=state/mesh_trial.db`.
+6. Send a message from Telegram to that session and watch it route:
+   - Gateway inserts pending row into `mesh_trial.db` (not self-claimed, since `machine_id` is set)
+   - Worker polls, claims, executes locally, posts result
+   - Gateway's `_dispatch_to_node` poll returns the result
+   - Telegram gets the reply
+7. Verify `session.backend_session_id` is updated (check the JSON file).
+8. Send a second message — it should resume the backend session (not create a new one).
+
+**Rollback:** set `MESH_ENABLED=false` and restart the gateway. The session's `machine_id` can be
+cleared to return it to local execution. No data loss.
+
+### Step C — Real two-machine test (after Step B passes)
+
+Before starting:
+- Both machines enrolled in Tailscale (or same LAN is fine for initial test)
+- Record both IPs; confirm connectivity: `curl http://{worker-ip}:9001/health` (connection refused = good, timeout = bad ACL)
+- Generate `WORKER_TOKEN`: `openssl rand -hex 32`
+- Set Tailscale ACL: worker port 9001 reachable from gateway machine; gateway's task server port 9002 reachable from worker
+
+Then:
+1. Start the task server on the gateway machine: `uvicorn src.control.task_server:app --host {tailscale-ip} --port 9002`
+2. Start the worker daemon on the second machine: `WORKER_NODE_ID=<machine-name> CONTROLLER_URL=http://{gateway-tailscale-ip}:9002 ...`
+3. Pin a test session to `machine_id = <machine-name>` and send a Telegram message.
+4. Watch it route: DB → worker on second machine → result → Telegram reply.
 
 ---
 
-## Important constraints
+## What NOT to do this session
 
-- **Do not change local-path behavior for sessions without `machine_id`.** That's the whole point —
-  zero regression for the 99% of sessions that stay local.
-- **Do not add new DB tables or change the schema** unless strictly required — all needed methods
-  already exist in `src/control/db.py` (`enqueue_task`, `claim_task`, `complete_task`, `fail_task`,
-  `get_pending_tasks`, `append_event`, etc).
-- **Do adversarial review of your own change** before calling it done — this codebase has a track
-  record of subtle async/locking/double-execution bugs (see the 14 issues found in the Phase 9
-  review, documented in `.ai/CONTEXT.md`). Don't skip this step.
-- The gateway runs under PM2 as `ai-team-gateway`. Restart with `pm2 restart ai-team-gateway --update-env`.
-- After finishing: update `.ai/CONTEXT.md` and `.ai/NEXT_TASKS.md`, run the smoke test, commit,
-  and write the next handoff prompt (this file) for Step C (real two-machine test).
+- **Do not change any production code.** The routing is complete. If you find a bug, fix it — but
+  no new features, no refactors, no schema changes.
+- **Do not run the trial with MESH_ENABLED=true pointing at state/mesh.db** — always use an
+  isolated trial DB (`mesh_trial.db`) until you've confirmed the trial works.
+- **Do not pin an existing active session to a remote node** without understanding that its
+  `backend_session_id` is machine-local — the remote worker will try to resume a session that
+  doesn't exist on the remote machine (it will get a "missing conversation" error and create a
+  new session instead). Use a fresh session for the trial.
 
 ---
 
-## Key files to read before starting
+## Key files
 
 | File | Why |
 |------|-----|
-| `.ai/CONTEXT.md` | Full project state, Phase 9 build history, all 14 review findings + fixes |
-| `.ai/NEXT_TASKS.md` | Exact rollout sequence (Steps A/B/C) and what's deliberately not done yet |
-| `docs/AGENT_MESH_SPEC.md` | Full mesh spec — Sections 5–8, 10 cover routing and session affinity |
-| `src/orchestrator.py` | `process_task`, `_task_worker`, `_dispatch_or_run_local`, `_dispatch_to_node`, `_mesh_enqueue_task` (read the docstring on this one — it explains the self-claim trick) |
-| `src/control/db.py` | All DB methods available |
-| `src/worker/agent.py` | What the worker does once it claims a task — your dispatch path needs to match its expectations (payload shape, result shape) |
-| `scripts/test_mesh_local.py` | Existing smoke test — extend this rather than writing from scratch |
+| `.ai/CONTEXT.md` | Full Phase 9 build history including Step B details |
+| `.ai/NEXT_TASKS.md` | Rollout sequence |
+| `src/orchestrator.py` | `process_task`, `_process_task_remote`, `_dispatch_to_node`, `_mesh_enqueue_task` |
+| `src/worker/agent.py` | Worker daemon — what it does when it claims a task |
+| `src/control/task_server.py` | Task server API |
+| `scripts/test_mesh_local.py` | Smoke test (18/18) |
+| `scripts/test_routing_integration.py` | Routing integration test (24/24) |
+| `docs/AGENT_MESH_SPEC.md` | Full mesh spec |
+| `ecosystem.config.js` | PM2 config — task server and worker entries (disabled by default) |
