@@ -765,15 +765,28 @@ def _find_free_port(preferred: int) -> int:
 class OpenCodeServerBackend(CodingBackend):
     """OpenCode HTTP server backend.
 
-    Starts a single `opencode serve` process on first use and reuses it for all
-    sessions.  Each gateway session maps to one OpenCode server session.
+    `opencode serve` has no per-request directory override — its working
+    directory is fixed to the process's launch cwd for the lifetime of the
+    server. To support sessions in different repos, we run one `opencode
+    serve` process per distinct repo directory (keyed by resolved path) and
+    launch each with `cwd` set to that directory.
     """
 
     def __init__(self) -> None:
         self._exe = shutil.which("opencode") or "opencode"
-        self._proc: Optional[subprocess.Popen] = None
-        self._base_url: str = ""
-        self._lock = threading.Lock()      # guards _proc / _base_url
+        self._procs: Dict[str, subprocess.Popen] = {}   # resolved dir -> process
+        self._base_urls: Dict[str, str] = {}            # resolved dir -> base URL
+        self._lock = threading.Lock()      # guards _procs / _base_urls
+
+    @staticmethod
+    def _server_key(repo_path: str) -> str:
+        """Resolve a repo path to the key used to look up its dedicated server."""
+        if not repo_path:
+            return ""
+        try:
+            return str(Path(repo_path).resolve())
+        except Exception:
+            return repo_path
 
     # ------------------------------------------------------------------
     # CodingBackend interface
@@ -781,7 +794,8 @@ class OpenCodeServerBackend(CodingBackend):
 
     def create_session(self, session: Session) -> ExecutionResult:
         start = time.time()
-        err = self._ensure_server()
+        key = self._server_key(session.repo_path)
+        err = self._ensure_server(key, session.repo_path)
         if err:
             return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
 
@@ -792,10 +806,8 @@ class OpenCodeServerBackend(CodingBackend):
             "title": session.session_id,
             "agent": agent,
         }
-        if session.repo_path:
-            create_body["directory"] = session.repo_path
 
-        oc_session, err = self._http("POST", "/session", create_body)
+        oc_session, err = self._http(key, "POST", "/session", create_body)
         if err:
             return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
 
@@ -807,13 +819,14 @@ class OpenCodeServerBackend(CodingBackend):
             )
 
         if model_id:
-            _, patch_err = self._http("PATCH", f"/session/{oc_session_id}", {
+            _, patch_err = self._http(key, "PATCH", f"/session/{oc_session_id}", {
                 "model": {"providerID": provider_id or "opencode", "modelID": model_id}
             })
             if patch_err:
                 logger.warning("event=opencode_model_patch_failed id=%s err=%s", oc_session_id, patch_err)
 
         return self._send_message(
+            key=key,
             oc_session_id=oc_session_id,
             message=session.last_user_message,
             cwd=session.repo_path,
@@ -823,6 +836,7 @@ class OpenCodeServerBackend(CodingBackend):
     def resume_session(self, session: Session, message: str) -> ExecutionResult:
         start = time.time()
         oc_session_id = session.backend_session_id
+        key = self._server_key(session.repo_path)
 
         # No session ID at all — treat as a fresh start rather than a dead end.
         if not oc_session_id:
@@ -834,12 +848,12 @@ class OpenCodeServerBackend(CodingBackend):
             session.backend_session_id = ""
             return self.create_session(session)
 
-        err = self._ensure_server()
+        err = self._ensure_server(key, session.repo_path)
         if err:
             return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
 
         # Verify the session still exists (server may have restarted and lost it).
-        info, sess_err = self._http("GET", f"/session/{oc_session_id}")
+        info, sess_err = self._http(key, "GET", f"/session/{oc_session_id}")
         if sess_err or not info.get("id"):
             # Session lost — recreate it transparently and continue.
             logger.warning(
@@ -851,6 +865,7 @@ class OpenCodeServerBackend(CodingBackend):
             return self.create_session(session)
 
         return self._send_message(
+            key=key,
             oc_session_id=oc_session_id,
             message=message,
             cwd=session.repo_path,
@@ -859,48 +874,49 @@ class OpenCodeServerBackend(CodingBackend):
 
     def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
         start = time.time()
-        err = self._ensure_server()
+        key = self._server_key(cwd)
+        err = self._ensure_server(key, cwd)
         if err:
             return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
 
         body: Dict[str, Any] = {"title": "oneoff", "agent": "build"}
-        if cwd:
-            body["directory"] = cwd
 
-        oc_session, err = self._http("POST", "/session", body)
+        oc_session, err = self._http(key, "POST", "/session", body)
         if err:
             return ExecutionResult(success=False, output="", errors=[err], execution_time=time.time() - start)
 
         oc_session_id = oc_session.get("id", "")
-        result = self._send_message(oc_session_id=oc_session_id, message=message, cwd=cwd, start=start)
+        result = self._send_message(key=key, oc_session_id=oc_session_id, message=message, cwd=cwd, start=start)
 
         # Only delete on success — on failure the session may hold partial useful state
         # for diagnostics (e.g. the user can check logs). Either way clear the ID so
         # no caller mistakenly tries to resume a deleted/unknown session.
         if result.success:
-            self._http("DELETE", f"/session/{oc_session_id}")
+            self._http(key, "DELETE", f"/session/{oc_session_id}")
         result.backend_session_id = ""
         return result
 
     def cancel(self, session: Session) -> None:
         oc_id = session.backend_session_id
-        if oc_id and self._base_url:
-            self._http("POST", f"/session/{oc_id}/abort")
+        key = self._server_key(session.repo_path)
+        if oc_id and self._base_urls.get(key):
+            self._http(key, "POST", f"/session/{oc_id}/abort")
 
     def close(self, session: Session) -> None:
         oc_id = session.backend_session_id
-        if oc_id and self._base_url:
-            self._http("DELETE", f"/session/{oc_id}")
+        key = self._server_key(session.repo_path)
+        if oc_id and self._base_urls.get(key):
+            self._http(key, "DELETE", f"/session/{oc_id}")
 
     def terminate_active_processes(self) -> None:
         with self._lock:
-            proc = self._proc
-            self._proc = None
-            self._base_url = ""
+            procs = list(self._procs.values())
+            self._procs = {}
+            self._base_urls = {}
             # Kill inside the lock so _ensure_server cannot start a new server
-            # while the old process is still alive and owns its port.
-            if proc is not None:
-                terminate_many_popen([proc])
+            # while the old processes are still alive and own their ports.
+            if procs:
+                terminate_many_popen(procs)
 
     # ------------------------------------------------------------------
     # Core message send
@@ -908,6 +924,7 @@ class OpenCodeServerBackend(CodingBackend):
 
     def _send_message(
         self,
+        key: str,
         oc_session_id: str,
         message: str,
         cwd: str,
@@ -924,7 +941,7 @@ class OpenCodeServerBackend(CodingBackend):
             timeout = 1800
 
         body = {"parts": [{"type": "text", "text": message}]}
-        response, err = self._http("POST", f"/session/{oc_session_id}/message", body, timeout=timeout)
+        response, err = self._http(key, "POST", f"/session/{oc_session_id}/message", body, timeout=timeout)
 
         elapsed = time.time() - start
 
@@ -1014,20 +1031,33 @@ class OpenCodeServerBackend(CodingBackend):
     # Server lifecycle
     # ------------------------------------------------------------------
 
-    def _ensure_server(self) -> Optional[str]:
-        """Start the server if not running and verify it responds. Returns error string or None."""
+    def _ensure_server(self, key: str, repo_path: str) -> Optional[str]:
+        """Start the per-directory server if not running and verify it responds.
+
+        `opencode serve` has no per-request directory override, so each distinct
+        repo directory gets its own server process launched with `cwd=repo_path`.
+        Returns error string or None.
+        """
         with self._lock:
-            if self._proc is not None and self._proc.poll() is None and self._base_url:
+            proc = self._procs.get(key)
+            if proc is not None and proc.poll() is None and self._base_urls.get(key):
                 return None  # already up
 
             # Clean up any dead process reference before restarting.
-            if self._proc is not None:
+            if proc is not None:
                 try:
-                    self._proc.wait(timeout=2)
+                    proc.wait(timeout=2)
                 except Exception:
                     pass
-                self._proc = None
-                self._base_url = ""
+                self._procs.pop(key, None)
+                self._base_urls.pop(key, None)
+
+            if not repo_path:
+                return "repo_path is required to start an opencode server."
+
+            p = Path(repo_path)
+            if not p.exists() or not p.is_dir():
+                return f"Repository path does not exist or is not a directory: {repo_path}"
 
             try:
                 from config import config as _cfg
@@ -1041,10 +1071,11 @@ class OpenCodeServerBackend(CodingBackend):
             port = _find_free_port(preferred_port)
             cmd = [self._exe, "serve", "--hostname", host, "--port", str(port)]
 
-            logger.info("event=opencode_server_start cmd=%s", cmd)
+            logger.info("event=opencode_server_start cmd=%s cwd=%s", cmd, repo_path)
             try:
                 proc = subprocess.Popen(
                     cmd,
+                    cwd=repo_path,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,   # capture for diagnostics
@@ -1054,7 +1085,7 @@ class OpenCodeServerBackend(CodingBackend):
 
             # Register the proc immediately so it is never orphaned if an
             # exception occurs below (terminate_active_processes will find it).
-            self._proc = proc
+            self._procs[key] = proc
 
             base_url = f"http://{host}:{port}"
 
@@ -1067,7 +1098,7 @@ class OpenCodeServerBackend(CodingBackend):
                         stderr_tail = proc.stderr.read(2000).decode(errors="replace").strip()
                     except Exception:
                         pass
-                    self._proc = None
+                    self._procs.pop(key, None)
                     return (
                         f"opencode server process exited immediately (exit={proc.returncode}). "
                         + (f"stderr: {stderr_tail}" if stderr_tail else "No stderr captured.")
@@ -1086,15 +1117,15 @@ class OpenCodeServerBackend(CodingBackend):
                     stderr_tail = proc.stderr.read(2000).decode(errors="replace").strip()
                 except Exception:
                     pass
-                self._proc = None
+                self._procs.pop(key, None)
                 terminate_many_popen([proc])
                 return (
                     f"opencode server did not start within 15s on {base_url}. "
                     + (f"stderr: {stderr_tail}" if stderr_tail else "No stderr output captured.")
                 )
 
-            self._base_url = base_url
-            logger.info("event=opencode_server_ready url=%s pid=%s", base_url, proc.pid)
+            self._base_urls[key] = base_url
+            logger.info("event=opencode_server_ready url=%s pid=%s cwd=%s", base_url, proc.pid, repo_path)
             return None
 
     # ------------------------------------------------------------------
@@ -1103,21 +1134,23 @@ class OpenCodeServerBackend(CodingBackend):
 
     def _http(
         self,
+        key: str,
         method: str,
         path: str,
         body: Optional[Dict[str, Any]] = None,
         timeout: int = 300,
     ) -> tuple:
-        """Make an HTTP request. Returns (parsed_json, error_str_or_None).
+        """Make an HTTP request against the server for `key`. Returns (parsed_json, error_str_or_None).
 
         `timeout` is the socket idle timeout (seconds with no data received).
         For long-running message POSTs the server streams nothing until done,
         so pass a value >= the expected max generation time.
 
-        Connection errors (ECONNREFUSED, timeout on connect) mark the server
+        Connection errors (ECONNREFUSED, timeout on connect) mark that server
         as gone so _ensure_server will restart it on the next call.
         """
-        url = self._base_url + path
+        base_url = self._base_urls.get(key, "")
+        url = base_url + path
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
@@ -1139,8 +1172,8 @@ class OpenCodeServerBackend(CodingBackend):
         except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
             # Server is gone — clear our reference so _ensure_server restarts it.
             with self._lock:
-                self._proc = None
-                self._base_url = ""
+                self._procs.pop(key, None)
+                self._base_urls.pop(key, None)
             return {}, f"opencode server unreachable ({method} {path}): {e} — will restart on next call"
         except Exception as e:
             return {}, f"Request failed ({method} {path}): {e}"
