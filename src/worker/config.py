@@ -1,0 +1,38 @@
+"""
+Worker daemon configuration — read from environment variables.
+"""
+
+import os
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class WorkerConfig:
+    node_id: str
+    worker_token: str
+    tailscale_ip: str
+    controller_url: str
+    backends: List[str]
+    api_port: int = 9001
+    max_concurrent: int = 2
+
+    @classmethod
+    def from_env(cls) -> "WorkerConfig":
+        node_id = os.environ["WORKER_NODE_ID"]
+        token = os.environ["WORKER_TOKEN"]
+        tailscale_ip = os.environ["WORKER_TAILSCALE_IP"]
+        controller_url = os.environ["CONTROLLER_URL"].rstrip("/")
+        raw_backends = os.environ["WORKER_BACKENDS"]
+        backends = [b.strip() for b in raw_backends.split(",") if b.strip()]
+        api_port = int(os.getenv("WORKER_API_PORT") or 9001)
+        max_concurrent = int(os.getenv("WORKER_MAX_CONCURRENT") or 2)
+        return cls(
+            node_id=node_id,
+            worker_token=token,
+            tailscale_ip=tailscale_ip,
+            controller_url=controller_url,
+            backends=backends,
+            api_port=api_port,
+            max_concurrent=max_concurrent,
+        )

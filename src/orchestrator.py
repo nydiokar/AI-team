@@ -860,7 +860,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 start_event = self._backend_event_name(backend_name, "started")
                 logger.info(f"event={start_event} worker={worker_name} task_id={task.id}")
                 self._emit_event(start_event, task, {"worker": worker_name, "backend": backend_name})
-                
+                self._mesh_enqueue_task(task, backend_name)
+
                 # Process the task
                 result = await self.process_task(task)
                 
@@ -909,13 +910,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                         logger.warning(f"Failed to send Telegram completion notification: {e}")
                 
                 # Write artifacts
+                artifact_path: Optional[str] = None
                 try:
                     self._write_artifacts(task.id, result, task=task)
+                    artifact_path = str(Path(config.system.results_dir) / f"{task.id}.json")
                     logger.info(f"event=artifacts_written task_id={task.id}")
                     self._emit_event("artifacts_written", task)
                 except Exception as e:
                     logger.error(f"event=artifacts_error task_id={task.id} error={e}")
                     self._emit_event("artifacts_error", task, {"error": str(e)})
+                self._mesh_complete_task(task, result, artifact_path)
 
                 # Update session record + write compact summary + per-session event log
                 try:
@@ -1875,6 +1879,341 @@ Generated from user description: {description}
             except Exception:
                 pass
         return {"calls": counts, "total": sum(counts.values()), "bash_commands": bash_commands}
+
+
+    # ------------------------------------------------------------------
+    # Mesh routing
+    # ------------------------------------------------------------------
+
+    async def _run_backend_local(
+        self,
+        task: "Task",
+        session: Optional[Any],
+        backend_name: str,
+    ) -> "TaskResult":
+        """Execute the task on this machine using the local backend pool.
+
+        This is the existing execution path extracted so that
+        `_dispatch_or_run_local` can call it when mesh routing is off or no
+        capable remote node is available.
+        """
+        from src.core.interfaces import ExecutionResult as _ER
+        backend = self._backends.get(backend_name, self._backends["claude"])
+        start = time.time()
+        cancel_ev = self._task_cancel_events.get(task.id)
+
+        if session:
+            session.last_user_message = task.prompt
+            if session.backend_session_id:
+                exec_task = asyncio.create_task(
+                    asyncio.to_thread(backend.resume_session, session, task.prompt)
+                )
+            else:
+                exec_task = asyncio.create_task(
+                    asyncio.to_thread(backend.create_session, session)
+                )
+        else:
+            cwd_override = str((task.metadata or {}).get("cwd") or "").strip()
+            if not cwd_override:
+                cwd_override = str(getattr(config.claude, "base_cwd", "") or "").strip()
+            exec_task = asyncio.create_task(
+                asyncio.to_thread(backend.run_oneoff, cwd_override, task.prompt)
+            )
+
+        self._running_exec_tasks[task.id] = exec_task
+
+        wait_set = {exec_task}
+        cancel_waiter: Optional[asyncio.Task] = None
+        if cancel_ev is not None:
+            cancel_waiter = asyncio.create_task(cancel_ev.wait())
+            wait_set.add(cancel_waiter)
+
+        try:
+            done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            if cancel_waiter and not cancel_waiter.done():
+                cancel_waiter.cancel()
+
+        if exec_task in done:
+            raw = exec_task.result()
+            if isinstance(raw, _ER):
+                if session and raw.backend_session_id:
+                    session.backend_session_id = raw.backend_session_id
+                    self.session_store.save(session)
+                result = TaskResult(
+                    task_id=task.id,
+                    success=raw.success,
+                    output=raw.output,
+                    errors=raw.errors,
+                    files_modified=raw.files_modified,
+                    execution_time=raw.execution_time,
+                    timestamp=datetime.now().isoformat(),
+                    file_changes=getattr(raw, "file_changes", []),
+                    raw_stdout=getattr(raw, "raw_stdout", ""),
+                    raw_stderr=getattr(raw, "raw_stderr", ""),
+                    parsed_output=getattr(raw, "parsed_output", None),
+                    return_code=getattr(raw, "return_code", 0),
+                )
+                setattr(result, "backend_name", backend_name)
+                return result
+            setattr(raw, "backend_name", backend_name)
+            return raw
+
+        # Cancel signal
+        if session:
+            import contextlib
+            with contextlib.suppress(Exception):
+                backend.cancel(session)
+        exec_task.cancel()
+        import contextlib
+        with contextlib.suppress(asyncio.CancelledError):
+            await exec_task
+        result = TaskResult(
+            task_id=task.id,
+            success=False,
+            output="",
+            errors=["cancelled"],
+            files_modified=[],
+            execution_time=time.time() - start,
+            timestamp=datetime.now().isoformat(),
+        )
+        setattr(result, "backend_name", backend_name)
+        return result
+
+    async def _dispatch_to_node(
+        self,
+        task: "Task",
+        session: Optional[Any],
+        node: Any,
+    ) -> "TaskResult":
+        """Enqueue task on the DB as pending (it is already enqueued by _mesh_enqueue_task).
+
+        Then poll the DB until it reaches completed/failed status, up to
+        `mesh.oneoff_queue_timeout_sec` seconds.  The worker daemon claims and
+        executes it independently; we just wait here and return the result.
+
+        The session dict is embedded in the payload by _mesh_enqueue_task so
+        the worker can reconstruct the Session object.
+        """
+        import asyncio as _aio
+        from src.control.db import get_db
+
+        db = get_db()
+        if db is None:
+            return await self._run_backend_local(task, session, self._resolve_task_backend(task))
+
+        timeout_sec = getattr(config.mesh, "oneoff_queue_timeout_sec", 600)
+        deadline = time.time() + timeout_sec
+        poll_interval = 3.0
+
+        while time.time() < deadline:
+            row = db.get_task(task.id)
+            if row:
+                status = row.get("status", "pending")
+                if status == "completed":
+                    result_raw = row.get("result")
+                    try:
+                        r = json.loads(result_raw) if isinstance(result_raw, str) else (result_raw or {})
+                    except Exception:
+                        r = {}
+                    result = TaskResult(
+                        task_id=task.id,
+                        success=r.get("success", True),
+                        output=r.get("output", ""),
+                        errors=r.get("errors") or [],
+                        files_modified=r.get("files_modified") or [],
+                        execution_time=r.get("execution_time", 0.0),
+                        timestamp=r.get("timestamp", datetime.now().isoformat()),
+                        return_code=r.get("return_code", 0),
+                    )
+                    setattr(result, "backend_name", row.get("backend", "claude"))
+                    return result
+
+                if status in ("failed", "failed_node_offline"):
+                    error_msg = row.get("error") or f"Task {status}"
+                    result = TaskResult(
+                        task_id=task.id,
+                        success=False,
+                        output="",
+                        errors=[error_msg],
+                        files_modified=[],
+                        execution_time=0.0,
+                        timestamp=datetime.now().isoformat(),
+                    )
+                    setattr(result, "backend_name", row.get("backend", "claude"))
+                    return result
+
+            # Check for cancellation
+            cancel_ev = self._task_cancel_events.get(task.id)
+            if cancel_ev and cancel_ev.is_set():
+                db.fail_task(task.id, "cancelled by gateway")
+                result = TaskResult(
+                    task_id=task.id,
+                    success=False,
+                    output="",
+                    errors=["cancelled"],
+                    files_modified=[],
+                    execution_time=0.0,
+                    timestamp=datetime.now().isoformat(),
+                )
+                setattr(result, "backend_name", self._resolve_task_backend(task))
+                return result
+
+            await _aio.sleep(poll_interval)
+
+        db.fail_task(task.id, f"dispatch timeout after {timeout_sec}s waiting for worker")
+        result = TaskResult(
+            task_id=task.id,
+            success=False,
+            output="",
+            errors=[f"Dispatch timeout: no worker picked up the task within {timeout_sec}s"],
+            files_modified=[],
+            execution_time=timeout_sec,
+            timestamp=datetime.now().isoformat(),
+        )
+        setattr(result, "backend_name", self._resolve_task_backend(task))
+        return result
+
+    async def _dispatch_or_run_local(
+        self,
+        task: "Task",
+        session: Optional[Any],
+        backend_name: str,
+    ) -> "TaskResult":
+        """Route task to a worker node or fall back to local execution.
+
+        `MESH_ENABLED=false` (default) → always runs locally, zero regression.
+        `MESH_ENABLED=true`            → routes through node registry when nodes
+                                         are available; falls back to local if not.
+        """
+        from src.control.node_registry import get_registry
+
+        if not config.mesh.enabled:
+            return await self._run_backend_local(task, session, backend_name)
+
+        registry = get_registry()
+        if registry.is_empty():
+            return await self._run_backend_local(task, session, backend_name)
+
+        def _routing_failure(msg: str) -> "TaskResult":
+            result = TaskResult(
+                task_id=task.id,
+                success=False,
+                output="",
+                errors=[msg],
+                files_modified=[],
+                execution_time=0.0,
+                timestamp=datetime.now().isoformat(),
+            )
+            setattr(result, "backend_name", backend_name)
+            return result
+
+        if session and session.machine_id:
+            node = registry.get(session.machine_id)
+            if not node or node.status != "online":
+                return _routing_failure(f"Node {session.machine_id!r} is offline; cannot continue session")
+        else:
+            node = registry.pick_capable(backend=backend_name)
+            if not node:
+                return _routing_failure(f"No online node supports backend {backend_name!r}")
+
+        return await self._dispatch_to_node(task, session, node)
+
+    # ------------------------------------------------------------------
+    # Mesh DB shadow-write helpers
+    # ------------------------------------------------------------------
+
+    def _mesh_enqueue_task(self, task: Task, backend_name: str) -> None:
+        """Shadow-write a dispatched task into mesh_tasks.
+
+        IMPORTANT: `process_task` always executes this task locally on this
+        host (mesh routing is not wired into the execution path — see
+        `_dispatch_or_run_local` which is reserved for a future routing
+        rewrite). If we wrote the row as 'pending', any worker daemon polling
+        this same DB could claim and re-execute it — double-running every
+        task. To keep the DB a faithful historical mirror without creating
+        claimable work, we insert the row and immediately self-claim it under
+        this host's identity. `_mesh_complete_task` then finishes the
+        lifecycle normally. This is invisible to `get_pending_tasks` for any
+        node (machine_id filter excludes other nodes; status != 'pending'
+        excludes this one too).
+        """
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return
+            session_id = (task.metadata or {}).get("session_id", "").strip() or None
+            session = self.session_store.get(session_id) if session_id else None
+            machine_id = (session.machine_id or None) if session else None
+            host = socket.gethostname()
+            if session_id and session and not session.backend_session_id:
+                action = "create_session"
+            elif session_id:
+                action = "resume_session"
+            else:
+                action = "run_oneoff"
+            payload = {
+                "prompt": task.prompt,
+                "task_id": task.id,
+                "action": action,
+                "metadata": task.metadata or {},
+            }
+            if session:
+                payload["session"] = {
+                    "session_id": session.session_id,
+                    "backend": session.backend,
+                    "repo_path": session.repo_path,
+                    "backend_session_id": session.backend_session_id,
+                    "machine_id": session.machine_id,
+                    "telegram_chat_id": session.telegram_chat_id,
+                    "telegram_thread_id": session.telegram_thread_id,
+                    "owner_user_id": session.owner_user_id,
+                    "last_user_message": session.last_user_message,
+                }
+            db.enqueue_task(
+                task_id=task.id,
+                session_id=session_id,
+                machine_id=machine_id,
+                backend=backend_name,
+                action=action,
+                payload=payload,
+            )
+            # Self-claim immediately — see docstring. Best-effort; if this
+            # fails the row stays 'pending' and a worker could pick it up,
+            # so log loudly if it doesn't succeed.
+            if not db.claim_task(task.id, host):
+                logger.warning(
+                    "event=mesh_self_claim_failed task_id=%s host=%s — "
+                    "row may be claimable by a remote worker",
+                    task.id, host,
+                )
+        except Exception as e:
+            logger.debug("event=mesh_enqueue_failed task_id=%s err=%s", task.id, e)
+
+    def _mesh_complete_task(self, task: Task, result: "TaskResult", artifact_path: Optional[str]) -> None:
+        """Shadow-write the task result into mesh_tasks."""
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return
+            result_dict = {
+                "success": result.success,
+                "output": result.output[:2000] if result.output else "",  # keep payload small
+                "errors": result.errors or [],
+                "files_modified": result.files_modified or [],
+                "execution_time": result.execution_time,
+                "timestamp": result.timestamp,
+                "return_code": getattr(result, "return_code", 0),
+            }
+            if result.success:
+                db.complete_task(task.id, result_dict, artifact_path)
+            else:
+                error_str = "; ".join(result.errors) if result.errors else "unknown error"
+                db.fail_task(task.id, error_str)
+        except Exception as e:
+            logger.debug("event=mesh_complete_failed task_id=%s err=%s", task.id, e)
 
 
 class _ContextLoader:
