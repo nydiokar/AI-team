@@ -2118,9 +2118,26 @@ Generated from user description: {description}
         timeout_sec = getattr(config.mesh, "oneoff_queue_timeout_sec", 600)
         deadline = time.time() + timeout_sec
         poll_interval = 3.0
+        first_poll = True
 
         while time.time() < deadline:
             row = db.get_task(task.id)
+            if row is None and first_poll:
+                # Row not found on the very first poll — _mesh_enqueue_task
+                # must have failed silently. Fail fast instead of burning the
+                # full timeout (up to 600s) before the user sees an error.
+                result = TaskResult(
+                    task_id=task.id,
+                    success=False,
+                    output="",
+                    errors=["Task row missing from DB — enqueue failed before dispatch; check logs for mesh_enqueue_failed"],
+                    files_modified=[],
+                    execution_time=0.0,
+                    timestamp=datetime.now().isoformat(),
+                )
+                setattr(result, "backend_name", self._resolve_task_backend(task))
+                return result
+            first_poll = False
             if row:
                 status = row.get("status", "pending")
                 if status == "completed":
@@ -2245,17 +2262,20 @@ Generated from user description: {description}
     def _mesh_enqueue_task(self, task: Task, backend_name: str) -> None:
         """Shadow-write a dispatched task into mesh_tasks.
 
-        IMPORTANT: `process_task` always executes this task locally on this
-        host (mesh routing is not wired into the execution path — see
-        `_dispatch_or_run_local` which is reserved for a future routing
-        rewrite). If we wrote the row as 'pending', any worker daemon polling
-        this same DB could claim and re-execute it — double-running every
-        task. To keep the DB a faithful historical mirror without creating
-        claimable work, we insert the row and immediately self-claim it under
-        this host's identity. `_mesh_complete_task` then finishes the
-        lifecycle normally. This is invisible to `get_pending_tasks` for any
-        node (machine_id filter excludes other nodes; status != 'pending'
-        excludes this one too).
+        Two cases:
+
+        Local execution (session.machine_id not set, or MESH_ENABLED=false):
+          Insert + immediately self-claim under this host's identity so no
+          worker daemon can pick up the row as claimable work. The row is a
+          faithful historical mirror; `_mesh_complete_task` finalises it.
+
+        Remote dispatch (session.machine_id set and MESH_ENABLED=true):
+          Insert as 'pending' WITHOUT self-claiming. The row is the actual
+          dispatch signal — the pinned worker polls `get_pending_tasks`, sees
+          it (machine_id filter matches), claims it, executes, and posts the
+          result. `process_task` (via `_dispatch_to_node`) polls the DB for
+          completion. `_mesh_complete_task` later enriches the row with the
+          local artifact_path.
         """
         try:
             from src.control.db import get_db
@@ -2309,7 +2329,16 @@ Generated from user description: {description}
                         task.id, host,
                     )
         except Exception as e:
-            logger.debug("event=mesh_enqueue_failed task_id=%s err=%s", task.id, e)
+            if machine_id:
+                # Remote dispatch depends on this row existing — log loudly so
+                # the operator sees it immediately rather than after a 600s poll timeout.
+                logger.error(
+                    "event=mesh_enqueue_failed task_id=%s machine_id=%s err=%s — "
+                    "worker will never see this task; dispatch will timeout",
+                    task.id, machine_id, e,
+                )
+            else:
+                logger.debug("event=mesh_enqueue_failed task_id=%s err=%s", task.id, e)
 
     def _mesh_complete_task(self, task: Task, result: "TaskResult", artifact_path: Optional[str]) -> None:
         """Shadow-write the task result into mesh_tasks."""

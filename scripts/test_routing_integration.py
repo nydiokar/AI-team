@@ -304,6 +304,40 @@ check("offline node -> session status = error",
       "error" in str(sess_off.status).lower(), f"got {sess_off.status!r}")
 
 # ---------------------------------------------------------------------------
+# 7. Missing row on first poll -> fast-fail, not 600s timeout
+# ---------------------------------------------------------------------------
+async def test_missing_row_fast_fail():
+    fake_session = make_session("sess_missing_row", machine_id="remote-worker-01")
+
+    class StubStore:
+        def get(self, sid): return fake_session
+        def save(self, s): pass
+
+    class MinimalOrch:
+        session_store = StubStore()
+        def _resolve_task_backend(self, t): return "claude"
+
+    orch = MinimalOrch()
+    from src.orchestrator import TaskOrchestrator
+    bound = TaskOrchestrator._dispatch_to_node.__get__(orch, type(orch))
+    # Use a task_id that was never enqueued — row will be missing on first poll
+    task = make_task("task_never_enqueued", session_id="sess_missing_row")
+
+    with patch("src.control.db.get_db", return_value=db):
+        t0 = time.time()
+        result = await bound(task, fake_session, node=None)
+        elapsed = time.time() - t0
+
+    return result, elapsed
+
+result_missing, elapsed_missing = asyncio.run(test_missing_row_fast_fail())
+check("missing row -> failure result", result_missing.success is False)
+check("missing row -> error mentions enqueue failure",
+      any("enqueue" in e.lower() for e in (result_missing.errors or [])))
+check("missing row -> fast-fail (not 600s timeout)", elapsed_missing < 5.0,
+      f"took {elapsed_missing:.1f}s")
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 print()
