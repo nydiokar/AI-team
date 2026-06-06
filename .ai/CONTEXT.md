@@ -198,6 +198,22 @@ Worker env vars: `WORKER_NODE_ID`, `WORKER_TOKEN`, `WORKER_TAILSCALE_IP`, `WORKE
 
 ---
 
+## Backend hooks strategy
+
+We evaluated whether backend lifecycle hooks (Claude Code, Codex CLI, OpenCode) can replace our current agent state management. Full analysis: `docs/BACKEND_HOOKS_STRATEGY.md`.
+
+**Bottom line:** Our external orchestration is correct for gateway-level concerns (Telegram, state persistence, mesh routing). But hooks can replace 3 fragile things the backends currently do via stdout regex parsing, and add security guardrails we currently lack entirely.
+
+**Tasks (when time allows):**
+
+- **A. SessionStart hook for session ID detection** — replace fragile stdout regex parsing of `session_id`/`thread_id` with a deterministic `SessionStart` hook that writes the native session ID to a known file. All 3 backends support this.
+- **B. PreToolUse security guardrails** — block dangerous commands (`rm -rf`, `DROP TABLE`, etc.) via `PreToolUse` exit-code-2 blocking. Claude Code (full), Codex CLI (shell only), OpenCode (plugin).
+- **C. PostToolUse code quality gates** — run linters/tests after every `Write`/`Edit` tool call deterministically, instead of relying on the LLM to remember. Claude Code (full), OpenCode (plugin).
+
+See `docs/BACKEND_HOOKS_STRATEGY.md` for event matrices, implementation order, and what NOT to do.
+
+---
+
 ## Architecture rules
 
 - JSON files are authoritative. DB is a shadow mirror until Phase 9 Step 3 flips the read source.
