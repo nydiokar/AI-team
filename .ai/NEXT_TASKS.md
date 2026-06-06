@@ -68,18 +68,26 @@ enqueues to `mesh_trial.db`). This proves the daemon lifecycle works without tou
 production state or risking duplicate execution. Stop with Ctrl+C — confirm clean
 deregistration in the logs.
 
-**Step B — Wire `_dispatch_or_run_local` into `process_task` ✅ DONE**
+**Step B — Wire `_dispatch_or_run_local` into `process_task` ✅ DONE + LIVE TESTED**
 
 `process_task` now routes to `_process_task_remote` when `MESH_ENABLED=true` and
-`session.machine_id` is set. Zero regression for all other sessions. 24/24 integration
-tests pass. See CONTEXT.md Phase 9 Step B section for full details.
+`session.machine_id` is set. Zero regression for all other sessions. 30/30 integration
+tests pass. Live trial confirmed: Telegram → DB → worker claim → result → Telegram reply,
+all on localhost with trial-node. Slowness is expected (worker polls every 5s).
 
-**Step C — Real two-machine test**
+**Step C — Real two-machine test** ← NEXT
 
-Run the worker on a second device. Point `CONTROLLER_URL` at the main PC's task
-server (Tailscale IP once enrolled, or LAN IP for an initial same-network test).
-Send a Telegram message to a session pinned to that node's `machine_id` and watch
-it route through DB → worker → result → Telegram.
+Run the worker on a second device (VPS or laptop). Point `CONTROLLER_URL` at the
+main PC's task server. Send a Telegram message to a session pinned to that node's
+`machine_id` and watch it route through DB → worker → result → Telegram.
+
+Before starting Step C:
+- Enroll both machines in Tailscale (or use LAN IP for same-network test)
+- Generate a permanent WORKER_TOKEN: `openssl rand -hex 32`
+- Start the task server on the PC: bound to Tailscale IP, port 9002
+- Start the worker on the second machine: CONTROLLER_URL=http://{pc-tailscale-ip}:9002
+- Pin a fresh session to machine_id matching the remote node's WORKER_NODE_ID
+- Restart gateway with MESH_ENABLED=true MESH_DB_PATH=state/mesh.db (production DB now)
 
 ---
 
