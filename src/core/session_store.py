@@ -4,6 +4,10 @@ File-backed session store.
 Layout:
   state/sessions/<session_id>.json       — one file per session
   state/telegram/active_bindings.json    — chat_id (str) -> session_id
+
+Shadow writes: if the mesh DB is initialised (MESH_SHADOW_WRITE=true, the
+default), every save() also calls MeshDB.upsert_session() so the DB stays in
+sync.  The JSON files remain authoritative — the DB is a queryable mirror.
 """
 import json
 import logging
@@ -63,6 +67,17 @@ class SessionStore:
     def save(self, session: Session) -> None:
         session.updated_at = datetime.now().isoformat()
         self._write(session)
+        self._shadow_write(session)
+
+    def _shadow_write(self, session: Session) -> None:
+        """Mirror session into the mesh DB if shadow writes are enabled."""
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None:
+                db.upsert_session(session)
+        except Exception as e:
+            logger.debug("shadow_write_failed session_id=%s err=%s", session.session_id, e)
 
     def list_all(self) -> List[Session]:
         sessions = []

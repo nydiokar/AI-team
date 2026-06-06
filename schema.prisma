@@ -1,0 +1,116 @@
+// Agent Mesh — database schema reference
+//
+// THIS FILE IS DOCUMENTATION ONLY. It is not executed.
+// The live schema is managed by src/control/db.py (_DDL + _get_migrations).
+// To add a column: edit db.py, append a migration tuple, bump _CURRENT_VERSION.
+//
+// Prisma DSL is used here purely for readability — no Node/npx dependency.
+// If a TypeScript dashboard or API is ever added alongside this Python backend,
+// this file becomes the actual Prisma schema with zero changes needed.
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:state/mesh.db"
+}
+
+// ---------------------------------------------------------------------------
+// Sessions — mirrors state/sessions/*.json
+// Source of truth: JSON files. DB is a queryable shadow copy.
+// Kept in sync by SessionStore.save() → _shadow_write() → MeshDB.upsert_session()
+// ---------------------------------------------------------------------------
+model Session {
+  sessionId         String   @id @map("session_id")
+  backend           String                          // claude | codex | opencode | opencode-server
+  repoPath          String   @map("repo_path")
+  status            String                          // idle | busy | awaiting_input | error | cancelled | closed
+  createdAt         String   @map("created_at")
+  updatedAt         String   @map("updated_at")
+  machineId         String   @default("") @map("machine_id")
+  backendSessionId  String   @default("") @map("backend_session_id")
+  lastTaskId        String   @default("") @map("last_task_id")
+  lastArtifactPath  String   @default("") @map("last_artifact_path")
+  lastSummary       String   @default("") @map("last_summary")
+  lastUserMessage   String   @default("") @map("last_user_message")
+  lastResultSummary String   @default("") @map("last_result_summary")
+  lastFilesModified String   @default("[]") @map("last_files_modified")  // JSON array
+  telegramChatId    Int?     @map("telegram_chat_id")
+  telegramThreadId  Int?     @map("telegram_thread_id")
+  ownerUserId       Int?     @map("owner_user_id")
+  taskHistory       String   @default("[]") @map("task_history")          // JSON array
+
+  tasks             MeshTask[]
+  events            TaskEvent[]
+
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Mesh tasks — dispatch queue + result store
+// One row per task turn. Workers poll pending rows, claim them, post results.
+// Also used as a historical record of every task ever run (seeded from results/).
+// ---------------------------------------------------------------------------
+model MeshTask {
+  id            String   @id
+  sessionId     String?  @map("session_id")         // NULL for run_oneoff
+  machineId     String?  @map("machine_id")          // NULL = any node; set on dispatch
+  backend       String
+  action        String                               // create_session | resume_session | run_oneoff | cancel | compact_session
+  payload       String                               // JSON: {session?, prompt, task_id, action, metadata?}
+  status        String   @default("pending")         // pending | claimed | completed | failed | failed_node_offline
+  claimedBy     String?  @map("claimed_by")          // node_id
+  claimedAt     String?  @map("claimed_at")
+  completedAt   String?  @map("completed_at")
+  result        String?                              // JSON: ExecutionResult subset on completion
+  error         String?                              // plain text error on failure
+  artifactPath  String?  @map("artifact_path")       // pointer to results/{task_id}.json
+  parentTaskId  String?  @map("parent_task_id")      // dependency chain (agent-to-agent flows)
+  createdAt     String   @map("created_at")
+  updatedAt     String   @map("updated_at")
+
+  session       Session? @relation(fields: [sessionId], references: [sessionId], onDelete: SetNull)
+
+  @@index([status, machineId], name: "idx_mesh_tasks_status_machine")
+  @@index([sessionId],         name: "idx_mesh_tasks_session")
+  @@index([createdAt],         name: "idx_mesh_tasks_created")
+  @@map("mesh_tasks")
+}
+
+// ---------------------------------------------------------------------------
+// Task events — append-only log per session
+// Mirrors logs/session_events/{session_id}.log (NDJSON).
+// Seeded from log files by scripts/seed_db_from_json.py.
+// Written live by orchestrator._append_session_event() (TODO: wire in Phase 3).
+// ---------------------------------------------------------------------------
+model TaskEvent {
+  id            Int      @id @default(autoincrement())
+  sessionId     String   @map("session_id")
+  taskId        String   @map("task_id")
+  timestamp     String
+  success       Int                                  // 0 | 1  (SQLite has no bool)
+  executionTime Float?   @map("execution_time")
+  error         String   @default("")
+
+  session       Session  @relation(fields: [sessionId], references: [sessionId])
+
+  @@index([sessionId], name: "idx_task_events_session")
+  @@map("task_events")
+}
+
+// ---------------------------------------------------------------------------
+// Nodes — registered worker nodes
+// Ephemeral: rebuilt from heartbeats on VPS restart.
+// Persisted here so /nodes Telegram command works after restart.
+// ---------------------------------------------------------------------------
+model Node {
+  nodeId        String   @id @map("node_id")
+  tailscaleIp   String   @default("") @map("tailscale_ip")
+  apiPort       Int      @default(9001) @map("api_port")
+  backends      String   @default("[]")              // JSON array of backend names
+  maxConcurrent Int      @default(2) @map("max_concurrent")
+  status        String   @default("online")          // online | offline
+  lastHeartbeat String   @map("last_heartbeat")
+  registeredAt  String   @map("registered_at")
+  updatedAt     String   @map("updated_at")
+
+  @@map("nodes")
+}

@@ -1,207 +1,177 @@
-# AI-Team Gateway - Project Context
+# AI-Team Gateway — Project Context
 
-**Last Updated:** 2026-05-29
+**Last Updated:** 2026-06-05
 **Branch:** `main`
-**Status:** Backend subprocess execution replaced with inactivity-based streaming model; wall-clock task timeout disabled by default; periodic heartbeats added for long-running tasks
+**Status:** Phase 9 Steps 1–3 complete — task server, worker daemon, and orchestrator mesh routing built; ready for local end-to-end test
 
 ---
 
 ## What this project is
 
-A Telegram-controlled remote gateway for local coding agents such as Claude Code and Codex.
-
-It is not a general autonomous agent framework.
+A Telegram-controlled remote gateway for local coding agents (Claude Code, Codex, OpenCode CLI, OpenCode server).
 
 Primary runtime flow:
 - open a session from Telegram
 - route follow-up messages to the active session
-- resume the native backend session on demand
-- keep gateway state file-backed, inspectable, and bounded
+- resume the native backend session on each turn
+- keep state file-backed and inspectable
 
-Compatibility flow still supported:
-- drop `.task.md` files into `tasks/`
-- let the external watcher ingest them
-- keep artifacts/summaries for auditability
+Long-term direction: move the control plane to a VPS, worker nodes (PC, laptop, etc.) pull tasks from a central task DB and execute them locally. Spec: `docs/AGENT_MESH_SPEC.md`.
 
-Canonical intent lives in `.ai/context/production_vision.md`.
+Canonical product intent: `.ai/context/production_vision.md`.
 
 ---
 
-## Vision vs Current State
+## Architecture — current state
 
-### Phase 1 - Session foundation
-- Done.
-- Session model exists in `state/sessions/<session_id>.json`.
-- File-backed session CRUD exists in `src/core/session_store.py`.
-- Active Telegram bindings exist in `state/telegram/active_bindings.json`.
+```
+[Telegram / Phone]
+      │
+      ▼
+[Gateway — runs on main PC via PM2]
+  ├── src/telegram/interface.py     Telegram command surface
+  ├── src/orchestrator.py           Task queue, workers, session routing
+  ├── src/core/session_store.py     File-backed session CRUD + shadow-write to DB
+  ├── src/control/db.py             SQLite mesh DB (WAL, versioned migrations)
+  └── src/backends/                 claude_code, codex, opencode, opencode-server
+```
 
-### Phase 2 - Backend session support
-- Done.
-- Claude backend uses native `--resume` in `src/backends/claude_code.py`.
-- Codex backend rewritten against real CLI contract (`codex exec` / `codex exec resume`) in `src/backends/codex.py`.
-- Session ID is the `thread_id` from the `thread.started` NDJSON event.
-- `backend_session_id` is stored in the session record and used for resume.
-
-### Phase 3 - Session execution flow
-- Done for the live runtime path.
-- Telegram plain text and `/task` queue runtime tasks directly.
-- Active sessions no longer create `.task.md` wrappers to execute a turn.
-- One-off non-session execution also uses the native backend path directly.
-- Artifacts are still written for every completed task/session turn.
-
-### Phase 4 - Observability
-- Mostly done.
-- Per-session event logs exist in `logs/session_events/<session_id>.log`.
-- System-wide event log exists in `logs/events.ndjson`.
-- Session summaries exist in `state/summaries/<session_id>.md`.
-- Result artifacts exist in `results/<task_id>.json`.
-- Path resolver exists in `src/core/path_resolver.py`.
-
-### Phase 5 - Compatibility and cleanup
-- Mostly done.
-- External `.task.md` watcher ingestion still exists as a compatibility lane.
-- `src/bridges/claude_bridge.py` still exists in the repo as legacy code, but it is no longer on the primary Telegram/runtime execution path.
-- Old bridge-era tests still need pruning or isolation.
-- Telegram no longer advertises task-runner-only commands, and the registered public command set is now session-first.
-- Claude dead-session recovery now recreates the backend conversation inside the same gateway session instead of poisoning session state.
-- Git commands now target the active session repo by default instead of requiring opaque task IDs.
-- Telegram plain-text buffering now merges split messages into a single queued instruction with a short debounce window.
-- Session switching is now available through inline Telegram buttons, not just manual ID copy/paste.
-- Session lists, switch/restore/close replies, and session status now surface the last material result before the last prompt so closed or inactive sessions are easier to identify.
-- Session task acknowledgements and completion replies now include searchable Telegram refs (`#s_<session_id>` and `#t_<task_id>`) so interleaved session messages can be correlated.
-- Session task history now stores recent user messages, result summaries, and changed-file lists for richer future summaries while keeping history bounded.
-- Gateway/process lifecycle is now guarded by single-instance takeover logic instead of best-effort manual restarts.
-
-### Phase 6 - Operations and persistence
-- Done for the current deployment model.
-- PM2 supervision config exists in `ecosystem.config.js`.
-- Operator runbook exists in `docs/OPERATIONS_PM2.md`.
-- `python main.py health [--json]` exists for local/supervisor health checks.
-- Gateway startup now safely replaces an older local gateway process instead of spawning duplicate Telegram pollers.
-- Backend child process termination is now managed through shared cross-platform process utilities.
+State layout:
+```
+state/sessions/<session_id>.json      authoritative session records
+state/telegram/active_bindings.json   chat_id → session_id
+state/summaries/<session_id>.md       compact per-session summary
+state/mesh.db                         SQLite mirror (shadow copy of all of the above)
+results/<task_id>.json                full task artifact (stdout, parsed output, diffs)
+results/sessions/<session_id>/        per-session ordered artifact history
+logs/session_events/<session_id>.log  append-only NDJSON event trail
+logs/events.ndjson                    system-wide event log
+```
 
 ---
 
-## Recent changes (2026-05-29)
+## Phase completion status
 
-### Inactivity-based subprocess execution (replaces wall-clock timeout)
+### Phase 1 — Session foundation ✅
+File-backed session CRUD, Telegram bindings, session picker, `#s_` / `#t_` refs.
 
-Both `ClaudeCodeBackend._run()` and `CodexBackend._run()` now stream stdout/stderr via reader threads feeding `queue.Queue`, instead of blocking on `communicate()`. The main thread drains stdout with `queue.get(timeout=inactivity_sec)` — if no output arrives for that window, the process is considered hung and killed. If Claude is actively working it keeps streaming NDJSON and the timer keeps resetting, so a legitimate 2-hour task will complete naturally.
+### Phase 2 — Backend session support ✅
+Claude, Codex, OpenCode CLI, OpenCode server — all with native create/resume.
+`backend_session_id` persisted and used for resume on every turn.
 
-Config:
-- `GATEWAY_INACTIVITY_TIMEOUT_SEC` — how long stdout silence triggers a kill (default 600s / 10 min)
-- `GATEWAY_TASK_TIMEOUT_SEC` — wall-clock absolute limit (default 0 = disabled)
-- `GATEWAY_HEARTBEAT_INTERVAL_SEC` — Telegram "still working" ping interval (default 300s / 5 min)
+### Phase 3 — Session execution flow ✅
+Telegram plain text and `/task` queue tasks directly. Artifacts written for every turn.
 
-Self-review bugs fixed during implementation:
-- Used explicit `killed_for_inactivity` flag instead of ambiguous `returncode == -1` check
-- `proc.wait()` TimeoutExpired now caught so a resisting process doesn't crash the call
-- Stderr is always fully drained after an inactivity kill so diagnostic output is preserved in artifacts
+### Phase 4 — Observability ✅
+Per-session event logs, system event log, session summaries, result artifacts, path resolver.
 
----
+### Phase 5 — Compatibility and cleanup ✅
+`.task.md` watcher still supported as compatibility lane. Legacy bridge code present but off the primary path. Telegram session commands, inline pickers, buffered message debounce.
 
-## Production gaps that remain
+### Phase 6 — Operations and persistence ✅
+PM2 supervision, health command, single-instance takeover, cross-platform process utilities.
 
-### 1. Real Codex end-to-end validation
+### Phase 7 — OpenCode backends ✅
+`OpenCodeBackend` (CLI, `opencode run`) and `OpenCodeServerBackend` (HTTP, `opencode serve`).
+Session picker exposes both. Auto-commit after each run. Inactivity timeout, truncation detection.
+Documented in `docs/OPENCODE_SERVER_CONTEXT.md`.
 
-Codex backend is now correct at the code level. Still requires a live two-turn Telegram test:
-1. `/session_new codex <repo_path>`
-2. send first message — verify `backend_session_id` (thread_id) is captured in `state/sessions/<id>.json`
-3. send second message — verify Codex resumes the same thread
+### Phase 8 — Agent mesh DB foundation ✅
+**What was built:**
+- `src/control/__init__.py` — package marker
+- `src/control/db.py` — `MeshDB` class: SQLite WAL, thread-safe write lock, per-thread connection cache, versioned migration runner, full public API
+- `schema.prisma` — documentation-only schema in Prisma DSL (no Node dependency; reference only)
+- `config/settings.py` — `MeshConfig` dataclass added (`MESH_ENABLED`, `MESH_DB_PATH`, `WORKER_TOKEN`, `MESH_SHADOW_WRITE`, etc.)
+- `src/core/session_store.py` — `_shadow_write()` hook: every `save()` mirrors to DB silently
+- `src/orchestrator.py` — `_mesh_enqueue_task()` and `_mesh_complete_task()` helpers wired into `_task_worker`
+- `scripts/seed_db_from_json.py` — one-shot backfill; already run: **149 sessions, 794 tasks, 799 events** seeded
+- `state/mesh.db` — live SQLite DB, verified shadow-writing on every session save and task completion
 
-### 2. Workspace scope confirmation
+**DB tables:**
+| Table | Purpose |
+|-------|---------|
+| `sessions` | mirror of `state/sessions/*.json` |
+| `mesh_tasks` | dispatch queue + historical task record |
+| `task_events` | append-only event log per session |
+| `nodes` | registered worker nodes (ephemeral, rebuilt from heartbeats) |
 
-`CLAUDE_BASE_CWD` and `CLAUDE_ALLOWED_ROOT` must be explicitly confirmed in `.env`.
+**Key design decisions:**
+- JSON files remain authoritative. DB is a queryable shadow copy.
+- `MESH_SHADOW_WRITE=true` by default — DB is always warm.
+- `MESH_ENABLED=false` by default — no routing change to the running gateway.
+- Migrations: append `(version, "ALTER TABLE ...")` to `_get_migrations()` in `db.py`. Auto-applied on startup.
+- No ORM. Raw `sqlite3` (stdlib). Simple schema, no maintenance burden. Postgres swap = change connection factory + RETURNING syntax.
 
-### 3. Telegram command polish
-
-- Add prettier, more compact Telegram replies for session status, git status, and errors.
-- Decide whether `/commit_all` should remain public.
-- Decide whether to keep compatibility-only handler methods for `/run`, `/say`, `/progress`, and `/cancel` in code at all now that they are no longer registered.
-- Continue tuning how much summary detail belongs in compact session pickers versus `/session_status`.
-
-### 4. Legacy code removal decision
-
-- Decide whether external `.task.md` ingestion stays supported long-term.
-- If not, delete watcher/bridge-era code and associated tests.
-- If yes, keep it clearly labeled as compatibility-only, not part of the main runtime path.
-
-### 5. Deployment hardening
-
-- Pin Claude Code and Codex CLI versions or add startup smoke checks so CLI contract shifts are caught immediately (Codex is currently at v0.115.0).
-- Add one real backend smoke path per supported backend.
-- Confirm operator-facing failure messages stay backend-specific and actionable.
-- Validate the full PM2 lifecycle on both Windows and Linux: start, Telegram traffic, restart, boot persistence, and recovery after crash.
-
----
-
-## What exists and works
-
-| Component | Location | Notes |
-|:----------|:---------|:------|
-| Orchestrator | `src/orchestrator.py` | Direct runtime queue, worker pool, retries, artifact persistence |
-| Telegram interface | `src/telegram/interface.py` | Session commands and direct runtime submission |
-| Session store | `src/core/session_store.py` | File-backed session CRUD and Telegram bindings |
-| Path resolver | `src/core/path_resolver.py` | Safe path resolution and suggestions |
-| Process utilities | `src/core/process_utils.py` | Cross-platform PID checks, takeover matching, and process-tree termination |
-| Claude backend | `src/backends/claude_code.py` | Native session create/resume and one-off execution |
-| Codex backend | `src/backends/codex.py` | Native session resume and one-off execution |
-| Llama helper | `src/bridges/llama_mediator.py` | Optional helper only, not a primary runtime dependency |
-| Compatibility watcher | `src/core/file_watcher.py` | Optional external `.task.md` ingestion lane |
-| Legacy Claude bridge | `src/bridges/claude_bridge.py` | No longer on the primary runtime path |
+**Verified live:** session `f6e22e5df521`, task `task_e2f65d7d` — both written to DB automatically after gateway restart.
 
 ---
 
-## Command surface
+### Phase 9 — Agent mesh worker + task server ✅  ← completed + adversarially reviewed + fixed this session
 
-### Session commands
-- `/session_new <backend> <path>`
-- `/session_list [all]`
-- `/session_use <session_id>` or `/session_use` with Telegram picker buttons
-- `/session_status [session_id]`
-- `/session_dirs [path]`
-- `/session_cancel [session_id]`
-- `/session_close [session_id]`
+**What was built:**
+- `src/control/task_server.py` — FastAPI app, 9 endpoints, Bearer auth, MeshDB-backed
+- `src/control/node_registry.py` — in-memory NodeRegistry, heartbeat expiry, offline task failover, DB persistence
+- `src/worker/__init__.py`, `src/worker/config.py`, `src/worker/agent.py` — full worker daemon (register, poll+backoff, nudge listener, heartbeat, SIGTERM drain)
+- `src/orchestrator.py` — `_run_backend_local`, `_dispatch_to_node`, `_dispatch_or_run_local` added
+- `ecosystem.config.js` — `ai-team-task-server` and `ai-team-worker` PM2 entries (disabled by default)
+- `scripts/test_mesh_local.py` — in-process FastAPI TestClient smoke test (18 checks, all passing)
 
-### Execution commands
-- plain text -> continue active session if one exists
-- `/task <instruction>` -> one-off task only
-- `/status`
+**Adversarial review found 14 issues; the following were fixed:**
+1. **Double-execution bug (critical)** — `_mesh_enqueue_task` wrote every task as `pending`, claimable by any worker, while `process_task` *also* always ran it locally. Fixed: the gateway now self-claims its own shadow-written rows immediately after insert (`db.claim_task(task_id, hostname)`), making them invisible to `get_pending_tasks` for every node including itself. DB stays a faithful historical mirror with zero claimable duplicate work. `_dispatch_or_run_local` remains defined but is intentionally NOT wired into `process_task` yet — that's a separate, larger rewrite (would need to absorb retry/timeout/heartbeat machinery into the remote path) reserved for when real multi-node routing is rolled out.
+2. **Session payload missing (critical)** — `_mesh_enqueue_task` now embeds the full session dict in the payload so `_make_session_from_payload` on a worker can reconstruct it.
+3. **Worker drain no-op (critical)** — `asyncio.create_task` results are now stored in `self._active` with a done-callback cleanup, so SIGTERM drain actually waits up to 30s.
+4. **No claim verification on result submission (critical)** — `submit_result` now checks `payload.node_id == task.claimed_by` and returns 403 on mismatch.
+5. **Blocking DB scan in async expiry loop (high)** — `_fail_offline_tasks` now runs via `asyncio.to_thread`.
+6. **Worker never re-registers after server restart (high)** — heartbeat 404 now triggers automatic re-registration.
+7. **`RuntimeError` would kill worker loop (high)** — routing failures now return structured failed `TaskResult` instead of raising.
+8. **Nudge listener accepted any TCP probe as a nudge (high)** — now validates `POST /nudge` prefix before setting the poll event.
+9. **`_fire_nudge` built invalid URL for empty `tailscale_ip`** — now skips with a debug log.
+10. **Wrong `action` label for new sessions** — `_mesh_enqueue_task` now correctly labels `create_session` vs `resume_session`.
 
-Runtime note:
-- Telegram/runtime commands now queue tasks directly in memory.
-- `.task.md` files are compatibility input, not the primary runtime entrypoint.
-- Plain Telegram messages are buffered briefly so split multi-part thoughts become one task instead of multiple accidental tasks.
+**Pre-existing bug found and fixed (not introduced this session):**
+- `MeshDB._run_migrations` called `executescript()` even for the empty baseline marker `(1, "")`. `executescript()` issues an implicit `COMMIT`, killing the `BEGIN IMMEDIATE` transaction and causing `cannot commit - no transaction is active` on every **fresh** DB (the live `state/mesh.db` was already at version 1 so this was invisible). Fixed by skipping `executescript` for empty SQL and using plain `execute()` per-statement for real migrations.
+- Found and cleaned up 2 orphaned `pending` rows in the live `mesh_tasks` table (`task_61e2816b`, `task_7259a339`) — both were cancelled/interrupted mid-run before Phase 8's `_mesh_complete_task` could finalize them. Marked `failed` so no worker could claim and re-execute them.
 
-### Operations
-- `python main.py health [--json]`
-- `pm2 start ecosystem.config.js --only ai-team-gateway --update-env`
-- `pm2 restart ai-team-gateway --update-env`
-- `pm2 logs ai-team-gateway`
-- `pm2 save`
-- `pm2 startup`
+**Verified:** `python scripts/test_mesh_local.py` — 18/18 checks pass (register, heartbeat, 404-unknown-node, enqueue, poll, claim, double-claim rejection, claim-mismatch result rejection, completion, deregistration).
 
----
-
-## Recommended next moves
-
-1. Validate PM2-managed operation end-to-end on both Windows and Linux, including reboot persistence.
-2. Validate Codex sessions end-to-end with the same rigor already applied to Claude.
-3. Polish Telegram replies so the command surface feels intentionally productized rather than debug-oriented.
-4. Pin or smoke-test backend CLI versions at startup to catch contract regressions early.
-5. Decide whether the compatibility watcher remains a supported feature and prune legacy code accordingly.
+**Status:** `MESH_ENABLED=false` (default) → gateway behavior is provably unchanged; shadow-write is safe and self-contained. Ready for a controlled `MESH_ENABLED=true` trial — see NEXT_TASKS.md for the recommended rollout sequence.
 
 ---
 
-## Architecture rules
+## Phase 9 architecture — now built
 
-- Session continuity uses native backend resume, not terminal persistence.
-- External supervision should own restart behavior; the Python app should remain a single foreground worker.
-- State stays file-backed.
-- Artifacts remain mandatory for audit/compliance purposes.
-- Ollama remains optional and helper-only.
-- Session ownership and path scope must stay explicit.
-- No uncontrolled autonomous behavior.
+### Step 1 — Task server (VPS-side) `src/control/task_server.py` ✅
+FastAPI app bound to `{MESH_TAILSCALE_IP}:9002`. Endpoints:
+- `POST /nodes/register` — worker startup
+- `POST /nodes/heartbeat` — keepalive every 30s
+- `POST /nodes/deregister` — clean shutdown
+- `GET /nodes` — list nodes
+- `GET /tasks/pending` — worker poll (filter by `node_id`, `backends`)
+- `POST /tasks/{id}/claim` — optimistic lock claim
+- `POST /tasks/{id}/result` — worker posts ExecutionResult
+- `POST /nodes/{id}/nudge` — VPS pushes nudge to worker (internal)
+
+All endpoints require `Authorization: Bearer {WORKER_TOKEN}`.
+
+### Step 2 — Worker daemon `src/worker/agent.py`
+Persistent daemon, one per participating machine, managed by PM2.
+- Registers with VPS on startup
+- Polls `GET /tasks/pending` with backoff (5s → 30s on empty)
+- Claims task, instantiates local backend, executes, posts result
+- Sends heartbeats every 30s concurrently
+- On SIGTERM: deregisters, drains active tasks (up to 30s)
+
+### Step 3 — Orchestrator mesh routing `_dispatch_or_run_local`
+Add to `src/orchestrator.py`. `MESH_ENABLED=false` = local execution as today. `MESH_ENABLED=true` = route through node registry. Zero regression.
+
+### Step 4 — `src/worker/config.py`
+Worker env vars: `WORKER_NODE_ID`, `WORKER_TOKEN`, `WORKER_TAILSCALE_IP`, `WORKER_API_PORT`, `WORKER_MAX_CONCURRENT`, `CONTROLLER_URL`, `WORKER_BACKENDS`.
+
+### Prerequisite (your action, not code)
+- Confirm both VPS and main PC are enrolled in Tailscale
+- Record both Tailscale IPs
+- Generate `WORKER_TOKEN`: `openssl rand -hex 32`
+- Set Tailscale ACL: VPS port 9002 reachable from PC; PC port 9001 reachable from VPS
 
 ---
 
@@ -209,16 +179,31 @@ Runtime note:
 
 | Path | Purpose |
 |:-----|:--------|
-| `src/orchestrator.py` | Main runtime orchestration and compatibility ingestion |
+| `src/orchestrator.py` | Main runtime, task queue, workers, session routing, mesh shadow-write hooks |
 | `src/telegram/interface.py` | Telegram command surface |
-| `src/core/path_resolver.py` | Shared path validation and suggestions |
-| `src/core/session_store.py` | File-backed session store |
-| `src/core/process_utils.py` | Cross-platform process lifecycle helpers |
-| `src/core/interfaces.py` | Session/task/backend dataclasses and interfaces |
-| `src/backends/claude_code.py` | Claude native session create/resume/one-off |
-| `src/backends/codex.py` | Codex native session create/resume/one-off |
-| `src/core/file_watcher.py` | Compatibility file watcher |
-| `src/bridges/claude_bridge.py` | Legacy compatibility code |
-| `main.py` | CLI entrypoints and status/doctor display |
-| `ecosystem.config.js` | PM2 single-instance supervisor config |
+| `src/core/session_store.py` | File-backed session store + DB shadow-write |
+| `src/control/db.py` | SQLite mesh DB — the canonical database layer |
+| `src/control/__init__.py` | Package marker |
+| `schema.prisma` | Schema documentation in Prisma DSL (read-only reference) |
+| `scripts/seed_db_from_json.py` | Backfill historical JSON data into DB |
+| `config/settings.py` | All config including new MeshConfig |
+| `src/core/interfaces.py` | Session/Task/TaskResult dataclasses |
+| `src/backends/claude_code.py` | Claude native backend |
+| `src/backends/codex.py` | Codex native backend |
+| `src/backends/opencode.py` | OpenCode CLI + server backends |
+| `docs/AGENT_MESH_SPEC.md` | Full mesh architecture spec |
+| `docs/OPENCODE_SERVER_CONTEXT.md` | OpenCode server backend context |
+| `ecosystem.config.js` | PM2 supervisor config |
 | `docs/OPERATIONS_PM2.md` | PM2 operator runbook |
+
+---
+
+## Architecture rules
+
+- JSON files are authoritative. DB is a shadow mirror until Phase 9 Step 3 flips the read source.
+- `MESH_ENABLED=false` by default. Gateway behaves identically to pre-mesh with it off.
+- Session affinity is a hard correctness requirement, not a preference. A session tied to a machine must execute on that machine.
+- Backend session state (`backend_session_id`) is machine-local and cannot be migrated across nodes (except OpenCode server with shared DB — future).
+- No uncontrolled autonomous behavior.
+- Ollama remains optional and helper-only.
+- Artifacts remain mandatory for audit purposes.

@@ -1,173 +1,77 @@
-You are modifying an existing Python codebase that currently acts as a Telegram-driven task runner around a local coding agent.
+# Handoff prompt — next session (Phase 9 Steps 1–3 complete)
 
-Your job is to evolve it into a session-aware remote coding gateway.
+## What this project is
 
-Product goal
+A Telegram-controlled gateway for local coding agents (Claude Code, Codex, OpenCode).
+The user sends messages from their phone, tasks execute on their PC, results come back to Telegram.
 
-This system is not meant to become a full autonomous agent framework.
+Long-term direction: move the control plane to a VPS, with worker nodes (PC, laptop, etc.)
+pulling tasks from a central SQLite task DB. Full spec: `docs/AGENT_MESH_SPEC.md`.
 
-It should become a safe Telegram-controlled gateway for local coding agents such as Claude Code and Codex.
+Read `.ai/CONTEXT.md` for full current state before doing anything.
 
-The system should let a user:
+---
 
-open a session against a specific repo/path/backend
-continue that same session later from Telegram
-route new Telegram messages into the correct active session
-use the backend's native resume/continue mechanism
-inspect session state
-cancel or close sessions
-keep all important state explicit and file-backed
-Important architectural rule
+## What was just completed (Phase 9 Steps 1–3)
 
-Do not build the main session model around keeping a terminal open forever and injecting messages into stdin.
+All Phase 9 Steps 1–3 are complete. The following files were built:
 
-Use the backend's native continuation/resume/session functionality as the primary mechanism.
+- `src/control/task_server.py` — FastAPI app, all 9 endpoints, Bearer auth, MeshDB-backed
+- `src/control/node_registry.py` — in-memory NodeRegistry with heartbeat expiry, offline task failover, DB persistence
+- `src/worker/__init__.py`, `src/worker/config.py`, `src/worker/agent.py` — full worker daemon
+- `src/orchestrator.py` — `_run_backend_local`, `_dispatch_to_node`, `_dispatch_or_run_local` added
+- `ecosystem.config.js` — PM2 entries for task server and worker (disabled by default)
 
-The correct architecture is:
+`MESH_ENABLED=false` (default) → gateway unchanged.
 
-Telegram conversation -> gateway session
-gateway session -> backend type + backend session id + cwd/repo + compact summary
-on each follow-up message:
-resolve active session
-resume native backend session
-execute the new turn
-persist results/artifacts/summary
+---
 
-A live terminal mode may be added later as an optional feature, but not as the backbone.
+## What to do next (Phase 9 Step 4 — local end-to-end test)
 
-What the current repo already has
+Test the full cycle on a single machine (no Tailscale needed):
 
-The current repo already includes:
+```bash
+# 1. Generate and set WORKER_TOKEN in .env
+openssl rand -hex 32
 
-orchestrator/task runner logic
-Telegram interface
-Claude bridge
-file-backed state/artifact patterns
-cancellation/status patterns
+# 2. Start task server
+uvicorn src.control.task_server:app --host 127.0.0.1 --port 9002
 
-Preserve those strengths.
+# 3. Start worker daemon (separate terminal)
+WORKER_NODE_ID=main-pc WORKER_TOKEN=<token> WORKER_TAILSCALE_IP=127.0.0.1 \
+CONTROLLER_URL=http://127.0.0.1:9002 WORKER_BACKENDS=claude,opencode \
+python -m src.worker.agent
 
-What to implement
-1. Add a first-class Session model
+# 4. Set MESH_ENABLED=true in .env, restart gateway
+pm2 restart ai-team-gateway --update-env
 
-Create a persistent session model containing at least:
+# 5. Send a Telegram message — should route through DB → worker → result
+```
 
-session_id
-backend
-backend_session_id
-machine_id
-cwd/repo_path
-status
-created_at
-updated_at
-last_task_id
-last_artifact_path
-last_summary
-telegram bindings if needed
+After local testing passes: proceed to VPS migration (see AGENT_MESH_SPEC.md Phase 4).
 
-Persist sessions in files first, not a database.
+---
 
-Suggested path:
+## Important constraints
 
-state/sessions/<session_id>.json
-2. Separate sessions from tasks
+- **Do not require Tailscale or VPS for any of this.** Tasks 1-3 are fully testable
+  on a single machine with `WORKER_TAILSCALE_IP=127.0.0.1` and `CONTROLLER_URL=http://127.0.0.1:9002`.
+- **Do not change the gateway's current behaviour.** `MESH_ENABLED=false` must leave
+  everything working exactly as it does today.
+- **Do not add new DB tables or change the schema** unless strictly required.
+  All needed methods already exist in `src/control/db.py`.
+- **WSL is available** on this machine if a Linux environment is needed for testing FastAPI.
+- The gateway runs under PM2 as `ai-team-gateway`. Restart with:
+  `pm2 restart ai-team-gateway --update-env`
 
-Refactor the system so tasks/messages occur within sessions.
+---
 
-The system should no longer treat every Telegram input as a fresh unrelated execution.
+## Key files to read before starting
 
-3. Add Telegram session management
-
-Implement commands or equivalents for:
-
-create session
-list sessions
-use/select session
-inspect session
-close session
-cancel current session
-send follow-up message to active session
-
-Also add active session binding per Telegram chat/thread/user.
-
-4. Add backend abstraction
-
-Create a backend interface that supports:
-
-create_session
-resume_session
-run_oneoff
-cancel
-close
-summarize
-
-Implement at least:
-
-Claude backend
-Codex backend
-5. Use native backend resume
-
-The backend implementations must use the native resume/continue/session commands provided by Claude Code / Codex rather than inventing custom continuity through raw terminal persistence.
-
-6. Add compact session summaries
-
-After each completed turn, update a compact session summary containing:
-
-objective
-recent instructions
-files changed
-blockers
-next step
-artifact references
-7. Add observability
-
-Make it easy to inspect:
-
-current status
-backend
-backend session id
-cwd/repo
-last activity
-last error
-last changed files
-artifacts
-latest summary
-8. Preserve safety constraints
-
-Do not weaken existing execution boundaries.
-
-Retain or improve:
-
-allowed tools restrictions
-cwd/path restrictions
-allowlists
-cancellation
-rate limiting
-explicit operator control
-Deliverables
-
-Produce:
-
-Code changes implementing the session model
-Refactor of Telegram routing to use active sessions
-Backend abstraction and at least Claude/Codex backend support
-File-backed session persistence
-Compact session summary updates
-Clear README/docs section describing:
-session model
-command flow
-storage layout
-backend resume strategy
-Constraints
-Keep the implementation practical and minimal
-Prefer file-backed explicit state over heavy infrastructure
-Do not introduce unnecessary framework complexity
-Do not turn this into a generalized autonomous agent platform
-Keep the code inspectable and operator-controlled
-Desired outcome
-
-At the end, the repo should function as a lightweight Telegram gateway that can manage resumable coding sessions on local machines through native Claude/Codex continuation, with explicit local session records and safe operational boundaries.
-
-10. One-paragraph version
-
-This project should become a lightweight Telegram-controlled remote gateway for local coding agents like Claude Code and Codex. The repo already has the correct base as a task runner, but it must be upgraded with first-class session support. The right way to maintain continuity is not keeping terminal windows alive as the main design, but mapping Telegram conversations to explicit local session records and using the coding agents' native resume/continue mechanisms on each follow-up turn. The implementation should add a persistent session model, Telegram session routing, backend abstraction, compact summaries, and observability, while preserving the repo's current safety boundaries and avoiding drift into a heavy autonomous agent framework.
+| File | Why |
+|------|-----|
+| `.ai/CONTEXT.md` | Full project state and architecture |
+| `docs/AGENT_MESH_SPEC.md` | Full mesh spec — read Sections 5, 6, 7, 8, 10 |
+| `src/control/db.py` | All DB methods available — understand before writing task server |
+| `src/orchestrator.py` | Understand `_task_worker` and existing local execution path |
+| `config/settings.py` | MeshConfig fields and env vars |

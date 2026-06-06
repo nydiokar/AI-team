@@ -113,9 +113,29 @@ class SystemConfig:
     telegram_rate_limit_window_sec: int = 60
     telegram_message_buffer_sec: float = 3.0
     
+@dataclass
+class MeshConfig:
+    """Agent mesh network configuration.
+
+    Phase 2: shadow-write DB is built and sessions/tasks are mirrored into SQLite.
+    Phase 3: MESH_ENABLED=true activates worker dispatch routing in the orchestrator.
+
+    DB_PATH is relative to the project root unless absolute.
+    On the VPS this will point to a persistent volume path.
+    """
+    enabled: bool = False                   # MESH_ENABLED — activates worker dispatch
+    db_path: str = "state/mesh.db"          # MESH_DB_PATH — SQLite file location
+    tailscale_ip: str = ""                  # MESH_TAILSCALE_IP — this node's TS IP
+    task_server_port: int = 9002            # MESH_TASK_SERVER_PORT
+    worker_token: str = ""                  # WORKER_TOKEN — shared mesh auth secret
+    node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
+    oneoff_queue_timeout_sec: int = 600     # MESH_ONEOFF_QUEUE_TIMEOUT_SEC
+    shadow_write: bool = True               # always mirror to DB even when mesh routing is off
+
+
 class Config:
     """Main configuration class"""
-    
+
     def __init__(self):
         self.claude = ClaudeConfig(
             base_command=self._get_claude_command(),
@@ -144,6 +164,7 @@ class Config:
         self.validation = ValidationConfig()
         self.system = SystemConfig()
         self.opencode = OpenCodeConfig()
+        self.mesh = MeshConfig()
         # Apply env overrides for selected runtime-tunable settings
         self._apply_env_overrides()
         
@@ -310,6 +331,55 @@ class Config:
             v = os.getenv("OPENCODE_MODE")
             if v in ("cli", "server"):
                 self.opencode.mode = v
+        except Exception:
+            pass
+        # Mesh env overrides
+        try:
+            v = os.getenv("MESH_ENABLED")
+            if v is not None:
+                self.mesh.enabled = v.lower() == "true"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_DB_PATH")
+            if v:
+                self.mesh.db_path = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_TAILSCALE_IP")
+            if v:
+                self.mesh.tailscale_ip = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_TASK_SERVER_PORT")
+            if v is not None:
+                self.mesh.task_server_port = int(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv("WORKER_TOKEN")
+            if v:
+                self.mesh.worker_token = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_HEARTBEAT_TIMEOUT_SEC")
+            if v is not None:
+                self.mesh.node_heartbeat_timeout_sec = max(10, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_ONEOFF_QUEUE_TIMEOUT_SEC")
+            if v is not None:
+                self.mesh.oneoff_queue_timeout_sec = max(60, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_SHADOW_WRITE")
+            if v is not None:
+                self.mesh.shadow_write = v.lower() != "false"
         except Exception:
             pass
 
