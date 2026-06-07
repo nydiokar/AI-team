@@ -330,7 +330,7 @@ async def test_help_lists_current_command_set(monkeypatch, isolated_session_stor
 
 
 @pytest.mark.asyncio
-async def test_session_list_hides_closed_by_default(monkeypatch, isolated_session_store):
+async def test_session_list_compact_shows_open_and_collapsed_closed(monkeypatch, isolated_session_store):
     workspace = _make_workspace()
     try:
         monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
@@ -352,15 +352,17 @@ async def test_session_list_hides_closed_by_default(monkeypatch, isolated_sessio
         await bot._handle_session_list(update, _DummyContext())
         text = update.message.replies[-1]
 
+        # D4: compact one-line layout. Open count headline, active session
+        # starred, closed sessions collapsed to one [closed] line each.
         assert len(update.message.replies) == 1
-        assert "Open sessions (1) - tap to switch:" in text
-        assert "⭐ ACTIVE" in text
-        assert "🧠 claude / repo-alpha" in text
-        assert "Summary: Added session summaries to the picker" in text
-        assert "Please inspect the repo" not in text
-        assert "🆔" in text
+        assert "Sessions (1)" in text
+        assert "⭐" in text
+        assert "repo-alpha" in text
         assert open_session.session_id in text
-        assert closed_session.session_id not in text
+        # Closed sessions are now shown, collapsed, with a [closed] marker.
+        assert "[closed]" in text
+        assert closed_session.session_id in text
+        # Full filesystem paths are never leaked — only repo basenames.
         assert str((workspace / "repo-alpha").resolve()) not in text
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)

@@ -1,9 +1,8 @@
 # Next Tasks
 
-**Current priority:** Phase 9 Step D — D1, D1.5 (observability), D2, D3 COMPLETE.
-Next up: D4 (status/session UX overhaul). Then D5 (machine_id migration script).
-
-All work on branch `feat/mesh-d1-observability-guard` (not yet merged to main).
+**Current priority:** Phase 9 Step D — D1, D1.5, D2, D3, D4, D5 COMPLETE.
+Branch `feat/mesh-d1-observability-guard` merged to main. Next: D6 (PM2 polish,
+low priority) and Phase 4 (VPS migration).
 
 > **⚠ TEST COST GUARD (read before running tests):** tests previously invoked
 > the live, paid Claude CLI (e2e watcher + opencode-server tests built a real
@@ -96,31 +95,27 @@ human last-heartbeat age, plus the local server line. `/node <id>` shows detail
 projects_root, repos). Reads `db.list_nodes()` / `db.get_node()`. Added to /help.
 (Active-task count per node deferred — not tracked per-node in the DB yet.)
 
-### D4. Status + session list UX overhaul — MEDIUM PRIORITY  ← start here next
-Current `/status` output is too verbose — walls of text nobody reads.
+### D4. Status + session list UX overhaul — ✅ DONE (2026-06-07)
+`/status` and `/session_list` rewritten to the compact target layout in
+`src/telegram/interface.py`. New helpers: `_mesh_node_column_enabled()`
+(node column only when mesh on AND nodes exist in DB), `_session_node_label()`
+(machine_id → friendly name / "this server"), `_compact_session_line()`
+(one line per session; `[closed]` prefix; ⭐ for active). `/status` now leads
+with a one-line headline (workers, nodes online when mesh, open sessions,
+running tasks) + a compact active-session block, and only surfaces components
+when degraded. Closed sessions are now shown in `/session_list`, collapsed to
+one line each. Verified by rendering against the live session store and by
+`tests/test_telegram_session_flow.py` (the renamed
+`test_session_list_compact_shows_open_and_collapsed_closed` asserts the new
+contract).
 
-**Target format for `/status`:**
-```
-✅ Gateway running — 3 workers, 1 active session
-
-Session: b52d0b06 | claude | LP-1 | awaiting_input
-Path: AI-team
-```
-
-**Target format for `/session_list`:**
-```
-Sessions (3)
-• b52d0b06 — claude — LP-1 — awaiting_input — AI-team
-• ae01d054 — claude — this server — idle — narrative-engine
-• [closed] f6e22e5d — claude — main-pc
-```
-
-Node column only shown when mesh is enabled and workers exist. Closed sessions collapsed to one line.
-
-### D5. Fix `scripts/fix_session_machine_ids.py` — MEDIUM PRIORITY
-Per spec Section 3.2 — needed before VPS migration (Phase 4).
-Script reads all session JSON files, finds sessions where `machine_id == socket.gethostname()` (the old server hostname), rewrites them to the correct `WORKER_NODE_ID`.
-Already noted as needed in the spec, not yet written.
+### D5. `scripts/fix_session_machine_ids.py` — ✅ DONE (2026-06-07)
+Per spec §3.2. Dry-run by default, `--apply` to write, idempotent. Matches
+sessions whose `machine_id == --from-host` (default `socket.gethostname()`) and
+rewrites to `--node-id` (default `WORKER_NODE_ID` from env/.env). Atomic
+per-file write via temp+replace; leaves other machines' sessions untouched;
+refuses to run if target == from-host. Verified apply + idempotent re-run on an
+isolated temp copy.
 
 ### D6. PM2 ecosystem update — LOW PRIORITY
 - `ai-team-task-server` entry: either remove (if D1 embedded) or enable properly with correct env
