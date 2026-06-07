@@ -668,13 +668,26 @@ class TelegramInterface:
         )
 
     def _mesh_online_nodes(self):
-        """Return list of online NodeInfo objects, empty if mesh disabled or no workers."""
+        """Return online nodes from the shared DB (works across processes)."""
         try:
-            from config import config as _cfg
-            if not _cfg.mesh.enabled:
+            import json as _json
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
                 return []
-            from src.control.node_registry import get_registry
-            return [n for n in get_registry().list_all() if n.status == "online"]
+            rows = db.list_nodes(status="online")
+            nodes = []
+            for r in rows:
+                nodes.append(type("_Node", (), {
+                    "node_id": r["node_id"],
+                    "tailscale_ip": r.get("tailscale_ip", ""),
+                    "status": r.get("status", "online"),
+                    "capabilities": type("_Caps", (), {
+                        "projects_root": r.get("projects_root", ""),
+                        "repos": _json.loads(r.get("repos") or "[]"),
+                    })(),
+                })())
+            return nodes
         except Exception:
             return []
 
@@ -702,10 +715,15 @@ class TelegramInterface:
         if node_id == "__local__":
             return self._local_repo_choices(limit=limit)
         try:
-            from src.control.node_registry import get_registry
-            node = get_registry().get(node_id)
-            if node and node.capabilities.repos:
-                return [(r["name"], r["path"]) for r in node.capabilities.repos[:limit]]
+            import json as _json
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return []
+            row = db.get_node(node_id)
+            if row:
+                repos = _json.loads(row.get("repos") or "[]")
+                return [(r["name"], r["path"]) for r in repos[:limit]]
         except Exception:
             pass
         return []
@@ -1400,7 +1418,7 @@ class TelegramInterface:
         await update.message.reply_text(self._format_session_switched_message(session))
 
     async def _handle_session_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/session_new <backend> <path>"""
+        """/session_new [<backend> [<node_id>] <path>]"""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("âŒ Access denied.")
             return
@@ -1417,36 +1435,67 @@ class TelegramInterface:
             return
         if len(args) < 2:
             await update.message.reply_text(
-                "Usage: /session_new <backend> <path>\n"
-                "Example: /session_new claude myrepo"
+                "Usage: /session_new <backend> [<node_id>] <path>\n"
+                "Examples:\n"
+                "  /session_new claude AI-team\n"
+                "  /session_new claude LP-1 AI-team"
             )
             return
-        backend, repo_path = args[0].lower(), " ".join(args[1:])
-        if backend not in ("claude", "codex", "opencode", "opencode-server"):
+
+        _valid_backends = ("claude", "codex", "opencode", "opencode-server")
+        backend = args[0].lower()
+        if backend not in _valid_backends:
             await update.message.reply_text("❌ Backend must be 'claude', 'codex', 'opencode', or 'opencode-server'.")
             return
-        resolution = self._path_resolver().resolve_session_path(repo_path)
-        if not resolution.ok or not resolution.resolved_path:
-            await update.message.reply_text(self._format_path_resolution_error(resolution))
-            return
-        chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
+
+        # Detect optional node_id: if args[1] matches a known online node treat as node
+        known_nodes = {n.node_id for n in self._mesh_online_nodes()}
+        if len(args) >= 3 and args[1] in known_nodes:
+            node_id = args[1]
+            repo_path = " ".join(args[2:])
+        else:
+            node_id = "__local__"
+            repo_path = " ".join(args[1:])
+
+        if node_id == "__local__":
+            resolution = self._path_resolver().resolve_session_path(repo_path)
+            if not resolution.ok or not resolution.resolved_path:
+                await update.message.reply_text(self._format_path_resolution_error(resolution))
+                return
+            resolved_path = resolution.resolved_path
+        else:
+            from src.control.node_registry import get_registry
+            node = get_registry().get(node_id)
+            repos = node.capabilities.repos if node else []
+            match = next(
+                (r["path"] for r in repos if r["name"] == repo_path or r["path"] == repo_path),
+                None,
+            )
+            if not match:
+                names = ", ".join(r["name"] for r in repos) or "none advertised"
+                await update.message.reply_text(
+                    f"âŒ Repo `{repo_path}` not found on `{node_id}`. Available: {names}"
+                )
+                return
+            resolved_path = match
+
         session = await self._create_and_bind_session(
-            chat_id=chat_id,
-            user_id=user_id,
+            chat_id=update.effective_chat.id,
+            user_id=update.effective_user.id,
             backend=backend,
-            repo_path=resolution.resolved_path,
+            repo_path=resolved_path,
+            node_id=node_id,
         )
+        node_label = "this server" if node_id == "__local__" else node_id
         lines = [
             "âœ… Session created and set as active.",
             f"ID: `{session.session_id}`",
             f"Backend: {backend}",
+            f"Node: {node_label}",
             f"Path: `{session.repo_path}`",
             "Send a plain message to continue in this session.",
-            "Use `/session_dirs` to browse directories under this repo.",
         ]
         await update.message.reply_text("\n".join(lines))
-
     async def _handle_session_use(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_use <session_id>"""
         if not self._check_user_permission(update.effective_user.id):

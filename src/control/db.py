@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 1
+_CURRENT_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +576,8 @@ class MeshDB:
         backends: List[str],
         max_concurrent: int,
         status: str = "online",
+        projects_root: str = "",
+        repos: Optional[List[dict]] = None,
     ) -> None:
         now = _now()
         try:
@@ -584,8 +586,9 @@ class MeshDB:
                     """
                     INSERT INTO nodes
                         (node_id, tailscale_ip, api_port, backends, max_concurrent,
-                         status, last_heartbeat, registered_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         status, last_heartbeat, registered_at, updated_at,
+                         projects_root, repos)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(node_id) DO UPDATE SET
                         tailscale_ip   = excluded.tailscale_ip,
                         api_port       = excluded.api_port,
@@ -593,7 +596,9 @@ class MeshDB:
                         max_concurrent = excluded.max_concurrent,
                         status         = excluded.status,
                         last_heartbeat = excluded.last_heartbeat,
-                        updated_at     = excluded.updated_at
+                        updated_at     = excluded.updated_at,
+                        projects_root  = excluded.projects_root,
+                        repos          = excluded.repos
                     """,
                     (
                         node_id,
@@ -605,6 +610,8 @@ class MeshDB:
                         now,
                         now,
                         now,
+                        projects_root,
+                        json.dumps(repos or []),
                     ),
                 )
         except Exception as e:
@@ -696,9 +703,8 @@ def _get_migrations() -> List[tuple]:
     """
     return [
         (1, ""),  # baseline marker — DDL already applied above
-        # Example future migration:
-        # (2, "ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';"),
-        # (3, "ALTER TABLE mesh_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;"),
+        (2, "ALTER TABLE nodes ADD COLUMN projects_root TEXT NOT NULL DEFAULT ''"),
+        (3, "ALTER TABLE nodes ADD COLUMN repos TEXT NOT NULL DEFAULT '[]'"),
     ]
 
 

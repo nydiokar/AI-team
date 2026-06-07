@@ -210,6 +210,8 @@ class NodeRegistry:
                     backends=node.capabilities.backends,
                     max_concurrent=node.capabilities.max_concurrent,
                     status="online",
+                    projects_root=node.capabilities.projects_root,
+                    repos=node.capabilities.repos,
                 )
         except Exception as e:
             logger.debug("event=db_node_upsert_err node_id=%s err=%s", node.node_id, e)
