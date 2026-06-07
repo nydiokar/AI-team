@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 class NodeCapabilities:
     backends: List[str] = field(default_factory=list)
     max_concurrent: int = 2
+    projects_root: str = ""
+    repos: List[dict] = field(default_factory=list)  # [{name, path}] snapshot from worker
 
 
 @dataclass
@@ -37,6 +39,8 @@ class NodeInfo:
         caps = NodeCapabilities(
             backends=list(caps_raw.get("backends") or []),
             max_concurrent=int(caps_raw.get("max_concurrent") or 2),
+            projects_root=caps_raw.get("projects_root") or "",
+            repos=list(caps_raw.get("repos") or []),
         )
         return cls(
             node_id=d["node_id"],
@@ -53,6 +57,8 @@ class NodeInfo:
             "capabilities": {
                 "backends": self.capabilities.backends,
                 "max_concurrent": self.capabilities.max_concurrent,
+                "projects_root": self.capabilities.projects_root,
+                "repos": self.capabilities.repos,
             },
             "status": self.status,
             "last_heartbeat": self.last_heartbeat.isoformat() if self.last_heartbeat else None,

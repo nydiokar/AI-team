@@ -258,9 +258,12 @@ class WorkerAgent:
             "capabilities": {
                 "backends": self.cfg.backends,
                 "max_concurrent": self.cfg.max_concurrent,
+                "projects_root": self.cfg.projects_root,
+                "repos": self.cfg.list_repos(),
             },
         })
-        logger.info("event=registered node_id=%s controller=%s", self.cfg.node_id, self.cfg.controller_url)
+        logger.info("event=registered node_id=%s controller=%s projects_root=%s",
+                    self.cfg.node_id, self.cfg.controller_url, self.cfg.projects_root or "(none)")
 
     def _deregister(self) -> None:
         try:
@@ -367,7 +370,7 @@ class WorkerAgent:
         async with self._semaphore:
             # Claim — optimistic lock
             try:
-                resp = await asyncio.to_thread(
+                await asyncio.to_thread(
                     self._http.post,
                     f"/tasks/{task_id}/claim",
                     {"node_id": self.cfg.node_id},
@@ -435,7 +438,7 @@ class WorkerAgent:
         # Drain: wait up to 30s for active tasks
         logger.info("event=draining active=%d", len(self._active))
         if self._active:
-            done, pending = await asyncio.wait(
+            _, pending = await asyncio.wait(
                 list(self._active.values()), timeout=30
             )
             for t in pending:
