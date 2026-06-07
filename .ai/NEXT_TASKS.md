@@ -1,122 +1,130 @@
 # Next Tasks
 
-**Current priority:** Phase 9 Step C — live two-machine test.
-Steps 1–3 and Step B are **complete, adversarially reviewed, and fully tested**.
-`scripts/test_mesh_local.py` 18/18; `scripts/test_routing_integration.py` 24/24.
+**Current priority:** Phase 9 Step D — D1 (process consolidation) COMPLETE.
+Next up: D2 (worker execution logging). Then D3 (/nodes), D4 (status/session UX).
 
 ---
 
-## ✅ 1–3. Task server, worker daemon, orchestrator routing — DONE & TESTED
+## ✅ Completed
 
-Files created:
-- `src/control/task_server.py` — FastAPI app, all 9 endpoints, Bearer auth, MeshDB-backed
-- `src/control/node_registry.py` — in-memory NodeRegistry + DB persistence + expiry loop
-- `src/worker/__init__.py`, `src/worker/config.py`, `src/worker/agent.py` — full daemon
-- `src/orchestrator.py` — `_run_backend_local`, `_dispatch_to_node`, `_dispatch_or_run_local`
-- `ecosystem.config.js` — both PM2 entries added (disabled by default)
-- `scripts/test_mesh_local.py` — automated smoke test (run with `python scripts/test_mesh_local.py`)
-
-**14 issues found in adversarial review; the 9 critical/high ones are fixed** (see CONTEXT.md
-Phase 9 section for the full list). Key fix: `_mesh_enqueue_task` now self-claims its own
-shadow-written rows immediately, so a running worker can never double-execute a task that
-the gateway is already running locally. `_dispatch_or_run_local` exists and is correct, but
-is intentionally **not** wired into `process_task` yet (see "What's NOT done" below).
-
-A pre-existing DB migration bug was also found and fixed: fresh `MeshDB` instances failed
-to initialize (`cannot commit - no transaction is active`). The live `state/mesh.db` was
-unaffected (already at schema v1) but any new deployment would have hit this.
+- Steps 1–3: Task server, worker daemon, orchestrator routing — done, adversarially reviewed, tested
+- Step B: `_dispatch_or_run_local` wired into `process_task` — done, live tested
+- Step C: Real two-machine test — **DONE** (2026-06-07)
+  - LP-1 worker registers via Tailscale, claims tasks, executes, returns results
+  - Node picker in Telegram: backend → node → repo buttons, fully DB-backed (cross-process)
+  - `/session_new claude LP-1 AI-team` text command fallback works
+  - Worker advertises `projects_root` + `repos` at register time; stored in DB (migration v2/v3)
+  - `_mesh_online_nodes()` reads shared DB — works across gateway and task server processes
+  - Routing fix: `route_remote` only true when `session.machine_id != local hostname`
+  - FastAPI `on_event` → `lifespan` (deprecation fix)
+  - Worker loads `.env` via dotenv on startup
+  - `WORKER_PROJECTS_ROOT` env var wired end-to-end
 
 ---
 
-## What's NOT done — and why that's the right call for now
+## Step D — Next (new session starts here)
 
-`_dispatch_or_run_local` is a fully-working router, but it is **not called** from
-`process_task`. Wiring it in for real would mean either:
-(a) duplicating `process_task`'s retry/timeout/heartbeat machinery inside the
-    remote-dispatch path, or
-(b) a larger refactor that extracts that machinery so both paths share it.
+### D1. Process consolidation — ✅ DONE (2026-06-07)
+The task server now runs **embedded inside the gateway process**, on the gateway's
+own asyncio event loop (not a separate thread — same loop so the registry's
+expiry task and the orchestrator share one loop).
 
-Either is a real piece of work and higher-risk than what's been done so far. Given that
-`MESH_ENABLED=false` is the default and the goal right now is a **safe, reversible trial**,
-it's better to land this as a separate, focused change once you've validated the
-server+worker mechanics in isolation (see the trial plan below).
+**What was built:**
+- `src/control/embedded_server.py` — `EmbeddedTaskServer`: runs `uvicorn.Server.serve()`
+  as an asyncio task on the current loop. Suppresses uvicorn's own signal handlers
+  (gateway owns SIGINT/SIGTERM). Waits up to ~5s for `started`, surfaces early-exit
+  exceptions. Clean `stop()` via `should_exit` + bounded await with cancel fallback.
+- `src/orchestrator.py` — `_embedded_task_server` field; `_start_embedded_task_server()`
+  (no-op unless `MESH_ENABLED`; binds `MESH_TAILSCALE_IP or 127.0.0.1` : `MESH_TASK_SERVER_PORT`;
+  failure logs loudly but doesn't crash the gateway) and `_stop_embedded_task_server()`.
+  Wired into `start()` (after workers spawn) and `stop()` (before worker cancel).
+- `ecosystem.config.js` — removed the `ai-team-task-server` PM2 entry; replaced with
+  a note. One process now: `ai-team-gateway` hosts the task server when mesh is on.
+- `scripts/test_embedded_server.py` — 7/7 checks pass. Core check proven: a node
+  registered over HTTP is immediately visible via the in-process `get_registry()`
+  singleton — the cross-process gap that forced the DB-only workaround is closed.
 
----
+**Result:** the gateway's `get_registry()` is no longer always empty. The DB
+fallback in `_process_task_remote` stays as a safety net (survives gateway restart
+before worker re-registration) but is no longer the primary discovery path.
 
-## Recommended rollout — safe trial sequence
+**⚠ Operator action before flipping `MESH_ENABLED=true` on this PC:** the live
+`.env` has `MESH_TAILSCALE_IP` set to a literal comment string (dotenv parsed
+`"# this PC's Tailscale IP..."` as the value) and `MESH_TASK_SERVER_PORT=9002`.
+Set `MESH_TASK_SERVER_PORT` and a real `MESH_TAILSCALE_IP` (or leave it blank to
+bind 127.0.0.1) before enabling. Note: dotenv loads with `override=True`, so `.env`
+beats process env vars — `scripts/test_mesh_local.py` currently fails for this
+reason (its hardcoded test token loses to the real `.env` WORKER_TOKEN), unrelated
+to D1.
 
-**Step A — Run server + worker in shadow mode (today, zero risk to the live gateway)**
+### D2. Worker execution logging — HIGH PRIORITY  ← start here next
+Currently when a task fails you see `success=False elapsed=0.0s` and nothing else. The error string from the backend exception never surfaces in Telegram or logs.
 
-This validates the *mechanics* (registration, heartbeat, polling, claiming, result
-posting) using the smoke-test script, which already does this in-process. No live
-processes need to run side-by-side with the gateway for this — `test_mesh_local.py`
-covers the full server-side cycle.
+**What to build:**
+- Worker: catch exception in `_execute_task`, include full traceback in `errors` list of the result dict
+- Gateway: when `_process_task_remote` receives a failed result, log `errors` and include first error line in the Telegram failure message (currently shows nothing useful)
+- Worker logs: add `node_id` field to every log line format string so you can grep by node
 
-If you want to see a *live* worker process run too:
-```bash
-# Terminal 1 — task server (separate port, separate DB to avoid touching live state)
-WORKER_TOKEN=<token> MESH_DB_PATH=state/mesh_trial.db \
-uvicorn src.control.task_server:app --host 127.0.0.1 --port 9099
+### D3. `/nodes` Telegram command — MEDIUM PRIORITY
+Per spec Section 9. Read from DB (`db.list_nodes()`), format compactly.
 
-# Terminal 2 — worker daemon pointed at the trial server
-WORKER_NODE_ID=trial-node WORKER_TOKEN=<token> WORKER_TAILSCALE_IP=127.0.0.1 \
-WORKER_API_PORT=9098 CONTROLLER_URL=http://127.0.0.1:9099 WORKER_BACKENDS=claude \
-python -m src.worker.agent
+**Format:**
 ```
-Watch it register, heartbeat every 30s, and poll `/tasks/pending` (empty — nothing
-enqueues to `mesh_trial.db`). This proves the daemon lifecycle works without touching
-production state or risking duplicate execution. Stop with Ctrl+C — confirm clean
-deregistration in the logs.
+Nodes (2 online)
+• LP-1 — claude — 100.x.x.x — last seen 12s ago
+• main-pc (this server) — claude,codex — local — last seen 2s ago
+```
 
-**Step B — Wire `_dispatch_or_run_local` into `process_task` ✅ DONE + LIVE TESTED**
+Also: `/node LP-1` for detail (backends, repos, active tasks, last heartbeat).
 
-`process_task` now routes to `_process_task_remote` when `MESH_ENABLED=true` and
-`session.machine_id` is set. Zero regression for all other sessions. 30/30 integration
-tests pass. Live trial confirmed: Telegram → DB → worker claim → result → Telegram reply,
-all on localhost with trial-node. Slowness is expected (worker polls every 5s).
+### D4. Status + session list UX overhaul — MEDIUM PRIORITY
+Current `/status` output is too verbose — walls of text nobody reads.
 
-**Step C — Real two-machine test** ← NEXT
+**Target format for `/status`:**
+```
+✅ Gateway running — 3 workers, 1 active session
 
-Run the worker on a second device (VPS or laptop). Point `CONTROLLER_URL` at the
-main PC's task server. Send a Telegram message to a session pinned to that node's
-`machine_id` and watch it route through DB → worker → result → Telegram.
+Session: b52d0b06 | claude | LP-1 | awaiting_input
+Path: AI-team
+```
 
-Before starting Step C:
-- Enroll both machines in Tailscale (or use LAN IP for same-network test)
-- Generate a permanent WORKER_TOKEN: `openssl rand -hex 32`
-- Start the task server on the PC: bound to Tailscale IP, port 9002
-- Start the worker on the second machine: CONTROLLER_URL=http://{pc-tailscale-ip}:9002
-- Pin a fresh session to machine_id matching the remote node's WORKER_NODE_ID
-- Restart gateway with MESH_ENABLED=true MESH_DB_PATH=state/mesh.db (production DB now)
+**Target format for `/session_list`:**
+```
+Sessions (3)
+• b52d0b06 — claude — LP-1 — awaiting_input — AI-team
+• ae01d054 — claude — this server — idle — narrative-engine
+• [closed] f6e22e5d — claude — main-pc
+```
 
----
+Node column only shown when mesh is enabled and workers exist. Closed sessions collapsed to one line.
 
-## Tailscale prerequisite (your action, not code)
+### D5. Fix `scripts/fix_session_machine_ids.py` — MEDIUM PRIORITY
+Per spec Section 3.2 — needed before VPS migration (Phase 4).
+Script reads all session JSON files, finds sessions where `machine_id == socket.gethostname()` (the old server hostname), rewrites them to the correct `WORKER_NODE_ID`.
+Already noted as needed in the spec, not yet written.
 
-Before deploying to VPS:
-- confirm VPS and main PC are enrolled in Tailscale
-- record both Tailscale IPs
-- set ACL: VPS port 9002 reachable from PC; PC port 9001 reachable from VPS
-- generate `WORKER_TOKEN`: `openssl rand -hex 32`
-- test connectivity: `curl http://{vps-tailscale-ip}:9002/health` from PC — should get connection refused (not timeout)
-
----
-
-## VPS migration (after the rollout plan steps above are validated)
-
-Per `docs/AGENT_MESH_SPEC.md` Phase 4:
-- clone repo to VPS
-- run `scripts/seed_db_from_json.py` on VPS after copying `state/` across
-- run `scripts/fix_session_machine_ids.py` (needs to be written) — updates existing session `machine_id` values to match the PC's `WORKER_NODE_ID`
-- start gateway on VPS, worker daemon on PC
-- test end-to-end Telegram → VPS → PC worker → result → Telegram
-- stop gateway on PC
+### D6. PM2 ecosystem update — LOW PRIORITY
+- `ai-team-task-server` entry: either remove (if D1 embedded) or enable properly with correct env
+- `ai-team-worker` entry: enable with `WORKER_PROJECTS_ROOT`, `WORKER_NODE_ID` etc wired in
+- Both should have `restart_delay`, `max_restarts`, `error_file` / `out_file` set
 
 ---
 
-## Deferred (from previous backlog — still valid but lower priority)
+## Phase 4 — VPS migration (after D1–D3 are solid)
 
-- Codex end-to-end validation (two-turn session test)
-- Telegram command polish (compact replies, `/commit_all` decision)
-- Backend CLI version pinning / smoke checks at startup
-- Legacy `.task.md` watcher cleanup decision
+Per spec Section 13 Phase 4. Pre-migration checklist:
+- [ ] Run `scripts/fix_session_machine_ids.py` to retag existing sessions
+- [ ] Clone repo to VPS
+- [ ] Copy `state/` to VPS
+- [ ] Start gateway on VPS, worker on main PC
+- [ ] Test end-to-end
+- [ ] Stop gateway on main PC
+
+---
+
+## Deferred (valid but lower priority)
+
+- Backend hooks (Session start ID detection, PreToolUse security, PostToolUse quality gates) — see `docs/BACKEND_HOOKS_STRATEGY.md`
+- Codex end-to-end validation
+- OpenCode server cross-machine sessions (requires shared DB mount — future)
+- Postgres migration trigger: >5 nodes or observed SQLite write contention

@@ -246,6 +246,9 @@ class ClaudeCodeBackend(CodingBackend):
         terminate_many_popen(procs)
 
     def _run(self, cwd: str, message: str, resume_id: Optional[str], session_id: Optional[str], session_key: Optional[str]) -> ExecutionResult:
+        # Cost guard: refuse to spawn the (paid) Claude CLI under test mode.
+        from src.core.test_guard import assert_live_calls_allowed
+        assert_live_calls_allowed("claude")
         start = time.time()
         cmd = self._build_cmd(resume_id, session_id)
         before_snapshot = _snapshot_worktree(cwd) if cwd else {}

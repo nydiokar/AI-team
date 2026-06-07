@@ -33,37 +33,16 @@ module.exports = {
     },
 
     // ---------------------------------------------------------------
-    // Mesh task server (VPS-side — disabled by default)
-    // Enable on the VPS with: pm2 start ecosystem.config.js --only ai-team-task-server
-    // Requires: WORKER_TOKEN set in .env or env block below
+    // NOTE: the mesh task server is no longer a separate PM2 process.
+    // As of Phase 9 Step D1 it runs *embedded* inside ai-team-gateway
+    // (see src/control/embedded_server.py), started by the orchestrator on
+    // its own event loop when MESH_ENABLED=true. This makes the gateway and
+    // the task server share one get_registry() singleton, eliminating the
+    // cross-process / DB-only node-discovery workaround.
+    //
+    // To run mesh routing: set MESH_ENABLED=true, MESH_TAILSCALE_IP, and
+    // MESH_TASK_SERVER_PORT in .env. No extra PM2 entry is needed.
     // ---------------------------------------------------------------
-    {
-      name: "ai-team-task-server",
-      cwd: __dirname,
-      script: "-m",
-      interpreter: python,
-      args: "uvicorn src.control.task_server:app --host 0.0.0.0 --port 9002",
-      exec_mode: "fork",
-      instances: 1,
-      autorestart: true,
-      watch: false,
-      min_uptime: "10s",
-      max_restarts: 10,
-      restart_delay: 3000,
-      kill_timeout: 10000,
-      // Disabled by default — start manually when deploying to VPS
-      stop_exit_codes: [0],
-      env: {
-        PYTHONUNBUFFERED: "1",
-        AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
-        // WORKER_TOKEN: "set-in-.env"
-        // MESH_DB_PATH: "state/mesh.db"
-      },
-      out_file: path.join(__dirname, "logs", "pm2-task-server-out.log"),
-      error_file: path.join(__dirname, "logs", "pm2-task-server-error.log"),
-      merge_logs: true,
-      time: true,
-    },
 
     // ---------------------------------------------------------------
     // Worker daemon (per-machine — disabled by default)
