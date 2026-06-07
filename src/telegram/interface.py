@@ -91,6 +91,8 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("help", self._handle_help))
         self.app.add_handler(CommandHandler("task", self._handle_task_command))
         self.app.add_handler(CommandHandler("status", self._handle_status_command))
+        self.app.add_handler(CommandHandler("nodes", self._handle_nodes_command))
+        self.app.add_handler(CommandHandler("node", self._handle_node_detail_command))
         # Session command handlers
         self.app.add_handler(CommandHandler("session_new", self._handle_session_new))
         self.app.add_handler(CommandHandler("session_list", self._handle_session_list))
@@ -993,6 +995,9 @@ class TelegramInterface:
             "• plain text continues the active session\n"
             "• `/task <instruction>` create a one-off task only\n"
             "• `/status` show gateway status and configured scope\n\n"
+            "Mesh:\n"
+            "• `/nodes` list worker nodes (online/offline, last seen)\n"
+            "• `/node <id>` node detail (backends, repos, heartbeat)\n\n"
             "Git:\n"
             "• `/git_status [session_id]`\n"
             "• `/commit [session_id] [--no-branch] [--push]`\n"
@@ -1083,6 +1088,113 @@ class TelegramInterface:
         except Exception as e:
             await update.message.reply_text(f"❌ Failed to get status: {e}")
             logger.error(f"Telegram status request failed: {e}")
+
+    @staticmethod
+    def _heartbeat_age(last_heartbeat: str) -> str:
+        """Return a compact human age like '12s ago' / '3m ago' / '2h ago'."""
+        if not last_heartbeat:
+            return "never"
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(last_heartbeat)
+            secs = (datetime.now() - dt).total_seconds()
+            if secs < 0:
+                secs = 0
+            if secs < 90:
+                return f"{int(secs)}s ago"
+            if secs < 5400:
+                return f"{int(secs // 60)}m ago"
+            if secs < 172800:
+                return f"{int(secs // 3600)}h ago"
+            return f"{int(secs // 86400)}d ago"
+        except Exception:
+            return last_heartbeat
+
+    async def _handle_nodes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """List all mesh worker nodes (online + offline) with last-heartbeat ages."""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        try:
+            import json as _json
+            import socket
+            from src.control.db import get_db
+            db = get_db()
+            rows = db.list_nodes() if db else []
+
+            online = [r for r in rows if r.get("status") == "online"]
+            lines = [f"Nodes ({len(online)} online / {len(rows)} total)", ""]
+
+            # This gateway/server, always shown as the local execution target.
+            lines.append(f"• {socket.gethostname()} (this server) — local")
+
+            for r in rows:
+                try:
+                    backends = ",".join(_json.loads(r.get("backends") or "[]")) or "—"
+                except Exception:
+                    backends = "—"
+                dot = "🟢" if r.get("status") == "online" else "⚪"
+                age = self._heartbeat_age(r.get("last_heartbeat", ""))
+                ip = r.get("tailscale_ip") or "—"
+                lines.append(
+                    f"{dot} {r['node_id']} — {backends} — {ip} — last seen {age}"
+                )
+
+            if not rows:
+                lines.append("_(no remote workers registered)_")
+            lines.append("")
+            lines.append("Use /node <id> for detail.")
+            await update.message.reply_text("\n".join(lines))
+        except Exception as e:
+            await update.message.reply_text(f"❌ Failed to list nodes: {e}")
+            logger.error(f"Telegram /nodes failed: {e}")
+
+    async def _handle_node_detail_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show detail for one node: /node <node_id>."""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        args = context.args or []
+        if not args:
+            await update.message.reply_text("Usage: /node <node_id>  (see /nodes)")
+            return
+        node_id = args[0].strip()
+        try:
+            import json as _json
+            from src.control.db import get_db
+            db = get_db()
+            row = db.get_node(node_id) if db else None
+            if not row:
+                await update.message.reply_text(f"❌ Node {node_id!r} not found. See /nodes.")
+                return
+            try:
+                backends = ", ".join(_json.loads(row.get("backends") or "[]")) or "—"
+            except Exception:
+                backends = "—"
+            try:
+                repos = [rp.get("name", "?") for rp in _json.loads(row.get("repos") or "[]")]
+            except Exception:
+                repos = []
+
+            dot = "🟢 online" if row.get("status") == "online" else "⚪ offline"
+            lines = [
+                f"Node: {row['node_id']}",
+                f"• Status: {dot}",
+                f"• Tailscale IP: {row.get('tailscale_ip') or '—'}:{row.get('api_port', '')}",
+                f"• Backends: {backends}",
+                f"• Max concurrent: {row.get('max_concurrent', '?')}",
+                f"• Last heartbeat: {self._heartbeat_age(row.get('last_heartbeat', ''))}",
+                f"• Registered: {self._heartbeat_age(row.get('registered_at', ''))}",
+                f"• Projects root: `{row.get('projects_root') or '—'}`",
+            ]
+            if repos:
+                shown = ", ".join(repos[:15])
+                more = f" (+{len(repos) - 15} more)" if len(repos) > 15 else ""
+                lines.append(f"• Repos ({len(repos)}): {shown}{more}")
+            await update.message.reply_text("\n".join(lines))
+        except Exception as e:
+            await update.message.reply_text(f"❌ Failed to get node detail: {e}")
+            logger.error(f"Telegram /node failed: {e}")
 
     async def _handle_progress_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Compatibility progress view for the active session or an explicit task."""
