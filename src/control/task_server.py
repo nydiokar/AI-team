@@ -12,6 +12,7 @@ The backing store is MeshDB (src/control/db.py). No SQL lives here.
 
 import json
 import logging
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
@@ -24,7 +25,16 @@ from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI-Team Mesh Task Server", version="1.0")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    get_registry().start()
+    logger.info("event=task_server_started")
+    yield
+    get_registry().stop()
+
+
+app = FastAPI(title="AI-Team Mesh Task Server", version="1.0", lifespan=_lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -55,28 +65,14 @@ def _require_auth(
 
 
 # ---------------------------------------------------------------------------
-# Startup / shutdown
-# ---------------------------------------------------------------------------
-
-@app.on_event("startup")
-async def _on_startup() -> None:
-    registry = get_registry()
-    registry.start()
-    logger.info("event=task_server_started")
-
-
-@app.on_event("shutdown")
-async def _on_shutdown() -> None:
-    get_registry().stop()
-
-
-# ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
 
 class _Capabilities(BaseModel):
     backends: List[str] = []
     max_concurrent: int = 2
+    projects_root: str = ""
+    repos: List[Dict[str, str]] = []
 
 
 class NodeRegisterPayload(BaseModel):
@@ -135,6 +131,8 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
         capabilities=NodeCapabilities(
             backends=list(payload.capabilities.backends),
             max_concurrent=payload.capabilities.max_concurrent,
+            projects_root=payload.capabilities.projects_root,
+            repos=list(payload.capabilities.repos),
         ),
     )
     get_registry().register(info)

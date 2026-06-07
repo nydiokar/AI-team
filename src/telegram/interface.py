@@ -667,19 +667,60 @@ class TelegramInterface:
             ]
         )
 
-    def _recent_session_repo_choices(self, limit: int = 10) -> list[tuple[str, str]]:
+    def _mesh_online_nodes(self):
+        """Return list of online NodeInfo objects, empty if mesh disabled or no workers."""
+        try:
+            from config import config as _cfg
+            if not _cfg.mesh.enabled:
+                return []
+            from src.control.node_registry import get_registry
+            return [n for n in get_registry().list_all() if n.status == "online"]
+        except Exception:
+            return []
+
+    def _build_session_node_markup(self, backend: str) -> Optional["InlineKeyboardMarkup"]:
+        """Node picker: server (local) + any online remote workers."""
+        if not TELEGRAM_AVAILABLE:
+            return None
+        import socket
+        rows = [
+            [InlineKeyboardButton(
+                text=f"🖥 This server ({socket.gethostname()})",
+                callback_data=f"session_new_node:{backend}:__local__",
+            )]
+        ]
+        for node in self._mesh_online_nodes():
+            label = f"⚙ {node.node_id} ({node.tailscale_ip})"
+            rows.append([InlineKeyboardButton(
+                text=label[:64],
+                callback_data=f"session_new_node:{backend}:{node.node_id}",
+            )])
+        return InlineKeyboardMarkup(rows)
+
+    def _repo_choices_for_node(self, node_id: str, limit: int = 10) -> list[tuple[str, str]]:
+        """Return [(name, path)] for the given node. __local__ uses server's own filesystem."""
+        if node_id == "__local__":
+            return self._local_repo_choices(limit=limit)
+        try:
+            from src.control.node_registry import get_registry
+            node = get_registry().get(node_id)
+            if node and node.capabilities.repos:
+                return [(r["name"], r["path"]) for r in node.capabilities.repos[:limit]]
+        except Exception:
+            pass
+        return []
+
+    def _local_repo_choices(self, limit: int = 10) -> list[tuple[str, str]]:
         resolver = self._path_resolver()
         root = resolver.base_cwd or resolver.allowed_root
         if not root:
             return []
-
         try:
             root_path = Path(root).resolve()
             children = [child for child in root_path.iterdir() if child.is_dir() and not child.name.startswith(".")]
             children.sort(key=lambda child: child.stat().st_mtime, reverse=True)
         except Exception:
             return []
-
         repos = [child for child in children if (child / ".git").exists()]
         if len(repos) < limit:
             seen = {item.resolve() for item in repos}
@@ -691,13 +732,12 @@ class TelegramInterface:
                 seen.add(resolved)
                 if len(repos) >= limit:
                     break
-
         return [(child.name, str(child.resolve())) for child in repos[:limit]]
 
-    def _build_session_repo_markup(self, backend: str) -> Optional["InlineKeyboardMarkup"]:
+    def _build_session_repo_markup(self, backend: str, node_id: str = "__local__") -> Optional["InlineKeyboardMarkup"]:
         if not TELEGRAM_AVAILABLE:
             return None
-        choices = self._recent_session_repo_choices(limit=10)
+        choices = self._repo_choices_for_node(node_id, limit=10)
         if not choices:
             return None
         rows = []
@@ -706,7 +746,7 @@ class TelegramInterface:
                 [
                     InlineKeyboardButton(
                         text=name[:64],
-                        callback_data=f"session_new_repo:{backend}:{idx}",
+                        callback_data=f"session_new_repo:{backend}:{node_id}:{idx}",
                     )
                 ]
             )
@@ -719,13 +759,19 @@ class TelegramInterface:
         user_id: int,
         backend: str,
         repo_path: str,
+        node_id: str = "__local__",
     ) -> Session:
+        import socket
         session = self.session_store.create(
             backend=backend,
             repo_path=repo_path,
             telegram_chat_id=chat_id,
             owner_user_id=user_id,
         )
+        # Pin to remote node; __local__ means this server (keep hostname set by session_store.create)
+        if node_id and node_id != "__local__":
+            session.machine_id = node_id
+            self.session_store.save(session)
         self.session_store.bind(chat_id, session.session_id)
         return session
 
@@ -1473,40 +1519,79 @@ class TelegramInterface:
             return
 
         data = query.data or ""
+        _valid_backends = ("claude", "codex", "opencode", "opencode-server")
+
         if data.startswith("session_new_backend:"):
             backend = data.split(":", 1)[1].strip().lower()
-            if backend not in ("claude", "codex", "opencode", "opencode-server"):
+            if backend not in _valid_backends:
                 await query.edit_message_text("❌ Unknown backend.")
                 return
-            markup = self._build_session_repo_markup(backend)
+            # If mesh is enabled and workers are online, show node picker first.
+            nodes = self._mesh_online_nodes()
+            if nodes:
+                markup = self._build_session_node_markup(backend)
+                await query.edit_message_text(
+                    f"Choose which machine will run `{backend}`:",
+                    reply_markup=markup,
+                    parse_mode="Markdown",
+                )
+            else:
+                markup = self._build_session_repo_markup(backend, node_id="__local__")
+                if markup is None:
+                    await query.edit_message_text(
+                        "âŒ No recent repositories found. Use `/session_new <backend> <path>`.",
+                        parse_mode="Markdown",
+                    )
+                    return
+                await query.edit_message_text(
+                    f"Choose the repository for `{backend}`:",
+                    reply_markup=markup,
+                    parse_mode="Markdown",
+                )
+            return
+
+        if data.startswith("session_new_node:"):
+            # format: session_new_node:{backend}:{node_id}
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                await query.edit_message_text("âŒ Invalid node selection.")
+                return
+            backend, node_id = parts[1].strip().lower(), parts[2].strip()
+            if backend not in _valid_backends:
+                await query.edit_message_text("❌ Unknown backend.")
+                return
+            markup = self._build_session_repo_markup(backend, node_id=node_id)
             if markup is None:
                 await query.edit_message_text(
-                    "âŒ No recent repositories found. Use `/session_new <backend> <path>`.",
+                    "âŒ No repositories found for this node. "
+                    "Set `WORKER_PROJECTS_ROOT` on the worker or use `/session_new <backend> <path>`.",
                     parse_mode="Markdown",
                 )
                 return
+            node_label = "this server" if node_id == "__local__" else node_id
             await query.edit_message_text(
-                f"Choose the repository for `{backend}`:",
+                f"Choose the repository on `{node_label}` for `{backend}`:",
                 reply_markup=markup,
                 parse_mode="Markdown",
             )
             return
 
         if data.startswith("session_new_repo:"):
+            # format: session_new_repo:{backend}:{node_id}:{index}
             parts = data.split(":")
-            if len(parts) != 3:
+            if len(parts) != 4:
                 await query.edit_message_text("âŒ Invalid repository selection.")
                 return
-            backend = parts[1].strip().lower()
+            backend, node_id = parts[1].strip().lower(), parts[2].strip()
             try:
-                repo_index = int(parts[2])
+                repo_index = int(parts[3])
             except ValueError:
                 await query.edit_message_text("âŒ Invalid repository selection.")
                 return
-            if backend not in ("claude", "codex", "opencode", "opencode-server"):
+            if backend not in _valid_backends:
                 await query.edit_message_text("❌ Unknown backend.")
                 return
-            choices = self._recent_session_repo_choices(limit=10)
+            choices = self._repo_choices_for_node(node_id, limit=10)
             if repo_index < 0 or repo_index >= len(choices):
                 await query.edit_message_text("âŒ Repository choice expired. Run /session_new again.")
                 return
@@ -1516,13 +1601,16 @@ class TelegramInterface:
                 user_id=update.effective_user.id,
                 backend=backend,
                 repo_path=repo_path,
+                node_id=node_id,
             )
+            node_label = "this server" if node_id == "__local__" else node_id
             await query.edit_message_text(
-                "\n".join(
+                  "\n".join(
                     [
                         "âœ… Session created and set as active.",
                         f"ID: `{session.session_id}`",
                         f"Backend: {backend}",
+                        f"Node: {node_label}",
                         f"Path: `{session.repo_path}`",
                         "Send a plain message to continue in this session.",
                     ]

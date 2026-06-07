@@ -1058,7 +1058,12 @@ class TaskOrchestrator(ITaskOrchestrator):
             # (`session.machine_id` set) with MESH_ENABLED=true take this path.
             # Everything else falls through to the untouched local retry loop
             # below — zero behavior change for ordinary local sessions.
-            route_remote = bool(config.mesh.enabled and session and session.machine_id)
+            route_remote = bool(
+                config.mesh.enabled
+                and session
+                and session.machine_id
+                and session.machine_id != socket.gethostname()
+            )
             if route_remote:
                 last_result = await self._process_task_remote(task, session, start_time, timeout_s)
 
