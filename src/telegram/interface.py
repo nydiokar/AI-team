@@ -96,6 +96,7 @@ class TelegramInterface:
         # Session command handlers
         self.app.add_handler(CommandHandler("session_new", self._handle_session_new))
         self.app.add_handler(CommandHandler("session_list", self._handle_session_list))
+        self.app.add_handler(CommandHandler("session_closed", self._handle_session_closed))
         self.app.add_handler(CommandHandler("session_use", self._handle_session_use))
         self.app.add_handler(CommandHandler("session_dirs", self._handle_session_dirs))
         self.app.add_handler(CommandHandler("session_status", self._handle_session_status))
@@ -118,21 +119,25 @@ class TelegramInterface:
     def _bot_commands() -> list[BotCommand]:
         """Commands exposed to Telegram clients via the slash-command chooser."""
         entries = [
-            ("session_new", "Create a new coding session"),
-            ("session_list", "List open sessions"),
-            ("session_close", "Close the active session"),
-            ("status", "Show gateway status"),
-            ("start", "Show welcome text"),
-            ("help", "Show command help"),
-            ("task", "Create a one-off task"),
-            ("session_use", "Switch the active session"),
-            ("session_dirs", "List allowed session roots"),
-            ("session_status", "Show active session details"),
-            ("session_cancel", "Cancel the active session task"),
-            ("session_restore", "Restore a recently closed session"),
-            ("commit", "Commit safe session changes"),
-            ("commit_all", "Commit all staged session changes"),
-            ("git_status", "Show repository git status"),
+            ("session_new", "🆕 Start a new coding session"),
+            ("session_list", "💬 Open sessions (tap to switch)"),
+            ("session_closed", "💤 Browse & restore closed sessions"),
+            ("session_status", "🔎 Active session details"),
+            ("status", "📊 Gateway health dashboard"),
+            ("nodes", "🌐 Worker nodes (mesh)"),
+            ("node", "🌐 One node's detail"),
+            ("task", "⚡ Run a one-off task"),
+            ("session_use", "🔀 Switch the active session"),
+            ("session_dirs", "📂 List project folders"),
+            ("session_cancel", "🛑 Cancel the running task"),
+            ("session_close", "✖️ Close the active session"),
+            ("session_restore", "↩️ Restore a closed session"),
+            ("compact", "🗜 Compact the session context"),
+            ("commit", "💾 Commit safe session changes"),
+            ("commit_all", "💾 Commit all session changes"),
+            ("git_status", "🔧 Repository git status"),
+            ("help", "❓ Full command help"),
+            ("start", "👋 Welcome / quick start"),
         ]
         return [BotCommand(command, description) for command, description in entries]
 
@@ -594,6 +599,98 @@ class TelegramInterface:
             return text[: limit - 1].rstrip() + "..."
         return text
 
+    # ------------------------------------------------------------------
+    # Shared visual vocabulary — one consistent look across every command.
+    # ------------------------------------------------------------------
+    _BACKEND_ICONS = {
+        "claude": "🧠",
+        "codex": "🤖",
+        "opencode": "🛠",
+        "opencode-server": "🛰",
+    }
+    _STATUS_DOT = {
+        SessionStatus.IDLE: "🟢",
+        SessionStatus.BUSY: "🔵",
+        SessionStatus.AWAITING_INPUT: "🟡",
+        SessionStatus.ERROR: "🔴",
+        SessionStatus.CANCELLED: "⚪",
+        SessionStatus.CLOSED: "⚫",
+    }
+    _STATUS_WORD = {
+        SessionStatus.IDLE: "idle",
+        SessionStatus.BUSY: "working",
+        SessionStatus.AWAITING_INPUT: "awaiting input",
+        SessionStatus.ERROR: "needs attention",
+        SessionStatus.CANCELLED: "cancelled",
+        SessionStatus.CLOSED: "closed",
+    }
+
+    @classmethod
+    def _backend_icon(cls, backend: str) -> str:
+        return cls._BACKEND_ICONS.get(backend, "💠")
+
+    @classmethod
+    def _status_chip(cls, status: SessionStatus) -> str:
+        """Compact 'dot word' chip, e.g. '🟡 awaiting input'."""
+        return f"{cls._STATUS_DOT.get(status, '•')} {cls._STATUS_WORD.get(status, status.value)}"
+
+    @staticmethod
+    def _short_id(session_id: str) -> str:
+        """First 8 chars — enough to recognise, short enough to scan."""
+        return (session_id or "")[:8]
+
+    @staticmethod
+    def _relative_age(value: str) -> str:
+        """Human 'time ago' from an ISO timestamp: '4m ago', '2h ago', 'just now'."""
+        if not value:
+            return "unknown"
+        try:
+            dt = datetime.fromisoformat(value)
+            secs = (datetime.now() - dt).total_seconds()
+            if secs < 0:
+                secs = 0
+            if secs < 10:
+                return "just now"
+            if secs < 90:
+                return f"{int(secs)}s ago"
+            if secs < 5400:
+                return f"{int(secs // 60)}m ago"
+            if secs < 172800:
+                return f"{int(secs // 3600)}h ago"
+            return f"{int(secs // 86400)}d ago"
+        except Exception:
+            return value
+
+    def _session_one_liner(self, session: Session, active_id: Optional[str], show_node: bool) -> str:
+        """A scannable multi-line entry with a short summary tail. Used in lists."""
+        star = "⭐ " if session.session_id == active_id else "• "
+        icon = self._backend_icon(session.backend)
+        node = f" · {self._session_node_label(session)}" if show_node else ""
+        head = f"{star}`{self._short_id(session.session_id)}` · {icon} {session.backend}{node}"
+        meta = (
+            f"   {self._session_repo_name(session)} · "
+            f"{self._status_chip(session.status)} · {self._relative_age(session.updated_at)}"
+        )
+        note = self._compact_session_note(session, limit=70)
+        if note:
+            return f"{head}\n{meta}\n   ↳ {note}"
+        return f"{head}\n{meta}"
+
+    def _session_card(self, session: Session, *, header: str = "📍 Active session", show_node: bool = True) -> str:
+        """Rich card for one session. Used by /status, /session_status, creation."""
+        icon = self._backend_icon(session.backend)
+        node = f" · {self._session_node_label(session)}" if show_node else ""
+        lines = [
+            header,
+            f"{icon} {session.backend}{node} · {self._status_chip(session.status)}",
+            f"📂 {self._session_repo_name(session)}   🆔 `{self._short_id(session.session_id)}`",
+            f"🕒 last activity {self._relative_age(session.updated_at)}",
+        ]
+        note = self._compact_session_note(session, limit=160)
+        if note:
+            lines.append(f"↳ {note}")
+        return "\n".join(lines)
+
     def _find_session_for_task(self, task_id: str, chat_id: Optional[int] = None) -> Optional[Session]:
         if not task_id:
             return None
@@ -650,17 +747,11 @@ class TelegramInterface:
         return "\n".join(lines)
 
     def _format_session_switched_message(self, session: Session) -> str:
-        backend_icon = "🤖" if session.backend == "codex" else "🧠"
-        lines = [
-            "⭐ Active session switched",
-            "",
-            f"{backend_icon} {session.backend} / {self._session_repo_name(session)}",
-            f"🆔 `{session.session_id}`",
-            f"{self._session_status_label(session.status)}  •  🕒 {self._format_session_timestamp(session.updated_at)}",
-            f"Ref: {self._session_message_ref(session)}",
-            f"Summary: {self._format_session_material_summary(session)}",
-        ]
-        return "\n".join(lines)
+        show_node = self._mesh_node_column_enabled()
+        return (
+            self._session_card(session, header="⭐ Switched to this session", show_node=show_node)
+            + "\n\n💬 Just type to continue here."
+        )
 
     def _build_session_picker_markup(self, sessions: list[Session], active_id: Optional[str]) -> Optional["InlineKeyboardMarkup"]:
         if not TELEGRAM_AVAILABLE or not sessions:
@@ -703,10 +794,11 @@ class TelegramInterface:
             return None
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton(text="Claude", callback_data="session_new_backend:claude")],
-                [InlineKeyboardButton(text="Codex", callback_data="session_new_backend:codex")],
-                [InlineKeyboardButton(text="OpenCode (server)", callback_data="session_new_backend:opencode-server")],
-                [InlineKeyboardButton(text="OpenCode (CLI)", callback_data="session_new_backend:opencode")],
+                [InlineKeyboardButton(text="🧠 Claude", callback_data="session_new_backend:claude")],
+                [InlineKeyboardButton(text="🤖 Codex", callback_data="session_new_backend:codex")],
+                [InlineKeyboardButton(text="🛰 OpenCode (server)", callback_data="session_new_backend:opencode-server")],
+                [InlineKeyboardButton(text="🛠 OpenCode (CLI)", callback_data="session_new_backend:opencode")],
+                [InlineKeyboardButton(text="✖️ Cancel", callback_data="session_new_cancel:")],
             ]
         )
 
@@ -746,11 +838,12 @@ class TelegramInterface:
             )]
         ]
         for node in self._mesh_online_nodes():
-            label = f"⚙ {node.node_id} ({node.tailscale_ip})"
+            label = f"🌐 {node.node_id} ({node.tailscale_ip})"
             rows.append([InlineKeyboardButton(
                 text=label[:64],
                 callback_data=f"session_new_node:{backend}:{node.node_id}",
             )])
+        rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="session_new_back:backend")])
         return InlineKeyboardMarkup(rows)
 
     def _repo_choices_for_node(self, node_id: str, limit: int = 10) -> list[tuple[str, str]]:
@@ -795,22 +888,31 @@ class TelegramInterface:
                     break
         return [(child.name, str(child.resolve())) for child in repos[:limit]]
 
-    def _build_session_repo_markup(self, backend: str, node_id: str = "__local__") -> Optional["InlineKeyboardMarkup"]:
+    def _build_session_repo_markup(
+        self, backend: str, node_id: str = "__local__", back_to: str = "backend"
+    ) -> Optional["InlineKeyboardMarkup"]:
+        """Repo picker. Always includes a Back button; `back_to` is 'backend' or 'node'.
+
+        Returns None only when Telegram is unavailable — an empty repo list still
+        yields a keyboard (just Back) so the user is never stranded.
+        """
         if not TELEGRAM_AVAILABLE:
             return None
         choices = self._repo_choices_for_node(node_id, limit=10)
-        if not choices:
-            return None
         rows = []
         for idx, (name, _repo_path) in enumerate(choices):
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=name[:64],
-                        callback_data=f"session_new_repo:{backend}:{node_id}:{idx}",
-                    )
-                ]
-            )
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"📁 {name}"[:64],
+                    callback_data=f"session_new_repo:{backend}:{node_id}:{idx}",
+                )
+            ])
+        if back_to == "node":
+            rows.append([InlineKeyboardButton(
+                text="⬅️ Back", callback_data=f"session_new_back:node:{backend}")])
+        else:
+            rows.append([InlineKeyboardButton(
+                text="⬅️ Back", callback_data="session_new_back:backend")])
         return InlineKeyboardMarkup(rows)
 
     async def _create_and_bind_session(
@@ -1006,13 +1108,15 @@ class TelegramInterface:
             return
 
         await update.message.reply_text(
-            "Telegram Coding Gateway\n\n"
-            "Primary flow:\n"
-            "• `/session_new claude <path>` opens a persistent coding session\n"
-            "• plain messages continue the active session\n"
-            "• `/task <instruction>` runs a one-off task outside any session\n"
-            "• `/session_dirs` shows likely project folders when you need to browse\n\n"
-            "Use `/help` for the full command set."
+            "👋 *Welcome to your Coding Gateway*\n\n"
+            "Drive coding agents (Claude, Codex, OpenCode) from your phone.\n\n"
+            "*Quick start*\n"
+            "1️⃣ `/session_new` — pick a backend, machine & repo (guided)\n"
+            "2️⃣ Just *type your request* — it goes to the agent\n"
+            "3️⃣ `/status` anytime to see what's happening\n\n"
+            "💡 `/task <instruction>` runs a quick one-off without a session.\n\n"
+            "Type `/help` for the full command set.",
+            parse_mode="Markdown",
         )
     
     async def _handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1022,31 +1126,33 @@ class TelegramInterface:
             return
 
         await update.message.reply_text(
-            "Telegram Coding Gateway\n\n"
-            "Sessions:\n"
-            "• `/session_new <backend> <path>` open a session in a bounded repo path\n"
-            "• `/session_list` list open sessions\n"
-            "• `/session_use <session_id>` switch the active session\n"
-            "• `/session_status [session_id]` inspect session state\n"
-            "• `/session_dirs [path]` list useful child directories for the active session or a path\n"
-            "• `/session_cancel [session_id]` cancel the last queued or running task for a session\n"
-            "• `/session_close [session_id]` close a session\n"
-            "• `/session_restore [session_id]` restore a closed session\n\n"
-            "Execution:\n"
-            "• plain text continues the active session\n"
-            "• `/task <instruction>` create a one-off task only\n"
-            "• `/status` show gateway status and configured scope\n\n"
-            "Mesh:\n"
-            "• `/nodes` list worker nodes (online/offline, last seen)\n"
-            "• `/node <id>` node detail (backends, repos, heartbeat)\n\n"
-            "Git:\n"
-            "• `/git_status [session_id]`\n"
-            "• `/commit [session_id] [--no-branch] [--push]`\n"
-            "• `/commit_all [session_id] [--no-branch] [--push]`\n\n"
-            "Path handling:\n"
-            "• relative paths resolve under your configured base workspace\n"
-            "• invalid paths return close matches and nearby directories\n"
-            "• `/session_dirs` without an active session shows likely project folders under the workspace"
+            "🧭 *Telegram Coding Gateway — command guide*\n\n"
+            "Once a session is active, *just type normally* — your message goes "
+            "straight to the agent. The commands below are for steering.\n\n"
+            "💬 *Sessions*\n"
+            "• `/session_new` — start one (guided picker, or `/session_new claude <path>`)\n"
+            "• `/session_list` — open sessions, tap to switch\n"
+            "• `/session_closed` — browse & restore closed ones\n"
+            "• `/session_status [id]` — full detail on a session\n"
+            "• `/session_use [id]` — switch active session\n"
+            "• `/session_close [id]` — close · `/session_restore [id]` — reopen\n"
+            "• `/session_cancel [id]` — stop the running task\n"
+            "• `/compact [id]` — shrink the agent's context window\n\n"
+            "⚡ *Work*\n"
+            "• plain text → continues the active session\n"
+            "• `/task <instruction>` — one-off task, no session\n\n"
+            "📊 *Health & mesh*\n"
+            "• `/status` — gateway dashboard + active session\n"
+            "• `/nodes` — worker nodes (online/offline, last seen)\n"
+            "• `/node <id>` — one node's backends, repos, heartbeat\n\n"
+            "💾 *Git*\n"
+            "• `/git_status [id]`\n"
+            "• `/commit [id] [--no-branch] [--push]`\n"
+            "• `/commit_all [id] [--no-branch] [--push]`\n\n"
+            "📂 *Paths*\n"
+            "• relative paths resolve under your workspace; bad paths suggest matches\n"
+            "• `/session_dirs [path]` — browse project folders",
+            parse_mode="Markdown",
         )
     
     async def _handle_task_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1098,7 +1204,7 @@ class TelegramInterface:
             show_node = self._mesh_node_column_enabled()
 
             telegram = status.get("telegram", {})
-            scope = status.get("scope", {})
+            comps = status.get("components", {})
             active_session = self.session_store.get_active(update.effective_chat.id)
             if active_session and not self._user_can_access_session(update.effective_user.id, active_session):
                 active_session = None
@@ -1113,43 +1219,55 @@ class TelegramInterface:
             except Exception:
                 open_count = 0
 
-            running = status.get("running") or telegram.get("running")
-            head_icon = "✅" if running else "⚠️"
+            running = bool(status.get("running") or telegram.get("running"))
             workers = status["tasks"]["workers"]
             active_tasks = status["tasks"]["active"]
-            session_word = "session" if open_count == 1 else "sessions"
+            queued = status["tasks"]["queued"]
 
-            headline_bits = [f"{workers} worker{'s' if workers != 1 else ''}"]
-            if show_node:
-                online = len(self._mesh_online_nodes())
-                headline_bits.append(f"{online} node{'s' if online != 1 else ''} online")
-            headline_bits.append(f"{open_count} open {session_word}")
+            # --- Headline: one glanceable health line ---
+            degraded = (not comps.get("claude_available")) or (
+                telegram.get("configured") and not telegram.get("running")
+            )
+            head_icon = "✅" if running and not degraded else ("⚠️" if running else "🔴")
+            head_word = "healthy" if running and not degraded else ("running" if running else "stopped")
+            bits = [f"{workers} worker{'s' if workers != 1 else ''}"]
+            bits.append(f"{open_count} session{'s' if open_count != 1 else ''}")
             if active_tasks:
-                headline_bits.append(f"{active_tasks} running")
-            lines = [
-                f"{head_icon} Gateway {'running' if running else 'stopped'} — "
-                + ", ".join(headline_bits)
-            ]
+                bits.append(f"{active_tasks} running")
+            if queued:
+                bits.append(f"{queued} queued")
+            lines = [f"{head_icon} Gateway {head_word} · " + " · ".join(bits)]
 
+            # --- Active session card (the thing you came to see) ---
+            lines.append("")
             if active_session:
-                node = f" | {self._session_node_label(active_session)}" if show_node else ""
-                lines.append(
-                    f"\nSession: `{active_session.session_id}` | {active_session.backend}"
-                    f"{node} | {active_session.status.value}"
-                )
-                lines.append(f"Path: `{self._session_repo_name(active_session)}`")
+                lines.append(self._session_card(active_session, show_node=show_node))
             else:
-                lines.append("\nNo active session. Use /session_new or /session_list.")
+                lines.append("💤 No active session.")
+                lines.append("   /session_new to start · /session_list to switch")
 
-            # Surface degraded components only when something is actually wrong.
-            comps = status.get("components", {})
-            warns = []
-            if not comps.get("claude_available"):
-                warns.append("Claude CLI unavailable")
-            if not telegram.get("running") and telegram.get("configured"):
-                warns.append("Telegram stopped")
-            if warns:
-                lines.append("\n⚠️ " + "; ".join(warns))
+            # --- Components: always shown, compact one line ---
+            def _mark(ok, optional=False):
+                if ok:
+                    return "✅"
+                return "➖" if optional else "❌"
+            lines.append("")
+            lines.append(
+                f"⚙️ Claude {_mark(comps.get('claude_available'))}"
+                f" · Watcher {_mark(comps.get('file_watcher_running'))}"
+                f" · Bot {_mark(telegram.get('running'))}"
+                f" · Ollama {_mark(comps.get('llama_available'), optional=True)}"
+            )
+
+            # --- Mesh line, only when enabled ---
+            if show_node:
+                nodes = self._mesh_online_nodes()
+                if nodes:
+                    names = " · ".join(f"{n.node_id} 🟢" for n in nodes[:4])
+                    extra = f" +{len(nodes) - 4}" if len(nodes) > 4 else ""
+                    lines.append(f"🌐 Mesh: {names}{extra}")
+                else:
+                    lines.append("🌐 Mesh: on, no workers online")
 
             await update.message.reply_text("\n".join(lines))
 
@@ -1517,15 +1635,10 @@ class TelegramInterface:
             backend=backend,
             repo_path=resolution.resolved_path,
         )
-        lines = [
-            "✅ Session created and set as active.",
-            f"ID: `{session.session_id}`",
-            f"Backend: {backend}",
-            f"Path: `{session.repo_path}`",
-            "Send a plain message to continue in this session.",
-            "Use `/session_dirs` to browse directories under this repo.",
-        ]
-        await update.message.reply_text("\n".join(lines))
+        await update.message.reply_text(
+            self._format_session_created_message(session),
+            parse_mode="Markdown",
+        )
 
     async def _handle_session_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_list — shows open sessions with a switch picker, then recently closed with restore buttons."""
@@ -1542,25 +1655,57 @@ class TelegramInterface:
         show_node = self._mesh_node_column_enabled()
 
         if not open_sessions and not closed_sessions:
-            await update.message.reply_text("No sessions yet. Use /session_new to create one.")
+            await update.message.reply_text(
+                "📭 No sessions yet.\nUse /session_new to start your first coding session."
+            )
             return
 
-        lines = [f"Sessions ({len(open_sessions)})"]
-        for s in open_sessions[:15]:
-            lines.append("• " + self._compact_session_line(s, active_id, show_node))
-        if len(open_sessions) > 15:
-            lines.append(f"…and {len(open_sessions) - 15} more open.")
+        if open_sessions:
+            lines = [f"💬 Open sessions ({len(open_sessions)}) — tap below to switch", ""]
+            for s in open_sessions[:12]:
+                lines.append(self._session_one_liner(s, active_id, show_node))
+                lines.append("")
+            if len(open_sessions) > 12:
+                lines.append(f"…and {len(open_sessions) - 12} more open.")
+        else:
+            lines = ["📭 No open sessions.", "Use /session_new to start one.", ""]
 
+        # Closed sessions stay out of the way — just a count + how to reach them.
         if closed_sessions:
-            lines.append("")
-            for s in closed_sessions[:8]:
-                lines.append("• " + self._compact_session_line(s, active_id, show_node))
-            if len(closed_sessions) > 8:
-                lines.append(f"…and {len(closed_sessions) - 8} more closed.")
+            lines.append("— — —")
+            lines.append(
+                f"💤 {len(closed_sessions)} closed. /session_closed to browse & restore."
+            )
 
         await update.message.reply_text(
-            "\n".join(lines),
+            "\n".join(lines).rstrip(),
             reply_markup=self._build_session_picker_markup(open_sessions, active_id),
+        )
+
+    async def _handle_session_closed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_closed — browse recently closed sessions with restore buttons."""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        all_sessions = [s for s in self.session_store.list_all() if self._user_can_access_session(update.effective_user.id, s)]
+        closed = [s for s in all_sessions if s.status == SessionStatus.CLOSED]
+        closed.sort(key=lambda s: s.updated_at or "", reverse=True)
+        show_node = self._mesh_node_column_enabled()
+
+        if not closed:
+            await update.message.reply_text("✨ No closed sessions. /session_list shows what's open.")
+            return
+
+        lines = [f"💤 Closed sessions ({len(closed)}) — tap to restore", ""]
+        for s in closed[:10]:
+            lines.append(self._session_one_liner(s, None, show_node))
+            lines.append("")
+        if len(closed) > 10:
+            lines.append(f"…and {len(closed) - 10} older. Use /session_restore <id> for those.")
+
+        await update.message.reply_text(
+            "\n".join(lines).rstrip(),
+            reply_markup=self._build_closed_session_picker_markup(closed[:10]),
         )
 
     async def _handle_session_use_legacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1572,11 +1717,12 @@ class TelegramInterface:
         if not args:
             markup = self._build_session_backend_markup()
             if markup is None:
-                await update.message.reply_text("âŒ Telegram inline buttons are unavailable.")
+                await update.message.reply_text("❌ Telegram inline buttons are unavailable.")
                 return
             await update.message.reply_text(
-                "Choose the backend for the new session:",
+                "🆕 *New session* — choose a backend:",
                 reply_markup=markup,
+                parse_mode="Markdown",
             )
             return
         if not args:
@@ -1612,17 +1758,18 @@ class TelegramInterface:
     async def _handle_session_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_new [<backend> [<node_id>] <path>]"""
         if not self._check_user_permission(update.effective_user.id):
-            await update.message.reply_text("âŒ Access denied.")
+            await update.message.reply_text("❌ Access denied.")
             return
         args = context.args or []
         if not args:
             markup = self._build_session_backend_markup()
             if markup is None:
-                await update.message.reply_text("âŒ Telegram inline buttons are unavailable.")
+                await update.message.reply_text("❌ Telegram inline buttons are unavailable.")
                 return
             await update.message.reply_text(
-                "Choose the backend for the new session:",
+                "🆕 *New session* — choose a backend:",
                 reply_markup=markup,
+                parse_mode="Markdown",
             )
             return
         if len(args) < 2:
@@ -1666,7 +1813,7 @@ class TelegramInterface:
             if not match:
                 names = ", ".join(r["name"] for r in repos) or "none advertised"
                 await update.message.reply_text(
-                    f"âŒ Repo `{repo_path}` not found on `{node_id}`. Available: {names}"
+                    f"❌ Repo `{repo_path}` not found on `{node_id}`. Available: {names}"
                 )
                 return
             resolved_path = match
@@ -1678,20 +1825,15 @@ class TelegramInterface:
             repo_path=resolved_path,
             node_id=node_id,
         )
-        node_label = "this server" if node_id == "__local__" else node_id
-        lines = [
-            "âœ… Session created and set as active.",
-            f"ID: `{session.session_id}`",
-            f"Backend: {backend}",
-            f"Node: {node_label}",
-            f"Path: `{session.repo_path}`",
-            "Send a plain message to continue in this session.",
-        ]
-        await update.message.reply_text("\n".join(lines))
+        await update.message.reply_text(
+            self._format_session_created_message(session),
+            parse_mode="Markdown",
+        )
+
     async def _handle_session_use(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_use <session_id>"""
         if not self._check_user_permission(update.effective_user.id):
-            await update.message.reply_text("âŒ Access denied.")
+            await update.message.reply_text("❌ Access denied.")
             return
         args = context.args or []
         if not args:
@@ -1712,13 +1854,13 @@ class TelegramInterface:
         session_id = args[0]
         session = self.session_store.get(session_id)
         if not session:
-            await update.message.reply_text(f"âŒ Session `{session_id}` not found.")
+            await update.message.reply_text(f"❌ Session `{session_id}` not found.")
             return
         if not self._user_can_access_session(update.effective_user.id, session):
-            await update.message.reply_text("âŒ You do not own that session.")
+            await update.message.reply_text("❌ You do not own that session.")
             return
         if session.status == SessionStatus.CLOSED:
-            await update.message.reply_text(f"âŒ Session `{session_id}` is closed.")
+            await update.message.reply_text(f"❌ Session `{session_id}` is closed.")
             return
         self.session_store.bind(update.effective_chat.id, session_id)
         await update.message.reply_text(self._format_session_switched_message(session))
@@ -1730,20 +1872,20 @@ class TelegramInterface:
         await query.answer()
 
         if not self._check_user_permission(update.effective_user.id):
-            await query.edit_message_text("âŒ Access denied.")
+            await query.edit_message_text("❌ Access denied.")
             return
 
         data = query.data or ""
         session_id = data.split(":", 1)[1] if ":" in data else ""
         session = self.session_store.get(session_id)
         if not session:
-            await query.edit_message_text(f"âŒ Session `{session_id}` not found.")
+            await query.edit_message_text(f"❌ Session `{session_id}` not found.")
             return
         if not self._user_can_access_session(update.effective_user.id, session):
-            await query.edit_message_text("âŒ You do not own that session.")
+            await query.edit_message_text("❌ You do not own that session.")
             return
         if session.status == SessionStatus.CLOSED:
-            await query.edit_message_text(f"âŒ Session `{session_id}` is closed.")
+            await query.edit_message_text(f"❌ Session `{session_id}` is closed.")
             return
 
         self.session_store.bind(update.effective_chat.id, session_id)
@@ -1756,11 +1898,36 @@ class TelegramInterface:
         await query.answer()
 
         if not self._check_user_permission(update.effective_user.id):
-            await query.edit_message_text("âŒ Access denied.")
+            await query.edit_message_text("❌ Access denied.")
             return
 
         data = query.data or ""
         _valid_backends = ("claude", "codex", "opencode", "opencode-server")
+
+        # --- Cancel: bail out of the whole flow ---
+        if data.startswith("session_new_cancel"):
+            await query.edit_message_text("✖️ Cancelled. Run /session_new whenever you're ready.")
+            return
+
+        # --- Back: step backwards through the picker ---
+        if data.startswith("session_new_back:"):
+            parts = data.split(":")
+            target = parts[1] if len(parts) > 1 else "backend"
+            if target == "node" and len(parts) > 2:
+                backend = parts[2].strip().lower()
+                markup = self._build_session_node_markup(backend)
+                await query.edit_message_text(
+                    f"🖥 *New {backend} session* — which machine should run it?",
+                    reply_markup=markup,
+                    parse_mode="Markdown",
+                )
+            else:
+                await query.edit_message_text(
+                    "🆕 *New session* — choose a backend:",
+                    reply_markup=self._build_session_backend_markup(),
+                    parse_mode="Markdown",
+                )
+            return
 
         if data.startswith("session_new_backend:"):
             backend = data.split(":", 1)[1].strip().lower()
@@ -1770,22 +1937,24 @@ class TelegramInterface:
             # If mesh is enabled and workers are online, show node picker first.
             nodes = self._mesh_online_nodes()
             if nodes:
-                markup = self._build_session_node_markup(backend)
                 await query.edit_message_text(
-                    f"Choose which machine will run `{backend}`:",
-                    reply_markup=markup,
+                    f"🖥 *New {backend} session* — which machine should run it?",
+                    reply_markup=self._build_session_node_markup(backend),
                     parse_mode="Markdown",
                 )
             else:
-                markup = self._build_session_repo_markup(backend, node_id="__local__")
-                if markup is None:
+                markup = self._build_session_repo_markup(backend, node_id="__local__", back_to="backend")
+                if not self._repo_choices_for_node("__local__", limit=10):
                     await query.edit_message_text(
-                        "âŒ No recent repositories found. Use `/session_new <backend> <path>`.",
+                        f"📂 *New {backend} session*\n\n"
+                        "No repositories found under your workspace.\n"
+                        f"Start one manually: `/session_new {backend} <path>`",
+                        reply_markup=markup,
                         parse_mode="Markdown",
                     )
                     return
                 await query.edit_message_text(
-                    f"Choose the repository for `{backend}`:",
+                    f"📂 *New {backend} session* — pick a repository:",
                     reply_markup=markup,
                     parse_mode="Markdown",
                 )
@@ -1795,23 +1964,26 @@ class TelegramInterface:
             # format: session_new_node:{backend}:{node_id}
             parts = data.split(":", 2)
             if len(parts) != 3:
-                await query.edit_message_text("âŒ Invalid node selection.")
+                await query.edit_message_text("❌ Invalid node selection.")
                 return
             backend, node_id = parts[1].strip().lower(), parts[2].strip()
             if backend not in _valid_backends:
                 await query.edit_message_text("❌ Unknown backend.")
                 return
-            markup = self._build_session_repo_markup(backend, node_id=node_id)
-            if markup is None:
+            node_label = "this server" if node_id == "__local__" else node_id
+            markup = self._build_session_repo_markup(backend, node_id=node_id, back_to="node")
+            if not self._repo_choices_for_node(node_id, limit=10):
                 await query.edit_message_text(
-                    "âŒ No repositories found for this node. "
-                    "Set `WORKER_PROJECTS_ROOT` on the worker or use `/session_new <backend> <path>`.",
+                    f"📂 *{backend} on {node_label}*\n\n"
+                    "No repositories found here.\n"
+                    "Set `WORKER_PROJECTS_ROOT` on the worker, or start one manually with "
+                    f"`/session_new {backend} <path>`.",
+                    reply_markup=markup,
                     parse_mode="Markdown",
                 )
                 return
-            node_label = "this server" if node_id == "__local__" else node_id
             await query.edit_message_text(
-                f"Choose the repository on `{node_label}` for `{backend}`:",
+                f"📂 *{backend} on {node_label}* — pick a repository:",
                 reply_markup=markup,
                 parse_mode="Markdown",
             )
@@ -1821,20 +1993,20 @@ class TelegramInterface:
             # format: session_new_repo:{backend}:{node_id}:{index}
             parts = data.split(":")
             if len(parts) != 4:
-                await query.edit_message_text("âŒ Invalid repository selection.")
+                await query.edit_message_text("❌ Invalid repository selection.")
                 return
             backend, node_id = parts[1].strip().lower(), parts[2].strip()
             try:
                 repo_index = int(parts[3])
             except ValueError:
-                await query.edit_message_text("âŒ Invalid repository selection.")
+                await query.edit_message_text("❌ Invalid repository selection.")
                 return
             if backend not in _valid_backends:
                 await query.edit_message_text("❌ Unknown backend.")
                 return
             choices = self._repo_choices_for_node(node_id, limit=10)
             if repo_index < 0 or repo_index >= len(choices):
-                await query.edit_message_text("âŒ Repository choice expired. Run /session_new again.")
+                await query.edit_message_text("❌ That choice expired. Run /session_new again.")
                 return
             _label, repo_path = choices[repo_index]
             session = await self._create_and_bind_session(
@@ -1844,23 +2016,22 @@ class TelegramInterface:
                 repo_path=repo_path,
                 node_id=node_id,
             )
-            node_label = "this server" if node_id == "__local__" else node_id
             await query.edit_message_text(
-                  "\n".join(
-                    [
-                        "âœ… Session created and set as active.",
-                        f"ID: `{session.session_id}`",
-                        f"Backend: {backend}",
-                        f"Node: {node_label}",
-                        f"Path: `{session.repo_path}`",
-                        "Send a plain message to continue in this session.",
-                    ]
-                ),
+                self._format_session_created_message(session),
                 parse_mode="Markdown",
             )
             return
 
-        await query.edit_message_text("âŒ Unknown session_new action.")
+        await query.edit_message_text("❌ Unknown session_new action.")
+
+    def _format_session_created_message(self, session: Session) -> str:
+        """Friendly confirmation shown after a session is created."""
+        show_node = self._mesh_node_column_enabled()
+        return (
+            self._session_card(session, header="✅ Session created & active", show_node=show_node)
+            + "\n\n💬 Just type your request to start working.\n"
+            "📂 /session_dirs to browse folders · /status to check in"
+        )
 
     async def _handle_session_dirs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_dirs [path]"""

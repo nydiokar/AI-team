@@ -175,7 +175,9 @@ async def test_start_registers_bot_commands(monkeypatch, isolated_session_store)
     await bot.start()
 
     names = [item.command for item in bot.app.bot.commands]
-    assert names[:4] == ["session_new", "session_list", "session_close", "status"]
+    # Most-used commands surface first in the slash menu.
+    assert names[:4] == ["session_new", "session_list", "session_closed", "session_status"]
+    assert "status" in names
     assert "git_status" in names
 
 
@@ -194,8 +196,10 @@ async def test_session_new_creates_session_and_guides_next_step(monkeypatch, iso
         active = SessionStore().get_active(update.effective_chat.id)
         assert active is not None
         assert active.repo_path == str((workspace / "repo-alpha").resolve())
-        assert "Send a plain message to continue in this session." in update.message.replies[-1]
-        assert "/session_dirs" in update.message.replies[-1]
+        reply = update.message.replies[-1]
+        assert "Session created" in reply
+        assert "Just type your request" in reply
+        assert "/session_dirs" in reply
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
@@ -212,10 +216,13 @@ async def test_session_new_without_args_shows_backend_picker(monkeypatch, isolat
         await bot._handle_session_new(update, _DummyContext())
 
         assert update.message.replies
-        assert "Choose the backend" in update.message.replies[-1]
+        assert "choose a backend" in update.message.replies[-1].lower()
         markup = update.message.reply_kwargs[-1]["reply_markup"]
         labels = [button.text for row in markup.inline_keyboard for button in row]
-        assert labels == ["Codex", "Claude"]
+        # Backend options + a Cancel escape hatch.
+        assert any("Claude" in l for l in labels)
+        assert any("Codex" in l for l in labels)
+        assert any("Cancel" in l for l in labels)
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
@@ -236,16 +243,21 @@ async def test_session_new_backend_callback_shows_recent_repos(monkeypatch, isol
         monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
         monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
         bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+        # Isolate from the live mesh DB: no remote nodes in this unit test.
+        monkeypatch.setattr(bot, "_mesh_online_nodes", lambda: [])
 
         update = _DummyUpdate()
         update.callback_query = _DummyCallbackQuery("session_new_backend:codex")
         await bot._handle_session_new_callback(update, _DummyContext())
 
         assert update.callback_query.answers == 1
-        assert "Choose the repository" in update.callback_query.edits[-1]
+        assert "pick a repository" in update.callback_query.edits[-1].lower()
         markup = update.callback_query.edit_kwargs[-1]["reply_markup"]
         labels = [button.text for row in markup.inline_keyboard for button in row]
-        assert labels[:2] == ["repo-beta", "repo-alpha"]
+        # Repos shown most-recent first, each prefixed with a folder icon; Back last.
+        assert labels[0] == "📁 repo-beta"
+        assert labels[1] == "📁 repo-alpha"
+        assert labels[-1] == "⬅️ Back"
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
@@ -260,16 +272,18 @@ async def test_session_new_repo_callback_creates_session(monkeypatch, isolated_s
         monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
         monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
         bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+        monkeypatch.setattr(bot, "_mesh_online_nodes", lambda: [])
 
         update = _DummyUpdate()
-        update.callback_query = _DummyCallbackQuery("session_new_repo:codex:0")
+        # Callback format: session_new_repo:{backend}:{node_id}:{index}
+        update.callback_query = _DummyCallbackQuery("session_new_repo:codex:__local__:0")
         await bot._handle_session_new_callback(update, _DummyContext())
 
         active = SessionStore().get_active(update.effective_chat.id)
         assert active is not None
         assert active.backend == "codex"
         assert active.repo_path == str(repo_alpha.resolve())
-        assert "Session created and set as active" in update.callback_query.edits[-1]
+        assert "Session created" in update.callback_query.edits[-1]
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
@@ -314,11 +328,14 @@ async def test_help_lists_current_command_set(monkeypatch, isolated_session_stor
         await bot._handle_help(update, _DummyContext())
 
         text = update.message.replies[-1]
-        assert "/session_new <backend> <path>" in text
-        assert "/session_dirs [path]" in text
-        assert "/session_cancel [session_id]" in text
-        assert "/git_status [session_id]" in text
-        assert "/commit [session_id] [--no-branch] [--push]" in text
+        # Core commands are all documented (exact phrasing is friendly now).
+        assert "/session_new" in text
+        assert "/session_closed" in text
+        assert "/session_dirs" in text
+        assert "/session_cancel" in text
+        assert "/git_status" in text
+        assert "/commit" in text
+        assert "/nodes" in text
         assert "/run <instruction>" not in text
         assert "/say <instruction>" not in text
         assert "/documentation" not in text
@@ -352,16 +369,19 @@ async def test_session_list_compact_shows_open_and_collapsed_closed(monkeypatch,
         await bot._handle_session_list(update, _DummyContext())
         text = update.message.replies[-1]
 
-        # D4: compact one-line layout. Open count headline, active session
-        # starred, closed sessions collapsed to one [closed] line each.
+        # Open sessions are rich (summary tail shown), the active one starred.
         assert len(update.message.replies) == 1
-        assert "Sessions (1)" in text
+        assert "Open sessions (1)" in text
         assert "⭐" in text
         assert "repo-alpha" in text
-        assert open_session.session_id in text
-        # Closed sessions are now shown, collapsed, with a [closed] marker.
-        assert "[closed]" in text
-        assert closed_session.session_id in text
+        assert bot._short_id(open_session.session_id) in text
+        # The orienting summary is back on each open session.
+        assert "Added session summaries to the picker" in text
+        # Closed sessions are kept out of the way — just a count + pointer.
+        assert "1 closed" in text
+        assert "/session_closed" in text
+        # The closed session's repo/id should NOT appear inline in this view.
+        assert "repo-beta" not in text
         # Full filesystem paths are never leaked — only repo basenames.
         assert str((workspace / "repo-alpha").resolve()) not in text
     finally:
@@ -412,11 +432,12 @@ async def test_session_picker_callback_uses_compact_switch_message(monkeypatch, 
         await bot._handle_session_picker_callback(update, _DummyContext())
         text = update.callback_query.edits[-1]
 
-        assert "⭐ Active session switched" in text
-        assert "🧠 claude / repo-alpha" in text
-        assert session.session_id in text
-        assert f"#s_{session.session_id}" in text
-        assert "Summary:" in text
+        assert "Switched to this session" in text
+        assert "🧠 claude" in text
+        assert "repo-alpha" in text
+        assert bot._short_id(session.session_id) in text
+        # Card invites the user to keep typing.
+        assert "type to continue" in text.lower()
         assert str((workspace / "repo-alpha").resolve()) not in text
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
