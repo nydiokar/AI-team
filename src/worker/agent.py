@@ -460,6 +460,15 @@ class WorkerAgent:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path as _Path
+        _env = _Path(__file__).resolve().parent.parent.parent / ".env"
+        if _env.exists():
+            load_dotenv(_env, override=False)
+    except ImportError:
+        pass
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
