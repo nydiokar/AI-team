@@ -28,6 +28,12 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
+
+# Spawns real `opencode serve` processes — e2e, deselected unless --run-e2e.
+# When run, set AI_TEAM_ALLOW_OPENCODE_E2E=1 so the cost guard permits OpenCode.
+pytestmark = pytest.mark.e2e
+
 # Allow running from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

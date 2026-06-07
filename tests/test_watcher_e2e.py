@@ -8,6 +8,12 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+import pytest
+
+# Builds a real orchestrator + watcher and can hit a live backend — e2e,
+# deselected unless --run-e2e (and even then the cost guard blocks Claude).
+pytestmark = pytest.mark.e2e
+
 # Add `orchestrator` (parent of `src`) to sys.path so `src` is importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

@@ -219,11 +219,28 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any]) -> D
         }
     except Exception as e:
         elapsed = time.monotonic() - start
-        logger.error("event=execute_task_failed task_id=%s err=%s", task_row.get("id"), e)
+        import traceback as _tb
+        from src.core.observability import emit_event
+        detail = _tb.format_exc()
+        error_class = type(e).__name__
+        concise = f"{error_class}: {e}"
+        task_id = task_row.get("id")
+        # Full traceback to the worker log (not just str(e)) so failures are
+        # actually diagnosable — this is the core D2 fix.
+        logger.error("task_failed error=%s\n%s", concise, detail)
+        emit_event(
+            "task_failed",
+            task_id=task_id,
+            error=concise,
+            error_class=error_class,
+            error_detail=detail[:4000],
+            backend=backend_name,
+        )
         return {
             "success": False,
             "output": "",
-            "errors": [str(e)],
+            "errors": [concise],
+            "error_detail": detail[:4000],
             "files_modified": [],
             "execution_time": elapsed,
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
@@ -366,7 +383,11 @@ class WorkerAgent:
     # ------------------------------------------------------------------
 
     async def _handle_task(self, task_row: Dict[str, Any]) -> None:
+        from src.core.observability import set_log_context, emit_event
         task_id = task_row.get("id", "unknown")
+        session_id = task_row.get("session_id", "")
+        # Correlate every line + event for this task with task_id/session_id.
+        set_log_context(task_id=task_id, session_id=session_id)
         async with self._semaphore:
             # Claim — optimistic lock
             try:
@@ -377,15 +398,16 @@ class WorkerAgent:
                 )
             except urllib.error.HTTPError as e:
                 if e.code == 409:
-                    logger.debug("event=claim_race task_id=%s", task_id)
+                    logger.debug("claim_race (already claimed)")
                 else:
-                    logger.warning("event=claim_failed task_id=%s err=%s", task_id, e)
+                    logger.warning("claim_failed err=%s", e)
                 return
             except Exception as e:
-                logger.warning("event=claim_failed task_id=%s err=%s", task_id, e)
+                logger.warning("claim_failed err=%s", e)
                 return
 
-            logger.info("event=task_claimed task_id=%s node=%s", task_id, self.cfg.node_id)
+            logger.info("task_claimed")
+            emit_event("task_claimed", backend=task_row.get("backend", ""))
 
             # Execute
             result = await _execute_task(task_row, self._backends)
@@ -398,11 +420,16 @@ class WorkerAgent:
                     {"node_id": self.cfg.node_id, **result},
                 )
                 logger.info(
-                    "event=task_result_posted task_id=%s success=%s elapsed=%.1fs",
-                    task_id, result["success"], result["execution_time"],
+                    "task_result_posted success=%s elapsed=%.1fs",
+                    result["success"], result["execution_time"],
+                )
+                emit_event(
+                    "task_result_posted",
+                    success=result["success"],
+                    duration_s=round(result.get("execution_time", 0.0), 3),
                 )
             except Exception as e:
-                logger.error("event=result_post_failed task_id=%s err=%s", task_id, e)
+                logger.error("result_post_failed err=%s", e)
 
     # ------------------------------------------------------------------
     # Run
@@ -469,10 +496,14 @@ def main() -> None:
     except ImportError:
         pass
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    # Use the shared observability spine so every worker log line auto-carries
+    # [node=<WORKER_NODE_ID> ...] and worker events land in this machine's
+    # logs/events.ndjson — correlatable with the gateway by task_id.
+    from src.worker.config import WorkerConfig
+    from src.core.observability import init_logging
+    _cfg = WorkerConfig.from_env()
+    init_logging(node_id=_cfg.node_id, level="INFO")
+
     agent = WorkerAgent()
     try:
         asyncio.run(agent.run())

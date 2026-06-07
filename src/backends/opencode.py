@@ -209,6 +209,9 @@ class OpenCodeBackend(CodingBackend):
         session_key: Optional[str],
         start: float,
     ) -> ExecutionResult:
+        # Cost guard: blocked under test mode unless OpenCode e2e is opted in.
+        from src.core.test_guard import assert_live_calls_allowed
+        assert_live_calls_allowed("opencode")
         cmd = self._build_cmd(
             cwd=cwd,
             message=message,
@@ -1038,6 +1041,9 @@ class OpenCodeServerBackend(CodingBackend):
         repo directory gets its own server process launched with `cwd=repo_path`.
         Returns error string or None.
         """
+        # Cost guard: blocked under test mode unless OpenCode e2e is opted in.
+        from src.core.test_guard import assert_live_calls_allowed
+        assert_live_calls_allowed("opencode-server")
         with self._lock:
             proc = self._procs.get(key)
             if proc is not None and proc.poll() is None and self._base_urls.get(key):

@@ -6,9 +6,9 @@ import asyncio
 import json
 import os
 import signal
+import socket
 import sys
 import logging
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # Add src to path after site-packages to avoid shadowing third-party modules (e.g., telegram)
@@ -17,6 +17,7 @@ if str(src_path) not in sys.path:
     sys.path.append(str(src_path))
 
 from src.orchestrator import TaskOrchestrator
+from src.core.observability import init_logging
 from src.core.process_utils import (
     current_process_create_time,
     pid_exists,
@@ -25,62 +26,18 @@ from src.core.process_utils import (
 )
 from config import config
 
-# Configure logging with rotation for file handler
+# Configure logging via the shared observability spine: bracketed-context
+# format, automatic [node=<hostname>] on every line, secret redaction, and a
+# rotating file handler at logs/orchestrator.log. This is the same init the
+# worker uses, so gateway and worker logs are formatted identically and can be
+# correlated by task_id across machines.
 logs_dir = Path(config.system.logs_dir)
-logs_dir.mkdir(parents=True, exist_ok=True)
-file_handler = RotatingFileHandler(
-    logs_dir / "orchestrator.log",
-    maxBytes=1_000_000,  # ~1MB
-    backupCount=3,
-    encoding="utf-8"
+init_logging(
+    node_id=socket.gethostname(),
+    level=config.system.log_level,
+    log_file=str(logs_dir / "orchestrator.log"),
+    logs_dir=str(logs_dir),
 )
-stream_handler = logging.StreamHandler(sys.stdout)
-logging.basicConfig(
-    level=getattr(logging, config.system.log_level),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[stream_handler, file_handler]
-)
-
-# Reduce noise from third-party HTTP logs (python-telegram-bot uses httpx)
-try:
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-except Exception:
-    pass
-
-# Global redaction filter for sensitive values in logs
-class _RedactFilter(logging.Filter):
-    def __init__(self) -> None:
-        super().__init__(name="redact")
-        import re as _re
-        # Compile common sensitive patterns
-        self._patterns = [
-            # Telegram bot token in URL path: /bot<token>/...
-            (_re.compile(r"/bot[0-9A-Za-z:_-]+"), "/bot<REDACTED>"),
-            # Authorization headers
-            (_re.compile(r"(Authorization:\s*Bearer\s+)[^\s]+", flags=_re.IGNORECASE), r"\1<REDACTED>"),
-            # Generic token key=value appearances (best-effort)
-            (_re.compile(r"(GATEWAY_TELEGRAM_BOT_TOKEN=)[^\s]+", flags=_re.IGNORECASE), r"\1<REDACTED>"),
-        ]
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            msg = record.getMessage()
-            redacted = msg
-            for pat, repl in self._patterns:
-                redacted = pat.sub(repl, redacted)
-            if redacted != msg:
-                record.msg = redacted
-                record.args = ()
-        except Exception:
-            pass
-        return True
-
-# Attach redaction filter to both handlers
-try:
-    _rf = _RedactFilter()
-    file_handler.addFilter(_rf)
-    stream_handler.addFilter(_rf)
-except Exception:
-    pass
 
 logger = logging.getLogger(__name__)
 
