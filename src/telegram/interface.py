@@ -515,6 +515,31 @@ class TelegramInterface:
             return value[:16]
 
     @staticmethod
+    def _mesh_node_column_enabled() -> bool:
+        """Show the node column only when mesh is on and workers exist (D4)."""
+        try:
+            from config import config as app_config
+            if not getattr(app_config.mesh, "enabled", False):
+                return False
+        except Exception:
+            return False
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            return bool(db and db.list_nodes())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _session_node_label(session: Session) -> str:
+        """Friendly node label for a session: its machine_id, or 'this server'."""
+        import socket
+        mid = (session.machine_id or "").strip()
+        if not mid or mid == socket.gethostname():
+            return "this server"
+        return mid
+
+    @staticmethod
     def _session_status_label(status: SessionStatus) -> str:
         labels = {
             SessionStatus.IDLE: "🟢 idle",
@@ -596,6 +621,22 @@ class TelegramInterface:
         if note:
             return "\n".join([title, details, f"  Summary: {note}"])
         return "\n".join([title, details])
+
+    def _compact_session_line(self, session: Session, active_id: Optional[str], show_node: bool) -> str:
+        """One-line session summary for /session_list (D4).
+
+        Open:   ⭐ `id` — backend — [node —] status — repo
+        Closed: [closed] `id` — backend — [node —] repo
+        """
+        sid = f"`{session.session_id}`"
+        node = f"{self._session_node_label(session)} — " if show_node else ""
+        if session.status == SessionStatus.CLOSED:
+            return f"[closed] {sid} — {session.backend} — {node}{self._session_repo_name(session)}"
+        star = "⭐ " if session.session_id == active_id else ""
+        return (
+            f"{star}{sid} — {session.backend} — {node}"
+            f"{session.status.value} — {self._session_repo_name(session)}"
+        )
 
     def _format_closed_session_list_item(self, session: Session) -> str:
         backend_icon = "🤖" if session.backend == "codex" else "🧠"
@@ -1054,35 +1095,62 @@ class TelegramInterface:
             
         try:
             status = self.orchestrator.get_status()
+            show_node = self._mesh_node_column_enabled()
 
             telegram = status.get("telegram", {})
             scope = status.get("scope", {})
             active_session = self.session_store.get_active(update.effective_chat.id)
             if active_session and not self._user_can_access_session(update.effective_user.id, active_session):
                 active_session = None
+
+            # Count open sessions this user can see, for the headline.
+            try:
+                open_count = sum(
+                    1 for s in self.session_store.list_all()
+                    if s.status != SessionStatus.CLOSED
+                    and self._user_can_access_session(update.effective_user.id, s)
+                )
+            except Exception:
+                open_count = 0
+
+            running = status.get("running") or telegram.get("running")
+            head_icon = "✅" if running else "⚠️"
+            workers = status["tasks"]["workers"]
+            active_tasks = status["tasks"]["active"]
+            session_word = "session" if open_count == 1 else "sessions"
+
+            headline_bits = [f"{workers} worker{'s' if workers != 1 else ''}"]
+            if show_node:
+                online = len(self._mesh_online_nodes())
+                headline_bits.append(f"{online} node{'s' if online != 1 else ''} online")
+            headline_bits.append(f"{open_count} open {session_word}")
+            if active_tasks:
+                headline_bits.append(f"{active_tasks} running")
             lines = [
-                "Gateway Status",
-                "",
-                "Components:",
-                f"• Claude Code CLI: {'✅ Available' if status['components']['claude_available'] else '❌ Not available'}",
-                f"• Ollama helpers: {'✅ Available' if status['components']['llama_available'] else '➖ Optional / disabled'}",
-                f"• External task watcher: {'✅ Running' if status['components']['file_watcher_running'] else '❌ Stopped'}",
-                f"• Telegram Bot: {'✅ Running' if telegram.get('running') else ('⚠️ Configured but stopped' if telegram.get('configured') else '❌ Not configured')}",
-                "",
-                "Tasks:",
-                f"• Active: {status['tasks']['active']}",
-                f"• Queued: {status['tasks']['queued']}",
-                f"• Completed: {status['tasks']['completed']}",
-                f"• Workers: {status['tasks']['workers']}",
-                "",
-                "Scope:",
-                f"• Base CWD: `{scope.get('base_cwd') or 'unset'}`",
-                f"• Allowed root: `{scope.get('allowed_root') or 'unset'}`",
+                f"{head_icon} Gateway {'running' if running else 'stopped'} — "
+                + ", ".join(headline_bits)
             ]
-            if scope.get("root_dirs"):
-                lines.append("• Root directories: " + ", ".join(f"`{item}`" for item in scope["root_dirs"][:8]))
+
             if active_session:
-                lines.extend(["", "Active session:", self._format_session_overview(active_session)])
+                node = f" | {self._session_node_label(active_session)}" if show_node else ""
+                lines.append(
+                    f"\nSession: `{active_session.session_id}` | {active_session.backend}"
+                    f"{node} | {active_session.status.value}"
+                )
+                lines.append(f"Path: `{self._session_repo_name(active_session)}`")
+            else:
+                lines.append("\nNo active session. Use /session_new or /session_list.")
+
+            # Surface degraded components only when something is actually wrong.
+            comps = status.get("components", {})
+            warns = []
+            if not comps.get("claude_available"):
+                warns.append("Claude CLI unavailable")
+            if not telegram.get("running") and telegram.get("configured"):
+                warns.append("Telegram stopped")
+            if warns:
+                lines.append("\n⚠️ " + "; ".join(warns))
+
             await update.message.reply_text("\n".join(lines))
 
         except Exception as e:
@@ -1467,21 +1535,33 @@ class TelegramInterface:
 
         all_sessions = [s for s in self.session_store.list_all() if self._user_can_access_session(update.effective_user.id, s)]
         open_sessions = [s for s in all_sessions if s.status != SessionStatus.CLOSED]
+        closed_sessions = [s for s in all_sessions if s.status == SessionStatus.CLOSED]
 
         active = self.session_store.get_active(update.effective_chat.id)
         active_id = active.session_id if active else None
+        show_node = self._mesh_node_column_enabled()
 
-        # --- Open sessions block ---
-        if open_sessions:
-            lines = [self._format_session_list_item(s, active_id) for s in open_sessions[:10]]
-            if len(open_sessions) > 10:
-                lines.append(f"...and {len(open_sessions) - 10} more. Use /session_status <session_id> for details.")
-            await update.message.reply_text(
-                f"Open sessions ({len(open_sessions)}) - tap to switch:\n\n" + "\n\n".join(lines),
-                reply_markup=self._build_session_picker_markup(open_sessions, active_id),
-            )
-        else:
-            await update.message.reply_text("No open sessions. Use /session_new to create one.")
+        if not open_sessions and not closed_sessions:
+            await update.message.reply_text("No sessions yet. Use /session_new to create one.")
+            return
+
+        lines = [f"Sessions ({len(open_sessions)})"]
+        for s in open_sessions[:15]:
+            lines.append("• " + self._compact_session_line(s, active_id, show_node))
+        if len(open_sessions) > 15:
+            lines.append(f"…and {len(open_sessions) - 15} more open.")
+
+        if closed_sessions:
+            lines.append("")
+            for s in closed_sessions[:8]:
+                lines.append("• " + self._compact_session_line(s, active_id, show_node))
+            if len(closed_sessions) > 8:
+                lines.append(f"…and {len(closed_sessions) - 8} more closed.")
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            reply_markup=self._build_session_picker_markup(open_sessions, active_id),
+        )
 
     async def _handle_session_use_legacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_use <session_id>"""
