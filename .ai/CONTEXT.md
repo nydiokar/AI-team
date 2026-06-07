@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-06-07
 **Branch:** `main`
-**Status:** Phase 9 Step D1 complete — task server now embedded inside the gateway process (shared `get_registry()` singleton, one PM2 entry). Step C two-machine test working over Tailscale. Next: D2 (worker logging), D3 (/nodes), D4 (UX).
+**Status:** Phase 9 Step D complete (D1–D5) and merged to `main`. Embedded task server, observability spine, worker traceback→Telegram, `/nodes`+`/node`, compact `/status`+`/session_list`, machine_id migration script, and the pytest cost guard are all in. Next: D6 (PM2 polish, low priority) and Phase 4 (VPS migration).
 
 ---
 
