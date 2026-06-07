@@ -105,6 +105,7 @@ class ExecutionResultPayload(BaseModel):
     return_code: int = 0
     artifact_path: Optional[str] = None
     backend_session_id: str = ""  # worker echoes back the native session ID for affinity continuity
+    error_detail: str = ""  # full traceback when the worker caught an exception (D2)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +117,58 @@ def health() -> Dict[str, Any]:
     db = get_db()
     stats = db.stats() if db else {}
     return {"status": "ok", "db": stats}
+
+
+# ---------------------------------------------------------------------------
+# Metrics — live aggregates for operators and the future project-manager agent
+# ---------------------------------------------------------------------------
+
+@app.get("/metrics", dependencies=[Depends(_require_auth)])
+def metrics() -> Dict[str, Any]:
+    """Live system aggregates: task counts, node liveness, success rate.
+
+    Authenticated (unlike /health) because it exposes operational detail. Built
+    from db.stats() plus the in-memory registry, so it reflects the embedded
+    server's real-time view. Intended to be polled over Tailscale rather than
+    tailing logs, and to be consumed by a task-distributing agent.
+    """
+    db = get_db()
+    s = db.stats() if db else {}
+    completed = s.get("tasks_completed", 0)
+    failed = s.get("tasks_failed", 0)
+    finished = completed + failed
+    success_rate = round(100.0 * completed / finished, 1) if finished else None
+
+    registry = get_registry()
+    nodes = [
+        {
+            "node_id": n.node_id,
+            "status": n.status,
+            "backends": n.capabilities.backends,
+            "last_heartbeat": n.last_heartbeat.isoformat() if n.last_heartbeat else None,
+        }
+        for n in registry.list_all()
+    ]
+
+    return {
+        "tasks": {
+            "pending": s.get("tasks_pending", 0),
+            "claimed": s.get("tasks_claimed", 0),
+            "completed": completed,
+            "failed": failed,
+            "success_rate_pct": success_rate,
+        },
+        "nodes": {
+            "online": s.get("nodes_online", 0),
+            "total": s.get("nodes_total", 0),
+            "detail": nodes,
+        },
+        "sessions": {
+            "total": s.get("sessions_total", 0),
+            "busy": s.get("sessions_busy", 0),
+        },
+        "schema_version": s.get("schema_version", 0),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -270,11 +323,12 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         "timestamp": payload.timestamp,
         "return_code": payload.return_code,
         "backend_session_id": payload.backend_session_id,
+        "error_detail": payload.error_detail,
     }
+    session_id = task.get("session_id")
     if payload.success:
         db.complete_task(task_id, result_dict, payload.artifact_path)
         # Append event for the session if present
-        session_id = task.get("session_id")
         if session_id:
             db.append_event(
                 session_id=session_id,
@@ -285,7 +339,6 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
     else:
         error_str = "; ".join(payload.errors) if payload.errors else "worker reported failure"
         db.fail_task(task_id, error_str)
-        session_id = task.get("session_id")
         if session_id:
             db.append_event(
                 session_id=session_id,
@@ -294,4 +347,20 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
                 execution_time=payload.execution_time,
                 error=error_str,
             )
+        # Record the failure in the controller-side event stream too, so the
+        # gateway's events.ndjson reflects remote failures (not only the
+        # worker's local stream). Correlated by task_id/session_id.
+        try:
+            from src.core.observability import emit_event
+            emit_event(
+                "task_failed",
+                task_id=task_id,
+                session_id=session_id or None,
+                node_id=payload.node_id,
+                error=payload.errors[0] if payload.errors else error_str,
+                error_detail=(payload.error_detail or "")[:4000],
+                duration_s=round(payload.execution_time, 3),
+            )
+        except Exception:
+            pass
     return {"status": "accepted"}

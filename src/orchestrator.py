@@ -70,6 +70,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         # System state
         self.running = False
         self.worker_tasks: List[asyncio.Task] = []
+        # Embedded mesh task server (started only when MESH_ENABLED) — shares the
+        # gateway event loop so get_registry() is the same singleton dispatch uses.
+        self._embedded_task_server = None
         
         # Component status
         self.component_status = {
@@ -398,6 +401,9 @@ class TaskOrchestrator(ITaskOrchestrator):
             worker = asyncio.create_task(self._task_worker(f"worker-{i}"))
             self.worker_tasks.append(worker)
 
+        # Start the embedded mesh task server (no-op unless MESH_ENABLED)
+        await self._start_embedded_task_server()
+
         # Resume pending before starting watcher to avoid duplicate/racy processing
         try:
             for file_path in list(self._pending_files):
@@ -486,7 +492,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Stop file watcher
         await self.file_watcher.stop_async()
         self.component_status["file_watcher_running"] = False
-        
+
+        # Stop the embedded mesh task server (no-op if it was never started)
+        await self._stop_embedded_task_server()
+
         # Cancel worker tasks
         for worker in self.worker_tasks:
             worker.cancel()
@@ -496,7 +505,44 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.worker_tasks.clear()
         
         logger.info("Telegram Coding Gateway stopped")
-    
+
+    async def _start_embedded_task_server(self) -> None:
+        """Start the in-process mesh task server when mesh routing is enabled.
+
+        Running it on the gateway's event loop means the HTTP handlers and the
+        orchestrator share the same get_registry() singleton, so node discovery
+        no longer needs the DB-only cross-process workaround.
+        """
+        if not config.mesh.enabled:
+            return
+        if self._embedded_task_server is not None:
+            return
+        host = config.mesh.tailscale_ip or "127.0.0.1"
+        port = config.mesh.task_server_port
+        try:
+            from src.control.embedded_server import EmbeddedTaskServer
+            server = EmbeddedTaskServer(host=host, port=port)
+            await server.start()
+            self._embedded_task_server = server
+            logger.info(
+                f"event=embedded_task_server_up host={host} port={port}"
+            )
+        except Exception as e:
+            # Don't take the whole gateway down if the task server fails to bind;
+            # log loudly so the operator notices mesh routing is degraded.
+            logger.error(f"event=embedded_task_server_start_failed err={e}")
+            self._embedded_task_server = None
+
+    async def _stop_embedded_task_server(self) -> None:
+        if self._embedded_task_server is None:
+            return
+        try:
+            await self._embedded_task_server.stop()
+        except Exception as e:
+            logger.warning(f"event=embedded_task_server_stop_failed err={e}")
+        finally:
+            self._embedded_task_server = None
+
     async def reload_worker_pool(self):
         """Reload worker pool size from environment configuration at runtime"""
         try:
@@ -1341,6 +1387,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         continuity, since backend sessions are machine-local.
         """
         from src.control.node_registry import get_registry
+        from src.core.observability import set_log_context
+
+        # Correlate every log line + event emitted during this remote dispatch
+        # with the task and session, across this gateway's logs and (by the same
+        # task_id) the worker's logs on the remote machine.
+        set_log_context(task_id=task.id, session_id=session.session_id)
 
         backend_name = session.backend
         session.status = SessionStatus.BUSY
@@ -1396,6 +1448,15 @@ class TaskOrchestrator(ITaskOrchestrator):
                     heartbeat_task = asyncio.create_task(
                         self._send_task_heartbeats(task, session, start_time, heartbeat_interval, timeout_s)
                     )
+                # node may be None here when liveness was confirmed via the DB
+                # fallback (the in-memory registry didn't have it). machine_id is
+                # the reliable identifier in every case.
+                target_node = node.node_id if node is not None else session.machine_id
+                logger.info("mesh_dispatch backend=%s -> %s", backend_name, target_node)
+                self._emit_event("mesh_dispatch", task, {
+                    "backend": backend_name,
+                    "target_node": target_node,
+                })
                 result = await self._dispatch_to_node(task, session, node)
             finally:
                 if heartbeat_task and not heartbeat_task.done():
@@ -1417,6 +1478,20 @@ class TaskOrchestrator(ITaskOrchestrator):
         else:
             session.status = SessionStatus.ERROR
         self.session_store.save(session)
+
+        first_error = result.errors[0] if result.errors else ""
+        logger.info(
+            "mesh_result success=%s elapsed=%.1fs%s",
+            result.success, result.execution_time,
+            "" if result.success else f" error={first_error}",
+        )
+        self._emit_event("mesh_result", task, {
+            "success": result.success,
+            "target_node": node.node_id if node is not None else session.machine_id,
+            "duration_s": round(result.execution_time, 3),
+            "error_class": result.error_class,
+            "error": first_error,
+        })
 
         return result
 
@@ -1694,53 +1769,27 @@ created: {task.created}
         return "fatal"
 
     def _emit_event(self, name: str, task: Optional[Task] = None, extra: Optional[Dict[str, Any]] = None) -> None:
-        """Append a single NDJSON event line to logs/events.ndjson"""
-        try:
-            event_path = Path(config.system.logs_dir) / "events.ndjson"
-            payload: Dict[str, Any] = {
-                "timestamp": datetime.now().isoformat(),
-                "event": name,
-            }
-            if task is not None:
-                payload.update({
-                    "task_id": task.id,
-                    "task_type": getattr(task.type, "value", str(task.type)),
-                    "priority": getattr(task.priority, "value", str(task.priority)),
-                    "status": getattr(task.status, "value", str(task.status)),
-                })
-            if extra:
-                payload.update(extra)
-            import json
-            # Write event line
-            with event_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            
-            # Simple size-based rotation (~1MB, keep 3 backups)
-            try:
-                max_bytes = 1_000_000
-                backup_count = 3
-                if event_path.stat().st_size > max_bytes:
-                    # Rotate: events.ndjson -> events.ndjson.1, .1 -> .2, etc.
-                    for idx in range(backup_count - 1, 0, -1):
-                        src = event_path.with_suffix(event_path.suffix + f".{idx}")
-                        dst = event_path.with_suffix(event_path.suffix + f".{idx+1}")
-                        if src.exists():
-                            try:
-                                src.replace(dst)
-                            except Exception:
-                                pass
-                    # Move current to .1 and recreate empty base file
-                    first_backup = event_path.with_suffix(event_path.suffix + ".1")
-                    try:
-                        event_path.replace(first_backup)
-                        event_path.touch()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        except Exception:
-            # Do not fail the pipeline on telemetry errors
-            pass
+        """Append a single NDJSON event line to logs/events.ndjson.
+
+        Thin wrapper over the shared observability spine. Preserves the legacy
+        envelope keys (task_id, task_type, priority, status) so the existing
+        `main.py stats` / `tail-events` readers keep parsing, while letting the
+        spine fill node_id and any task_id/session_id from the correlation
+        context automatically.
+        """
+        from src.core.observability import emit_event as _emit
+        fields: Dict[str, Any] = {}
+        task_id = None
+        if task is not None:
+            task_id = task.id
+            fields.update({
+                "task_type": getattr(task.type, "value", str(task.type)),
+                "priority": getattr(task.priority, "value", str(task.priority)),
+                "status": getattr(task.status, "value", str(task.status)),
+            })
+        if extra:
+            fields.update(extra)
+        _emit(name, task_id=task_id, **fields)
     
     # Simulation execution removed: system now always runs real Claude Code CLI
     

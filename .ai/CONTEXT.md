@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-06-07
 **Branch:** `main`
-**Status:** Phase 9 Step B complete + live trial confirmed — full Telegram→DB→worker→result→Telegram cycle working on localhost. Ready for Step C (real two-machine test).
+**Status:** Phase 9 Step D1 complete — task server now embedded inside the gateway process (shared `get_registry()` singleton, one PM2 entry). Step C two-machine test working over Tailscale. Next: D2 (worker logging), D3 (/nodes), D4 (UX).
 
 ---
 
@@ -135,6 +135,28 @@ Documented in `docs/OPENCODE_SERVER_CONTEXT.md`.
 **Verified:** `python scripts/test_mesh_local.py` — 18/18 checks pass (register, heartbeat, 404-unknown-node, enqueue, poll, claim, double-claim rejection, claim-mismatch result rejection, completion, deregistration).
 
 **Status:** `MESH_ENABLED=false` (default) → gateway behavior is provably unchanged; shadow-write is safe and self-contained. Ready for a controlled `MESH_ENABLED=true` trial — see NEXT_TASKS.md for the recommended rollout sequence.
+
+---
+
+### Phase 9 Step C — Real two-machine test ✅  ← completed 2026-06-07
+
+**What was built/fixed:**
+- Worker advertises `projects_root` + `repos` at register time; stored in DB (migrations v2/v3 added to `db.py`)
+- `_mesh_online_nodes()` reads shared SQLite DB — works cross-process (gateway ≠ task server process)
+- `_repo_choices_for_node()` and `_handle_session_new` text command also read from DB
+- Telegram node picker: backend → node → repo button flow; `session_new_node:` callback step added
+- `/session_new claude LP-1 AI-team` text fallback: detects node_id from known online nodes
+- Session `machine_id` set correctly at creation time via `_create_and_bind_session(node_id=...)`
+- `route_remote` fix: only true when `session.machine_id != socket.gethostname()` — local sessions never routed remotely
+- FastAPI `@app.on_event` → `lifespan` context manager (deprecation fix)
+- Worker loads `.env` via dotenv on startup (`main()` in `agent.py`)
+- `WORKER_PROJECTS_ROOT` + `list_repos()` in `WorkerConfig`
+- `upsert_node` stores `projects_root` + `repos`; `NodeCapabilities` extended to match
+- Unused variable fixes: `resp =` on claim removed, `done, pending` → `_, pending`
+
+**Known issue going into Step D:** gateway and task server are separate processes — the gateway's in-memory `NodeRegistry` is always empty. Fixed by reading from DB, but the real fix is process consolidation (D1).
+
+**→ Resolved in Step D1 (2026-06-07):** task server is now embedded in the gateway via `src/control/embedded_server.py`, started by `TaskOrchestrator._start_embedded_task_server()` on the gateway's event loop when `MESH_ENABLED=true`. The `get_registry()` singleton is shared in-process; the DB path remains only as a post-restart safety net. The separate `ai-team-task-server` PM2 entry was removed.
 
 ---
 

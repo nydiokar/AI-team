@@ -1,5 +1,13 @@
 # Handoff prompt — next session (Phase 9 Step C: real two-machine test)
 
+> **⚠ Superseded in part by Step D1 (2026-06-07):** the task server is now embedded
+> in the gateway (`src/control/embedded_server.py`). You no longer start
+> `uvicorn src.control.task_server:app` as a separate process. To enable mesh on
+> the PC, set `MESH_ENABLED=true` + `MESH_TASK_SERVER_PORT` + a real
+> `MESH_TAILSCALE_IP` (or blank for 127.0.0.1) in `.env` and restart the gateway.
+> The "start the task server" PowerShell block below is retained only for isolated
+> manual testing.
+
 ## What this project is
 
 A Telegram-controlled gateway for local coding agents (Claude Code, Codex, OpenCode).
