@@ -175,9 +175,9 @@ async def test_start_registers_bot_commands(monkeypatch, isolated_session_store)
     await bot.start()
 
     names = [item.command for item in bot.app.bot.commands]
-    # Most-used commands surface first in the slash menu.
-    assert names[:4] == ["session_new", "session_list", "session_closed", "session_status"]
-    assert "status" in names
+    # Most-used commands surface first; session_close stays in the top 3.
+    assert names[:4] == ["session_new", "session_list", "session_close", "status"]
+    assert "session_closed" in names
     assert "git_status" in names
 
 

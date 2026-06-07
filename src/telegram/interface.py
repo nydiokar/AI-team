@@ -115,29 +115,55 @@ class TelegramInterface:
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
+        # Global error handler: without one, a failed reply (e.g. a Markdown
+        # parse error) is logged but the user sees nothing — a button "flickers"
+        # and the menu never goes away. This surfaces the failure to the user.
+        self.app.add_error_handler(self._on_error)
+
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Last-resort handler so UI failures never silently strand the user."""
+        err = getattr(context, "error", None)
+        logger.error(f"Telegram handler error: {err!r}", exc_info=err)
+        try:
+            # Acknowledge any callback query so the button stops spinning.
+            if isinstance(update, Update) and update.callback_query:
+                try:
+                    await update.callback_query.answer()
+                except Exception:
+                    pass
+                await update.callback_query.edit_message_text(
+                    "⚠️ Something went wrong handling that. Please try again."
+                )
+            elif isinstance(update, Update) and update.effective_message:
+                await update.effective_message.reply_text(
+                    "⚠️ Something went wrong handling that. Please try again."
+                )
+        except Exception as e:
+            logger.error(f"error handler failed to notify user: {e}")
+
     @staticmethod
     def _bot_commands() -> list[BotCommand]:
         """Commands exposed to Telegram clients via the slash-command chooser."""
         entries = [
             ("session_new", "🆕 Start a new coding session"),
             ("session_list", "💬 Open sessions (tap to switch)"),
-            ("session_closed", "💤 Browse & restore closed sessions"),
-            ("session_status", "🔎 Active session details"),
+            ("session_close", "✖️ Close the active session"),
             ("status", "📊 Gateway health dashboard"),
-            ("nodes", "🌐 Worker nodes (mesh)"),
-            ("node", "🌐 One node's detail"),
+            ("start", "👋 Welcome / quick start"),
+            ("help", "❓ Full command help"),
             ("task", "⚡ Run a one-off task"),
             ("session_use", "🔀 Switch the active session"),
             ("session_dirs", "📂 List project folders"),
+            ("session_status", "🔎 Active session details"),
             ("session_cancel", "🛑 Cancel the running task"),
-            ("session_close", "✖️ Close the active session"),
             ("session_restore", "↩️ Restore a closed session"),
+            ("session_closed", "💤 Browse & restore closed sessions"),
             ("compact", "🗜 Compact the session context"),
+            ("nodes", "🌐 Worker nodes (mesh)"),
+            ("node", "🌐 One node's detail"),
             ("commit", "💾 Commit safe session changes"),
             ("commit_all", "💾 Commit all session changes"),
             ("git_status", "🔧 Repository git status"),
-            ("help", "❓ Full command help"),
-            ("start", "👋 Welcome / quick start"),
         ]
         return [BotCommand(command, description) for command, description in entries]
 
@@ -662,11 +688,16 @@ class TelegramInterface:
             return value
 
     def _session_one_liner(self, session: Session, active_id: Optional[str], show_node: bool) -> str:
-        """A scannable multi-line entry with a short summary tail. Used in lists."""
+        """A scannable multi-line entry with a short summary tail. Used in lists.
+
+        Rendered as PLAIN TEXT — repo names and agent summaries contain `_`,
+        `*`, and stray backticks that break Telegram Markdown parsing, so these
+        messages must never be sent with parse_mode.
+        """
         star = "⭐ " if session.session_id == active_id else "• "
         icon = self._backend_icon(session.backend)
         node = f" · {self._session_node_label(session)}" if show_node else ""
-        head = f"{star}`{self._short_id(session.session_id)}` · {icon} {session.backend}{node}"
+        head = f"{star}{self._short_id(session.session_id)} · {icon} {session.backend}{node}"
         meta = (
             f"   {self._session_repo_name(session)} · "
             f"{self._status_chip(session.status)} · {self._relative_age(session.updated_at)}"
@@ -677,13 +708,13 @@ class TelegramInterface:
         return f"{head}\n{meta}"
 
     def _session_card(self, session: Session, *, header: str = "📍 Active session", show_node: bool = True) -> str:
-        """Rich card for one session. Used by /status, /session_status, creation."""
+        """Rich card for one session (PLAIN TEXT — see _session_one_liner)."""
         icon = self._backend_icon(session.backend)
         node = f" · {self._session_node_label(session)}" if show_node else ""
         lines = [
             header,
             f"{icon} {session.backend}{node} · {self._status_chip(session.status)}",
-            f"📂 {self._session_repo_name(session)}   🆔 `{self._short_id(session.session_id)}`",
+            f"📂 {self._session_repo_name(session)}   🆔 {self._short_id(session.session_id)}",
             f"🕒 last activity {self._relative_age(session.updated_at)}",
         ]
         note = self._compact_session_note(session, limit=160)
@@ -1637,7 +1668,6 @@ class TelegramInterface:
         )
         await update.message.reply_text(
             self._format_session_created_message(session),
-            parse_mode="Markdown",
         )
 
     async def _handle_session_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1827,7 +1857,6 @@ class TelegramInterface:
         )
         await update.message.reply_text(
             self._format_session_created_message(session),
-            parse_mode="Markdown",
         )
 
     async def _handle_session_use(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2018,7 +2047,6 @@ class TelegramInterface:
             )
             await query.edit_message_text(
                 self._format_session_created_message(session),
-                parse_mode="Markdown",
             )
             return
 
