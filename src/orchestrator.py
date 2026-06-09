@@ -671,7 +671,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             result = subprocess.run(
                 [exe, "auth", "status"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=10,
             )
             return result.returncode == 0

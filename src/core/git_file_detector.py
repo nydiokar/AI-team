@@ -29,7 +29,7 @@ class GitFileDetector:
                 ['git', 'rev-parse', '--git-dir'],
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=False
             )
             return result.returncode == 0
@@ -47,7 +47,7 @@ class GitFileDetector:
                 ['git', 'branch', '--show-current'],
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=True
             )
             return result.stdout.strip()
@@ -69,7 +69,7 @@ class GitFileDetector:
                     ['git', 'diff', '--cached'],
                     cwd=self.repo_path,
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8", errors="replace",
                     check=True
                 )
             else:
@@ -77,7 +77,7 @@ class GitFileDetector:
                     ['git', 'diff'],
                     cwd=self.repo_path,
                     capture_output=True,
-                    text=True,
+                    text=True, encoding="utf-8", errors="replace",
                     check=True
                 )
             return result.stdout
@@ -137,7 +137,7 @@ class GitFileDetector:
                 ['git', 'branch', '--list', branch_name],
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=True
             )
             
@@ -172,7 +172,7 @@ class GitFileDetector:
                 ['git', 'commit', '-m', commit_message],
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=True
             )
             logger.info(f"Committed changes: {commit_message}")
@@ -201,7 +201,7 @@ class GitFileDetector:
                 ['git', 'push', 'origin', branch_name],
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=True
             )
             logger.info(f"Pushed branch {branch_name} to remote")
@@ -223,7 +223,7 @@ class GitFileDetector:
                 ['git', 'log', f'--max-count={limit}', '--pretty=format:%H|%an|%ad|%s', '--date=short'],
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=True
             )
             
@@ -259,7 +259,7 @@ class GitFileDetector:
                 ['git', 'status', '--porcelain'],
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=True
             )
             return not result.stdout.strip()
@@ -280,7 +280,7 @@ class GitFileDetector:
                 ['git', 'diff', '--cached', '--name-only'],
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=True
             )
             
@@ -308,7 +308,7 @@ class GitFileDetector:
                 ['git', 'status', '--porcelain'],
                 cwd=self.repo_path,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=True
             )
             

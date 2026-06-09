@@ -55,7 +55,7 @@ def _run_git(cwd: str, args: List[str], timeout: int = 10) -> Optional[str]:
             ["git", *args],
             cwd=cwd,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
         )
         if result.returncode != 0:
@@ -634,7 +634,7 @@ class OpenCodeBackend(CodingBackend):
             result = subprocess.run(
                 [self._exe, "session", "list", "--format", "json", "--max-count", "10"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=15,
             )
             if result.returncode != 0:
