@@ -91,12 +91,13 @@ _PERMISSION_BLOCK_MARKERS = (
     "user rejected permission",
     "the user rejected",
     "permission denied",
-    "external_directory",
 )
 
 # Forward-looking phrases that signal the model only stated an *intention* to
 # work rather than reporting completed work. Used together with "no side
-# effects" to catch the false-success / intent-only pattern.
+# effects" to catch the false-success / intent-only pattern. Kept deliberately
+# narrow: bare openers like "let me " / "i'll " are NOT here because they very
+# often begin substantive, completed replies and would cause false positives.
 _INTENT_ONLY_PREFIXES = (
     "understood",
     "starting with",
@@ -104,20 +105,21 @@ _INTENT_ONLY_PREFIXES = (
     "let me start",
     "i'll start",
     "i will start",
+    "let me begin",
+    "i'll begin",
     "working autonomously",
-    "let me ",
-    "i'll ",
-    "i will ",
-    "first, i",
-    "first i",
-    "let's ",
-    "now i'll",
-    "now let me",
 )
 
 
 def _detect_permission_block(stdout: str, stderr: str) -> str:
-    """Return the matched marker if opencode auto-rejected a permission, else ''."""
+    """Return the matched marker if opencode auto-rejected a permission, else ''.
+
+    Only markers that indicate an *actual rejection* count. We deliberately do
+    NOT treat the bare token "external_directory" as a block: opencode prints it
+    in permission *prompts* even for calls that are subsequently allowed, so
+    matching it alone causes false positives on successful runs. A genuine
+    rejection always co-occurs with "auto-rejecting" or a "rejected" phrase.
+    """
     haystack = f"{stderr}\n{stdout}".lower()
     for marker in _PERMISSION_BLOCK_MARKERS:
         if marker in haystack:
@@ -129,8 +131,7 @@ def _looks_intent_only(output: str) -> bool:
     """True if the text only announces intent (no evidence of completed work).
 
     Conservative: only fires for short outputs that *start* with a forward-looking
-    phrase. A long, substantive reply is never treated as intent-only even if it
-    opens with "Let me".
+    phrase. A long, substantive reply is never treated as intent-only.
     """
     text = (output or "").strip().lower()
     if not text:
@@ -442,6 +443,27 @@ class OpenCodeBackend(CodingBackend):
                 if isinstance(result.parsed_output, dict):
                     result.parsed_output["git_diff_stat"] = diff_stat
                     result.parsed_output["git_diff"] = diff
+
+                # Un-flag a suspect "permission_block": if the run actually
+                # modified files, real work happened — the rejected permission
+                # was incidental, not a dead-end. The gate in _parse runs before
+                # git state is known, so we correct it here.
+                if (
+                    not result.success
+                    and result.error_class == "permission_block"
+                    and (result.files_modified or diff.strip())
+                ):
+                    logger.info(
+                        "event=opencode_suspect_cleared reason=files_modified files=%s",
+                        result.files_modified,
+                    )
+                    result.success = True
+                    result.error_class = ""
+                    # Drop the dead-end error we added in _parse.
+                    result.errors = [
+                        e for e in (result.errors or [])
+                        if "dead-end" not in e.lower()
+                    ]
 
             # Auto-commit so the working tree is clean for subsequent runs.
             # OpenCode enforces a clean tree before each run; without this the
@@ -1065,22 +1087,6 @@ class OpenCodeServerBackend(CodingBackend):
             errors.append(f"Generation ended with unexpected finish reason: {finish!r}")
             success = False
 
-        # Suspect-run / dead-end detection (mirrors the CLI backend): a clean
-        # finish that only announced intent after a permission block is a
-        # dead-end, not a success. Check the serialized response for markers.
-        if success and finish != "stop":
-            try:
-                blocked = _detect_permission_block(json.dumps(response), "")
-            except Exception:
-                blocked = ""
-            if blocked and _looks_intent_only(output):
-                success = False
-                errors.append(
-                    "OpenCode stopped early on an auto-rejected permission "
-                    f"({blocked}) with only intent-only text. This is a dead-end, "
-                    "not a success. Widen the opencode permission/allowed paths."
-                )
-
         # Collect git diff
         files_modified: List[str] = []
         git_diff_stat = ""
@@ -1089,6 +1095,26 @@ class OpenCodeServerBackend(CodingBackend):
             files_modified = _git_changed_files(cwd)
             git_diff_stat = _run_git(cwd, ["diff", "--stat", "HEAD"]) or ""
             git_diff = _run_git(cwd, ["diff", "HEAD"]) or ""
+
+        # Suspect-run / dead-end detection (mirrors the CLI backend): a clean
+        # finish that only announced intent after a permission block, with NO
+        # files changed, is a dead-end rather than a success. The files-modified
+        # check makes this safe — a run that did real work is never flagged.
+        result_error_class = ""
+        if success and finish != "stop" and not files_modified and not git_diff.strip():
+            try:
+                blocked = _detect_permission_block(json.dumps(response), "")
+            except Exception:
+                blocked = ""
+            if blocked and _looks_intent_only(output):
+                success = False
+                result_error_class = "permission_block"
+                errors.append(
+                    "OpenCode stopped early on an auto-rejected permission "
+                    f"({blocked}) with only intent-only text and no file changes. "
+                    "This is a dead-end, not a success. Widen the opencode "
+                    "permission/allowed paths or keep actions inside the repo."
+                )
 
         parsed_output: Dict[str, Any] = {
             "git_diff_stat": git_diff_stat,
@@ -1111,6 +1137,7 @@ class OpenCodeServerBackend(CodingBackend):
             execution_time=elapsed,
             files_modified=files_modified,
             parsed_output=parsed_output,
+            error_class=result_error_class,
         )
 
     @staticmethod
