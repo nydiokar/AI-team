@@ -20,6 +20,8 @@ These guards are set BEFORE any test imports config, so they win over .env.
 """
 
 import os
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -40,6 +42,38 @@ def _enforce_test_mode():
     except Exception:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_db():
+    """Redirect the mesh DB to a unique temporary file per test so tests never
+    touch the live ``state/mesh.db`` and see a clean, empty database.
+
+    Phase 1 made ``SessionStore`` read from DB first. Without isolation,
+    ``list_all()`` / ``get()`` return live production sessions, breaking
+    tests that assert specific session counts or states.
+    """
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    test_db = Path(tmp.name)
+    try:
+        from config import config
+        config.mesh.shadow_write = True
+        config.mesh.db_path = str(test_db)
+        import src.control.db as db_mod
+        old = db_mod._db_instance
+        db_mod._db_instance = None
+        if old is not None:
+            old.close()
+        yield
+    finally:
+        for ext in ("", "-wal", "-shm"):
+            p = Path(str(test_db) + ext)
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
 
 
 @pytest.fixture(autouse=True)

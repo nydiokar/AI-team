@@ -55,6 +55,17 @@ class SessionStore:
         return session
 
     def get(self, session_id: str) -> Optional[Session]:
+        # Read from DB first when available (DB is canonical state source).
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None:
+                row = db.get_session(session_id)
+                if row:
+                    return self._from_dict(row)
+        except Exception:
+            pass
+        # Fall back to JSON file when DB is unavailable or row is missing.
         path = _SESSIONS_DIR / f"{session_id}.json"
         if not path.exists():
             return None
@@ -80,6 +91,22 @@ class SessionStore:
             logger.debug("shadow_write_failed session_id=%s err=%s", session.session_id, e)
 
     def list_all(self) -> List[Session]:
+        # Read from DB first when available (DB is canonical state source).
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None:
+                rows = db.list_sessions(limit=10000)
+                sessions = []
+                for row in rows:
+                    try:
+                        sessions.append(self._from_dict(row))
+                    except Exception:
+                        pass
+                return sessions
+        except Exception:
+            pass
+        # Fall back to JSON directory scan when DB is unavailable.
         sessions = []
         for p in sorted(_SESSIONS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
             try:
@@ -163,6 +190,15 @@ class SessionStore:
 
     @staticmethod
     def _from_dict(d: dict) -> Session:
+        def _parse_list(value):
+            """Parse a field that may be a JSON string (DB) or already a list (JSON file)."""
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except Exception:
+                    return []
+            return value or []
+
         return Session(
             session_id=d["session_id"],
             backend=d["backend"],
@@ -177,9 +213,9 @@ class SessionStore:
             last_summary=d.get("last_summary", ""),
             last_user_message=d.get("last_user_message", ""),
             last_result_summary=d.get("last_result_summary", ""),
-            last_files_modified=d.get("last_files_modified", []),
+            last_files_modified=_parse_list(d.get("last_files_modified", [])),
             telegram_chat_id=d.get("telegram_chat_id"),
             telegram_thread_id=d.get("telegram_thread_id"),
             owner_user_id=d.get("owner_user_id"),
-            task_history=d.get("task_history", []),
+            task_history=_parse_list(d.get("task_history", [])),
         )
