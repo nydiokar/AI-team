@@ -507,6 +507,14 @@ class MeshDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_task_by_session(self, session_id: str, task_id: str) -> Optional[Dict[str, Any]]:
+        """Return a task row matching both session_id and task_id."""
+        row = self._conn().execute(
+            "SELECT * FROM mesh_tasks WHERE session_id = ? AND id = ?",
+            (session_id, task_id),
+        ).fetchone()
+        return dict(row) if row else None
+
     def list_tasks(
         self,
         status: Optional[str] = None,

@@ -297,10 +297,25 @@ class TaskOrchestrator(ITaskOrchestrator):
         return f"{backend}_{phase}"
 
     async def _recover_stale_busy_sessions(self) -> None:
-        """Convert BUSY sessions left behind by a previous restart into a stable error state."""
-        stale_sessions: List[Any] = []
+        """Recover BUSY sessions after a gateway restart.
+
+        Uses the DB to distinguish three cases instead of blindly marking ERROR:
+        1. Task completed in DB → restore session to AWAITING_INPUT, propagate result.
+        2. Task still pending/claimed in DB → skip (worker will finish it).
+        3. No DB record or DB unavailable → mark ERROR (legacy fallback).
+
+        When DB is unavailable, falls back to the original behaviour: mark all
+        stale BUSY sessions as ERROR.
+        """
         host = socket.gethostname()
         active_task_ids = set(self.active_tasks.keys())
+
+        db = None
+        try:
+            from src.control.db import get_db
+            db = get_db()
+        except Exception:
+            pass
 
         for session in self.session_store.list_all():
             if session.status != SessionStatus.BUSY:
@@ -309,14 +324,33 @@ class TaskOrchestrator(ITaskOrchestrator):
                 continue
             if session.last_task_id and session.last_task_id in active_task_ids:
                 continue
-            stale_sessions.append(session)
 
-        for session in stale_sessions:
+            task_id = session.last_task_id
+            if db is not None and task_id:
+                row = db.get_task(task_id)
+                if row:
+                    status = row.get("status")
+                    if status == "completed":
+                        # Task completed successfully while gateway was down.
+                        # Restore session and propagate the result.
+                        await self._recover_completed_session(session, row)
+                        continue
+                    elif status in ("pending", "claimed"):
+                        # Worker is still working on it — don't touch the session.
+                        logger.info(
+                            "event=session_recovery_deferred session_id=%s task_id=%s status=%s",
+                            session.session_id, task_id, status,
+                        )
+                        continue
+                    # Other terminal status (failed, failed_node_offline) — fall
+                    # through to ERROR marking below.
+
+            # No DB record available (or DB unavailable), or task failed.
             session.status = SessionStatus.ERROR
             session.last_result_summary = "Interrupted by gateway restart; partial changes may exist."
             self.session_store.save(session)
             result = TaskResult(
-                task_id=session.last_task_id or f"session_{session.session_id}",
+                task_id=task_id or f"session_{session.session_id}",
                 success=False,
                 output="",
                 errors=["interrupted by gateway restart"],
@@ -326,22 +360,66 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
             setattr(result, "backend_name", session.backend or "claude")
             self._write_session_summary(session, result)
-            self._append_session_event(session.session_id, session.last_task_id or "", result)
+            self._append_session_event(session.session_id, task_id or "", result)
             self._emit_event(
                 "session_interrupted_recovered",
                 None,
-                {"session_id": session.session_id, "task_id": session.last_task_id, "backend": session.backend},
+                {"session_id": session.session_id, "task_id": task_id, "backend": session.backend},
             )
             if self.telegram_interface and session.telegram_chat_id:
                 try:
                     await self.telegram_interface.notify_completion(
-                        session.last_task_id or session.session_id,
+                        task_id or session.session_id,
                         "Task interrupted by gateway restart",
                         success=False,
                         chat_id=session.telegram_chat_id,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to notify interrupted session recovery: {e}")
+
+    async def _recover_completed_session(self, session: Any, task_row: Dict[str, Any]) -> None:
+        """Restore a session whose task completed in DB while the gateway was down."""
+        result_raw = task_row.get("result")
+        result_dict: Dict[str, Any] = {}
+        if result_raw:
+            try:
+                result_dict = json.loads(result_raw) if isinstance(result_raw, str) else result_raw
+            except Exception:
+                pass
+
+        session.status = SessionStatus.AWAITING_INPUT
+        session.last_result_summary = (result_dict.get("output", "") or "")[-400:] or "Task completed (recovered)"
+        session.last_files_modified = result_dict.get("files_modified") or []
+        self.session_store.save(session)
+
+        result = TaskResult(
+            task_id=task_row["id"],
+            success=True,
+            output=result_dict.get("output", ""),
+            errors=[],
+            files_modified=result_dict.get("files_modified") or [],
+            execution_time=result_dict.get("execution_time", 0.0),
+            timestamp=datetime.now().isoformat(),
+        )
+        setattr(result, "backend_name", session.backend or "claude")
+        self._write_session_summary(session, result)
+        self._append_session_event(session.session_id, task_row["id"], result)
+        self._emit_event(
+            "session_recovered_completed",
+            None,
+            {"session_id": session.session_id, "task_id": task_row["id"], "backend": session.backend},
+        )
+
+        if self.telegram_interface and session.telegram_chat_id:
+            try:
+                await self.telegram_interface.notify_completion(
+                    task_row["id"],
+                    "Task completed while gateway was restarting — session restored.",
+                    success=True,
+                    chat_id=session.telegram_chat_id,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to notify recovered completed session: {e}")
 
     @staticmethod
     def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:
