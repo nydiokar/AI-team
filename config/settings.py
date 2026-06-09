@@ -58,6 +58,7 @@ class TelegramConfig:
     bot_token: str = ""
     allowed_users: List[int] = None
     notification_chat_id: Optional[int] = None
+    upload_max_mb: int = 0  # 0 = no cap; Telegram's own limits apply
     
     def __post_init__(self):
         if self.allowed_users is None:
@@ -282,6 +283,12 @@ class Config:
             tg_buffer = os.getenv("TELEGRAM_MESSAGE_BUFFER_SEC")
             if tg_buffer is not None:
                 self.system.telegram_message_buffer_sec = max(0.0, float(tg_buffer))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("GATEWAY_UPLOAD_MAX_MB")
+            if v is not None:
+                self.telegram.upload_max_mb = max(0, int(v))
         except Exception:
             pass
         try:

@@ -46,6 +46,12 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_DANGEROUS_EXTENSIONS: set[str] = {
+    ".exe", ".bat", ".cmd", ".com", ".msi", ".msp", ".scr", ".pif", ".cpl",
+    ".vbs", ".vbe", ".ps1", ".psm1", ".psd1", ".wsf", ".wsh", ".hta",
+    ".jar", ".dll", ".reg", ".lnk", ".gadget", ".application",
+}
+
 class TelegramInterface:
     """Telegram bot interface for task management and notifications"""
     
@@ -114,6 +120,9 @@ class TelegramInterface:
         
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
+
+        # Document / photo upload handler
+        self.app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, self._handle_document))
 
         # Global error handler: without one, a failed reply (e.g. a Markdown
         # parse error) is logged but the user sees nothing — a button "flickers"
@@ -596,6 +605,23 @@ class TelegramInterface:
         if task:
             return f"#s_{session.session_id} #t_{task}"
         return f"#s_{session.session_id}"
+
+    @staticmethod
+    def _safe_upload_name(file_name: str | None, fallback: str) -> str:
+        name = (file_name or fallback).strip()
+        name = name.replace("\\", "_").replace("/", "_")
+        name = re.sub(r'[<>:"|?*]', "_", name)
+        name = re.sub(r'_+', "_", name)
+        if len(name) > 200:
+            stem, ext = os.path.splitext(name)
+            ext = ext[:20]
+            name = stem[: 200 - len(ext) - 1] + ext
+        return name.strip("._ ")
+
+    @staticmethod
+    def _is_dangerous_extension(file_name: str) -> bool:
+        _, ext = os.path.splitext(file_name)
+        return ext.lower() in _DANGEROUS_EXTENSIONS
 
     def _format_session_material_summary(self, session: Session, limit: int = 220) -> str:
         parts = []
@@ -1609,6 +1635,128 @@ class TelegramInterface:
         except Exception as e:
             await update.message.reply_text(f"❌ Failed to create task: {e}")
             logger.error(f"message handler failed: {e}")
+
+    async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+
+        # Flush any pending text buffer so ordering is preserved
+        await self._flush_buffer(chat_id)
+
+        # Active session is required for file uploads
+        active_session = self.session_store.get_active(chat_id)
+        if not active_session:
+            await update.message.reply_text(
+                "❌ No active session. Use /session_new to start one, then send the file."
+            )
+            return
+        if not self._user_can_access_session(user_id, active_session):
+            await update.message.reply_text("❌ You do not own the active session.")
+            return
+
+        # Determine file source
+        doc = update.message.document
+        photo_arr = update.message.photo
+        caption = (update.message.caption or "").strip()
+
+        if doc:
+            file_id = doc.file_id
+            file_name = doc.file_name
+            file_size = doc.file_size or 0
+        elif photo_arr:
+            largest = photo_arr[-1]
+            file_id = largest.file_id
+            file_name = None
+            file_size = largest.file_size or 0
+        else:
+            await update.message.reply_text("❌ Unsupported file type.")
+            return
+
+        # Check extension blacklist
+        raw_name = file_name or f"file_{file_id[:12]}"
+        if self._is_dangerous_extension(raw_name):
+            await update.message.reply_text(
+                f"❌ File extension `{os.path.splitext(raw_name)[1]}` is not allowed for security reasons.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Check size cap (0 = disabled)
+        try:
+            from config import config as app_config
+            max_mb = app_config.telegram.upload_max_mb
+        except Exception:
+            max_mb = 0
+        if max_mb > 0 and file_size > max_mb * 1024 * 1024:
+            await update.message.reply_text(
+                f"❌ File exceeds {max_mb} MB limit ({file_size / 1024 / 1024:.1f} MB)."
+            )
+            return
+
+        # Build destination and download
+        fallback_name = f"photo_{file_id[:12]}.jpg" if photo_arr else f"file_{file_id[:12]}"
+        safe_name = self._safe_upload_name(file_name, fallback_name)
+        dest_dir = Path(active_session.repo_path) / "uploads"
+
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / safe_name
+            if dest.exists():
+                stem, ext = os.path.splitext(safe_name)
+                counter = 1
+                while dest.exists():
+                    dest = dest_dir / f"{stem}_{counter}{ext}"
+                    counter += 1
+            tg_file = await context.bot.get_file(file_id)
+            await tg_file.download_to_drive(custom_path=dest)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Failed to download file: {e}")
+            logger.error(f"file download failed: user=%s chat=%s error=%s", user_id, chat_id, e)
+            return
+
+        file_size_kb = file_size / 1024
+        size_str = f"{file_size_kb:.1f} KB" if file_size_kb < 1024 else f"{file_size_kb / 1024:.1f} MB"
+        save_msg = f"📎 Saved `uploads/{safe_name}` ({size_str})"
+
+        if caption:
+            full_instruction = f"{caption}\n\n📎 File: `uploads/{safe_name}`"
+            active_session.last_user_message = full_instruction
+            active_session.status = SessionStatus.BUSY
+            try:
+                task_id = await self.orchestrator.submit_instruction(
+                    description=full_instruction,
+                    session_id=active_session.session_id,
+                    target_files=[str(dest)],
+                    cwd=active_session.repo_path,
+                    source="telegram_session",
+                )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Failed to create task: {e}")
+                logger.error(f"instruction submission failed: user=%s chat=%s error=%s", user_id, chat_id, e)
+                return
+            active_session.last_task_id = task_id
+            self.session_store.save(active_session)
+            await update.message.reply_text(
+                f"{save_msg}\n⏳ Working on your request... {self._session_message_ref(active_session, task_id)}",
+                parse_mode="Markdown",
+            )
+            logger.info(
+                "file+instruction user=%s chat=%s file=%s task=%s session=%s",
+                user_id, chat_id, safe_name, task_id, active_session.session_id,
+            )
+        else:
+            await update.message.reply_text(
+                f"{save_msg}\nIt's in your session repo — type an instruction to work with it.",
+                parse_mode="Markdown",
+            )
+            logger.info(
+                "file user=%s chat=%s file=%s session=%s (no caption)",
+                user_id, chat_id, safe_name, active_session.session_id,
+            )
 
     async def _handle_run_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Compatibility alias for the older task-runner UX."""
