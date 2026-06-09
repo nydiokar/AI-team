@@ -191,6 +191,75 @@ def test_normal_success_unaffected_by_gate():
     assert result.error_class == ""
 
 
+def test_short_reply_starting_with_let_me_is_not_flagged():
+    """Regression: bare openers like 'Let me ...' must NOT be treated as
+    intent-only, even with a permission marker present. They commonly begin
+    real, completed short replies."""
+    stdout = _ndjson(
+        {"type": "text", "part": {"type": "text",
+            "text": "Let me know if you want the diff — the fix is applied and tests pass."}},
+        {"type": "step_finish", "part": {"type": "step-finish", "reason": "tool-calls"}},
+    )
+    result = OpenCodeBackend._parse(stdout, "auto-rejecting", 0, 30.0)
+    assert result.success is True
+    assert result.error_class == ""
+
+
+def test_external_directory_marker_alone_does_not_flag():
+    """Regression: opencode prints 'external_directory' in permission PROMPTS
+    even for allowed calls; that token alone must not flip success."""
+    stdout = _ndjson(
+        {"type": "text", "part": {"type": "text", "text": "Understood. Starting with the fix."}},
+        {"type": "step_finish", "part": {"type": "step-finish", "reason": "tool-calls"}},
+    )
+    # stderr mentions external_directory but NO actual rejection occurred.
+    result = OpenCodeBackend._parse(stdout, "permission requested: external_directory (x); allowing", 0, 5.0)
+    assert result.success is True
+    assert result.error_class == ""
+
+
+def test_suspect_flag_cleared_when_files_modified(tmp_path):
+    """A run flagged as a dead-end in _parse must be un-flagged in _run_locked
+    if it actually modified files (real work happened)."""
+    b = OpenCodeBackend()
+    stdout, stderr = _intent_only_with_block()
+    stdout_bytes = [(l + "\n").encode() for l in stdout.splitlines()]
+    stderr_bytes = [(stderr + "\n").encode()]
+
+    class _FakeProc:
+        pid = 999
+        returncode = 0
+        stdout = MagicMock()
+        stderr = MagicMock()
+
+        def wait(self, timeout=None):
+            pass
+
+    def _fake_popen(cmd, **kwargs):
+        p = _FakeProc()
+        p.stdout.__iter__ = lambda self: iter(stdout_bytes)
+        p.stderr.__iter__ = lambda self: iter(stderr_bytes)
+        return p
+
+    with (
+        patch.object(b, "_pre_run_git_check", return_value=None),
+        patch.object(b, "_recover_session_id", return_value="ses_x"),
+        patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
+        patch("src.backends.opencode._git_changed_files", return_value=["src/foo.py"]),
+        patch("src.backends.opencode._run_git", return_value="diff --git a/src/foo.py b/src/foo.py"),
+        patch.object(OpenCodeBackend, "_auto_commit", staticmethod(lambda cwd, label: None)),
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
+        patch("config.config") as mock_cfg,
+    ):
+        mock_cfg.system.inactivity_timeout_sec = 600
+        mock_cfg.opencode.collect_diff = True
+        result = b._run(cwd=str(tmp_path), message="go", session_id="ses_x",
+                        title=None, model=None, agent=None, session_key="k")
+
+    assert result.success is True, f"expected un-flag, got errors={result.errors}"
+    assert result.error_class == ""
+
+
 # ---------------------------------------------------------------------------
 # Concurrent same-repo lock rejection
 # ---------------------------------------------------------------------------
