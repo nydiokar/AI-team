@@ -490,7 +490,7 @@ class TelegramInterface:
 
     def _format_session_overview(self, session: Session, include_dirs: bool = False) -> str:
         lines = [
-            f"Session: `{session.session_id}`",
+            f"Session: {self._session_tag(session.session_id)}",
             f"Backend: {session.backend}  |  Status: {session.status.value}",
             f"Path: `{session.repo_path}`",
             f"Machine: {session.machine_id}",
@@ -793,7 +793,7 @@ class TelegramInterface:
         Open:   ⭐ `id` — backend — [node —] status — repo
         Closed: [closed] `id` — backend — [node —] repo
         """
-        sid = f"`{session.session_id}`"
+        sid = self._session_tag(session.session_id)
         node = f"{self._session_node_label(session)} — " if show_node else ""
         if session.status == SessionStatus.CLOSED:
             return f"[closed] {sid} — {session.backend} — {node}{self._session_repo_name(session)}"
@@ -1015,7 +1015,7 @@ class TelegramInterface:
         if session_id:
             session = self.session_store.get(session_id)
             if not session:
-                return None, f"❌ Session `{session_id}` not found."
+                return None, f"❌ Session {self._session_tag(session_id)} not found."
         else:
             session = self.session_store.get_active(update.effective_chat.id)
             if not session:
@@ -1026,7 +1026,7 @@ class TelegramInterface:
         if not self._user_can_access_session(update.effective_user.id, session):
             return None, "❌ You do not own that session."
         if session.status == SessionStatus.CLOSED:
-            return None, f"❌ Session `{session.session_id}` is closed."
+            return None, f"❌ Session {self._session_tag(session.session_id)} is closed."
         return session, None
 
     @staticmethod
@@ -1109,7 +1109,7 @@ class TelegramInterface:
 
         if require_task and not task_id:
             if session is not None:
-                return None, session, f"❌ Session `{session.session_id}` has no active or recent task."
+                return None, session, f"❌ Session {self._session_tag(session.session_id)} has no active or recent task."
             return None, None, "❌ No active session task found. Use `/session_cancel`, `/session_status`, or pass a task ID explicitly."
 
         return task_id, session, None
@@ -1480,11 +1480,11 @@ class TelegramInterface:
                     if ev.get("task_id") == task_id:
                         buf.append(ev)
             if not buf:
-                label = f"session `{session.session_id}`" if session else f"task `{task_id}`"
+                label = f"session {self._session_tag(session.session_id)}" if session else f"task `{task_id}`"
                 await update.message.reply_text(f"No recent events for {label}.")
                 return
             lines = [self._format_progress_line(ev) for ev in list(buf)[-10:]]
-            header_target = f"session `{session.session_id}` / task `{task_id}`" if session else f"task `{task_id}`"
+            header_target = f"session {self._session_tag(session.session_id)} / task `{task_id}`" if session else f"task `{task_id}`"
             header = f"📈 Progress for {header_target} (last {len(lines)} events)"
             await update.message.reply_text("\n".join([header, *lines]))
         except Exception as e:
@@ -1590,7 +1590,7 @@ class TelegramInterface:
                 ok = False
             if ok:
                 response = (
-                    f"🔄 Cancellation requested for session `{session.session_id}` task `{task_id}`."
+                    f"🔄 Cancellation requested for session {self._session_tag(session.session_id)} task `{task_id}`."
                     if session else
                     f"🔄 Cancellation requested for task `{task_id}`."
                 )
@@ -1598,7 +1598,7 @@ class TelegramInterface:
                 logger.info(f"Telegram user requested cancellation of task {task_id}")
             else:
                 response = (
-                    f"❌ Task `{task_id}` from session `{session.session_id}` is not cancellable."
+                    f"❌ Task `{task_id}` from session {self._session_tag(session.session_id)} is not cancellable."
                     if session else
                     f"❌ Task `{task_id}` not found or already finished."
                 )
@@ -1933,13 +1933,13 @@ class TelegramInterface:
         session_id = args[0]
         session = self.session_store.get(session_id)
         if not session:
-            await update.message.reply_text(f"❌ Session `{session_id}` not found.")
+            await update.message.reply_text(f"❌ Session {self._session_tag(session_id)} not found.")
             return
         if not self._user_can_access_session(update.effective_user.id, session):
             await update.message.reply_text("❌ You do not own that session.")
             return
         if session.status == SessionStatus.CLOSED:
-            await update.message.reply_text(f"❌ Session `{session_id}` is closed.")
+            await update.message.reply_text(f"❌ Session {self._session_tag(session_id)} is closed.")
             return
         self.session_store.bind(update.effective_chat.id, session_id)
         await update.message.reply_text(self._format_session_switched_message(session))
@@ -2042,13 +2042,13 @@ class TelegramInterface:
         session_id = args[0]
         session = self.session_store.get(session_id)
         if not session:
-            await update.message.reply_text(f"❌ Session `{session_id}` not found.")
+            await update.message.reply_text(f"❌ Session {self._session_tag(session_id)} not found.")
             return
         if not self._user_can_access_session(update.effective_user.id, session):
             await update.message.reply_text("❌ You do not own that session.")
             return
         if session.status == SessionStatus.CLOSED:
-            await update.message.reply_text(f"❌ Session `{session_id}` is closed.")
+            await update.message.reply_text(f"❌ Session {self._session_tag(session_id)} is closed.")
             return
         self.session_store.bind(update.effective_chat.id, session_id)
         await update.message.reply_text(self._format_session_switched_message(session))
@@ -2067,13 +2067,13 @@ class TelegramInterface:
         session_id = data.split(":", 1)[1] if ":" in data else ""
         session = self.session_store.get(session_id)
         if not session:
-            await query.edit_message_text(f"❌ Session `{session_id}` not found.")
+            await query.edit_message_text(f"❌ Session {self._session_tag(session_id)} not found.")
             return
         if not self._user_can_access_session(update.effective_user.id, session):
             await query.edit_message_text("❌ You do not own that session.")
             return
         if session.status == SessionStatus.CLOSED:
-            await query.edit_message_text(f"❌ Session `{session_id}` is closed.")
+            await query.edit_message_text(f"❌ Session {self._session_tag(session_id)} is closed.")
             return
 
         self.session_store.bind(update.effective_chat.id, session_id)
@@ -2293,7 +2293,7 @@ class TelegramInterface:
             session.status = SessionStatus.CANCELLED
             self.session_store.save(session)
             await update.message.reply_text(
-                f"Cancellation requested for `{session.last_task_id}` in session `{session.session_id}`."
+                f"Cancellation requested for `{session.last_task_id}` in session {self._session_tag(session.session_id)}."
             )
         else:
             await update.message.reply_text(f"Task `{session.last_task_id}` is not cancellable.")
@@ -2348,7 +2348,7 @@ class TelegramInterface:
         if active and active.session_id == session.session_id:
             self.session_store.unbind(update.effective_chat.id)
         await update.message.reply_text(
-            f"Session `{session.session_id}` closed.\n"
+            f"Session {self._session_tag(session.session_id)} closed.\n"
             f"Ref: {self._session_message_ref(session)}\n"
             f"Summary: {self._format_session_material_summary(session)}"
         )
@@ -2368,7 +2368,7 @@ class TelegramInterface:
                 await update.message.reply_text("❌ You do not own that session.")
                 return
             if session.status != SessionStatus.CLOSED:
-                await update.message.reply_text(f"Session `{session.session_id}` is already open ({session.status.value}).")
+                await update.message.reply_text(f"Session {self._session_tag(session.session_id)} is already open ({session.status.value}).")
                 return
             session.status = SessionStatus.IDLE
             self.session_store.save(session)
@@ -2402,14 +2402,14 @@ class TelegramInterface:
         session_id = data.split(":", 1)[1] if ":" in data else ""
         session = self.session_store.get(session_id)
         if not session:
-            await query.edit_message_text(f"❌ Session `{session_id}` not found.")
+            await query.edit_message_text(f"❌ Session {self._session_tag(session_id)} not found.")
             return
         if not self._user_can_access_session(update.effective_user.id, session):
             await query.edit_message_text("❌ You do not own that session.")
             return
         if session.status != SessionStatus.CLOSED:
             await query.edit_message_text(
-                f"Session `{session_id}` is already open ({session.status.value}). Use /session_use to switch."
+                f"Session {self._session_tag(session.session_id)} is already open ({session.status.value}). Use /session_use to switch."
             )
             return
 
@@ -2520,7 +2520,7 @@ Please check the system logs for more details.
             )
             await update.message.reply_text(
                 self._format_git_result(
-                    f"❌ Failed to commit changes in session `{session.session_id}`.",
+                    f"❌ Failed to commit changes in session {self._session_tag(session.session_id)}.",
                     result,
                     push_branch=push_branch,
                 )
@@ -2557,7 +2557,7 @@ Please check the system logs for more details.
             )
             await update.message.reply_text(
                 self._format_git_result(
-                    f"❌ Failed to commit staged changes in session `{session.session_id}`.",
+                    f"❌ Failed to commit staged changes in session {self._session_tag(session.session_id)}.",
                     result,
                     push_branch=push_branch,
                 )
@@ -2595,7 +2595,7 @@ Please check the system logs for more details.
             changes = status["changes"]
             message_parts = [
                 "Git Repository Status",
-                f"Session: `{session.session_id}`",
+                f"Session: {self._session_tag(session.session_id)}",
                 f"Path: `{session.repo_path}`",
                 f"Branch: `{status['current_branch']}`",
                 f"Working directory: {'✅ Clean' if status['working_directory_clean'] else '⚠️ Has changes'}",
