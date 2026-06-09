@@ -82,6 +82,64 @@ def _git_changed_files(cwd: str) -> List[str]:
 
 
 
+# Markers opencode emits (in stdout JSON events or on stderr) when its own
+# permission system blocks a tool call. These mean the agent was *prevented*
+# from acting, not that it chose to stop.
+_PERMISSION_BLOCK_MARKERS = (
+    "auto-rejecting",
+    "rejected permission",
+    "user rejected permission",
+    "the user rejected",
+    "permission denied",
+    "external_directory",
+)
+
+# Forward-looking phrases that signal the model only stated an *intention* to
+# work rather than reporting completed work. Used together with "no side
+# effects" to catch the false-success / intent-only pattern.
+_INTENT_ONLY_PREFIXES = (
+    "understood",
+    "starting with",
+    "starting by",
+    "let me start",
+    "i'll start",
+    "i will start",
+    "working autonomously",
+    "let me ",
+    "i'll ",
+    "i will ",
+    "first, i",
+    "first i",
+    "let's ",
+    "now i'll",
+    "now let me",
+)
+
+
+def _detect_permission_block(stdout: str, stderr: str) -> str:
+    """Return the matched marker if opencode auto-rejected a permission, else ''."""
+    haystack = f"{stderr}\n{stdout}".lower()
+    for marker in _PERMISSION_BLOCK_MARKERS:
+        if marker in haystack:
+            return marker
+    return ""
+
+
+def _looks_intent_only(output: str) -> bool:
+    """True if the text only announces intent (no evidence of completed work).
+
+    Conservative: only fires for short outputs that *start* with a forward-looking
+    phrase. A long, substantive reply is never treated as intent-only even if it
+    opens with "Let me".
+    """
+    text = (output or "").strip().lower()
+    if not text:
+        return True  # empty output with a permission block is definitely a dead end
+    if len(text) > 600:
+        return False
+    return any(text.startswith(p) for p in _INTENT_ONLY_PREFIXES)
+
+
 class OpenCodeBackend(CodingBackend):
     """OpenCode CLI backend."""
 
@@ -526,6 +584,33 @@ class OpenCodeBackend(CodingBackend):
             if not errors:
                 errors.append(f"opencode exited with code {returncode}")
 
+        # Suspect-run / dead-end detection. opencode can exit 0 having done no
+        # real work because it hit a permission wall (e.g. it tried to read a
+        # path outside the repo and opencode auto-rejected it) and then gave up.
+        # Such a run reports success with optimistic, intent-only text ("Working
+        # autonomously...", "Starting with...") and zero side effects — which is
+        # indistinguishable from a real success unless we look. Flip it to a
+        # failure so the orchestrator retries / surfaces it instead of relaying
+        # a false "it's going to work" to the user.
+        error_class = ""
+        if success:
+            blocked = _detect_permission_block(stdout, stderr)
+            if blocked:
+                no_side_effects = (
+                    not any(r == "stop" for r in step_finish_reasons)  # never reached a natural end
+                )
+                intent_only = _looks_intent_only(output)
+                if no_side_effects and intent_only:
+                    success = False
+                    error_class = "permission_block"
+                    errors.append(
+                        "OpenCode stopped early on an auto-rejected permission "
+                        f"({blocked}) and produced only intent-only text without "
+                        "completing the work. This is a dead-end, not a success. "
+                        "Widen the opencode permission/allowed paths or keep the "
+                        "agent's actions inside the repo."
+                    )
+
         return ExecutionResult(
             success=success,
             output=output,
@@ -536,6 +621,7 @@ class OpenCodeBackend(CodingBackend):
             raw_stderr=stderr,
             parsed_output=parsed_output,
             return_code=returncode,
+            error_class=error_class,
         )
 
     # ------------------------------------------------------------------
@@ -821,19 +907,19 @@ class OpenCodeServerBackend(CodingBackend):
                 execution_time=time.time() - start,
             )
 
-        if model_id:
-            _, patch_err = self._http(key, "PATCH", f"/session/{oc_session_id}", {
-                "model": {"providerID": provider_id or "opencode", "modelID": model_id}
-            })
-            if patch_err:
-                logger.warning("event=opencode_model_patch_failed id=%s err=%s", oc_session_id, patch_err)
-
+        # NOTE: do NOT PATCH /session/{id} to set the model. On opencode 1.16.2
+        # that PATCH is a silent no-op that leaves the session in a corrupt state
+        # (providerID="big-pickle", modelID="") and then 500s at message time
+        # (ProviderModelNotFoundError). The supported way is to pass the model
+        # inline in the message body, which _send_message does.
         return self._send_message(
             key=key,
             oc_session_id=oc_session_id,
             message=session.last_user_message,
             cwd=session.repo_path,
             start=start,
+            model_id=model_id,
+            provider_id=provider_id,
         )
 
     def resume_session(self, session: Session, message: str) -> ExecutionResult:
@@ -867,12 +953,15 @@ class OpenCodeServerBackend(CodingBackend):
             session.last_user_message = message
             return self.create_session(session)
 
+        model_id, provider_id = self._parse_model(self._session_model(session))
         return self._send_message(
             key=key,
             oc_session_id=oc_session_id,
             message=message,
             cwd=session.repo_path,
             start=start,
+            model_id=model_id,
+            provider_id=provider_id,
         )
 
     def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
@@ -932,6 +1021,8 @@ class OpenCodeServerBackend(CodingBackend):
         message: str,
         cwd: str,
         start: float,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
     ) -> ExecutionResult:
         try:
             from config import config as _cfg
@@ -943,7 +1034,13 @@ class OpenCodeServerBackend(CodingBackend):
         except Exception:
             timeout = 1800
 
-        body = {"parts": [{"type": "text", "text": message}]}
+        body: Dict[str, Any] = {"parts": [{"type": "text", "text": message}]}
+        # Set the model inline in the message body — the only reliable way on
+        # opencode 1.16.2 (PATCH /session is a no-op that corrupts model state).
+        # Only sent when we have a concrete model id; otherwise opencode resolves
+        # it from the agent/global config (which already defaults correctly).
+        if model_id:
+            body["model"] = {"providerID": provider_id or "opencode", "modelID": model_id}
         response, err = self._http(key, "POST", f"/session/{oc_session_id}/message", body, timeout=timeout)
 
         elapsed = time.time() - start
@@ -967,6 +1064,22 @@ class OpenCodeServerBackend(CodingBackend):
             # finish="" → no step-finish part at all, malformed/empty response.
             errors.append(f"Generation ended with unexpected finish reason: {finish!r}")
             success = False
+
+        # Suspect-run / dead-end detection (mirrors the CLI backend): a clean
+        # finish that only announced intent after a permission block is a
+        # dead-end, not a success. Check the serialized response for markers.
+        if success and finish != "stop":
+            try:
+                blocked = _detect_permission_block(json.dumps(response), "")
+            except Exception:
+                blocked = ""
+            if blocked and _looks_intent_only(output):
+                success = False
+                errors.append(
+                    "OpenCode stopped early on an auto-rejected permission "
+                    f"({blocked}) with only intent-only text. This is a dead-end, "
+                    "not a success. Widen the opencode permission/allowed paths."
+                )
 
         # Collect git diff
         files_modified: List[str] = []
@@ -1044,6 +1157,13 @@ class OpenCodeServerBackend(CodingBackend):
         # Cost guard: blocked under test mode unless OpenCode e2e is opted in.
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("opencode-server")
+
+        # NOTE: deliberately NO auth.json pre-flight here. opencode authenticates
+        # via a cached session in opencode.db, so a missing/empty auth.json does
+        # NOT mean "logged out" — checking it produces false negatives that block
+        # working setups. A genuine auth failure surfaces as an error from the
+        # message POST and is handled there.
+
         with self._lock:
             proc = self._procs.get(key)
             if proc is not None and proc.poll() is None and self._base_urls.get(key):
@@ -1198,10 +1318,30 @@ class OpenCodeServerBackend(CodingBackend):
 
     @staticmethod
     def _parse_model(model_str: Optional[str]) -> tuple:
-        """Split 'provider/model' into (model_id, provider_id). Falls back to bare model ID."""
+        """Split 'provider/model' into (model_id, provider_id). Falls back to bare model ID.
+
+        Hardened against malformed input: a string like 'big-pickle/' or '/big-pickle'
+        previously yielded an empty model or provider half, which opencode rejects with
+        an opaque ProviderModelNotFoundError (HTTP 500). We never emit an empty model_id:
+        if the model half is blank, we treat the whole non-empty token as a bare model id.
+        """
+        if not model_str:
+            return None, None
+        model_str = model_str.strip()
         if not model_str:
             return None, None
         if "/" in model_str:
-            parts = model_str.split("/", 1)
-            return parts[1], parts[0]
+            provider, _, model = model_str.partition("/")
+            provider = provider.strip()
+            model = model.strip()
+            if provider and model:
+                return model, provider
+            # Malformed (one side empty) — recover the non-empty half as a bare model id
+            # rather than sending an empty model to the server.
+            bare = model or provider
+            logger.warning(
+                "event=opencode_model_malformed input=%r recovered_model=%r",
+                model_str, bare,
+            )
+            return (bare or None), None
         return model_str, None

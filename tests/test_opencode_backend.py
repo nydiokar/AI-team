@@ -142,6 +142,56 @@ def test_parse_skips_non_json_lines():
 
 
 # ---------------------------------------------------------------------------
+# Suspect-run / dead-end detection (false-success gate)
+# Regression for session 3383428cbe2a / task_8652c07a: opencode exited 0 with
+# only intent-only text after auto-rejecting an external_directory permission,
+# and the result was scored success=True. It must now be a failure.
+# ---------------------------------------------------------------------------
+
+def _intent_only_with_block():
+    """Reconstruct the real dead-end: intent text + a rejected permission, exit 0."""
+    stdout = _ndjson(
+        {"type": "text", "part": {"type": "text",
+            "text": "Understood. Working autonomously to get the full pipeline running. "
+                    "Starting with the opencode server failure."}},
+        {"type": "tool_use", "part": {"type": "tool", "tool": "glob", "state": {
+            "status": "error", "error": "The user rejected permission to use this specific tool call."}}},
+        {"type": "step_finish", "part": {"type": "step-finish", "reason": "tool-calls"}},
+    )
+    stderr = "! permission requested: external_directory (C:\\Users\\x\\.config\\opencode\\*); auto-rejecting"
+    return stdout, stderr
+
+
+def test_intent_only_after_permission_block_is_failure():
+    stdout, stderr = _intent_only_with_block()
+    result = OpenCodeBackend._parse(stdout, stderr, 0, 15.2)
+    assert result.success is False
+    assert result.error_class == "permission_block"
+    assert any("dead-end" in e.lower() or "auto-rejected" in e.lower() for e in result.errors)
+
+
+def test_real_work_after_permission_block_is_not_failed():
+    """A substantive reply that ends naturally must NOT be flagged, even if a
+    permission was rejected somewhere mid-run."""
+    stdout = _ndjson(
+        {"type": "text", "part": {"type": "text",
+            "text": "I fixed the root cause: the agent config had edit:deny. " * 30}},
+        {"type": "tool_use", "part": {"type": "tool", "tool": "glob", "state": {
+            "status": "error", "error": "The user rejected permission to use this specific tool call."}}},
+        {"type": "step_finish", "part": {"type": "step-finish", "reason": "stop"}},
+    )
+    result = OpenCodeBackend._parse(stdout, "auto-rejecting", 0, 120.0)
+    assert result.success is True
+
+
+def test_normal_success_unaffected_by_gate():
+    """No permission block → ordinary success is untouched."""
+    result = OpenCodeBackend._parse(SAMPLE_EVENTS, "", 0, 1.0)
+    assert result.success is True
+    assert result.error_class == ""
+
+
+# ---------------------------------------------------------------------------
 # Concurrent same-repo lock rejection
 # ---------------------------------------------------------------------------
 
