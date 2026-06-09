@@ -96,7 +96,7 @@ class LlamaMediator(ILlamaMediator):
             result = subprocess.run(
                 ["ollama", "list"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=5
             )
             output = (result.stdout or "") + (result.stderr or "")

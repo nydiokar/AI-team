@@ -46,7 +46,7 @@ def _run_git(cwd: str, args: List[str], timeout: int = 10) -> Optional[str]:
             ["git", *args],
             cwd=cwd,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
         )
         if result.returncode != 0:
