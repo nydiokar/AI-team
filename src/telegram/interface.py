@@ -692,6 +692,17 @@ class TelegramInterface:
         return (session_id or "")[:8]
 
     @staticmethod
+    def _session_tag(session_id: str) -> str:
+        """Tappable Telegram hashtag for a session, e.g. '#s_69927c233d34'.
+
+        Matches the `#s_<id>` tag emitted on agent responses
+        (`_session_message_ref`) so tapping it in Telegram surfaces the whole
+        thread for that session. Uses the FULL id — truncating would break the
+        search link.
+        """
+        return f"#s_{session_id}" if session_id else ""
+
+    @staticmethod
     def _relative_age(value: str) -> str:
         """Human 'time ago' from an ISO timestamp: '4m ago', '2h ago', 'just now'."""
         if not value:
@@ -723,7 +734,7 @@ class TelegramInterface:
         star = "⭐ " if session.session_id == active_id else "• "
         icon = self._backend_icon(session.backend)
         node = f" · {self._session_node_label(session)}" if show_node else ""
-        head = f"{star}{self._short_id(session.session_id)} · {icon} {session.backend}{node}"
+        head = f"{star}{self._session_tag(session.session_id)} · {icon} {session.backend}{node}"
         meta = (
             f"   {self._session_repo_name(session)} · "
             f"{self._status_chip(session.status)} · {self._relative_age(session.updated_at)}"
@@ -740,7 +751,7 @@ class TelegramInterface:
         lines = [
             header,
             f"{icon} {session.backend}{node} · {self._status_chip(session.status)}",
-            f"📂 {self._session_repo_name(session)}   🆔 {self._short_id(session.session_id)}",
+            f"📂 {self._session_repo_name(session)}   🆔 {self._session_tag(session.session_id)}",
             f"🕒 last activity {self._relative_age(session.updated_at)}",
         ]
         note = self._compact_session_note(session, limit=160)
@@ -767,7 +778,7 @@ class TelegramInterface:
         backend_icon = "🤖" if session.backend == "codex" else "🧠"
         title = f"{prefix}  {backend_icon} {session.backend} / {self._session_repo_name(session)}"
         details = (
-            f"  🆔 `{session.session_id}`  •  "
+            f"  🆔 {self._session_tag(session.session_id)}  •  "
             f"{self._session_status_label(session.status)} | "
             f"🕒 {self._format_session_timestamp(session.updated_at)}"
         )
@@ -796,7 +807,7 @@ class TelegramInterface:
         backend_icon = "🤖" if session.backend == "codex" else "🧠"
         lines = [
             f"↩️ {backend_icon} {session.backend} / {self._session_repo_name(session)}",
-            f"  🆔 `{session.session_id}`  •  ⚫ closed | 🕒 {self._format_session_timestamp(session.updated_at)}",
+            f"  🆔 {self._session_tag(session.session_id)}  •  ⚫ closed | 🕒 {self._format_session_timestamp(session.updated_at)}",
         ]
         note = self._compact_session_note(session)
         if note:

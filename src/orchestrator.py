@@ -387,9 +387,32 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception:
                 pass
 
+        if not result_dict:
+            logger.warning(
+                "event=recovery_missing_result session_id=%s task_id=%s",
+                session.session_id, task_row.get("id"),
+            )
+
+        exec_time = result_dict.get("execution_time", 0.0)
+        if not isinstance(exec_time, (int, float)):
+            exec_time = 0.0
+
         session.status = SessionStatus.AWAITING_INPUT
         session.last_result_summary = (result_dict.get("output", "") or "")[-400:] or "Task completed (recovered)"
         session.last_files_modified = result_dict.get("files_modified") or []
+        artifact_path = task_row.get("artifact_path") or ""
+        if artifact_path:
+            session.last_artifact_path = artifact_path
+        session.task_history.append({
+            "task_id": task_row["id"],
+            "timestamp": result_dict.get("timestamp", datetime.now().isoformat()),
+            "success": True,
+            "execution_time": round(exec_time, 2),
+            "user_message": session.last_user_message,
+            "result_summary": session.last_result_summary,
+            "files_modified": session.last_files_modified[:20],
+        })
+        session.task_history = session.task_history[-20:]
         self.session_store.save(session)
 
         result = TaskResult(
@@ -398,7 +421,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             output=result_dict.get("output", ""),
             errors=[],
             files_modified=result_dict.get("files_modified") or [],
-            execution_time=result_dict.get("execution_time", 0.0),
+            execution_time=exec_time,
             timestamp=datetime.now().isoformat(),
         )
         setattr(result, "backend_name", session.backend or "claude")
