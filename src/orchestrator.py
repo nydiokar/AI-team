@@ -1789,6 +1789,7 @@ created: {task.created}
             })
         if extra:
             fields.update(extra)
+        task_id = fields.pop("task_id", task_id)
         _emit(name, task_id=task_id, **fields)
     
     # Simulation execution removed: system now always runs real Claude Code CLI
