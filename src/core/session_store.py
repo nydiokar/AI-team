@@ -62,7 +62,13 @@ class SessionStore:
             if db is not None:
                 row = db.get_session(session_id)
                 if row:
-                    return self._from_dict(row)
+                    try:
+                        return self._from_dict(row)
+                    except Exception as e:
+                        logger.warning(
+                            "session_db_row_parse_failed id=%s err=%s — falling back to JSON",
+                            session_id, e,
+                        )
         except Exception:
             pass
         # Fall back to JSON file when DB is unavailable or row is missing.
@@ -101,8 +107,12 @@ class SessionStore:
                 for row in rows:
                     try:
                         sessions.append(self._from_dict(row))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        sid = row.get("session_id", "unknown")
+                        logger.warning(
+                            "session_db_row_parse_failed id=%s err=%s — skipping",
+                            sid, e,
+                        )
                 return sessions
         except Exception:
             pass
