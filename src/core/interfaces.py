@@ -196,6 +196,7 @@ class ExecutionResult:
     parsed_output: Any = None
     return_code: int = 0
     file_changes: List[Dict[str, Any]] = None
+    error_class: str = ""   # categorised failure reason, e.g. "permission_block"
 
     def __post_init__(self):
         if self.files_modified is None:
