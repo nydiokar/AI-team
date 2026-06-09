@@ -1,8 +1,8 @@
 # AI-Team Gateway — Project Context
 
-**Last Updated:** 2026-06-07
+**Last Updated:** 2026-06-09
 **Branch:** `main`
-**Status:** Phase 9 Step D complete (D1–D5) and merged to `main`. Embedded task server, observability spine, worker traceback→Telegram, `/nodes`+`/node`, compact `/status`+`/session_list`, machine_id migration script, and the pytest cost guard are all in. Next: D6 (PM2 polish, low priority) and Phase 4 (VPS migration).
+**Status:** File upload support + observability crash fix shipped. Next: State Separation Phase 0 (prerequisite checks) followed by Phase 1 (DB as canonical state source). Full plan in `docs/STATE_SEPARATION_PLAN.md`.
 
 ---
 
@@ -271,10 +271,193 @@ See `docs/BACKEND_HOOKS_STRATEGY.md` for event matrices, implementation order, a
 
 ## Architecture rules
 
-- JSON files are authoritative. DB is a shadow mirror until Phase 9 Step 3 flips the read source.
+- DB is canonical state source (migrating from JSON). JSON files remain as legacy fallback — never deleted.
+- Gateway keeps exactly 1 embedded fallback worker that activates only when the mesh is broken (task server unreachable, no workers online). This preserves the ability to run recovery tasks.
 - `MESH_ENABLED=false` by default. Gateway behaves identically to pre-mesh with it off.
 - Session affinity is a hard correctness requirement, not a preference. A session tied to a machine must execute on that machine.
 - Backend session state (`backend_session_id`) is machine-local and cannot be migrated across nodes (except OpenCode server with shared DB — future).
 - No uncontrolled autonomous behavior.
 - Ollama remains optional and helper-only.
 - Artifacts remain mandatory for audit purposes.
+
+---
+
+## State Separation Phases
+
+Detailed plan: `docs/STATE_SEPARATION_PLAN.md`
+
+### Phase 0 — Prerequisites (manual checks, no code)
+
+- [ ] Verify `mesh.db` is in WAL mode and `busy_timeout=5000`:
+      ```python
+      import sqlite3; c = sqlite3.connect("state/mesh.db")
+      print(c.execute("PRAGMA journal_mode").fetchone())     # must be 'wal'
+      print(c.execute("PRAGMA busy_timeout").fetchone())     # must be 5000
+      ```
+- [ ] Verify session counts match: `SELECT COUNT(*) FROM sessions` vs `ls state/sessions/*.json | wc -l`
+- [ ] Check `mesh_tasks` for orphaned `pending` or `claimed` rows; mark them `failed` if the task is dead
+- [ ] Confirm `WORKER_TOKEN` is set in `.env`
+- [ ] Confirm `MESH_TAILSCALE_IP` in `.env` is a real IP (not a comment string or empty)
+- [ ] Run `scripts/test_mesh_local.py` and confirm 18/18 pass
+
+### Phase 1 — DB as canonical state source
+
+**Goal:** `SessionStore` reads from DB first, falls back to JSON. Recovery logic uses DB + worker liveness instead of blindly marking ERROR.
+
+**Tasks:**
+
+1. **`src/core/session_store.py` — add DB read path**
+   - `get(session_id)`: try `db.get_session(session_id)` first, fall back to JSON file
+   - `list_all()`: read from DB, fall back to JSON directory scan
+   - `save()`: unchanged — continues dual-write (DB + JSON)
+   - JSON files remain written and untouched; they just become the fallback read source
+   - Files: `src/core/session_store.py`
+   - Test: create session, verify it reads back from DB after cache clear; delete DB row, verify it falls back to JSON
+
+2. **`src/orchestrator.py` — fix `_recover_stale_busy_sessions`**
+   - Current: marks every BUSY session as ERROR unconditionally
+   - New: before marking ERROR, check:
+     - Is the task still running? (check `active_tasks` dict, check subprocess PID)
+     - Is there a completed result in `mesh_tasks` for `session.last_task_id`?
+     - Is the task still `pending` or `claimed` in `mesh_tasks`? (worker will finish it)
+   - Only mark ERROR if: no worker is running the task AND no result exists in DB
+   - If result exists in DB: restore session to IDLE, propagate the completion
+   - Test: simulate a stale BUSY session with a completed DB entry → verify recovery sets IDLE, not ERROR
+
+3. **`src/control/db.py` — add `get_task_by_session()` query**
+   - `get_task_by_session(session_id, task_id)` → returns task status + result dict if completed
+   - Used by recovery logic to distinguish "interrupted" from "finished but not propagated"
+   - Test: enqueue a task, complete it, call `get_task_by_session` → verify it returns the result
+
+4. **Deploy and monitor**
+   - Restart gateway, observe recovery behavior
+   - No behavioral change yet (tasks still run locally in-process)
+   - But recovery should correctly restore finished tasks instead of ERROR-marking them
+
+**Verification:** Create a session, submit a task, wait for it to complete, kill the gateway (`pm2 restart`), gateway comes back → session should be IDLE, not ERROR.
+
+### Phase 2 — Standalone task server
+
+**Goal:** Task server runs as its own PM2 process (`ai-team-server`). Gateway connects to it as an HTTP client instead of embedding it.
+
+**Tasks:**
+
+1. **`ecosystem.config.js` — add `ai-team-server` PM2 entry**
+   - Script: `worker_main.py` or a new `server_main.py` (thin entry that starts uvicorn on `task_server:app`)
+   - Env: `MESH_TAILSCALE_IP`, `MESH_TASK_SERVER_PORT`, `WORKER_TOKEN`
+   - No autorestart limit (task server should always be up)
+   - Kill timeout: 10s
+   - Logs: `logs/pm2-server-out.log`, `logs/pm2-server-error.log`
+
+2. **Create `server_main.py`** (thin PM2 entry point)
+   - Loads `.env`, runs `uvicorn.run(src.control.task_server:app, host=..., port=...)`
+   - Or use `python -m uvicorn src.control.task_server:app --host ... --port ...` directly in PM2
+
+3. **Delete `src/control/embedded_server.py`**
+   - Remove the file
+   - No longer needed — task server is a separate process
+
+4. **`src/orchestrator.py` — remove embedding, add HTTP client**
+   - Remove `_embedded_task_server` field, `_start_embedded_task_server()`, `_stop_embedded_task_server()`
+   - Remove calls to these from `start()` and `stop()`
+   - Add `TaskServerClient` class (stdlib `urllib`, same pattern as `src/worker/agent.py` `_HTTP`)
+   - Methods: `enqueue_task(payload)`, `get_task_status(task_id)`, `get_health()`, `list_nodes()`
+   - Auth: Bearer `WORKER_TOKEN`
+   - Base URL: `http://{MESH_TAILSCALE_IP}:{MESH_TASK_SERVER_PORT}`
+
+5. **Recovery goes through the client**
+   - `_recover_stale_busy_sessions` queries the task server via `TaskServerClient` instead of direct DB access
+   - Health check uses `TaskServerClient.get_health()` instead of checking embedded server state
+
+6. **Remove wiring from `_dispatch_to_node` that assumed in-process registry**
+   - Current: reads in-process `get_registry()` singleton (same process, shared memory)
+   - New: reads from `TaskServerClient.list_nodes()` (HTTP round-trip)
+   - Cache node list with a short TTL (e.g., 5s) to avoid hammering on every task dispatch
+
+**Deployment order:**
+1. Start `ai-team-server` first (binds port 9002)
+2. Restart `ai-team-gateway` (no longer binds port 9002, connects as client)
+3. If gateway cannot reach task server → enter fallback mode (see Phase 4)
+
+**Risk:** Gateway loses in-process NodeRegistry — node discovery now requires HTTP. Mitigated by client-side caching.
+
+### Phase 3 — Standalone workers
+
+**Goal:** The `ai-team-worker` PM2 process runs and executes tasks. Gateway's in-process workers become the fallback (Phase 4).
+
+**Tasks:**
+
+1. **`ecosystem.config.js` — enable `ai-team-worker` entry**
+   - Set `WORKER_NODE_ID` to this machine's hostname (from `socket.gethostname()`)
+   - Set `CONTROLLER_URL` to `http://{MESH_TAILSCALE_IP}:{MESH_TASK_SERVER_PORT}`
+   - Set `WORKER_PROJECTS_ROOT` to the projects directory
+   - Set `WORKER_BACKENDS` to the installed backends (e.g., `claude,opencode,opencode-server`)
+   - Kill timeout: 35s (matches 30s drain window)
+   - Enable: add `pm2 start ecosystem.config.js --only ai-team-worker` to deploy script
+
+2. **`src/orchestrator.py` — reduce in-process workers to 1**
+   - Change `max_concurrent_tasks` from 3 to 1 for the gateway's own worker pool
+   - Or add a `MIN_WORKERS` config: 1 for embedded fallback, 0 for pure mesh
+   - Default: `min_workers = 1` (always have the fallback)
+
+3. **`src/orchestrator.py` — update `process_task` dispatch**
+   - Current: if `MESH_ENABLED=true` and `session.machine_id != local` → route remote; else → run locally
+   - New: always try mesh first via `TaskServerClient.enqueue_task()`, fall back to embedded worker only on failure
+   - Session affinity still respected: if `session.machine_id` matches this host, route to embedded worker directly (no mesh round-trip)
+   - Add a timeout for mesh dispatch (e.g., 5s) — if the task server doesn't respond, fall back
+
+4. **Test the full flow end-to-end:**
+   - Gateway receives instruction → enqueues to task server via HTTP
+   - Worker polls → claims → executes → posts result via HTTP
+   - Gateway polls for result → relays to Telegram
+   - Kill gateway during task → worker continues, task completes, result in DB
+   - Restart gateway → reads completed result from DB → relays to Telegram (`notify_completion`)
+
+5. **Run worker in foreground first to observe logs:**
+   ```bash
+   pm2 start ecosystem.config.js --only ai-team-worker --no-daemon
+   ```
+   Watch for: token mismatch, backend session ID routing issues, nudge listener binding
+
+**Risk:** Worker agent code exists but has never been exercised in production. Mitigation: keep the embedded fallback worker so the system is never completely stuck.
+
+### Phase 4 — Fallback worker + graceful degradation
+
+**Goal:** If the task server or mesh workers are unavailable, the gateway uses its 1 embedded worker and JSON files to keep operating. The fallback can run recovery tasks (e.g., "restart the task server").
+
+**Tasks:**
+
+1. **Define mesh health criteria (config or constants):**
+   - Task server responds to `/health` within 5s → healthy
+   - At least 1 worker has heartbeated within `heartbeat_timeout_sec` (90s) → healthy
+   - Both must be true for "mesh healthy" — otherwise → fallback mode
+
+2. **Implement fallback mode in `src/orchestrator.py`:**
+   - When a task arrives and mesh is unhealthy:
+     - Route to the 1 embedded in-process worker
+     - Write task state to JSON files directly (existing `state/sessions/` path, no DB dependency)
+     - Session reads fall back to JSON (Phase 1 already implemented this)
+     - Telegram notifications work normally (gateway is fully local)
+   - While in fallback mode, run a periodic health check every 30s:
+     - Try `TaskServerClient.get_health()` again
+     - If task server responds, check for worker heartbeats
+     - If both pass → exit fallback mode
+
+3. **Make the fallback worker capable of running recovery tasks:**
+   - If task server is down, the user can send a message like "restart the task server"
+   - The fallback worker executes: `pm2 restart ai-team-server` (local shell)
+   - Result: "Task server restarted, mesh healthy again"
+   - This requires the fallback worker to have access to shell commands (it already does via the backend interface)
+
+4. **Sync completed fallback tasks to DB when mesh recovers:**
+   - After exiting fallback mode, read any completed results from JSON files
+   - Write them to the task server DB via `TaskServerClient`
+   - This ensures the task server has a complete history even after fallback periods
+   - Mark synced tasks in JSON to avoid double-sync on next recovery
+
+5. **Test:**
+   - Stop the task server → send a task → verify it runs via fallback worker
+   - Restart the task server → verify the gateway detects it and exits fallback mode
+   - Verify completed tasks during fallback are synced to DB after recovery
+
+**Risk:** Low — this is additive. The embedded worker already exists. The fallback logic is new but has no effect when the mesh is healthy.

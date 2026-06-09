@@ -1,8 +1,12 @@
 # Next Tasks
 
-**Current priority:** Phase 9 Step D — D1, D1.5, D2, D3, D4, D5 COMPLETE.
-Branch `feat/mesh-d1-observability-guard` merged to main. Next: D6 (PM2 polish,
-low priority) and Phase 4 (VPS migration).
+**Current priority:** State Separation Phase 0 (prerequisite checks) then Phase 1
+(DB as canonical state source). Full plan in `docs/STATE_SEPARATION_PLAN.md`.
+Task definitions per phase in `.ai/CONTEXT.md`.
+
+**Previous Phase 4 (VPS migration)** is superseded by the State Separation Plan.
+The "VPS migration" goal is now the end state of Phases 2-3 (standalone task server
+on the VPS, workers on local machines).
 
 > **⚠ TEST COST GUARD (read before running tests):** tests previously invoked
 > the live, paid Claude CLI (e2e watcher + opencode-server tests built a real
