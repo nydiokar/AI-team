@@ -26,7 +26,9 @@ machines). The operational cutover steps, when we get there, are in
 | 1 | DB canonical read + smart recovery | ✅ DONE (battle-tested live) |
 | 2 | Standalone task server + `TaskServerClient` | ✅ DONE |
 | 3 | Standalone worker; machine-to-machine dispatch; gateway-restart resilience | ✅ DONE (live on 2 machines 2026-06-11) |
-| 4 | Graceful degradation / fallback when mesh is down | ⛔ NOT STARTED — **the only remaining plan work** |
+| 4 | Graceful degradation / fallback (server runs work when no nodes) | ⛔ NOT STARTED — last plan piece |
+| T1 | CI/CD: auto-deploy `main` to the server | ⛔ NOT STARTED — standalone |
+| T2 | Fix truncated Telegram output (long results) | ⛔ NOT STARTED — standalone |
 
 **The mesh is LIVE.** Gateway + embedded task server on the **Pi5 (`kanebra`)**;
 worker daemon on **`Horse`**. Tasks dispatch machine-to-machine and survive a
@@ -44,17 +46,21 @@ real result). Detail: `docs/PROGRESS_LOG.md` (2026-06-11 entry).
 
 ## ▶ NEXT: Phase 4 — Graceful degradation / fallback
 
-**Goal:** when the mesh is unhealthy (task server unreachable, or no workers
-online for a pinned session), the gateway degrades gracefully instead of failing
-tasks — it keeps **exactly one** embedded fallback worker that can run recovery
-tasks locally, and reconciles state when the mesh comes back. This is the last
-piece of the State Separation plan. Full design: `docs/STATE_SEPARATION_PLAN.md`
-§Phase 4.
+**Goal:** when no worker nodes are available (none online, or task server
+unreachable), the **server/gateway host runs the work itself** instead of failing
+tasks — and reconciles state when nodes come back. The server already holds
+session outputs/results, so it is a legitimate execution host, not just an
+emergency stopgap. This is the last piece of the State Separation plan. Full
+design: `docs/STATE_SEPARATION_PLAN.md` §Phase 4.
 
-> **Architecture rule (do not violate):** the gateway must keep **exactly 1**
-> embedded fallback worker that activates **only** when the mesh is broken. It is
-> not a second general worker pool — its job is to keep the gateway able to run
-> recovery tasks (e.g. "restart the task server") when no remote worker can.
+> **Architecture rule (updated 2026-06-11 — supersedes the old "exactly 1
+> fallback worker"):** the server/gateway host keeps its **own embedded worker
+> capacity** that runs tasks when no remote node is available. It is a real
+> fallback execution host (configurable pool size, default ≥1), NOT a single
+> emergency worker. When nodes ARE available, prefer them (load-balance /
+> capability route); when none are, the server executes locally so work never
+> stalls. The old "must keep exactly 1" cap is removed — the user wants real
+> available capacity on the server, scalable.
 
 These tasks are written to be picked up cold by an agent. Do them roughly in
 order; each has explicit files + acceptance checks. **Test cost guard applies —
@@ -72,18 +78,23 @@ never run the paid Claude CLI from tests (see banner above).**
   unhealthy case (server down; server up but zero online nodes). `/status` shows a
   clear mesh health line. No paid CLI.
 
-### P4.2 — Single embedded fallback worker, mesh-gated
-- **What:** the gateway runs **one** embedded worker that is **dormant while the
-  mesh is healthy** and only claims work when P4.1 reports unhealthy. Reduce the
-  general gateway worker pool accordingly (today it still spins a full local pool
-  — the `worker-0/worker-1` seen in logs).
+### P4.2 — Server-side embedded worker capacity (replaces "exactly 1")
+- **What:** the server/gateway host runs its **own embedded worker pool** that
+  executes tasks when no remote node is available. Pool size is **configurable**
+  (e.g. `SERVER_FALLBACK_WORKERS`, default ≥1 — NOT hard-capped at 1). Behaviour:
+  when ≥1 remote node is online, prefer routing to nodes (load-balance); when none
+  are online (P4.1 unhealthy), the server's embedded workers claim and execute the
+  work locally so tasks never stall. The server already holds session
+  outputs/results, so local execution is first-class, not a degraded hack.
 - **Where to look:** `src/orchestrator.py` — `_task_worker`, `start()` pool
-  creation (`config.system.max_concurrent_tasks`), `reload_worker_pool`; the
-  mesh routing check in `process_task` (`route_remote`).
-- **Acceptance:** with mesh healthy, the fallback worker does not execute pinned
-  remote tasks (they still route to the remote node). With mesh unhealthy, the
-  fallback worker runs the task locally and it completes. Cover both with tests
-  using a fake backend (no paid CLI).
+  creation (`config.system.max_concurrent_tasks`), `reload_worker_pool`; the mesh
+  routing check in `process_task` (`route_remote`); `config/settings.py`
+  (`MeshConfig` / system config for the new pool-size setting).
+- **Acceptance:** with ≥1 node online, work routes to nodes and the server pool
+  stays idle for those tasks. With zero nodes online, the server pool executes the
+  task locally and it completes. Pool size honors the config value (e.g. set to 2
+  and observe 2 concurrent local executions). Cover with tests using a fake
+  backend (no paid CLI).
 
 ### P4.3 — Fallback can run recovery tasks
 - **What:** when degraded, allow a small set of **recovery actions** to run on the
@@ -126,6 +137,71 @@ never run the paid Claude CLI from tests (see banner above).**
 - Optional Phase 1 hardening test: stale BUSY session + completed DB result →
   recovery yields AWAITING_INPUT (not ERROR). (Largely covered now by the
   2026-06-11 restart work, but an explicit regression test is cheap.)
+
+---
+
+## ▶ Standalone tasks (independent of Phase 4 — dispatch any time)
+
+### T1 — CI/CD: auto-deploy `main` to the server
+- **Why:** the codebase is worked on from multiple machines (e.g. `Horse`) but the
+  gateway runs on the **server (Pi5 `kanebra`)**. Today a change only lands after a
+  manual `git pull` + gateway restart on the Pi5 — and forgetting that step has
+  already caused "the fix didn't work" false alarms (2026-06-11). Automate it: a
+  push to `main` should deploy to the server.
+- **What to build:** on push to `main`, the server pulls the new code and restarts
+  the affected PM2 processes (`ai-team-gateway`, and `ai-team-server` /
+  `ai-team-worker` if their code changed). Two viable shapes — pick based on
+  whether the Pi5 is reachable from CI:
+  1. **GitHub Actions → SSH deploy** (if the Pi5 is reachable, e.g. over Tailscale
+     from a self-hosted runner or via SSH action): on `push: branches: [main]`, SSH
+     to the Pi5, `git pull`, `pm2 reload ecosystem.config.js` (or reload only
+     changed apps), health-check `/health`, report status.
+  2. **Pull-based agent on the Pi5** (if inbound SSH isn't desirable): a small
+     systemd timer / PM2 cron on the Pi5 that polls `origin/main`, and on a new
+     commit does `git pull` + `pm2 reload` + health check. Simpler/safer for a
+     home server behind NAT.
+- **Must include:** zero-downtime-ish reload (PM2 `reload`, not `restart`, where
+  possible); a **health gate** — if `/health` doesn't come back `ok` after reload,
+  log loudly and (option 1) fail the CI job; never auto-deploy a branch other than
+  `main`; respect the **test cost guard** (CI must run with `AI_TEAM_TEST_MODE` so
+  it can never invoke the paid Claude CLI).
+- **Where to look:** `ecosystem.config.js` (process names), `server_main.py` /
+  `worker_main.py` (entrypoints), `src/control/task_server.py` (`/health`),
+  `docs/OPERATIONS_PM2.md` (existing ops conventions), `docs/PHASE_4_RUNBOOK.md`.
+- **Acceptance:** a commit to `main` results in the server running that commit
+  (`git log -1` on the Pi5 matches) with processes reloaded and `/health` green,
+  **without any manual step**. Document the chosen mechanism in
+  `docs/OPERATIONS_PM2.md`. Decide & note: does the worker on `Horse` also
+  auto-update, or only the server? (Recommend: server auto-updates; worker nodes
+  update on their own cadence to avoid mid-task restarts.)
+
+### T2 — Fix truncated Telegram output (long results cut to one message)
+- **Symptom:** a long task result arrives as a single Telegram message cut off at
+  the end, with no continuation — the remainder is lost, not sent as follow-up
+  messages.
+- **Root cause (already traced 2026-06-11):** the Telegram side is NOT the
+  problem — `notify_completion` already routes through `_send_long_message` →
+  `_split_message` (4096-char chunks), which is correct. The truncation happens
+  **upstream on the worker**: `src/worker/agent.py` caps output with
+  `(raw.output or "")[:4000]` (and a second `str(raw)[:4000]` in the legacy
+  branch) **before** the result is stored in the DB. So the gateway never receives
+  the full text and has nothing to split.
+- **What to do:** remove or greatly raise the worker-side `[:4000]` cap so the
+  **full** backend output reaches the DB result, then let the existing Telegram
+  splitter chunk it for delivery. If a cap is kept for DB sanity, make it large
+  (e.g. configurable, ≥ a few hundred KB) and ensure it's applied as a safety
+  bound, not a silent content truncation. Confirm the artifact JSON
+  (`results/<task_id>.json`) also stores the full output.
+- **Where to look:** `src/worker/agent.py:202` and the legacy branch ~`:213`
+  (`_ER` result dict); `src/control/db.py` (result column — check it isn't itself
+  capping); `src/telegram/interface.py:512` `_split_message` /
+  `:528` `_send_long_message` (verify, no change expected); `_session_reply_text`
+  and `notify_completion` paths in `src/orchestrator.py`.
+- **Acceptance:** a task whose output exceeds ~4096 chars is delivered to Telegram
+  as **multiple sequential messages** with nothing lost, and the full text is
+  present in `results/<task_id>.json` and the DB result. Add a test that feeds a
+  long output through the worker→DB→notify path with a fake backend and asserts no
+  truncation + correct multi-chunk split (no paid CLI).
 
 ---
 
