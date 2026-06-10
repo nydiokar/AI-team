@@ -33,16 +33,49 @@ module.exports = {
     },
 
     // ---------------------------------------------------------------
-    // NOTE: the mesh task server is no longer a separate PM2 process.
-    // As of Phase 9 Step D1 it runs *embedded* inside ai-team-gateway
-    // (see src/control/embedded_server.py), started by the orchestrator on
-    // its own event loop when MESH_ENABLED=true. This makes the gateway and
-    // the task server share one get_registry() singleton, eliminating the
-    // cross-process / DB-only node-discovery workaround.
+    // Mesh task server.
     //
-    // To run mesh routing: set MESH_ENABLED=true, MESH_TAILSCALE_IP, and
-    // MESH_TASK_SERVER_PORT in .env. No extra PM2 entry is needed.
+    // Two ways to run it:
+    //   (a) EMBEDDED (default today): runs inside ai-team-gateway on its own
+    //       event loop when MESH_ENABLED=true (src/control/embedded_server.py).
+    //       Gateway + server share one get_registry() singleton. No extra PM2
+    //       entry needed — just set MESH_ENABLED=true + MESH_TASK_SERVER_PORT.
+    //   (b) STANDALONE (State Separation Phase 2, below): runs as its own
+    //       ai-team-server process via server_main.py, so a gateway restart no
+    //       longer kills the task queue / node registry. The gateway then talks
+    //       to it over HTTP (src/control/task_server_client.py).
+    //
+    // The standalone entry is DISABLED by default. Do NOT run (a) and (b) at the
+    // same time — they'd both try to bind MESH_TASK_SERVER_PORT. The cutover
+    // (stop embedding, start ai-team-server) lands later in Phase 2.
+    //
+    // Enable standalone: pm2 start ecosystem.config.js --only ai-team-server
+    // Required env (in .env): MESH_TASK_SERVER_PORT, WORKER_TOKEN,
+    //   MESH_TAILSCALE_IP (or blank for 127.0.0.1), MESH_DB_PATH.
     // ---------------------------------------------------------------
+    {
+      name: "ai-team-server",
+      cwd: __dirname,
+      script: "server_main.py",
+      interpreter: python,
+      args: "",
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      min_uptime: "10s",
+      max_restarts: 20,
+      restart_delay: 2000,
+      kill_timeout: 10000,   // no active execution to drain; just stop serving
+      env: {
+        PYTHONUNBUFFERED: "1",
+        AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
+      },
+      out_file: path.join(__dirname, "logs", "pm2-server-out.log"),
+      error_file: path.join(__dirname, "logs", "pm2-server-error.log"),
+      merge_logs: true,
+      time: true,
+    },
 
     // ---------------------------------------------------------------
     // Worker daemon (per-machine — disabled by default)

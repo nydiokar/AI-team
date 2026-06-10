@@ -69,27 +69,50 @@ Remaining (optional hardening): a focused test that simulates a stale BUSY
 session with a completed DB result and asserts recovery → IDLE/AWAITING_INPUT,
 not ERROR.
 
-### Phase 2 — Standalone task server — ⏭ NEXT TO BUILD
+### Phase 2 — Standalone task server — 🔨 IN PROGRESS
 
 Goal: task server runs as its own PM2 process; the gateway talks to it over HTTP
-instead of embedding it.
+instead of embedding it. Building **incrementally** — embedded path stays intact
+until the standalone path is proven, so the running gateway is never broken.
 
-1. Add `ai-team-server` entry to `ecosystem.config.js` (uvicorn on
-   `task_server:app`, bound to `MESH_TAILSCALE_IP:MESH_TASK_SERVER_PORT`,
-   kill timeout 10s, its own out/error logs).
-2. Add a thin `server_main.py` entry point (loads `.env`, runs uvicorn).
-3. Add a `TaskServerClient` in the gateway (stdlib `urllib`, mirror the worker's
-   `_HTTP`): `enqueue_task`, `get_task_status`, `get_health`, `list_nodes`,
-   Bearer `WORKER_TOKEN`.
-4. Repoint `_dispatch_to_node` / recovery / health from the in-process
-   `get_registry()` singleton to `TaskServerClient` (cache node list ~5s TTL).
-5. Retire `src/control/embedded_server.py` and the
-   `_start/_stop_embedded_task_server()` wiring.
+**Done (2026-06-10, scaffolding — additive, embedded still default):**
+- [x] `server_main.py` — thin PM2 entry (mirrors `worker_main.py`): loads `.env`,
+      inits observability as `node=controller`, runs `uvicorn` on
+      `src.control.task_server:app`, binds `MESH_TAILSCALE_IP or 127.0.0.1`
+      : `MESH_TASK_SERVER_PORT`.
+- [x] `src/control/task_server_client.py` — `TaskServerClient` (stdlib `urllib`,
+      Bearer `WORKER_TOKEN`): `get_health`/`is_healthy`, `list_nodes` (5s TTL
+      cache, returns stale cache on transient failure), `get_node`, `nudge`,
+      `get_task_status`. Failures degrade to None/[] so an unreachable server
+      reads as "mesh unhealthy" (Phase 4 trigger), not a crash.
+- [x] `ai-team-server` PM2 entry added to `ecosystem.config.js` — **disabled by
+      default**; comments warn not to run embedded + standalone at once (port
+      clash on `MESH_TASK_SERVER_PORT`).
+- [x] Verified in isolation (temp env file via `AI_TEAM_ENV_FILE`, port 9099,
+      temp DB — never touched prod or the live gateway): server boots, migrates,
+      serves; client sees a node registered over HTTP; bad token → `[]`.
+      `tests/test_task_server_client.py` (8/8).
 
-**Risk:** gateway loses the in-process NodeRegistry singleton — discovery becomes
-an HTTP round-trip. Mitigate with the short-TTL client cache; the registry
-already persists to DB. Deploy order: start `ai-team-server` first, then restart
-gateway. Full detail: `docs/STATE_SEPARATION_PLAN.md` §Phase 2.
+**Remaining (the actual cutover — the risky part):**
+- [ ] Repoint `_process_task_remote` / `_dispatch_to_node` / recovery / health
+      from the in-process `get_registry()` singleton to `TaskServerClient`.
+      (orchestrator.py:1490, 1519, 2402-2407 call `get_registry()` directly today.)
+- [ ] Retire `src/control/embedded_server.py` and the
+      `_start/_stop_embedded_task_server()` wiring (orchestrator.py:506, 598,
+      610-645).
+- [ ] Cutover test (gateway stopped): start `ai-team-server`, restart gateway,
+      confirm node discovery + dispatch work over HTTP. Deploy order: server
+      first, then gateway.
+
+**Risk:** this deliberately re-opens the cross-process registry gap that D1
+closed (dispatch reads the in-memory registry; standalone moves it out). The
+short-TTL client cache mitigates discovery cost; the registry already persists to
+DB as a backstop. Full detail: `docs/STATE_SEPARATION_PLAN.md` §Phase 2.
+
+> **Testing mesh processes without touching prod:** point `AI_TEAM_ENV_FILE` at a
+> throwaway `.env` (config loads it with `override=True`, so it beats process env
+> vars), use a spare port + a temp `MESH_DB_PATH`. This is how the scaffolding
+> above was verified while the live gateway kept running on `:9002`.
 
 ---
 
