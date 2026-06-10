@@ -132,6 +132,11 @@ class MeshConfig:
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
     oneoff_queue_timeout_sec: int = 600     # MESH_ONEOFF_QUEUE_TIMEOUT_SEC
     shadow_write: bool = True               # always mirror to DB even when mesh routing is off
+    # State Separation Phase 2: when False (default), the task server runs as its
+    # own process (server_main.py / ai-team-server) and the gateway reaches it
+    # over HTTP + the shared DB. Set MESH_EMBEDDED_SERVER=true to run it embedded
+    # inside the gateway (single-process / fallback mode). Never run both at once.
+    embedded_server: bool = False           # MESH_EMBEDDED_SERVER
 
 
 class Config:
@@ -369,6 +374,12 @@ class Config:
             v = os.getenv("WORKER_TOKEN")
             if v:
                 self.mesh.worker_token = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_EMBEDDED_SERVER")
+            if v is not None:
+                self.mesh.embedded_server = v.lower() == "true"
         except Exception:
             pass
         try:

@@ -69,7 +69,7 @@ Remaining (optional hardening): a focused test that simulates a stale BUSY
 session with a completed DB result and asserts recovery → IDLE/AWAITING_INPUT,
 not ERROR.
 
-### Phase 2 — Standalone task server — 🔨 IN PROGRESS
+### Phase 2 — Standalone task server — ✅ DONE
 
 Goal: task server runs as its own PM2 process; the gateway talks to it over HTTP
 instead of embedding it. Building **incrementally** — embedded path stays intact
@@ -93,21 +93,34 @@ until the standalone path is proven, so the running gateway is never broken.
       serves; client sees a node registered over HTTP; bad token → `[]`.
       `tests/test_task_server_client.py` (8/8).
 
-**Remaining (the actual cutover — the risky part):**
-- [ ] Repoint `_process_task_remote` / `_dispatch_to_node` / recovery / health
-      from the in-process `get_registry()` singleton to `TaskServerClient`.
-      (orchestrator.py:1490, 1519, 2402-2407 call `get_registry()` directly today.)
-- [ ] Retire `src/control/embedded_server.py` and the
-      `_start/_stop_embedded_task_server()` wiring (orchestrator.py:506, 598,
-      610-645).
-- [ ] Cutover test (gateway stopped): start `ai-team-server`, restart gateway,
-      confirm node discovery + dispatch work over HTTP. Deploy order: server
-      first, then gateway.
+**Cutover — ✅ DONE (2026-06-10, gateway stopped for this):**
+- [x] **Key realization:** the live remote path `_process_task_remote`
+      (orchestrator.py:1215) was *already DB-backed* — it falls through to
+      `db.get_node()` for liveness (lines 1528-1533) and `_dispatch_to_node`
+      polls the DB for results, taking no behavior from the in-memory registry.
+      `_dispatch_or_run_local` (the only hard registry dependency via
+      `registry.is_empty()` / `pick_capable()`) is **defined but never called** —
+      dead code reserved for Phase 3. So the cutover did NOT require rewriting
+      dispatch.
+- [x] Added `MeshConfig.embedded_server` (env `MESH_EMBEDDED_SERVER`, **default
+      False**). `_start_embedded_task_server()` now skips with a log line unless
+      explicitly enabled — so the gateway no longer binds the task-server port;
+      the standalone `ai-team-server` owns it. Embedded remains available as the
+      single-process / fallback mode.
+- [x] `_mesh_online_nodes()` (Telegram `/status`, `/nodes`) already reads
+      `db.list_nodes()` — cross-process safe, no change needed.
+- [x] **Kept `embedded_server.py`** rather than deleting it — it's now the
+      explicit fallback mode the State-Sep plan wants (Phase 4), gated behind the
+      flag. Not dead code.
+- [x] Cutover integration test (standalone server + temp DB/port via
+      `AI_TEAM_ENV_FILE`): server healthy → worker registers over HTTP → gateway
+      in-process registry empty BUT reads node `online` from shared DB →
+      `_start_embedded_task_server()` is a clean no-op (doesn't grab the port).
+      Full suite: **138 passed, 13 skipped, 0 failures.**
 
-**Risk:** this deliberately re-opens the cross-process registry gap that D1
-closed (dispatch reads the in-memory registry; standalone moves it out). The
-short-TTL client cache mitigates discovery cost; the registry already persists to
-DB as a backstop. Full detail: `docs/STATE_SEPARATION_PLAN.md` §Phase 2.
+**Deploy order (when enabling mesh for real):** start `ai-team-server` first,
+then `ai-team-gateway`. Do NOT set `MESH_EMBEDDED_SERVER=true` while
+`ai-team-server` runs — they'd clash on `MESH_TASK_SERVER_PORT`.
 
 > **Testing mesh processes without touching prod:** point `AI_TEAM_ENV_FILE` at a
 > throwaway `.env` (config loads it with `override=True`, so it beats process env
