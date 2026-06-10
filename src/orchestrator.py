@@ -320,8 +320,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         for session in self.session_store.list_all():
             if session.status != SessionStatus.BUSY:
                 continue
-            if session.machine_id and session.machine_id != host:
-                continue
+            is_remote = bool(session.machine_id and session.machine_id != host)
             if session.last_task_id and session.last_task_id in active_task_ids:
                 continue
 
@@ -336,14 +335,28 @@ class TaskOrchestrator(ITaskOrchestrator):
                         await self._recover_completed_session(session, row)
                         continue
                     elif status in ("pending", "claimed"):
-                        # Worker is still working on it — don't touch the session.
-                        logger.info(
-                            "event=session_recovery_deferred session_id=%s task_id=%s status=%s",
-                            session.session_id, task_id, status,
-                        )
+                        # Worker is still working on it. For a remote (mesh)
+                        # session the worker lives on another node and keeps
+                        # running across our restart, so reattach a poll loop
+                        # that will deliver its real result. For a local session
+                        # the in-process worker is gone, so just defer.
+                        if is_remote:
+                            logger.info(
+                                "event=session_recovery_reattach session_id=%s task_id=%s status=%s node=%s",
+                                session.session_id, task_id, status, session.machine_id,
+                            )
+                            asyncio.create_task(self._reattach_remote_task(session, row))
+                        else:
+                            logger.info(
+                                "event=session_recovery_deferred session_id=%s task_id=%s status=%s",
+                                session.session_id, task_id, status,
+                            )
                         continue
                     # Other terminal status (failed, failed_node_offline) — fall
                     # through to ERROR marking below.
+
+            # A remote session with no usable DB row falls through to ERROR like
+            # any other: we genuinely don't know the task's state.
 
             # No DB record available (or DB unavailable), or task failed.
             session.status = SessionStatus.ERROR
@@ -443,6 +456,99 @@ class TaskOrchestrator(ITaskOrchestrator):
                 )
             except Exception as e:
                 logger.warning(f"Failed to notify recovered completed session: {e}")
+
+    async def _reattach_remote_task(self, session: Any, task_row: Dict[str, Any]) -> None:
+        """Reattach to a remote task still in-flight after a gateway restart.
+
+        The worker on `session.machine_id` kept running across our restart and
+        owns the task's terminal state in the DB. We poll the row until it
+        reaches a terminal status, then report the worker's *real* result to
+        Telegram — never a fabricated one. This is the startup half of the
+        detach/reattach handoff (the shutdown half lives in _dispatch_to_node).
+
+        Bounded by the same oneoff_queue_timeout so a worker that died without
+        writing a result doesn't leave the session BUSY forever.
+        """
+        import asyncio as _aio
+        from src.control.db import get_db
+
+        task_id = task_row.get("id") or ""
+        db = get_db()
+        if db is None or not task_id:
+            return
+
+        timeout_sec = getattr(config.mesh, "oneoff_queue_timeout_sec", 600)
+        deadline = time.time() + timeout_sec
+        poll_interval = 3.0
+
+        while time.time() < deadline:
+            if not self.running:
+                # Gateway is shutting down again; detach quietly. The next
+                # startup will reattach from the still-claimed DB row.
+                return
+            row = db.get_task(task_id)
+            status = row.get("status") if row else None
+            if status == "completed":
+                await self._recover_completed_session(session, row)
+                return
+            if status in ("failed", "failed_node_offline"):
+                error_msg = (row.get("error") if row else "") or f"Task {status}"
+                session.status = SessionStatus.ERROR
+                session.last_result_summary = error_msg[-400:]
+                self.session_store.save(session)
+                result = TaskResult(
+                    task_id=task_id,
+                    success=False,
+                    output="",
+                    errors=[error_msg],
+                    files_modified=[],
+                    execution_time=0.0,
+                    timestamp=datetime.now().isoformat(),
+                )
+                setattr(result, "backend_name", session.backend or "claude")
+                self._write_session_summary(session, result)
+                self._append_session_event(session.session_id, task_id, result)
+                self._emit_event(
+                    "session_recovered_failed",
+                    None,
+                    {"session_id": session.session_id, "task_id": task_id, "backend": session.backend},
+                )
+                if self.telegram_interface and session.telegram_chat_id:
+                    try:
+                        await self.telegram_interface.notify_completion(
+                            task_id,
+                            f"Task failed on remote node while gateway was restarting: {error_msg}",
+                            success=False,
+                            chat_id=session.telegram_chat_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to notify reattached failed session: {e}")
+                return
+            # still pending/claimed — worker is running; keep waiting.
+            await _aio.sleep(poll_interval)
+
+        # Timed out waiting for a terminal state. Don't fabricate a result —
+        # surface the uncertainty and unblock the session.
+        logger.warning(
+            "event=reattach_timeout session_id=%s task_id=%s node=%s",
+            session.session_id, task_id, session.machine_id,
+        )
+        session.status = SessionStatus.ERROR
+        session.last_result_summary = (
+            "Lost contact with the remote node after a gateway restart; "
+            "the task's outcome is unknown."
+        )
+        self.session_store.save(session)
+        if self.telegram_interface and session.telegram_chat_id:
+            try:
+                await self.telegram_interface.notify_completion(
+                    task_id,
+                    "Lost contact with the remote node after a restart; task outcome unknown.",
+                    success=False,
+                    chat_id=session.telegram_chat_id,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to notify reattach timeout: {e}")
 
     @staticmethod
     def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:
@@ -1583,6 +1689,17 @@ class TaskOrchestrator(ITaskOrchestrator):
         result.error_class = self._classify_error(result)
         result.retries = 0
 
+        # Detached = gateway is shutting down while the remote worker keeps
+        # running. Leave the session BUSY (do not touch its status) so startup
+        # recovery reattaches and reports the worker's real result. Marking it
+        # CANCELLED/ERROR here would be the fabricated state we're fixing.
+        if getattr(result, "detached", False):
+            logger.info(
+                "event=mesh_dispatch_detached task_id=%s session_id=%s reason=gateway_shutdown",
+                task.id, session.session_id,
+            )
+            return result
+
         if result.success:
             session.status = SessionStatus.AWAITING_INPUT
         elif cancel_ev is not None and cancel_ev.is_set():
@@ -2370,17 +2487,29 @@ Generated from user description: {description}
             # Check for cancellation
             cancel_ev = self._task_cancel_events.get(task.id)
             if cancel_ev and cancel_ev.is_set():
-                db.fail_task(task.id, "cancelled by gateway")
+                # Distinguish a genuine user cancel from a gateway shutdown.
+                # On shutdown we are only *detaching* our poll loop — the remote
+                # worker keeps running and owns the task's real terminal state in
+                # the DB. Writing fail_task here would fabricate a 'failed' row
+                # that overwrites the worker's truth, which is exactly the
+                # restart-cancel bug. So on shutdown we leave the DB row as-is
+                # (still 'claimed') and return a non-terminal detached result;
+                # startup recovery (_recover_stale_busy_sessions) reattaches and
+                # reports whatever the worker actually wrote.
+                interrupted = task.id in self._shutdown_interrupted_tasks
+                if not interrupted:
+                    db.fail_task(task.id, "cancelled by gateway")
                 result = TaskResult(
                     task_id=task.id,
                     success=False,
                     output="",
-                    errors=["cancelled"],
+                    errors=["interrupted by gateway restart" if interrupted else "cancelled"],
                     files_modified=[],
                     execution_time=0.0,
                     timestamp=datetime.now().isoformat(),
                 )
                 setattr(result, "backend_name", self._resolve_task_backend(task))
+                setattr(result, "detached", interrupted)
                 return result
 
             await _aio.sleep(poll_interval)
