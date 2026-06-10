@@ -111,7 +111,7 @@ Three processes + one fallback:
 - [ ] Count sessions: `SELECT COUNT(*) FROM sessions` vs `ls state/sessions/*.json | wc -l` — verify they match
 - [ ] Check for any sessions in `mesh_tasks` with `status=pending` or `status=claimed` that might be orphaned
 - [ ] Verify `WORKER_TOKEN` is set in `.env` (it is — 7b54e516...)
-- [ ] Verify `MESH_TAILSCALE_IP` is correct (100.112.245.29)
+- [ ] Verify `MESH_TAILSCALE_IP` is correct ()
 
 ---
 
