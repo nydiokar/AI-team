@@ -1679,6 +1679,13 @@ created: {task.created}
                 "timeout": getattr(config.claude, "timeout", 600),
                 "skip_permissions": bool(getattr(config.claude, "skip_permissions", True)),
             },
+            "bridge": {
+                "available": bool(shutil.which("claude")),
+                "claude_executable": shutil.which("claude") or "claude",
+                "max_turns": getattr(config.claude, "max_turns", 3),
+                "timeout": getattr(config.claude, "timeout", 600),
+                "skip_permissions": bool(getattr(config.claude, "skip_permissions", True)),
+            },
             "llama": self.llama_mediator.get_status(probe=False),
             "tool_summary": self._extract_tool_summary(result.raw_stdout or ""),
         }

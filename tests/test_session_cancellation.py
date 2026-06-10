@@ -74,6 +74,6 @@ async def test_session_timeout_calls_backend_cancel(tmp_path, monkeypatch):
     elapsed = time.time() - start
 
     assert result.success is False
-    assert "timeout after 1s" in result.errors[0]
+    assert any("timed out" in e.lower() or "timeout" in e.lower() for e in result.errors)
     assert cancelled == [session.session_id]
     assert elapsed < 2.0

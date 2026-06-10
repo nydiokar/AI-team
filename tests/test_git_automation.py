@@ -76,7 +76,9 @@ class TestGitAutomationService:
     
     def test_init_not_git_repo(self, tmp_path):
         """Test initialization with non-git directory"""
-        service = GitAutomationService(str(tmp_path))
+        with patch('src.core.git_file_detector.subprocess.run') as mock_run:
+            mock_run.return_value = Mock(returncode=1, stdout='', stderr='not a git repository')
+            service = GitAutomationService(str(tmp_path))
         assert service.git_detector.repo_path is None
     
     def test_generate_commit_message_with_llama(self, git_service, mock_llama_mediator):

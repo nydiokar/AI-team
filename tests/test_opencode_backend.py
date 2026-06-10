@@ -313,6 +313,7 @@ def test_missing_session_id_marks_needs_manual_attention(tmp_path):
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode._git_changed_files", return_value=[]),
         patch.object(b, "_recover_session_id", return_value=None),
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
@@ -334,12 +335,44 @@ def test_missing_session_id_marks_needs_manual_attention(tmp_path):
 # Continuation with no session ID stored
 # ---------------------------------------------------------------------------
 
-def test_resume_session_rejects_when_no_backend_session_id():
+def test_resume_session_falls_back_to_create_when_no_backend_session_id(tmp_path):
+    """When no backend_session_id is stored, resume falls back to create_session (fresh start)."""
     b = OpenCodeBackend()
-    session = _make_session(backend_session_id="")
-    result = b.resume_session(session, "follow-up prompt")
-    assert result.success is False
-    assert any("needs_manual_attention" in e for e in result.errors)
+    session = _make_session(backend_session_id="", repo_path=str(tmp_path))
+
+    class _FakeProc:
+        pid = 11
+        returncode = 0
+        stdout = MagicMock()
+        stderr = MagicMock()
+
+        def wait(self, timeout=None):
+            pass
+
+    stdout_line = (
+        json.dumps({"sessionID": "ses_new_from_fallback", "type": "message", "content": "started fresh"}).encode()
+        + b"\n"
+    )
+
+    def _fake_popen(cmd, **kwargs):
+        p = _FakeProc()
+        p.stdout.__iter__ = lambda self: iter([stdout_line])
+        p.stderr.__iter__ = lambda self: iter([])
+        return p
+
+    with (
+        patch.object(b, "_pre_run_git_check", return_value=None),
+        patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
+        patch("src.backends.opencode._git_changed_files", return_value=[]),
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
+        patch("config.config") as mock_cfg,
+    ):
+        mock_cfg.system.inactivity_timeout_sec = 600
+        mock_cfg.opencode.collect_diff = False
+        result = b.resume_session(session, "follow-up prompt")
+
+    assert result.success is True
+    assert result.backend_session_id == "ses_new_from_fallback"
 
 
 def test_resume_session_uses_explicit_session_id():
@@ -368,6 +401,7 @@ def test_resume_session_uses_explicit_session_id():
         patch.object(b, "_pre_run_git_check", return_value=None),
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode._git_changed_files", return_value=[]),
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
@@ -406,6 +440,7 @@ def test_nonzero_exit_produces_failure_result(tmp_path):
     with (
         patch.object(b, "_pre_run_git_check", return_value=None),
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
@@ -454,6 +489,7 @@ def test_diff_collected_after_successful_run(tmp_path):
         patch("src.backends.opencode._git_changed_files", return_value=["src/foo.py"]),
         patch("src.backends.opencode._run_git", side_effect=lambda cwd, args, **kw: "1 file changed" if "--stat" in args else "diff output"),
         patch.object(b, "_auto_commit"),
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
@@ -512,6 +548,7 @@ def test_session_list_fallback_recovers_session_id(tmp_path):
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode.subprocess.run", side_effect=_fake_session_list_run),
         patch("src.backends.opencode._git_changed_files", return_value=[]),
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
@@ -575,6 +612,7 @@ def test_inactivity_timeout_kills_process_and_returns_failure(tmp_path):
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode.terminate_many_popen", side_effect=lambda procs: terminated.extend(p.pid for p in procs)),
         patch("src.backends.opencode.queue.Queue.get", _patched_queue_get),
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
@@ -629,6 +667,7 @@ def test_start_task_successfully(tmp_path):
         patch("src.backends.opencode.subprocess.Popen", side_effect=_fake_popen),
         patch("src.backends.opencode._git_changed_files", return_value=[]),
         patch("src.backends.opencode._run_git", return_value=""),
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
         patch("config.config") as mock_cfg,
     ):
         mock_cfg.system.inactivity_timeout_sec = 600
