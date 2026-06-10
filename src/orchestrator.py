@@ -608,13 +608,24 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info("Telegram Coding Gateway stopped")
 
     async def _start_embedded_task_server(self) -> None:
-        """Start the in-process mesh task server when mesh routing is enabled.
+        """Start the in-process mesh task server in single-process / fallback mode.
 
-        Running it on the gateway's event loop means the HTTP handlers and the
-        orchestrator share the same get_registry() singleton, so node discovery
-        no longer needs the DB-only cross-process workaround.
+        State Separation Phase 2: by default the task server now runs as its own
+        process (server_main.py / ai-team-server) and this is a no-op. It only
+        starts embedded when `MESH_EMBEDDED_SERVER=true` — the single-process or
+        mesh-broken fallback mode. Running it on the gateway's event loop makes
+        the HTTP handlers and the orchestrator share one get_registry() singleton.
+
+        When embedded is off, node discovery in the remote path falls through to
+        the shared DB (see _process_task_remote), so dispatch still works.
         """
         if not config.mesh.enabled:
+            return
+        if not config.mesh.embedded_server:
+            logger.info(
+                "event=embedded_task_server_skipped reason=standalone_mode "
+                "(set MESH_EMBEDDED_SERVER=true to embed; otherwise run ai-team-server)"
+            )
             return
         if self._embedded_task_server is not None:
             return

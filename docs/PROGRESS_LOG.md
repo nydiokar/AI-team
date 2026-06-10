@@ -23,6 +23,29 @@
   Tool: `scripts/analyze_sessions.py`. Follow-up logged: standalone dev/test
   scripts still default to the prod DB (pytest is already isolated).
 
+## 2026-06-10 — State Separation Phase 2 (standalone task server)
+
+- Scaffolding: `server_main.py` (PM2 entry, mirrors `worker_main.py`),
+  `src/control/task_server_client.py` (`TaskServerClient` — urllib, Bearer auth,
+  5s TTL node cache, degrades to None/[] when the server is unreachable),
+  disabled `ai-team-server` PM2 entry. `tests/test_task_server_client.py` (8).
+- Cutover: added `MeshConfig.embedded_server` / `MESH_EMBEDDED_SERVER`
+  (default **False**); `_start_embedded_task_server()` now no-ops unless embed is
+  explicitly requested, so the gateway stops binding the task-server port and the
+  standalone `ai-team-server` owns it.
+- Why it was small: the live remote path `_process_task_remote` was already
+  DB-backed (node liveness via `db.get_node()`, results via DB polling in
+  `_dispatch_to_node`); `_dispatch_or_run_local` (the only hard in-memory-registry
+  dependency) is dead code reserved for Phase 3. So no dispatch rewrite was
+  needed — discovery survives the process split via the shared DB.
+- `embedded_server.py` kept (not deleted) as the explicit single-process /
+  fallback mode behind the flag.
+- Verified: cutover integration test (standalone server + temp DB/port via
+  `AI_TEAM_ENV_FILE`) — gateway in-process registry empty yet reads the node
+  online from the shared DB; embedded start is a clean no-op. Full suite 138
+  passed / 13 skipped. Gateway was stopped (`pm2 stop ai-team-gateway`) for the
+  cutover.
+
 ## Mesh build history (Phases 8–9, Steps B/C, D1–D6)
 
 Condensed from the former `.ai/CONTEXT.md`. All shipped behind `MESH_ENABLED`
