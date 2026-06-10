@@ -20,19 +20,40 @@ machines). The operational cutover steps, when we get there, are in
 
 ## ▶ Current work — State Separation Phases 0 → 2
 
-### Phase 0 — Prerequisites (partly done — finish this first)
+### Phase 0 — Prerequisites — ✅ DONE (2026-06-10)
 
-Verified 2026-06-10:
 - [x] `mesh.db` is WAL + `busy_timeout=5000`.
 - [x] `test_mesh_local.py` exists (note: fails locally only because `.env`
       `WORKER_TOKEN` overrides its hardcoded test token — not a regression).
-- [ ] **2 orphan tasks** still `pending`/`claimed` in `mesh_tasks` — mark `failed`.
-- [ ] **DB/JSON session mismatch**: DB has **410** sessions, `state/sessions/`
-      has **234** JSON files. Decide & reconcile (prune stale DB rows, or
-      confirm JSON is the smaller current set) before fully trusting DB as
-      canonical. This is the real blocker — don't skip it.
+- [x] **2 orphan tasks** (`task_8cc6b7c4`, `task_73f11521`, both
+      `resume_session`/`pending`, never claimable since mesh isn't running)
+      marked `failed` via `db.fail_task`.
+- [x] **DB/JSON session mismatch investigated and reconciled.** Was DB 410 /
+      JSON 234. Two independent causes:
+      - **183 only-in-DB** = benign history: seeded rows (`seed_db_from_json.py`)
+        plus old sessions whose JSON was later pruned off disk. DB is correctly a
+        superset. Left as-is.
+      - **7 only-in-JSON** = a real **shadow-write gap**: `SessionStore.create()`
+        wrote the JSON file but never shadow-wrote to the DB, so a session
+        created-then-closed with no task (no intervening `save()`) never reached
+        the DB. Root-cause **fixed**: `create()` now calls `_shadow_write()`
+        (`session_store.py:53-54`). The 7 stragglers were backfilled.
+      - Result after backfill: only-in-JSON = 0; orphan tasks = 0.
+      - Backup before writes: `state/mesh.db.bak-phase0-20260610`.
+- [x] **DB trust cleanup (so 3-process split starts from clean state).** Profiled
+      all 418 DB sessions: only **162** had real task history; the other 256 were
+      45 test/fixture leftovers (`.test_session_artifacts/*`, `/test/repo`,
+      `test-pc`/`other-pc`/`trial-node`, `solastic`, `urban_mage`) + 215 abandoned
+      zero-task shells. **Purged all 256 zero-task sessions** (+34 orphan
+      `task_events`), VACUUM'd. DB now = **162 sessions, every one with ≥1 task**;
+      0 orphans; live JSON working set (234 files) untouched. Backup:
+      `state/mesh.db.bak-cleanup-20260610-181929`. Script: `scripts/analyze_sessions.py`.
+      Note: the pytest suite already isolates the DB per-test (conftest
+      `_isolate_db`, added in Phase 1); the leaked rows came from **standalone
+      dev/test scripts** run directly against the prod DB — see follow-up below.
 - [ ] Confirm `WORKER_TOKEN` set and `MESH_TAILSCALE_IP` is a **real IP** in
-      `.env` (it was previously parsed as a literal comment string).
+      `.env` (was parsed as a literal comment string). *Operator action — do
+      before flipping `MESH_ENABLED=true`; not a code task.*
 
 ### Phase 1 — DB as canonical read source — ✅ DONE
 
@@ -107,6 +128,10 @@ gateway. Full detail: `docs/STATE_SEPARATION_PLAN.md` §Phase 2.
 
 ## Deferred (valid, lower priority)
 
+- **Standalone dev/test scripts default to prod `state/mesh.db`.** The pytest
+  suite is isolated, but `scripts/test_*.py` and ad-hoc runs are not — that's how
+  the 45 junk sessions leaked in. Give those scripts a `MESH_DB_PATH` override (or
+  a shared `--test-db` helper) so they can never write prod state again.
 - Backend hooks (session-ID detection, PreToolUse security, PostToolUse quality
   gates) — `docs/BACKEND_HOOKS_STRATEGY.md`.
 - Codex end-to-end validation.

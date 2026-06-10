@@ -81,7 +81,7 @@ Progress against that plan (verified against code on 2026-06-10):
 
 | Phase | Goal | Status |
 |-------|------|--------|
-| 0 | Prereq checks (WAL, counts, orphan tasks, env) | **Partly** — DB is WAL+5000, but 2 orphan tasks remain and DB(410)≠JSON(234) sessions |
+| 0 | Prereq checks + DB trust cleanup | **DONE (2026-06-10)** — orphan tasks failed; shadow-write `create()` bug fixed; DB purged from 418→**162 real sessions** (all with task history; 256 test/empty rows removed). Remaining: operator sets real `MESH_TAILSCALE_IP` in `.env` before enabling mesh. |
 | 1 | DB as canonical read source + smart recovery | **DONE** — `session_store.get` reads DB-first; `db.get_task_by_session` exists; `_recover_stale_busy_sessions` uses DB (orchestrator.py:299) |
 | 2 | Standalone `ai-team-server` process + `TaskServerClient` in gateway | **Not started** |
 | 3 | Standalone `ai-team-worker` process; gateway workers → fallback | **Not started** (worker code exists, never run in prod) |
@@ -91,14 +91,18 @@ Progress against that plan (verified against code on 2026-06-10):
 
 ## ➡️ Immediate next step
 
-**Finish State Separation Phase 0**, then start **Phase 2**. Specifically:
+Phase 0 is done. **Start State Separation Phase 2:**
 
-1. Mark the 2 orphan `pending/claimed` rows in `mesh_tasks` as `failed`.
-2. Reconcile the DB(410)/JSON(234) session mismatch — decide whether DB has stale
-   rows to prune or JSON is missing records, before trusting DB as canonical.
-3. Confirm `WORKER_TOKEN` + a real `MESH_TAILSCALE_IP` in `.env` (the literal-comment-string bug).
-4. Then Phase 2: create `ai-team-server` PM2 entry, `server_main.py`, a
-   `TaskServerClient` in the gateway, and retire `embedded_server.py`.
+1. Create `ai-team-server` PM2 entry + a thin `server_main.py` (uvicorn on
+   `task_server:app`).
+2. Add a `TaskServerClient` in the gateway (stdlib `urllib`, Bearer
+   `WORKER_TOKEN`): `enqueue_task`, `get_task_status`, `get_health`, `list_nodes`.
+3. Repoint `_dispatch_to_node` / recovery / health from the in-process
+   `get_registry()` singleton to `TaskServerClient` (short-TTL node cache).
+4. Retire `src/control/embedded_server.py` and its start/stop wiring.
+
+(One operator action still pending before mesh can be enabled: set a real
+`MESH_TAILSCALE_IP` in `.env` — it was parsed as a literal comment string.)
 
 Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 
