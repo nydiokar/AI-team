@@ -1128,13 +1128,37 @@ class TaskOrchestrator(ITaskOrchestrator):
 
                 # Process the task
                 result = await self.process_task(task)
-                
+
+                # Detached: the gateway is shutting down while a remote worker
+                # keeps running and owns this task's real state in the DB. This
+                # is NOT a failure — do not notify Telegram, do not write a
+                # terminal artifact, do not mark the task FAILED. Leave the DB
+                # row as 'claimed' so startup reattach reports the worker's real
+                # result. Just release in-process bookkeeping and move on.
+                if getattr(result, "detached", False):
+                    logger.info(
+                        "event=task_detached worker=%s task_id=%s reason=gateway_shutdown",
+                        worker_name, task.id,
+                    )
+                    # Release in-process bookkeeping but DO NOT touch the DB row,
+                    # Telegram, or session status — the remote worker owns this
+                    # task and startup reattach will report its real result.
+                    try:
+                        self._running_exec_tasks.pop(task.id, None)
+                        self.active_tasks.pop(task.id, None)
+                        if getattr(task, "metadata", None):
+                            self._inflight_paths.discard(task.metadata.get("__file_path", ""))
+                    except Exception:
+                        pass
+                    self.task_queue.task_done()
+                    continue
+
                 # Store result
                 self.task_results[task.id] = result
-                
+
                 # Update task status
                 task.status = TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
-                
+
                 # Log completion
                 status = "SUCCESS" if result.success else "FAILED"
                 finish_backend = getattr(result, "backend_name", backend_name)
