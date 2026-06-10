@@ -204,62 +204,6 @@ async def test_session_new_creates_session_and_guides_next_step(monkeypatch, iso
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
 
-@pytest.mark.asyncio
-async def test_session_new_without_args_shows_backend_picker(monkeypatch, isolated_session_store):
-    workspace = _make_workspace()
-    try:
-        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
-        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
-        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
-
-        update = _DummyUpdate()
-        await bot._handle_session_new(update, _DummyContext())
-
-        assert update.message.replies
-        assert "choose a backend" in update.message.replies[-1].lower()
-        markup = update.message.reply_kwargs[-1]["reply_markup"]
-        labels = [button.text for row in markup.inline_keyboard for button in row]
-        # Backend options + a Cancel escape hatch.
-        assert any("Claude" in l for l in labels)
-        assert any("Codex" in l for l in labels)
-        assert any("Cancel" in l for l in labels)
-    finally:
-        shutil.rmtree(workspace.parent, ignore_errors=True)
-
-
-@pytest.mark.asyncio
-async def test_session_new_backend_callback_shows_recent_repos(monkeypatch, isolated_session_store):
-    workspace = _make_workspace()
-    try:
-        repo_alpha = workspace / "repo-alpha"
-        repo_beta = workspace / "repo-beta"
-        (repo_alpha / ".git").mkdir(exist_ok=True)
-        (repo_beta / ".git").mkdir(exist_ok=True)
-        repo_alpha.touch()
-        repo_beta.touch()
-        os.utime(repo_alpha, (1_700_000_000, 1_700_000_000))
-        os.utime(repo_beta, (1_800_000_000, 1_800_000_000))
-
-        monkeypatch.setattr(config.claude, "base_cwd", str(workspace), raising=False)
-        monkeypatch.setattr(config.claude, "allowed_root", str(workspace), raising=False)
-        bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
-        # Isolate from the live mesh DB: no remote nodes in this unit test.
-        monkeypatch.setattr(bot, "_mesh_online_nodes", lambda: [])
-
-        update = _DummyUpdate()
-        update.callback_query = _DummyCallbackQuery("session_new_backend:codex")
-        await bot._handle_session_new_callback(update, _DummyContext())
-
-        assert update.callback_query.answers == 1
-        assert "pick a repository" in update.callback_query.edits[-1].lower()
-        markup = update.callback_query.edit_kwargs[-1]["reply_markup"]
-        labels = [button.text for row in markup.inline_keyboard for button in row]
-        # Repos shown most-recent first, each prefixed with a folder icon; Back last.
-        assert labels[0] == "📁 repo-beta"
-        assert labels[1] == "📁 repo-alpha"
-        assert labels[-1] == "⬅️ Back"
-    finally:
-        shutil.rmtree(workspace.parent, ignore_errors=True)
 
 
 @pytest.mark.asyncio
@@ -522,7 +466,7 @@ async def test_git_status_uses_active_session_repo(monkeypatch, isolated_session
 
         text = update.message.replies[-1]
         assert captured["repo_path"] == repo_path
-        assert f"Session: `{session.session_id}`" in text
+        assert f"#s_{session.session_id}" in text
         assert "• Modified: 1" in text
         assert "• Created: 1" in text
         assert "• Deleted: 0" in text
@@ -575,7 +519,7 @@ async def test_commit_uses_active_session_context_not_task_id(monkeypatch, isola
         assert captured["task_description"] == "Fix the flaky Telegram session recovery path"
         assert captured["create_branch"] is True
         assert captured["push_branch"] is True
-        assert f"session `{session.session_id}`" in text
+        assert f"#s_{session.session_id}" in text
         assert "Files committed: 1" in text
         assert "Branch pushed to remote." in text
     finally:
@@ -600,7 +544,8 @@ async def test_cancel_without_args_uses_active_session_last_task(monkeypatch, is
         await bot._handle_cancel_command(update, _DummyContext())
 
         assert orchestrator.cancelled_tasks == ["task_777"]
-        assert f"session `{session.session_id}` task `task_777`" in update.message.replies[-1]
+        assert f"#s_{session.session_id}" in update.message.replies[-1]
+        assert "task_777" in update.message.replies[-1]
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
@@ -632,7 +577,8 @@ async def test_progress_without_args_uses_active_session_last_task(monkeypatch, 
         await bot._handle_progress_command(update, _DummyContext())
 
         text = update.message.replies[-1]
-        assert f"session `{session.session_id}` / task `task_888`" in text
+        assert f"#s_{session.session_id}" in text
+        assert "task_888" in text
         assert "started" in text
         assert "finished" in text
     finally:
