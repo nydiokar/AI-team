@@ -18,7 +18,127 @@ machines). The operational cutover steps, when we get there, are in
 
 ---
 
-## ▶ Current work — State Separation Phases 0 → 2
+## 🟢 STATUS AT A GLANCE (2026-06-11)
+
+| Phase | What | Status |
+|---|---|---|
+| 0 | Prereqs + DB cleanup | ✅ DONE |
+| 1 | DB canonical read + smart recovery | ✅ DONE (battle-tested live) |
+| 2 | Standalone task server + `TaskServerClient` | ✅ DONE |
+| 3 | Standalone worker; machine-to-machine dispatch; gateway-restart resilience | ✅ DONE (live on 2 machines 2026-06-11) |
+| 4 | Graceful degradation / fallback when mesh is down | ⛔ NOT STARTED — **the only remaining plan work** |
+
+**The mesh is LIVE.** Gateway + embedded task server on the **Pi5 (`kanebra`)**;
+worker daemon on **`Horse`**. Tasks dispatch machine-to-machine and survive a
+gateway restart (detach on shutdown → reattach on startup → deliver the worker's
+real result). Detail: `docs/PROGRESS_LOG.md` (2026-06-11 entry).
+
+> **DEPLOY NOTE — read before testing any gateway change.** The gateway runs on
+> the **Pi5**. Code you edit/commit on a worker machine (e.g. `Horse`) only takes
+> effect after: push → `git pull` on the Pi5 → **restart the gateway** → confirm
+> `git log -1` on the Pi5 matches. A fix on `origin/main` that hasn't been
+> pulled+restarted on the Pi5 will look like it "didn't work." (This cost us two
+> debugging rounds on 2026-06-11.)
+
+---
+
+## ▶ NEXT: Phase 4 — Graceful degradation / fallback
+
+**Goal:** when the mesh is unhealthy (task server unreachable, or no workers
+online for a pinned session), the gateway degrades gracefully instead of failing
+tasks — it keeps **exactly one** embedded fallback worker that can run recovery
+tasks locally, and reconciles state when the mesh comes back. This is the last
+piece of the State Separation plan. Full design: `docs/STATE_SEPARATION_PLAN.md`
+§Phase 4.
+
+> **Architecture rule (do not violate):** the gateway must keep **exactly 1**
+> embedded fallback worker that activates **only** when the mesh is broken. It is
+> not a second general worker pool — its job is to keep the gateway able to run
+> recovery tasks (e.g. "restart the task server") when no remote worker can.
+
+These tasks are written to be picked up cold by an agent. Do them roughly in
+order; each has explicit files + acceptance checks. **Test cost guard applies —
+never run the paid Claude CLI from tests (see banner above).**
+
+### P4.1 — Define + expose mesh-health criteria
+- **What:** a single source of truth for "is the mesh healthy?". Healthy =
+  task server reachable AND at least one node `online` in the DB. Surface it as a
+  method (e.g. `MeshHealth.is_healthy()` / on the orchestrator) and in `/status`.
+- **Where to look:** `src/control/task_server_client.py` (`is_healthy`,
+  `list_nodes` already exist), `src/control/db.py` (`list_nodes`/node status),
+  `src/orchestrator.py` (`_mesh_online_nodes`), `src/telegram/interface.py`
+  (`/status`).
+- **Acceptance:** unit test with a mocked client/DB asserting healthy vs each
+  unhealthy case (server down; server up but zero online nodes). `/status` shows a
+  clear mesh health line. No paid CLI.
+
+### P4.2 — Single embedded fallback worker, mesh-gated
+- **What:** the gateway runs **one** embedded worker that is **dormant while the
+  mesh is healthy** and only claims work when P4.1 reports unhealthy. Reduce the
+  general gateway worker pool accordingly (today it still spins a full local pool
+  — the `worker-0/worker-1` seen in logs).
+- **Where to look:** `src/orchestrator.py` — `_task_worker`, `start()` pool
+  creation (`config.system.max_concurrent_tasks`), `reload_worker_pool`; the
+  mesh routing check in `process_task` (`route_remote`).
+- **Acceptance:** with mesh healthy, the fallback worker does not execute pinned
+  remote tasks (they still route to the remote node). With mesh unhealthy, the
+  fallback worker runs the task locally and it completes. Cover both with tests
+  using a fake backend (no paid CLI).
+
+### P4.3 — Fallback can run recovery tasks
+- **What:** when degraded, allow a small set of **recovery actions** to run on the
+  fallback worker — minimally "restart/repoint the task server" — so the operator
+  can self-heal from Telegram without SSH.
+- **Where to look:** `src/telegram/interface.py` (command surface),
+  `src/control/embedded_server.py` (fallback server mode), `ecosystem.config.js`
+  (process names for restart).
+- **Acceptance:** from Telegram while degraded, an operator can trigger the
+  recovery action and see a clear result. Guard it behind owner-only auth (match
+  existing ownership checks). No destructive action without confirmation.
+
+### P4.4 — Reconcile fallback-completed work when the mesh recovers
+- **What:** tasks completed by the fallback worker while degraded must be synced
+  to the DB and their sessions reconciled once the mesh is healthy again, so there
+  is no split-brain between JSON fallback state and the DB.
+- **Where to look:** `src/control/db.py` (task/session upsert), `src/core/
+  session_store.py` (dual-write), the recovery path
+  `_recover_stale_busy_sessions` / `_reattach_remote_task` in
+  `src/orchestrator.py` (2026-06-11 additions — mirror their conventions).
+- **Acceptance:** simulate degraded completion (DB unavailable or mesh down) then
+  recovery; assert the task + session land in the DB exactly once, session status
+  is correct, and no duplicate Telegram notifications fire. Test only (no paid
+  CLI).
+
+### P4.5 — Wire the dead `_dispatch_or_run_local` (or delete it)
+- **What:** `_dispatch_or_run_local` is defined but never called (was reserved for
+  this phase). Either wire it as the fallback decision point (dispatch to mesh
+  when healthy, run on the embedded worker when not) or delete it if P4.2 makes it
+  redundant. Decide explicitly; don't leave dead code.
+- **Where to look:** `src/orchestrator.py` (`_dispatch_or_run_local`,
+  `registry.is_empty()`, `pick_capable()`).
+- **Acceptance:** no unreferenced dispatch helper remains; whichever path is kept
+  has a test.
+
+### P4.6 — Tidy-ups unblocked by going live (low priority, do alongside)
+- Give standalone dev/test scripts a `MESH_DB_PATH` override so they can never
+  write prod `state/mesh.db` again (this is how 45 junk sessions leaked in —
+  see Deferred). `scripts/test_*.py`, ad-hoc runs.
+- Optional Phase 1 hardening test: stale BUSY session + completed DB result →
+  recovery yields AWAITING_INPUT (not ERROR). (Largely covered now by the
+  2026-06-11 restart work, but an explicit regression test is cheap.)
+
+---
+
+## ✅ Completed plan work (was "Current work")
+
+### Phase 3 — Standalone worker — ✅ DONE (2026-06-11)
+
+Mesh runs live across two machines (gateway+server on Pi5 `kanebra`, worker on
+`Horse`). Machine-to-machine dispatch works AND in-flight remote tasks survive a
+gateway restart via detach/reattach. The restart-cancel bug and two recovery
+delivery bugs (placeholder message; dropped `backend_session_id`) are fixed.
+Commits `f7b0777`, `f887ba1`, `5bc9137`. Detail: `docs/PROGRESS_LOG.md`
+(2026-06-11). The earlier "blocked on a 2nd Tailscale node" caveat is retired.
 
 ### Phase 0 — Prerequisites — ✅ DONE (2026-06-10)
 
@@ -129,27 +249,12 @@ then `ai-team-gateway`. Do NOT set `MESH_EMBEDDED_SERVER=true` while
 
 ---
 
-## ⏳ Later in this plan
+## ⏳ Later — beyond the plan
 
-- **Phase 3 — Standalone workers — PARTIAL (2026-06-10).** Worker daemon proven
-  to run end-to-end against the standalone server, locally, no paid backend:
-  `scripts/test_worker_loopback.py` drives the real `worker_main.py` +
-  `server_main.py` (temp DB/ports) → register → `task_claimed` → execute →
-  `task_result_posted` → DB terminal → SIGTERM drain. Execution failed cleanly on
-  the `CLAUDE_ALLOWED_ROOT` allowlist, proving the safety boundary holds on the
-  remote path. **"Never run in prod" risk retired.**
-  - **Remaining (needs Tailscale / 2nd machine):** the gateway only routes to a
-    worker when `session.machine_id != socket.gethostname()` (orchestrator.py:1223),
-    so single-machine a worker just idles. Real worker execution + reducing the
-    gateway pool to the 1 fallback + wiring `_dispatch_or_run_local` all land with
-    the Phase 4 two-machine cutover (`docs/PHASE_4_RUNBOOK.md`). Deferred until a
-    second node is on the tailnet. (`STATE_SEPARATION_PLAN.md` §Phase 3.)
-- **Phase 4 — Fallback + graceful degradation:** define mesh-health criteria; the
-  1 embedded worker + JSON path activate only when the mesh is down; fallback can
-  run recovery tasks (e.g. "restart the task server"); sync fallback-completed
-  tasks to DB on recovery. (`STATE_SEPARATION_PLAN.md` §Phase 4.)
-- **VPS cutover:** once Phases 2–3 are solid, execute `docs/PHASE_4_RUNBOOK.md`
-  (server→VPS, this PC→worker). Operational, babysit it.
+- **VPS cutover (optional end-state):** the mesh is already split across two
+  machines. Moving the server to a VPS is now just a *relocation* of the existing
+  controller, not new architecture — follow `docs/PHASE_4_RUNBOOK.md` when/if you
+  want the gateway off the Pi5. Operational; babysit it.
 
 ---
 

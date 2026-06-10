@@ -1,5 +1,50 @@
 # Progress Log
 
+## 2026-06-11 — Mesh goes live: two-machine execution + gateway restart resilience
+
+**Milestone: the State Separation architecture is proven in production.** The
+mesh now runs split across two real machines — gateway + embedded task server on
+the Pi5 (`kanebra`), worker daemon on this PC (`Horse`) — and a task survives a
+gateway restart end-to-end: dispatched → gateway restarts mid-flight → worker
+keeps running → gateway reattaches on startup → delivers the worker's **real**
+result to Telegram. This retires the long-standing "blocked on 2nd machine"
+caveat on Phase 3.
+
+**The restart-cancel bug (fixed).** A gateway restart used to mark in-flight
+remote tasks `failed` ("interrupted by gateway restart"), fabricating a terminal
+state the worker never produced. Root cause: the gateway owned task lifecycle via
+an in-memory poll loop + cancel event; shutdown fired that event and wrote
+`fail_task`. The fix separates two states (the "websocket model"): the DB row is
+the task's truth, owned by the worker; the gateway's poll loop is a detachable
+subscriber. Three layers changed in `src/orchestrator.py`:
+
+1. **`_dispatch_to_node`** — on shutdown (`task.id in _shutdown_interrupted_tasks`)
+   it no longer calls `db.fail_task`; it returns a result tagged `detached=True`
+   and leaves the DB row `claimed`.
+2. **`_process_task_remote`** — a `detached` result leaves the session **BUSY**
+   (no ERROR/CANCELLED) so startup recovery can reattach.
+3. **`_task_worker`** — a `detached` result short-circuits the completion path:
+   no Telegram "Task failed", no failure artifact, no `_mesh_complete_task`.
+4. **Startup reattach** — `_recover_stale_busy_sessions` no longer skips remote
+   sessions; a remote session whose task is still `claimed`/`pending` spawns
+   `_reattach_remote_task`, which polls the DB to a terminal state and reports the
+   worker's real result (bounded by `oneoff_queue_timeout_sec`).
+
+**Two delivery bugs in recovery (fixed, were pre-existing in
+`_recover_completed_session`):**
+- It sent a hardcoded *"Task completed while gateway was restarting — session
+  restored."* placeholder instead of the worker's actual output. Now delivers the
+  real reply text (via `_session_reply_text` + changed-file list, prefixed
+  `_(recovered after a gateway restart)_`).
+- It never propagated `backend_session_id` from the worker's result, so a
+  recovered session couldn't resume the remote backend (started cold instead).
+  Now restores `session.backend_session_id` exactly as the live path does.
+
+Commits: `f7b0777` (reattach scaffolding), `f887ba1` (detach in `_task_worker`),
+`5bc9137` (recovery delivery + `backend_session_id`). Verified: full
+`test_claude_session_backend.py` green; live two-machine restart test delivered
+the real joke + resumed the session.
+
 ## 2026-06-10 — Doc cleanup
 
 - Rewrote `.ai/CONTEXT.md` into a short hot-context doc (was an 880-line history

@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-06-10
+**Last Updated:** 2026-06-11
 **Branch:** `main`
 
 > This file is the **fast-orientation** doc: what the project is, how it's wired
@@ -34,7 +34,7 @@ the task server embedded on its own event loop.
   ├── src/control/db.py             SQLite mesh DB (WAL, busy_timeout=5000, migrations)
   ├── src/control/embedded_server.py task server, embedded (mesh on)
   ├── src/control/{task_server,node_registry}.py  HTTP API + node registry
-  ├── src/worker/agent.py           worker daemon — built, NOT run in prod yet
+  ├── src/worker/agent.py           worker daemon — runs as its own process on worker nodes (e.g. Horse)
   └── src/backends/                 claude_code, codex, opencode, opencode-server
 ```
 
@@ -57,17 +57,19 @@ exactly as pre-mesh), `MESH_SHADOW_WRITE` (default `true`), `WORKER_TOKEN`,
 
 ## Where we are NOW
 
-The mesh foundation is **fully built and reviewed** (DB layer, task server, node
-registry, worker daemon, orchestrator remote routing, `/nodes` + `/node`,
-observability spine, `fix_session_machine_ids.py`). All of it ships behind
-`MESH_ENABLED`, which is **off in production** — so today the gateway is still a
-single-process, locally-executing gateway, unchanged in behavior.
+**The mesh is LIVE across two real machines (as of 2026-06-11).** Gateway +
+embedded task server run on the **Pi5 (`kanebra`)**; the worker daemon runs on a
+separate PC (**`Horse`**). Real tasks dispatch machine-to-machine, and — the part
+that was the whole point — a task now **survives a gateway restart end-to-end**:
+the worker keeps running, the gateway reattaches on startup and delivers the
+worker's real result to Telegram (no fabricated "Task failed"). State Separation
+Phases 0–3 are effectively complete.
 
-What is *not* yet done is making the three roles (gateway / task server / worker)
-**independent processes** so a gateway restart no longer kills in-flight work.
-That is the active plan below.
+The only remaining plan work is **Phase 4 — graceful degradation / fallback**
+(see active plan + `.ai/NEXT_TASKS.md`).
 
-History of every completed phase (8, 9, Step B/C, D1–D6): `docs/PROGRESS_LOG.md`.
+History of every completed phase (8, 9, Step B/C, D1–D6) + the 2026-06-11
+restart-resilience milestone: `docs/PROGRESS_LOG.md`.
 
 ---
 
@@ -84,33 +86,25 @@ Progress against that plan (verified against code on 2026-06-10):
 | 0 | Prereq checks + DB trust cleanup | **DONE (2026-06-10)** — orphan tasks failed; shadow-write `create()` bug fixed; DB purged from 418→**162 real sessions** (all with task history; 256 test/empty rows removed). Remaining: operator sets real `MESH_TAILSCALE_IP` in `.env` before enabling mesh. |
 | 1 | DB as canonical read source + smart recovery | **DONE** — `session_store.get` reads DB-first; `db.get_task_by_session` exists; `_recover_stale_busy_sessions` uses DB (orchestrator.py:299) |
 | 2 | Standalone `ai-team-server` process + `TaskServerClient` in gateway | **DONE (2026-06-10)** — `server_main.py` + `TaskServerClient` + `ai-team-server` PM2 entry. `MESH_EMBEDDED_SERVER` (default off) makes standalone the norm; remote dispatch was already DB-backed so no rewrite needed. Cutover-tested; 138 tests green. |
-| 3 | Standalone `ai-team-worker` process; gateway workers → fallback | **PARTIAL** — worker daemon proven end-to-end locally (`scripts/test_worker_loopback.py`); real routing needs a 2nd machine (Tailscale), deferred to Phase 4. |
-| 4 | Graceful degradation: 1 embedded fallback worker + JSON when mesh down | **Not started** |
+| 3 | Standalone `ai-team-worker` process; gateway workers → fallback | **DONE (2026-06-11)** — worker daemon runs in prod on `Horse`; real machine-to-machine dispatch + gateway-restart resilience proven live. Tidy-ups (shrink gateway pool toward the 1 fallback, wire dead `_dispatch_or_run_local`) folded into Phase 4. |
+| 4 | Graceful degradation: 1 embedded fallback worker + JSON when mesh down | **Not started — the only remaining plan work** |
 
 ---
 
 ## ➡️ Immediate next step
 
-Phases 2 done and Phase 3 proven as far as a single machine allows (worker daemon
-runs end-to-end via `scripts/test_worker_loopback.py`). **The next real step is
-Phase 4 — the two-machine cutover — which is BLOCKED on Tailscale** (no 2nd node
-available right now). When Tailscale is back:
+The two-machine cutover is **done and live** — gateway+server on the Pi5,
+worker on `Horse`, restart-resilient. **The only remaining plan work is Phase 4
+(graceful degradation / fallback).** Full, dispatch-ready task definitions with
+acceptance checks are in `.ai/NEXT_TASKS.md` (§Phase 4).
 
-1. Follow `docs/PHASE_4_RUNBOOK.md`: retag sessions
-   (`scripts/fix_session_machine_ids.py --node-id main-pc --apply`), start
-   `ai-team-server` + gateway on the controller, start `ai-team-worker` on this
-   PC, verify a task routes machine-to-machine.
-2. That cutover also delivers the rest of Phase 3 (real worker execution, reduce
-   gateway pool to the 1 fallback, wire `_dispatch_or_run_local`).
+Current run mode: gateway + embedded task server in one process on the Pi5
+(`MESH_EMBEDDED_SERVER=true`), worker daemon as a separate process on `Horse`.
 
-Until then, nothing further in the mesh split is testable here. Optional
-non-mesh work available: open roadmap live-resume validation; backend hooks
-(`docs/BACKEND_HOOKS_STRATEGY.md`).
-
-Current run mode: single-process, `MESH_EMBEDDED_SERVER=true` in `.env` keeps the
-gateway embedding the task server exactly as before. Start order when going
-split: `ai-team-server` first, then gateway; never embed while standalone runs
-(port clash on `MESH_TASK_SERVER_PORT`).
+**Deploy note (important):** the gateway runs on the **Pi5**. Code changed on a
+worker machine must be pushed, then `git pull` + gateway restart **on the Pi5**;
+confirm with `git log -1` on the Pi5. A fix that's on `origin/main` but not yet
+pulled+restarted on the Pi5 will look like it "didn't work."
 
 Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 
@@ -140,7 +134,7 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | `src/control/db.py` | SQLite mesh DB — canonical DB layer |
 | `src/control/task_server.py` | FastAPI task server (currently embedded) |
 | `src/control/node_registry.py` | node registry + heartbeat expiry |
-| `src/worker/agent.py` | worker daemon (built, not yet run in prod) |
+| `src/worker/agent.py` | worker daemon (runs as its own process on worker nodes) |
 | `src/telegram/interface.py` | Telegram command surface |
 | `config/settings.py` | all config incl. `MeshConfig` |
 | `docs/STATE_SEPARATION_PLAN.md` | **active plan** |
