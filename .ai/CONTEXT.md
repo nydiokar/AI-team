@@ -114,9 +114,11 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 
 - DB is the canonical **read** source; JSON dual-write stays as the ultimate
   fallback and is **never deleted**.
-- The gateway must keep **exactly 1** embedded fallback worker that activates only
-  when the mesh is broken (task server unreachable or no workers online), so it
-  can always run recovery tasks.
+- The server/gateway host keeps its **own embedded worker capacity** (configurable
+  pool, default ≥1 — **not** capped at 1) that executes tasks when no remote node
+  is available. Prefer remote nodes when online; the server runs work locally when
+  none are, so tasks never stall. (Updated 2026-06-11; supersedes the old "exactly
+  1 fallback worker" rule.)
 - `MESH_ENABLED=false` ⇒ gateway is byte-for-byte the old behavior.
 - Session affinity is a hard correctness requirement: a session pinned to a
   machine must execute on that machine. `backend_session_id` is machine-local.
