@@ -31,7 +31,6 @@ test = [
 ]
 llama = [
   "ollama>=0.1.7",
-  "sentence-transformers>=2.2.2",
 ]
 telegram = [
   "python-telegram-bot>=20.0",
