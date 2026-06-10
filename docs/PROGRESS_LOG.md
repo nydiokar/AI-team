@@ -11,9 +11,17 @@
   (`docs/PHASE_4_RUNBOOK.md`) is the end-state of State Sep Phases 2–3.
 - Verified against code: State Sep **Phase 1 is already done** (DB-first reads in
   `session_store.py:63`, `db.get_task_by_session` at `db.py:510`, DB-aware
-  `_recover_stale_busy_sessions` at `orchestrator.py:299`). Phase 0 still has 2
-  orphan `mesh_tasks` rows and a DB(410)/JSON(234) session-count mismatch to
-  reconcile.
+  `_recover_stale_busy_sessions` at `orchestrator.py:299`).
+- **Phase 0 completed.** (1) Fixed root-cause shadow-write bug: `create()` now
+  shadow-writes to DB (was JSON-only, the source of 7 only-in-JSON sessions).
+  (2) Failed orphan `mesh_tasks` rows. (3) **DB trust cleanup before the
+  3-process split:** profiled 418 DB sessions — only 162 had real task history;
+  purged the other 256 (45 test/fixture leftovers + 215 abandoned zero-task
+  shells) plus 34 orphan `task_events`, then VACUUM. DB now = 162 real sessions,
+  0 orphans; live JSON (234 files) untouched. Backups:
+  `state/mesh.db.bak-phase0-20260610`, `state/mesh.db.bak-cleanup-20260610-181929`.
+  Tool: `scripts/analyze_sessions.py`. Follow-up logged: standalone dev/test
+  scripts still default to the prod DB (pytest is already isolated).
 
 ## Mesh build history (Phases 8–9, Steps B/C, D1–D6)
 

@@ -51,6 +51,7 @@ class SessionStore:
             owner_user_id=owner_user_id,
         )
         self._write(session)
+        self._shadow_write(session)
         logger.info(f"session_created id={session.session_id} backend={backend} path={repo_path}")
         return session
 
