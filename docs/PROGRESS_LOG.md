@@ -46,6 +46,25 @@
   passed / 13 skipped. Gateway was stopped (`pm2 stop ai-team-gateway`) for the
   cutover.
 
+## 2026-06-10 — State Separation Phase 3 (worker loopback proof)
+
+- `scripts/test_worker_loopback.py`: drives the REAL worker daemon
+  (`worker_main.py`) against the REAL standalone server (`server_main.py`) on a
+  temp DB + temp ports (`AI_TEAM_ENV_FILE`), no paid backend. Proves the full
+  pipeline: register → nudge listener → `task_claimed` → execute →
+  `task_result_posted` → DB `status=failed claimed_by=<node>` → SIGTERM drain.
+- The injected `opencode` task failed cleanly on the `CLAUDE_ALLOWED_ROOT` path
+  allowlist (non-repo cwd rejected) — confirms the worker enforces the backend
+  safety boundary on the remote-execution path. "Never run in prod" risk retired.
+- Test bug found + fixed along the way: first attempt used a backend the worker
+  doesn't advertise, which the server's `get_pending_tasks` backend filter
+  excludes, so the worker correctly never saw it. Switched to an advertised
+  backend (`opencode`).
+- Real worker *execution* (vs. this loopback proof) is blocked on a 2nd machine:
+  the gateway only routes remotely when `session.machine_id != hostname`
+  (orchestrator.py:1223), so single-machine a worker idles. That lands with the
+  Phase 4 two-machine cutover, deferred until Tailscale is available.
+
 ## Mesh build history (Phases 8–9, Steps B/C, D1–D6)
 
 Condensed from the former `.ai/CONTEXT.md`. All shipped behind `MESH_ENABLED`

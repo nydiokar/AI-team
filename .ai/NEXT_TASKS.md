@@ -131,11 +131,19 @@ then `ai-team-gateway`. Do NOT set `MESH_EMBEDDED_SERVER=true` while
 
 ## ⏳ Later in this plan
 
-- **Phase 3 — Standalone workers:** enable `ai-team-worker` PM2 entry; reduce
-  gateway in-process workers to 1 (the fallback); `process_task` tries mesh
-  first, falls back on failure; respect session affinity. Worker code exists but
-  has never run in prod — run it foreground first to shake out token/port/nudge
-  issues. (`STATE_SEPARATION_PLAN.md` §Phase 3.)
+- **Phase 3 — Standalone workers — PARTIAL (2026-06-10).** Worker daemon proven
+  to run end-to-end against the standalone server, locally, no paid backend:
+  `scripts/test_worker_loopback.py` drives the real `worker_main.py` +
+  `server_main.py` (temp DB/ports) → register → `task_claimed` → execute →
+  `task_result_posted` → DB terminal → SIGTERM drain. Execution failed cleanly on
+  the `CLAUDE_ALLOWED_ROOT` allowlist, proving the safety boundary holds on the
+  remote path. **"Never run in prod" risk retired.**
+  - **Remaining (needs Tailscale / 2nd machine):** the gateway only routes to a
+    worker when `session.machine_id != socket.gethostname()` (orchestrator.py:1223),
+    so single-machine a worker just idles. Real worker execution + reducing the
+    gateway pool to the 1 fallback + wiring `_dispatch_or_run_local` all land with
+    the Phase 4 two-machine cutover (`docs/PHASE_4_RUNBOOK.md`). Deferred until a
+    second node is on the tailnet. (`STATE_SEPARATION_PLAN.md` §Phase 3.)
 - **Phase 4 — Fallback + graceful degradation:** define mesh-health criteria; the
   1 embedded worker + JSON path activate only when the mesh is down; fallback can
   run recovery tasks (e.g. "restart the task server"); sync fallback-completed

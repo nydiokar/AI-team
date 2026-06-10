@@ -84,29 +84,33 @@ Progress against that plan (verified against code on 2026-06-10):
 | 0 | Prereq checks + DB trust cleanup | **DONE (2026-06-10)** — orphan tasks failed; shadow-write `create()` bug fixed; DB purged from 418→**162 real sessions** (all with task history; 256 test/empty rows removed). Remaining: operator sets real `MESH_TAILSCALE_IP` in `.env` before enabling mesh. |
 | 1 | DB as canonical read source + smart recovery | **DONE** — `session_store.get` reads DB-first; `db.get_task_by_session` exists; `_recover_stale_busy_sessions` uses DB (orchestrator.py:299) |
 | 2 | Standalone `ai-team-server` process + `TaskServerClient` in gateway | **DONE (2026-06-10)** — `server_main.py` + `TaskServerClient` + `ai-team-server` PM2 entry. `MESH_EMBEDDED_SERVER` (default off) makes standalone the norm; remote dispatch was already DB-backed so no rewrite needed. Cutover-tested; 138 tests green. |
-| 3 | Standalone `ai-team-worker` process; gateway workers → fallback | **NEXT** (worker code exists, never run in prod) |
+| 3 | Standalone `ai-team-worker` process; gateway workers → fallback | **PARTIAL** — worker daemon proven end-to-end locally (`scripts/test_worker_loopback.py`); real routing needs a 2nd machine (Tailscale), deferred to Phase 4. |
 | 4 | Graceful degradation: 1 embedded fallback worker + JSON when mesh down | **Not started** |
 
 ---
 
 ## ➡️ Immediate next step
 
-Phase 2 is done (standalone task server is the default; cutover tested). **Next
-is State Separation Phase 3 — standalone workers:**
+Phases 2 done and Phase 3 proven as far as a single machine allows (worker daemon
+runs end-to-end via `scripts/test_worker_loopback.py`). **The next real step is
+Phase 4 — the two-machine cutover — which is BLOCKED on Tailscale** (no 2nd node
+available right now). When Tailscale is back:
 
-1. Enable the `ai-team-worker` PM2 entry (`WORKER_NODE_ID`, `CONTROLLER_URL`,
-   `WORKER_BACKENDS`, `WORKER_PROJECTS_ROOT`).
-2. Reduce the gateway's in-process workers toward 1 (the fallback) — or wire
-   `_dispatch_or_run_local` (currently dead code) into `process_task` so
-   non-pinned tasks route to a capable worker, falling back to local.
-3. End-to-end test: gateway → standalone server → worker claims → result back
-   over the shared DB. Worker code exists but has **never run in prod** — run it
-   foreground first to shake out token/port/nudge issues.
+1. Follow `docs/PHASE_4_RUNBOOK.md`: retag sessions
+   (`scripts/fix_session_machine_ids.py --node-id main-pc --apply`), start
+   `ai-team-server` + gateway on the controller, start `ai-team-worker` on this
+   PC, verify a task routes machine-to-machine.
+2. That cutover also delivers the rest of Phase 3 (real worker execution, reduce
+   gateway pool to the 1 fallback, wire `_dispatch_or_run_local`).
 
-Operator actions pending before mesh runs for real:
-- Set a valid `MESH_TAILSCALE_IP` in `.env` (or blank for `127.0.0.1`).
-- Start order: `ai-team-server` first, then `ai-team-gateway`. Don't set
-  `MESH_EMBEDDED_SERVER=true` while `ai-team-server` runs (port clash).
+Until then, nothing further in the mesh split is testable here. Optional
+non-mesh work available: open roadmap live-resume validation; backend hooks
+(`docs/BACKEND_HOOKS_STRATEGY.md`).
+
+Current run mode: single-process, `MESH_EMBEDDED_SERVER=true` in `.env` keeps the
+gateway embedding the task server exactly as before. Start order when going
+split: `ai-team-server` first, then gateway; never embed while standalone runs
+(port clash on `MESH_TASK_SERVER_PORT`).
 
 Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 
