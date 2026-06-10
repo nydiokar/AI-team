@@ -413,6 +413,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         session.status = SessionStatus.AWAITING_INPUT
         session.last_result_summary = (result_dict.get("output", "") or "")[-400:] or "Task completed (recovered)"
         session.last_files_modified = result_dict.get("files_modified") or []
+        # Propagate the backend_session_id the worker established, exactly as the
+        # live dispatch path does (_dispatch_to_node). Without this the recovered
+        # session has no backend_session_id and the next turn can't resume the
+        # remote Claude session — it would silently start a fresh one.
+        recovered_bsid = result_dict.get("backend_session_id", "")
+        if recovered_bsid:
+            session.backend_session_id = recovered_bsid
         artifact_path = task_row.get("artifact_path") or ""
         if artifact_path:
             session.last_artifact_path = artifact_path
@@ -448,9 +455,19 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         if self.telegram_interface and session.telegram_chat_id:
             try:
+                # Deliver the worker's ACTUAL output, not a placeholder. The task
+                # finished on the remote node while we were restarting; the user
+                # still needs the real answer. Mirror the live completion path:
+                # reply text + changed-file list, with a short restored prefix.
+                content = self._session_reply_text(result)
+                files = result.files_modified or []
+                if files:
+                    lines = self._format_file_change_lines(result, limit=20)
+                    content = content + "\n\n**Changed files:**\n" + "\n".join(lines)
+                content = "_(recovered after a gateway restart)_\n\n" + content
                 await self.telegram_interface.notify_completion(
                     task_row["id"],
-                    "Task completed while gateway was restarting — session restored.",
+                    content,
                     success=True,
                     chat_id=session.telegram_chat_id,
                 )
