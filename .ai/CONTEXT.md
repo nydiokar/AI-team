@@ -83,7 +83,7 @@ Progress against that plan (verified against code on 2026-06-10):
 |-------|------|--------|
 | 0 | Prereq checks + DB trust cleanup | **DONE (2026-06-10)** — orphan tasks failed; shadow-write `create()` bug fixed; DB purged from 418→**162 real sessions** (all with task history; 256 test/empty rows removed). Remaining: operator sets real `MESH_TAILSCALE_IP` in `.env` before enabling mesh. |
 | 1 | DB as canonical read source + smart recovery | **DONE** — `session_store.get` reads DB-first; `db.get_task_by_session` exists; `_recover_stale_busy_sessions` uses DB (orchestrator.py:299) |
-| 2 | Standalone `ai-team-server` process + `TaskServerClient` in gateway | **Not started** |
+| 2 | Standalone `ai-team-server` process + `TaskServerClient` in gateway | **In progress** — `server_main.py`, `TaskServerClient`, disabled PM2 entry built + isolation-tested (embedded still default). Remaining: repoint dispatch/recovery off `get_registry()`, retire `embedded_server.py`, cutover. |
 | 3 | Standalone `ai-team-worker` process; gateway workers → fallback | **Not started** (worker code exists, never run in prod) |
 | 4 | Graceful degradation: 1 embedded fallback worker + JSON when mesh down | **Not started** |
 
@@ -91,18 +91,23 @@ Progress against that plan (verified against code on 2026-06-10):
 
 ## ➡️ Immediate next step
 
-Phase 0 is done. **Start State Separation Phase 2:**
+Phase 2 scaffolding is built (`server_main.py`, `TaskServerClient`, disabled PM2
+entry — all isolation-tested, embedded still default). **Next is the Phase 2
+cutover:**
 
-1. Create `ai-team-server` PM2 entry + a thin `server_main.py` (uvicorn on
-   `task_server:app`).
-2. Add a `TaskServerClient` in the gateway (stdlib `urllib`, Bearer
-   `WORKER_TOKEN`): `enqueue_task`, `get_task_status`, `get_health`, `list_nodes`.
-3. Repoint `_dispatch_to_node` / recovery / health from the in-process
-   `get_registry()` singleton to `TaskServerClient` (short-TTL node cache).
-4. Retire `src/control/embedded_server.py` and its start/stop wiring.
+1. Repoint `_process_task_remote` / `_dispatch_to_node` / recovery / health off
+   the in-process `get_registry()` singleton onto `TaskServerClient`.
+2. Retire `src/control/embedded_server.py` + its `_start/_stop` wiring.
+3. Cutover test **with the gateway stopped** (deliberate, together): start
+   `ai-team-server`, restart gateway, verify discovery + dispatch over HTTP.
 
-(One operator action still pending before mesh can be enabled: set a real
-`MESH_TAILSCALE_IP` in `.env` — it was parsed as a literal comment string.)
+Constraints while the live gateway runs: no `pm2 restart`, no migrations/DB
+surgery against prod `state/mesh.db`, no starting `ai-team-server` (would clash
+on `:9002`). Test mesh processes via `AI_TEAM_ENV_FILE`=temp env + spare port +
+temp `MESH_DB_PATH`.
+
+(Operator action still pending before mesh is enabled for real: set a valid
+`MESH_TAILSCALE_IP` in `.env`, or blank it for `127.0.0.1`.)
 
 Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 
