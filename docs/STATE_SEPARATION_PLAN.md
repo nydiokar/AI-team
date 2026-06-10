@@ -1,6 +1,11 @@
 # State Separation & Mesh Migration Plan
 
-> **Status:** Draft — review before implementing
+> **Status:** ACTIVE — plan of record (supersedes the standalone "VPS migration
+> Phase 4"). VPS cutover is the end-state of Phases 2–3; runbook in
+> `docs/PHASE_4_RUNBOOK.md`.
+> **Progress (2026-06-10):** Phase 0 partly done (2 orphan tasks + DB/JSON count
+> mismatch outstanding); **Phase 1 DONE** (DB-first reads + DB-aware recovery
+> already in code); Phases 2–4 not started.
 > **Target:** Three-process architecture with clear state boundaries and a management-plane fallback
 
 ---
