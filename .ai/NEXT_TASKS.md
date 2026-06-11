@@ -28,7 +28,7 @@ machines). The operational cutover steps, when we get there, are in
 | 3 | Standalone worker; machine-to-machine dispatch; gateway-restart resilience | ✅ DONE (live on 2 machines 2026-06-11) |
 | 4 | Graceful degradation / fallback (server runs work when no nodes) | ⛔ NOT STARTED — last plan piece |
 | T1 | CI/CD: auto-deploy `main` to the server | ⛔ NOT STARTED — standalone |
-| T2 | Fix truncated Telegram output (long results) | ⛔ NOT STARTED — standalone |
+| T2 | Fix truncated Telegram output (long results) | ✅ DONE (2026-06-11) |
 | T3 | Watched jobs: notify on long-script completion | ⛔ NOT STARTED — standalone |
 
 **The mesh is LIVE.** Gateway + embedded task server on the **Pi5 (`kanebra`)**;
@@ -176,7 +176,25 @@ never run the paid Claude CLI from tests (see banner above).**
   auto-update, or only the server? (Recommend: server auto-updates; worker nodes
   update on their own cadence to avoid mid-task restarts.)
 
-### T2 — Fix truncated Telegram output (long results cut to one message)
+### T2 — Fix truncated Telegram output — ✅ DONE (2026-06-11)
+- **Fix shipped:** removed the worker-side hard `[:4000]` cap on `output` in
+  `src/worker/agent.py` (both the `ExecutionResult` and legacy branches),
+  replaced with `_bound_output()` — a large, configurable DB-sanity bound
+  (`WORKER_MAX_OUTPUT_CHARS`, default 500k; `0` = unbounded) that **labels** any
+  truncation instead of silently dropping content. The full output now reaches
+  the DB; the existing Telegram `_split_message` chunks it for delivery.
+- **Also fixed (artifact path):** `_dispatch_to_node` in `src/orchestrator.py`
+  built the remote `TaskResult` with only `output` set, leaving `raw_stdout`
+  empty — and `_write_artifacts` persists `raw_stdout`, so the artifact JSON's
+  stdout field was blank for every mesh task. Now mirrors `output → raw_stdout`
+  so `results/<task_id>.json` carries the full remote result (acceptance req).
+- **Tests:** `tests/test_output_truncation.py` (6 tests, fake backend, cost-guarded):
+  worker passes full output through, configurable bound labels truncation, `0`
+  disables it, splitter produces multiple lossless chunks, end-to-end worker→split.
+  Full suite: 144 passed, 13 skipped, 0 failures.
+
+<details><summary>Original task spec (for reference)</summary>
+
 - **Symptom:** a long task result arrives as a single Telegram message cut off at
   the end, with no continuation — the remainder is lost, not sent as follow-up
   messages.
@@ -203,6 +221,8 @@ never run the paid Claude CLI from tests (see banner above).**
   present in `results/<task_id>.json` and the DB result. Add a test that feeds a
   long output through the worker→DB→notify path with a fake backend and asserts no
   truncation + correct multi-chunk split (no paid CLI).
+
+</details>
 
 ---
 
