@@ -27,7 +27,7 @@ machines). The operational cutover steps, when we get there, are in
 | 2 | Standalone task server + `TaskServerClient` | ✅ DONE |
 | 3 | Standalone worker; machine-to-machine dispatch; gateway-restart resilience | ✅ DONE (live on 2 machines 2026-06-11) |
 | 4 | Graceful degradation / fallback (server runs work when no nodes) | ⛔ NOT STARTED — last plan piece |
-| T1 | CI/CD: auto-deploy `main` to the server | ⛔ NOT STARTED — standalone |
+| T1 | CI/CD: auto-deploy `main` to the server | ✅ DONE (2026-06-11) — enable on Pi5 |
 | T2 | Fix truncated Telegram output (long results) | ✅ DONE (2026-06-11) |
 | T3 | Watched jobs: notify on long-script completion | ⛔ NOT STARTED — standalone |
 | T4 | Reclaim in-flight tasks dropped by a worker restart | ⛔ NOT STARTED — **resilience gap, hit live 2026-06-11** |
@@ -144,7 +144,23 @@ never run the paid Claude CLI from tests (see banner above).**
 
 ## ▶ Standalone tasks (independent of Phase 4 — dispatch any time)
 
-### T1 — CI/CD: auto-deploy `main` to the server
+### T1 — CI/CD: auto-deploy `main` to the server — ✅ DONE (2026-06-11)
+- **Shipped:** pull-based poller `scripts/auto_deploy.sh` + `ai-team-deploy` PM2
+  entry (cron_restart `*/2 * * * *`, disabled by default). Chose pull-based over
+  GitHub Actions→SSH because the Pi5 is behind home NAT (user did not want CI in
+  the tailnet). Flow: `git fetch` → ff-only → `pm2 reload ai-team-gateway` →
+  poll `/health` (60s) → **roll back + exit non-zero on health failure**.
+  Docs-only pushes fast-forward but skip the reload. Refuses any branch but
+  `main`; single-flight lock; exports `AI_TEAM_TEST_MODE`.
+- **SCOPE — gateway host ONLY.** Not enabled on worker boxes: auto-restarting a
+  worker mid-task drops its claim (the **T4** bug). Revisit workers after T4.
+- **Operator step (one-time, on the Pi5):** `pm2 start ecosystem.config.js
+  --only ai-team-deploy && pm2 save`. Docs: `docs/OPERATIONS_PM2.md` §Auto-Deploy.
+- **NOT yet activated** — the PM2 entry must be started on the Pi5 by an operator
+  (or the server agent). Until then, deploys remain manual.
+
+<details><summary>Original task spec (for reference)</summary>
+
 - **Why:** the codebase is worked on from multiple machines (e.g. `Horse`) but the
   gateway runs on the **server (Pi5 `kanebra`)**. Today a change only lands after a
   manual `git pull` + gateway restart on the Pi5 — and forgetting that step has
@@ -176,6 +192,8 @@ never run the paid Claude CLI from tests (see banner above).**
   `docs/OPERATIONS_PM2.md`. Decide & note: does the worker on `Horse` also
   auto-update, or only the server? (Recommend: server auto-updates; worker nodes
   update on their own cadence to avoid mid-task restarts.)
+
+</details>
 
 ### T2 — Fix truncated Telegram output — ✅ DONE (2026-06-11)
 - **Fix shipped:** removed the worker-side hard `[:4000]` cap on `output` in

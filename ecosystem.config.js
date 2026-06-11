@@ -124,5 +124,44 @@ module.exports = {
       merge_logs: true,
       time: true,
     },
+
+    // ---------------------------------------------------------------
+    // Auto-deploy poller (T1 — gateway/server host ONLY, disabled by default)
+    //
+    // Pull-based CI: polls origin/main and self-deploys on the box it runs on.
+    // Chosen over GitHub Actions -> SSH because the Pi5 is behind home NAT and
+    // we don't want CI reaching into the tailnet / inbound SSH. PM2 owns the
+    // schedule via cron_restart (run, exit, re-run) — no systemd timer needed.
+    //
+    // SCOPE: enable on the GATEWAY host ONLY. Do NOT enable on worker boxes —
+    // auto-restarting a worker mid-task drops its in-flight claim (the T4 bug).
+    //
+    // Enable on the Pi5:  pm2 start ecosystem.config.js --only ai-team-deploy
+    // Script: scripts/auto_deploy.sh  (git fetch -> ff-only -> pm2 reload ->
+    //   /health gate -> rollback on failure). Linux/bash only.
+    // Tunables via env (see the script header): DEPLOY_PM2_APPS,
+    //   DEPLOY_HEALTH_URL, DEPLOY_HEALTH_TIMEOUT, DEPLOY_BRANCH.
+    // ---------------------------------------------------------------
+    {
+      name: "ai-team-deploy",
+      cwd: __dirname,
+      script: path.join(__dirname, "scripts", "auto_deploy.sh"),
+      interpreter: "bash",
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: false,      // not a daemon — it runs once and exits
+      cron_restart: "*/2 * * * *",  // re-run every 2 minutes
+      watch: false,
+      env: {
+        AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
+        DEPLOY_PM2_APPS: "ai-team-gateway",
+        DEPLOY_HEALTH_URL: "http://127.0.0.1:9002/health",
+        DEPLOY_HEALTH_TIMEOUT: "60",
+      },
+      out_file: path.join(__dirname, "logs", "pm2-deploy-out.log"),
+      error_file: path.join(__dirname, "logs", "pm2-deploy-error.log"),
+      merge_logs: true,
+      time: true,
+    },
   ],
 };
