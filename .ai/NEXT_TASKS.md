@@ -30,6 +30,7 @@ machines). The operational cutover steps, when we get there, are in
 | T1 | CI/CD: auto-deploy `main` to the server | ⛔ NOT STARTED — standalone |
 | T2 | Fix truncated Telegram output (long results) | ✅ DONE (2026-06-11) |
 | T3 | Watched jobs: notify on long-script completion | ⛔ NOT STARTED — standalone |
+| T4 | Reclaim in-flight tasks dropped by a worker restart | ⛔ NOT STARTED — **resilience gap, hit live 2026-06-11** |
 
 **The mesh is LIVE.** Gateway + embedded task server on the **Pi5 (`kanebra`)**;
 worker daemon on **`Horse`**. Tasks dispatch machine-to-machine and survive a
@@ -268,6 +269,99 @@ never run the paid Claude CLI from tests (see banner above).**
   reconciles `running` jobs; no `mesh_tasks` row ever created for a job. All tests
   honor the **test cost guard** — watched-job tests use trivial real processes
   (`sleep`, exit-N scripts), never a paid backend.
+
+---
+
+### T4 — Reclaim in-flight tasks dropped by a worker restart
+
+#### What happened (live incident, 2026-06-11)
+A task (`task_94d78ff9`, session `2ba1b4aee6d2`) was **claimed** by the `Horse`
+worker at 17:44:41 local. ~28s later the worker process was **restarted**
+(`pm2 restart ai-team-worker` — PM2 `created at 14:45:09.965Z`, `restarts: 1`,
+**`unstable restarts: 0`** → a clean commanded restart, NOT a crash; the error
+log is empty, no traceback). The user reached the box only via the gateway and
+did not run it; the restart was issued from the agent session immediately after
+a `git merge`, and the agent then lost context — so the agent restarted the
+worker without retaining that it had. Either way the *mechanism* is what matters,
+not who pressed the button.
+
+**Result:** the gateway showed `❌ Task failed: Dispatch timeout: no worker
+picked up the task within 600s`. That terminal message is **correct given the
+state** — but the underlying state was wrong: the task sat `claimed` by a worker
+that was no longer running it, and nothing ever freed it.
+
+#### Root cause (traced in code)
+- `_handle_task` (`src/worker/agent.py:407`) claims, then `await _execute_task`
+  (line 435). A restart kills the process mid-execute.
+- On **Windows, `pm2 restart` is effectively a hard kill** — the graceful drain
+  (`run()` lines 487-494: wait 30s, then `t.cancel()`) does not run. The
+  in-flight coroutine just dies.
+- Even the graceful path only does `t.cancel()` locally — it **never tells the
+  server the task was abandoned**. The DB row stays `status='claimed',
+  claimed_by='Horse'`.
+- **There is no reaper.** `claim_task` (`src/control/db.py:404`) only does
+  `pending → claimed`; `claimed_at` is written (db.py:106/412) but **never read**
+  for staleness. So an orphaned claim is never reset to `pending`.
+- The gateway poll (`_dispatch_to_node`, `src/orchestrator.py:2469`) only reacts
+  to `completed`/`failed`/`failed_node_offline`. A stuck `claimed` row is invisible
+  to it, so it waits the full `oneoff_queue_timeout_sec` (600s) and then
+  `fail_task`s — the symptom the user saw.
+
+> **The undesired state = a `claimed` `mesh_tasks` row whose `claimed_by` worker
+> is no longer executing it, with nothing to detect or recover it.** This is the
+> worker-side analogue of the *gateway*-restart resilience already shipped in
+> Phase 3 (detach/reattach) — that work covered the gateway bouncing, NOT the
+> worker bouncing. This is the missing half.
+
+#### Fix (design — agreed with the user)
+Make a dropped claim **reclaimable** instead of dead:
+1. **Worker releases its claims on shutdown (best-effort, fast path).** In the
+   drain path (and a `SIGTERM`/`atexit`/`KeyboardInterrupt` hook), for each task
+   still in `self._active`, POST a new **`/tasks/{id}/release`** (or reuse a
+   "requeue" endpoint) that sets the row back to `status='pending', claimed_by=NULL`
+   so another worker (or the restarted one) can re-claim immediately. Must be
+   quick + best-effort — a hard kill may skip it, which is why step 2 exists.
+2. **Server-side stale-claim reaper (authoritative safety net, covers hard kill).**
+   A periodic sweep (task server loop, or piggy-backed on heartbeat handling):
+   any row `status='claimed'` whose `claimed_by` node is **offline** (missed
+   heartbeats) **OR** whose `claimed_at` is older than a `claim_lease_sec`
+   threshold with no progress → reset to `pending` (or `failed_node_offline` if it
+   should not be retried). This is the real fix; the worker-side release is just a
+   fast path. Mirrors the gateway's `_recover_stale_busy_sessions` posture.
+3. **Idempotency / double-execution guard.** If a slow worker finishes a task
+   that was already requeued + re-run elsewhere, the late `POST /result` must not
+   clobber a newer terminal state. Gate `submit_result` on `claimed_by ==
+   payload.node_id` (already partially there, `task_server.py:311`) AND only
+   accept results for non-terminal rows; drop/ignore stale posts.
+4. **(Optional) shorten the user-visible failure.** Once the reaper frees stale
+   claims promptly, a worker that bounces no longer costs the full 600s — the
+   freed task is re-dispatched in seconds. Consider lowering the 600s only after
+   the reaper exists.
+
+#### Where to look
+- `src/worker/agent.py` — `_handle_task` (claim/execute), `run()` drain
+  (lines 487-498), `_on_sigterm` (502); add the release-on-shutdown + a Windows
+  shutdown hook (PM2 hard-kills on Windows — verify SIGTERM even fires).
+- `src/control/db.py` — `claim_task` (404), `claimed_at` (106); add
+  `release_task`/`requeue_task` + a `list_stale_claims(lease_sec)` query.
+- `src/control/task_server.py` — `/tasks/{id}/claim`, `submit_result` auth gate
+  (311); add `/tasks/{id}/release`; run the reaper loop (or expose a sweep the
+  gateway calls).
+- `src/orchestrator.py` — `_dispatch_to_node` (2469) poll: optionally treat a
+  requeued task transparently; `_recover_stale_busy_sessions` (~299) as the
+  pattern to mirror.
+
+#### Acceptance
+- A worker that is **hard-killed** mid-task (simulate: kill the process, do not
+  send SIGTERM) leaves a `claimed` row that the **reaper** resets to `pending`
+  within `claim_lease_sec`, and another worker re-claims + completes it — no 600s
+  timeout, task succeeds.
+- A worker that is **gracefully** stopped releases its in-flight claim
+  immediately (faster than the lease) and it is re-claimed.
+- A late `POST /result` from a superseded worker does **not** overwrite a newer
+  terminal result (idempotency test).
+- All tests honor the **test cost guard** — use a fake/trivial backend, never the
+  paid Claude CLI. (See `tests/conftest.py`; mirror `test_task_server_client.py`.)
 
 ---
 
