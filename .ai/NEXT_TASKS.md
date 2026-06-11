@@ -29,6 +29,7 @@ machines). The operational cutover steps, when we get there, are in
 | 4 | Graceful degradation / fallback (server runs work when no nodes) | ⛔ NOT STARTED — last plan piece |
 | T1 | CI/CD: auto-deploy `main` to the server | ⛔ NOT STARTED — standalone |
 | T2 | Fix truncated Telegram output (long results) | ⛔ NOT STARTED — standalone |
+| T3 | Watched jobs: notify on long-script completion | ⛔ NOT STARTED — standalone |
 
 **The mesh is LIVE.** Gateway + embedded task server on the **Pi5 (`kanebra`)**;
 worker daemon on **`Horse`**. Tasks dispatch machine-to-machine and survive a
@@ -202,6 +203,51 @@ never run the paid Claude CLI from tests (see banner above).**
   present in `results/<task_id>.json` and the DB result. Add a test that feeds a
   long output through the worker→DB→notify path with a fake backend and asserts no
   truncation + correct multi-chunk split (no paid CLI).
+
+---
+
+### T3 — Watched jobs: notify Telegram when a long-running script finishes
+- **Symptom / why:** an agent on a worker (e.g. `Horse`) starts a long-running,
+  often **detached** script and reports "it's running" — the task turn ends and
+  the script then runs owned by nobody. When it finishes/fails, **nobody is
+  subscribed**, so the user is never told. The gateway already does a server-
+  initiated push on task completion (`_session_reply_text` →
+  `app.bot.send_message`); we reuse that channel — this is **not** a new reverse
+  portal.
+- **The trap to avoid:** do **NOT** model the script as a `mesh_tasks` row. A task
+  that stays `claimed` for hours pins a `max_concurrent` slot, keeps the session
+  `BUSY`, and feeds the stale-busy reattach loop a task that won't terminate.
+  That's a real state-management bug. Watched jobs are a **separate first-class
+  entity** (`jobs` table), orthogonal to the task/session lifecycle.
+- **The other trap:** do **NOT** auto-notify on every script an agent runs — that
+  spams the user on every `npm test`/`ls`. Watching is **opt-in / explicit
+  registration only**; default is silent. Detection is by **observing the
+  process** (PID/pgid exit), not by trusting the script to call back. No open
+  `POST /notify` endpoint for arbitrary processes (that's the portal).
+- **What to build:** a `jobs` table (next migration in `src/control/db.py` —
+  leave `mesh_tasks` untouched) + a `_job_watcher_loop` on the worker (sibling of
+  `_poll_loop`/`_heartbeat_loop`) that spawns detached, reaps by observation, and
+  POSTs completion; `/jobs` endpoints on the task server (same Bearer auth); an
+  orchestrator branch that turns a terminal `jobs` row into a Telegram push; a
+  `/jobs` Telegram command for visibility. Optional: `notify_agent` to auto-
+  dispatch a follow-up `resume_session` task on completion. The `jobs` table
+  doubles as the seed of the future dashboard.
+- **Blast radius:** medium new machinery, **low** interference (jobs never touch
+  the semaphore / session-BUSY / reattach loop), lowest future-fuckup surface of
+  the options considered.
+- **Full spec (goals, explicit no-goals/anti-solutions, schema, build order,
+  acceptance):** `docs/WATCHED_JOBS_SPEC.md`. Build in the 6 independently-
+  shippable steps in §9.
+- **Where to look:** `src/control/db.py` (`_get_migrations`/`_CURRENT_VERSION`),
+  `src/worker/agent.py` (`run()` loop registration), `src/control/task_server.py`,
+  `src/orchestrator.py` (`_session_reply_text` push path), `src/telegram/
+  interface.py`.
+- **Acceptance:** unwatched script → zero notifications; registered job → exactly
+  one Telegram message (label, status, exit code, log tail) on terminal; while a
+  job runs, task slots stay free and the session is not `BUSY`; worker restart
+  reconciles `running` jobs; no `mesh_tasks` row ever created for a job. All tests
+  honor the **test cost guard** — watched-job tests use trivial real processes
+  (`sleep`, exit-N scripts), never a paid backend.
 
 ---
 
