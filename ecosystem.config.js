@@ -154,7 +154,10 @@ module.exports = {
       watch: false,
       env: {
         AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
-        DEPLOY_PM2_APPS: "ai-team-gateway",
+        // Deploy gateway + standalone task server together (live split runs
+        // MESH_EMBEDDED_SERVER=false, so ai-team-server owns :9002). Apps not
+        // present on this host are skipped automatically by the script.
+        DEPLOY_PM2_APPS: "ai-team-gateway ai-team-server",
         DEPLOY_HEALTH_URL: "http://127.0.0.1:9002/health",
         DEPLOY_HEALTH_TIMEOUT: "60",
       },

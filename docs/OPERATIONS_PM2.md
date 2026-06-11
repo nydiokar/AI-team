@@ -98,14 +98,25 @@ home NAT and we don't want CI reaching into the tailnet.
 as a `cron_restart` job (runs, exits, re-runs every 2 min). Each run:
 
 1. `git fetch`; if `origin/main` == local HEAD → quiet exit (no-op).
-2. Fast-forward only (never merge/rewrite); refuses if HEAD isn't `main` or has
+2. **Poison guard:** refuse to redeploy a commit that already failed the health
+   gate (recorded in `.deploy.poison`) — prevents an every-2-min redeploy loop on
+   a bad commit. Push a fix to clear it.
+3. Fast-forward only (never merge/rewrite); refuses if HEAD isn't `main` or has
    diverged.
-3. `pm2 reload ai-team-gateway` (reload, not restart). **Docs-only pushes**
-   (`docs/`, `.ai/`, `*.md`) fast-forward but skip the reload.
-4. **Health gate:** poll `http://127.0.0.1:9002/health` until `status: ok` or
-   60s timeout.
-5. **On health failure → roll back** to the previous commit, reload again, and
-   exit non-zero (loud). A bad commit never leaves the gateway down silently.
+4. Restart the target apps — **`ai-team-gateway` + `ai-team-server`** by default
+   (the live split runs the task server standalone on :9002). Apps not present on
+   this host are skipped. **Docs-only pushes** (`docs/`, `.ai/`, `*.md`)
+   fast-forward but skip the restart. (These apps run in PM2 *fork* mode, where
+   `reload` is not zero-downtime, so we `restart` plainly — expect a brief blip.)
+5. **Health gate (authoritative = PM2 process status):** every restarted app must
+   reach `online` and *stay* online for a stability window without its PM2 restart
+   counter climbing (catches a crash-loop on bad code). Additionally, if
+   `ai-team-server` is running, the `:9002/health` HTTP endpoint must report
+   `status: ok`. The HTTP check alone is **not** trusted — it only proves the task
+   server is up, not that the gateway came back.
+6. **On health failure → roll back** to the previous commit, restart again, record
+   the bad SHA in `.deploy.poison`, and exit non-zero (loud). A bad commit never
+   leaves the gateway down silently or loops.
 
 **Enable on the Pi5 (only there):**
 
