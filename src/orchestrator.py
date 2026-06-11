@@ -2498,15 +2498,21 @@ Generated from user description: {description}
                     if session and new_bsid:
                         session.backend_session_id = new_bsid
                         self.session_store.save(session)
+                    worker_output = r.get("output", "")
                     result = TaskResult(
                         task_id=task.id,
                         success=r.get("success", True),
-                        output=r.get("output", ""),
+                        output=worker_output,
                         errors=r.get("errors") or [],
                         files_modified=r.get("files_modified") or [],
                         execution_time=r.get("execution_time", 0.0),
                         timestamp=r.get("timestamp", datetime.now().isoformat()),
                         return_code=r.get("return_code", 0),
+                        # The worker only ships `output` over the wire; mirror it
+                        # into raw_stdout so the artifact JSON (which persists
+                        # raw_stdout, not output) captures the full remote result
+                        # rather than an empty field (T2).
+                        raw_stdout=worker_output,
                     )
                     setattr(result, "backend_name", row.get("backend", "claude"))
                     return result

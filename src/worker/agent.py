@@ -19,6 +19,7 @@ Run locally (no Tailscale required):
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -30,6 +31,27 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Safety bound on the output we store in the DB result, NOT a content-truncation
+# knob. The old hard `[:4000]` cap silently lost the tail of long results before
+# they ever reached the gateway, so the Telegram splitter had nothing to chunk
+# (T2). We keep a large bound only so a runaway backend can't write hundreds of
+# MB into a single DB row; the gateway's `_split_message` chunks the rest for
+# delivery. Configurable via WORKER_MAX_OUTPUT_CHARS (0 / negative = unbounded).
+def _max_output_chars() -> int:
+    try:
+        return int(os.getenv("WORKER_MAX_OUTPUT_CHARS") or 500_000)
+    except ValueError:
+        return 500_000
+
+
+def _bound_output(text: str) -> str:
+    """Apply the DB-sanity safety bound, marking the truncation when it bites."""
+    limit = _max_output_chars()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    marker = f"\n\n[...output truncated at {limit} chars by WORKER_MAX_OUTPUT_CHARS]"
+    return text[:limit] + marker
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +221,7 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any]) -> D
         if isinstance(raw, _ER):
             return {
                 "success": raw.success,
-                "output": (raw.output or "")[:4000],
+                "output": _bound_output(raw.output or ""),
                 "errors": list(raw.errors or []),
                 "files_modified": list(raw.files_modified or []),
                 "execution_time": elapsed,
@@ -210,7 +232,7 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any]) -> D
         # Fallback for legacy return types
         return {
             "success": True,
-            "output": str(raw)[:4000],
+            "output": _bound_output(str(raw)),
             "errors": [],
             "files_modified": [],
             "execution_time": elapsed,
