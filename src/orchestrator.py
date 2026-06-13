@@ -483,8 +483,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         Telegram — never a fabricated one. This is the startup half of the
         detach/reattach handoff (the shutdown half lives in _dispatch_to_node).
 
-        Bounded by the same oneoff_queue_timeout so a worker that died without
-        writing a result doesn't leave the session BUSY forever.
+        Pending pickup is bounded by the same oneoff_queue_timeout. Once the
+        worker has claimed the row, that queue timeout no longer applies.
         """
         import asyncio as _aio
         from src.control.db import get_db
@@ -494,11 +494,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         if db is None or not task_id:
             return
 
-        timeout_sec = getattr(config.mesh, "oneoff_queue_timeout_sec", 600)
-        deadline = time.time() + timeout_sec
+        pickup_timeout_sec = getattr(config.mesh, "oneoff_queue_timeout_sec", 600)
+        pickup_deadline = time.time() + pickup_timeout_sec
         poll_interval = 3.0
 
-        while time.time() < deadline:
+        while True:
             if not self.running:
                 # Gateway is shutting down again; detach quietly. The next
                 # startup will reattach from the still-claimed DB row.
@@ -541,7 +541,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                     except Exception as e:
                         logger.warning(f"Failed to notify reattached failed session: {e}")
                 return
-            # still pending/claimed — worker is running; keep waiting.
+            if status != "claimed" and time.time() >= pickup_deadline:
+                break
+            # still pending/claimed before pickup timeout, or claimed execution
+            # after pickup — keep waiting for the worker's terminal state.
             await _aio.sleep(poll_interval)
 
         # Timed out waiting for a terminal state. Don't fabricate a result —
@@ -2435,8 +2438,9 @@ Generated from user description: {description}
         """Enqueue task on the DB as pending (it is already enqueued by _mesh_enqueue_task).
 
         Then poll the DB until it reaches completed/failed status, up to
-        `mesh.oneoff_queue_timeout_sec` seconds.  The worker daemon claims and
-        executes it independently; we just wait here and return the result.
+        `mesh.oneoff_queue_timeout_sec` seconds. Once a worker claims it, the
+        queue timeout no longer applies; the worker owns execution and we wait
+        for the terminal DB state.
 
         The session dict is embedded in the payload by _mesh_enqueue_task so
         the worker can reconstruct the Session object.
@@ -2461,12 +2465,12 @@ Generated from user description: {description}
             setattr(result, "backend_name", self._resolve_task_backend(task))
             return result
 
-        timeout_sec = getattr(config.mesh, "oneoff_queue_timeout_sec", 600)
-        deadline = time.time() + timeout_sec
+        pickup_timeout_sec = getattr(config.mesh, "oneoff_queue_timeout_sec", 600)
+        pickup_deadline = time.time() + pickup_timeout_sec
         poll_interval = 3.0
         first_poll = True
 
-        while time.time() < deadline:
+        while True:
             row = db.get_task(task.id)
             if row is None and first_poll:
                 # Row not found on the very first poll — _mesh_enqueue_task
@@ -2531,6 +2535,36 @@ Generated from user description: {description}
                     setattr(result, "backend_name", row.get("backend", "claude"))
                     return result
 
+                if status != "claimed" and time.time() >= pickup_deadline:
+                    db.fail_task(task.id, f"dispatch timeout after {pickup_timeout_sec}s waiting for worker")
+                    result = TaskResult(
+                        task_id=task.id,
+                        success=False,
+                        output="",
+                        errors=[f"Dispatch timeout: no worker picked up the task within {pickup_timeout_sec}s"],
+                        files_modified=[],
+                        execution_time=pickup_timeout_sec,
+                        timestamp=datetime.now().isoformat(),
+                    )
+                    setattr(result, "backend_name", self._resolve_task_backend(task))
+                    return result
+
+                # status == claimed: a worker has picked up the task. Do not
+                # apply the pickup timeout to execution time; wait for the
+                # worker's real completed/failed state or an offline update.
+            elif time.time() >= pickup_deadline:
+                result = TaskResult(
+                    task_id=task.id,
+                    success=False,
+                    output="",
+                    errors=["Task row disappeared from DB while waiting for worker pickup"],
+                    files_modified=[],
+                    execution_time=pickup_timeout_sec,
+                    timestamp=datetime.now().isoformat(),
+                )
+                setattr(result, "backend_name", self._resolve_task_backend(task))
+                return result
+
             # Check for cancellation
             cancel_ev = self._task_cancel_events.get(task.id)
             if cancel_ev and cancel_ev.is_set():
@@ -2560,19 +2594,6 @@ Generated from user description: {description}
                 return result
 
             await _aio.sleep(poll_interval)
-
-        db.fail_task(task.id, f"dispatch timeout after {timeout_sec}s waiting for worker")
-        result = TaskResult(
-            task_id=task.id,
-            success=False,
-            output="",
-            errors=[f"Dispatch timeout: no worker picked up the task within {timeout_sec}s"],
-            files_modified=[],
-            execution_time=timeout_sec,
-            timestamp=datetime.now().isoformat(),
-        )
-        setattr(result, "backend_name", self._resolve_task_backend(task))
-        return result
 
     async def _dispatch_or_run_local(
         self,

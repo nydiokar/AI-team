@@ -38,6 +38,7 @@ from src.control.db import MeshDB
 from src.core.interfaces import (
     Session, SessionStatus, Task, TaskType, TaskPriority, TaskStatus, TaskResult
 )
+from config import config
 
 db = MeshDB(str(TEST_DB))
 HOST = socket.gethostname()
@@ -231,6 +232,67 @@ check("_dispatch_to_node files_modified propagated", result_d.files_modified == 
 check("backend_session_id applied to session object",
       sess_d.backend_session_id == NEW_BSID2, f"got {sess_d.backend_session_id!r}")
 check("session_store.save called with new bsid", NEW_BSID2 in saves_d, f"saves={saves_d}")
+
+# ---------------------------------------------------------------------------
+# 4b. Claimed task is not failed by pickup timeout
+# ---------------------------------------------------------------------------
+NEW_BSID_CLAIMED = "claude-conv-claimed-late"
+enqueue("task_claimed_late", "sess_claimed_late", machine_id="remote-worker-01")
+db.claim_task("task_claimed_late", "remote-worker-01")
+
+async def test_claimed_task_outlives_pickup_timeout():
+    fake_session = make_session("sess_claimed_late", machine_id="remote-worker-01")
+    saves = []
+    sleep_calls = {"count": 0}
+
+    class StubStore:
+        def get(self, sid): return fake_session
+        def save(self, s): saves.append(s.backend_session_id)
+
+    class MinimalOrch:
+        session_store = StubStore()
+        _task_cancel_events = {}
+        def _resolve_task_backend(self, t): return "claude"
+
+    async def complete_on_sleep(delay):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] == 1:
+            db.complete_task("task_claimed_late", {
+                "success": True,
+                "output": "Task finished after pickup timeout.",
+                "errors": [],
+                "files_modified": [],
+                "execution_time": 601.0,
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "return_code": 0,
+                "backend_session_id": NEW_BSID_CLAIMED,
+            }, artifact_path=None)
+
+    orch = MinimalOrch()
+    from src.orchestrator import TaskOrchestrator
+    bound = TaskOrchestrator._dispatch_to_node.__get__(orch, type(orch))
+    task = make_task("task_claimed_late", session_id="sess_claimed_late")
+
+    old_timeout = config.mesh.oneoff_queue_timeout_sec
+    config.mesh.oneoff_queue_timeout_sec = 0
+    try:
+        with patch("src.control.db.get_db", return_value=db), patch("asyncio.sleep", complete_on_sleep):
+            result = await bound(task, fake_session, node=None)
+    finally:
+        config.mesh.oneoff_queue_timeout_sec = old_timeout
+
+    return result, saves, fake_session
+
+result_claimed, saves_claimed, sess_claimed = asyncio.run(test_claimed_task_outlives_pickup_timeout())
+check("claimed task outlives pickup timeout -> returns success", result_claimed.success is True)
+check("claimed task output returned",
+      result_claimed.output == "Task finished after pickup timeout.")
+check("claimed task backend_session_id propagated",
+      sess_claimed.backend_session_id == NEW_BSID_CLAIMED,
+      f"got {sess_claimed.backend_session_id!r}")
+check("claimed task was not overwritten as failed",
+      db.get_task("task_claimed_late").get("status") == "completed",
+      f"status={db.get_task('task_claimed_late').get('status')!r}")
 
 # ---------------------------------------------------------------------------
 # 5. DB unavailable -> fail loudly, no local fallback
