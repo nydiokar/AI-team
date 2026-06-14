@@ -98,6 +98,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._artifact_index_path = Path(config.system.results_dir) / "index.json"
         # Lazy-initialized context loader (simple functional helper encapsulated here)
         self._context_loader = None
+        # Job completion polling (T3)
+        self._last_job_poll = datetime.now().isoformat()
         # Cancellation and runtime tracking
         self._task_cancel_events: Dict[str, asyncio.Event] = {}
         self._running_exec_tasks: Dict[str, asyncio.Task] = {}
@@ -570,6 +572,67 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception as e:
                 logger.warning(f"Failed to notify reattach timeout: {e}")
 
+    async def _job_completion_poller(self) -> None:
+        """Poll for terminal watched jobs and push Telegram notifications.
+
+        Runs as a background task during the gateway's lifetime. Checks every
+        30s for jobs that reached terminal state since the last poll.
+        """
+        while self.running:
+            try:
+                from src.control.db import get_db
+                db = get_db()
+                if db is None:
+                    await asyncio.sleep(30)
+                    continue
+
+                terminal = db.get_terminal_jobs_since(self._last_job_poll)
+                if terminal:
+                    self._last_job_poll = datetime.now().isoformat()
+
+                for job in terminal:
+                    if not job.get("notify"):
+                        continue
+                    session_id = job.get("session_id")
+                    if not session_id or not self.telegram_interface:
+                        continue
+
+                    session = self.session_store.get(session_id)
+                    if not session:
+                        continue
+                    chat_id = getattr(session, "telegram_chat_id", None)
+                    if not chat_id:
+                        continue
+
+                    label = job.get("label", job.get("id", "unknown"))
+                    status = job.get("status", "done")
+                    exit_code = job.get("exit_code")
+                    tail = job.get("tail", "")
+
+                    status_icon = "✅" if status == "done" else ("❌" if status == "failed" else "⚠️")
+                    lines = [
+                        f"{status_icon} Job **{label}** {status}",
+                    ]
+                    if exit_code is not None:
+                        lines.append(f"Exit code: `{exit_code}`")
+                    if tail:
+                        lines.append(f"\n```\n{tail[-1500:]}\n```")
+
+                    summary = "\n".join(lines)
+                    await self.telegram_interface.notify_completion(
+                        job.get("id", ""),
+                        summary,
+                        success=(status == "done"),
+                        chat_id=chat_id,
+                    )
+            except Exception as e:
+                logger.debug("event=job_poller_error err=%s", e)
+
+            try:
+                await asyncio.wait_for(asyncio.sleep(30), timeout=30)
+            except asyncio.TimeoutError:
+                pass
+
     @staticmethod
     def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:
         changes = list(getattr(result, "file_changes", None) or [])
@@ -662,7 +725,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self.stop()
                 raise
         await self._recover_stale_busy_sessions()
-        
+
+        # Start the job completion poller (T3 — Watched Jobs)
+        asyncio.create_task(self._job_completion_poller())
+
         # Log startup status
         self._log_startup_status()
         

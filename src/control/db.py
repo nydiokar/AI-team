@@ -38,6 +38,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 3
+_CURRENT_VERSION = 4
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +154,37 @@ CREATE TABLE IF NOT EXISTS nodes (
     registered_at       TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );
+
+-- Watched jobs — orthogonal to mesh_tasks/session lifecycle.
+-- A job is a long-lived external process monitored by the worker's
+-- _job_watcher_loop.  It does NOT hold a task semaphore slot, does NOT
+-- keep a session BUSY, and does NOT enter the stale-busy reattach loop.
+CREATE TABLE IF NOT EXISTS jobs (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT,
+    node_id         TEXT NOT NULL,
+    label           TEXT NOT NULL,
+    command         TEXT,
+    pid             INTEGER,
+    pgid            INTEGER,
+    started_at      TEXT NOT NULL,
+    started_epoch   REAL,
+    finished_at     TEXT,
+    status          TEXT NOT NULL DEFAULT 'running',  -- running | done | failed | lost
+    exit_code       INTEGER,
+    log_path        TEXT,
+    tail            TEXT,
+    notify          INTEGER NOT NULL DEFAULT 1,
+    notify_agent    INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_node_status
+    ON jobs(node_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_session
+    ON jobs(session_id);
 """
 
 
@@ -665,6 +697,158 @@ class MeshDB:
         return dict(row) if row else None
 
     # ------------------------------------------------------------------
+    # Watched jobs
+    # ------------------------------------------------------------------
+
+    def register_job(
+        self,
+        job_id: str,
+        node_id: str,
+        label: str,
+        session_id: Optional[str] = None,
+        command: Optional[str] = None,
+        log_path: Optional[str] = None,
+        notify: bool = True,
+        notify_agent: bool = False,
+    ) -> None:
+        """Insert a new running job row."""
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO jobs
+                        (id, session_id, node_id, label, command, status,
+                         started_at, started_epoch, log_path, notify, notify_agent,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id, session_id, node_id, label, command,
+                        now, time.time(), log_path,
+                        1 if notify else 0, 1 if notify_agent else 0,
+                        now, now,
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            logger.debug("event=db_register_job_duplicate job_id=%s", job_id)
+        except Exception as e:
+            logger.warning("event=db_register_job_failed job_id=%s err=%s", job_id, e)
+
+    def start_job(
+        self,
+        job_id: str,
+        pid: int,
+        pgid: int,
+        log_path: Optional[str] = None,
+    ) -> None:
+        """Record PID/PGID for a spawned job."""
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET pid = ?, pgid = ?, log_path = COALESCE(?, log_path),
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (pid, pgid, log_path, now, job_id),
+                )
+        except Exception as e:
+            logger.warning("event=db_start_job_failed job_id=%s err=%s", job_id, e)
+
+    def complete_job(
+        self,
+        job_id: str,
+        exit_code: int,
+        tail: str = "",
+    ) -> None:
+        """Mark a running job as done."""
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'done', exit_code = ?, tail = ?,
+                        finished_at = ?, updated_at = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (exit_code, tail, now, now, job_id),
+                )
+        except Exception as e:
+            logger.warning("event=db_complete_job_failed job_id=%s err=%s", job_id, e)
+
+    def fail_job(
+        self,
+        job_id: str,
+        error: str,
+        status: str = "failed",
+    ) -> None:
+        """Mark a running job as failed or lost."""
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, tail = ?, finished_at = ?, updated_at = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (status, error, now, now, job_id),
+                )
+        except Exception as e:
+            logger.warning("event=db_fail_job_failed job_id=%s err=%s", job_id, e)
+
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        row = self._conn().execute(
+            "SELECT * FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_jobs(
+        self,
+        node_id: Optional[str] = None,
+        status: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if node_id:
+            clauses.append("node_id = ?")
+            params.append(node_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        rows = self._conn().execute(
+            f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_terminal_jobs_since(self, since: str) -> List[Dict[str, Any]]:
+        """Return jobs that reached a terminal state after `since`."""
+        rows = self._conn().execute(
+            "SELECT * FROM jobs WHERE updated_at > ? AND status IN ('done', 'failed', 'lost')",
+            (since,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_running_jobs_for_node(self, node_id: str) -> List[Dict[str, Any]]:
+        rows = self._conn().execute(
+            "SELECT * FROM jobs WHERE node_id = ? AND status = 'running'",
+            (node_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
 
@@ -713,6 +897,7 @@ def _get_migrations() -> List[tuple]:
         (1, ""),  # baseline marker — DDL already applied above
         (2, "ALTER TABLE nodes ADD COLUMN projects_root TEXT NOT NULL DEFAULT ''"),
         (3, "ALTER TABLE nodes ADD COLUMN repos TEXT NOT NULL DEFAULT '[]'"),
+        (4, ""),  # jobs table added to _DDL; marker for clean version tracking
     ]
 
 
