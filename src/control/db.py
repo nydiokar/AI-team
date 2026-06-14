@@ -453,6 +453,75 @@ class MeshDB:
             logger.warning("event=db_claim_task_failed task_id=%s err=%s", task_id, e)
             return False
 
+    def release_task(self, task_id: str, node_id: str) -> bool:
+        """Release a claimed task back to pending. Only succeeds if claimed_by matches.
+
+        Returns True if the task was released. Used by workers on graceful shutdown
+        and by the stale-claim reaper to reclaim orphaned tasks.
+        """
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    UPDATE mesh_tasks
+                    SET status = 'pending', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+                    WHERE id = ? AND claimed_by = ? AND status = 'claimed'
+                    """,
+                    (now, task_id, node_id),
+                )
+                return conn.execute("SELECT changes()").fetchone()[0] > 0
+        except Exception as e:
+            logger.warning("event=db_release_task_failed task_id=%s err=%s", task_id, e)
+            return False
+
+    def list_stale_claims(self, lease_sec: int = 300) -> List[Dict[str, Any]]:
+        """Return claimed tasks whose claim has expired.
+
+        A claim is stale when:
+        - `claimed_at` is older than `lease_sec` seconds ago, AND
+        - the claiming node is offline (missed heartbeats), OR
+        - the claiming node no longer exists in the nodes table.
+
+        This is the authoritative safety net for workers that are hard-killed
+        without releasing their claims (T4).
+        """
+        try:
+            # Open a fresh connection for stale-claim queries to avoid potential
+            # stale cache issues when SQLite connections are reused across tests.
+            import sqlite3 as _sqlite3
+            conn = _sqlite3.connect(str(self._path))
+            conn.row_factory = _sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT t.*, n.status AS node_status
+                FROM mesh_tasks t
+                LEFT JOIN nodes n ON t.claimed_by = n.node_id
+                WHERE t.status = 'claimed'
+                  AND t.claimed_at IS NOT NULL
+                  AND (n.node_id IS NULL OR n.status = 'offline')
+                """,
+            ).fetchall()
+            conn.close()
+            now = datetime.utcnow()
+            cutoff = lease_sec
+            result = []
+            for r in rows:
+                claimed_str = r["claimed_at"]
+                try:
+                    claimed_dt = datetime.fromisoformat(claimed_str)
+                except Exception:
+                    claimed_dt = datetime.strptime(claimed_str, "%Y-%m-%d %H:%M:%S.%f")
+                age = (now - claimed_dt).total_seconds()
+                if age > cutoff:
+                    d = dict(r)
+                    d.pop("node_status", None)
+                    result.append(d)
+            return result
+        except Exception as e:
+            logger.warning("event=db_list_stale_claims_failed err=%s", e)
+            return []
+
     def complete_task(
         self,
         task_id: str,
