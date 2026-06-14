@@ -727,8 +727,20 @@ class WorkerAgent:
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.info("event=keyboard_interrupt node_id=%s", self.cfg.node_id)
 
-        # Drain: wait up to 30s for active tasks
+        # Drain: best-effort release of in-flight claims (T4 fast path),
+        # then wait up to 30s for active tasks to finish or cancel.
         logger.info("event=draining active=%d", len(self._active))
+        release_tasks = list(self._active.keys())
+        for task_id in release_tasks:
+            try:
+                await asyncio.to_thread(
+                    self._http.post,
+                    f"/tasks/{task_id}/release",
+                    {"node_id": self.cfg.node_id},
+                )
+            except Exception as e:
+                logger.debug("event=release_on_drain_failed task_id=%s err=%s", task_id, e)
+
         if self._active:
             _, pending = await asyncio.wait(
                 list(self._active.values()), timeout=30

@@ -131,6 +131,7 @@ class MeshConfig:
     worker_token: str = ""                  # WORKER_TOKEN — shared mesh auth secret
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
     oneoff_queue_timeout_sec: int = 600     # MESH_ONEOFF_QUEUE_TIMEOUT_SEC
+    claim_lease_sec: int = 300              # MESH_CLAIM_LEASE_SEC — stale-claim reaper threshold (T4)
     shadow_write: bool = True               # always mirror to DB even when mesh routing is off
     # State Separation Phase 2: when False (default), the task server runs as its
     # own process (server_main.py / ai-team-server) and the gateway reaches it
@@ -392,6 +393,12 @@ class Config:
             v = os.getenv("MESH_ONEOFF_QUEUE_TIMEOUT_SEC")
             if v is not None:
                 self.mesh.oneoff_queue_timeout_sec = max(60, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_CLAIM_LEASE_SEC")
+            if v is not None:
+                self.mesh.claim_lease_sec = max(30, int(v))
         except Exception:
             pass
         try:

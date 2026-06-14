@@ -10,8 +10,10 @@ All endpoints except /health require:
 The backing store is MeshDB (src/control/db.py). No SQL lives here.
 """
 
+import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
@@ -30,7 +32,13 @@ logger = logging.getLogger(__name__)
 async def _lifespan(app: FastAPI):
     get_registry().start()
     logger.info("event=task_server_started")
+    reaper_task = asyncio.create_task(_stale_claim_reaper_loop())
     yield
+    reaper_task.cancel()
+    try:
+        await reaper_task
+    except asyncio.CancelledError:
+        pass
     get_registry().stop()
 
 
@@ -44,7 +52,6 @@ app = FastAPI(title="AI-Team Mesh Task Server", version="1.0", lifespan=_lifespa
 _bearer = HTTPBearer()
 
 
-@lru_cache(maxsize=1)
 def _worker_token() -> str:
     try:
         from config import config as _cfg
@@ -327,6 +334,22 @@ def claim_task(task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
     return {"status": "claimed", "task": task}
 
 
+@app.post("/tasks/{task_id}/release", dependencies=[Depends(_require_auth)])
+def release_task(task_id: str, payload: ClaimPayload) -> Dict[str, str]:
+    """Release a claimed task back to pending (worker graceful shutdown).
+
+    Only the claiming worker can release its own claim. The stale-claim reaper
+    handles hard-killed workers that don't call this endpoint.
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    ok = db.release_task(task_id, payload.node_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail="Task not claimed by this node or not in claimed state")
+    return {"status": "released", "task_id": task_id}
+
+
 @app.post("/tasks/{task_id}/result", dependencies=[Depends(_require_auth)])
 def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, str]:
     db = get_db()
@@ -335,6 +358,19 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
+
+    # Terminal check first: if the task is already done, accept any late
+    # result as stale regardless of who sends it. This is essential for
+    # workers that were superseded by the reaper or another worker — they
+    # must get "accepted (stale)" instead of 403.
+    task_status = task.get("status")
+    if task_status in ("completed", "failed", "failed_node_offline"):
+        logger.debug(
+            "event=submit_result_stale task_id=%s status=%s node=%s — ignoring late result",
+            task_id, task_status, payload.node_id,
+        )
+        return {"status": "accepted (stale)", "task_id": task_id}
+
     claimed_by = task.get("claimed_by")
     if claimed_by and claimed_by != payload.node_id:
         raise HTTPException(
@@ -391,6 +427,49 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         except Exception:
             pass
     return {"status": "accepted"}
+
+
+# ---------------------------------------------------------------------------
+# Stale-claim reaper (T4) — runs as a background coroutine during the
+# task server's lifetime.
+# ---------------------------------------------------------------------------
+
+async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
+    """Periodically sweep for stale claimed tasks and release them.
+
+    A task claim is stale when:
+    - claimed_at is older than `lease_sec`
+    - AND the claiming node is offline or gone
+
+    This is the authoritative safety net for workers that are hard-killed
+    (e.g. `pm2 restart` on Windows, which is effectively SIGKILL). The
+    worker-side release-on-shutdown is a best-effort fast path; this reaper
+    ensures orphaned claims don't block tasks indefinitely.
+    """
+    logger.info("event=stale_claim_reaper_started interval=%ds", interval_sec)
+    try:
+        while True:
+            try:
+                db = get_db()
+                if db is not None:
+                    from config import config as _cfg
+                    lease_sec = getattr(_cfg.mesh, "claim_lease_sec", 300)
+                    stale = db.list_stale_claims(lease_sec=lease_sec)
+                    for row in stale:
+                        task_id = row.get("id", "?")
+                        claimed_by = row.get("claimed_by", "?")
+                        claimed_at = row.get("claimed_at", "?")
+                        db.release_task(task_id, claimed_by)
+                        logger.info(
+                            "event=stale_claim_released task_id=%s claimed_by=%s claimed_at=%s",
+                            task_id, claimed_by, claimed_at,
+                        )
+            except Exception as e:
+                logger.debug("event=stale_claim_reaper_error err=%s", e)
+
+            await asyncio.sleep(interval_sec)
+    except asyncio.CancelledError:
+        logger.info("event=stale_claim_reaper_stopped")
 
 
 # ---------------------------------------------------------------------------
