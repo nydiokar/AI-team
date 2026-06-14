@@ -114,6 +114,7 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
         self.app.add_handler(CommandHandler("commit_all", self._handle_git_commit_all))
         self.app.add_handler(CommandHandler("git_status", self._handle_git_status))
+        self.app.add_handler(CommandHandler("jobs", self._handle_jobs_command))
         self.app.add_handler(CallbackQueryHandler(self._handle_session_picker_callback, pattern=r"^session_use:"))
         self.app.add_handler(CallbackQueryHandler(self._handle_session_new_callback, pattern=r"^session_new_"))
         self.app.add_handler(CallbackQueryHandler(self._handle_session_restore_callback, pattern=r"^session_restore:"))
@@ -2639,3 +2640,60 @@ Please check the system logs for more details.
         except Exception as e:
             await update.message.reply_text(f"❌ Error getting git status: {e}")
             logger.error(f"Git status command failed: {e}")
+
+    async def _handle_jobs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /jobs command — list watched jobs (running and recent)."""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                await update.message.reply_text("❌ Mesh DB unavailable.")
+                return
+
+            args = context.args or []
+            limit = 10
+            if args:
+                try:
+                    limit = max(1, min(50, int(args[0])))
+                except ValueError:
+                    pass
+
+            running = db.list_jobs(status="running", limit=limit)
+            recent = db.list_jobs(limit=limit)
+
+            lines = ["📋 **Watched Jobs**\n"]
+            if running:
+                lines.append(f"**Running ({len(running)}):**")
+                for j in running:
+                    label = j.get("label", j.get("id", "?"))
+                    pid = j.get("pid")
+                    pid_str = f" (PID {pid})" if pid else ""
+                    lines.append(f"• `{label}`{pid_str}")
+                lines.append("")
+
+            done = [j for j in recent if j.get("status") in ("done", "failed", "lost")]
+            if done:
+                lines.append(f"**Recent ({len(done)}):**")
+                for j in done[:limit]:
+                    label = j.get("label", j.get("id", "?"))
+                    s = j.get("status", "?")
+                    ec = j.get("exit_code")
+                    ec_str = f" exit={ec}" if ec is not None else ""
+                    icon = {"done": "✅", "failed": "❌", "lost": "⚠️"}.get(s, "❓")
+                    lines.append(f"{icon} `{label}` — {s}{ec_str}")
+                lines.append("")
+
+            if not running and not done:
+                lines.append("No watched jobs.")
+
+            await self._send_long_message(
+                chat_id=update.effective_chat.id,
+                text="\n".join(lines),
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error listing jobs: {e}")
+            logger.error(f"Jobs command failed: {e}")

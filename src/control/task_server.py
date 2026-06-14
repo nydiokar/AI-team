@@ -109,6 +109,33 @@ class ExecutionResultPayload(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Job models (T3)
+# ---------------------------------------------------------------------------
+
+class RegisterJobPayload(BaseModel):
+    node_id: str
+    session_id: Optional[str] = None
+    label: str
+    command: Optional[str] = None
+    log_path: Optional[str] = None
+    notify: bool = True
+    notify_agent: bool = False
+
+
+class JobDonePayload(BaseModel):
+    node_id: str
+    exit_code: int
+    tail: str = ""
+
+
+class JobStartPayload(BaseModel):
+    node_id: str
+    pid: int
+    pgid: int = 0
+    log_path: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
@@ -364,3 +391,97 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         except Exception:
             pass
     return {"status": "accepted"}
+
+
+# ---------------------------------------------------------------------------
+# Job endpoints (T3 — Watched Jobs)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/jobs", dependencies=[Depends(_require_auth)])
+def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
+    """Register a new watched job. The worker's job watcher loop will pick it
+    up, spawn the command (if any), and monitor the process."""
+    import uuid
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    job_id = f"job_{uuid.uuid4().hex[:12]}"
+    db.register_job(
+        job_id=job_id,
+        node_id=payload.node_id,
+        label=payload.label,
+        session_id=payload.session_id,
+        command=payload.command,
+        log_path=payload.log_path,
+        notify=payload.notify,
+        notify_agent=payload.notify_agent,
+    )
+    job = db.get_job(job_id)
+    return {"status": "registered", "job_id": job_id, "job": job}
+
+
+@app.post("/jobs/{job_id}/start", dependencies=[Depends(_require_auth)])
+def start_job(job_id: str, payload: JobStartPayload) -> Dict[str, str]:
+    """Worker records PID/PGID for a spawned job."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    if job.get("node_id") != payload.node_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Job {job_id!r} is owned by node {job.get('node_id')!r}",
+        )
+    db.start_job(job_id, payload.pid, payload.pgid, payload.log_path)
+    return {"status": "started", "job_id": job_id}
+
+
+@app.post("/jobs/{job_id}/done", dependencies=[Depends(_require_auth)])
+def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
+    """Worker reports that a watched job reached terminal state."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    if job.get("node_id") != payload.node_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Job {job_id!r} is owned by node {job.get('node_id')!r}, not {payload.node_id!r}",
+        )
+    if payload.exit_code == 0:
+        db.complete_job(job_id, payload.exit_code, payload.tail)
+    else:
+        err = f"exit code {payload.exit_code}"
+        if payload.tail:
+            err = f"{err}: {payload.tail[:500]}"
+        db.fail_job(job_id, err)
+    return {"status": "accepted", "job_id": job_id}
+
+
+@app.get("/jobs", dependencies=[Depends(_require_auth)])
+def list_jobs(
+    node_id: Optional[str] = None,
+    status: Optional[str] = None,
+    session_id: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    db = get_db()
+    if db is None:
+        return []
+    return db.list_jobs(node_id=node_id, status=status, session_id=session_id, limit=limit)
+
+
+@app.get("/jobs/{job_id}", dependencies=[Depends(_require_auth)])
+def get_job(job_id: str) -> Dict[str, Any]:
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    return job
