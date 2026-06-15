@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 4
+_CURRENT_VERSION = 5
 
 
 # ---------------------------------------------------------------------------
@@ -776,6 +776,7 @@ class MeshDB:
         label: str,
         session_id: Optional[str] = None,
         command: Optional[str] = None,
+        cwd: Optional[str] = None,
         log_path: Optional[str] = None,
         notify: bool = True,
         notify_agent: bool = False,
@@ -787,13 +788,13 @@ class MeshDB:
                 conn.execute(
                     """
                     INSERT INTO jobs
-                        (id, session_id, node_id, label, command, status,
+                        (id, session_id, node_id, label, command, cwd, status,
                          started_at, started_epoch, log_path, notify, notify_agent,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        job_id, session_id, node_id, label, command,
+                        job_id, session_id, node_id, label, command, cwd,
                         now, time.time(), log_path,
                         1 if notify else 0, 1 if notify_agent else 0,
                         now, now,
@@ -967,6 +968,7 @@ def _get_migrations() -> List[tuple]:
         (2, "ALTER TABLE nodes ADD COLUMN projects_root TEXT NOT NULL DEFAULT ''"),
         (3, "ALTER TABLE nodes ADD COLUMN repos TEXT NOT NULL DEFAULT '[]'"),
         (4, ""),  # jobs table added to _DDL; marker for clean version tracking
+        (5, "ALTER TABLE jobs ADD COLUMN cwd TEXT"),  # working directory for spawn mode
     ]
 
 

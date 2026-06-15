@@ -159,6 +159,56 @@ class TaskServerClient:
         return bool(resp and resp.get("status") == "nudged")
 
     # ------------------------------------------------------------------
+    # Jobs
+    # ------------------------------------------------------------------
+
+    def register_job(
+        self,
+        node_id: str,
+        label: str,
+        *,
+        session_id: Optional[str] = None,
+        command: Optional[str] = None,
+        cwd: Optional[str] = None,
+        attach_pid: Optional[int] = None,
+        log_path: Optional[str] = None,
+        notify: bool = True,
+        notify_agent: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Register a watched job. Returns the job dict on success, None on failure.
+
+        Pass `command` to have the worker spawn it (output captured to log), or
+        `attach_pid` to attach to an already-running process (output: log_path only).
+        """
+        return self._post("/jobs", {
+            "node_id": node_id,
+            "label": label,
+            "session_id": session_id,
+            "command": command,
+            "cwd": cwd,
+            "attach_pid": attach_pid,
+            "log_path": log_path,
+            "notify": notify,
+            "notify_agent": notify_agent,
+        })
+
+    def list_jobs(
+        self,
+        node_id: Optional[str] = None,
+        status: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {"limit": limit}
+        if node_id:
+            params["node_id"] = node_id
+        if status:
+            params["status"] = status
+        if session_id:
+            params["session_id"] = session_id
+        return self._get("/jobs", params) or []
+
+    # ------------------------------------------------------------------
     # Tasks
     # ------------------------------------------------------------------
 

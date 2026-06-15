@@ -131,6 +131,8 @@ class RegisterJobPayload(BaseModel):
     session_id: Optional[str] = None
     label: str
     command: Optional[str] = None
+    attach_pid: Optional[int] = None   # attach to an already-running process instead of spawning
+    cwd: Optional[str] = None          # working directory for spawn mode
     log_path: Optional[str] = None
     notify: bool = True
     notify_agent: bool = False
@@ -534,8 +536,12 @@ def delete_staged_file(file_id: str) -> Dict[str, str]:
 
 @app.post("/jobs", dependencies=[Depends(_require_auth)])
 def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
-    """Register a new watched job. The worker's job watcher loop will pick it
-    up, spawn the command (if any), and monitor the process."""
+    """Register a new watched job.
+
+    Two modes:
+    - command: worker spawns the command detached and monitors it.
+    - attach_pid: job is already running; worker monitors the existing PID.
+    """
     import uuid
     db = get_db()
     if db is None:
@@ -547,10 +553,14 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
         label=payload.label,
         session_id=payload.session_id,
         command=payload.command,
+        cwd=payload.cwd,
         log_path=payload.log_path,
         notify=payload.notify,
         notify_agent=payload.notify_agent,
     )
+    if payload.attach_pid is not None:
+        # Record the PID immediately so the worker watcher monitors it without spawning.
+        db.start_job(job_id, pid=payload.attach_pid, pgid=0, log_path=payload.log_path)
     job = db.get_job(job_id)
     return {"status": "registered", "job_id": job_id, "job": job}
 
