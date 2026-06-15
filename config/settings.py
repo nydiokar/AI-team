@@ -138,6 +138,9 @@ class MeshConfig:
     # over HTTP + the shared DB. Set MESH_EMBEDDED_SERVER=true to run it embedded
     # inside the gateway (single-process / fallback mode). Never run both at once.
     embedded_server: bool = False           # MESH_EMBEDDED_SERVER
+    # Mesh health sliding-window detection (Phase 4.1)
+    mesh_health_window_size: int = 6         # MESH_HEALTH_WINDOW_SIZE
+    mesh_health_failure_threshold: int = 3   # MESH_HEALTH_FAILURE_THRESHOLD
 
 
 class Config:
@@ -405,6 +408,18 @@ class Config:
             v = os.getenv("MESH_SHADOW_WRITE")
             if v is not None:
                 self.mesh.shadow_write = v.lower() != "false"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_HEALTH_WINDOW_SIZE")
+            if v is not None:
+                self.mesh.mesh_health_window_size = max(2, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_HEALTH_FAILURE_THRESHOLD")
+            if v is not None:
+                self.mesh.mesh_health_failure_threshold = max(1, int(v))
         except Exception:
             pass
 

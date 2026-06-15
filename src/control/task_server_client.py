@@ -26,6 +26,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from src.control.mesh_health import MeshHealth, get_mesh_health
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +45,7 @@ class TaskServerClient:
         *,
         timeout: int = 10,
         node_cache_ttl: float = 5.0,
+        mesh_health: Optional[MeshHealth] = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._token = token
@@ -50,6 +53,7 @@ class TaskServerClient:
         self._node_cache_ttl = node_cache_ttl
         self._node_cache: Optional[List[Dict[str, Any]]] = None
         self._node_cache_at: float = 0.0
+        self._mesh_health: MeshHealth = mesh_health or MeshHealth()
 
     # ------------------------------------------------------------------
     # Low-level transport
@@ -98,9 +102,22 @@ class TaskServerClient:
         return self._get("/health", timeout=timeout)
 
     def is_healthy(self, timeout: int = 5) -> bool:
-        """True iff the server responds with status=ok within `timeout`."""
+        """True iff the mesh has been consistently healthy (sliding window).
+
+        Each call performs a fresh probe against ``/health`` and feeds the
+        result into the internal *MeshHealth* sliding window.  The return
+        value is the *smoothed* state — it only flips to ``False`` after
+        ``failure_threshold`` consecutive failures, preventing false
+        positives from transient network blips.
+        """
         body = self.get_health(timeout=timeout)
-        return bool(body and body.get("status") == "ok")
+        healthy = bool(body and body.get("status") == "ok")
+        self._mesh_health.record_check(healthy)
+        return self._mesh_health.is_healthy()
+
+    def mesh_health_stats(self) -> Dict[str, Any]:
+        """Return raw MeshHealth diagnostics (for embedding in /health etc.)."""
+        return self._mesh_health.stats()
 
     # ------------------------------------------------------------------
     # Nodes
