@@ -13,9 +13,11 @@ and stored in the gateway Session record for subsequent resumes.
 import hashlib
 import json
 import logging
+import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -28,6 +30,10 @@ from src.core.interfaces import CodingBackend, ExecutionResult, Session
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TOOLS = ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]
+
+# MCP config written by scripts/setup_mcp.py on each worker machine.
+# When present, the watch_job tool is added to the allowed list automatically.
+_MCP_CONFIG_PATH = Path.home() / ".config" / "ai-team" / "mcp.json"
 _STATUS_LABELS = {
     "A": "created",
     "M": "modified",
@@ -259,6 +265,12 @@ class ClaudeCodeBackend(CodingBackend):
         except Exception:
             inactivity_sec = 600
 
+        # Propagate session ID so the MCP watch_job tool can route notifications
+        # back to the right Telegram chat without the agent having to pass it explicitly.
+        proc_env = os.environ.copy()
+        if session_id:
+            proc_env["SESSION_ID"] = session_id
+
         proc: Optional[subprocess.Popen] = None
         try:
             proc = subprocess.Popen(
@@ -267,6 +279,7 @@ class ClaudeCodeBackend(CodingBackend):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cwd or None,
+                env=proc_env,
             )
             self._register_process(proc, session_key)
 
@@ -427,7 +440,18 @@ class ClaudeCodeBackend(CodingBackend):
             ]
             if session_id:
                 cmd.extend(["--session-id", session_id])
-        cmd.extend(["--allowedTools", ",".join(_DEFAULT_TOOLS)])
+
+        tools = list(_DEFAULT_TOOLS)
+        mcp_cfg = _MCP_CONFIG_PATH
+        if sys.platform == "win32":
+            import os as _os
+            appdata = _os.environ.get("APPDATA", "")
+            mcp_cfg = Path(appdata) / "ai-team" / "mcp.json" if appdata else mcp_cfg
+        if mcp_cfg.exists():
+            cmd.extend(["--mcp-config", str(mcp_cfg)])
+            tools.append("mcp__jobs__watch_job")
+
+        cmd.extend(["--allowedTools", ",".join(tools)])
         return cmd
 
     def _register_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
