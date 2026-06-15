@@ -990,6 +990,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         session_id: Optional[str] = None,
         cwd: Optional[str] = None,
         source: str = "runtime",
+        extra_metadata: Optional[Dict] = None,
     ) -> Task:
         """Create an in-memory task object for direct queueing."""
         task_id = f"task_{uuid.uuid4().hex[:8]}"
@@ -1013,6 +1014,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                 task_type_enum = candidate
                 break
 
+        metadata: Dict = {
+            "session_id": session_id or "",
+            "cwd": resolved_cwd,
+            "source": source,
+            "task_origin": "runtime",
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
         task = Task(
             id=task_id,
             type=task_type_enum,
@@ -1024,12 +1033,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             prompt=parsed.get("prompt", description),
             success_criteria=["Task completed successfully", "Results validated"],
             context=f"Generated from {source}: {description}",
-            metadata={
-                "session_id": session_id or "",
-                "cwd": resolved_cwd,
-                "source": source,
-                "task_origin": "runtime",
-            },
+            metadata=metadata,
         )
         return task
 
@@ -1069,6 +1073,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         session_id: Optional[str] = None,
         cwd: Optional[str] = None,
         source: str = "telegram",
+        extra_metadata: Optional[Dict] = None,
     ) -> str:
         """Direct runtime entrypoint for Telegram/CLI instructions."""
         task = self._make_task(
@@ -1078,6 +1083,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             session_id=session_id,
             cwd=cwd,
             source=source,
+            extra_metadata=extra_metadata,
         )
         return await self._enqueue_task(task)
 
@@ -2741,7 +2747,10 @@ Generated from user description: {description}
             session = self.session_store.get(session_id) if session_id else None
             machine_id = (session.machine_id or None) if session else None
             host = socket.gethostname()
-            if session_id and session and not session.backend_session_id:
+            action_override = (task.metadata or {}).get("task_type", "")
+            if action_override == "fetch_staged_file":
+                action = "fetch_staged_file"
+            elif session_id and session and not session.backend_session_id:
                 action = "create_session"
             elif session_id:
                 action = "resume_session"

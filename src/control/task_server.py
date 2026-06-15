@@ -13,14 +13,20 @@ The backing store is MeshDB (src/control/db.py). No SQL lives here.
 import asyncio
 import json
 import logging
+import shutil
 import time
+import uuid
 from contextlib import asynccontextmanager
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+
+_STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
 from src.control.db import get_db
 from src.control.mesh_health import get_mesh_health
@@ -476,6 +482,49 @@ async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
             await asyncio.sleep(interval_sec)
     except asyncio.CancelledError:
         logger.info("event=stale_claim_reaper_stopped")
+
+
+# ---------------------------------------------------------------------------
+# File staging endpoints — server holds files briefly so remote workers can pull
+# ---------------------------------------------------------------------------
+
+@app.post("/files", dependencies=[Depends(_require_auth)])
+async def stage_file(file: UploadFile = File(...)) -> Dict[str, str]:
+    """Accept a file upload and park it in a staging slot.
+
+    Returns {file_id, filename}. The remote worker fetches it via GET /files/{file_id}
+    and deletes it via DELETE /files/{file_id} once saved locally.
+    """
+    file_id = uuid.uuid4().hex[:16]
+    dest_dir = _STAGING_ROOT / file_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = file.filename or "upload"
+    dest = dest_dir / safe_name
+    content = await file.read()
+    dest.write_bytes(content)
+    logger.info("event=file_staged file_id=%s filename=%s size=%d", file_id, safe_name, len(content))
+    return {"file_id": file_id, "filename": safe_name}
+
+
+@app.get("/files/{file_id}", dependencies=[Depends(_require_auth)])
+def get_staged_file(file_id: str) -> FileResponse:
+    staging = _STAGING_ROOT / file_id
+    if not staging.exists():
+        raise HTTPException(status_code=404, detail="Staged file not found")
+    files = [f for f in staging.iterdir() if f.is_file()]
+    if not files:
+        raise HTTPException(status_code=404, detail="Staged file not found")
+    f = files[0]
+    return FileResponse(str(f), filename=f.name, media_type="application/octet-stream")
+
+
+@app.delete("/files/{file_id}", dependencies=[Depends(_require_auth)])
+def delete_staged_file(file_id: str) -> Dict[str, str]:
+    staging = _STAGING_ROOT / file_id
+    if staging.exists():
+        shutil.rmtree(staging)
+        logger.info("event=staged_file_deleted file_id=%s", file_id)
+    return {"status": "deleted", "file_id": file_id}
 
 
 # ---------------------------------------------------------------------------

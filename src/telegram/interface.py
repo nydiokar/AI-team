@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import time
+import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional
 from pathlib import Path
@@ -1713,63 +1714,142 @@ class TelegramInterface:
         # Build destination and download
         fallback_name = f"photo_{file_id[:12]}.jpg" if photo_arr else f"file_{file_id[:12]}"
         safe_name = self._safe_upload_name(file_name, fallback_name)
-        dest_dir = Path(active_session.repo_path) / "uploads"
 
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / safe_name
-            if dest.exists():
-                stem, ext = os.path.splitext(safe_name)
-                counter = 1
-                while dest.exists():
-                    dest = dest_dir / f"{stem}_{counter}{ext}"
-                    counter += 1
-            tg_file = await context.bot.get_file(file_id)
-            await tg_file.download_to_drive(custom_path=dest)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Failed to download file: {e}")
-            logger.error(f"file download failed: user=%s chat=%s error=%s", user_id, chat_id, e)
-            return
+        # Detect remote session: machine_id is set and doesn't match this host
+        is_remote = bool(
+            active_session.machine_id
+            and active_session.machine_id != socket.gethostname()
+        )
 
         file_size_kb = file_size / 1024
         size_str = f"{file_size_kb:.1f} KB" if file_size_kb < 1024 else f"{file_size_kb / 1024:.1f} MB"
-        save_msg = f"📎 Saved `uploads/{safe_name}` ({size_str})"
 
-        if caption:
-            full_instruction = f"{caption}\n\n📎 File: `uploads/{safe_name}`"
-            active_session.last_user_message = full_instruction
-            active_session.status = SessionStatus.BUSY
+        if is_remote:
+            # Stage the file on the server; the remote worker will pull it via GET /files/{file_id}
+            _staging_root = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
+            stage_id = uuid.uuid4().hex[:16]
+            stage_dir = _staging_root / stage_id
             try:
-                task_id = await self.orchestrator.submit_instruction(
-                    description=full_instruction,
-                    session_id=active_session.session_id,
-                    target_files=[str(dest)],
-                    cwd=active_session.repo_path,
-                    source="telegram_session",
-                )
+                stage_dir.mkdir(parents=True, exist_ok=True)
+                dest = stage_dir / safe_name
+                tg_file = await context.bot.get_file(file_id)
+                await tg_file.download_to_drive(custom_path=dest)
             except Exception as e:
-                await update.message.reply_text(f"❌ Failed to create task: {e}")
-                logger.error(f"instruction submission failed: user=%s chat=%s error=%s", user_id, chat_id, e)
+                await update.message.reply_text(f"❌ Failed to download file: {e}")
+                logger.error("file download failed: user=%s chat=%s error=%s", user_id, chat_id, e)
                 return
-            active_session.last_task_id = task_id
-            self.session_store.save(active_session)
-            await update.message.reply_text(
-                f"{save_msg}\n⏳ Working on your request... {self._session_message_ref(active_session, task_id)}",
-                parse_mode="Markdown",
-            )
-            logger.info(
-                "file+instruction user=%s chat=%s file=%s task=%s session=%s",
-                user_id, chat_id, safe_name, task_id, active_session.session_id,
-            )
+
+            staged_file_meta = {"file_id": stage_id, "filename": safe_name}
+            save_msg = f"📎 Staged `uploads/{safe_name}` ({size_str}) → sending to {active_session.machine_id}"
+
+            if caption:
+                full_instruction = f"{caption}\n\n📎 File: `uploads/{safe_name}`"
+                active_session.last_user_message = full_instruction
+                active_session.status = SessionStatus.BUSY
+                try:
+                    task_id = await self.orchestrator.submit_instruction(
+                        description=full_instruction,
+                        session_id=active_session.session_id,
+                        cwd=active_session.repo_path,
+                        source="telegram_session",
+                        extra_metadata={"staged_file": staged_file_meta},
+                    )
+                except Exception as e:
+                    await update.message.reply_text(f"❌ Failed to create task: {e}")
+                    logger.error("instruction submission failed: user=%s chat=%s error=%s", user_id, chat_id, e)
+                    return
+                active_session.last_task_id = task_id
+                self.session_store.save(active_session)
+                await update.message.reply_text(
+                    f"{save_msg}\n⏳ Working on your request... {self._session_message_ref(active_session, task_id)}",
+                    parse_mode="Markdown",
+                )
+                logger.info(
+                    "file+instruction user=%s chat=%s file=%s task=%s session=%s node=%s",
+                    user_id, chat_id, safe_name, task_id, active_session.session_id, active_session.machine_id,
+                )
+            else:
+                # No instruction — deliver the file now so the user can reference it next
+                try:
+                    task_id = await self.orchestrator.submit_instruction(
+                        description=f"File `uploads/{safe_name}` delivered to session.",
+                        session_id=active_session.session_id,
+                        cwd=active_session.repo_path,
+                        source="telegram_session",
+                        extra_metadata={
+                            "staged_file": staged_file_meta,
+                            "task_type": "fetch_staged_file",
+                        },
+                    )
+                except Exception as e:
+                    await update.message.reply_text(f"❌ Failed to deliver file: {e}")
+                    logger.error("file delivery task failed: user=%s chat=%s error=%s", user_id, chat_id, e)
+                    return
+                await update.message.reply_text(
+                    f"{save_msg}\nFile is being delivered to {active_session.machine_id} — type an instruction once it arrives.",
+                    parse_mode="Markdown",
+                )
+                logger.info(
+                    "file user=%s chat=%s file=%s task=%s session=%s node=%s (no caption)",
+                    user_id, chat_id, safe_name, task_id, active_session.session_id, active_session.machine_id,
+                )
         else:
-            await update.message.reply_text(
-                f"{save_msg}\nIt's in your session repo — type an instruction to work with it.",
-                parse_mode="Markdown",
-            )
-            logger.info(
-                "file user=%s chat=%s file=%s session=%s (no caption)",
-                user_id, chat_id, safe_name, active_session.session_id,
-            )
+            # Local session: save directly into the repo's uploads/ folder
+            dest_dir = Path(active_session.repo_path) / "uploads"
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / safe_name
+                if dest.exists():
+                    stem, ext = os.path.splitext(safe_name)
+                    counter = 1
+                    while dest.exists():
+                        dest = dest_dir / f"{stem}_{counter}{ext}"
+                        counter += 1
+                    safe_name = dest.name
+                tg_file = await context.bot.get_file(file_id)
+                await tg_file.download_to_drive(custom_path=dest)
+            except Exception as e:
+                await update.message.reply_text(f"❌ Failed to download file: {e}")
+                logger.error("file download failed: user=%s chat=%s error=%s", user_id, chat_id, e)
+                return
+
+            save_msg = f"📎 Saved `uploads/{safe_name}` ({size_str})"
+
+            if caption:
+                full_instruction = f"{caption}\n\n📎 File: `uploads/{safe_name}`"
+                active_session.last_user_message = full_instruction
+                active_session.status = SessionStatus.BUSY
+                try:
+                    task_id = await self.orchestrator.submit_instruction(
+                        description=full_instruction,
+                        session_id=active_session.session_id,
+                        target_files=[str(dest)],
+                        cwd=active_session.repo_path,
+                        source="telegram_session",
+                    )
+                except Exception as e:
+                    await update.message.reply_text(f"❌ Failed to create task: {e}")
+                    logger.error("instruction submission failed: user=%s chat=%s error=%s", user_id, chat_id, e)
+                    return
+                active_session.last_task_id = task_id
+                self.session_store.save(active_session)
+                await update.message.reply_text(
+                    f"{save_msg}\n⏳ Working on your request... {self._session_message_ref(active_session, task_id)}",
+                    parse_mode="Markdown",
+                )
+                logger.info(
+                    "file+instruction user=%s chat=%s file=%s task=%s session=%s",
+                    user_id, chat_id, safe_name, task_id, active_session.session_id,
+                )
+            else:
+                await update.message.reply_text(
+                    f"{save_msg}\nIt's in your session repo — type an instruction to work with it.",
+                    parse_mode="Markdown",
+                )
+                logger.info(
+                    "file user=%s chat=%s file=%s session=%s (no caption)",
+                    user_id, chat_id, safe_name, active_session.session_id,
+                )
 
     async def _handle_run_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Compatibility alias for the older task-runner UX."""
