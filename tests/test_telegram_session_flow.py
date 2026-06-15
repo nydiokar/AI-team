@@ -66,6 +66,7 @@ class _DummyOrchestrator:
     def __init__(self):
         self.created_tasks = []
         self.cancelled_tasks = []
+        self._backends = {}
 
     async def submit_instruction(self, description, task_type=None, target_files=None, session_id=None, cwd=None, source="runtime"):
         task_id = f"task_{len(self.created_tasks) + 1}"
@@ -286,6 +287,46 @@ async def test_help_lists_current_command_set(monkeypatch, isolated_session_stor
         assert "/code_review" not in text
         assert "/bug_fix" not in text
         assert "/analyze" not in text
+    finally:
+        shutil.rmtree(workspace.parent, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_session_close_closes_local_backend_and_clears_backend_session_id(
+    monkeypatch,
+    isolated_session_store,
+):
+    workspace = _make_workspace()
+    try:
+        store = SessionStore()
+        session = store.create(
+            "opencode-server",
+            str((workspace / "repo-alpha").resolve()),
+            telegram_chat_id=100,
+            owner_user_id=1,
+        )
+        session.backend_session_id = "ses_close_me"
+        session.machine_id = telegram_interface_module.socket.gethostname()
+        store.save(session)
+        store.bind(100, session.session_id)
+
+        closed = []
+
+        class _Backend:
+            def close(self, session_obj):
+                closed.append((session_obj.session_id, session_obj.backend_session_id))
+
+        orchestrator = _DummyOrchestrator()
+        orchestrator._backends = {"opencode-server": _Backend()}
+        bot = TelegramInterface("", orchestrator, allowed_users=[1])
+
+        update = _DummyUpdate(user_id=1, chat_id=100)
+        await bot._handle_session_close(update, _DummyContext())
+
+        saved = store.get(session.session_id)
+        assert closed == [(session.session_id, "ses_close_me")]
+        assert saved.status == session_store_module.SessionStatus.CLOSED
+        assert saved.backend_session_id == ""
     finally:
         shutil.rmtree(workspace.parent, ignore_errors=True)
 

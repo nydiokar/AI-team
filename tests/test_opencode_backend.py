@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.backends.opencode import OpenCodeBackend, _get_repo_lock
+from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend, _get_repo_lock
 
 
 # ---------------------------------------------------------------------------
@@ -677,3 +677,94 @@ def test_start_task_successfully(tmp_path):
     assert result.success is True
     assert result.backend_session_id == "ses_new_happy"
     assert "Refactored" in result.output
+
+
+# ---------------------------------------------------------------------------
+# OpenCode server transport failures
+# ---------------------------------------------------------------------------
+
+def test_server_http_timeout_kills_cached_server_process():
+    b = OpenCodeServerBackend()
+    key = "/repo"
+
+    class _Proc:
+        pid = 4242
+
+    proc = _Proc()
+    b._procs[key] = proc
+    b._base_urls[key] = "http://127.0.0.1:4096"
+    terminated = []
+
+    with (
+        patch("src.backends.opencode.urllib.request.urlopen", side_effect=TimeoutError("timed out")),
+        patch(
+            "src.backends.opencode.terminate_many_popen",
+            side_effect=lambda procs: terminated.extend(procs),
+        ),
+    ):
+        response, err = b._http(key, "POST", "/session/ses_1/message", {"parts": []}, timeout=7)
+
+    assert response == {}
+    assert "timed out" in err
+    assert "will restart on next call" in err
+    assert key not in b._procs
+    assert key not in b._base_urls
+    assert terminated == [proc]
+
+
+def test_server_resume_transport_failure_clears_backend_session_id(tmp_path):
+    b = OpenCodeServerBackend()
+    session = _make_session(
+        repo_path=str(tmp_path),
+        backend_session_id="ses_old",
+        last_user_message="previous",
+    )
+
+    with (
+        patch.object(b, "_ensure_server", return_value=None),
+        patch.object(
+            b,
+            "_http",
+            side_effect=[
+                ({"id": "ses_old"}, None),
+                (
+                    {},
+                    "opencode server timed out (POST /session/ses_old/message) after 7s "
+                    "— killed server; will restart on next call",
+                ),
+            ],
+        ),
+        patch.object(b, "_parse_model", return_value=(None, None)),
+    ):
+        result = b.resume_session(session, "continue")
+
+    assert result.success is False
+    assert session.backend_session_id == ""
+    assert result.backend_session_id == ""
+
+
+def test_server_create_transport_failure_does_not_persist_backend_session_id(tmp_path):
+    b = OpenCodeServerBackend()
+    session = _make_session(repo_path=str(tmp_path), last_user_message="start")
+
+    with (
+        patch.object(b, "_ensure_server", return_value=None),
+        patch.object(
+            b,
+            "_http",
+            side_effect=[
+                ({"id": "ses_new"}, None),
+                (
+                    {},
+                    "opencode server timed out (POST /session/ses_new/message) after 7s "
+                    "— killed server; will restart on next call",
+                ),
+            ],
+        ),
+        patch.object(b, "_parse_model", return_value=(None, None)),
+    ):
+        result = b.create_session(session)
+
+    assert result.success is False
+    assert session.backend_session_id == ""
+    assert result.backend_session_id == ""

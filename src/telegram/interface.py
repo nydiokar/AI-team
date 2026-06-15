@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import socket
 import time
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -2343,6 +2344,27 @@ class TelegramInterface:
         if not self._user_can_access_session(update.effective_user.id, session):
             await update.message.reply_text("❌ You do not own that session.")
             return
+        backend_session_id = session.backend_session_id
+        if backend_session_id:
+            backend = getattr(self.orchestrator, "_backends", {}).get(session.backend)
+            if backend and (not session.machine_id or session.machine_id == socket.gethostname()):
+                try:
+                    await asyncio.to_thread(backend.close, session)
+                except Exception as e:
+                    logger.warning(
+                        "event=session_backend_close_failed session_id=%s backend=%s err=%s",
+                        session.session_id,
+                        session.backend,
+                        e,
+                    )
+            elif session.machine_id and session.machine_id != socket.gethostname():
+                logger.info(
+                    "event=session_backend_close_remote_skipped session_id=%s backend=%s node=%s",
+                    session.session_id,
+                    session.backend,
+                    session.machine_id,
+                )
+            session.backend_session_id = ""
         session.status = SessionStatus.CLOSED
         self.session_store.save(session)
         active = self.session_store.get_active(update.effective_chat.id)

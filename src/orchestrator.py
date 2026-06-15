@@ -2049,7 +2049,11 @@ created: {task.created}
             else:
                 actions.append("Usage limit active. Tasks will resume when the limit resets.")
         elif ec == "timeout":
-            actions.append("Increase CLAUDE_TIMEOUT_SEC or reduce task scope.")
+            backend_name = str(getattr(result, "backend_name", "") or "").lower()
+            if backend_name.startswith("opencode"):
+                actions.append("Increase OPENCODE_TIMEOUT_SEC or reduce task scope.")
+            else:
+                actions.append("Increase GATEWAY_TASK_TIMEOUT_SEC or reduce task scope.")
         elif ec == "network":
             actions.append("Check connectivity/VPN; retry with backoff.")
         elif ec == "context_overflow":

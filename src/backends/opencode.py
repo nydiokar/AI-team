@@ -934,7 +934,7 @@ class OpenCodeServerBackend(CodingBackend):
         # (providerID="big-pickle", modelID="") and then 500s at message time
         # (ProviderModelNotFoundError). The supported way is to pass the model
         # inline in the message body, which _send_message does.
-        return self._send_message(
+        result = self._send_message(
             key=key,
             oc_session_id=oc_session_id,
             message=session.last_user_message,
@@ -943,6 +943,10 @@ class OpenCodeServerBackend(CodingBackend):
             model_id=model_id,
             provider_id=provider_id,
         )
+        if not result.success and self._message_transport_failed(result):
+            session.backend_session_id = ""
+            result.backend_session_id = ""
+        return result
 
     def resume_session(self, session: Session, message: str) -> ExecutionResult:
         start = time.time()
@@ -976,7 +980,7 @@ class OpenCodeServerBackend(CodingBackend):
             return self.create_session(session)
 
         model_id, provider_id = self._parse_model(self._session_model(session))
-        return self._send_message(
+        result = self._send_message(
             key=key,
             oc_session_id=oc_session_id,
             message=message,
@@ -985,6 +989,10 @@ class OpenCodeServerBackend(CodingBackend):
             model_id=model_id,
             provider_id=provider_id,
         )
+        if not result.success and self._message_transport_failed(result):
+            session.backend_session_id = ""
+            result.backend_session_id = ""
+        return result
 
     def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
         start = time.time()
@@ -1031,6 +1039,15 @@ class OpenCodeServerBackend(CodingBackend):
             # while the old processes are still alive and own their ports.
             if procs:
                 terminate_many_popen(procs)
+
+    @staticmethod
+    def _message_transport_failed(result: ExecutionResult) -> bool:
+        text = "\n".join(result.errors or []).lower()
+        return (
+            "opencode server unreachable" in text
+            or "opencode server timed out" in text
+            or "request timed out" in text
+        )
 
     # ------------------------------------------------------------------
     # Core message send
@@ -1322,11 +1339,28 @@ class OpenCodeServerBackend(CodingBackend):
             except Exception:
                 msg = raw.decode(errors="replace") if raw else str(e)
             return {}, f"HTTP {e.code} from opencode server ({method} {path}): {msg}"
-        except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
-            # Server is gone — clear our reference so _ensure_server restarts it.
+        except (TimeoutError, socket.timeout) as e:
+            # A blocking /message call exceeded the HTTP idle timeout. The
+            # opencode server may still be busy with that generation, so kill
+            # the process instead of orphaning a wedged server behind a dropped
+            # cache entry.
             with self._lock:
-                self._procs.pop(key, None)
+                proc = self._procs.pop(key, None)
                 self._base_urls.pop(key, None)
+            if proc is not None:
+                terminate_many_popen([proc])
+            return {}, (
+                f"opencode server timed out ({method} {path}) after {timeout}s — "
+                "killed server; will restart on next call"
+            )
+        except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
+            # Server is gone or unhealthy — clear and terminate our reference so
+            # _ensure_server restarts it, and avoid leaving an orphaned process.
+            with self._lock:
+                proc = self._procs.pop(key, None)
+                self._base_urls.pop(key, None)
+            if proc is not None:
+                terminate_many_popen([proc])
             return {}, f"opencode server unreachable ({method} {path}): {e} — will restart on next call"
         except Exception as e:
             return {}, f"Request failed ({method} {path}): {e}"
