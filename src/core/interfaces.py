@@ -272,6 +272,7 @@ class ITaskOrchestrator(ABC):
         session_id: Optional[str] = None,
         cwd: Optional[str] = None,
         source: str = "runtime",
+        extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Queue an instruction directly without writing a compatibility task file."""
         pass

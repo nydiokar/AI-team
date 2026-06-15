@@ -200,6 +200,24 @@ class _HTTP:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
 
+    def get_bytes(self, path: str, timeout: int = 60) -> bytes:
+        req = urllib.request.Request(
+            f"{self._base}{path}",
+            headers=self._headers(),
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+
+    def delete(self, path: str, timeout: int = 10) -> Any:
+        req = urllib.request.Request(
+            f"{self._base}{path}",
+            headers=self._headers(),
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+
 
 # ---------------------------------------------------------------------------
 # Nudge listener — tiny asyncio HTTP server, just accepts POST /nudge
@@ -286,7 +304,43 @@ def _make_session_from_payload(payload: Dict[str, Any]) -> Any:
 # Task executor
 # ---------------------------------------------------------------------------
 
-async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any]) -> Dict[str, Any]:
+async def _fetch_staged_file(
+    staged: Dict[str, Any],
+    payload: Dict[str, Any],
+    http: "_HTTP",
+) -> Optional[str]:
+    """Fetch a staged file from the controller and save it into the session's uploads dir.
+
+    Returns the local path string on success, None on failure.
+    """
+    file_id = staged.get("file_id", "")
+    filename = staged.get("filename", "upload")
+    if not file_id:
+        logger.warning("event=staged_file_skip reason=missing_file_id")
+        return None
+    session = payload.get("session") or {}
+    repo_path = session.get("repo_path", "")
+    if not repo_path:
+        logger.warning("event=staged_file_skip reason=no_repo_path file_id=%s", file_id)
+        return None
+    dest_dir = Path(repo_path) / "uploads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / filename
+    try:
+        file_bytes = await asyncio.to_thread(http.get_bytes, f"/files/{file_id}")
+        dest.write_bytes(file_bytes)
+        logger.info("event=staged_file_fetched file_id=%s dest=%s size=%d", file_id, dest, len(file_bytes))
+    except Exception as e:
+        logger.error("event=staged_file_fetch_failed file_id=%s err=%s", file_id, e)
+        return None
+    try:
+        await asyncio.to_thread(http.delete, f"/files/{file_id}")
+    except Exception as e:
+        logger.warning("event=staged_file_cleanup_failed file_id=%s err=%s", file_id, e)
+    return str(dest)
+
+
+async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any], http: Optional["_HTTP"] = None) -> Dict[str, Any]:
     """Execute one task row from mesh_tasks. Returns an ExecutionResultPayload-compatible dict."""
     payload = task_row.get("payload") or {}
     if isinstance(payload, str):
@@ -296,6 +350,24 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any]) -> D
             payload = {}
 
     action = task_row.get("action", "run_oneoff")
+
+    # Fetch any file staged on the controller before backend execution
+    staged = (payload.get("metadata") or {}).get("staged_file")
+    if staged and http is not None:
+        await _fetch_staged_file(staged, payload, http)
+
+    # File-delivery-only tasks: no backend needed
+    if action == "fetch_staged_file":
+        return {
+            "success": True,
+            "output": f"File delivered to uploads/{(staged or {}).get('filename', '')}",
+            "errors": [],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 0,
+        }
+
     backend_name = task_row.get("backend", "claude")
     backend = backends.get(backend_name)
     if backend is None:
@@ -674,7 +746,7 @@ class WorkerAgent:
             emit_event("task_claimed", backend=task_row.get("backend", ""))
 
             # Execute
-            result = await _execute_task(task_row, self._backends)
+            result = await _execute_task(task_row, self._backends, self._http)
 
             # Post result
             try:
