@@ -615,7 +615,8 @@ class WorkerAgent:
         if not command:
             return
 
-        log_dir = Path(self.cfg.projects_root) / ".ai" if self.cfg.projects_root else Path.cwd() / ".ai"
+        job_cwd = job.get("cwd") or self.cfg.projects_root or None
+        log_dir = Path(job_cwd) / ".ai" if job_cwd else Path.cwd() / ".ai"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = str(log_dir / f"job_{job_id.replace('job_', '')}.log")
 
@@ -627,7 +628,7 @@ class WorkerAgent:
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                cwd=self.cfg.projects_root or None,
+                cwd=job_cwd,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
             )
             log_fh.close()
