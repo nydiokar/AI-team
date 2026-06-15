@@ -408,3 +408,6 @@ $RECYCLE.BIN/
 .directory
 .Trash-*
 .nfs*
+
+# Stray Windows paths from dev machines
+C:\\*
