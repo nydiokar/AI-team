@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from src.control.mesh_health import MeshHealth
 from src.control.task_server_client import TaskServerClient
 
 
@@ -21,9 +22,16 @@ def test_is_healthy_true_on_ok(monkeypatch, client):
     assert client.is_healthy() is True
 
 
-def test_is_healthy_false_when_unreachable(monkeypatch, client):
-    monkeypatch.setattr(client, "_get", lambda path, **kw: None)
-    assert client.is_healthy() is False
+def test_is_healthy_false_after_consecutive_failures(monkeypatch):
+    """Sliding window requires 3 consecutive failures before returning False."""
+    mh = MeshHealth(window_size=6, failure_threshold=3)
+    c = TaskServerClient("http://127.0.0.1:9099", "tok", mesh_health=mh)
+    monkeypatch.setattr(c, "_get", lambda path, **kw: None)
+    # First two failures are absorbed
+    assert c.is_healthy() is True
+    assert c.is_healthy() is True
+    # Third consecutive failure triggers degradation
+    assert c.is_healthy() is False
 
 
 def test_list_nodes_returns_empty_on_failure(monkeypatch, client):

@@ -23,6 +23,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from src.control.db import get_db
+from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
 
 logger = logging.getLogger(__name__)
@@ -150,7 +151,12 @@ class JobStartPayload(BaseModel):
 def health() -> Dict[str, Any]:
     db = get_db()
     stats = db.stats() if db else {}
-    return {"status": "ok", "db": stats}
+    mesh_health = get_mesh_health()
+    return {
+        "status": "ok",
+        "db": stats,
+        "mesh_health": mesh_health.stats(),
+    }
 
 
 # ---------------------------------------------------------------------------
