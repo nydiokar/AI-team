@@ -160,6 +160,9 @@ class NodeRegisterPayload(BaseModel):
 
 class HeartbeatPayload(BaseModel):
     node_id: str
+    active_tasks: List[str] = []
+    slots_used: int = 0
+    slots_total: int = 0
 
 
 class DeregisterPayload(BaseModel):
@@ -304,7 +307,12 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
 
 @app.post("/nodes/heartbeat", dependencies=[Depends(_require_auth)])
 def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
-    ok = get_registry().heartbeat(payload.node_id)
+    live_state = {
+        "active_tasks": payload.active_tasks,
+        "slots_used": payload.slots_used,
+        "slots_total": payload.slots_total,
+    } if payload.slots_total > 0 else None
+    ok = get_registry().heartbeat(payload.node_id, live_state=live_state)
     if not ok:
         # Unknown node — prompt re-register instead of silently failing
         raise HTTPException(status_code=404, detail="Node not found; send /nodes/register first")

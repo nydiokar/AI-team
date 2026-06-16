@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 7
+_CURRENT_VERSION = 8
 
 
 # ---------------------------------------------------------------------------
@@ -787,13 +787,18 @@ class MeshDB:
             logger.warning("event=db_upsert_node_failed node_id=%s err=%s", node_id, e)
         return incarnation_id
 
-    def heartbeat_node(self, node_id: str) -> None:
+    def heartbeat_node(self, node_id: str, live_state: Optional[str] = None) -> None:
         now = _now()
         try:
             with self._write() as conn:
                 conn.execute(
-                    "UPDATE nodes SET last_heartbeat = ?, status = 'online', updated_at = ? WHERE node_id = ?",
-                    (now, now, node_id),
+                    """
+                    UPDATE nodes
+                    SET last_heartbeat = ?, status = 'online', updated_at = ?,
+                        live_state = COALESCE(?, live_state)
+                    WHERE node_id = ?
+                    """,
+                    (now, now, live_state, node_id),
                 )
         except Exception as e:
             logger.warning("event=db_heartbeat_node_failed node_id=%s err=%s", node_id, e)
@@ -1032,6 +1037,7 @@ def _get_migrations() -> List[tuple]:
         (5, "ALTER TABLE jobs ADD COLUMN cwd TEXT"),  # working directory for spawn mode
         (6, "ALTER TABLE nodes ADD COLUMN incarnation_id TEXT"),  # per-restart UUID for orphan detection
         (7, "ALTER TABLE mesh_tasks ADD COLUMN claimer_incarnation TEXT"),  # matched against nodes.incarnation_id by reaper
+        (8, "ALTER TABLE nodes ADD COLUMN live_state TEXT"),  # JSON snapshot sent with each heartbeat (slots, active tasks)
     ]
 
 
