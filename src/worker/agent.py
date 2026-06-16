@@ -498,14 +498,29 @@ class WorkerAgent:
     # Heartbeat loop
     # ------------------------------------------------------------------
 
+    def _live_state(self) -> dict:
+        """Snapshot of current operational state for heartbeat reporting."""
+        return {
+            "active_tasks": list(self._active.keys()),
+            "slots_used": len(self._active),
+            "slots_total": self.cfg.max_concurrent,
+        }
+
     async def _heartbeat_loop(self) -> None:
         try:
             while not self._shutdown.is_set():
                 try:
+                    payload = {"node_id": self.cfg.node_id, **self._live_state()}
                     await asyncio.to_thread(
-                        self._http.post, "/nodes/heartbeat", {"node_id": self.cfg.node_id}
+                        self._http.post, "/nodes/heartbeat", payload
                     )
-                    logger.debug("event=heartbeat_sent node_id=%s", self.cfg.node_id)
+                    logger.debug(
+                        "event=heartbeat_sent node_id=%s slots=%d/%d active=%s",
+                        self.cfg.node_id,
+                        len(self._active),
+                        self.cfg.max_concurrent,
+                        list(self._active.keys()),
+                    )
                 except urllib.error.HTTPError as e:
                     if e.code == 404:
                         # Server doesn't know us — likely restarted and lost

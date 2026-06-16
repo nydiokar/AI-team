@@ -7,6 +7,7 @@ and persists state to the DB so the /nodes Telegram command works after restart.
 """
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -32,6 +33,7 @@ class NodeInfo:
     status: str = "online"                  # online | offline
     last_heartbeat: Optional[datetime] = None
     registered_at: Optional[datetime] = None
+    live_state: Optional[dict] = None       # last heartbeat snapshot: slots, active_tasks
 
     @classmethod
     def from_dict(cls, d: dict) -> "NodeInfo":
@@ -63,6 +65,7 @@ class NodeInfo:
             "status": self.status,
             "last_heartbeat": self.last_heartbeat.isoformat() if self.last_heartbeat else None,
             "registered_at": self.registered_at.isoformat() if self.registered_at else None,
+            "live_state": self.live_state,
         }
 
 
@@ -121,14 +124,16 @@ class NodeRegistry:
             self._db_mark_offline(node_id)
             logger.info("event=node_deregistered node_id=%s", node_id)
 
-    def heartbeat(self, node_id: str) -> bool:
-        """Update last_heartbeat. Returns False if node is unknown."""
+    def heartbeat(self, node_id: str, live_state: Optional[dict] = None) -> bool:
+        """Update last_heartbeat and optional live_state. Returns False if node is unknown."""
         node = self._nodes.get(node_id)
         if node is None:
             return False
         node.last_heartbeat = datetime.now(tz=timezone.utc)
         node.status = "online"
-        self._db_heartbeat(node_id)
+        if live_state is not None:
+            node.live_state = live_state
+        self._db_heartbeat(node_id, live_state)
         return True
 
     # ------------------------------------------------------------------
@@ -225,12 +230,15 @@ class NodeRegistry:
         except Exception as e:
             logger.debug("event=db_node_upsert_err node_id=%s err=%s", node.node_id, e)
 
-    def _db_heartbeat(self, node_id: str) -> None:
+    def _db_heartbeat(self, node_id: str, live_state: Optional[dict] = None) -> None:
         try:
             from src.control.db import get_db
             db = get_db()
             if db:
-                db.heartbeat_node(node_id)
+                db.heartbeat_node(
+                    node_id,
+                    live_state=json.dumps(live_state) if live_state is not None else None,
+                )
         except Exception as e:
             logger.debug("event=db_heartbeat_err node_id=%s err=%s", node_id, e)
 
