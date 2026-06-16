@@ -11,17 +11,28 @@ Synchronous — called via asyncio.to_thread() by the orchestrator.
 """
 import json
 import logging
+import os
 import queue
 import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import List, Optional
 
 from src.core.process_utils import terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
 logger = logging.getLogger(__name__)
+
+
+def _mcp_jobs_configured() -> bool:
+    """True if setup_mcp.py has registered the jobs server in Codex's config."""
+    try:
+        content = (Path.home() / ".codex" / "config.toml").read_text(encoding="utf-8")
+        return 'name = "jobs"' in content
+    except Exception:
+        return False
 
 
 class CodexBackend(CodingBackend):
@@ -68,6 +79,10 @@ class CodexBackend(CodingBackend):
         except Exception:
             inactivity_sec = 600
 
+        proc_env = os.environ.copy()
+        if session_key:
+            proc_env["SESSION_ID"] = session_key
+
         proc: Optional[subprocess.Popen] = None
         try:
             proc = subprocess.Popen(
@@ -76,6 +91,7 @@ class CodexBackend(CodingBackend):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cwd or None,
+                env=proc_env,
             )
             self._register_process(proc, session_key)
 
