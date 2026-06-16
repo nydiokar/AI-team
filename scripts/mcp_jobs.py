@@ -28,30 +28,37 @@ from typing import Any, Dict, Optional
 
 def _bootstrap() -> None:
     """Load project .env into os.environ before anything else runs."""
-    # mcp_jobs.py lives at <project>/scripts/mcp_jobs.py
     project_root = Path(__file__).resolve().parent.parent
-    env_path = Path(os.environ.get("AI_TEAM_ENV_FILE", "")) or (project_root / ".env")
+    ai_team_env = os.environ.get("AI_TEAM_ENV_FILE", "")
+    env_path = Path(ai_team_env) if ai_team_env else (project_root / ".env")
+
+    print(f"[mcp_jobs] project_root: {project_root}", file=sys.stderr, flush=True)
+    print(f"[mcp_jobs] .env path:    {env_path}", file=sys.stderr, flush=True)
+
     if not env_path.exists():
-        env_path = project_root / ".env"
-    if not env_path.exists():
+        print(f"[mcp_jobs] WARNING: .env not found at {env_path}", file=sys.stderr, flush=True)
         return
+
     try:
         from dotenv import load_dotenv
         load_dotenv(env_path, override=False)
-        return
+        print("[mcp_jobs] .env loaded via python-dotenv", file=sys.stderr, flush=True)
     except ImportError:
-        pass
-    # Fallback: manual parse (no python-dotenv installed)
-    with open(env_path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            val = val.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = val
+        # Fallback: manual parse
+        with open(env_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+        print("[mcp_jobs] .env loaded via manual parse", file=sys.stderr, flush=True)
+
+    token_found = bool(os.environ.get("WORKER_TOKEN"))
+    print(f"[mcp_jobs] WORKER_TOKEN present: {token_found}", file=sys.stderr, flush=True)
 
 _bootstrap()
 
