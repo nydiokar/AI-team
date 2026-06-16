@@ -558,8 +558,20 @@ class WorkerAgent:
                         # Spawn the detached process
                         await self._spawn_job_process(job)
                     elif pid is not None:
-                        # Check if process still alive
-                        alive = await asyncio.to_thread(_pid_alive, pid)
+                        # Check if process still alive.
+                        # IMPORTANT (Windows): we retain the Popen handle in
+                        # self._job_procs, which keeps an OS handle open on the
+                        # process. A finished-but-handle-held process still answers
+                        # OpenProcess(), so _pid_alive() would report it alive
+                        # forever and the job would never complete. proc.poll() is
+                        # authoritative here: None while running, exit code once
+                        # exited. Only fall back to the OS probe when we have no
+                        # stored handle (e.g. after a worker restart).
+                        stored_proc = self._job_procs.get(job_id)
+                        if stored_proc is not None:
+                            alive = stored_proc.poll() is None
+                        else:
+                            alive = await asyncio.to_thread(_pid_alive, pid)
                         if not alive:
                             # Process exited — collect tail and exit code.
                             # Prefer proc.poll() from the stored Popen object: on Windows

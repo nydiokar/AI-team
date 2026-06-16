@@ -586,11 +586,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                     await asyncio.sleep(30)
                     continue
 
+                # Job-completion notifications are sent from the task server's
+                # /done handler (report_job_done) — the authoritative point that
+                # works for jobs with no session_id. This poller previously also
+                # sent here but skipped session-less jobs, silently dropping
+                # their notifications. It is disabled to avoid duplicate sends.
                 terminal = db.get_terminal_jobs_since(self._last_job_poll)
                 if terminal:
                     self._last_job_poll = datetime.now().isoformat()
 
-                for job in terminal:
+                for job in []:  # disabled: server-side /done handler owns notifications
                     if not job.get("notify"):
                         continue
                     session_id = job.get("session_id")
