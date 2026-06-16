@@ -32,9 +32,6 @@ def _bootstrap() -> None:
     ai_team_env = os.environ.get("AI_TEAM_ENV_FILE", "")
     env_path = Path(ai_team_env) if ai_team_env else (project_root / ".env")
 
-    print(f"[mcp_jobs] project_root: {project_root}", file=sys.stderr, flush=True)
-    print(f"[mcp_jobs] .env path:    {env_path}", file=sys.stderr, flush=True)
-
     if not env_path.exists():
         print(f"[mcp_jobs] WARNING: .env not found at {env_path}", file=sys.stderr, flush=True)
         return
@@ -42,7 +39,6 @@ def _bootstrap() -> None:
     try:
         from dotenv import load_dotenv
         load_dotenv(env_path, override=False)
-        print("[mcp_jobs] .env loaded via python-dotenv", file=sys.stderr, flush=True)
     except ImportError:
         # Fallback: manual parse
         with open(env_path, encoding="utf-8", errors="replace") as f:
@@ -55,10 +51,6 @@ def _bootstrap() -> None:
                 val = val.strip().strip('"').strip("'")
                 if key and key not in os.environ:
                     os.environ[key] = val
-        print("[mcp_jobs] .env loaded via manual parse", file=sys.stderr, flush=True)
-
-    token_found = bool(os.environ.get("WORKER_TOKEN"))
-    print(f"[mcp_jobs] WORKER_TOKEN present: {token_found}", file=sys.stderr, flush=True)
 
 _bootstrap()
 
