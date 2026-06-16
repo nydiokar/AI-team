@@ -39,6 +39,7 @@ import logging
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 5
+_CURRENT_VERSION = 7
 
 
 # ---------------------------------------------------------------------------
@@ -441,10 +442,11 @@ class MeshDB:
                 conn.execute(
                     """
                     UPDATE mesh_tasks
-                    SET status = 'claimed', claimed_by = ?, claimed_at = ?, updated_at = ?
+                    SET status = 'claimed', claimed_by = ?, claimed_at = ?, updated_at = ?,
+                        claimer_incarnation = (SELECT incarnation_id FROM nodes WHERE node_id = ?)
                     WHERE id = ? AND status = 'pending'
                     """,
-                    (node_id, now, now, task_id),
+                    (node_id, now, now, node_id, task_id),
                 )
                 return conn.execute(
                     "SELECT changes()"
@@ -465,7 +467,8 @@ class MeshDB:
                 conn.execute(
                     """
                     UPDATE mesh_tasks
-                    SET status = 'pending', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+                    SET status = 'pending', claimed_by = NULL, claimed_at = NULL,
+                        claimer_incarnation = NULL, updated_at = ?
                     WHERE id = ? AND claimed_by = ? AND status = 'claimed'
                     """,
                     (now, task_id, node_id),
@@ -475,16 +478,54 @@ class MeshDB:
             logger.warning("event=db_release_task_failed task_id=%s err=%s", task_id, e)
             return False
 
+    def release_node_claims(self, node_id: str) -> List[str]:
+        """Release all claimed tasks for node_id back to pending. Returns released task ids.
+
+        Called when a node re-registers (startup sweep). A re-registering node
+        means a new process started — any claims from the previous process are
+        orphaned and must be returned to the queue so another worker can pick
+        them up. This is the fast-path complement to list_stale_claims: it fires
+        immediately on restart rather than waiting for the reaper lease to expire.
+        """
+        now = _now()
+        try:
+            with self._write() as conn:
+                rows = conn.execute(
+                    "SELECT id FROM mesh_tasks WHERE claimed_by = ? AND status = 'claimed'",
+                    (node_id,),
+                ).fetchall()
+                task_ids = [r[0] for r in rows]
+                if task_ids:
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET status = 'pending', claimed_by = NULL, claimed_at = NULL,
+                            claimer_incarnation = NULL, updated_at = ?
+                        WHERE claimed_by = ? AND status = 'claimed'
+                        """,
+                        (now, node_id),
+                    )
+                return task_ids
+        except Exception as e:
+            logger.warning("event=db_release_node_claims_failed node_id=%s err=%s", node_id, e)
+            return []
+
     def list_stale_claims(self, lease_sec: int = 300) -> List[Dict[str, Any]]:
         """Return claimed tasks whose claim has expired.
 
         A claim is stale when:
-        - `claimed_at` is older than `lease_sec` seconds ago, AND
-        - the claiming node is offline (missed heartbeats), OR
-        - the claiming node no longer exists in the nodes table.
+        - `claimed_at` is older than `lease_sec` seconds ago, AND one of:
+          - the claiming node no longer exists in the nodes table, OR
+          - the claiming node is offline (missed heartbeats), OR
+          - the claiming node is online but its current incarnation_id differs
+            from claimer_incarnation (node restarted in-place — new process,
+            same node_id, same online status — the dead process's claim is
+            orphaned and will never complete).
 
-        This is the authoritative safety net for workers that are hard-killed
-        without releasing their claims (T4).
+        The incarnation mismatch condition catches the PM2-restart gap that the
+        offline-only check misses: the old process is SIGKILLed, the new process
+        re-registers within seconds (online again), so the orphaned claim never
+        becomes offline → was stuck forever before this fix.
         """
         try:
             # Open a fresh connection for stale-claim queries to avoid potential
@@ -499,7 +540,16 @@ class MeshDB:
                 LEFT JOIN nodes n ON t.claimed_by = n.node_id
                 WHERE t.status = 'claimed'
                   AND t.claimed_at IS NOT NULL
-                  AND (n.node_id IS NULL OR n.status = 'offline')
+                  AND (
+                    n.node_id IS NULL
+                    OR n.status = 'offline'
+                    OR (
+                      n.status = 'online'
+                      AND t.claimer_incarnation IS NOT NULL
+                      AND n.incarnation_id IS NOT NULL
+                      AND n.incarnation_id != t.claimer_incarnation
+                    )
+                  )
                 """,
             ).fetchall()
             conn.close()
@@ -687,8 +737,16 @@ class MeshDB:
         status: str = "online",
         projects_root: str = "",
         repos: Optional[List[dict]] = None,
-    ) -> None:
+    ) -> str:
+        """Upsert a node record and return the new incarnation_id.
+
+        A fresh incarnation_id UUID is minted on every call — each registration
+        represents a new process start, even when the node_id is unchanged.
+        list_stale_claims uses the mismatch between claimer_incarnation and the
+        node's current incarnation_id to detect claims orphaned by a restart.
+        """
         now = _now()
+        incarnation_id = uuid.uuid4().hex
         try:
             with self._write() as conn:
                 conn.execute(
@@ -696,8 +754,8 @@ class MeshDB:
                     INSERT INTO nodes
                         (node_id, tailscale_ip, api_port, backends, max_concurrent,
                          status, last_heartbeat, registered_at, updated_at,
-                         projects_root, repos)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         projects_root, repos, incarnation_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(node_id) DO UPDATE SET
                         tailscale_ip   = excluded.tailscale_ip,
                         api_port       = excluded.api_port,
@@ -707,7 +765,8 @@ class MeshDB:
                         last_heartbeat = excluded.last_heartbeat,
                         updated_at     = excluded.updated_at,
                         projects_root  = excluded.projects_root,
-                        repos          = excluded.repos
+                        repos          = excluded.repos,
+                        incarnation_id = excluded.incarnation_id
                     """,
                     (
                         node_id,
@@ -721,10 +780,12 @@ class MeshDB:
                         now,
                         projects_root,
                         json.dumps(repos or []),
+                        incarnation_id,
                     ),
                 )
         except Exception as e:
             logger.warning("event=db_upsert_node_failed node_id=%s err=%s", node_id, e)
+        return incarnation_id
 
     def heartbeat_node(self, node_id: str) -> None:
         now = _now()
@@ -969,6 +1030,8 @@ def _get_migrations() -> List[tuple]:
         (3, "ALTER TABLE nodes ADD COLUMN repos TEXT NOT NULL DEFAULT '[]'"),
         (4, ""),  # jobs table added to _DDL; marker for clean version tracking
         (5, "ALTER TABLE jobs ADD COLUMN cwd TEXT"),  # working directory for spawn mode
+        (6, "ALTER TABLE nodes ADD COLUMN incarnation_id TEXT"),  # per-restart UUID for orphan detection
+        (7, "ALTER TABLE mesh_tasks ADD COLUMN claimer_incarnation TEXT"),  # matched against nodes.incarnation_id by reaper
     ]
 
 

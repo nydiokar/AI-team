@@ -104,6 +104,15 @@ class NodeRegistry:
         info.registered_at = now
         self._nodes[info.node_id] = info
         self._db_upsert(info)
+        # Sweep any claims from the previous process incarnation back to pending.
+        # A re-registering node means a new process started (e.g. PM2 restart);
+        # its predecessor was hard-killed without releasing claims.
+        released = self._db_release_node_claims(info.node_id)
+        if released:
+            logger.warning(
+                "event=orphaned_claims_released node_id=%s count=%d task_ids=%s",
+                info.node_id, len(released), released,
+            )
         logger.info("event=node_registered node_id=%s ip=%s", info.node_id, info.tailscale_ip)
 
     def deregister(self, node_id: str) -> None:
@@ -233,6 +242,16 @@ class NodeRegistry:
                 db.mark_node_offline(node_id)
         except Exception as e:
             logger.debug("event=db_mark_offline_err node_id=%s err=%s", node_id, e)
+
+    def _db_release_node_claims(self, node_id: str) -> list:
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db:
+                return db.release_node_claims(node_id)
+        except Exception as e:
+            logger.debug("event=db_release_node_claims_err node_id=%s err=%s", node_id, e)
+        return []
 
 
 # ---------------------------------------------------------------------------

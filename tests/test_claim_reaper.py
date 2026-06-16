@@ -157,6 +157,94 @@ def test_late_result_after_reclaim_is_safe(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Incarnation mismatch — restart-in-place orphan detection
+# ---------------------------------------------------------------------------
+
+
+def test_stale_claims_when_node_restarted_in_place(tmp_path):
+    """Claim from dead process is stale even though the same node_id is online."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+
+    # Simulate original process: register node, then claim
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
+    db.claim_task(tid, "node-a")  # claimer_incarnation = original incarnation_id
+
+    # Simulate PM2 restart: new upsert mints a fresh incarnation_id
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
+
+    stale = db.list_stale_claims(lease_sec=0)
+    assert len(stale) == 1
+    assert stale[0]["id"] == tid
+
+
+def test_no_stale_claims_when_same_incarnation(tmp_path):
+    """Claim from the current process incarnation is not stale."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+
+    # Register then claim — claimer_incarnation matches the current incarnation_id
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
+    db.claim_task(tid, "node-a")
+
+    stale = db.list_stale_claims(lease_sec=0)
+    assert len(stale) == 0
+
+
+def test_stale_claims_incarnation_mismatch_respects_lease(tmp_path):
+    """Incarnation-mismatch claims still require the lease to expire."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
+    db.claim_task(tid, "node-a")
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
+
+    stale = db.list_stale_claims(lease_sec=999999)
+    assert len(stale) == 0  # claim is too recent even though incarnation changed
+
+
+# ---------------------------------------------------------------------------
+# release_node_claims — startup sweep
+# ---------------------------------------------------------------------------
+
+
+def test_release_node_claims_returns_task_ids(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2)
+    db.claim_task(tid, "node-a")
+
+    released = db.release_node_claims("node-a")
+    assert released == [tid]
+    row = db.get_task(tid)
+    assert row["status"] == "pending"
+    assert row["claimed_by"] is None
+    assert row["claimer_incarnation"] is None
+
+
+def test_release_node_claims_noop_for_different_node(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+    db.claim_task(tid, "node-a")
+
+    released = db.release_node_claims("node-b")
+    assert released == []
+    row = db.get_task(tid)
+    assert row["status"] == "claimed"  # untouched
+
+
+def test_release_node_claims_noop_when_none_claimed(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    released = db.release_node_claims("node-a")
+    assert released == []
+
+
+# ---------------------------------------------------------------------------
 # FastAPI TestClient — release endpoint + idempotency
 # ---------------------------------------------------------------------------
 
