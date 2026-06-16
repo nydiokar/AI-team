@@ -48,14 +48,34 @@ def _register_claude(script: Path) -> None:
 
 
 def _register_opencode(script: Path) -> None:
-    """Register in OpenCode's user config (~/.config/opencode/config.json).
+    """Register in OpenCode's user config (~/.config/opencode/opencode.json).
 
-    Creates the config file (and parent dir) if they don't exist yet.
-    MCP is configured under the top-level "mcp" key; OpenCode loads it
-    automatically — no per-run CLI flag is needed.
+    OpenCode reads ``opencode.json`` / ``opencode.jsonc`` from this dir — NOT
+    a file named ``config.json`` (that one is silently ignored, and any stray
+    ``config.json`` can make OpenCode report "Configuration is invalid"). If a
+    ``.jsonc`` config already exists we update that in place; otherwise we
+    write ``opencode.json``. A leftover ``config.json`` is removed.
+
+    OpenCode's MCP schema differs from Claude Code's: each entry needs
+    ``type: "local"`` and a single ``command`` array combining the executable
+    and its args (there is no separate ``args`` key).
     """
-    cfg_path = Path.home() / ".config" / "opencode" / "config.json"
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_dir = Path.home() / ".config" / "opencode"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove the stale, ignored file written by older versions of this script.
+    stale = cfg_dir / "config.json"
+    if stale.exists():
+        try:
+            stale.unlink()
+            print(f"  [opencode]     removed stale {stale}")
+        except Exception as e:
+            print(f"Warning: could not remove {stale}: {e}", file=sys.stderr)
+
+    # Prefer an existing .jsonc config; otherwise use opencode.json.
+    jsonc_path = cfg_dir / "opencode.jsonc"
+    cfg_path = jsonc_path if jsonc_path.exists() else cfg_dir / "opencode.json"
+
     existing: dict = {}
     if cfg_path.exists():
         try:
@@ -63,10 +83,12 @@ def _register_opencode(script: Path) -> None:
         except Exception as e:
             print(f"Warning: could not parse {cfg_path}: {e}", file=sys.stderr)
 
+    existing.setdefault("$schema", "https://opencode.ai/config.json")
     existing.setdefault("mcp", {})
     existing["mcp"]["jobs"] = {
-        "command": sys.executable,
-        "args": [str(script)],
+        "type": "local",
+        "command": [sys.executable, str(script)],
+        "enabled": True,
     }
     cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     print(f"  [opencode]     {cfg_path}")
@@ -76,8 +98,8 @@ def _register_codex(script: Path) -> None:
     """Register in Codex CLI's user config (~/.codex/config.toml).
 
     Skipped silently if the config file doesn't exist (Codex not installed).
-    The MCP server is appended as a [[mcp_servers]] TOML table if not already
-    present.
+    The MCP server is appended as a [mcp_servers.jobs] TOML table if not
+    already present.
     """
     cfg_path = Path.home() / ".codex" / "config.toml"
     if not cfg_path.exists():
@@ -85,15 +107,18 @@ def _register_codex(script: Path) -> None:
 
     content = cfg_path.read_text(encoding="utf-8")
     # Idempotent: skip if already registered.
-    if 'name = "jobs"' in content:
+    if "[mcp_servers.jobs]" in content:
         print(f"  [codex]        {cfg_path}  (already registered)")
         return
 
+    # Use forward slashes so Windows paths don't trip TOML's backslash
+    # escape parsing (e.g. "\Users" -> invalid \U unicode escape).
+    command = sys.executable.replace("\\", "/")
+    script_path = str(script).replace("\\", "/")
     entry = (
-        "\n[[mcp_servers]]\n"
-        'name = "jobs"\n'
-        f'command = "{sys.executable}"\n'
-        f'args = ["{script}"]\n'
+        "\n[mcp_servers.jobs]\n"
+        f'command = "{command}"\n'
+        f'args = ["{script_path}"]\n'
     )
     with cfg_path.open("a", encoding="utf-8") as fh:
         fh.write(entry)
