@@ -6,11 +6,9 @@ Exposes a single tool:  watch_job
 Claude Code (and OpenCode) load this as a subprocess via stdio transport.
 The agent calls it like any built-in tool — no bash scripts, no curl, no guessing.
 
-Config comes from env vars set by the host process (worker or setup_mcp.py):
-  CONTROLLER_URL   task server base URL  (default: http://127.0.0.1:9002)
-  WORKER_TOKEN     shared mesh auth secret
-  NODE_ID          this machine's node id  (default: hostname)
-  SESSION_ID       gateway session id for routing the completion notification
+No env vars or secrets need to be configured externally. This script loads the
+project .env at startup (same file the worker process uses) and reads
+WORKER_TOKEN, CONTROLLER_URL, and WORKER_NODE_ID from there.
 """
 from __future__ import annotations
 
@@ -20,7 +18,42 @@ import socket
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap: load the project .env the same way the worker does
+# ---------------------------------------------------------------------------
+
+def _bootstrap() -> None:
+    """Load project .env into os.environ before anything else runs."""
+    # mcp_jobs.py lives at <project>/scripts/mcp_jobs.py
+    project_root = Path(__file__).resolve().parent.parent
+    env_path = Path(os.environ.get("AI_TEAM_ENV_FILE", "")) or (project_root / ".env")
+    if not env_path.exists():
+        env_path = project_root / ".env"
+    if not env_path.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(env_path, override=False)
+        return
+    except ImportError:
+        pass
+    # Fallback: manual parse (no python-dotenv installed)
+    with open(env_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+_bootstrap()
 
 # ---------------------------------------------------------------------------
 # Tool catalogue
@@ -96,7 +129,7 @@ def _post_job(payload: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _watch_job(args: Dict[str, Any]) -> str:
-    node = os.environ.get("NODE_ID", socket.gethostname())
+    node = os.environ.get("NODE_ID") or os.environ.get("WORKER_NODE_ID") or socket.gethostname()
     session = args.get("session_id") or os.environ.get("SESSION_ID") or None
     cwd = args.get("cwd") or os.getcwd()
     command = args["command"]
