@@ -17,7 +17,6 @@ import os
 import queue
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -31,9 +30,14 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TOOLS = ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]
 
-# MCP config written by scripts/setup_mcp.py on each worker machine.
-# When present, the watch_job tool is added to the allowed list automatically.
-_MCP_CONFIG_PATH = Path.home() / ".config" / "ai-team" / "mcp.json"
+
+def _mcp_jobs_configured() -> bool:
+    """True if setup_mcp.py has registered the jobs server in ~/.claude.json."""
+    try:
+        cfg = json.loads((Path.home() / ".claude.json").read_text(encoding="utf-8"))
+        return "jobs" in cfg.get("mcpServers", {})
+    except Exception:
+        return False
 _STATUS_LABELS = {
     "A": "created",
     "M": "modified",
@@ -442,13 +446,7 @@ class ClaudeCodeBackend(CodingBackend):
                 cmd.extend(["--session-id", session_id])
 
         tools = list(_DEFAULT_TOOLS)
-        mcp_cfg = _MCP_CONFIG_PATH
-        if sys.platform == "win32":
-            import os as _os
-            appdata = _os.environ.get("APPDATA", "")
-            mcp_cfg = Path(appdata) / "ai-team" / "mcp.json" if appdata else mcp_cfg
-        if mcp_cfg.exists():
-            cmd.extend(["--mcp-config", str(mcp_cfg)])
+        if _mcp_jobs_configured():
             tools.append("mcp__jobs__watch_job")
 
         cmd.extend(["--allowedTools", ",".join(tools)])
