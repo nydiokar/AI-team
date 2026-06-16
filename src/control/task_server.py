@@ -513,14 +513,16 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
 async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
     """Periodically sweep for stale claimed tasks and release them.
 
-    A task claim is stale when:
-    - claimed_at is older than `lease_sec`
-    - AND the claiming node is offline or gone
+    A task claim is stale when claimed_at is older than `lease_sec` AND one of:
+    - the claiming node is offline or gone (original condition), OR
+    - the claiming node is online but its incarnation_id changed since the
+      claim was made — meaning the worker was hard-restarted in-place (e.g.
+      pm2 restart) and the old process's claim will never complete.
 
-    This is the authoritative safety net for workers that are hard-killed
-    (e.g. `pm2 restart` on Windows, which is effectively SIGKILL). The
-    worker-side release-on-shutdown is a best-effort fast path; this reaper
-    ensures orphaned claims don't block tasks indefinitely.
+    The fast path for restart-in-place is NodeRegistry.register(), which
+    releases orphaned claims immediately on re-registration. This reaper is
+    the safety net for cases where the fast path was missed (e.g. gateway
+    restart between worker death and re-registration).
     """
     logger.info("event=stale_claim_reaper_started interval=%ds", interval_sec)
     try:
