@@ -19,6 +19,7 @@ Both are synchronous — called via asyncio.to_thread() by the orchestrator.
 """
 import json
 import logging
+import os
 import queue
 import shutil
 import socket
@@ -34,6 +35,18 @@ from src.core.process_utils import terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
 logger = logging.getLogger(__name__)
+
+
+def _mcp_jobs_configured() -> bool:
+    """True if setup_mcp.py has registered the jobs server in OpenCode's config."""
+    try:
+        cfg = json.loads(
+            (Path.home() / ".config" / "opencode" / "config.json").read_text(encoding="utf-8")
+        )
+        return "jobs" in cfg.get("mcp", {})
+    except Exception:
+        return False
+
 
 # Repo-level lock: only one mutating OpenCode run per repo path at a time.
 # Key: normalised absolute repo path string.  Value: threading.Lock().
@@ -298,6 +311,10 @@ class OpenCodeBackend(CodingBackend):
         )
 
         proc: Optional[subprocess.Popen] = None
+        proc_env = os.environ.copy()
+        if session_key:
+            proc_env["SESSION_ID"] = session_key
+
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -305,6 +322,7 @@ class OpenCodeBackend(CodingBackend):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cwd or None,
+                env=proc_env,
             )
             self._register_process(proc, session_key)
 
