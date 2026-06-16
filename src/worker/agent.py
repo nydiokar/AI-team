@@ -466,6 +466,7 @@ class WorkerAgent:
         self._shutdown = asyncio.Event()
         self._poll_now = asyncio.Event()
         self._semaphore = asyncio.Semaphore(self.cfg.max_concurrent)
+        self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
 
     # ------------------------------------------------------------------
     # Registration
@@ -560,10 +561,17 @@ class WorkerAgent:
                         # Check if process still alive
                         alive = await asyncio.to_thread(_pid_alive, pid)
                         if not alive:
-                            # Process exited — collect tail and report done
+                            # Process exited — collect tail and exit code.
+                            # Prefer proc.poll() from the stored Popen object: on Windows
+                            # the OS handle stays open as long as Popen is alive, so this
+                            # reliably returns the real exit code even after the process ends.
                             log_path = job.get("log_path")
                             tail = _read_log_tail(log_path) if log_path else ""
-                            exit_code = await asyncio.to_thread(_collect_exit_code, pid)
+                            stored_proc = self._job_procs.pop(job_id, None)
+                            if stored_proc is not None:
+                                exit_code = stored_proc.poll()
+                            else:
+                                exit_code = await asyncio.to_thread(_collect_exit_code, pid)
                             try:
                                 await asyncio.to_thread(
                                     self._http.post,
@@ -650,6 +658,7 @@ class WorkerAgent:
                     "log_path": log_path,
                 },
             )
+            self._job_procs[job_id] = proc  # keep handle alive so poll() can read exit code on Windows
             logger.info("event=job_spawned job_id=%s label=%s pid=%d", job_id, label, proc.pid)
         except Exception as e:
             logger.warning("event=job_spawn_failed job_id=%s label=%s err=%s", job_id, label, e)
