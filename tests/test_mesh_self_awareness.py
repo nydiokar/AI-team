@@ -4,6 +4,7 @@ import pytest
 
 from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus
+from src.orchestrator import TaskOrchestrator
 from src.worker.agent import WorkerAgent, _mark_nudge_received
 
 
@@ -71,3 +72,52 @@ def test_list_stale_busy_sessions_excludes_pending_and_claimed(tmp_path):
 
     rows = db.list_stale_busy_sessions()
     assert [row["session_id"] for row in rows] == ["stale"]
+
+
+def test_dispatch_nudge_uses_node_address(monkeypatch):
+    calls = []
+
+    class _Node:
+        node_id = "worker-a"
+        tailscale_ip = "100.64.0.10"
+        api_port = 9001
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    def fake_urlopen(req, timeout):
+        calls.append((req.full_url, req.get_method(), timeout))
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    orchestrator = TaskOrchestrator.__new__(TaskOrchestrator)
+
+    assert orchestrator._nudge_worker_for_dispatch(_Node(), "worker-a", db=None) is True
+    assert calls == [("http://100.64.0.10:9001/nudge", "POST", 2)]
+
+
+def test_dispatch_nudge_falls_back_to_db_node(monkeypatch, tmp_path):
+    calls = []
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_node("worker-a", "100.64.0.11", 9002, ["claude"], 2)
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    def fake_urlopen(req, timeout):
+        calls.append((req.full_url, req.get_method(), timeout))
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    orchestrator = TaskOrchestrator.__new__(TaskOrchestrator)
+
+    assert orchestrator._nudge_worker_for_dispatch(None, "worker-a", db=db) is True
+    assert calls == [("http://100.64.0.11:9002/nudge", "POST", 2)]

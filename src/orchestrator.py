@@ -2550,6 +2550,8 @@ Generated from user description: {description}
         pickup_deadline = time.time() + pickup_timeout_sec
         poll_interval = 3.0
         first_poll = True
+        target_node_id = getattr(node, "node_id", None) or (session.machine_id if session else "")
+        await _aio.to_thread(self._nudge_worker_for_dispatch, node, target_node_id, db)
 
         while True:
             row = db.get_task(task.id)
@@ -2675,6 +2677,36 @@ Generated from user description: {description}
                 return result
 
             await _aio.sleep(poll_interval)
+
+    def _nudge_worker_for_dispatch(self, node: Any, node_id: str, db: Any) -> bool:
+        """Best-effort wake-up for a worker after enqueuing remote work."""
+        import urllib.request
+
+        tailscale_ip = getattr(node, "tailscale_ip", "") if node is not None else ""
+        api_port = getattr(node, "api_port", 0) if node is not None else 0
+        if (not tailscale_ip or not api_port) and node_id and db is not None:
+            try:
+                row = db.get_node(node_id)
+            except Exception:
+                row = None
+            if row:
+                tailscale_ip = row.get("tailscale_ip") or tailscale_ip
+                api_port = row.get("api_port") or api_port
+
+        if not tailscale_ip or not api_port:
+            logger.debug("event=mesh_nudge_skipped node_id=%s reason=no_address", node_id)
+            return False
+
+        url = f"http://{tailscale_ip}:{api_port}/nudge"
+        try:
+            req = urllib.request.Request(url, method="POST", data=b"")
+            with urllib.request.urlopen(req, timeout=2):
+                pass
+            logger.debug("event=mesh_nudge_sent node_id=%s url=%s", node_id, url)
+            return True
+        except Exception as e:
+            logger.debug("event=mesh_nudge_failed node_id=%s url=%s err=%s", node_id, url, e)
+            return False
 
     async def _dispatch_or_run_local(
         self,
