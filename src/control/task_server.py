@@ -185,6 +185,7 @@ class ExecutionResultPayload(BaseModel):
     artifact_path: Optional[str] = None
     backend_session_id: str = ""  # worker echoes back the native session ID for affinity continuity
     error_detail: str = ""  # full traceback when the worker caught an exception (D2)
+    inspect: Optional[Dict[str, Any]] = None  # repo inspection op result (action=='inspect')
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +472,7 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         "return_code": payload.return_code,
         "backend_session_id": payload.backend_session_id,
         "error_detail": payload.error_detail,
+        "inspect": payload.inspect,
     }
     session_id = task.get("session_id")
     if payload.success:

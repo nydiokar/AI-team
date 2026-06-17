@@ -491,7 +491,20 @@ class TelegramInterface:
                     lines.append(f"• `{item}`")
         return "\n".join(lines)
 
-    def _format_session_overview(self, session: Session, include_dirs: bool = False) -> str:
+    async def _inspect(self, session: Session, op: str, params: Optional[dict] = None) -> dict:
+        """Run a repo inspection op against the node that owns `session`.
+
+        Returns the op result dict (which may contain an ``error`` key). Routing
+        (local vs. owning remote node) and the offline-node honesty guard live in
+        NodeInspector — the gateway is canonical about *where* the repo is.
+        """
+        from src.control.node_inspector import get_inspector, InspectError
+        try:
+            return await get_inspector().run(session, op, params or {})
+        except InspectError as e:
+            return {"error": str(e)}
+
+    def _format_session_overview(self, session: Session, dirs: Optional[list] = None) -> str:
         lines = [
             f"Session: {self._session_tag(session.session_id)}",
             f"Backend: {session.backend}  |  Status: {session.status.value}",
@@ -505,10 +518,10 @@ class TelegramInterface:
             lines.append(f"Last task: `{session.last_task_id}`")
         lines.append(f"Ref: {self._session_message_ref(session)}")
         lines.append(f"Summary: {self._format_session_material_summary(session)}")
-        if include_dirs:
-            dirs = self._path_resolver().list_child_directories(session.repo_path, limit=8, include_hidden=False)
-            if dirs:
-                lines.append("Directories: " + ", ".join(f"`{item}`" for item in dirs))
+        # `dirs` is fetched by the caller via NodeInspector so it reflects the
+        # owning node's filesystem, not the gateway host's.
+        if dirs:
+            lines.append("Directories: " + ", ".join(f"`{item}`" for item in dirs))
         return "\n".join(lines)
 
     @staticmethod
@@ -1715,11 +1728,11 @@ class TelegramInterface:
         fallback_name = f"photo_{file_id[:12]}.jpg" if photo_arr else f"file_{file_id[:12]}"
         safe_name = self._safe_upload_name(file_name, fallback_name)
 
-        # Detect remote session: machine_id is set and doesn't match this host
-        is_remote = bool(
-            active_session.machine_id
-            and active_session.machine_id != socket.gethostname()
-        )
+        # Detect remote session via the canonical registry-based predicate
+        # (same rule NodeInspector uses), so uploads and inspection agree on
+        # where a session lives — including after the gateway moves to the VPS.
+        from src.control.node_inspector import session_node
+        is_remote = session_node(active_session) is not None
 
         file_size_kb = file_size / 1024
         size_str = f"{file_size_kb:.1f} KB" if file_size_kb < 1024 else f"{file_size_kb / 1024:.1f} MB"
@@ -2308,25 +2321,38 @@ class TelegramInterface:
             await update.message.reply_text("❌ Access denied.")
             return
         args = context.args or []
-        if args:
+        session = self.session_store.get_active(update.effective_chat.id)
+        has_session = bool(session and self._user_can_access_session(update.effective_user.id, session))
+
+        if args and not has_session:
+            # No session to anchor against — browse the gateway workspace locally,
+            # exactly as before. (An explicit path is resolved against gateway roots.)
             resolution = self._path_resolver().resolve_session_path(" ".join(args))
             if not resolution.ok or not resolution.resolved_path:
                 await update.message.reply_text(self._format_path_resolution_error(resolution))
                 return
             path = resolution.resolved_path
             dirs = self._path_resolver().list_child_directories(path, limit=12, include_hidden=False, sort_by_recent=True)
+        elif has_session:
+            # Anchor on the session's repo and route to its owning node. An
+            # optional path arg is treated as a child of the repo path.
+            path = session.repo_path
+            if args:
+                import os
+                path = os.path.join(session.repo_path, " ".join(args).lstrip("/\\"))
+            result = await self._inspect(session, "list_dirs", {"path": path, "limit": 12, "sort_by_recent": True})
+            if "error" in result:
+                await update.message.reply_text(f"❌ {result['error']}")
+                return
+            dirs = result.get("dirs") or []
+            path = result.get("path", path)
         else:
-            session = self.session_store.get_active(update.effective_chat.id)
-            if session and self._user_can_access_session(update.effective_user.id, session):
-                path = session.repo_path
-                dirs = self._path_resolver().list_child_directories(path, limit=12, include_hidden=False, sort_by_recent=True)
-            else:
-                resolver = self._path_resolver()
-                path = str(resolver.base_cwd or resolver.allowed_root or "")
-                dirs = resolver.list_child_directories(path, limit=12, include_hidden=False, sort_by_recent=True) if path else []
-                if not path:
-                    await update.message.reply_text("No active session and no workspace root configured.")
-                    return
+            resolver = self._path_resolver()
+            path = str(resolver.base_cwd or resolver.allowed_root or "")
+            if not path:
+                await update.message.reply_text("No active session and no workspace root configured.")
+                return
+            dirs = resolver.list_child_directories(path, limit=12, include_hidden=False, sort_by_recent=True)
 
         if not dirs:
             await update.message.reply_text(f"No child directories found under `{path}`.")
@@ -2352,7 +2378,9 @@ class TelegramInterface:
         if not self._user_can_access_session(update.effective_user.id, session):
             await update.message.reply_text("❌ You do not own that session.")
             return
-        await update.message.reply_text(self._format_session_overview(session, include_dirs=True))
+        result = await self._inspect(session, "list_dirs", {"limit": 8, "sort_by_recent": False})
+        dirs = result.get("dirs") if "error" not in result else None
+        await update.message.reply_text(self._format_session_overview(session, dirs=dirs))
 
     async def _handle_session_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_cancel [session_id]"""
@@ -2611,16 +2639,13 @@ Please check the system logs for more details.
                 await update.message.reply_text(error)
                 return
 
-            from src.core.git_automation import GitAutomationService
-
-            git_service = GitAutomationService(session.repo_path)
             commit_key, task_description = self._build_git_commit_context(session)
-            result = git_service.safe_commit_task(
-                task_id=commit_key,
-                task_description=task_description,
-                create_branch=create_branch,
-                push_branch=push_branch,
-            )
+            result = await self._inspect(session, "commit", {
+                "task_id": commit_key,
+                "task_description": task_description,
+                "create_branch": create_branch,
+                "push_branch": push_branch,
+            })
             await update.message.reply_text(
                 self._format_git_result(
                     f"❌ Failed to commit changes in session {self._session_tag(session.session_id)}.",
@@ -2648,16 +2673,13 @@ Please check the system logs for more details.
                 await update.message.reply_text(error)
                 return
 
-            from src.core.git_automation import GitAutomationService
-
-            git_service = GitAutomationService(session.repo_path)
             commit_key, task_description = self._build_git_commit_context(session)
-            result = git_service.commit_all_staged(
-                task_id=commit_key,
-                task_description=task_description,
-                create_branch=create_branch,
-                push_branch=push_branch,
-            )
+            result = await self._inspect(session, "commit_all", {
+                "task_id": commit_key,
+                "task_description": task_description,
+                "create_branch": create_branch,
+                "push_branch": push_branch,
+            })
             await update.message.reply_text(
                 self._format_git_result(
                     f"❌ Failed to commit staged changes in session {self._session_tag(session.session_id)}.",
@@ -2686,10 +2708,7 @@ Please check the system logs for more details.
                 await update.message.reply_text(error)
                 return
 
-            from src.core.git_automation import GitAutomationService
-
-            git_service = GitAutomationService(session.repo_path)
-            status = git_service.get_git_status_summary()
+            status = await self._inspect(session, "git_status")
 
             if "error" in status:
                 await update.message.reply_text(f"❌ {status['error']}")
