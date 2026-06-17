@@ -121,3 +121,70 @@ def test_dispatch_nudge_falls_back_to_db_node(monkeypatch, tmp_path):
 
     assert orchestrator._nudge_worker_for_dispatch(None, "worker-a", db=db) is True
     assert calls == [("http://100.64.0.11:9002/nudge", "POST", 2)]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_busy_sessions_marks_error(monkeypatch, tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    stale = _session("stale")
+    db.upsert_session(stale)
+
+    saved = []
+    events = []
+    session_events = []
+
+    class _Store:
+        def get(self, session_id):
+            return stale if session_id == stale.session_id else None
+
+        def save(self, session):
+            saved.append(session)
+            db.upsert_session(session)
+
+    async def direct_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    orchestrator = TaskOrchestrator.__new__(TaskOrchestrator)
+    orchestrator.active_tasks = {}
+    orchestrator.session_store = _Store()
+    orchestrator._append_session_event = lambda *args: session_events.append(args)
+    orchestrator._emit_event = lambda *args: events.append(args)
+
+    monkeypatch.setattr("src.control.db.get_db", lambda: db)
+    monkeypatch.setattr("asyncio.to_thread", direct_to_thread)
+
+    assert await orchestrator._reconcile_stale_busy_sessions_once() == 1
+    assert stale.status == SessionStatus.ERROR
+    assert "mesh reconciliation" in stale.last_result_summary
+    assert saved == [stale]
+    assert session_events[0][0] == stale.session_id
+    assert events[0][0] == "stale_busy_session_reconciled"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_busy_sessions_skips_gateway_active_task(monkeypatch, tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    stale = _session("active")
+    db.upsert_session(stale)
+
+    class _Store:
+        def get(self, session_id):
+            return stale if session_id == stale.session_id else None
+
+        def save(self, session):
+            raise AssertionError("active in-memory task should not be reconciled")
+
+    async def direct_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    orchestrator = TaskOrchestrator.__new__(TaskOrchestrator)
+    orchestrator.active_tasks = {stale.last_task_id: object()}
+    orchestrator.session_store = _Store()
+    orchestrator._append_session_event = lambda *args: None
+    orchestrator._emit_event = lambda *args: None
+
+    monkeypatch.setattr("src.control.db.get_db", lambda: db)
+    monkeypatch.setattr("asyncio.to_thread", direct_to_thread)
+
+    assert await orchestrator._reconcile_stale_busy_sessions_once() == 0
+    assert stale.status == SessionStatus.BUSY
