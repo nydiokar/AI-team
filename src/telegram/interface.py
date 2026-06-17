@@ -1380,6 +1380,32 @@ class TelegramInterface:
         except Exception:
             return last_heartbeat
 
+    @staticmethod
+    def _node_live_state(row: dict) -> dict:
+        """Parse a node live_state field from DB rows or API-shaped dicts."""
+        import json as _json
+
+        live = row.get("live_state")
+        if isinstance(live, dict):
+            return live
+        if isinstance(live, str) and live.strip():
+            try:
+                parsed = _json.loads(live)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    @classmethod
+    def _node_load_text(cls, row: dict) -> str:
+        live = cls._node_live_state(row)
+        slots_total = live.get("slots_total") or row.get("max_concurrent") or "?"
+        slots_used = live.get("slots_used")
+        active = live.get("active_tasks") if isinstance(live.get("active_tasks"), list) else []
+        if slots_used is None:
+            return f"slots ?/{slots_total}"
+        return f"slots {slots_used}/{slots_total}, active {len(active)}"
+
     async def _handle_nodes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """List all mesh worker nodes (online + offline) with last-heartbeat ages."""
         if not self._check_user_permission(update.effective_user.id):
@@ -1405,9 +1431,10 @@ class TelegramInterface:
                     backends = "—"
                 dot = "🟢" if r.get("status") == "online" else "⚪"
                 age = self._heartbeat_age(r.get("last_heartbeat", ""))
+                state_age = self._heartbeat_age(r.get("live_state_updated_at", ""))
                 ip = r.get("tailscale_ip") or "—"
                 lines.append(
-                    f"{dot} {r['node_id']} — {backends} — {ip} — last seen {age}"
+                    f"{dot} {r['node_id']} — {self._node_load_text(r)} — {backends} — {ip} — hb {age}, state {state_age}"
                 )
 
             if not rows:
@@ -1447,16 +1474,24 @@ class TelegramInterface:
                 repos = []
 
             dot = "🟢 online" if row.get("status") == "online" else "⚪ offline"
+            live = self._node_live_state(row)
+            active_tasks = live.get("active_tasks") if isinstance(live.get("active_tasks"), list) else []
             lines = [
                 f"Node: {row['node_id']}",
                 f"• Status: {dot}",
                 f"• Tailscale IP: {row.get('tailscale_ip') or '—'}:{row.get('api_port', '')}",
                 f"• Backends: {backends}",
+                f"• Load: {self._node_load_text(row)}",
                 f"• Max concurrent: {row.get('max_concurrent', '?')}",
                 f"• Last heartbeat: {self._heartbeat_age(row.get('last_heartbeat', ''))}",
+                f"• Last live state: {self._heartbeat_age(row.get('live_state_updated_at', ''))}",
                 f"• Registered: {self._heartbeat_age(row.get('registered_at', ''))}",
                 f"• Projects root: `{row.get('projects_root') or '—'}`",
             ]
+            if active_tasks:
+                shown_tasks = ", ".join(str(t) for t in active_tasks[:10])
+                more_tasks = f" (+{len(active_tasks) - 10} more)" if len(active_tasks) > 10 else ""
+                lines.append(f"• Active tasks: {shown_tasks}{more_tasks}")
             if repos:
                 shown = ", ".join(repos[:15])
                 more = f" (+{len(repos) - 15} more)" if len(repos) > 15 else ""
