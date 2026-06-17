@@ -39,15 +39,17 @@ mesh health has real signal instead of just "online/offline".
 
 ---
 
-### M2 — On-Demand Worker Pull
+### M2 — On-Demand Worker Pull (CORE DONE)
 **Goal:** Gateway can obtain a worker's current state right now, not wait 30s for the
 next heartbeat. Used before dispatch and during stuck-task investigation.
 
 **What changes:**
 - On nudge receipt, worker immediately sends a heartbeat (in addition to waking the
-  poll loop). Gateway gets fresh live_state within ~1s instead of up to 30s.
-- Gateway orchestrator can send a nudge before dispatch and wait for a newer
-  `live_state_updated_at` before making freshness-sensitive routing decisions.
+  poll loop). Implemented by sharing the nudge signal with the heartbeat loop.
+- Gateway orchestrator nudges the target worker after enqueueing remote work, so
+  workers wake promptly instead of waiting for the next poll interval.
+- TODO: for future slot-sensitive routing, gateway can send a pre-routing nudge and
+  wait for a newer `live_state_updated_at` before choosing a worker.
 
 **What does NOT change:**
 - The nudge server remains a minimal raw asyncio socket — no GET /status route.
@@ -89,18 +91,18 @@ self-healing mesh where divergence resolves automatically.
 
 ---
 
-### M4 — Network-Wide Dashboard
+### M4 — Network-Wide Dashboard (PARTIAL)
 **Goal:** Full network observability from a single view. Operators and the gateway
 itself can see every node's live state, session assignments, slot utilization, and
 health trends.
 
 **What changes:**
-- `/nodes` endpoint enriched with live_state, session_states, slot utilization
-- Telegram `/nodes` command shows rich per-node status (slots used, active tasks,
-  session states, last heartbeat age)
+- `/nodes` endpoint includes in-memory `live_state` and `live_state_updated_at`.
+- Telegram `/nodes` and `/node <id>` show per-node slot load, active task count,
+  active task ids, heartbeat age, and live-state age.
 - Aggregate mesh metrics: total slots used/available across all nodes, sessions
-  per node, error rates
-- Alerts on divergence patterns (node reporting idle but gateway shows 3 busy sessions)
+  per node, error rates. TODO.
+- Alerts on divergence patterns and stale-busy reconciliation counts. TODO.
 
 **Unblocks:** True mesh self-awareness. Operators see the network as it sees itself.
 Anomalies surface before they become incidents.
@@ -119,3 +121,42 @@ Neither guesses about the other's domain.
 | Task queue         | Gateway | mesh_tasks table                 |
 | Node routing       | Gateway | NodeRegistry + live_state        |
 | Network health     | Gateway | Aggregated from all node slices  |
+
+---
+
+## Implementation Status / Handoff
+
+Last updated on this branch after commits:
+- `b3101f8` — M1 correctness, M2 worker heartbeat wake, M3 DB primitive, test transport cleanup
+- `39f8cba` — M2 dispatch-side worker nudge
+- `2b4baa9` — test hygiene: fixed mesh dispatch timeout test and marked real full-pipeline test as e2e
+- `dec1790` — M3 periodic stale-busy session reconciliation
+- `0b2e982` — M4 node live-load visibility in Telegram and NodeInfo responses
+
+Completed:
+- M1 enriched heartbeats:
+  - worker sends nested `live_state` with `v`, `active_tasks`, `slots_used`, `slots_total`
+  - `slots_used` is semaphore-acquired count, not `len(_active)`
+  - DB stores `live_state` and `live_state_updated_at`
+- M2 core:
+  - raw nudge listener still only accepts `POST /nudge`
+  - nudge wakes poll loop and heartbeat loop
+  - remote dispatch sends best-effort nudge after enqueue
+- M3 core:
+  - DB has `list_stale_busy_sessions()`
+  - orchestrator runs periodic stale-busy reconciliation when `MESH_ENABLED=true`
+  - stale busy sessions are marked `ERROR`, session event is appended, and `stale_busy_session_reconciled` is emitted
+  - interval is `MESH_SESSION_RECONCILE_INTERVAL_SEC`, default 60, 0 disables
+- M4 partial:
+  - Telegram `/nodes` and `/node <id>` show slot load, active task counts/ids, heartbeat age, and live-state freshness
+
+Known remaining work:
+- M2 optional routing freshness:
+  - before choosing among capable workers, nudge candidates and wait briefly for newer `live_state_updated_at`
+  - use fresh `slots_used < slots_total` in `NodeRegistry.pick_capable()` or a new picker
+- M4 metrics/dashboard:
+  - enrich `/metrics` with aggregate slots used/total, active task totals, stale-busy counts
+  - surface stale-busy reconciliation history or current stale count in Telegram/status views
+- Test hygiene follow-up:
+  - default suite now skips `test_full_pipeline.py` as `e2e`, but later opencode/node-inspector tests can still stall
+  - add stricter markers/timeouts and split default unit tests from external/backend integration tests
