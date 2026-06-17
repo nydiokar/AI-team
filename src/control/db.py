@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 8
+_CURRENT_VERSION = 9
 
 
 # ---------------------------------------------------------------------------
@@ -795,10 +795,11 @@ class MeshDB:
                     """
                     UPDATE nodes
                     SET last_heartbeat = ?, status = 'online', updated_at = ?,
-                        live_state = COALESCE(?, live_state)
+                        live_state = COALESCE(?, live_state),
+                        live_state_updated_at = CASE WHEN ? IS NOT NULL THEN ? ELSE live_state_updated_at END
                     WHERE node_id = ?
                     """,
-                    (now, now, live_state, node_id),
+                    (now, now, live_state, live_state, now, node_id),
                 )
         except Exception as e:
             logger.warning("event=db_heartbeat_node_failed node_id=%s err=%s", node_id, e)
@@ -1038,6 +1039,7 @@ def _get_migrations() -> List[tuple]:
         (6, "ALTER TABLE nodes ADD COLUMN incarnation_id TEXT"),  # per-restart UUID for orphan detection
         (7, "ALTER TABLE mesh_tasks ADD COLUMN claimer_incarnation TEXT"),  # matched against nodes.incarnation_id by reaper
         (8, "ALTER TABLE nodes ADD COLUMN live_state TEXT"),  # JSON snapshot sent with each heartbeat (slots, active tasks)
+        (9, "ALTER TABLE nodes ADD COLUMN live_state_updated_at TEXT"),  # timestamp of last live_state update; NULL = never received
     ]
 
 

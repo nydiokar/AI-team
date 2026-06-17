@@ -158,11 +158,16 @@ class NodeRegisterPayload(BaseModel):
     capabilities: _Capabilities = _Capabilities()
 
 
-class HeartbeatPayload(BaseModel):
-    node_id: str
+class LiveStatePayload(BaseModel):
+    v: int = 1
     active_tasks: List[str] = []
     slots_used: int = 0
     slots_total: int = 0
+
+
+class HeartbeatPayload(BaseModel):
+    node_id: str
+    live_state: Optional[LiveStatePayload] = None
 
 
 class DeregisterPayload(BaseModel):
@@ -308,11 +313,7 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
 
 @app.post("/nodes/heartbeat", dependencies=[Depends(_require_auth)])
 def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
-    live_state = {
-        "active_tasks": payload.active_tasks,
-        "slots_used": payload.slots_used,
-        "slots_total": payload.slots_total,
-    } if payload.slots_total > 0 else None
+    live_state = payload.live_state.model_dump() if payload.live_state is not None else None
     ok = get_registry().heartbeat(payload.node_id, live_state=live_state)
     if not ok:
         # Unknown node — prompt re-register instead of silently failing
