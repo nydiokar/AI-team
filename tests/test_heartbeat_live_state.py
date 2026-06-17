@@ -61,6 +61,12 @@ def test_heartbeat_node_without_live_state_preserves_existing(tmp_path):
     assert node["live_state"] is not None
     stored = json.loads(node["live_state"])
     assert stored["slots_used"] == 1
+    first_updated = node["live_state_updated_at"]
+    assert first_updated
+
+    db.heartbeat_node("node-a", live_state=None)
+    node = next(r for r in db.list_nodes() if r["node_id"] == "node-a")
+    assert node["live_state_updated_at"] == first_updated
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +109,7 @@ def test_node_info_to_dict_includes_live_state():
 
     d = registry.get(nid).to_dict()
     assert d["live_state"] == live
+    assert d["live_state_updated_at"] is not None
 
 
 # ---------------------------------------------------------------------------

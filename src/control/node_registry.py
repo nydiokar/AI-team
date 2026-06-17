@@ -34,6 +34,7 @@ class NodeInfo:
     last_heartbeat: Optional[datetime] = None
     registered_at: Optional[datetime] = None
     live_state: Optional[dict] = None       # last heartbeat snapshot: slots, active_tasks
+    live_state_updated_at: Optional[datetime] = None
     incarnation_id: Optional[str] = None   # minted by DB on every register; used by reaper
 
     @classmethod
@@ -67,6 +68,7 @@ class NodeInfo:
             "last_heartbeat": self.last_heartbeat.isoformat() if self.last_heartbeat else None,
             "registered_at": self.registered_at.isoformat() if self.registered_at else None,
             "live_state": self.live_state,
+            "live_state_updated_at": self.live_state_updated_at.isoformat() if self.live_state_updated_at else None,
         }
 
 
@@ -134,6 +136,7 @@ class NodeRegistry:
         node.status = "online"
         if live_state is not None:
             node.live_state = live_state
+            node.live_state_updated_at = node.last_heartbeat
         self._db_heartbeat(node_id, live_state)
         return True
 

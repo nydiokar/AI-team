@@ -291,6 +291,26 @@ async def test_help_lists_current_command_set(monkeypatch, isolated_session_stor
         shutil.rmtree(workspace.parent, ignore_errors=True)
 
 
+def test_node_live_state_helpers_format_db_rows():
+    row = {
+        "max_concurrent": 4,
+        "live_state": json.dumps({
+            "v": 1,
+            "slots_used": 2,
+            "slots_total": 4,
+            "active_tasks": ["task_a", "task_b"],
+        }),
+    }
+
+    assert TelegramInterface._node_live_state(row)["slots_used"] == 2
+    assert TelegramInterface._node_load_text(row) == "slots 2/4, active 2"
+
+
+def test_node_live_state_helpers_handle_missing_state():
+    assert TelegramInterface._node_live_state({"live_state": ""}) == {}
+    assert TelegramInterface._node_load_text({"max_concurrent": 3}) == "slots ?/3"
+
+
 @pytest.mark.asyncio
 async def test_session_close_closes_local_backend_and_clears_backend_session_id(
     monkeypatch,
