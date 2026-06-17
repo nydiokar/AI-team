@@ -487,6 +487,7 @@ class WorkerAgent:
         self._shutdown = asyncio.Event()
         self._poll_now = asyncio.Event()
         self._semaphore = asyncio.Semaphore(self.cfg.max_concurrent)
+        self._slots_used: int = 0  # semaphore-acquired count; differs from len(_active) which includes queued tasks
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
 
     # ------------------------------------------------------------------
@@ -520,10 +521,17 @@ class WorkerAgent:
     # ------------------------------------------------------------------
 
     def _live_state(self) -> dict:
-        """Snapshot of current operational state for heartbeat reporting."""
+        """Snapshot of current operational state for heartbeat reporting.
+
+        slots_used counts semaphore-acquired tasks only. len(self._active)
+        also includes tasks queued but not yet scheduled, so it can exceed
+        max_concurrent when the poll loop fetches a batch larger than the
+        semaphore allows.
+        """
         return {
+            "v": 1,
             "active_tasks": list(self._active.keys()),
-            "slots_used": len(self._active),
+            "slots_used": self._slots_used,
             "slots_total": self.cfg.max_concurrent,
         }
 
@@ -531,16 +539,17 @@ class WorkerAgent:
         try:
             while not self._shutdown.is_set():
                 try:
-                    payload = {"node_id": self.cfg.node_id, **self._live_state()}
+                    live = self._live_state()
+                    payload = {"node_id": self.cfg.node_id, "live_state": live}
                     await asyncio.to_thread(
                         self._http.post, "/nodes/heartbeat", payload
                     )
                     logger.debug(
                         "event=heartbeat_sent node_id=%s slots=%d/%d active=%s",
                         self.cfg.node_id,
-                        len(self._active),
-                        self.cfg.max_concurrent,
-                        list(self._active.keys()),
+                        live["slots_used"],
+                        live["slots_total"],
+                        live["active_tasks"],
                     )
                 except urllib.error.HTTPError as e:
                     if e.code == 404:
@@ -633,28 +642,6 @@ class WorkerAgent:
                                 logger.info("event=job_completed job_id=%s exit_code=%s", job_id, exit_code)
                             except Exception as e:
                                 logger.warning("event=job_done_post_failed job_id=%s err=%s", job_id, e)
-
-                # Reconcile after restart: check if running PIDs still match
-                # (uses the same `running` list so no extra fetch needed)
-                for job in running:
-                    pid = job.get("pid")
-                    if pid is None:
-                        continue
-                    if job.get("id") in {j.get("id") for j in running if j.get("pid")}:
-                        continue
-                    alive = await asyncio.to_thread(_pid_alive, pid)
-                    if not alive:
-                        log_path = job.get("log_path")
-                        tail = _read_log_tail(log_path) if log_path else ""
-                        tail = f"[reconciled after worker restart] {tail}"
-                        try:
-                            await asyncio.to_thread(
-                                self._http.post,
-                                f"/jobs/{job.get('id')}/done",
-                                {"node_id": self.cfg.node_id, "exit_code": -1, "tail": tail},
-                            )
-                        except Exception:
-                            pass
 
                 try:
                     await asyncio.wait_for(self._shutdown.wait(), timeout=10)
@@ -783,47 +770,51 @@ class WorkerAgent:
         # Correlate every line + event for this task with task_id/session_id.
         set_log_context(task_id=task_id, session_id=session_id)
         async with self._semaphore:
-            # Claim — optimistic lock
+            self._slots_used += 1
             try:
-                await asyncio.to_thread(
-                    self._http.post,
-                    f"/tasks/{task_id}/claim",
-                    {"node_id": self.cfg.node_id},
-                )
-            except urllib.error.HTTPError as e:
-                if e.code == 409:
-                    logger.debug("claim_race (already claimed)")
-                else:
+                # Claim — optimistic lock
+                try:
+                    await asyncio.to_thread(
+                        self._http.post,
+                        f"/tasks/{task_id}/claim",
+                        {"node_id": self.cfg.node_id},
+                    )
+                except urllib.error.HTTPError as e:
+                    if e.code == 409:
+                        logger.debug("claim_race (already claimed)")
+                    else:
+                        logger.warning("claim_failed err=%s", e)
+                    return
+                except Exception as e:
                     logger.warning("claim_failed err=%s", e)
-                return
-            except Exception as e:
-                logger.warning("claim_failed err=%s", e)
-                return
+                    return
 
-            logger.info("task_claimed")
-            emit_event("task_claimed", backend=task_row.get("backend", ""))
+                logger.info("task_claimed")
+                emit_event("task_claimed", backend=task_row.get("backend", ""))
 
-            # Execute
-            result = await _execute_task(task_row, self._backends, self._http)
+                # Execute
+                result = await _execute_task(task_row, self._backends, self._http)
 
-            # Post result
-            try:
-                await asyncio.to_thread(
-                    self._http.post,
-                    f"/tasks/{task_id}/result",
-                    {"node_id": self.cfg.node_id, **result},
-                )
-                logger.info(
-                    "task_result_posted success=%s elapsed=%.1fs",
-                    result["success"], result["execution_time"],
-                )
-                emit_event(
-                    "task_result_posted",
-                    success=result["success"],
-                    duration_s=round(result.get("execution_time", 0.0), 3),
-                )
-            except Exception as e:
-                logger.error("result_post_failed err=%s", e)
+                # Post result
+                try:
+                    await asyncio.to_thread(
+                        self._http.post,
+                        f"/tasks/{task_id}/result",
+                        {"node_id": self.cfg.node_id, **result},
+                    )
+                    logger.info(
+                        "task_result_posted success=%s elapsed=%.1fs",
+                        result["success"], result["execution_time"],
+                    )
+                    emit_event(
+                        "task_result_posted",
+                        success=result["success"],
+                        duration_s=round(result.get("execution_time", 0.0), 3),
+                    )
+                except Exception as e:
+                    logger.error("result_post_failed err=%s", e)
+            finally:
+                self._slots_used -= 1
 
     # ------------------------------------------------------------------
     # Run

@@ -40,29 +40,47 @@ mesh health has real signal instead of just "online/offline".
 ---
 
 ### M2 — On-Demand Worker Pull
-**Goal:** Gateway can query a worker's current state right now, not wait 30s for the
+**Goal:** Gateway can obtain a worker's current state right now, not wait 30s for the
 next heartbeat. Used before dispatch and during stuck-task investigation.
 
 **What changes:**
-- Worker's raw asyncio nudge server gains `GET /status` route alongside `POST /nudge`
-- Returns same state snapshot as heartbeat live_state
-- Gateway calls this from orchestrator before task dispatch and from mesh health checks
+- On nudge receipt, worker immediately sends a heartbeat (in addition to waking the
+  poll loop). Gateway gets fresh live_state within ~1s instead of up to 30s.
+- Gateway orchestrator sends a nudge before dispatch; the returned heartbeat updates
+  live_state before the routing decision is made.
 
-**Unblocks:** Gateway can make routing decisions on fresh state. Stuck task
+**What does NOT change:**
+- The nudge server remains a minimal raw asyncio socket — no GET /status route.
+  Adding HTTP routing to a hand-rolled 512-byte server is fragile. The nudge →
+  immediate-heartbeat pattern achieves the same freshness without a new protocol.
+
+**Unblocks:** Gateway can make routing decisions on near-fresh state. Stuck task
 investigation no longer requires reading 30s-stale data.
 
 ---
 
 ### M3 — Session State Reconciliation
-**Goal:** Worker reports per-session backend states (busy/idle/error) with each
-heartbeat. Gateway reconciles against its sessions table to detect divergence.
+**Goal:** Detect divergence between what the gateway thinks a session's state is and
+what the task record says. Catch stuck sessions without manual investigation.
+
+**Design note:** Workers do NOT report session states. Session state (busy/idle/error)
+is owned by the gateway's `sessions` table. Workers only know which tasks they are
+currently executing — they have no persistent view of session state between tasks.
+Asking workers to report session states would invert the ownership model and create a
+circular dependency (worker importing gateway session models). Reconciliation belongs
+entirely on the gateway side.
 
 **What changes:**
-- Worker backends expose a `get_session_states() -> dict[session_id, status]` method
-- Worker includes `session_states: {session_id: busy|idle|error}` in heartbeat
-- Gateway compares reported states against sessions table
-- Divergence (worker says idle, gateway says busy) triggers a flag and optional
-  auto-recovery (mark session error, release for reattach)
+- Gateway-side reconciliation job: find sessions with `status='busy'` that have no
+  corresponding active task (`mesh_tasks WHERE session_id=X AND status IN
+  ('pending','claimed')`). These are stale-busy sessions — the task completed or was
+  lost without updating the session.
+- On divergence: mark session `error`, emit an event, surface in /nodes dashboard.
+- Optional auto-recovery: re-enqueue or mark the session idle for reattach.
+
+**What does NOT change:**
+- Worker heartbeat payload — no session_states field added.
+- Worker backends — no get_session_states() method added.
 
 **Unblocks:** Catches stuck sessions without manual investigation. Foundation for
 self-healing mesh where divergence resolves automatically.

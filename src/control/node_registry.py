@@ -34,6 +34,7 @@ class NodeInfo:
     last_heartbeat: Optional[datetime] = None
     registered_at: Optional[datetime] = None
     live_state: Optional[dict] = None       # last heartbeat snapshot: slots, active_tasks
+    incarnation_id: Optional[str] = None   # minted by DB on every register; used by reaper
 
     @classmethod
     def from_dict(cls, d: dict) -> "NodeInfo":
@@ -217,7 +218,7 @@ class NodeRegistry:
             from src.control.db import get_db
             db = get_db()
             if db:
-                db.upsert_node(
+                incarnation_id = db.upsert_node(
                     node_id=node.node_id,
                     tailscale_ip=node.tailscale_ip,
                     api_port=node.api_port,
@@ -227,6 +228,7 @@ class NodeRegistry:
                     projects_root=node.capabilities.projects_root,
                     repos=node.capabilities.repos,
                 )
+                node.incarnation_id = incarnation_id
         except Exception as e:
             logger.debug("event=db_node_upsert_err node_id=%s err=%s", node.node_id, e)
 

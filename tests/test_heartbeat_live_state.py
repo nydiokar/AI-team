@@ -141,9 +141,11 @@ def test_heartbeat_endpoint_accepts_live_state(tmp_path):
 
         resp = client.post("/nodes/heartbeat", json={
             "node_id": nid,
-            "active_tasks": ["task_abc"],
-            "slots_used": 1,
-            "slots_total": 2,
+            "live_state": {
+                "active_tasks": ["task_abc"],
+                "slots_used": 1,
+                "slots_total": 2,
+            },
         }, headers=headers)
         assert resp.status_code == 200
 
