@@ -454,9 +454,12 @@ class MeshDB:
                         now,
                     ),
                 )
-        except sqlite3.IntegrityError:
-            # Idempotent — task already exists (e.g. duplicate dispatch on retry)
-            logger.debug("event=db_enqueue_task_duplicate task_id=%s", task_id)
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed: mesh_tasks.id" in str(e):
+                # Idempotent — task already exists (e.g. duplicate dispatch on retry)
+                logger.debug("event=db_enqueue_task_duplicate task_id=%s", task_id)
+            else:
+                logger.warning("event=db_enqueue_task_integrity_failed task_id=%s err=%s", task_id, e)
         except Exception as e:
             logger.warning("event=db_enqueue_task_failed task_id=%s err=%s", task_id, e)
 
