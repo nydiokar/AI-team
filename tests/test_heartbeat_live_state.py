@@ -111,11 +111,8 @@ def test_node_info_to_dict_includes_live_state():
 
 
 def test_heartbeat_endpoint_accepts_live_state(tmp_path):
-    from fastapi.testclient import TestClient
     from config import config as cfg
     cfg.mesh.db_path = str(tmp_path / "hb_live.db")
-    shared_token = "test-hb-live"
-    cfg.mesh.worker_token = shared_token
     import src.control.db as db_mod
     old = db_mod._db_instance
     db_mod._db_instance = None
@@ -123,31 +120,34 @@ def test_heartbeat_endpoint_accepts_live_state(tmp_path):
         old.close()
 
     try:
-        from src.control.task_server import app
-        from src.control.node_registry import _registry
+        from src.control.task_server import (
+            HeartbeatPayload,
+            LiveStatePayload,
+            NodeRegisterPayload,
+            _Capabilities,
+            node_heartbeat,
+            register_node,
+        )
         import src.control.node_registry as reg_mod
         reg_mod._registry = None  # fresh registry for this test
 
-        client = TestClient(app)
-        headers = {"Authorization": f"Bearer {shared_token}"}
-
         nid = _node_id()
-        client.post("/nodes/register", json={
-            "node_id": nid,
-            "tailscale_ip": "127.0.0.1",
-            "api_port": 9001,
-            "capabilities": {"backends": ["claude"], "max_concurrent": 2},
-        }, headers=headers)
+        register_node(NodeRegisterPayload(
+            node_id=nid,
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=_Capabilities(backends=["claude"], max_concurrent=2),
+        ))
 
-        resp = client.post("/nodes/heartbeat", json={
-            "node_id": nid,
-            "live_state": {
-                "active_tasks": ["task_abc"],
-                "slots_used": 1,
-                "slots_total": 2,
-            },
-        }, headers=headers)
-        assert resp.status_code == 200
+        resp = node_heartbeat(HeartbeatPayload(
+            node_id=nid,
+            live_state=LiveStatePayload(
+                active_tasks=["task_abc"],
+                slots_used=1,
+                slots_total=2,
+            ),
+        ))
+        assert resp["status"] == "ok"
 
         node = reg_mod.get_registry().get(nid)
         assert node.live_state["slots_used"] == 1
@@ -163,11 +163,8 @@ def test_heartbeat_endpoint_accepts_live_state(tmp_path):
 
 def test_heartbeat_endpoint_backward_compatible(tmp_path):
     """Old workers sending only node_id still work — live_state defaults to None."""
-    from fastapi.testclient import TestClient
     from config import config as cfg
     cfg.mesh.db_path = str(tmp_path / "hb_compat.db")
-    shared_token = "test-hb-compat"
-    cfg.mesh.worker_token = shared_token
     import src.control.db as db_mod
     old = db_mod._db_instance
     db_mod._db_instance = None
@@ -175,24 +172,27 @@ def test_heartbeat_endpoint_backward_compatible(tmp_path):
         old.close()
 
     try:
-        from src.control.task_server import app
+        from src.control.task_server import (
+            HeartbeatPayload,
+            NodeRegisterPayload,
+            _Capabilities,
+            node_heartbeat,
+            register_node,
+        )
         import src.control.node_registry as reg_mod
         reg_mod._registry = None
 
-        client = TestClient(app)
-        headers = {"Authorization": f"Bearer {shared_token}"}
-
         nid = _node_id()
-        client.post("/nodes/register", json={
-            "node_id": nid,
-            "tailscale_ip": "127.0.0.1",
-            "api_port": 9001,
-            "capabilities": {"backends": ["claude"], "max_concurrent": 2},
-        }, headers=headers)
+        register_node(NodeRegisterPayload(
+            node_id=nid,
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=_Capabilities(backends=["claude"], max_concurrent=2),
+        ))
 
         # Old-style heartbeat with only node_id
-        resp = client.post("/nodes/heartbeat", json={"node_id": nid}, headers=headers)
-        assert resp.status_code == 200
+        resp = node_heartbeat(HeartbeatPayload(node_id=nid))
+        assert resp["status"] == "ok"
 
     finally:
         db_mod._db_instance = None

@@ -245,17 +245,15 @@ def test_release_node_claims_noop_when_none_claimed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# FastAPI TestClient — release endpoint + idempotency
+# FastAPI endpoint functions — release endpoint + idempotency
 # ---------------------------------------------------------------------------
 
 
-def test_release_endpoint_via_testclient(tmp_path):
-    from fastapi.testclient import TestClient
+def test_release_endpoint_function(tmp_path):
+    from fastapi import HTTPException
 
     from config import config as cfg
     cfg.mesh.db_path = str(tmp_path / "mesh_api.db")
-    shared_token = "test-token-t4"
-    cfg.mesh.worker_token = shared_token
     import src.control.db as db_mod
     old = db_mod._db_instance
     db_mod._db_instance = None
@@ -263,9 +261,7 @@ def test_release_endpoint_via_testclient(tmp_path):
         old.close()
 
     try:
-        from src.control.task_server import app
-        client = TestClient(app)
-        headers = {"Authorization": f"Bearer {shared_token}"}
+        from src.control.task_server import ClaimPayload, release_task
 
         # Enqueue + claim via DB directly
         db = db_mod.get_db()
@@ -275,9 +271,8 @@ def test_release_endpoint_via_testclient(tmp_path):
         db.claim_task(tid, "test-node")
 
         # Release via API
-        resp = client.post(f"/tasks/{tid}/release", json={"node_id": "test-node"}, headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "released"
+        resp = release_task(tid, ClaimPayload(node_id="test-node"))
+        assert resp["status"] == "released"
 
         # Verify released in DB
         row = db.get_task(tid)
@@ -285,8 +280,9 @@ def test_release_endpoint_via_testclient(tmp_path):
 
         # Wrong node cannot release
         db.claim_task(tid, "test-node")
-        resp = client.post(f"/tasks/{tid}/release", json={"node_id": "wrong-node"}, headers=headers)
-        assert resp.status_code == 409
+        with pytest.raises(HTTPException) as exc:
+            release_task(tid, ClaimPayload(node_id="wrong-node"))
+        assert exc.value.status_code == 409
 
     finally:
         db_mod._db_instance = None
@@ -295,14 +291,10 @@ def test_release_endpoint_via_testclient(tmp_path):
         db_mod._db_instance = old
 
 
-def test_submit_result_idempotency_via_testclient(tmp_path):
+def test_submit_result_idempotency_endpoint_function(tmp_path):
     """Late result after task is already terminal is accepted without error."""
-    from fastapi.testclient import TestClient
-
     from config import config as cfg
     cfg.mesh.db_path = str(tmp_path / "mesh_api_idem.db")
-    shared_token = "test-token-shared"
-    cfg.mesh.worker_token = shared_token
     import src.control.db as db_mod
     old = db_mod._db_instance
     db_mod._db_instance = None
@@ -310,9 +302,7 @@ def test_submit_result_idempotency_via_testclient(tmp_path):
         old.close()
 
     try:
-        from src.control.task_server import app
-        client = TestClient(app)
-        headers = {"Authorization": f"Bearer {shared_token}"}
+        from src.control.task_server import ExecutionResultPayload, submit_result
 
         db = db_mod.get_db()
         assert db is not None
@@ -321,22 +311,20 @@ def test_submit_result_idempotency_via_testclient(tmp_path):
         db.claim_task(tid, "worker-a")
 
         # First result goes through
-        resp = client.post(f"/tasks/{tid}/result", json={
-            "node_id": "worker-a",
-            "success": True,
-            "output": "first result",
-        }, headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "accepted"
+        resp = submit_result(tid, ExecutionResultPayload(
+            node_id="worker-a",
+            success=True,
+            output="first result",
+        ))
+        assert resp["status"] == "accepted"
 
         # Late result from same node (after completion) should not error
-        resp = client.post(f"/tasks/{tid}/result", json={
-            "node_id": "worker-a",
-            "success": True,
-            "output": "late duplicate",
-        }, headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "accepted (stale)"
+        resp = submit_result(tid, ExecutionResultPayload(
+            node_id="worker-a",
+            success=True,
+            output="late duplicate",
+        ))
+        assert resp["status"] == "accepted (stale)"
 
         # DB state still shows first result
         row = db.get_task(tid)

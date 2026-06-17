@@ -12,7 +12,7 @@ honestly. The gateway aggregates slices into a network-wide view and acts on it.
 ```
 Current                         Target
 ───────                         ──────
-Worker knows: slots, sessions   Worker reports: slots, active tasks, session states
+Worker knows: slots, tasks      Worker reports: slots and active task ids
 Gateway knows: online/offline   Gateway knows: rich live state per node
                                 Network knows: itself
 ```
@@ -26,8 +26,8 @@ Gateway knows: online/offline   Gateway knows: rich live state per node
 it and exposes it. No new protocol — extend the existing 30s heartbeat.
 
 **What workers send:**
-- `active_tasks: [task_id, ...]` — tasks currently executing
-- `slots_used: int` — semaphore slots consumed (len of _active)
+- `active_tasks: [task_id, ...]` — tasks currently queued or executing in the worker process
+- `slots_used: int` — semaphore slots consumed by tasks that have entered execution
 - `slots_total: int` — max_concurrent from config
 
 **What gateway stores:**
@@ -46,8 +46,8 @@ next heartbeat. Used before dispatch and during stuck-task investigation.
 **What changes:**
 - On nudge receipt, worker immediately sends a heartbeat (in addition to waking the
   poll loop). Gateway gets fresh live_state within ~1s instead of up to 30s.
-- Gateway orchestrator sends a nudge before dispatch; the returned heartbeat updates
-  live_state before the routing decision is made.
+- Gateway orchestrator can send a nudge before dispatch and wait for a newer
+  `live_state_updated_at` before making freshness-sensitive routing decisions.
 
 **What does NOT change:**
 - The nudge server remains a minimal raw asyncio socket — no GET /status route.
@@ -112,7 +112,7 @@ Neither guesses about the other's domain.
 
 | Truth domain       | Owner   | Mechanism                        |
 |--------------------|---------|----------------------------------|
-| Session busy/idle  | Worker  | Heartbeat (push) + /status (pull)|
+| Session busy/idle  | Gateway | sessions table + mesh_tasks reconciliation |
 | Slot utilization   | Worker  | Heartbeat live_state             |
 | Task queue         | Gateway | mesh_tasks table                 |
 | Node routing       | Gateway | NodeRegistry + live_state        |
