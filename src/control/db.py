@@ -1031,6 +1031,8 @@ class MeshDB:
     def stats(self) -> Dict[str, Any]:
         """Quick health snapshot — useful for /status Telegram command."""
         conn = self._conn()
+        nodes = self.list_nodes()
+        mesh_load = _mesh_load_stats(nodes, self.list_stale_busy_sessions(limit=10000))
         return {
             "sessions_total":   conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
             "sessions_busy":    conn.execute("SELECT COUNT(*) FROM sessions WHERE status='busy'").fetchone()[0],
@@ -1042,6 +1044,7 @@ class MeshDB:
             "nodes_total":      conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0],
             "schema_version":   conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] or 0,
             "db_path":          str(self._path),
+            "mesh_load":        mesh_load,
         }
 
 
@@ -1078,6 +1081,72 @@ def _get_migrations() -> List[tuple]:
 
 def _now() -> str:
     return datetime.utcnow().isoformat()
+
+
+def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Aggregate node live_state blobs into network-wide slot/task counters."""
+    slots_used = 0
+    slots_total = 0
+    active_tasks = 0
+    nodes_with_state = 0
+    nodes_without_state = 0
+    stale_state_nodes: List[str] = []
+
+    now = datetime.utcnow()
+    for row in nodes:
+        live_raw = row.get("live_state")
+        live: Dict[str, Any] = {}
+        if isinstance(live_raw, dict):
+            live = live_raw
+        elif isinstance(live_raw, str) and live_raw.strip():
+            try:
+                parsed = json.loads(live_raw)
+                if isinstance(parsed, dict):
+                    live = parsed
+            except Exception:
+                live = {}
+
+        if live:
+            nodes_with_state += 1
+            try:
+                slots_used += int(live.get("slots_used") or 0)
+            except Exception:
+                pass
+            try:
+                slots_total += int(live.get("slots_total") or row.get("max_concurrent") or 0)
+            except Exception:
+                pass
+            tasks = live.get("active_tasks")
+            if isinstance(tasks, list):
+                active_tasks += len(tasks)
+        else:
+            nodes_without_state += 1
+            try:
+                slots_total += int(row.get("max_concurrent") or 0)
+            except Exception:
+                pass
+
+        updated = row.get("live_state_updated_at")
+        if row.get("status") == "online" and not updated:
+            stale_state_nodes.append(row.get("node_id", ""))
+        elif row.get("status") == "online" and updated:
+            try:
+                age_s = (now - datetime.fromisoformat(str(updated))).total_seconds()
+                if age_s > 120:
+                    stale_state_nodes.append(row.get("node_id", ""))
+            except Exception:
+                stale_state_nodes.append(row.get("node_id", ""))
+
+    return {
+        "slots_used": slots_used,
+        "slots_total": slots_total,
+        "slots_available": max(slots_total - slots_used, 0),
+        "active_tasks": active_tasks,
+        "nodes_with_live_state": nodes_with_state,
+        "nodes_without_live_state": nodes_without_state,
+        "stale_live_state_nodes": [n for n in stale_state_nodes if n],
+        "stale_busy_sessions": len(stale_busy or []),
+    }
 
 
 # ---------------------------------------------------------------------------

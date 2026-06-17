@@ -253,6 +253,7 @@ def metrics() -> Dict[str, Any]:
     """
     db = get_db()
     s = db.stats() if db else {}
+    mesh_load = s.get("mesh_load") or {}
     completed = s.get("tasks_completed", 0)
     failed = s.get("tasks_failed", 0)
     finished = completed + failed
@@ -280,11 +281,19 @@ def metrics() -> Dict[str, Any]:
         "nodes": {
             "online": s.get("nodes_online", 0),
             "total": s.get("nodes_total", 0),
+            "slots_used": mesh_load.get("slots_used", 0),
+            "slots_total": mesh_load.get("slots_total", 0),
+            "slots_available": mesh_load.get("slots_available", 0),
+            "active_tasks": mesh_load.get("active_tasks", 0),
+            "nodes_with_live_state": mesh_load.get("nodes_with_live_state", 0),
+            "nodes_without_live_state": mesh_load.get("nodes_without_live_state", 0),
+            "stale_live_state_nodes": mesh_load.get("stale_live_state_nodes", []),
             "detail": nodes,
         },
         "sessions": {
             "total": s.get("sessions_total", 0),
             "busy": s.get("sessions_busy", 0),
+            "stale_busy": mesh_load.get("stale_busy_sessions", 0),
         },
         "schema_version": s.get("schema_version", 0),
     }
