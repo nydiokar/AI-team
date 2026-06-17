@@ -132,6 +132,7 @@ class MeshConfig:
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
     oneoff_queue_timeout_sec: int = 600     # MESH_ONEOFF_QUEUE_TIMEOUT_SEC
     claim_lease_sec: int = 300              # MESH_CLAIM_LEASE_SEC — stale-claim reaper threshold (T4)
+    session_reconcile_interval_sec: int = 60  # MESH_SESSION_RECONCILE_INTERVAL_SEC — 0 disables M3 loop
     shadow_write: bool = True               # always mirror to DB even when mesh routing is off
     # State Separation Phase 2: when False (default), the task server runs as its
     # own process (server_main.py / ai-team-server) and the gateway reaches it
@@ -402,6 +403,12 @@ class Config:
             v = os.getenv("MESH_CLAIM_LEASE_SEC")
             if v is not None:
                 self.mesh.claim_lease_sec = max(30, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_SESSION_RECONCILE_INTERVAL_SEC")
+            if v is not None:
+                self.mesh.session_reconcile_interval_sec = max(0, int(v))
         except Exception:
             pass
         try:

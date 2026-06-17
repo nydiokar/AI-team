@@ -104,6 +104,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._task_cancel_events: Dict[str, asyncio.Event] = {}
         self._running_exec_tasks: Dict[str, asyncio.Task] = {}
         self._shutdown_interrupted_tasks: set[str] = set()
+        self._stale_busy_reconcile_task: Optional[asyncio.Task] = None
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -476,6 +477,90 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception as e:
                 logger.warning(f"Failed to notify recovered completed session: {e}")
 
+    def _start_stale_busy_reconciler(self) -> None:
+        """Start the periodic M3 reconciliation loop when mesh routing is active."""
+        interval = int(getattr(config.mesh, "session_reconcile_interval_sec", 60) or 0)
+        if not config.mesh.enabled or interval <= 0:
+            return
+        if self._stale_busy_reconcile_task and not self._stale_busy_reconcile_task.done():
+            return
+        self._stale_busy_reconcile_task = asyncio.create_task(
+            self._stale_busy_reconciliation_loop(interval)
+        )
+
+    async def _stale_busy_reconciliation_loop(self, interval_sec: int) -> None:
+        logger.info("event=stale_busy_reconciler_started interval=%ds", interval_sec)
+        try:
+            while self.running:
+                try:
+                    await self._reconcile_stale_busy_sessions_once()
+                except Exception as e:
+                    logger.debug("event=stale_busy_reconcile_failed err=%s", e)
+                await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            logger.info("event=stale_busy_reconciler_stopped")
+            raise
+
+    async def _reconcile_stale_busy_sessions_once(self) -> int:
+        """Mark BUSY sessions with no active task row as ERROR."""
+        try:
+            from src.control.db import get_db
+            db = get_db()
+        except Exception:
+            db = None
+        if db is None:
+            return 0
+
+        rows = await asyncio.to_thread(db.list_stale_busy_sessions)
+        reconciled = 0
+        active_task_ids = set(self.active_tasks.keys())
+        for row in rows:
+            session_id = row.get("session_id", "")
+            task_id = row.get("last_task_id", "") or ""
+            if task_id and task_id in active_task_ids:
+                continue
+
+            session = self.session_store.get(session_id)
+            if session is None or session.status != SessionStatus.BUSY:
+                continue
+
+            session.status = SessionStatus.ERROR
+            session.last_result_summary = (
+                "Marked error by mesh reconciliation: session was busy with no active task."
+            )
+            self.session_store.save(session)
+
+            result = TaskResult(
+                task_id=task_id or f"session_{session_id}",
+                success=False,
+                output="",
+                errors=["stale busy session: no pending or claimed mesh task"],
+                files_modified=[],
+                execution_time=0.0,
+                timestamp=datetime.now().isoformat(),
+            )
+            setattr(result, "backend_name", session.backend or "claude")
+            self._append_session_event(session_id, task_id, result)
+            self._emit_event(
+                "stale_busy_session_reconciled",
+                None,
+                {
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "machine_id": session.machine_id,
+                    "backend": session.backend,
+                },
+            )
+            logger.warning(
+                "event=stale_busy_session_reconciled session_id=%s task_id=%s node=%s",
+                session_id,
+                task_id,
+                session.machine_id,
+            )
+            reconciled += 1
+
+        return reconciled
+
     async def _reattach_remote_task(self, session: Any, task_row: Dict[str, Any]) -> None:
         """Reattach to a remote task still in-flight after a gateway restart.
 
@@ -730,6 +815,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self.stop()
                 raise
         await self._recover_stale_busy_sessions()
+        self._start_stale_busy_reconciler()
 
         # Start the job completion poller (T3 — Watched Jobs)
         asyncio.create_task(self._job_completion_poller())
@@ -793,6 +879,12 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         # Stop the embedded mesh task server (no-op if it was never started)
         await self._stop_embedded_task_server()
+
+        if self._stale_busy_reconcile_task and not self._stale_busy_reconcile_task.done():
+            self._stale_busy_reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stale_busy_reconcile_task
+        self._stale_busy_reconcile_task = None
 
         # Cancel worker tasks
         for worker in self.worker_tasks:

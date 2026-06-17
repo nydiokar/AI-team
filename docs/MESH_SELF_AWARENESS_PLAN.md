@@ -59,7 +59,7 @@ investigation no longer requires reading 30s-stale data.
 
 ---
 
-### M3 — Session State Reconciliation
+### M3 — Session State Reconciliation (CORE DONE)
 **Goal:** Detect divergence between what the gateway thinks a session's state is and
 what the task record says. Catch stuck sessions without manual investigation.
 
@@ -74,8 +74,10 @@ entirely on the gateway side.
 - Gateway-side reconciliation job: find sessions with `status='busy'` that have no
   corresponding active task (`mesh_tasks WHERE session_id=X AND status IN
   ('pending','claimed')`). These are stale-busy sessions — the task completed or was
-  lost without updating the session.
-- On divergence: mark session `error`, emit an event, surface in /nodes dashboard.
+  lost without updating the session. Implemented as `list_stale_busy_sessions()` plus
+  the gateway's periodic stale-busy reconciler.
+- On divergence: mark session `error` and emit an event.
+- TODO for M4: surface stale-busy reconciliation events in /nodes dashboard.
 - Optional auto-recovery: re-enqueue or mark the session idle for reattach.
 
 **What does NOT change:**
