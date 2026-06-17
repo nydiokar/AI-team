@@ -356,6 +356,27 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any], http
     if staged and http is not None:
         await _fetch_staged_file(staged, payload, http)
 
+    # Repo inspection tasks: read-only (or commit) ops against the session's
+    # repo, which lives on THIS worker. No backend needed — the gateway routes
+    # these here precisely because it cannot touch the worker's filesystem.
+    if action == "inspect":
+        from src.core.inspect_ops import run_inspect_op
+        meta = payload.get("metadata") or {}
+        op = meta.get("op", "")
+        repo_path = meta.get("repo_path", "") or (payload.get("session") or {}).get("repo_path", "")
+        op_params = meta.get("params") or {}
+        inspect_result = await asyncio.to_thread(run_inspect_op, op, repo_path, op_params)
+        return {
+            "success": "error" not in inspect_result,
+            "output": "",
+            "errors": [inspect_result["error"]] if "error" in inspect_result else [],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 0 if "error" not in inspect_result else 1,
+            "inspect": inspect_result,
+        }
+
     # File-delivery-only tasks: no backend needed
     if action == "fetch_staged_file":
         return {
