@@ -1417,9 +1417,21 @@ class TelegramInterface:
             from src.control.db import get_db
             db = get_db()
             rows = db.list_nodes() if db else []
+            stats = db.stats() if db else {}
+            mesh_load = stats.get("mesh_load") or {}
 
             online = [r for r in rows if r.get("status") == "online"]
             lines = [f"Nodes ({len(online)} online / {len(rows)} total)", ""]
+            if rows:
+                stale_busy = mesh_load.get("stale_busy_sessions", 0)
+                stale_state = len(mesh_load.get("stale_live_state_nodes") or [])
+                lines.append(
+                    "Mesh load: "
+                    f"{mesh_load.get('slots_used', 0)}/{mesh_load.get('slots_total', 0)} slots, "
+                    f"{mesh_load.get('active_tasks', 0)} active tasks, "
+                    f"{stale_busy} stale-busy sessions, {stale_state} stale states"
+                )
+                lines.append("")
 
             # This gateway/server, always shown as the local execution target.
             lines.append(f"• {socket.gethostname()} (this server) — local")

@@ -74,6 +74,47 @@ def test_list_stale_busy_sessions_excludes_pending_and_claimed(tmp_path):
     assert [row["session_id"] for row in rows] == ["stale"]
 
 
+def test_mesh_load_stats_aggregates_live_state_and_stale_busy(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    stale = _session("stale")
+    db.upsert_session(stale)
+    db.upsert_node("worker-a", "100.64.0.1", 9001, ["claude"], 4)
+    db.upsert_node("worker-b", "100.64.0.2", 9001, ["claude"], 2)
+    db.heartbeat_node(
+        "worker-a",
+        live_state='{"v":1,"slots_used":2,"slots_total":4,"active_tasks":["t1","t2"]}',
+    )
+
+    stats = db.stats()["mesh_load"]
+
+    assert stats["slots_used"] == 2
+    assert stats["slots_total"] == 6
+    assert stats["slots_available"] == 4
+    assert stats["active_tasks"] == 2
+    assert stats["nodes_with_live_state"] == 1
+    assert stats["nodes_without_live_state"] == 1
+    assert stats["stale_busy_sessions"] == 1
+
+
+def test_metrics_includes_mesh_load(monkeypatch, tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_node("worker-a", "100.64.0.1", 9001, ["claude"], 4)
+    db.heartbeat_node(
+        "worker-a",
+        live_state='{"v":1,"slots_used":1,"slots_total":4,"active_tasks":["t1"]}',
+    )
+
+    monkeypatch.setattr("src.control.task_server.get_db", lambda: db)
+
+    from src.control.task_server import metrics
+
+    body = metrics()
+    assert body["nodes"]["slots_used"] == 1
+    assert body["nodes"]["slots_total"] == 4
+    assert body["nodes"]["active_tasks"] == 1
+    assert body["sessions"]["stale_busy"] == 0
+
+
 def test_dispatch_nudge_uses_node_address(monkeypatch):
     calls = []
 

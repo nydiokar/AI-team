@@ -100,8 +100,8 @@ health trends.
 - `/nodes` endpoint includes in-memory `live_state` and `live_state_updated_at`.
 - Telegram `/nodes` and `/node <id>` show per-node slot load, active task count,
   active task ids, heartbeat age, and live-state age.
-- Aggregate mesh metrics: total slots used/available across all nodes, sessions
-  per node, error rates. TODO.
+- `/metrics` includes aggregate slots used/total/available, active task count,
+  live-state freshness counts, and stale-busy session count.
 - Alerts on divergence patterns and stale-busy reconciliation counts. TODO.
 
 **Unblocks:** True mesh self-awareness. Operators see the network as it sees itself.
@@ -149,13 +149,13 @@ Completed:
   - interval is `MESH_SESSION_RECONCILE_INTERVAL_SEC`, default 60, 0 disables
 - M4 partial:
   - Telegram `/nodes` and `/node <id>` show slot load, active task counts/ids, heartbeat age, and live-state freshness
+  - `/metrics` exposes aggregate slot utilization, active tasks, live-state freshness, and stale-busy session count
 
 Known remaining work:
 - M2 optional routing freshness:
   - before choosing among capable workers, nudge candidates and wait briefly for newer `live_state_updated_at`
   - use fresh `slots_used < slots_total` in `NodeRegistry.pick_capable()` or a new picker
-- M4 metrics/dashboard:
-  - enrich `/metrics` with aggregate slots used/total, active task totals, stale-busy counts
+- M4 dashboard/history:
   - surface stale-busy reconciliation history or current stale count in Telegram/status views
 - Test hygiene follow-up:
   - default suite now skips `test_full_pipeline.py` as `e2e`, but later opencode/node-inspector tests can still stall
