@@ -388,6 +388,32 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_stale_busy_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return BUSY sessions with no pending or claimed mesh task.
+
+        This is the gateway-side M3 reconciliation query. A session is considered
+        stale-busy when the gateway still marks it busy but the dispatch ledger has
+        no active task for that session. Completed/failed historical rows do not
+        count as active work.
+        """
+        rows = self._conn().execute(
+            """
+            SELECT s.*
+            FROM sessions s
+            WHERE s.status = 'busy'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM mesh_tasks t
+                WHERE t.session_id = s.session_id
+                  AND t.status IN ('pending', 'claimed')
+              )
+            ORDER BY s.updated_at ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ------------------------------------------------------------------
     # Mesh tasks
     # ------------------------------------------------------------------

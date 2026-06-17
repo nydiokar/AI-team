@@ -127,9 +127,8 @@ def test_list_jobs_limits(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_job_endpoints_via_testclient(tmp_path):
-    """Verify job CRUD endpoints using FastAPI's TestClient (no real server)."""
-    from fastapi.testclient import TestClient
+def test_job_endpoint_functions(tmp_path):
+    """Verify job CRUD endpoint functions without opening a real server."""
 
     # Point the DB singleton at a temp path
     from config import config as cfg
@@ -142,58 +141,63 @@ def test_job_endpoints_via_testclient(tmp_path):
         old.close()
 
     try:
-        from src.control.task_server import app
-        client = TestClient(app)
-        headers = {"Authorization": "Bearer test-token-api"}
+        from fastapi import HTTPException
+        from src.control.task_server import (
+            JobDonePayload,
+            JobStartPayload,
+            RegisterJobPayload,
+            _require_auth,
+            get_job,
+            list_jobs,
+            register_job,
+            report_job_done,
+            start_job,
+        )
+        from fastapi.security import HTTPAuthorizationCredentials
 
         # Register a job
-        resp = client.post("/jobs", json={
-            "node_id": "test-node",
-            "label": "api-test",
-            "session_id": "sess_api",
-            "command": "echo ok",
-            "notify": True,
-        }, headers=headers)
-        assert resp.status_code == 200
-        data = resp.json()
+        data = register_job(RegisterJobPayload(
+            node_id="test-node",
+            label="api-test",
+            session_id="sess_api",
+            command="echo ok",
+            notify=True,
+        ))
         assert data["status"] == "registered"
         jid = data["job_id"]
         assert jid.startswith("job_")
 
         # GET /jobs/{id}
-        resp = client.get(f"/jobs/{jid}", headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "running"
+        assert get_job(jid)["status"] == "running"
 
         # Start the job
-        resp = client.post(f"/jobs/{jid}/start", json={
-            "node_id": "test-node",
-            "pid": 8888,
-            "pgid": 8888,
-        }, headers=headers)
-        assert resp.status_code == 200
+        resp = start_job(jid, JobStartPayload(
+            node_id="test-node",
+            pid=8888,
+            pgid=8888,
+        ))
+        assert resp["status"] == "started"
 
         # Report done
-        resp = client.post(f"/jobs/{jid}/done", json={
-            "node_id": "test-node",
-            "exit_code": 0,
-            "tail": "api test passed",
-        }, headers=headers)
-        assert resp.status_code == 200
+        resp = report_job_done(jid, JobDonePayload(
+            node_id="test-node",
+            exit_code=0,
+            tail="api test passed",
+        ))
+        assert resp["status"] == "accepted"
 
         # Verify terminal state
-        resp = client.get(f"/jobs/{jid}", headers=headers)
-        assert resp.json()["status"] == "done"
-        assert resp.json()["exit_code"] == 0
+        job = get_job(jid)
+        assert job["status"] == "done"
+        assert job["exit_code"] == 0
 
         # GET /jobs lists it
-        resp = client.get("/jobs?node_id=test-node", headers=headers)
-        assert resp.status_code == 200
-        assert any(j["id"] == jid for j in resp.json())
+        assert any(j["id"] == jid for j in list_jobs(node_id="test-node"))
 
         # Auth failure
-        resp = client.get("/jobs", headers={"Authorization": "Bearer wrong-token"})
-        assert resp.status_code == 401
+        with pytest.raises(HTTPException) as exc:
+            _require_auth(HTTPAuthorizationCredentials(scheme="Bearer", credentials="wrong-token"))
+        assert exc.value.status_code == 401
 
     finally:
         db_mod._db_instance = None

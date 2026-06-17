@@ -223,8 +223,23 @@ class _HTTP:
 # Nudge listener — tiny asyncio HTTP server, just accepts POST /nudge
 # ---------------------------------------------------------------------------
 
-async def _run_nudge_listener(host: str, port: int, poll_event: asyncio.Event) -> None:
-    """Accept POST /nudge and set poll_event so the poll loop fires immediately."""
+def _mark_nudge_received(
+    poll_event: asyncio.Event,
+    heartbeat_event: Optional[asyncio.Event] = None,
+) -> None:
+    """Wake worker loops that should react immediately to a gateway nudge."""
+    poll_event.set()
+    if heartbeat_event is not None:
+        heartbeat_event.set()
+
+
+async def _run_nudge_listener(
+    host: str,
+    port: int,
+    poll_event: asyncio.Event,
+    heartbeat_event: Optional[asyncio.Event] = None,
+) -> None:
+    """Accept POST /nudge and wake polling plus heartbeat state publication."""
 
     async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -235,7 +250,7 @@ async def _run_nudge_listener(host: str, port: int, poll_event: asyncio.Event) -
             is_nudge = data.startswith(b"POST /nudge")
             if is_nudge:
                 response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
-                poll_event.set()
+                _mark_nudge_received(poll_event, heartbeat_event)
                 logger.debug("event=nudge_received")
             else:
                 response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
@@ -486,6 +501,7 @@ class WorkerAgent:
         self._active: Dict[str, asyncio.Task] = {}   # task_id → asyncio.Task
         self._shutdown = asyncio.Event()
         self._poll_now = asyncio.Event()
+        self._heartbeat_now = asyncio.Event()
         self._semaphore = asyncio.Semaphore(self.cfg.max_concurrent)
         self._slots_used: int = 0  # semaphore-acquired count; differs from len(_active) which includes queued tasks
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
@@ -538,6 +554,7 @@ class WorkerAgent:
     async def _heartbeat_loop(self) -> None:
         try:
             while not self._shutdown.is_set():
+                self._heartbeat_now.clear()
                 try:
                     live = self._live_state()
                     payload = {"node_id": self.cfg.node_id, "live_state": live}
@@ -568,12 +585,28 @@ class WorkerAgent:
                         logger.warning("event=heartbeat_failed status=%s err=%s", e.code, e)
                 except Exception as e:
                     logger.warning("event=heartbeat_failed err=%s", e)
-                try:
-                    await asyncio.wait_for(self._shutdown.wait(), timeout=30)
-                except asyncio.TimeoutError:
-                    pass
+                await self._wait_for_next_heartbeat()
         except asyncio.CancelledError:
             pass
+
+    async def _wait_for_next_heartbeat(self) -> None:
+        """Wait for the normal interval, shutdown, or an on-demand heartbeat nudge."""
+        shutdown_wait = asyncio.create_task(self._shutdown.wait())
+        heartbeat_wait = asyncio.create_task(self._heartbeat_now.wait())
+        try:
+            _, pending = await asyncio.wait(
+                {shutdown_wait, heartbeat_wait},
+                timeout=30,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            for task in (shutdown_wait, heartbeat_wait):
+                if not task.done():
+                    task.cancel()
 
     # ------------------------------------------------------------------
     # Job watcher loop (T3 — Watched Jobs)
@@ -824,7 +857,12 @@ class WorkerAgent:
         self._register()
 
         nudge_listener = asyncio.create_task(
-            _run_nudge_listener(self.cfg.tailscale_ip, self.cfg.api_port, self._poll_now)
+            _run_nudge_listener(
+                self.cfg.tailscale_ip,
+                self.cfg.api_port,
+                self._poll_now,
+                self._heartbeat_now,
+            )
         )
         heartbeat = asyncio.create_task(self._heartbeat_loop())
         poller = asyncio.create_task(self._poll_loop())
