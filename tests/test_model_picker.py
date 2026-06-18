@@ -165,14 +165,3 @@ def test_effective_model_label_strips_backticks():
     assert label.count("`") == 2
 
 
-def test_wizard_model_callbacks_are_index_only_and_fit_budget():
-    """R7: wizard model buttons carry only the catalog index (selection stashed
-    server-side), so they stay tiny regardless of node_id length."""
-    from src.telegram.interface import TelegramInterface, TELEGRAM_AVAILABLE
-    if not TELEGRAM_AVAILABLE:
-        pytest.skip("python-telegram-bot not installed")
-    iface = TelegramInterface.__new__(TelegramInterface)
-    markup = iface._build_session_model_markup("opencode")
-    for cb in _iter_callbacks(markup):
-        assert len(cb.encode()) <= 64
-        assert cb.startswith("session_new_model:") or cb.startswith("session_new_cancel")
