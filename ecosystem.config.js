@@ -6,9 +6,10 @@ const venvPython = path.join(__dirname, ".venv", isWindows ? "Scripts/python.exe
 const python = process.env.PM2_PYTHON || (fs.existsSync(venvPython) ? venvPython : (isWindows ? "python" : "python3"));
 const nodePath = process.env.CODEX_NODE_PATH || process.env.NODE_EXE || "";
 const nodeDir = nodePath ? path.dirname(nodePath) : "";
+const inheritedPath = process.env.PATH || process.env.Path || process.env.path || "";
 const workerPath = isWindows && nodeDir
-  ? `${nodeDir}${path.delimiter}${process.env.PATH || ""}`
-  : process.env.PATH;
+  ? `${nodeDir}${path.delimiter}${inheritedPath}`
+  : inheritedPath;
 
 module.exports = {
   apps: [
@@ -116,6 +117,7 @@ module.exports = {
         PYTHONUNBUFFERED: "1",
         AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
         PATH: workerPath,
+        Path: workerPath,
         CODEX_NODE_PATH: nodePath,
         // Required — set these in .env or uncomment + fill here:
         // WORKER_NODE_ID: "main-pc",

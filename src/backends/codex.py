@@ -86,10 +86,13 @@ class CodexBackend(CodingBackend):
 
         if sys.platform == "win32":
             node_hint = os.getenv("CODEX_NODE_PATH") or os.getenv("NODE_EXE")
+            current_path = proc_env.get("PATH") or proc_env.get("Path") or ""
             if node_hint:
                 node_dir = str(Path(node_hint).expanduser().parent)
-                proc_env["PATH"] = node_dir + os.pathsep + proc_env.get("PATH", "")
-            if shutil.which("node", path=proc_env.get("PATH")) is None:
+                current_path = node_dir + os.pathsep + current_path
+                proc_env["PATH"] = current_path
+                proc_env["Path"] = current_path
+            if shutil.which("node", path=current_path) is None:
                 return ExecutionResult(
                     success=False,
                     output="",
