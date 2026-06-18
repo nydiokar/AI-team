@@ -105,6 +105,14 @@ class CodexBackend(CodingBackend):
                     execution_time=time.time() - start,
                 )
 
+        logger.info(
+            "event=codex_spawn exe=%s node=%s cwd=%s session_key=%s",
+            cmd[0],
+            shutil.which("node", path=(proc_env.get("PATH") or proc_env.get("Path") or "")),
+            cwd,
+            session_key or "(oneoff)",
+        )
+
         proc: Optional[subprocess.Popen] = None
         try:
             proc = subprocess.Popen(

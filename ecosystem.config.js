@@ -4,12 +4,15 @@ const fs = require("fs");
 const isWindows = process.platform === "win32";
 const venvPython = path.join(__dirname, ".venv", isWindows ? "Scripts/python.exe" : "bin/python");
 const python = process.env.PM2_PYTHON || (fs.existsSync(venvPython) ? venvPython : (isWindows ? "python" : "python3"));
-const nodePath = process.env.CODEX_NODE_PATH || process.env.NODE_EXE || "";
+const defaultNodePath = isWindows ? "C:/Program Files/nodejs/node.exe" : "";
+const nodePath = process.env.CODEX_NODE_PATH
+  || process.env.NODE_EXE
+  || (defaultNodePath && fs.existsSync(defaultNodePath) ? defaultNodePath : "");
 const nodeDir = nodePath ? path.dirname(nodePath) : "";
+const npmDir = isWindows && process.env.APPDATA ? path.join(process.env.APPDATA, "npm") : "";
 const inheritedPath = process.env.PATH || process.env.Path || process.env.path || "";
-const workerPath = isWindows && nodeDir
-  ? `${nodeDir}${path.delimiter}${inheritedPath}`
-  : inheritedPath;
+const pathParts = [nodeDir, npmDir, inheritedPath].filter(Boolean);
+const workerPath = isWindows ? pathParts.join(path.delimiter) : inheritedPath;
 
 module.exports = {
   apps: [
