@@ -1411,7 +1411,7 @@ class TelegramInterface:
         try:
             from datetime import datetime
             dt = datetime.fromisoformat(last_heartbeat)
-            secs = (datetime.now() - dt).total_seconds()
+            secs = (datetime.utcnow() - dt).total_seconds()
             if secs < 0:
                 secs = 0
             if secs < 90:
