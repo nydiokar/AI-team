@@ -1,7 +1,9 @@
 const path = require("path");
+const fs = require("fs");
 
 const isWindows = process.platform === "win32";
-const python = process.env.PM2_PYTHON || (isWindows ? "python" : "python3");
+const venvPython = path.join(__dirname, ".venv", isWindows ? "Scripts/python.exe" : "bin/python");
+const python = process.env.PM2_PYTHON || (fs.existsSync(venvPython) ? venvPython : (isWindows ? "python" : "python3"));
 
 module.exports = {
   apps: [
