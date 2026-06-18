@@ -153,11 +153,71 @@ class NodeRegistry:
     def is_empty(self) -> bool:
         return not bool(self._nodes)
 
-    def pick_capable(self, backend: str) -> Optional[NodeInfo]:
-        """Return the first online node that supports `backend`. Round-robin is future work."""
-        for node in self._nodes.values():
-            if node.status == "online" and backend in node.capabilities.backends:
-                return node
+    def list_capable(self, backend: str) -> List[NodeInfo]:
+        """Return online nodes that support `backend`."""
+        return [
+            node
+            for node in self._nodes.values()
+            if node.status == "online" and backend in node.capabilities.backends
+        ]
+
+    @staticmethod
+    def _live_state_age_sec(node: NodeInfo) -> Optional[float]:
+        if node.live_state_updated_at is None:
+            return None
+        updated = node.live_state_updated_at
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        return (datetime.now(tz=timezone.utc) - updated).total_seconds()
+
+    @classmethod
+    def _fresh_slot_snapshot(
+        cls,
+        node: NodeInfo,
+        max_live_state_age_sec: int,
+    ) -> Optional[tuple[int, int]]:
+        """Return (used, total) for fresh live_state, or None when unknown/stale."""
+        if not isinstance(node.live_state, dict):
+            return None
+        age = cls._live_state_age_sec(node)
+        if age is None or age > max_live_state_age_sec:
+            return None
+        try:
+            total = int(node.live_state.get("slots_total") or node.capabilities.max_concurrent or 0)
+            used = int(node.live_state.get("slots_used") or 0)
+        except (TypeError, ValueError):
+            return None
+        if total <= 0:
+            return None
+        return used, total
+
+    def pick_capable(
+        self,
+        backend: str,
+        *,
+        max_live_state_age_sec: int = 90,
+    ) -> Optional[NodeInfo]:
+        """Pick an online capable node, preferring fresh live_state with free slots."""
+        candidates = self.list_capable(backend)
+        if not candidates:
+            return None
+
+        fresh_available: List[tuple[float, int, NodeInfo]] = []
+        unknown: List[NodeInfo] = []
+        for index, node in enumerate(candidates):
+            slots = self._fresh_slot_snapshot(node, max_live_state_age_sec)
+            if slots is None:
+                unknown.append(node)
+                continue
+            used, total = slots
+            if used < total:
+                fresh_available.append((used / total, index, node))
+
+        if fresh_available:
+            fresh_available.sort(key=lambda item: (item[0], item[1]))
+            return fresh_available[0][2]
+        if unknown:
+            return unknown[0]
         return None
 
     # ------------------------------------------------------------------

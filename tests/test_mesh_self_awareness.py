@@ -1,7 +1,9 @@
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
+from src.control.node_registry import NodeCapabilities, NodeInfo, NodeRegistry
 from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus
 from src.orchestrator import TaskOrchestrator
@@ -113,6 +115,82 @@ def test_metrics_includes_mesh_load(monkeypatch, tmp_path):
     assert body["nodes"]["slots_total"] == 4
     assert body["nodes"]["active_tasks"] == 1
     assert body["sessions"]["stale_busy"] == 0
+
+
+def _registry_node(node_id: str, *, used=None, total=2) -> NodeInfo:
+    node = NodeInfo(
+        node_id=node_id,
+        tailscale_ip=f"100.64.0.{len(node_id)}",
+        api_port=9001,
+        capabilities=NodeCapabilities(backends=["claude"], max_concurrent=total),
+        status="online",
+        last_heartbeat=datetime.now(tz=timezone.utc),
+        registered_at=datetime.now(tz=timezone.utc),
+    )
+    if used is not None:
+        node.live_state = {
+            "v": 1,
+            "slots_used": used,
+            "slots_total": total,
+            "active_tasks": [f"task_{i}" for i in range(used)],
+        }
+        node.live_state_updated_at = datetime.now(tz=timezone.utc)
+    return node
+
+
+def test_pick_capable_prefers_fresh_available_slots():
+    registry = NodeRegistry()
+    full = _registry_node("full", used=2, total=2)
+    free = _registry_node("free", used=1, total=3)
+    registry._nodes = {"full": full, "free": free}
+
+    assert registry.pick_capable("claude").node_id == "free"
+
+
+def test_pick_capable_skips_fresh_full_nodes():
+    registry = NodeRegistry()
+    registry._nodes = {
+        "full-a": _registry_node("full-a", used=2, total=2),
+        "full-b": _registry_node("full-b", used=1, total=1),
+    }
+
+    assert registry.pick_capable("claude") is None
+
+
+def test_pick_capable_keeps_unknown_live_state_eligible():
+    registry = NodeRegistry()
+    registry._nodes = {
+        "full": _registry_node("full", used=2, total=2),
+        "legacy": _registry_node("legacy", used=None, total=2),
+    }
+
+    assert registry.pick_capable("claude").node_id == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_preroute_refresh_nudges_capable_nodes(monkeypatch):
+    registry = NodeRegistry()
+    worker_a = _registry_node("worker-a", used=0, total=2)
+    worker_b = _registry_node("worker-b", used=0, total=2)
+    registry._nodes = {"worker-a": worker_a, "worker-b": worker_b}
+    calls = []
+
+    orchestrator = TaskOrchestrator.__new__(TaskOrchestrator)
+
+    def fake_nudge(node, node_id, db):
+        calls.append(node_id)
+        node.live_state_updated_at = datetime.now(tz=timezone.utc)
+        return True
+
+    from config import config
+
+    monkeypatch.setattr("src.control.db.get_db", lambda: None)
+    monkeypatch.setattr(config.mesh, "routing_freshness_wait_sec", 0.5)
+    orchestrator._nudge_worker_for_dispatch = fake_nudge
+
+    await orchestrator._refresh_capable_nodes_before_routing(registry, "claude")
+
+    assert sorted(calls) == ["worker-a", "worker-b"]
 
 
 def test_dispatch_nudge_uses_node_address(monkeypatch):

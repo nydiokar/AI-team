@@ -39,7 +39,7 @@ mesh health has real signal instead of just "online/offline".
 
 ---
 
-### M2 — On-Demand Worker Pull (CORE DONE)
+### M2 — On-Demand Worker Pull (DONE)
 **Goal:** Gateway can obtain a worker's current state right now, not wait 30s for the
 next heartbeat. Used before dispatch and during stuck-task investigation.
 
@@ -48,8 +48,9 @@ next heartbeat. Used before dispatch and during stuck-task investigation.
   poll loop). Implemented by sharing the nudge signal with the heartbeat loop.
 - Gateway orchestrator nudges the target worker after enqueueing remote work, so
   workers wake promptly instead of waiting for the next poll interval.
-- TODO: for future slot-sensitive routing, gateway can send a pre-routing nudge and
-  wait for a newer `live_state_updated_at` before choosing a worker.
+- For unpinned routing, the gateway nudges capable workers before choosing a node,
+  waits briefly for a newer `live_state_updated_at`, then prefers fresh live_state
+  with available slots.
 
 **What does NOT change:**
 - The nudge server remains a minimal raw asyncio socket — no GET /status route.
@@ -91,7 +92,7 @@ self-healing mesh where divergence resolves automatically.
 
 ---
 
-### M4 — Network-Wide Dashboard (PARTIAL)
+### M4 — Network-Wide Dashboard (DONE FOR THIS BRANCH)
 **Goal:** Full network observability from a single view. Operators and the gateway
 itself can see every node's live state, session assignments, slot utilization, and
 health trends.
@@ -102,7 +103,8 @@ health trends.
   active task ids, heartbeat age, and live-state age.
 - `/metrics` includes aggregate slots used/total/available, active task count,
   live-state freshness counts, and stale-busy session count.
-- Alerts on divergence patterns and stale-busy reconciliation counts. TODO.
+- `/status` also surfaces aggregate slot load plus stale-busy/stale-live-state
+  counts for the quick operator path.
 
 **Unblocks:** True mesh self-awareness. Operators see the network as it sees itself.
 Anomalies surface before they become incidents.
@@ -132,6 +134,8 @@ Last updated on this branch after commits:
 - `2b4baa9` — test hygiene: fixed mesh dispatch timeout test and marked real full-pipeline test as e2e
 - `dec1790` — M3 periodic stale-busy session reconciliation
 - `0b2e982` — M4 node live-load visibility in Telegram and NodeInfo responses
+- `7cd7471` — M4 aggregate live-load metrics
+- current wrap-up — M2 slot-aware pre-route freshness and `/status` mesh anomaly summary
 
 Completed:
 - M1 enriched heartbeats:
@@ -142,6 +146,7 @@ Completed:
   - raw nudge listener still only accepts `POST /nudge`
   - nudge wakes poll loop and heartbeat loop
   - remote dispatch sends best-effort nudge after enqueue
+  - unpinned routing nudges capable workers before picking, waits briefly for a fresh heartbeat, then prefers workers with fresh available slots
 - M3 core:
   - DB has `list_stale_busy_sessions()`
   - orchestrator runs periodic stale-busy reconciliation when `MESH_ENABLED=true`
@@ -150,13 +155,9 @@ Completed:
 - M4 partial:
   - Telegram `/nodes` and `/node <id>` show slot load, active task counts/ids, heartbeat age, and live-state freshness
   - `/metrics` exposes aggregate slot utilization, active tasks, live-state freshness, and stale-busy session count
+  - Telegram `/status` shows aggregate mesh load and stale-busy/stale-live-state counts
+  - current stale-busy count is visible in the operator views; detailed reconciliation history remains in session/system events
 
 Known remaining work:
-- M2 optional routing freshness:
-  - before choosing among capable workers, nudge candidates and wait briefly for newer `live_state_updated_at`
-  - use fresh `slots_used < slots_total` in `NodeRegistry.pick_capable()` or a new picker
-- M4 dashboard/history:
-  - surface stale-busy reconciliation history or current stale count in Telegram/status views
-- Test hygiene follow-up:
-  - default suite now skips `test_full_pipeline.py` as `e2e`, but later opencode/node-inspector tests can still stall
-  - add stricter markers/timeouts and split default unit tests from external/backend integration tests
+- If this grows beyond a two-node personal mesh, add historical trend storage for stale-busy reconciliation and live-state freshness.
+- Default tests already force `AI_TEAM_TEST_MODE`, disable mesh routing and file watching, and skip `e2e` unless `--run-e2e` is passed. Add stricter timeouts only if a specific default-suite stall reappears.

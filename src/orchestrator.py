@@ -2800,6 +2800,47 @@ Generated from user description: {description}
             logger.debug("event=mesh_nudge_failed node_id=%s url=%s err=%s", node_id, url, e)
             return False
 
+    async def _refresh_capable_nodes_before_routing(self, registry: Any, backend_name: str) -> None:
+        """Nudge capable workers and briefly wait for fresher live_state."""
+        import asyncio as _aio
+        from src.control.db import get_db
+
+        wait_sec = float(getattr(config.mesh, "routing_freshness_wait_sec", 2.0) or 0.0)
+        if wait_sec <= 0:
+            return
+
+        try:
+            candidates = registry.list_capable(backend_name)
+        except Exception:
+            candidates = []
+        if not candidates:
+            return
+
+        before = {
+            node.node_id: node.live_state_updated_at
+            for node in candidates
+        }
+        db = get_db()
+        await _aio.gather(
+            *[
+                _aio.to_thread(self._nudge_worker_for_dispatch, node, node.node_id, db)
+                for node in candidates
+            ],
+            return_exceptions=True,
+        )
+
+        deadline = time.time() + wait_sec
+        while time.time() < deadline:
+            for node in candidates:
+                if node.live_state_updated_at and node.live_state_updated_at != before.get(node.node_id):
+                    logger.debug(
+                        "event=mesh_preroute_fresh_state node_id=%s backend=%s",
+                        node.node_id,
+                        backend_name,
+                    )
+                    return
+            await _aio.sleep(0.1)
+
     async def _dispatch_or_run_local(
         self,
         task: "Task",
@@ -2839,9 +2880,15 @@ Generated from user description: {description}
             if not node or node.status != "online":
                 return _routing_failure(f"Node {session.machine_id!r} is offline; cannot continue session")
         else:
-            node = registry.pick_capable(backend=backend_name)
+            await self._refresh_capable_nodes_before_routing(registry, backend_name)
+            node = registry.pick_capable(
+                backend=backend_name,
+                max_live_state_age_sec=getattr(config.mesh, "routing_live_state_max_age_sec", 90),
+            )
             if not node:
-                return _routing_failure(f"No online node supports backend {backend_name!r}")
+                return _routing_failure(
+                    f"No online node supports backend {backend_name!r} with available capacity"
+                )
 
         return await self._dispatch_to_node(task, session, node)
 

@@ -1346,12 +1346,29 @@ class TelegramInterface:
             # --- Mesh line, only when enabled ---
             if show_node:
                 nodes = self._mesh_online_nodes()
+                mesh_load = {}
+                try:
+                    from src.control.db import get_db
+                    db = get_db()
+                    mesh_load = (db.stats().get("mesh_load") if db else {}) or {}
+                except Exception:
+                    mesh_load = {}
+                load_text = ""
+                if mesh_load:
+                    stale_busy = mesh_load.get("stale_busy_sessions", 0)
+                    stale_state = len(mesh_load.get("stale_live_state_nodes") or [])
+                    load_text = (
+                        f" · {mesh_load.get('slots_used', 0)}/{mesh_load.get('slots_total', 0)} slots"
+                        f" · {mesh_load.get('active_tasks', 0)} active"
+                        f" · {stale_busy} stale-busy"
+                        f" · {stale_state} stale-state"
+                    )
                 if nodes:
                     names = " · ".join(f"{n.node_id} 🟢" for n in nodes[:4])
                     extra = f" +{len(nodes) - 4}" if len(nodes) > 4 else ""
-                    lines.append(f"🌐 Mesh: {names}{extra}")
+                    lines.append(f"🌐 Mesh: {names}{extra}{load_text}")
                 else:
-                    lines.append("🌐 Mesh: on, no workers online")
+                    lines.append(f"🌐 Mesh: on, no workers online{load_text}")
 
             await update.message.reply_text("\n".join(lines))
 
