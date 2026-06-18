@@ -31,7 +31,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.core.process_utils import terminate_many_popen
+from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
 logger = logging.getLogger(__name__)
@@ -311,7 +311,7 @@ class OpenCodeBackend(CodingBackend):
         )
 
         proc: Optional[subprocess.Popen] = None
-        proc_env = os.environ.copy()
+        proc_env = ensure_node_on_path()
         if session_key:
             proc_env["SESSION_ID"] = session_key
 
@@ -1260,6 +1260,7 @@ class OpenCodeServerBackend(CodingBackend):
             cmd = [self._exe, "serve", "--hostname", host, "--port", str(port)]
 
             logger.info("event=opencode_server_start cmd=%s cwd=%s", cmd, repo_path)
+            proc_env = ensure_node_on_path()
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -1267,6 +1268,7 @@ class OpenCodeServerBackend(CodingBackend):
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,   # capture for diagnostics
+                    env=proc_env,
                 )
             except Exception as e:
                 return f"Failed to start opencode server: {e}"

@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from src.core.process_utils import terminate_many_popen
+from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ class CodexBackend(CodingBackend):
         except Exception:
             inactivity_sec = 600
 
-        proc_env = os.environ.copy()
+        proc_env = ensure_node_on_path()
         if session_key:
             proc_env["SESSION_ID"] = session_key
 
