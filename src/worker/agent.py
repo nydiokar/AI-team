@@ -847,6 +847,8 @@ class WorkerAgent:
 
     async def _spawn_job_process(self, job: Dict[str, Any]) -> None:
         """Spawn a detached process for a watched job."""
+        from src.core.process_utils import ensure_node_on_path
+
         command = job.get("command", "")
         job_id = job.get("id", "")
         label = job.get("label", job_id)
@@ -867,6 +869,7 @@ class WorkerAgent:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 cwd=job_cwd,
+                env=ensure_node_on_path(),
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
             )
             log_fh.close()

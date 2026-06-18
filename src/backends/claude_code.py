@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.core.process_utils import terminate_many_popen
+from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
 logger = logging.getLogger(__name__)
@@ -271,7 +271,7 @@ class ClaudeCodeBackend(CodingBackend):
 
         # Propagate session ID so the MCP watch_job tool can route notifications
         # back to the right Telegram chat without the agent having to pass it explicitly.
-        proc_env = os.environ.copy()
+        proc_env = ensure_node_on_path()
         if session_id:
             proc_env["SESSION_ID"] = session_id
 
