@@ -182,3 +182,19 @@ Hot-path-ish: each turn re-imports config inside `_config_default`. `config` is 
 - **B2 fixed** 🟡: wizard stash carries a monotonic timestamp; the model step rejects + clears a stash older than `_WIZARD_TTL_SEC` (600s), so an abandoned wizard can't be consumed against a stale repo/node.
 - **B1 mitigated** 🟡: manual `/session_new <backend> <path>` still creates at default model (kept arg parser simple), but the creation confirmation now points to `/model` for switching. Documented behaviour, not a silent gap.
 - **B3 / B5 / B6 / B7**: accepted as-is (hardening / cosmetic / negligible). B3's window is now also smaller because the stash TTL bounds it.
+
+## 7. Second review pass (2026-06-19) — reviewing the fixes themselves
+
+Re-checked the B1/B2/B4 fixes for new bugs and swept untouched paths.
+
+### Confirmed NOT bugs (investigated, cleared)
+- **Mid-turn `/model` race:** orchestrator re-reads the session fresh at turn completion (`orchestrator.py:1419`) rather than holding the turn-start copy, and the turn's model is read at turn start (`:1546`). So `/model` during a running turn lands in the DB and is honoured next turn. The lose-the-write window is a sub-millisecond overlap between the completion-save and a concurrent `/model` save — identical last-writer-wins exposure as every other Session field (`last_user_message`, status…); `model` is no more fragile. Self-correcting (next `/model` re-applies). Not a new bug.
+- **B4 fix re-check:** callback `model_set:<sid>:<choice>` is parsed with `split(":", 2)` (handles model names with colons in the choice slot — though choice is only an int or `__default__`), loads the pinned session, re-verifies ownership + not-closed. Sound.
+- **OpenCode `run_oneoff`:** still passes `model=None` directly, bypassing `_session_model` — one-offs stay on the default. Unchanged.
+- **No stale callback formats:** grep confirms all `model_set:`/`session_new_model:` producers and the handler registration use the new formats.
+
+### New minor findings — FIXED this pass
+- **B8 🟢 (fixed):** `/model "   "` (whitespace/garbage arg) on an advisory backend hit `validate()->None`, and since the reject condition only fires for *strict* backends it would silently reset the model to default. Now a blank-after-strip arg falls through to the picker instead of resetting; only the explicit Default button/`__default__` resets.
+- **B9 🟢 (fixed):** free-text (advisory) model names allow backticks, which would break the Markdown code span in confirmations/errors. `_effective_model_label` and the unknown-model error now strip backticks from the dynamic name. Covered by `test_effective_model_label_strips_backticks`.
+
+**Verdict after two passes:** no 🔴 or 🟡 issues remain open. Remaining accepted items (B3/B5/B6/B7) are hardening/cosmetic and documented. 76 tests pass across the touched suites; no regressions.
