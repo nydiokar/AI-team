@@ -57,8 +57,6 @@ _DANGEROUS_EXTENSIONS: set[str] = {
 class TelegramInterface:
     """Telegram bot interface for task management and notifications"""
 
-    _WIZARD_TTL_SEC = 600  # /session_new model-step stash expiry (B2)
-
     def __init__(self, bot_token: str, orchestrator, allowed_users: list[int] = None):
         self.bot_token = bot_token
         self.orchestrator = orchestrator
@@ -73,9 +71,6 @@ class TelegramInterface:
         self._rate_limit_state: Dict[int, list[float]] = {}
         # Per-chat plain-text debounce buffer to merge split Telegram messages
         self._message_buffers: Dict[int, Dict[str, Any]] = {}
-        # Per-chat in-progress /session_new wizard selection (R7: keeps callback_data
-        # under Telegram's 64-byte limit by stashing backend/node/repo server-side).
-        self._session_wizard: Dict[int, Dict[str, Any]] = {}
 
         if not self.bot_token:
             logger.info("Telegram bot token not configured. Command interface available without live bot app.")
@@ -900,26 +895,6 @@ class TelegramInterface:
                 [InlineKeyboardButton(text="✖️ Cancel", callback_data="session_new_cancel:")],
             ]
         )
-
-    def _build_session_model_markup(self, backend: str) -> Optional["InlineKeyboardMarkup"]:
-        """Model picker for the /session_new wizard. Buttons carry only the
-        catalog index (R7: backend/node/repo are stashed server-side)."""
-        if not TELEGRAM_AVAILABLE:
-            return None
-        from config.models import options, default_model
-        default = default_model(backend)
-        rows = [[InlineKeyboardButton(
-            text=f"⚡ Default ({default or 'CLI default'})",
-            callback_data="session_new_model:__default__",
-        )]]
-        for idx, opt in enumerate(options(backend)):
-            if opt.is_default:
-                continue  # already covered by the Default button
-            rows.append([InlineKeyboardButton(
-                text=opt.name, callback_data=f"session_new_model:{idx}",
-            )])
-        rows.append([InlineKeyboardButton(text="✖️ Cancel", callback_data="session_new_cancel:")])
-        return InlineKeyboardMarkup(rows)
 
     def _build_model_set_markup(self, session: Session) -> Optional["InlineKeyboardMarkup"]:
         """Model picker for the /model command on an existing session.
@@ -2406,7 +2381,6 @@ class TelegramInterface:
 
         # --- Cancel: bail out of the whole flow ---
         if data.startswith("session_new_cancel"):
-            self._session_wizard.pop(update.effective_chat.id, None)
             await query.edit_message_text("✖️ Cancelled. Run /session_new whenever you're ready.")
             return
 
@@ -2510,49 +2484,15 @@ class TelegramInterface:
                 await query.edit_message_text("❌ That choice expired. Run /session_new again.")
                 return
             _label, repo_path = choices[repo_index]
-            # Stash the selection server-side (R7) and advance to the model step.
-            # `ts` bounds staleness (B2): an abandoned wizard expires instead of
-            # being consumed later against a stale repo/node.
-            self._session_wizard[update.effective_chat.id] = {
-                "backend": backend,
-                "node_id": node_id,
-                "repo_path": repo_path,
-                "ts": time.monotonic(),
-            }
-            await query.edit_message_text(
-                f"🧬 *{backend} session* — pick a model:",
-                reply_markup=self._build_session_model_markup(backend),
-                parse_mode="Markdown",
-            )
-            return
-
-        if data.startswith("session_new_model:"):
-            # format: session_new_model:{modelIdx|__default__}; selection is stashed.
-            stash = self._session_wizard.get(update.effective_chat.id)
-            if not stash or (time.monotonic() - stash.get("ts", 0)) > self._WIZARD_TTL_SEC:
-                self._session_wizard.pop(update.effective_chat.id, None)
-                await query.edit_message_text("❌ That choice expired. Run /session_new again.")
-                return
-            choice = data.split(":", 1)[1].strip()
-            backend = stash["backend"]
-            model: Optional[str] = None
-            if choice != "__default__":
-                from config.models import options
-                try:
-                    opt_idx = int(choice)
-                    model = options(backend)[opt_idx].name
-                except (ValueError, IndexError):
-                    await query.edit_message_text("❌ Invalid model selection.")
-                    return
+            # Create immediately at the default model — no model step in the wizard.
+            # Picking a model is intentional and on-demand via /model afterwards.
             session = await self._create_and_bind_session(
                 chat_id=update.effective_chat.id,
                 user_id=update.effective_user.id,
                 backend=backend,
-                repo_path=stash["repo_path"],
-                node_id=stash["node_id"],
-                model=model,
+                repo_path=repo_path,
+                node_id=node_id,
             )
-            self._session_wizard.pop(update.effective_chat.id, None)
             await query.edit_message_text(
                 self._format_session_created_message(session),
             )
