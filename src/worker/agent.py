@@ -415,6 +415,7 @@ def _make_session_from_payload(payload: Dict[str, Any]) -> Any:
         updated_at=datetime.now(tz=timezone.utc).isoformat(),
         machine_id=session_dict.get("machine_id", ""),
         backend_session_id=session_dict.get("backend_session_id", ""),
+        model=session_dict.get("model") or None,
     )
     # Copy optional fields if present
     for attr in ("telegram_chat_id", "telegram_thread_id", "owner_user_id", "last_user_message"):

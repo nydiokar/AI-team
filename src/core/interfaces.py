@@ -164,6 +164,7 @@ class Session:
     updated_at: str
     machine_id: str = ""
     backend_session_id: str = ""        # native session ID returned by the backend
+    model: Optional[str] = None         # picked model name; None = use backend default
     last_task_id: str = ""
     last_artifact_path: str = ""
     last_summary: str = ""
