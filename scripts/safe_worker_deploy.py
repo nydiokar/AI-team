@@ -114,10 +114,26 @@ def _check_tools(backends: List[str]) -> None:
         raise RuntimeError("; ".join(problems))
 
 
+def _worker_startup_preflight() -> None:
+    code = """
+from src.worker.config import WorkerConfig
+from src.core.observability import init_logging
+from src.worker.agent import WorkerAgent
+
+WorkerConfig.from_env()
+init_logging(node_id="worker-preflight")
+agent = WorkerAgent()
+agent._live_state()
+print("worker_startup_preflight_ok")
+"""
+    _run([sys.executable, "-c", code.strip()])
+
+
 def _preflight(backends: List[str]) -> None:
     _required_env(["WORKER_NODE_ID", "WORKER_TOKEN", "WORKER_TAILSCALE_IP", "CONTROLLER_URL", "WORKER_BACKENDS"])
     _run([sys.executable, "-m", "py_compile", "worker_main.py", "src/worker/agent.py", "src/worker/config.py"])
     _run([sys.executable, "-m", "py_compile", "src/backends/codex.py", "src/backends/claude_code.py", "src/backends/opencode.py"])
+    _worker_startup_preflight()
     _http_get("/health")
     _check_tools(backends)
 
@@ -204,6 +220,7 @@ def main() -> int:
     parser.add_argument("--canary-port-offset", type=int, default=100)
     parser.add_argument("--health-timeout", type=int, default=90)
     parser.add_argument("--no-promote", action="store_true", help="start and verify canary, then leave real worker untouched")
+    parser.add_argument("--keep-canary", action="store_true", help="with --no-promote, leave the healthy canary running")
     args = parser.parse_args()
 
     _load_env()
@@ -220,6 +237,13 @@ def main() -> int:
         print(f"canary healthy: {row.get('node_id')} live_state={row.get('live_state')}")
         if args.no_promote:
             print("no-promote requested; leaving real worker untouched")
+            if not args.keep_canary:
+                print("cleaning verified canary")
+                _pm2_delete(args.canary_app)
+                try:
+                    _http_post("/nodes/deregister", {"node_id": canary_node}, timeout=5)
+                except Exception:
+                    pass
             return 0
         _promote(args.real_app, args.canary_app, canary_node, args.health_timeout)
         return 0
