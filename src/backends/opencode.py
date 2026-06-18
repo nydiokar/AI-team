@@ -844,15 +844,18 @@ class OpenCodeBackend(CodingBackend):
 
     @staticmethod
     def _session_model(session: Session) -> Optional[str]:
-        meta = session.task_history[-1] if session.task_history else {}
-        explicit = meta.get("opencode_model") or None
-        if explicit:
-            return explicit
+        # Resolve via the shared catalog logic: session.model → config default →
+        # catalog default. (Previously read a dead task_history["opencode_model"]
+        # key that nothing ever wrote — see MODEL_PICKER_PLAN.md R2.)
         try:
-            from config import config as _cfg
-            return getattr(_cfg.opencode, "default_model", None) or None
+            from config.models import resolve_model
+            return resolve_model(session)
         except Exception:
-            return None
+            try:
+                from config import config as _cfg
+                return getattr(_cfg.opencode, "default_model", None) or None
+            except Exception:
+                return None
 
     @staticmethod
     def _session_agent(session: Session) -> Optional[str]:

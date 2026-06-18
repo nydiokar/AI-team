@@ -56,7 +56,9 @@ _DANGEROUS_EXTENSIONS: set[str] = {
 
 class TelegramInterface:
     """Telegram bot interface for task management and notifications"""
-    
+
+    _WIZARD_TTL_SEC = 600  # /session_new model-step stash expiry (B2)
+
     def __init__(self, bot_token: str, orchestrator, allowed_users: list[int] = None):
         self.bot_token = bot_token
         self.orchestrator = orchestrator
@@ -71,6 +73,9 @@ class TelegramInterface:
         self._rate_limit_state: Dict[int, list[float]] = {}
         # Per-chat plain-text debounce buffer to merge split Telegram messages
         self._message_buffers: Dict[int, Dict[str, Any]] = {}
+        # Per-chat in-progress /session_new wizard selection (R7: keeps callback_data
+        # under Telegram's 64-byte limit by stashing backend/node/repo server-side).
+        self._session_wizard: Dict[int, Dict[str, Any]] = {}
 
         if not self.bot_token:
             logger.info("Telegram bot token not configured. Command interface available without live bot app.")
@@ -112,6 +117,7 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("session_close", self._handle_session_close))
         self.app.add_handler(CommandHandler("session_restore", self._handle_session_restore))
         self.app.add_handler(CommandHandler("compact", self._handle_compact))
+        self.app.add_handler(CommandHandler("model", self._handle_model_command))
         # Git automation command handlers
         self.app.add_handler(CommandHandler("commit", self._handle_git_commit))
         self.app.add_handler(CommandHandler("commit_all", self._handle_git_commit_all))
@@ -120,6 +126,7 @@ class TelegramInterface:
         self.app.add_handler(CallbackQueryHandler(self._handle_session_picker_callback, pattern=r"^session_use:"))
         self.app.add_handler(CallbackQueryHandler(self._handle_session_new_callback, pattern=r"^session_new_"))
         self.app.add_handler(CallbackQueryHandler(self._handle_session_restore_callback, pattern=r"^session_restore:"))
+        self.app.add_handler(CallbackQueryHandler(self._handle_model_set_callback, pattern=r"^model_set:"))
         
         # Message handler for natural language task creation
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -767,11 +774,12 @@ class TelegramInterface:
         """Rich card for one session (PLAIN TEXT — see _session_one_liner)."""
         icon = self._backend_icon(session.backend)
         node = f" · {self._session_node_label(session)}" if show_node else ""
+        model_label = "default" if not session.model else session.model
         lines = [
             header,
             f"{icon} {session.backend}{node} · {self._status_chip(session.status)}",
             f"📂 {self._session_repo_name(session)}   🆔 {self._session_tag(session.session_id)}",
-            f"🕒 last activity {self._relative_age(session.updated_at)}",
+            f"🧬 model {model_label}   🕒 last activity {self._relative_age(session.updated_at)}",
         ]
         note = self._compact_session_note(session, limit=160)
         if note:
@@ -892,6 +900,50 @@ class TelegramInterface:
                 [InlineKeyboardButton(text="✖️ Cancel", callback_data="session_new_cancel:")],
             ]
         )
+
+    def _build_session_model_markup(self, backend: str) -> Optional["InlineKeyboardMarkup"]:
+        """Model picker for the /session_new wizard. Buttons carry only the
+        catalog index (R7: backend/node/repo are stashed server-side)."""
+        if not TELEGRAM_AVAILABLE:
+            return None
+        from config.models import options, default_model
+        default = default_model(backend)
+        rows = [[InlineKeyboardButton(
+            text=f"⚡ Default ({default or 'CLI default'})",
+            callback_data="session_new_model:__default__",
+        )]]
+        for idx, opt in enumerate(options(backend)):
+            if opt.is_default:
+                continue  # already covered by the Default button
+            rows.append([InlineKeyboardButton(
+                text=opt.name, callback_data=f"session_new_model:{idx}",
+            )])
+        rows.append([InlineKeyboardButton(text="✖️ Cancel", callback_data="session_new_cancel:")])
+        return InlineKeyboardMarkup(rows)
+
+    def _build_model_set_markup(self, session: Session) -> Optional["InlineKeyboardMarkup"]:
+        """Model picker for the /model command on an existing session.
+
+        The session_id is pinned into each callback (B4) so the click applies to
+        the session the picker was built for, even if the active session changed.
+        """
+        if not TELEGRAM_AVAILABLE:
+            return None
+        from config.models import options, default_model
+        backend = session.backend
+        sid = session.session_id
+        default = default_model(backend)
+        rows = [[InlineKeyboardButton(
+            text=f"⚡ Default ({default or 'CLI default'})",
+            callback_data=f"model_set:{sid}:__default__",
+        )]]
+        for idx, opt in enumerate(options(backend)):
+            if opt.is_default:
+                continue
+            rows.append([InlineKeyboardButton(
+                text=opt.name, callback_data=f"model_set:{sid}:{idx}",
+            )])
+        return InlineKeyboardMarkup(rows)
 
     def _mesh_online_node_rows(self, backend: Optional[str] = None) -> list[dict]:
         """Return online node DB rows, optionally filtered by backend support."""
@@ -1041,6 +1093,7 @@ class TelegramInterface:
         backend: str,
         repo_path: str,
         node_id: str = "__local__",
+        model: Optional[str] = None,
     ) -> Session:
         import socket
         session = self.session_store.create(
@@ -1049,9 +1102,15 @@ class TelegramInterface:
             telegram_chat_id=chat_id,
             owner_user_id=user_id,
         )
-        # Pin to remote node; __local__ means this server (keep hostname set by session_store.create)
+        # Pin model and/or remote node, then persist once.
+        dirty = False
+        if model:
+            session.model = model
+            dirty = True
         if node_id and node_id != "__local__":
             session.machine_id = node_id
+            dirty = True
+        if dirty:
             self.session_store.save(session)
         self.session_store.bind(chat_id, session.session_id)
         return session
@@ -2347,6 +2406,7 @@ class TelegramInterface:
 
         # --- Cancel: bail out of the whole flow ---
         if data.startswith("session_new_cancel"):
+            self._session_wizard.pop(update.effective_chat.id, None)
             await query.edit_message_text("✖️ Cancelled. Run /session_new whenever you're ready.")
             return
 
@@ -2450,13 +2510,49 @@ class TelegramInterface:
                 await query.edit_message_text("❌ That choice expired. Run /session_new again.")
                 return
             _label, repo_path = choices[repo_index]
+            # Stash the selection server-side (R7) and advance to the model step.
+            # `ts` bounds staleness (B2): an abandoned wizard expires instead of
+            # being consumed later against a stale repo/node.
+            self._session_wizard[update.effective_chat.id] = {
+                "backend": backend,
+                "node_id": node_id,
+                "repo_path": repo_path,
+                "ts": time.monotonic(),
+            }
+            await query.edit_message_text(
+                f"🧬 *{backend} session* — pick a model:",
+                reply_markup=self._build_session_model_markup(backend),
+                parse_mode="Markdown",
+            )
+            return
+
+        if data.startswith("session_new_model:"):
+            # format: session_new_model:{modelIdx|__default__}; selection is stashed.
+            stash = self._session_wizard.get(update.effective_chat.id)
+            if not stash or (time.monotonic() - stash.get("ts", 0)) > self._WIZARD_TTL_SEC:
+                self._session_wizard.pop(update.effective_chat.id, None)
+                await query.edit_message_text("❌ That choice expired. Run /session_new again.")
+                return
+            choice = data.split(":", 1)[1].strip()
+            backend = stash["backend"]
+            model: Optional[str] = None
+            if choice != "__default__":
+                from config.models import options
+                try:
+                    opt_idx = int(choice)
+                    model = options(backend)[opt_idx].name
+                except (ValueError, IndexError):
+                    await query.edit_message_text("❌ Invalid model selection.")
+                    return
             session = await self._create_and_bind_session(
                 chat_id=update.effective_chat.id,
                 user_id=update.effective_user.id,
                 backend=backend,
-                repo_path=repo_path,
-                node_id=node_id,
+                repo_path=stash["repo_path"],
+                node_id=stash["node_id"],
+                model=model,
             )
+            self._session_wizard.pop(update.effective_chat.id, None)
             await query.edit_message_text(
                 self._format_session_created_message(session),
             )
@@ -2470,7 +2566,7 @@ class TelegramInterface:
         return (
             self._session_card(session, header="✅ Session created & active", show_node=show_node)
             + "\n\n💬 Just type your request to start working.\n"
-            "📂 /session_dirs to browse folders · /status to check in"
+            "📂 /session_dirs to browse folders · 🧬 /model to switch model · /status to check in"
         )
 
     async def _handle_session_dirs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2593,6 +2689,109 @@ class TelegramInterface:
         except Exception as e:
             logger.error(f"compact_session error: {e}")
             await update.message.reply_text(f"Error during compaction: {e}")
+
+    @staticmethod
+    def _effective_model_label(session: Session) -> str:
+        """Human label for the model a session will actually use next turn.
+
+        Model names are wrapped in Markdown code spans; backticks in a (free-text,
+        advisory) model name are stripped so they can't break the formatting (B9).
+        """
+        from config.models import resolve_model
+
+        def _safe(name: str) -> str:
+            return str(name).replace("`", "")
+
+        resolved = resolve_model(session) or "CLI default"
+        if session.model:
+            return f"`{_safe(session.model)}`"
+        return f"default (`{_safe(resolved)}`)"
+
+    async def _handle_model_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/model [name] — show or set the model for the active session.
+
+        No arg → show current model + an inline picker.
+        With a name → set it directly (free-text pass-through for OpenCode; see R6).
+        Applies on the next turn.
+        """
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        session = self.session_store.get_active(update.effective_chat.id)
+        if not session:
+            await update.message.reply_text("No active session. Use /session_new or /session_use first.")
+            return
+        if not self._user_can_access_session(update.effective_user.id, session):
+            await update.message.reply_text("❌ You do not own that session.")
+            return
+
+        args = context.args or []
+        requested = " ".join(args).strip()
+        if requested:
+            from config.models import validate, is_advisory
+            # An advisory backend would otherwise treat a blank/garbage arg as
+            # validate()->None and silently reset to default (B8). `requested`
+            # is already non-empty here; a truly empty arg falls through to the
+            # picker below instead of resetting.
+            resolved = validate(session.backend, requested)
+            if resolved is None and not is_advisory(session.backend):
+                from config.models import options
+                names = ", ".join(o.name for o in options(session.backend)) or "(none)"
+                safe_requested = requested.replace("`", "")
+                await update.message.reply_text(
+                    f"❌ Unknown {session.backend} model `{safe_requested}`.\nKnown: {names}",
+                    parse_mode="Markdown",
+                )
+                return
+            session.model = resolved
+            self.session_store.save(session)
+            await update.message.reply_text(
+                f"✅ Model set to {self._effective_model_label(session)} — applies on the next turn.",
+                parse_mode="Markdown",
+            )
+            return
+
+        await update.message.reply_text(
+            f"🧬 *{session.backend}* session model: {self._effective_model_label(session)}\n\nPick a model:",
+            reply_markup=self._build_model_set_markup(session),
+            parse_mode="Markdown",
+        )
+
+    async def _handle_model_set_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if not query:
+            return
+        await query.answer()
+        if not self._check_user_permission(update.effective_user.id):
+            await query.edit_message_text("❌ Access denied.")
+            return
+        # callback: model_set:<session_id>:<choice>  (session_id pinned, B4)
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("❌ Invalid model selection.")
+            return
+        sid, choice = parts[1].strip(), parts[2].strip()
+        session = self.session_store.get(sid)
+        if not session or not self._user_can_access_session(update.effective_user.id, session):
+            await query.edit_message_text("❌ That session is no longer accessible.")
+            return
+        if session.status == SessionStatus.CLOSED:
+            await query.edit_message_text("❌ That session is closed.")
+            return
+        if choice == "__default__":
+            session.model = None
+        else:
+            from config.models import options
+            try:
+                session.model = options(session.backend)[int(choice)].name
+            except (ValueError, IndexError):
+                await query.edit_message_text("❌ Invalid model selection.")
+                return
+        self.session_store.save(session)
+        await query.edit_message_text(
+            f"✅ Model set to {self._effective_model_label(session)} — applies on the next turn.",
+            parse_mode="Markdown",
+        )
 
     async def _handle_session_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/session_close [session_id]"""

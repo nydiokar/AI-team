@@ -27,6 +27,15 @@ from src.core.interfaces import CodingBackend, ExecutionResult, Session
 logger = logging.getLogger(__name__)
 
 
+def _resolve_model(session: Session) -> Optional[str]:
+    """Resolve the model for this session via the shared catalog logic."""
+    try:
+        from config.models import resolve_model
+        return resolve_model(session)
+    except Exception:
+        return None
+
+
 def _mcp_jobs_configured() -> bool:
     """True if setup_mcp.py has registered the jobs server in Codex's config."""
     try:
@@ -45,13 +54,13 @@ class CodexBackend(CodingBackend):
         self._proc_lock = threading.Lock()
 
     def create_session(self, session: Session) -> ExecutionResult:
-        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_key=session.session_id)
+        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_key=session.session_id, model=_resolve_model(session))
 
     def resume_session(self, session: Session, message: str) -> ExecutionResult:
-        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_key=session.session_id)
+        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_key=session.session_id, model=_resolve_model(session))
 
     def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
-        return self._run(cwd, message, resume_id=None, session_key=None)
+        return self._run(cwd, message, resume_id=None, session_key=None, model=None)
 
     def cancel(self, session: Session) -> None:
         with self._proc_lock:
@@ -67,7 +76,7 @@ class CodexBackend(CodingBackend):
             procs = list(self._session_procs.values()) + list(self._oneoff_procs)
         terminate_many_popen(procs)
 
-    def _run(self, cwd: str, message: str, resume_id: Optional[str], session_key: Optional[str]) -> ExecutionResult:
+    def _run(self, cwd: str, message: str, resume_id: Optional[str], session_key: Optional[str], model: Optional[str] = None) -> ExecutionResult:
         # Cost guard: refuse to spawn the Codex CLI under test mode.
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("codex")
@@ -83,7 +92,7 @@ class CodexBackend(CodingBackend):
         if session_key:
             proc_env["SESSION_ID"] = session_key
 
-        cmd = self._build_cmd(resume_id, cwd)
+        cmd = self._build_cmd(resume_id, cwd, model)
         cmd[0] = self._resolve_exe(proc_env)
 
         if sys.platform == "win32":
@@ -251,16 +260,22 @@ class CodexBackend(CodingBackend):
             path_value = env.get("Path") or env.get("PATH") or ""
         return shutil.which("codex", path=path_value or None) or shutil.which("codex") or "codex"
 
-    def _build_cmd(self, resume_id: Optional[str], cwd: Optional[str]) -> List[str]:
+    def _build_cmd(self, resume_id: Optional[str], cwd: Optional[str], model: Optional[str] = None) -> List[str]:
+        # -m is valid on both `exec` and `exec resume` (verified via --help).
         if resume_id:
-            return [
-                self._exe, "exec", "resume", resume_id,
+            cmd = [self._exe, "exec", "resume", resume_id]
+            if model:
+                cmd += ["-m", model]
+            cmd += [
                 "--json",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "-",
             ]
-        cmd = [
-            self._exe, "exec",
+            return cmd
+        cmd = [self._exe, "exec"]
+        if model:
+            cmd += ["-m", model]
+        cmd += [
             "--json",
             "--dangerously-bypass-approvals-and-sandbox",
         ]

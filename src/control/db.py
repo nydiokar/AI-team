@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 10
+_CURRENT_VERSION = 11
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at          TEXT NOT NULL,
     machine_id          TEXT NOT NULL DEFAULT '',
     backend_session_id  TEXT NOT NULL DEFAULT '',
+    -- NOTE: `model` column is added by migration 11 (not here) so fresh and
+    -- existing DBs converge through the same ALTER. See _get_migrations().
     last_task_id        TEXT NOT NULL DEFAULT '',
     last_artifact_path  TEXT NOT NULL DEFAULT '',
     last_summary        TEXT NOT NULL DEFAULT '',
@@ -304,13 +306,13 @@ class MeshDB:
                     """
                     INSERT INTO sessions (
                         session_id, backend, repo_path, status,
-                        created_at, updated_at, machine_id, backend_session_id,
+                        created_at, updated_at, machine_id, backend_session_id, model,
                         last_task_id, last_artifact_path, last_summary,
                         last_user_message, last_result_summary, last_files_modified,
                         telegram_chat_id, telegram_thread_id, owner_user_id, task_history
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
-                        :created_at, :updated_at, :machine_id, :backend_session_id,
+                        :created_at, :updated_at, :machine_id, :backend_session_id, :model,
                         :last_task_id, :last_artifact_path, :last_summary,
                         :last_user_message, :last_result_summary, :last_files_modified,
                         :telegram_chat_id, :telegram_thread_id, :owner_user_id, :task_history
@@ -322,6 +324,7 @@ class MeshDB:
                         updated_at          = excluded.updated_at,
                         machine_id          = excluded.machine_id,
                         backend_session_id  = excluded.backend_session_id,
+                        model               = excluded.model,
                         last_task_id        = excluded.last_task_id,
                         last_artifact_path  = excluded.last_artifact_path,
                         last_summary        = excluded.last_summary,
@@ -342,6 +345,7 @@ class MeshDB:
                         "updated_at":          session.updated_at,
                         "machine_id":          session.machine_id or "",
                         "backend_session_id":  session.backend_session_id or "",
+                        "model":               getattr(session, "model", None),
                         "last_task_id":        session.last_task_id or "",
                         "last_artifact_path":  session.last_artifact_path or "",
                         "last_summary":        session.last_summary or "",
@@ -1218,6 +1222,7 @@ def _get_migrations() -> List[tuple]:
             ALTER TABLE jobs ADD COLUMN last_seen_command TEXT;
             ALTER TABLE jobs ADD COLUMN last_seen_started_epoch REAL
         """),  # durable watched-job process identity probes
+        (11, "ALTER TABLE sessions ADD COLUMN model TEXT"),  # per-session picked model; NULL = backend default
     ]
 
 
