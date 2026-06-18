@@ -136,6 +136,7 @@ Last updated on this branch after commits:
 - `0b2e982` — M4 node live-load visibility in Telegram and NodeInfo responses
 - `7cd7471` — M4 aggregate live-load metrics
 - current wrap-up — M2 slot-aware pre-route freshness and `/status` mesh anomaly summary
+- final review fix — session creation node picker is backend-aware, DB-backed, and load-labeled
 
 Completed:
 - M1 enriched heartbeats:
@@ -156,6 +157,7 @@ Completed:
   - Telegram `/nodes` and `/node <id>` show slot load, active task counts/ids, heartbeat age, and live-state freshness
   - `/metrics` exposes aggregate slot utilization, active tasks, live-state freshness, and stale-busy session count
   - Telegram `/status` shows aggregate mesh load and stale-busy/stale-live-state counts
+  - Telegram session creation filters node choices by selected backend and shows node load in the picker
   - current stale-busy count is visible in the operator views; detailed reconciliation history remains in session/system events
 
 Known remaining work:
