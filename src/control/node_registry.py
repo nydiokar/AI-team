@@ -34,6 +34,8 @@ class NodeInfo:
     last_heartbeat: Optional[datetime] = None
     registered_at: Optional[datetime] = None
     live_state: Optional[dict] = None       # last heartbeat snapshot: slots, active_tasks
+    live_state_updated_at: Optional[datetime] = None
+    incarnation_id: Optional[str] = None   # minted by DB on every register; used by reaper
 
     @classmethod
     def from_dict(cls, d: dict) -> "NodeInfo":
@@ -66,6 +68,8 @@ class NodeInfo:
             "last_heartbeat": self.last_heartbeat.isoformat() if self.last_heartbeat else None,
             "registered_at": self.registered_at.isoformat() if self.registered_at else None,
             "live_state": self.live_state,
+            "live_state_updated_at": self.live_state_updated_at.isoformat() if self.live_state_updated_at else None,
+            "incarnation_id": self.incarnation_id,
         }
 
 
@@ -106,16 +110,17 @@ class NodeRegistry:
         info.last_heartbeat = now
         info.registered_at = now
         self._nodes[info.node_id] = info
-        self._db_upsert(info)
-        # Sweep any claims from the previous process incarnation back to pending.
-        # A re-registering node means a new process started (e.g. PM2 restart);
-        # its predecessor was hard-killed without releasing claims.
-        released = self._db_release_node_claims(info.node_id)
-        if released:
-            logger.warning(
-                "event=orphaned_claims_released node_id=%s count=%d task_ids=%s",
-                info.node_id, len(released), released,
-            )
+        old_incarnation, new_incarnation = self._db_upsert(info)
+        # Sweep claims only when the worker process identity changed. A controller
+        # restart also forces workers to re-register, but the worker process is
+        # still alive and may still be executing its claimed task.
+        if old_incarnation and new_incarnation and old_incarnation != new_incarnation:
+            released = self._db_release_node_claims(info.node_id)
+            if released:
+                logger.warning(
+                    "event=orphaned_claims_released node_id=%s old_incarnation=%s new_incarnation=%s count=%d task_ids=%s",
+                    info.node_id, old_incarnation, new_incarnation, len(released), released,
+                )
         logger.info("event=node_registered node_id=%s ip=%s", info.node_id, info.tailscale_ip)
 
     def deregister(self, node_id: str) -> None:
@@ -133,6 +138,7 @@ class NodeRegistry:
         node.status = "online"
         if live_state is not None:
             node.live_state = live_state
+            node.live_state_updated_at = node.last_heartbeat
         self._db_heartbeat(node_id, live_state)
         return True
 
@@ -149,11 +155,71 @@ class NodeRegistry:
     def is_empty(self) -> bool:
         return not bool(self._nodes)
 
-    def pick_capable(self, backend: str) -> Optional[NodeInfo]:
-        """Return the first online node that supports `backend`. Round-robin is future work."""
-        for node in self._nodes.values():
-            if node.status == "online" and backend in node.capabilities.backends:
-                return node
+    def list_capable(self, backend: str) -> List[NodeInfo]:
+        """Return online nodes that support `backend`."""
+        return [
+            node
+            for node in self._nodes.values()
+            if node.status == "online" and backend in node.capabilities.backends
+        ]
+
+    @staticmethod
+    def _live_state_age_sec(node: NodeInfo) -> Optional[float]:
+        if node.live_state_updated_at is None:
+            return None
+        updated = node.live_state_updated_at
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        return (datetime.now(tz=timezone.utc) - updated).total_seconds()
+
+    @classmethod
+    def _fresh_slot_snapshot(
+        cls,
+        node: NodeInfo,
+        max_live_state_age_sec: int,
+    ) -> Optional[tuple[int, int]]:
+        """Return (used, total) for fresh live_state, or None when unknown/stale."""
+        if not isinstance(node.live_state, dict):
+            return None
+        age = cls._live_state_age_sec(node)
+        if age is None or age > max_live_state_age_sec:
+            return None
+        try:
+            total = int(node.live_state.get("slots_total") or node.capabilities.max_concurrent or 0)
+            used = int(node.live_state.get("slots_used") or 0)
+        except (TypeError, ValueError):
+            return None
+        if total <= 0:
+            return None
+        return used, total
+
+    def pick_capable(
+        self,
+        backend: str,
+        *,
+        max_live_state_age_sec: int = 90,
+    ) -> Optional[NodeInfo]:
+        """Pick an online capable node, preferring fresh live_state with free slots."""
+        candidates = self.list_capable(backend)
+        if not candidates:
+            return None
+
+        fresh_available: List[tuple[float, int, NodeInfo]] = []
+        unknown: List[NodeInfo] = []
+        for index, node in enumerate(candidates):
+            slots = self._fresh_slot_snapshot(node, max_live_state_age_sec)
+            if slots is None:
+                unknown.append(node)
+                continue
+            used, total = slots
+            if used < total:
+                fresh_available.append((used / total, index, node))
+
+        if fresh_available:
+            fresh_available.sort(key=lambda item: (item[0], item[1]))
+            return fresh_available[0][2]
+        if unknown:
+            return unknown[0]
         return None
 
     # ------------------------------------------------------------------
@@ -212,12 +278,14 @@ class NodeRegistry:
     # DB helpers — best-effort, never raise
     # ------------------------------------------------------------------
 
-    def _db_upsert(self, node: NodeInfo) -> None:
+    def _db_upsert(self, node: NodeInfo) -> tuple[Optional[str], Optional[str]]:
         try:
             from src.control.db import get_db
             db = get_db()
             if db:
-                db.upsert_node(
+                old = db.get_node(node.node_id)
+                old_incarnation = old.get("incarnation_id") if old else None
+                incarnation_id = db.upsert_node(
                     node_id=node.node_id,
                     tailscale_ip=node.tailscale_ip,
                     api_port=node.api_port,
@@ -226,9 +294,13 @@ class NodeRegistry:
                     status="online",
                     projects_root=node.capabilities.projects_root,
                     repos=node.capabilities.repos,
+                    incarnation_id=node.incarnation_id,
                 )
+                node.incarnation_id = incarnation_id
+                return old_incarnation, incarnation_id
         except Exception as e:
             logger.debug("event=db_node_upsert_err node_id=%s err=%s", node.node_id, e)
+        return None, node.incarnation_id
 
     def _db_heartbeat(self, node_id: str, live_state: Optional[dict] = None) -> None:
         try:

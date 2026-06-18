@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
@@ -145,24 +145,35 @@ def _require_auth(
 # ---------------------------------------------------------------------------
 
 class _Capabilities(BaseModel):
-    backends: List[str] = []
+    backends: List[str] = Field(default_factory=list)
     max_concurrent: int = 2
     projects_root: str = ""
-    repos: List[Dict[str, str]] = []
+    repos: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class NodeRegisterPayload(BaseModel):
     node_id: str
     tailscale_ip: str = ""
     api_port: int = 9001
-    capabilities: _Capabilities = _Capabilities()
+    incarnation_id: str = ""
+    capabilities: _Capabilities = Field(default_factory=_Capabilities)
+
+
+class LiveStatePayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    v: int = 1
+    active_tasks: List[str] = Field(default_factory=list)
+    active_task_details: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    slots_used: int = 0
+    slots_total: int = 0
+    canary: bool = False
+    incarnation_id: str = ""
 
 
 class HeartbeatPayload(BaseModel):
     node_id: str
-    active_tasks: List[str] = []
-    slots_used: int = 0
-    slots_total: int = 0
+    live_state: Optional[LiveStatePayload] = None
 
 
 class DeregisterPayload(BaseModel):
@@ -208,6 +219,7 @@ class JobDonePayload(BaseModel):
     node_id: str
     exit_code: int
     tail: str = ""
+    status: Optional[str] = None
 
 
 class JobStartPayload(BaseModel):
@@ -215,6 +227,15 @@ class JobStartPayload(BaseModel):
     pid: int
     pgid: int = 0
     log_path: Optional[str] = None
+    started_epoch: Optional[float] = None
+    observed_command: Optional[str] = None
+
+
+class JobProbePayload(BaseModel):
+    node_id: str
+    observed_command: Optional[str] = None
+    observed_started_epoch: Optional[float] = None
+    probe_error: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +269,7 @@ def metrics() -> Dict[str, Any]:
     """
     db = get_db()
     s = db.stats() if db else {}
+    mesh_load = s.get("mesh_load") or {}
     completed = s.get("tasks_completed", 0)
     failed = s.get("tasks_failed", 0)
     finished = completed + failed
@@ -275,11 +297,19 @@ def metrics() -> Dict[str, Any]:
         "nodes": {
             "online": s.get("nodes_online", 0),
             "total": s.get("nodes_total", 0),
+            "slots_used": mesh_load.get("slots_used", 0),
+            "slots_total": mesh_load.get("slots_total", 0),
+            "slots_available": mesh_load.get("slots_available", 0),
+            "active_tasks": mesh_load.get("active_tasks", 0),
+            "nodes_with_live_state": mesh_load.get("nodes_with_live_state", 0),
+            "nodes_without_live_state": mesh_load.get("nodes_without_live_state", 0),
+            "stale_live_state_nodes": mesh_load.get("stale_live_state_nodes", []),
             "detail": nodes,
         },
         "sessions": {
             "total": s.get("sessions_total", 0),
             "busy": s.get("sessions_busy", 0),
+            "stale_busy": mesh_load.get("stale_busy_sessions", 0),
         },
         "schema_version": s.get("schema_version", 0),
     }
@@ -301,6 +331,7 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
             projects_root=payload.capabilities.projects_root,
             repos=list(payload.capabilities.repos),
         ),
+        incarnation_id=payload.incarnation_id or None,
     )
     get_registry().register(info)
     return {"status": "registered", "node_id": payload.node_id}
@@ -308,11 +339,7 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
 
 @app.post("/nodes/heartbeat", dependencies=[Depends(_require_auth)])
 def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
-    live_state = {
-        "active_tasks": payload.active_tasks,
-        "slots_used": payload.slots_used,
-        "slots_total": payload.slots_total,
-    } if payload.slots_total > 0 else None
+    live_state = payload.live_state.model_dump() if payload.live_state is not None else None
     ok = get_registry().heartbeat(payload.node_id, live_state=live_state)
     if not ok:
         # Unknown node — prompt re-register instead of silently failing
@@ -542,16 +569,35 @@ async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
                 if db is not None:
                     from config import config as _cfg
                     lease_sec = getattr(_cfg.mesh, "claim_lease_sec", 300)
-                    stale = db.list_stale_claims(lease_sec=lease_sec)
+                    max_runtime_sec = int(getattr(_cfg.mesh, "claim_max_runtime_sec", 1800) or 0)
+                    if max_runtime_sec <= 0:
+                        max_runtime_sec = int(getattr(_cfg.system, "task_timeout", 0) or 1800)
+                    stale = db.list_stale_claims(
+                        lease_sec=lease_sec,
+                        live_state_max_age_sec=getattr(_cfg.mesh, "routing_live_state_max_age_sec", 90),
+                        active_task_max_runtime_sec=max_runtime_sec,
+                    )
                     for row in stale:
                         task_id = row.get("id", "?")
                         claimed_by = row.get("claimed_by", "?")
                         claimed_at = row.get("claimed_at", "?")
-                        db.release_task(task_id, claimed_by)
-                        logger.info(
-                            "event=stale_claim_released task_id=%s claimed_by=%s claimed_at=%s",
-                            task_id, claimed_by, claimed_at,
-                        )
+                        reason = row.get("_stale_reason", "unknown")
+                        if reason == "active_task_over_max_runtime":
+                            db.fail_task(
+                                task_id,
+                                f"remote task exceeded mesh max runtime while still active on {claimed_by}",
+                                status="failed",
+                            )
+                            logger.warning(
+                                "event=stale_claim_failed task_id=%s claimed_by=%s claimed_at=%s reason=%s",
+                                task_id, claimed_by, claimed_at, reason,
+                            )
+                        else:
+                            db.release_task(task_id, claimed_by)
+                            logger.info(
+                                "event=stale_claim_released task_id=%s claimed_by=%s claimed_at=%s reason=%s",
+                                task_id, claimed_by, claimed_at, reason,
+                            )
             except Exception as e:
                 logger.debug("event=stale_claim_reaper_error err=%s", e)
 
@@ -653,8 +699,38 @@ def start_job(job_id: str, payload: JobStartPayload) -> Dict[str, str]:
             status_code=403,
             detail=f"Job {job_id!r} is owned by node {job.get('node_id')!r}",
         )
-    db.start_job(job_id, payload.pid, payload.pgid, payload.log_path)
+    db.start_job(
+        job_id,
+        payload.pid,
+        payload.pgid,
+        payload.log_path,
+        started_epoch=payload.started_epoch,
+        observed_command=payload.observed_command,
+    )
     return {"status": "started", "job_id": job_id}
+
+
+@app.post("/jobs/{job_id}/probe", dependencies=[Depends(_require_auth)])
+def record_job_probe(job_id: str, payload: JobProbePayload) -> Dict[str, str]:
+    """Worker records its latest liveness/identity probe for a running job."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    if job.get("node_id") != payload.node_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Job {job_id!r} is owned by node {job.get('node_id')!r}, not {payload.node_id!r}",
+        )
+    db.record_job_probe(
+        job_id,
+        observed_command=payload.observed_command,
+        observed_started_epoch=payload.observed_started_epoch,
+        probe_error=payload.probe_error,
+    )
+    return {"status": "recorded", "job_id": job_id}
 
 
 @app.post("/jobs/{job_id}/done", dependencies=[Depends(_require_auth)])
@@ -671,7 +747,13 @@ def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
             status_code=403,
             detail=f"Job {job_id!r} is owned by node {job.get('node_id')!r}, not {payload.node_id!r}",
         )
-    if payload.exit_code == 0:
+    if payload.status == "lost":
+        db.fail_job(
+            job_id,
+            payload.tail or "watched job process identity could not be verified",
+            status="lost",
+        )
+    elif payload.exit_code == 0:
         db.complete_job(job_id, payload.exit_code, payload.tail)
     else:
         err = f"exit code {payload.exit_code}"

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from unittest.mock import patch
 
@@ -47,6 +48,7 @@ async def test_claimed_remote_task_is_not_failed_by_pickup_timeout(tmp_path, mon
     task = _task("task_claimed_timeout", session.session_id)
     saves = []
 
+    db.upsert_session(session)
     db.enqueue_task(
         task_id=task.id,
         session_id=session.session_id,
@@ -69,7 +71,11 @@ async def test_claimed_remote_task_is_not_failed_by_pickup_timeout(tmp_path, mon
         def _resolve_task_backend(self, _task):
             return "claude"
 
+        def _nudge_worker_for_dispatch(self, _node, _node_id, _db):
+            return False
+
     sleep_calls = {"count": 0}
+    real_sleep = asyncio.sleep
 
     async def complete_on_sleep(_delay):
         sleep_calls["count"] += 1
@@ -87,14 +93,18 @@ async def test_claimed_remote_task_is_not_failed_by_pickup_timeout(tmp_path, mon
                     "backend_session_id": "claude-after",
                 },
             )
+        await real_sleep(0)
+
+    async def direct_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
 
     monkeypatch.setattr(config.mesh, "oneoff_queue_timeout_sec", 0)
-    monkeypatch.setattr("asyncio.sleep", complete_on_sleep)
 
     orch = MinimalOrchestrator()
     bound = TaskOrchestrator._dispatch_to_node.__get__(orch, type(orch))
     with patch("src.control.db.get_db", return_value=db):
-        result = await bound(task, session, node=None)
+        with patch("asyncio.sleep", complete_on_sleep), patch("asyncio.to_thread", direct_to_thread):
+            result = await bound(task, session, node=None)
 
     assert result.success is True
     assert result.output == "finished after claim"

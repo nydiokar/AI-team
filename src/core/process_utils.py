@@ -6,6 +6,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -13,6 +14,54 @@ try:
     import psutil
 except ImportError:  # pragma: no cover
     psutil = None
+
+
+def ensure_node_on_path(env: Optional[dict] = None) -> dict:
+    """Return an env dict with Node.js directories prepended to PATH on Windows.
+
+    Node-based CLIs (codex, opencode) installed via npm use ``.cmd`` shims
+    that invoke ``node``. If the parent process's PATH lacks the Node.js
+    install directory, Windows ``cmd.exe`` fails with::
+
+        '"node"' is not recognized as an internal or external command
+
+    This is a well-known Windows PATH-inheritance problem: PM2 worker
+    processes started via ``pm2 resurrect`` inherit a stale PATH that
+    lacks the Node.js bin directories.  ``pm2-ressurect.bat`` works around
+    it at the PM2 level, but children spawned by the worker still inherit
+    the worker's PATH, so every backend that launches a Node-based CLI
+    must call this helper to build the child's environment.
+
+    The function is a no-op on non-Windows platforms.
+    """
+    if env is None:
+        env = os.environ.copy()
+    else:
+        env = dict(env)
+
+    if sys.platform != "win32":
+        return env
+
+    path_key = "Path" if "Path" in env else "PATH"
+    path = env.get(path_key) or env.get("PATH") or env.get("Path") or ""
+    appdata = env.get("APPDATA", "")
+    node_dirs = []
+    node_hint = env.get("CODEX_NODE_PATH") or env.get("NODE_EXE")
+    if node_hint:
+        node_dirs.append(str(Path(node_hint).expanduser().parent))
+    node_dirs.append(r"C:\Program Files\nodejs")
+    if appdata:
+        node_dirs.append(os.path.join(appdata, "npm"))
+
+    path_parts = path.split(os.pathsep)
+    additions = [d for d in node_dirs if d not in path_parts]
+    if additions:
+        path = os.pathsep.join(additions) + os.pathsep + path
+
+    env["PATH"] = path
+    env["Path"] = path
+
+    return env
 
 
 def pid_exists(pid: int) -> bool:

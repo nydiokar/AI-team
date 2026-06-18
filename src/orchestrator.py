@@ -104,6 +104,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._task_cancel_events: Dict[str, asyncio.Event] = {}
         self._running_exec_tasks: Dict[str, asyncio.Task] = {}
         self._shutdown_interrupted_tasks: set[str] = set()
+        self._stale_busy_reconcile_task: Optional[asyncio.Task] = None
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -476,6 +477,104 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception as e:
                 logger.warning(f"Failed to notify recovered completed session: {e}")
 
+    def _start_stale_busy_reconciler(self) -> None:
+        """Start the periodic M3 reconciliation loop when mesh routing is active."""
+        interval = int(getattr(config.mesh, "session_reconcile_interval_sec", 60) or 0)
+        if not config.mesh.enabled or interval <= 0:
+            return
+        if self._stale_busy_reconcile_task and not self._stale_busy_reconcile_task.done():
+            return
+        self._stale_busy_reconcile_task = asyncio.create_task(
+            self._stale_busy_reconciliation_loop(interval)
+        )
+
+    async def _stale_busy_reconciliation_loop(self, interval_sec: int) -> None:
+        logger.info("event=stale_busy_reconciler_started interval=%ds", interval_sec)
+        try:
+            while self.running:
+                try:
+                    await self._reconcile_stale_busy_sessions_once()
+                except Exception as e:
+                    logger.debug("event=stale_busy_reconcile_failed err=%s", e)
+                await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            logger.info("event=stale_busy_reconciler_stopped")
+            raise
+
+    async def _reconcile_stale_busy_sessions_once(self) -> int:
+        """Mark BUSY sessions with no active task row as ERROR."""
+        try:
+            from src.control.db import get_db
+            db = get_db()
+        except Exception:
+            db = None
+        if db is None:
+            return 0
+
+        rows = await asyncio.to_thread(db.list_stale_busy_sessions)
+        reconciled = 0
+        active_task_ids = set(self.active_tasks.keys())
+        for row in rows:
+            session_id = row.get("session_id", "")
+            task_id = row.get("last_task_id", "") or ""
+            if task_id and task_id in active_task_ids:
+                continue
+
+            session = self.session_store.get(session_id)
+            if session is None or session.status != SessionStatus.BUSY:
+                continue
+
+            if task_id:
+                task_row = db.get_task(task_id)
+                status = task_row.get("status") if task_row else None
+                if status == "completed":
+                    await self._recover_completed_session(session, task_row)
+                    reconciled += 1
+                    continue
+                if status in ("pending", "claimed"):
+                    continue
+                if status in ("failed", "failed_node_offline"):
+                    error_msg = (task_row.get("error") if task_row else "") or f"Task {status}"
+                    session.last_result_summary = error_msg[-400:]
+
+            session.status = SessionStatus.ERROR
+            if not session.last_result_summary:
+                session.last_result_summary = (
+                    "Marked error by mesh reconciliation: session was busy with no active task."
+                )
+            self.session_store.save(session)
+
+            result = TaskResult(
+                task_id=task_id or f"session_{session_id}",
+                success=False,
+                output="",
+                errors=[session.last_result_summary or "stale busy session: no pending or claimed mesh task"],
+                files_modified=[],
+                execution_time=0.0,
+                timestamp=datetime.now().isoformat(),
+            )
+            setattr(result, "backend_name", session.backend or "claude")
+            self._append_session_event(session_id, task_id, result)
+            self._emit_event(
+                "stale_busy_session_reconciled",
+                None,
+                {
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "machine_id": session.machine_id,
+                    "backend": session.backend,
+                },
+            )
+            logger.warning(
+                "event=stale_busy_session_reconciled session_id=%s task_id=%s node=%s",
+                session_id,
+                task_id,
+                session.machine_id,
+            )
+            reconciled += 1
+
+        return reconciled
+
     async def _reattach_remote_task(self, session: Any, task_row: Dict[str, Any]) -> None:
         """Reattach to a remote task still in-flight after a gateway restart.
 
@@ -730,6 +829,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self.stop()
                 raise
         await self._recover_stale_busy_sessions()
+        self._start_stale_busy_reconciler()
 
         # Start the job completion poller (T3 — Watched Jobs)
         asyncio.create_task(self._job_completion_poller())
@@ -793,6 +893,12 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         # Stop the embedded mesh task server (no-op if it was never started)
         await self._stop_embedded_task_server()
+
+        if self._stale_busy_reconcile_task and not self._stale_busy_reconcile_task.done():
+            self._stale_busy_reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stale_busy_reconcile_task
+        self._stale_busy_reconcile_task = None
 
         # Cancel worker tasks
         for worker in self.worker_tasks:
@@ -2550,6 +2656,8 @@ Generated from user description: {description}
         pickup_deadline = time.time() + pickup_timeout_sec
         poll_interval = 3.0
         first_poll = True
+        target_node_id = getattr(node, "node_id", None) or (session.machine_id if session else "")
+        await _aio.to_thread(self._nudge_worker_for_dispatch, node, target_node_id, db)
 
         while True:
             row = db.get_task(task.id)
@@ -2676,6 +2784,77 @@ Generated from user description: {description}
 
             await _aio.sleep(poll_interval)
 
+    def _nudge_worker_for_dispatch(self, node: Any, node_id: str, db: Any) -> bool:
+        """Best-effort wake-up for a worker after enqueuing remote work."""
+        import urllib.request
+
+        tailscale_ip = getattr(node, "tailscale_ip", "") if node is not None else ""
+        api_port = getattr(node, "api_port", 0) if node is not None else 0
+        if (not tailscale_ip or not api_port) and node_id and db is not None:
+            try:
+                row = db.get_node(node_id)
+            except Exception:
+                row = None
+            if row:
+                tailscale_ip = row.get("tailscale_ip") or tailscale_ip
+                api_port = row.get("api_port") or api_port
+
+        if not tailscale_ip or not api_port:
+            logger.debug("event=mesh_nudge_skipped node_id=%s reason=no_address", node_id)
+            return False
+
+        url = f"http://{tailscale_ip}:{api_port}/nudge"
+        try:
+            req = urllib.request.Request(url, method="POST", data=b"")
+            with urllib.request.urlopen(req, timeout=2):
+                pass
+            logger.debug("event=mesh_nudge_sent node_id=%s url=%s", node_id, url)
+            return True
+        except Exception as e:
+            logger.debug("event=mesh_nudge_failed node_id=%s url=%s err=%s", node_id, url, e)
+            return False
+
+    async def _refresh_capable_nodes_before_routing(self, registry: Any, backend_name: str) -> None:
+        """Nudge capable workers and briefly wait for fresher live_state."""
+        import asyncio as _aio
+        from src.control.db import get_db
+
+        wait_sec = float(getattr(config.mesh, "routing_freshness_wait_sec", 2.0) or 0.0)
+        if wait_sec <= 0:
+            return
+
+        try:
+            candidates = registry.list_capable(backend_name)
+        except Exception:
+            candidates = []
+        if not candidates:
+            return
+
+        before = {
+            node.node_id: node.live_state_updated_at
+            for node in candidates
+        }
+        db = get_db()
+        await _aio.gather(
+            *[
+                _aio.to_thread(self._nudge_worker_for_dispatch, node, node.node_id, db)
+                for node in candidates
+            ],
+            return_exceptions=True,
+        )
+
+        deadline = time.time() + wait_sec
+        while time.time() < deadline:
+            for node in candidates:
+                if node.live_state_updated_at and node.live_state_updated_at != before.get(node.node_id):
+                    logger.debug(
+                        "event=mesh_preroute_fresh_state node_id=%s backend=%s",
+                        node.node_id,
+                        backend_name,
+                    )
+                    return
+            await _aio.sleep(0.1)
+
     async def _dispatch_or_run_local(
         self,
         task: "Task",
@@ -2715,9 +2894,15 @@ Generated from user description: {description}
             if not node or node.status != "online":
                 return _routing_failure(f"Node {session.machine_id!r} is offline; cannot continue session")
         else:
-            node = registry.pick_capable(backend=backend_name)
+            await self._refresh_capable_nodes_before_routing(registry, backend_name)
+            node = registry.pick_capable(
+                backend=backend_name,
+                max_live_state_age_sec=getattr(config.mesh, "routing_live_state_max_age_sec", 90),
+            )
             if not node:
-                return _routing_failure(f"No online node supports backend {backend_name!r}")
+                return _routing_failure(
+                    f"No online node supports backend {backend_name!r} with available capacity"
+                )
 
         return await self._dispatch_to_node(task, session, node)
 

@@ -15,12 +15,13 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import List, Optional
 
-from src.core.process_utils import terminate_many_popen
+from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ def _mcp_jobs_configured() -> bool:
 class CodexBackend(CodingBackend):
 
     def __init__(self):
-        self._exe = shutil.which("codex") or "codex"
+        self._exe = self._resolve_exe(ensure_node_on_path())
         self._session_procs: dict[str, subprocess.Popen] = {}
         self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
@@ -71,7 +72,6 @@ class CodexBackend(CodingBackend):
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("codex")
         start = time.time()
-        cmd = self._build_cmd(resume_id, cwd)
 
         try:
             from config import config as _cfg
@@ -79,9 +79,39 @@ class CodexBackend(CodingBackend):
         except Exception:
             inactivity_sec = 600
 
-        proc_env = os.environ.copy()
+        proc_env = ensure_node_on_path()
         if session_key:
             proc_env["SESSION_ID"] = session_key
+
+        cmd = self._build_cmd(resume_id, cwd)
+        cmd[0] = self._resolve_exe(proc_env)
+
+        if sys.platform == "win32":
+            node_hint = os.getenv("CODEX_NODE_PATH") or os.getenv("NODE_EXE")
+            current_path = proc_env.get("PATH") or proc_env.get("Path") or ""
+            if node_hint:
+                node_dir = str(Path(node_hint).expanduser().parent)
+                current_path = node_dir + os.pathsep + current_path
+                proc_env["PATH"] = current_path
+                proc_env["Path"] = current_path
+            if shutil.which("node", path=current_path) is None:
+                return ExecutionResult(
+                    success=False,
+                    output="",
+                    errors=[
+                        "Codex CLI requires node.exe, but node is not on PATH for this worker process. "
+                        "Install Node.js or set CODEX_NODE_PATH/NODE_EXE to the full node.exe path in the worker .env."
+                    ],
+                    execution_time=time.time() - start,
+                )
+
+        logger.info(
+            "event=codex_spawn exe=%s node=%s cwd=%s session_key=%s",
+            cmd[0],
+            shutil.which("node", path=(proc_env.get("PATH") or proc_env.get("Path") or "")),
+            cwd,
+            session_key or "(oneoff)",
+        )
 
         proc: Optional[subprocess.Popen] = None
         try:
@@ -213,6 +243,13 @@ class CodexBackend(CodingBackend):
         finally:
             if proc is not None:
                 self._unregister_process(proc, session_key)
+
+    @staticmethod
+    def _resolve_exe(env: Optional[dict] = None) -> str:
+        path_value = ""
+        if env:
+            path_value = env.get("Path") or env.get("PATH") or ""
+        return shutil.which("codex", path=path_value or None) or shutil.which("codex") or "codex"
 
     def _build_cmd(self, resume_id: Optional[str], cwd: Optional[str]) -> List[str]:
         if resume_id:

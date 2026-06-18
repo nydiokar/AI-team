@@ -1,7 +1,18 @@
 const path = require("path");
+const fs = require("fs");
 
 const isWindows = process.platform === "win32";
-const python = process.env.PM2_PYTHON || (isWindows ? "python" : "python3");
+const venvPython = path.join(__dirname, ".venv", isWindows ? "Scripts/python.exe" : "bin/python");
+const python = process.env.PM2_PYTHON || (fs.existsSync(venvPython) ? venvPython : (isWindows ? "python" : "python3"));
+const defaultNodePath = isWindows ? "C:/Program Files/nodejs/node.exe" : "";
+const nodePath = process.env.CODEX_NODE_PATH
+  || process.env.NODE_EXE
+  || (defaultNodePath && fs.existsSync(defaultNodePath) ? defaultNodePath : "");
+const nodeDir = nodePath ? path.dirname(nodePath) : "";
+const npmDir = isWindows && process.env.APPDATA ? path.join(process.env.APPDATA, "npm") : "";
+const inheritedPath = process.env.PATH || process.env.Path || process.env.path || "";
+const pathParts = [nodeDir, npmDir, inheritedPath].filter(Boolean);
+const workerPath = isWindows ? pathParts.join(path.delimiter) : inheritedPath;
 
 module.exports = {
   apps: [
@@ -108,6 +119,9 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
         AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
+        PATH: workerPath,
+        Path: workerPath,
+        CODEX_NODE_PATH: nodePath,
         // Required — set these in .env or uncomment + fill here:
         // WORKER_NODE_ID: "main-pc",
         // WORKER_TOKEN: "...",
@@ -118,6 +132,7 @@ module.exports = {
         // WORKER_API_PORT: "9001",
         // WORKER_MAX_CONCURRENT: "2",
         // WORKER_PROJECTS_ROOT: "C:/Users/Cicada38/Projects",  // enables repo discovery
+        // CODEX_NODE_PATH: "C:/Program Files/nodejs/node.exe",  // required if PM2 cannot see node.exe
       },
       out_file: path.join(__dirname, "logs", "pm2-worker-out.log"),
       error_file: path.join(__dirname, "logs", "pm2-worker-error.log"),

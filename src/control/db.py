@@ -41,7 +41,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 8
+_CURRENT_VERSION = 10
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +388,32 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_stale_busy_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return BUSY sessions with no pending or claimed mesh task.
+
+        This is the gateway-side M3 reconciliation query. A session is considered
+        stale-busy when the gateway still marks it busy but the dispatch ledger has
+        no active task for that session. Completed/failed historical rows do not
+        count as active work.
+        """
+        rows = self._conn().execute(
+            """
+            SELECT s.*
+            FROM sessions s
+            WHERE s.status = 'busy'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM mesh_tasks t
+                WHERE t.session_id = s.session_id
+                  AND t.status IN ('pending', 'claimed')
+              )
+            ORDER BY s.updated_at ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ------------------------------------------------------------------
     # Mesh tasks
     # ------------------------------------------------------------------
@@ -428,9 +454,12 @@ class MeshDB:
                         now,
                     ),
                 )
-        except sqlite3.IntegrityError:
-            # Idempotent — task already exists (e.g. duplicate dispatch on retry)
-            logger.debug("event=db_enqueue_task_duplicate task_id=%s", task_id)
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed: mesh_tasks.id" in str(e):
+                # Idempotent — task already exists (e.g. duplicate dispatch on retry)
+                logger.debug("event=db_enqueue_task_duplicate task_id=%s", task_id)
+            else:
+                logger.warning("event=db_enqueue_task_integrity_failed task_id=%s err=%s", task_id, e)
         except Exception as e:
             logger.warning("event=db_enqueue_task_failed task_id=%s err=%s", task_id, e)
 
@@ -510,7 +539,80 @@ class MeshDB:
             logger.warning("event=db_release_node_claims_failed node_id=%s err=%s", node_id, e)
             return []
 
-    def list_stale_claims(self, lease_sec: int = 300) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _parse_dt(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except Exception:
+            try:
+                dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S.%f")
+            except Exception:
+                return None
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
+    @classmethod
+    def _stale_online_claim_reason(
+        cls,
+        row: sqlite3.Row,
+        now: datetime,
+        live_state_max_age_sec: int,
+        active_task_max_runtime_sec: int,
+    ) -> Optional[str]:
+        live_raw = row["live_state"] if "live_state" in row.keys() else None
+        updated_raw = row["live_state_updated_at"] if "live_state_updated_at" in row.keys() else None
+        if not live_raw or not updated_raw:
+            # Compatibility for old workers: without live_state, online still
+            # means unknown. Offline/incarnation checks remain active.
+            return None
+
+        updated = cls._parse_dt(updated_raw)
+        if updated is None or (now - updated).total_seconds() > live_state_max_age_sec:
+            return None
+
+        try:
+            live = json.loads(live_raw) if isinstance(live_raw, str) else (live_raw or {})
+        except Exception:
+            return None
+        if not isinstance(live, dict):
+            return None
+
+        task_id = row["id"]
+        active_ids = set(str(t) for t in (live.get("active_tasks") or []))
+        details = live.get("active_task_details") or {}
+        if isinstance(details, list):
+            details = {
+                str(item.get("task_id")): item
+                for item in details
+                if isinstance(item, dict) and item.get("task_id")
+            }
+        elif not isinstance(details, dict):
+            details = {}
+
+        if str(task_id) not in active_ids and str(task_id) not in details:
+            return "missing_from_live_state"
+
+        max_runtime = max(0, int(active_task_max_runtime_sec or 0))
+        if max_runtime <= 0:
+            return None
+
+        detail = details.get(str(task_id)) if isinstance(details, dict) else None
+        started_raw = detail.get("started_at") if isinstance(detail, dict) else None
+        started = cls._parse_dt(started_raw) or cls._parse_dt(row["claimed_at"])
+        if started is not None and (now - started).total_seconds() > max_runtime:
+            return "active_task_over_max_runtime"
+        return None
+
+    def list_stale_claims(
+        self,
+        lease_sec: int = 300,
+        *,
+        live_state_max_age_sec: int = 90,
+        active_task_max_runtime_sec: int = 1800,
+    ) -> List[Dict[str, Any]]:
         """Return claimed tasks whose claim has expired.
 
         A claim is stale when:
@@ -521,6 +623,10 @@ class MeshDB:
             from claimer_incarnation (node restarted in-place — new process,
             same node_id, same online status — the dead process's claim is
             orphaned and will never complete).
+          - the claiming node has fresh live_state and the task is not in that
+            live_state's active task set.
+          - the task is still active in fresh live_state but has exceeded the
+            active-task hard runtime cap.
 
         The incarnation mismatch condition catches the PM2-restart gap that the
         offline-only check misses: the old process is SIGKILLed, the new process
@@ -535,21 +641,12 @@ class MeshDB:
             conn.row_factory = _sqlite3.Row
             rows = conn.execute(
                 """
-                SELECT t.*, n.status AS node_status
+                SELECT t.*, n.status AS node_status, n.incarnation_id AS node_incarnation_id,
+                       n.live_state, n.live_state_updated_at
                 FROM mesh_tasks t
                 LEFT JOIN nodes n ON t.claimed_by = n.node_id
                 WHERE t.status = 'claimed'
                   AND t.claimed_at IS NOT NULL
-                  AND (
-                    n.node_id IS NULL
-                    OR n.status = 'offline'
-                    OR (
-                      n.status = 'online'
-                      AND t.claimer_incarnation IS NOT NULL
-                      AND n.incarnation_id IS NOT NULL
-                      AND n.incarnation_id != t.claimer_incarnation
-                    )
-                  )
                 """,
             ).fetchall()
             conn.close()
@@ -557,15 +654,38 @@ class MeshDB:
             cutoff = lease_sec
             result = []
             for r in rows:
-                claimed_str = r["claimed_at"]
-                try:
-                    claimed_dt = datetime.fromisoformat(claimed_str)
-                except Exception:
-                    claimed_dt = datetime.strptime(claimed_str, "%Y-%m-%d %H:%M:%S.%f")
+                claimed_dt = self._parse_dt(r["claimed_at"])
+                if claimed_dt is None:
+                    continue
                 age = (now - claimed_dt).total_seconds()
-                if age > cutoff:
+                if age <= cutoff:
+                    continue
+
+                node_status = r["node_status"]
+                reason = None
+                if node_status is None:
+                    reason = "node_missing"
+                elif node_status == "offline":
+                    reason = "node_offline"
+                elif (
+                    node_status == "online"
+                    and r["claimer_incarnation"] is not None
+                    and r["node_incarnation_id"] is not None
+                    and r["node_incarnation_id"] != r["claimer_incarnation"]
+                ):
+                    reason = "incarnation_mismatch"
+                elif node_status == "online":
+                    reason = self._stale_online_claim_reason(
+                        r,
+                        now,
+                        live_state_max_age_sec,
+                        active_task_max_runtime_sec,
+                    )
+
+                if reason:
                     d = dict(r)
                     d.pop("node_status", None)
+                    d["_stale_reason"] = reason
                     result.append(d)
             return result
         except Exception as e:
@@ -737,16 +857,18 @@ class MeshDB:
         status: str = "online",
         projects_root: str = "",
         repos: Optional[List[dict]] = None,
+        incarnation_id: Optional[str] = None,
     ) -> str:
         """Upsert a node record and return the new incarnation_id.
 
-        A fresh incarnation_id UUID is minted on every call — each registration
-        represents a new process start, even when the node_id is unchanged.
+        New workers provide a process incarnation_id that remains stable across
+        controller restarts and re-registration. Older workers omit it, so we
+        mint a fresh UUID and preserve the previous restart-detection behavior.
         list_stale_claims uses the mismatch between claimer_incarnation and the
         node's current incarnation_id to detect claims orphaned by a restart.
         """
         now = _now()
-        incarnation_id = uuid.uuid4().hex
+        incarnation_id = incarnation_id or uuid.uuid4().hex
         try:
             with self._write() as conn:
                 conn.execute(
@@ -795,10 +917,11 @@ class MeshDB:
                     """
                     UPDATE nodes
                     SET last_heartbeat = ?, status = 'online', updated_at = ?,
-                        live_state = COALESCE(?, live_state)
+                        live_state = COALESCE(?, live_state),
+                        live_state_updated_at = CASE WHEN ? IS NOT NULL THEN ? ELSE live_state_updated_at END
                     WHERE node_id = ?
                     """,
-                    (now, now, live_state, node_id),
+                    (now, now, live_state, live_state, now, node_id),
                 )
         except Exception as e:
             logger.warning("event=db_heartbeat_node_failed node_id=%s err=%s", node_id, e)
@@ -877,6 +1000,8 @@ class MeshDB:
         pid: int,
         pgid: int,
         log_path: Optional[str] = None,
+        started_epoch: Optional[float] = None,
+        observed_command: Optional[str] = None,
     ) -> None:
         """Record PID/PGID for a spawned job."""
         now = _now()
@@ -886,13 +1011,58 @@ class MeshDB:
                     """
                     UPDATE jobs
                     SET pid = ?, pgid = ?, log_path = COALESCE(?, log_path),
+                        started_epoch = COALESCE(?, started_epoch),
+                        last_checked_at = ?,
+                        last_probe_error = '',
+                        last_seen_command = COALESCE(?, last_seen_command),
+                        last_seen_started_epoch = COALESCE(?, last_seen_started_epoch),
                         updated_at = ?
                     WHERE id = ?
                     """,
-                    (pid, pgid, log_path, now, job_id),
+                    (
+                        pid, pgid, log_path,
+                        started_epoch, now,
+                        observed_command, started_epoch,
+                        now, job_id,
+                    ),
                 )
         except Exception as e:
             logger.warning("event=db_start_job_failed job_id=%s err=%s", job_id, e)
+
+    def record_job_probe(
+        self,
+        job_id: str,
+        *,
+        checked_at: Optional[str] = None,
+        observed_command: Optional[str] = None,
+        observed_started_epoch: Optional[float] = None,
+        probe_error: str = "",
+    ) -> None:
+        """Persist the worker's latest process-identity probe for a running job."""
+        now = checked_at or _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET last_checked_at = ?,
+                        last_probe_error = ?,
+                        last_seen_command = COALESCE(?, last_seen_command),
+                        last_seen_started_epoch = COALESCE(?, last_seen_started_epoch),
+                        updated_at = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (
+                        now,
+                        probe_error,
+                        observed_command,
+                        observed_started_epoch,
+                        now,
+                        job_id,
+                    ),
+                )
+        except Exception as e:
+            logger.warning("event=db_record_job_probe_failed job_id=%s err=%s", job_id, e)
 
     def complete_job(
         self,
@@ -1001,6 +1171,8 @@ class MeshDB:
     def stats(self) -> Dict[str, Any]:
         """Quick health snapshot — useful for /status Telegram command."""
         conn = self._conn()
+        nodes = self.list_nodes()
+        mesh_load = _mesh_load_stats(nodes, self.list_stale_busy_sessions(limit=10000))
         return {
             "sessions_total":   conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
             "sessions_busy":    conn.execute("SELECT COUNT(*) FROM sessions WHERE status='busy'").fetchone()[0],
@@ -1012,6 +1184,7 @@ class MeshDB:
             "nodes_total":      conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0],
             "schema_version":   conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] or 0,
             "db_path":          str(self._path),
+            "mesh_load":        mesh_load,
         }
 
 
@@ -1038,6 +1211,13 @@ def _get_migrations() -> List[tuple]:
         (6, "ALTER TABLE nodes ADD COLUMN incarnation_id TEXT"),  # per-restart UUID for orphan detection
         (7, "ALTER TABLE mesh_tasks ADD COLUMN claimer_incarnation TEXT"),  # matched against nodes.incarnation_id by reaper
         (8, "ALTER TABLE nodes ADD COLUMN live_state TEXT"),  # JSON snapshot sent with each heartbeat (slots, active tasks)
+        (9, "ALTER TABLE nodes ADD COLUMN live_state_updated_at TEXT"),  # timestamp of last live_state update; NULL = never received
+        (10, """
+            ALTER TABLE jobs ADD COLUMN last_checked_at TEXT;
+            ALTER TABLE jobs ADD COLUMN last_probe_error TEXT;
+            ALTER TABLE jobs ADD COLUMN last_seen_command TEXT;
+            ALTER TABLE jobs ADD COLUMN last_seen_started_epoch REAL
+        """),  # durable watched-job process identity probes
     ]
 
 
@@ -1047,6 +1227,78 @@ def _get_migrations() -> List[tuple]:
 
 def _now() -> str:
     return datetime.utcnow().isoformat()
+
+
+def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Aggregate node live_state blobs into network-wide slot/task counters."""
+    slots_used = 0
+    slots_total = 0
+    active_tasks = 0
+    nodes_with_state = 0
+    nodes_without_state = 0
+    stale_state_nodes: List[str] = []
+
+    now = datetime.utcnow()
+    _live_state_max_age_s = 120
+    for row in nodes:
+        live_raw = row.get("live_state")
+        live: Dict[str, Any] = {}
+        if isinstance(live_raw, dict):
+            live = live_raw
+        elif isinstance(live_raw, str) and live_raw.strip():
+            try:
+                parsed = json.loads(live_raw)
+                if isinstance(parsed, dict):
+                    live = parsed
+            except Exception:
+                live = {}
+
+        # Check staleness before aggregating — stale live_state must not
+        # contribute phantom slot/task counts to the mesh totals.
+        live_is_fresh = False
+        updated = row.get("live_state_updated_at")
+        if live and updated:
+            try:
+                age_s = (now - datetime.fromisoformat(str(updated))).total_seconds()
+                live_is_fresh = age_s <= _live_state_max_age_s
+            except Exception:
+                live_is_fresh = False
+        elif live and not updated:
+            live_is_fresh = False  # live_state present but timestamp missing — treat as stale
+
+        if live and live_is_fresh:
+            nodes_with_state += 1
+            try:
+                slots_used += int(live.get("slots_used") or 0)
+            except Exception:
+                pass
+            try:
+                slots_total += int(live.get("slots_total") or row.get("max_concurrent") or 0)
+            except Exception:
+                pass
+            tasks = live.get("active_tasks")
+            if isinstance(tasks, list):
+                active_tasks += len(tasks)
+        else:
+            nodes_without_state += 1
+            try:
+                slots_total += int(row.get("max_concurrent") or 0)
+            except Exception:
+                pass
+
+        if row.get("status") == "online" and (not updated or not live_is_fresh):
+            stale_state_nodes.append(row.get("node_id", ""))
+
+    return {
+        "slots_used": slots_used,
+        "slots_total": slots_total,
+        "slots_available": max(slots_total - slots_used, 0),
+        "active_tasks": active_tasks,
+        "nodes_with_live_state": nodes_with_state,
+        "nodes_without_live_state": nodes_without_state,
+        "stale_live_state_nodes": [n for n in stale_state_nodes if n],
+        "stale_busy_sessions": len(stale_busy or []),
+    }
 
 
 # ---------------------------------------------------------------------------
