@@ -281,6 +281,60 @@ async def test_reconcile_stale_busy_sessions_marks_error(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_stale_busy_sessions_recovers_completed_task(monkeypatch, tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    session = _session("completed")
+    db.upsert_session(session)
+    db.enqueue_task(
+        task_id=session.last_task_id,
+        session_id=session.session_id,
+        machine_id=session.machine_id,
+        backend="claude",
+        action="resume_session",
+        payload={"task_id": session.last_task_id, "prompt": "completed"},
+    )
+    db.complete_task(
+        session.last_task_id,
+        {
+            "success": True,
+            "output": "done",
+            "errors": [],
+            "files_modified": [],
+            "execution_time": 1.0,
+            "timestamp": "2026-01-01T00:00:01",
+        },
+    )
+
+    recovered = []
+
+    class _Store:
+        def get(self, session_id):
+            return session if session_id == session.session_id else None
+
+        def save(self, session):
+            raise AssertionError("completed task should go through recovery path")
+
+    async def direct_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def recover_completed(sess, row):
+        recovered.append((sess.session_id, row["id"]))
+        sess.status = SessionStatus.AWAITING_INPUT
+
+    orchestrator = TaskOrchestrator.__new__(TaskOrchestrator)
+    orchestrator.active_tasks = {}
+    orchestrator.session_store = _Store()
+    orchestrator._recover_completed_session = recover_completed
+
+    monkeypatch.setattr("src.control.db.get_db", lambda: db)
+    monkeypatch.setattr("asyncio.to_thread", direct_to_thread)
+
+    assert await orchestrator._reconcile_stale_busy_sessions_once() == 1
+    assert recovered == [(session.session_id, session.last_task_id)]
+    assert session.status == SessionStatus.AWAITING_INPUT
+
+
+@pytest.mark.asyncio
 async def test_reconcile_stale_busy_sessions_skips_gateway_active_task(monkeypatch, tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     stale = _session("active")

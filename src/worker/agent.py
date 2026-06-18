@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -614,6 +615,7 @@ class WorkerAgent:
         self._slots_used: int = 0  # semaphore-acquired count; differs from len(_active) which includes queued tasks
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
         self._canary = (os.getenv("WORKER_CANARY") or "").lower() in {"1", "true", "yes"}
+        self._incarnation_id = uuid.uuid4().hex
 
     # ------------------------------------------------------------------
     # Registration
@@ -624,6 +626,7 @@ class WorkerAgent:
             "node_id": self.cfg.node_id,
             "tailscale_ip": self.cfg.tailscale_ip,
             "api_port": self.cfg.api_port,
+            "incarnation_id": self._incarnation_id,
             "capabilities": {
                 "backends": self.cfg.backends,
                 "max_concurrent": self.cfg.max_concurrent,
@@ -660,6 +663,7 @@ class WorkerAgent:
             "slots_used": self._slots_used,
             "slots_total": self.cfg.max_concurrent,
             "canary": self._canary,
+            "incarnation_id": self._incarnation_id,
         }
 
     async def _heartbeat_loop(self) -> None:

@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
@@ -145,26 +145,30 @@ def _require_auth(
 # ---------------------------------------------------------------------------
 
 class _Capabilities(BaseModel):
-    backends: List[str] = []
+    backends: List[str] = Field(default_factory=list)
     max_concurrent: int = 2
     projects_root: str = ""
-    repos: List[Dict[str, str]] = []
+    repos: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class NodeRegisterPayload(BaseModel):
     node_id: str
     tailscale_ip: str = ""
     api_port: int = 9001
-    capabilities: _Capabilities = _Capabilities()
+    incarnation_id: str = ""
+    capabilities: _Capabilities = Field(default_factory=_Capabilities)
 
 
 class LiveStatePayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     v: int = 1
     active_tasks: List[str] = Field(default_factory=list)
     active_task_details: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     slots_used: int = 0
     slots_total: int = 0
     canary: bool = False
+    incarnation_id: str = ""
 
 
 class HeartbeatPayload(BaseModel):
@@ -327,6 +331,7 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
             projects_root=payload.capabilities.projects_root,
             repos=list(payload.capabilities.repos),
         ),
+        incarnation_id=payload.incarnation_id or None,
     )
     get_registry().register(info)
     return {"status": "registered", "node_id": payload.node_id}
