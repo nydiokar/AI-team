@@ -1239,6 +1239,7 @@ def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict
     stale_state_nodes: List[str] = []
 
     now = datetime.utcnow()
+    _live_state_max_age_s = 120
     for row in nodes:
         live_raw = row.get("live_state")
         live: Dict[str, Any] = {}
@@ -1252,7 +1253,20 @@ def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict
             except Exception:
                 live = {}
 
-        if live:
+        # Check staleness before aggregating — stale live_state must not
+        # contribute phantom slot/task counts to the mesh totals.
+        live_is_fresh = False
+        updated = row.get("live_state_updated_at")
+        if live and updated:
+            try:
+                age_s = (now - datetime.fromisoformat(str(updated))).total_seconds()
+                live_is_fresh = age_s <= _live_state_max_age_s
+            except Exception:
+                live_is_fresh = False
+        elif live and not updated:
+            live_is_fresh = False  # live_state present but timestamp missing — treat as stale
+
+        if live and live_is_fresh:
             nodes_with_state += 1
             try:
                 slots_used += int(live.get("slots_used") or 0)
@@ -1272,16 +1286,8 @@ def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict
             except Exception:
                 pass
 
-        updated = row.get("live_state_updated_at")
-        if row.get("status") == "online" and not updated:
+        if row.get("status") == "online" and (not updated or not live_is_fresh):
             stale_state_nodes.append(row.get("node_id", ""))
-        elif row.get("status") == "online" and updated:
-            try:
-                age_s = (now - datetime.fromisoformat(str(updated))).total_seconds()
-                if age_s > 120:
-                    stale_state_nodes.append(row.get("node_id", ""))
-            except Exception:
-                stale_state_nodes.append(row.get("node_id", ""))
 
     return {
         "slots_used": slots_used,

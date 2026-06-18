@@ -667,6 +667,8 @@ class WorkerAgent:
         }
 
     async def _heartbeat_loop(self) -> None:
+        _consecutive_failures = 0
+        _reregister_after = 3  # re-register after this many consecutive non-404 failures
         try:
             while not self._shutdown.is_set():
                 self._heartbeat_now.clear()
@@ -676,6 +678,7 @@ class WorkerAgent:
                     await asyncio.to_thread(
                         self._http.post, "/nodes/heartbeat", payload
                     )
+                    _consecutive_failures = 0
                     logger.debug(
                         "event=heartbeat_sent node_id=%s slots=%d/%d active=%s",
                         self.cfg.node_id,
@@ -692,14 +695,29 @@ class WorkerAgent:
                             "event=heartbeat_node_unknown node_id=%s — re-registering",
                             self.cfg.node_id,
                         )
+                        _consecutive_failures = 0
                         try:
                             await asyncio.to_thread(self._register)
                         except Exception as re_err:
                             logger.warning("event=re_register_failed err=%s", re_err)
                     else:
+                        _consecutive_failures += 1
                         logger.warning("event=heartbeat_failed status=%s err=%s", e.code, e)
                 except Exception as e:
+                    _consecutive_failures += 1
                     logger.warning("event=heartbeat_failed err=%s", e)
+
+                if _consecutive_failures >= _reregister_after:
+                    logger.warning(
+                        "event=heartbeat_repeated_failure node_id=%s failures=%d — re-registering",
+                        self.cfg.node_id, _consecutive_failures,
+                    )
+                    _consecutive_failures = 0
+                    try:
+                        await asyncio.to_thread(self._register)
+                    except Exception as re_err:
+                        logger.warning("event=re_register_failed err=%s", re_err)
+
                 await self._wait_for_next_heartbeat()
         except asyncio.CancelledError:
             pass
@@ -1014,6 +1032,7 @@ class WorkerAgent:
                     "started_at": datetime.now(tz=timezone.utc).isoformat(),
                 })
                 emit_event("task_claimed", backend=task_row.get("backend", ""))
+                self._heartbeat_now.set()  # push slots_used immediately to the server
 
                 # Execute
                 result = await _execute_task(task_row, self._backends, self._http)
@@ -1038,6 +1057,7 @@ class WorkerAgent:
                     logger.error("result_post_failed err=%s", e)
             finally:
                 self._slots_used -= 1
+                self._heartbeat_now.set()  # push slots_used=0 immediately after task ends
 
     # ------------------------------------------------------------------
     # Run
