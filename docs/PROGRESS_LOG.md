@@ -1,5 +1,16 @@
 # Progress Log
 
+## 2026-06-18 — Watched job process-identity resilience
+
+T3.1 is complete. Watched jobs now persist worker probe fields
+(`last_checked_at`, `last_probe_error`, `last_seen_command`,
+`last_seen_started_epoch`) and the worker verifies PID identity with process
+start time plus command where the host can provide it. A reused PID or mismatched
+process is reported as `lost` instead of being left indefinitely `running`.
+Telegram `/jobs` now shows probe freshness/errors for running jobs.
+
+Tests: `.venv/bin/python -m pytest tests/test_watched_jobs.py`.
+
 ## 2026-06-11 — Mesh goes live: two-machine execution + gateway restart resilience
 
 **Milestone: the State Separation architecture is proven in production.** The

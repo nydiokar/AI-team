@@ -1,6 +1,7 @@
 # Watched Jobs — Notify-on-Completion for Long-Running Scripts
 
-> **Status:** Design-approved, not started.
+> **Status:** Implemented. T3.1 resilience follow-up complete: running jobs are
+> probed by PID + process identity and stale/reused PIDs are marked `lost`.
 > **Created:** 2026-06-11
 > **Owner concept:** a long-running script/process started on a worker machine
 > can be *watched* so its completion is pushed to Telegram — **without** abusing
@@ -162,6 +163,10 @@ CREATE TABLE jobs (
     exit_code     INTEGER,
     log_path      TEXT,                 -- file the worker tails for the summary
     tail          TEXT,                 -- last N lines, filled on completion
+    last_checked_at TEXT,               -- latest worker liveness probe
+    last_probe_error TEXT,              -- probe failure detail, if identity couldn't be read
+    last_seen_command TEXT,             -- command observed on the worker host
+    last_seen_started_epoch REAL,       -- process creation/start epoch observed on the worker
     notify        INTEGER NOT NULL DEFAULT 1,       -- send Telegram on completion
     notify_agent  INTEGER NOT NULL DEFAULT 0,       -- also dispatch a follow-up task (G6)
     created_at    TEXT NOT NULL,
@@ -176,6 +181,7 @@ and can't be confirmed dead-or-alive; surfaced, not silently dropped.
 
 - `POST /jobs` — register/spawn a watch (Bearer `WORKER_TOKEN`).
 - `POST /jobs/{id}/done` — worker reports terminal state.
+- `POST /jobs/{id}/probe` — worker reports the latest process-identity probe.
 - `GET  /jobs` / `GET /jobs/{id}` — list/inspect (dashboard + `/jobs` Telegram cmd).
 
 ---

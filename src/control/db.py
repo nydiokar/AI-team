@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 9
+_CURRENT_VERSION = 10
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +907,8 @@ class MeshDB:
         pid: int,
         pgid: int,
         log_path: Optional[str] = None,
+        started_epoch: Optional[float] = None,
+        observed_command: Optional[str] = None,
     ) -> None:
         """Record PID/PGID for a spawned job."""
         now = _now()
@@ -916,13 +918,58 @@ class MeshDB:
                     """
                     UPDATE jobs
                     SET pid = ?, pgid = ?, log_path = COALESCE(?, log_path),
+                        started_epoch = COALESCE(?, started_epoch),
+                        last_checked_at = ?,
+                        last_probe_error = '',
+                        last_seen_command = COALESCE(?, last_seen_command),
+                        last_seen_started_epoch = COALESCE(?, last_seen_started_epoch),
                         updated_at = ?
                     WHERE id = ?
                     """,
-                    (pid, pgid, log_path, now, job_id),
+                    (
+                        pid, pgid, log_path,
+                        started_epoch, now,
+                        observed_command, started_epoch,
+                        now, job_id,
+                    ),
                 )
         except Exception as e:
             logger.warning("event=db_start_job_failed job_id=%s err=%s", job_id, e)
+
+    def record_job_probe(
+        self,
+        job_id: str,
+        *,
+        checked_at: Optional[str] = None,
+        observed_command: Optional[str] = None,
+        observed_started_epoch: Optional[float] = None,
+        probe_error: str = "",
+    ) -> None:
+        """Persist the worker's latest process-identity probe for a running job."""
+        now = checked_at or _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET last_checked_at = ?,
+                        last_probe_error = ?,
+                        last_seen_command = COALESCE(?, last_seen_command),
+                        last_seen_started_epoch = COALESCE(?, last_seen_started_epoch),
+                        updated_at = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (
+                        now,
+                        probe_error,
+                        observed_command,
+                        observed_started_epoch,
+                        now,
+                        job_id,
+                    ),
+                )
+        except Exception as e:
+            logger.warning("event=db_record_job_probe_failed job_id=%s err=%s", job_id, e)
 
     def complete_job(
         self,
@@ -1072,6 +1119,12 @@ def _get_migrations() -> List[tuple]:
         (7, "ALTER TABLE mesh_tasks ADD COLUMN claimer_incarnation TEXT"),  # matched against nodes.incarnation_id by reaper
         (8, "ALTER TABLE nodes ADD COLUMN live_state TEXT"),  # JSON snapshot sent with each heartbeat (slots, active tasks)
         (9, "ALTER TABLE nodes ADD COLUMN live_state_updated_at TEXT"),  # timestamp of last live_state update; NULL = never received
+        (10, """
+            ALTER TABLE jobs ADD COLUMN last_checked_at TEXT;
+            ALTER TABLE jobs ADD COLUMN last_probe_error TEXT;
+            ALTER TABLE jobs ADD COLUMN last_seen_command TEXT;
+            ALTER TABLE jobs ADD COLUMN last_seen_started_epoch REAL
+        """),  # durable watched-job process identity probes
     ]
 
 

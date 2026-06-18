@@ -2840,7 +2840,11 @@ Please check the system logs for more details.
                     label = j.get("label", j.get("id", "?"))
                     pid = j.get("pid")
                     pid_str = f" (PID {pid})" if pid else ""
-                    lines.append(f"• `{label}`{pid_str}")
+                    checked = j.get("last_checked_at")
+                    checked_str = f" · checked {checked[:19]}" if checked else " · not checked yet"
+                    probe_error = j.get("last_probe_error")
+                    err_str = f" · probe: {probe_error[:80]}" if probe_error else ""
+                    lines.append(f"• `{label}`{pid_str}{checked_str}{err_str}")
                 lines.append("")
 
             done = [j for j in recent if j.get("status") in ("done", "failed", "lost")]
