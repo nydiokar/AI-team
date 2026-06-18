@@ -15,6 +15,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -82,6 +83,22 @@ class CodexBackend(CodingBackend):
         proc_env = ensure_node_on_path()
         if session_key:
             proc_env["SESSION_ID"] = session_key
+
+        if sys.platform == "win32":
+            node_hint = os.getenv("CODEX_NODE_PATH") or os.getenv("NODE_EXE")
+            if node_hint:
+                node_dir = str(Path(node_hint).expanduser().parent)
+                proc_env["PATH"] = node_dir + os.pathsep + proc_env.get("PATH", "")
+            if shutil.which("node", path=proc_env.get("PATH")) is None:
+                return ExecutionResult(
+                    success=False,
+                    output="",
+                    errors=[
+                        "Codex CLI requires node.exe, but node is not on PATH for this worker process. "
+                        "Install Node.js or set CODEX_NODE_PATH/NODE_EXE to the full node.exe path in the worker .env."
+                    ],
+                    execution_time=time.time() - start,
+                )
 
         proc: Optional[subprocess.Popen] = None
         try:

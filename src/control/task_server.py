@@ -562,16 +562,35 @@ async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
                 if db is not None:
                     from config import config as _cfg
                     lease_sec = getattr(_cfg.mesh, "claim_lease_sec", 300)
-                    stale = db.list_stale_claims(lease_sec=lease_sec)
+                    max_runtime_sec = int(getattr(_cfg.mesh, "claim_max_runtime_sec", 1800) or 0)
+                    if max_runtime_sec <= 0:
+                        max_runtime_sec = int(getattr(_cfg.system, "task_timeout", 0) or 1800)
+                    stale = db.list_stale_claims(
+                        lease_sec=lease_sec,
+                        live_state_max_age_sec=getattr(_cfg.mesh, "routing_live_state_max_age_sec", 90),
+                        active_task_max_runtime_sec=max_runtime_sec,
+                    )
                     for row in stale:
                         task_id = row.get("id", "?")
                         claimed_by = row.get("claimed_by", "?")
                         claimed_at = row.get("claimed_at", "?")
-                        db.release_task(task_id, claimed_by)
-                        logger.info(
-                            "event=stale_claim_released task_id=%s claimed_by=%s claimed_at=%s",
-                            task_id, claimed_by, claimed_at,
-                        )
+                        reason = row.get("_stale_reason", "unknown")
+                        if reason == "active_task_over_max_runtime":
+                            db.fail_task(
+                                task_id,
+                                f"remote task exceeded mesh max runtime while still active on {claimed_by}",
+                                status="failed",
+                            )
+                            logger.warning(
+                                "event=stale_claim_failed task_id=%s claimed_by=%s claimed_at=%s reason=%s",
+                                task_id, claimed_by, claimed_at, reason,
+                            )
+                        else:
+                            db.release_task(task_id, claimed_by)
+                            logger.info(
+                                "event=stale_claim_released task_id=%s claimed_by=%s claimed_at=%s reason=%s",
+                                task_id, claimed_by, claimed_at, reason,
+                            )
             except Exception as e:
                 logger.debug("event=stale_claim_reaper_error err=%s", e)
 

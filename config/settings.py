@@ -132,6 +132,7 @@ class MeshConfig:
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
     oneoff_queue_timeout_sec: int = 600     # MESH_ONEOFF_QUEUE_TIMEOUT_SEC
     claim_lease_sec: int = 300              # MESH_CLAIM_LEASE_SEC — stale-claim reaper threshold (T4)
+    claim_max_runtime_sec: int = 1800       # MESH_CLAIM_MAX_RUNTIME_SEC — hard cap for active claimed tasks
     session_reconcile_interval_sec: int = 60  # MESH_SESSION_RECONCILE_INTERVAL_SEC — 0 disables M3 loop
     routing_freshness_wait_sec: float = 2.0  # MESH_ROUTING_FRESHNESS_WAIT_SEC — pre-route nudge wait; 0 disables
     routing_live_state_max_age_sec: int = 90  # MESH_ROUTING_LIVE_STATE_MAX_AGE_SEC — stale state is ignored for slot routing
@@ -405,6 +406,12 @@ class Config:
             v = os.getenv("MESH_CLAIM_LEASE_SEC")
             if v is not None:
                 self.mesh.claim_lease_sec = max(30, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_CLAIM_MAX_RUNTIME_SEC")
+            if v is not None:
+                self.mesh.claim_max_runtime_sec = max(60, int(v))
         except Exception:
             pass
         try:
