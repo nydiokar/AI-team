@@ -311,6 +311,100 @@ def test_node_live_state_helpers_handle_missing_state():
     assert TelegramInterface._node_load_text({"max_concurrent": 3}) == "slots ?/3"
 
 
+def test_session_node_picker_filters_backend_and_shows_load(tmp_path, monkeypatch, isolated_session_store):
+    from src.control.db import MeshDB
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_node(
+        "claude-full",
+        "100.64.0.1",
+        9001,
+        ["claude"],
+        2,
+        repos=[{"name": "repo-alpha", "path": "/worker/repo-alpha"}],
+    )
+    db.heartbeat_node(
+        "claude-full",
+        live_state=json.dumps({"v": 1, "slots_used": 2, "slots_total": 2, "active_tasks": ["a", "b"]}),
+    )
+    db.upsert_node(
+        "codex-only",
+        "100.64.0.2",
+        9001,
+        ["codex"],
+        2,
+        repos=[{"name": "repo-beta", "path": "/worker/repo-beta"}],
+    )
+
+    monkeypatch.setattr("src.control.db.get_db", lambda: db)
+    bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+
+    rows = bot._mesh_online_node_rows("claude")
+
+    assert [row["node_id"] for row in rows] == ["claude-full"]
+    assert TelegramInterface._node_load_text(rows[0]) == "slots 2/2, active 2"
+    assert bot._mesh_online_node_rows("opencode") == []
+
+
+@pytest.mark.asyncio
+async def test_session_new_remote_command_uses_db_node_repos(
+    tmp_path,
+    monkeypatch,
+    isolated_session_store,
+):
+    from src.control.db import MeshDB
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_node(
+        "worker-db",
+        "100.64.0.3",
+        9001,
+        ["claude"],
+        2,
+        repos=[{"name": "repo-alpha", "path": "/worker/repo-alpha"}],
+    )
+
+    monkeypatch.setattr("src.control.db.get_db", lambda: db)
+    bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+
+    update = _DummyUpdate(user_id=1, chat_id=100)
+    await bot._handle_session_new(update, _DummyContext(["claude", "worker-db", "repo-alpha"]))
+
+    store = SessionStore()
+    session = store.get_active(100)
+    assert session is not None
+    assert session.machine_id == "worker-db"
+    assert session.repo_path == "/worker/repo-alpha"
+
+
+@pytest.mark.asyncio
+async def test_session_new_rejects_node_without_backend(
+    tmp_path,
+    monkeypatch,
+    isolated_session_store,
+):
+    from src.control.db import MeshDB
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_node(
+        "codex-only",
+        "100.64.0.4",
+        9001,
+        ["codex"],
+        2,
+        repos=[{"name": "repo-beta", "path": "/worker/repo-beta"}],
+    )
+
+    monkeypatch.setattr("src.control.db.get_db", lambda: db)
+    bot = TelegramInterface("", _DummyOrchestrator(), allowed_users=[1])
+
+    update = _DummyUpdate(user_id=1, chat_id=100)
+    await bot._handle_session_new(update, _DummyContext(["claude", "codex-only", "repo-beta"]))
+
+    assert "does not advertise backend `claude`" in update.message.replies[-1]
+    assert SessionStore().get_active(100) is None
+
+
 @pytest.mark.asyncio
 async def test_session_close_closes_local_backend_and_clears_backend_session_id(
     monkeypatch,

@@ -886,8 +886,8 @@ class TelegramInterface:
             ]
         )
 
-    def _mesh_online_nodes(self):
-        """Return online nodes from the shared DB (works across processes)."""
+    def _mesh_online_node_rows(self, backend: Optional[str] = None) -> list[dict]:
+        """Return online node DB rows, optionally filtered by backend support."""
         try:
             import json as _json
             from src.control.db import get_db
@@ -895,13 +895,36 @@ class TelegramInterface:
             if db is None:
                 return []
             rows = db.list_nodes(status="online")
-            nodes = []
+            filtered = []
             for r in rows:
+                try:
+                    backends = _json.loads(r.get("backends") or "[]")
+                except Exception:
+                    backends = []
+                if backend and backend not in backends:
+                    continue
+                filtered.append(r)
+            return filtered
+        except Exception:
+            return []
+
+    def _mesh_online_nodes(self, backend: Optional[str] = None):
+        """Return online nodes from the shared DB (works across processes)."""
+        try:
+            import json as _json
+            nodes = []
+            for r in self._mesh_online_node_rows(backend=backend):
+                try:
+                    backends = _json.loads(r.get("backends") or "[]")
+                except Exception:
+                    backends = []
                 nodes.append(type("_Node", (), {
                     "node_id": r["node_id"],
                     "tailscale_ip": r.get("tailscale_ip", ""),
                     "status": r.get("status", "online"),
                     "capabilities": type("_Caps", (), {
+                        "backends": backends,
+                        "max_concurrent": r.get("max_concurrent", 2),
                         "projects_root": r.get("projects_root", ""),
                         "repos": _json.loads(r.get("repos") or "[]"),
                     })(),
@@ -921,11 +944,15 @@ class TelegramInterface:
                 callback_data=f"session_new_node:{backend}:__local__",
             )]
         ]
-        for node in self._mesh_online_nodes():
-            label = f"🌐 {node.node_id} ({node.tailscale_ip})"
+        node_rows = self._mesh_online_node_rows(backend=backend)
+        node_rows.sort(key=lambda r: self._node_load_sort_key(r))
+        for row in node_rows:
+            node_id = row.get("node_id", "")
+            ip = row.get("tailscale_ip") or ""
+            label = f"🌐 {node_id} ({ip}) · {self._node_load_text(row)}"
             rows.append([InlineKeyboardButton(
                 text=label[:64],
-                callback_data=f"session_new_node:{backend}:{node.node_id}",
+                callback_data=f"session_new_node:{backend}:{node_id}",
             )])
         rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="session_new_back:backend")])
         return InlineKeyboardMarkup(rows)
@@ -1422,6 +1449,23 @@ class TelegramInterface:
         if slots_used is None:
             return f"slots ?/{slots_total}"
         return f"slots {slots_used}/{slots_total}, active {len(active)}"
+
+    @classmethod
+    def _node_load_sort_key(cls, row: dict) -> tuple[int, float, str]:
+        """Sort online nodes by known available capacity, then unknown state."""
+        live = cls._node_live_state(row)
+        try:
+            total = int(live.get("slots_total") or row.get("max_concurrent") or 0)
+            used = int(live.get("slots_used") or 0)
+        except (TypeError, ValueError):
+            total = 0
+            used = 0
+        node_id = str(row.get("node_id") or "")
+        if not live or total <= 0:
+            return (1, 1.0, node_id)
+        if used >= total:
+            return (2, 1.0, node_id)
+        return (0, used / total, node_id)
 
     async def _handle_nodes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """List all mesh worker nodes (online + offline) with last-heartbeat ages."""
@@ -2136,10 +2180,16 @@ class TelegramInterface:
             return
 
         # Detect optional node_id: if args[1] matches a known online node treat as node
-        known_nodes = {n.node_id for n in self._mesh_online_nodes()}
+        known_nodes_all = {n.node_id for n in self._mesh_online_nodes()}
+        known_nodes = {n.node_id for n in self._mesh_online_nodes(backend=backend)}
         if len(args) >= 3 and args[1] in known_nodes:
             node_id = args[1]
             repo_path = " ".join(args[2:])
+        elif len(args) >= 3 and args[1] in known_nodes_all:
+            await update.message.reply_text(
+                f"❌ Node `{args[1]}` is online but does not advertise backend `{backend}`."
+            )
+            return
         else:
             node_id = "__local__"
             repo_path = " ".join(args[1:])
@@ -2151,9 +2201,11 @@ class TelegramInterface:
                 return
             resolved_path = resolution.resolved_path
         else:
-            from src.control.node_registry import get_registry
-            node = get_registry().get(node_id)
-            repos = node.capabilities.repos if node else []
+            import json as _json
+            from src.control.db import get_db
+            db = get_db()
+            row = db.get_node(node_id) if db else None
+            repos = _json.loads(row.get("repos") or "[]") if row else []
             match = next(
                 (r["path"] for r in repos if r["name"] == repo_path or r["path"] == repo_path),
                 None,
