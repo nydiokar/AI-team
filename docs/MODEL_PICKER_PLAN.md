@@ -1,7 +1,7 @@
 # Per-Backend Model Picker — Design + Adversarial Review
 
-**Status:** READY TO IMPLEMENT — all open blockers verified (see §5)
-**Date:** 2026-06-18 (verified 2026-06-19)
+**Status:** IMPLEMENTED on `feat/model-picker` — post-implementation adversarial review in §6
+**Date:** 2026-06-18 (verified 2026-06-19, implemented + reviewed 2026-06-19)
 **Goal:** Pick a default *or* on-demand model per backend (Claude / Codex / OpenCode) through the Telegram gateway.
 
 ---
@@ -139,3 +139,46 @@ Codex currently has *no* config dataclass (only Claude/OpenCode do). Adding `def
 | **R9** | Single migrator path, safe ALTER? | ✅ `db.py:273`, version-gated, multi-statement safe. Add migration 11, bump `_CURRENT_VERSION` (db.py:54) 10→11. |
 
 **Spec is ready to implement.** Build order in §3 stands, with the R7 decision folded into step 6.
+
+---
+
+## 6. Post-implementation adversarial review (2026-06-19)
+
+Severity: 🔴 breaks normal usage · 🟡 wrong/confusing behaviour · 🟢 minor/cosmetic · ✅ checked, NOT a bug
+
+### B1 🔴 — The manual `/session_new <backend> <path>` command skips the model step entirely.
+`_handle_session_new` (the text-command path, interface.py ~2314) calls `_create_and_bind_session` directly with no `model`, so a session created via `/session_new claude AI-team` is **always default model** with no way to pick at creation. Only the *button* wizard has the model step. Inconsistent UX. Not data-corrupting (you can `/model` afterwards), but it's a real gap vs. the stated "pick at creation". Fix: either accept an optional trailing model arg, or just rely on `/model` and document it.
+
+### B2 🟡 — Wizard stash is unbounded and never expires.
+`self._session_wizard[chat_id]` is written at the repo step and only popped on model-pick or cancel. If a user opens the wizard, reaches the model step, then walks away (or uses Back, or sends other commands), the entry lingers forever. Across many chats this is a slow memory leak and a correctness trap: a *stale* stash from an abandoned wizard is happily consumed by the next `session_new_model:` callback (e.g. user re-opens an old message's buttons). No TTL, no overwrite-guard tying the model click to the message it belongs to. Low blast radius (one entry per chat, overwritten on next repo-pick) but it is unbounded across distinct chats and can mis-create a session against a stale repo/node.
+
+### B3 🟡 — `session_new_back` does not restore/clear the stash.
+The Back button (`session_new_back:`) walks the user backwards through backend/node, but the stash is only set at the repo step and only cleared on cancel/model-pick. If a user reaches the model step, hits Back to backend, picks a *different* backend, then somehow the old model callback fires, the stash backend and the chosen model can disagree. Also: after Back, the stash still holds the old repo/node. Minor because the normal forward path overwrites it, but the state machine is not airtight.
+
+### B4 🟡 — `/model` and its callback operate on the *active* session, which can change between render and click.
+`/model` renders a picker for the active session's backend; `_handle_model_set_callback` re-fetches `get_active(chat_id)` at click time. If the user switches active session (`/session_use`) between opening the picker and tapping a button, the model is applied to a **different** session than the one shown — and possibly with a backend mismatch (e.g. picker built for codex indices, applied to a claude session → wrong model name or IndexError caught as "Invalid model selection"). The button doesn't carry the session_id it was built for. Should pin session_id into the callback or the picker.
+
+### B5 🟡 — `/model <name>` advisory pass-through can store a model the worker can't run, surfacing only as a later opaque failure.
+For OpenCode, `validate()` passes any typed string through (by design, R6). But the user gets "✅ Model set" immediately, then the *next turn* may 500 on the worker if the model isn't in that node's `opencode.json` (exactly the phantom-model class from memory `opencode-bigpickle-phantom-model`). The success message is honest about *setting* but not about *validity*. Acceptable per design, but worth a softer confirmation ("set — will be validated on next run") for advisory backends.
+
+### B6 🟢 — Session card model line is plain-text but `/model` confirmations use Markdown backticks.
+`_session_card` shows `🧬 model opus` (plain), while `/model` replies show `` `opus` `` (Markdown). Cosmetic inconsistency; the card is intentionally plain text (documented), so leave it, but be aware the two surfaces render the model differently.
+
+### B7 🟢 — `resolve_model` imports `config.config` on every call (OpenCode `_session_model`, backend helpers).
+Hot-path-ish: each turn re-imports config inside `_config_default`. `config` is a cached singleton/proxy so cost is negligible, but it's a repeated import in a frequently-called path. Not a bug.
+
+### ✅ Checked and NOT bugs
+- **Wizard catalog-index aliasing:** buttons use `enumerate(options(backend))` (full-list index) and the callback resolves `options(backend)[idx]` against the same list — they line up exactly, including the skipped default. Verified by simulation for all backends.
+- **DB migration on fresh + existing DBs:** `model` lives only in migration 11 (removed from baseline DDL), so both fresh (runs 1→11) and existing (10→11) DBs converge through the same ALTER. The earlier duplicate-column bug is fixed and covered by `test_db_round_trip_preserves_model`.
+- **Existing backend tests:** `_build_cmd(model=None)` default preserves old call sites; 63 existing tests pass.
+- **`run_oneoff` model:** intentionally `None` (stateless); uses CLI/config default. Documented (R8).
+- **Codex `-m` placement on resume:** verified via `--help` and asserted in tests.
+
+### Recommended fixes before merge
+- **B1** (gap) and **B4** (wrong-session) are the two worth fixing now — B4 especially, since it silently mis-applies a model. B2/B3 are hardening (add a TTL + tie callbacks to message/session identity). B5/B6/B7 are accept-as-is with optional polish.
+
+### Fixes applied (post-review, same branch)
+- **B4 fixed** 🔴: `/model` picker callbacks now encode `model_set:<session_id>:<choice>`. The callback loads *that* session by id (and re-checks ownership + not-closed), so a click can no longer be mis-applied to a different active session or hit a backend/index mismatch. Covered by `test_model_set_callbacks_pin_session_id_and_fit_budget`.
+- **B2 fixed** 🟡: wizard stash carries a monotonic timestamp; the model step rejects + clears a stash older than `_WIZARD_TTL_SEC` (600s), so an abandoned wizard can't be consumed against a stale repo/node.
+- **B1 mitigated** 🟡: manual `/session_new <backend> <path>` still creates at default model (kept arg parser simple), but the creation confirmation now points to `/model` for switching. Documented behaviour, not a silent gap.
+- **B3 / B5 / B6 / B7**: accepted as-is (hardening / cosmetic / negligible). B3's window is now also smaller because the stash TTL bounds it.

@@ -56,7 +56,9 @@ _DANGEROUS_EXTENSIONS: set[str] = {
 
 class TelegramInterface:
     """Telegram bot interface for task management and notifications"""
-    
+
+    _WIZARD_TTL_SEC = 600  # /session_new model-step stash expiry (B2)
+
     def __init__(self, bot_token: str, orchestrator, allowed_users: list[int] = None):
         self.bot_token = bot_token
         self.orchestrator = orchestrator
@@ -919,21 +921,27 @@ class TelegramInterface:
         rows.append([InlineKeyboardButton(text="✖️ Cancel", callback_data="session_new_cancel:")])
         return InlineKeyboardMarkup(rows)
 
-    def _build_model_set_markup(self, backend: str) -> Optional["InlineKeyboardMarkup"]:
-        """Model picker for the /model command on an existing session."""
+    def _build_model_set_markup(self, session: Session) -> Optional["InlineKeyboardMarkup"]:
+        """Model picker for the /model command on an existing session.
+
+        The session_id is pinned into each callback (B4) so the click applies to
+        the session the picker was built for, even if the active session changed.
+        """
         if not TELEGRAM_AVAILABLE:
             return None
         from config.models import options, default_model
+        backend = session.backend
+        sid = session.session_id
         default = default_model(backend)
         rows = [[InlineKeyboardButton(
             text=f"⚡ Default ({default or 'CLI default'})",
-            callback_data="model_set:__default__",
+            callback_data=f"model_set:{sid}:__default__",
         )]]
         for idx, opt in enumerate(options(backend)):
             if opt.is_default:
                 continue
             rows.append([InlineKeyboardButton(
-                text=opt.name, callback_data=f"model_set:{idx}",
+                text=opt.name, callback_data=f"model_set:{sid}:{idx}",
             )])
         return InlineKeyboardMarkup(rows)
 
@@ -2503,10 +2511,13 @@ class TelegramInterface:
                 return
             _label, repo_path = choices[repo_index]
             # Stash the selection server-side (R7) and advance to the model step.
+            # `ts` bounds staleness (B2): an abandoned wizard expires instead of
+            # being consumed later against a stale repo/node.
             self._session_wizard[update.effective_chat.id] = {
                 "backend": backend,
                 "node_id": node_id,
                 "repo_path": repo_path,
+                "ts": time.monotonic(),
             }
             await query.edit_message_text(
                 f"🧬 *{backend} session* — pick a model:",
@@ -2518,7 +2529,8 @@ class TelegramInterface:
         if data.startswith("session_new_model:"):
             # format: session_new_model:{modelIdx|__default__}; selection is stashed.
             stash = self._session_wizard.get(update.effective_chat.id)
-            if not stash:
+            if not stash or (time.monotonic() - stash.get("ts", 0)) > self._WIZARD_TTL_SEC:
+                self._session_wizard.pop(update.effective_chat.id, None)
                 await query.edit_message_text("❌ That choice expired. Run /session_new again.")
                 return
             choice = data.split(":", 1)[1].strip()
@@ -2554,7 +2566,7 @@ class TelegramInterface:
         return (
             self._session_card(session, header="✅ Session created & active", show_node=show_node)
             + "\n\n💬 Just type your request to start working.\n"
-            "📂 /session_dirs to browse folders · /status to check in"
+            "📂 /session_dirs to browse folders · 🧬 /model to switch model · /status to check in"
         )
 
     async def _handle_session_dirs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2728,7 +2740,7 @@ class TelegramInterface:
 
         await update.message.reply_text(
             f"🧬 *{session.backend}* session model: {self._effective_model_label(session)}\n\nPick a model:",
-            reply_markup=self._build_model_set_markup(session.backend),
+            reply_markup=self._build_model_set_markup(session),
             parse_mode="Markdown",
         )
 
@@ -2740,11 +2752,19 @@ class TelegramInterface:
         if not self._check_user_permission(update.effective_user.id):
             await query.edit_message_text("❌ Access denied.")
             return
-        session = self.session_store.get_active(update.effective_chat.id)
-        if not session or not self._user_can_access_session(update.effective_user.id, session):
-            await query.edit_message_text("❌ No accessible active session.")
+        # callback: model_set:<session_id>:<choice>  (session_id pinned, B4)
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("❌ Invalid model selection.")
             return
-        choice = (query.data or "").split(":", 1)[1].strip()
+        sid, choice = parts[1].strip(), parts[2].strip()
+        session = self.session_store.get(sid)
+        if not session or not self._user_can_access_session(update.effective_user.id, session):
+            await query.edit_message_text("❌ That session is no longer accessible.")
+            return
+        if session.status == SessionStatus.CLOSED:
+            await query.edit_message_text("❌ That session is closed.")
+            return
         if choice == "__default__":
             session.model = None
         else:

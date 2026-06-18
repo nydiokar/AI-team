@@ -129,3 +129,40 @@ def test_mesh_payload_round_trips_model():
     }
     rebuilt = _make_session_from_payload({"session": payload_session})
     assert rebuilt.model == "opus"
+
+
+# --------------------------------------------------------------------------- telegram markup (B4/B7/R7)
+def _iter_callbacks(markup):
+    for row in markup.inline_keyboard:
+        for btn in row:
+            if btn.callback_data:
+                yield btn.callback_data
+
+
+def test_model_set_callbacks_pin_session_id_and_fit_budget():
+    """B4: each /model button must carry the session_id so a click can't be
+    mis-applied to a different active session. R7: stay under 64 bytes."""
+    from src.telegram.interface import TelegramInterface, TELEGRAM_AVAILABLE
+    if not TELEGRAM_AVAILABLE:
+        pytest.skip("python-telegram-bot not installed")
+    iface = TelegramInterface.__new__(TelegramInterface)  # no bot needed for a pure builder
+    s = _mk("opencode")  # longest model names → worst case
+    markup = iface._build_model_set_markup(s)
+    cbs = list(_iter_callbacks(markup))
+    assert cbs, "expected at least the default button"
+    for cb in cbs:
+        assert cb.startswith(f"model_set:{s.session_id}:"), cb
+        assert len(cb.encode()) <= 64, f"callback over 64 bytes: {cb!r} ({len(cb.encode())})"
+
+
+def test_wizard_model_callbacks_are_index_only_and_fit_budget():
+    """R7: wizard model buttons carry only the catalog index (selection stashed
+    server-side), so they stay tiny regardless of node_id length."""
+    from src.telegram.interface import TelegramInterface, TELEGRAM_AVAILABLE
+    if not TELEGRAM_AVAILABLE:
+        pytest.skip("python-telegram-bot not installed")
+    iface = TelegramInterface.__new__(TelegramInterface)
+    markup = iface._build_session_model_markup("opencode")
+    for cb in _iter_callbacks(markup):
+        assert len(cb.encode()) <= 64
+        assert cb.startswith("session_new_model:") or cb.startswith("session_new_cancel")
