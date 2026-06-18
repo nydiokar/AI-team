@@ -4,7 +4,7 @@
 Use `.ai/CONTEXT.md` for orientation and `docs/PROGRESS_LOG.md` for detailed
 history.
 
-**Last updated:** 2026-06-17
+**Last updated:** 2026-06-18
 **Plan of record:** `docs/STATE_SEPARATION_PLAN.md`
 
 > **Test cost guard:** normal test command is `pytest`. Tests must not invoke
@@ -61,6 +61,29 @@ still touch prod `state/mesh.db`. This previously leaked junk sessions.
 
 **Acceptance:** running any script named like a test cannot write to prod
 `state/mesh.db` unless explicitly opted in.
+
+### M5 — Mesh Health History / Trend Ledger
+
+**Why:** the self-awareness branch exposes current mesh state (`/status`,
+`/nodes`, `/node`, `/metrics`) and emits reconciliation events, but operators
+still have to reconstruct trends from logs. Stale-busy count, live-state
+freshness, slot utilization, and node availability are important enough to keep
+as queryable history once the live mesh sees real incidents.
+
+**Task:** add a lightweight historical ledger for mesh health snapshots and/or
+reconciliation events. Keep it separate from `mesh_tasks`; this is operational
+telemetry, not task lifecycle state.
+
+**Possible shape:**
+- table such as `mesh_health_samples` or append-only event rows keyed by
+  timestamp/node/session
+- periodic sample of aggregate slot load, stale-live-state nodes, stale-busy
+  count, online/offline node count
+- compact Telegram or CLI view for recent anomalies
+- retention policy so the SQLite DB does not grow without bound
+
+**Acceptance:** an operator can answer "did stale-busy/live-state freshness get
+worse over the last hour/day?" without manually reading logs.
 
 ---
 
