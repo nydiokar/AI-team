@@ -150,8 +150,10 @@ def test_heartbeat_endpoint_accepts_live_state(tmp_path):
             node_id=nid,
             live_state=LiveStatePayload(
                 active_tasks=["task_abc"],
+                active_task_details={"task_abc": {"session_id": "session_abc"}},
                 slots_used=1,
                 slots_total=2,
+                canary=True,
             ),
         ))
         assert resp["status"] == "ok"
@@ -159,6 +161,8 @@ def test_heartbeat_endpoint_accepts_live_state(tmp_path):
         node = reg_mod.get_registry().get(nid)
         assert node.live_state["slots_used"] == 1
         assert node.live_state["active_tasks"] == ["task_abc"]
+        assert node.live_state["active_task_details"] == {"task_abc": {"session_id": "session_abc"}}
+        assert node.live_state["canary"] is True
 
     finally:
         db_mod._db_instance = None

@@ -18,7 +18,7 @@ try:
     )
     for env_path in env_candidates:
         if env_path.exists():
-            load_dotenv(env_path, override=True)
+            load_dotenv(env_path, override=False)
             print(f"Loaded environment from: {env_path}")
             break
     else:

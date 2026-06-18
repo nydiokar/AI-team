@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
@@ -160,9 +160,11 @@ class NodeRegisterPayload(BaseModel):
 
 class LiveStatePayload(BaseModel):
     v: int = 1
-    active_tasks: List[str] = []
+    active_tasks: List[str] = Field(default_factory=list)
+    active_task_details: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     slots_used: int = 0
     slots_total: int = 0
+    canary: bool = False
 
 
 class HeartbeatPayload(BaseModel):
