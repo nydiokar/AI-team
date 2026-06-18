@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TOOLS = ["Read", "Edit", "MultiEdit", "LS", "Grep", "Glob", "Bash"]
 
 
+def _resolve_model(session: Session) -> Optional[str]:
+    """Resolve the model for this session via the shared catalog logic."""
+    try:
+        from config.models import resolve_model
+        return resolve_model(session)
+    except Exception:
+        return None
+
+
 def _mcp_jobs_configured() -> bool:
     """True if setup_mcp.py has registered the jobs server in ~/.claude.json."""
     try:
@@ -233,13 +242,13 @@ class ClaudeCodeBackend(CodingBackend):
 
     def create_session(self, session: Session) -> ExecutionResult:
         session_id = session.backend_session_id or str(uuid.uuid4())
-        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_id=session_id, session_key=session.session_id)
+        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_id=session_id, session_key=session.session_id, model=_resolve_model(session))
 
     def resume_session(self, session: Session, message: str) -> ExecutionResult:
-        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_id=None, session_key=session.session_id)
+        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_id=None, session_key=session.session_id, model=_resolve_model(session))
 
     def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
-        return self._run(cwd, message, resume_id=None, session_id=None, session_key=None)
+        return self._run(cwd, message, resume_id=None, session_id=None, session_key=None, model=None)
 
     def cancel(self, session: Session) -> None:
         with self._proc_lock:
@@ -255,12 +264,12 @@ class ClaudeCodeBackend(CodingBackend):
             procs = list(self._session_procs.values()) + list(self._oneoff_procs)
         terminate_many_popen(procs)
 
-    def _run(self, cwd: str, message: str, resume_id: Optional[str], session_id: Optional[str], session_key: Optional[str]) -> ExecutionResult:
+    def _run(self, cwd: str, message: str, resume_id: Optional[str], session_id: Optional[str], session_key: Optional[str], model: Optional[str] = None) -> ExecutionResult:
         # Cost guard: refuse to spawn the (paid) Claude CLI under test mode.
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
         start = time.time()
-        cmd = self._build_cmd(resume_id, session_id)
+        cmd = self._build_cmd(resume_id, session_id, model)
         before_snapshot = _snapshot_worktree(cwd) if cwd else {}
 
         try:
@@ -419,7 +428,7 @@ class ClaudeCodeBackend(CodingBackend):
             if proc is not None:
                 self._unregister_process(proc, session_key)
 
-    def _build_cmd(self, resume_id: Optional[str], session_id: Optional[str]) -> List[str]:
+    def _build_cmd(self, resume_id: Optional[str], session_id: Optional[str], model: Optional[str] = None) -> List[str]:
         if resume_id:
             cmd = [
                 self._exe,
@@ -444,6 +453,10 @@ class ClaudeCodeBackend(CodingBackend):
             ]
             if session_id:
                 cmd.extend(["--session-id", session_id])
+
+        # --model is a per-invocation setting (verified: works with --resume too).
+        if model:
+            cmd.extend(["--model", model])
 
         tools = list(_DEFAULT_TOOLS)
         if _mcp_jobs_configured():

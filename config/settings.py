@@ -38,7 +38,15 @@ class ClaudeConfig:
     # Working directory controls
     base_cwd: Optional[str] = None
     allowed_root: Optional[str] = None
-    
+    # Default model (alias like "sonnet"/"opus", or full name). None = CLI default.
+    default_model: Optional[str] = None
+
+@dataclass
+class CodexConfig:
+    """Codex CLI configuration"""
+    # Default model name passed via `-m` (e.g. "gpt-5.5"). None = CLI/config.toml default.
+    default_model: Optional[str] = None
+
 @dataclass
 class LlamaConfig:
     """Local LLAMA configuration"""
@@ -177,6 +185,7 @@ class Config:
         )
         self.validation = ValidationConfig()
         self.system = SystemConfig()
+        self.codex = CodexConfig()
         self.opencode = OpenCodeConfig()
         self.mesh = MeshConfig()
         # Apply env overrides for selected runtime-tunable settings
@@ -233,6 +242,22 @@ class Config:
             errors.append("GATEWAY_TELEGRAM_CHAT_ID environment variable is required")
             
         return errors
+
+    @staticmethod
+    def _validated_default_model(backend: str, value: str) -> Optional[str]:
+        """Validate a *_DEFAULT_MODEL env value through the model catalog.
+
+        Strict backends (claude/codex) reject unknown names → None (the catalog
+        default applies downstream) so one .env typo can't break every session.
+        Advisory backends (opencode) pass unknown names through (provider set is
+        environment-specific). See config/models.py.
+        """
+        try:
+            from config.models import validate as _validate_model
+            return _validate_model(backend, value)
+        except Exception:
+            # If the catalog can't be imported for any reason, don't block startup.
+            return value
 
     def _apply_env_overrides(self) -> None:
         """Apply environment variable overrides to runtime-tunable settings."""
@@ -332,7 +357,20 @@ class Config:
         try:
             v = os.getenv("OPENCODE_DEFAULT_MODEL")
             if v:
-                self.opencode.default_model = v
+                self.opencode.default_model = self._validated_default_model("opencode", v) or self.opencode.default_model
+        except Exception:
+            pass
+        # Claude / Codex default model env overrides (validated through the catalog).
+        try:
+            v = os.getenv("CLAUDE_DEFAULT_MODEL")
+            if v:
+                self.claude.default_model = self._validated_default_model("claude", v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv("CODEX_DEFAULT_MODEL")
+            if v:
+                self.codex.default_model = self._validated_default_model("codex", v)
         except Exception:
             pass
         try:
