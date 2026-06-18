@@ -69,6 +69,7 @@ class NodeInfo:
             "registered_at": self.registered_at.isoformat() if self.registered_at else None,
             "live_state": self.live_state,
             "live_state_updated_at": self.live_state_updated_at.isoformat() if self.live_state_updated_at else None,
+            "incarnation_id": self.incarnation_id,
         }
 
 
@@ -109,16 +110,17 @@ class NodeRegistry:
         info.last_heartbeat = now
         info.registered_at = now
         self._nodes[info.node_id] = info
-        self._db_upsert(info)
-        # Sweep any claims from the previous process incarnation back to pending.
-        # A re-registering node means a new process started (e.g. PM2 restart);
-        # its predecessor was hard-killed without releasing claims.
-        released = self._db_release_node_claims(info.node_id)
-        if released:
-            logger.warning(
-                "event=orphaned_claims_released node_id=%s count=%d task_ids=%s",
-                info.node_id, len(released), released,
-            )
+        old_incarnation, new_incarnation = self._db_upsert(info)
+        # Sweep claims only when the worker process identity changed. A controller
+        # restart also forces workers to re-register, but the worker process is
+        # still alive and may still be executing its claimed task.
+        if old_incarnation and new_incarnation and old_incarnation != new_incarnation:
+            released = self._db_release_node_claims(info.node_id)
+            if released:
+                logger.warning(
+                    "event=orphaned_claims_released node_id=%s old_incarnation=%s new_incarnation=%s count=%d task_ids=%s",
+                    info.node_id, old_incarnation, new_incarnation, len(released), released,
+                )
         logger.info("event=node_registered node_id=%s ip=%s", info.node_id, info.tailscale_ip)
 
     def deregister(self, node_id: str) -> None:
@@ -276,11 +278,13 @@ class NodeRegistry:
     # DB helpers — best-effort, never raise
     # ------------------------------------------------------------------
 
-    def _db_upsert(self, node: NodeInfo) -> None:
+    def _db_upsert(self, node: NodeInfo) -> tuple[Optional[str], Optional[str]]:
         try:
             from src.control.db import get_db
             db = get_db()
             if db:
+                old = db.get_node(node.node_id)
+                old_incarnation = old.get("incarnation_id") if old else None
                 incarnation_id = db.upsert_node(
                     node_id=node.node_id,
                     tailscale_ip=node.tailscale_ip,
@@ -290,10 +294,13 @@ class NodeRegistry:
                     status="online",
                     projects_root=node.capabilities.projects_root,
                     repos=node.capabilities.repos,
+                    incarnation_id=node.incarnation_id,
                 )
                 node.incarnation_id = incarnation_id
+                return old_incarnation, incarnation_id
         except Exception as e:
             logger.debug("event=db_node_upsert_err node_id=%s err=%s", node.node_id, e)
+        return None, node.incarnation_id
 
     def _db_heartbeat(self, node_id: str, live_state: Optional[dict] = None) -> None:
         try:

@@ -857,16 +857,18 @@ class MeshDB:
         status: str = "online",
         projects_root: str = "",
         repos: Optional[List[dict]] = None,
+        incarnation_id: Optional[str] = None,
     ) -> str:
         """Upsert a node record and return the new incarnation_id.
 
-        A fresh incarnation_id UUID is minted on every call — each registration
-        represents a new process start, even when the node_id is unchanged.
+        New workers provide a process incarnation_id that remains stable across
+        controller restarts and re-registration. Older workers omit it, so we
+        mint a fresh UUID and preserve the previous restart-detection behavior.
         list_stale_claims uses the mismatch between claimer_incarnation and the
         node's current incarnation_id to detect claims orphaned by a restart.
         """
         now = _now()
-        incarnation_id = uuid.uuid4().hex
+        incarnation_id = incarnation_id or uuid.uuid4().hex
         try:
             with self._write() as conn:
                 conn.execute(

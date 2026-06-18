@@ -154,6 +154,7 @@ def test_heartbeat_endpoint_accepts_live_state(tmp_path):
                 slots_used=1,
                 slots_total=2,
                 canary=True,
+                queue_depth=3,
             ),
         ))
         assert resp["status"] == "ok"
@@ -163,6 +164,7 @@ def test_heartbeat_endpoint_accepts_live_state(tmp_path):
         assert node.live_state["active_tasks"] == ["task_abc"]
         assert node.live_state["active_task_details"] == {"task_abc": {"session_id": "session_abc"}}
         assert node.live_state["canary"] is True
+        assert node.live_state["queue_depth"] == 3
 
     finally:
         db_mod._db_instance = None

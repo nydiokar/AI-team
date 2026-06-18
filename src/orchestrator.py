@@ -524,17 +524,31 @@ class TaskOrchestrator(ITaskOrchestrator):
             if session is None or session.status != SessionStatus.BUSY:
                 continue
 
+            if task_id:
+                task_row = db.get_task(task_id)
+                status = task_row.get("status") if task_row else None
+                if status == "completed":
+                    await self._recover_completed_session(session, task_row)
+                    reconciled += 1
+                    continue
+                if status in ("pending", "claimed"):
+                    continue
+                if status in ("failed", "failed_node_offline"):
+                    error_msg = (task_row.get("error") if task_row else "") or f"Task {status}"
+                    session.last_result_summary = error_msg[-400:]
+
             session.status = SessionStatus.ERROR
-            session.last_result_summary = (
-                "Marked error by mesh reconciliation: session was busy with no active task."
-            )
+            if not session.last_result_summary:
+                session.last_result_summary = (
+                    "Marked error by mesh reconciliation: session was busy with no active task."
+                )
             self.session_store.save(session)
 
             result = TaskResult(
                 task_id=task_id or f"session_{session_id}",
                 success=False,
                 output="",
-                errors=["stale busy session: no pending or claimed mesh task"],
+                errors=[session.last_result_summary or "stale busy session: no pending or claimed mesh task"],
                 files_modified=[],
                 execution_time=0.0,
                 timestamp=datetime.now().isoformat(),

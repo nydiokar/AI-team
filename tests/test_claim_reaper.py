@@ -9,6 +9,7 @@ import uuid
 import pytest
 
 from src.control.db import MeshDB
+from src.control.node_registry import NodeCapabilities, NodeInfo, NodeRegistry
 
 
 def _task_id() -> str:
@@ -236,6 +237,123 @@ def test_no_stale_claims_when_same_incarnation_without_live_state(tmp_path):
 
     stale = db.list_stale_claims(lease_sec=0)
     assert len(stale) == 0
+
+
+def test_no_stale_claims_when_worker_reregisters_same_process_incarnation(tmp_path):
+    """Controller restart forces re-register, but same worker process is not stale."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online", incarnation_id="proc-1")
+    db.claim_task(tid, "node-a")
+
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online", incarnation_id="proc-1")
+
+    stale = db.list_stale_claims(lease_sec=0)
+    assert stale == []
+
+
+def test_stale_claims_when_worker_reregisters_new_process_incarnation(tmp_path):
+    """Actual worker process restart changes incarnation and makes old claim stale."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online", incarnation_id="proc-1")
+    db.claim_task(tid, "node-a")
+
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online", incarnation_id="proc-2")
+
+    stale = db.list_stale_claims(lease_sec=0)
+    assert [row["id"] for row in stale] == [tid]
+    assert stale[0]["_stale_reason"] == "incarnation_mismatch"
+
+
+def test_registry_reregister_same_incarnation_does_not_release_claim(tmp_path):
+    from config import config as cfg
+    import src.control.db as db_mod
+
+    cfg.mesh.db_path = str(tmp_path / "mesh.db")
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old:
+        old.close()
+
+    try:
+        registry = NodeRegistry()
+        registry.register(NodeInfo(
+            node_id="node-a",
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2),
+            incarnation_id="proc-1",
+        ))
+        db = db_mod.get_db()
+        tid = _task_id()
+        _enqueue_test_task(db, tid)
+        assert db.claim_task(tid, "node-a")
+
+        registry.register(NodeInfo(
+            node_id="node-a",
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2),
+            incarnation_id="proc-1",
+        ))
+
+        row = db.get_task(tid)
+        assert row["status"] == "claimed"
+        assert row["claimed_by"] == "node-a"
+        assert row["claimer_incarnation"] == "proc-1"
+    finally:
+        db_mod._db_instance = None
+        if old:
+            old.close()
+        db_mod._db_instance = old
+
+
+def test_registry_reregister_new_incarnation_releases_claim(tmp_path):
+    from config import config as cfg
+    import src.control.db as db_mod
+
+    cfg.mesh.db_path = str(tmp_path / "mesh.db")
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old:
+        old.close()
+
+    try:
+        registry = NodeRegistry()
+        registry.register(NodeInfo(
+            node_id="node-a",
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2),
+            incarnation_id="proc-1",
+        ))
+        db = db_mod.get_db()
+        tid = _task_id()
+        _enqueue_test_task(db, tid)
+        assert db.claim_task(tid, "node-a")
+
+        registry.register(NodeInfo(
+            node_id="node-a",
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2),
+            incarnation_id="proc-2",
+        ))
+
+        row = db.get_task(tid)
+        assert row["status"] == "pending"
+        assert row["claimed_by"] is None
+        assert row["claimer_incarnation"] is None
+    finally:
+        db_mod._db_instance = None
+        if old:
+            old.close()
+        db_mod._db_instance = old
 
 
 def test_stale_claims_incarnation_mismatch_respects_lease(tmp_path):
