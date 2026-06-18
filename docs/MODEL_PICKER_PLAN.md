@@ -198,3 +198,14 @@ Re-checked the B1/B2/B4 fixes for new bugs and swept untouched paths.
 - **B9 🟢 (fixed):** free-text (advisory) model names allow backticks, which would break the Markdown code span in confirmations/errors. `_effective_model_label` and the unknown-model error now strip backticks from the dynamic name. Covered by `test_effective_model_label_strips_backticks`.
 
 **Verdict after two passes:** no 🔴 or 🟡 issues remain open. Remaining accepted items (B3/B5/B6/B7) are hardening/cosmetic and documented. 76 tests pass across the touched suites; no regressions.
+
+## 8. UX change (2026-06-19) — removed the wizard model step
+
+User feedback: forcing a model pick on every `/session_new` is annoying; the
+intent was "default by default, pick by intention." Reverted the wizard to
+`backend → node → repo → create` (no model step). New sessions are created with
+`model = None` (backend default); model selection is now exclusively on-demand
+via `/model`. Removed the now-dead `_build_session_model_markup`, the
+`session_new_model:` callback branch, the `_session_wizard` stash, and
+`_WIZARD_TTL_SEC` (so R7/B2/B3 — all wizard-stash concerns — are moot). `/model`
+(session-pinned callbacks, B4) is unchanged and remains the single way to switch.
