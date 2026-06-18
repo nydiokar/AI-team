@@ -559,7 +559,10 @@ class TelegramInterface:
 
     @staticmethod
     def _session_repo_name(session: Session) -> str:
-        return Path(session.repo_path).name or session.repo_path
+        path = session.repo_path or ""
+        # Split on both separators to handle Windows paths on a Linux host.
+        name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        return name or path
 
     @staticmethod
     def _format_session_timestamp(value: str) -> str:
@@ -844,7 +847,9 @@ class TelegramInterface:
         for session in sessions[:10]:
             name = self._session_repo_name(session)
             icon = "🤖" if session.backend == "codex" else "🧠"
-            label = f"{icon} {session.backend}: {name}"
+            node = session.machine_id or ""
+            node_part = f" · {node}" if node else ""
+            label = f"{icon} {session.backend}{node_part}: {name}"
             if session.session_id == active_id:
                 label = f"⭐ {label}"
             rows.append([
@@ -864,7 +869,9 @@ class TelegramInterface:
             name = self._session_repo_name(session)
             updated = self._format_session_timestamp(session.updated_at)[:10]
             icon = "🤖" if session.backend == "codex" else "🧠"
-            label = f"↩️ {icon} {session.backend}: {name} ({updated})"
+            node = session.machine_id or ""
+            node_part = f" · {node}" if node else ""
+            label = f"↩️ {icon} {session.backend}{node_part}: {name} ({updated})"
             rows.append([
                 InlineKeyboardButton(
                     text=label[:64],
@@ -1442,13 +1449,28 @@ class TelegramInterface:
 
     @classmethod
     def _node_load_text(cls, row: dict) -> str:
+        from datetime import datetime as _dt
         live = cls._node_live_state(row)
         slots_total = live.get("slots_total") or row.get("max_concurrent") or "?"
         slots_used = live.get("slots_used")
         active = live.get("active_tasks") if isinstance(live.get("active_tasks"), list) else []
+
+        # Check whether live_state is fresh enough to trust.
+        stale = False
+        updated = row.get("live_state_updated_at")
+        if live and updated:
+            try:
+                age_s = (_dt.utcnow() - _dt.fromisoformat(str(updated))).total_seconds()
+                stale = age_s > 120
+            except Exception:
+                stale = True
+        elif live and not updated:
+            stale = True
+
         if slots_used is None:
             return f"slots ?/{slots_total}"
-        return f"slots {slots_used}/{slots_total}, active {len(active)}"
+        suffix = " (stale)" if stale else ""
+        return f"slots {slots_used}/{slots_total}, active {len(active)}{suffix}"
 
     @classmethod
     def _node_load_sort_key(cls, row: dict) -> tuple[int, float, str]:
@@ -1468,12 +1490,11 @@ class TelegramInterface:
         return (0, used / total, node_id)
 
     async def _handle_nodes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """List all mesh worker nodes (online + offline) with last-heartbeat ages."""
+        """List mesh worker nodes — online in full, recent offline compact, ancient offline as count."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
             return
         try:
-            import json as _json
             import socket
             from src.control.db import get_db
             db = get_db()
@@ -1482,33 +1503,54 @@ class TelegramInterface:
             mesh_load = stats.get("mesh_load") or {}
 
             online = [r for r in rows if r.get("status") == "online"]
+            offline = [r for r in rows if r.get("status") != "online"]
+
+            # Split offline into recently gone (< 24h) and ancient (>= 24h, just noise).
+            recent_offline, ancient_offline = [], []
+            for r in offline:
+                hb = r.get("last_heartbeat", "")
+                try:
+                    from datetime import datetime as _dt
+                    age_s = (_dt.utcnow() - _dt.fromisoformat(str(hb))).total_seconds()
+                    (recent_offline if age_s < 86400 else ancient_offline).append(r)
+                except Exception:
+                    recent_offline.append(r)
+
             lines = [f"Nodes ({len(online)} online / {len(rows)} total)", ""]
             if rows:
                 stale_busy = mesh_load.get("stale_busy_sessions", 0)
                 stale_state = len(mesh_load.get("stale_live_state_nodes") or [])
                 lines.append(
-                    "Mesh load: "
-                    f"{mesh_load.get('slots_used', 0)}/{mesh_load.get('slots_total', 0)} slots, "
-                    f"{mesh_load.get('active_tasks', 0)} active tasks, "
-                    f"{stale_busy} stale-busy sessions, {stale_state} stale states"
+                    f"Mesh load: {mesh_load.get('slots_used', 0)}/{mesh_load.get('slots_total', 0)} slots"
+                    f" · {mesh_load.get('active_tasks', 0)} active"
+                    + (f" · {stale_busy} stale-busy" if stale_busy else "")
+                    + (f" · {stale_state} stale-state" if stale_state else "")
                 )
                 lines.append("")
 
-            # This gateway/server, always shown as the local execution target.
-            lines.append(f"• {socket.gethostname()} (this server) — local")
+            # Gateway itself — always on top, consistent format.
+            lines.append(f"🖥️ {socket.gethostname()} — gateway · local")
 
-            for r in rows:
-                try:
-                    backends = ",".join(_json.loads(r.get("backends") or "[]")) or "—"
-                except Exception:
-                    backends = "—"
-                dot = "🟢" if r.get("status") == "online" else "⚪"
-                age = self._heartbeat_age(r.get("last_heartbeat", ""))
-                state_age = self._heartbeat_age(r.get("live_state_updated_at", ""))
+            # Online remote nodes — full detail, no backends column.
+            for r in sorted(online, key=self._node_load_sort_key):
                 ip = r.get("tailscale_ip") or "—"
+                age = self._heartbeat_age(r.get("last_heartbeat", ""))
                 lines.append(
-                    f"{dot} {r['node_id']} — {self._node_load_text(r)} — {backends} — {ip} — hb {age}, state {state_age}"
+                    f"🟢 {r['node_id']} — {self._node_load_text(r)} — {ip} — hb {age}"
                 )
+
+            # Recently offline — compact, no load data (it's stale anyway).
+            if recent_offline:
+                lines.append("")
+                for r in recent_offline:
+                    ip = r.get("tailscale_ip") or "—"
+                    age = self._heartbeat_age(r.get("last_heartbeat", ""))
+                    lines.append(f"⚪ {r['node_id']} — offline · last seen {age} — {ip}")
+
+            # Ancient offline — just a count, not worth scrolling past.
+            if ancient_offline:
+                names = ", ".join(r["node_id"] for r in ancient_offline)
+                lines.append(f"\n_{len(ancient_offline)} node(s) offline >1d: {names}_")
 
             if not rows:
                 lines.append("_(no remote workers registered)_")
