@@ -4,6 +4,11 @@ const fs = require("fs");
 const isWindows = process.platform === "win32";
 const venvPython = path.join(__dirname, ".venv", isWindows ? "Scripts/python.exe" : "bin/python");
 const python = process.env.PM2_PYTHON || (fs.existsSync(venvPython) ? venvPython : (isWindows ? "python" : "python3"));
+const nodePath = process.env.CODEX_NODE_PATH || process.env.NODE_EXE || "";
+const nodeDir = nodePath ? path.dirname(nodePath) : "";
+const workerPath = isWindows && nodeDir
+  ? `${nodeDir}${path.delimiter}${process.env.PATH || ""}`
+  : process.env.PATH;
 
 module.exports = {
   apps: [
@@ -110,6 +115,8 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
         AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
+        PATH: workerPath,
+        CODEX_NODE_PATH: nodePath,
         // Required — set these in .env or uncomment + fill here:
         // WORKER_NODE_ID: "main-pc",
         // WORKER_TOKEN: "...",
@@ -120,6 +127,7 @@ module.exports = {
         // WORKER_API_PORT: "9001",
         // WORKER_MAX_CONCURRENT: "2",
         // WORKER_PROJECTS_ROOT: "C:/Users/Cicada38/Projects",  // enables repo discovery
+        // CODEX_NODE_PATH: "C:/Program Files/nodejs/node.exe",  // required if PM2 cannot see node.exe
       },
       out_file: path.join(__dirname, "logs", "pm2-worker-out.log"),
       error_file: path.join(__dirname, "logs", "pm2-worker-error.log"),

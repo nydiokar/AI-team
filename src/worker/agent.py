@@ -606,6 +606,7 @@ class WorkerAgent:
         self._http = _HTTP(self.cfg.controller_url, self.cfg.worker_token)
         self._backends = _make_backends()
         self._active: Dict[str, asyncio.Task] = {}   # task_id → asyncio.Task
+        self._active_meta: Dict[str, Dict[str, Any]] = {}
         self._shutdown = asyncio.Event()
         self._poll_now = asyncio.Event()
         self._heartbeat_now = asyncio.Event()
@@ -654,6 +655,7 @@ class WorkerAgent:
         return {
             "v": 1,
             "active_tasks": list(self._active.keys()),
+            "active_task_details": dict(self._active_meta),
             "slots_used": self._slots_used,
             "slots_total": self.cfg.max_concurrent,
         }
@@ -922,9 +924,16 @@ class WorkerAgent:
                         if self._shutdown.is_set():
                             break
                         task_id = row.get("id", "unknown")
+                        self._active_meta[task_id] = {
+                            "task_id": task_id,
+                            "backend": row.get("backend", ""),
+                            "action": row.get("action", ""),
+                            "phase": "scheduled",
+                            "started_at": datetime.now(tz=timezone.utc).isoformat(),
+                        }
                         t = asyncio.create_task(self._handle_task(row))
                         self._active[task_id] = t
-                        t.add_done_callback(lambda _t, tid=task_id: self._active.pop(tid, None))
+                        t.add_done_callback(lambda _t, tid=task_id: (self._active.pop(tid, None), self._active_meta.pop(tid, None)))
                     # Short pause to avoid hammering if tasks are always present
                     wait_sec = 2
                 else:
@@ -991,6 +1000,13 @@ class WorkerAgent:
                     return
 
                 logger.info("task_claimed")
+                meta = self._active_meta.setdefault(task_id, {"task_id": task_id})
+                meta.update({
+                    "backend": task_row.get("backend", ""),
+                    "action": task_row.get("action", ""),
+                    "phase": "running",
+                    "started_at": datetime.now(tz=timezone.utc).isoformat(),
+                })
                 emit_event("task_claimed", backend=task_row.get("backend", ""))
 
                 # Execute

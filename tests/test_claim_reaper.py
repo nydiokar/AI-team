@@ -76,7 +76,7 @@ def test_release_task_noop_for_completed(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_no_stale_claims_when_node_online(tmp_path):
+def test_no_stale_claims_when_node_online_without_live_state(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     tid = _task_id()
     _enqueue_test_task(db, tid)
@@ -84,7 +84,52 @@ def test_no_stale_claims_when_node_online(tmp_path):
     # Register the node as online
     db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
     stale = db.list_stale_claims(lease_sec=0)  # 0 = everything is stale by time
-    assert len(stale) == 0  # node is online, so not stale
+    assert len(stale) == 0  # old workers without live_state preserve compatibility
+
+
+def test_stale_claims_when_online_live_state_missing_task(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
+    db.claim_task(tid, "node-a")
+    db.heartbeat_node("node-a", live_state=json.dumps({
+        "v": 1,
+        "active_tasks": [],
+        "slots_used": 0,
+        "slots_total": 2,
+    }))
+
+    stale = db.list_stale_claims(lease_sec=0)
+    assert len(stale) == 1
+    assert stale[0]["id"] == tid
+    assert stale[0]["_stale_reason"] == "missing_from_live_state"
+
+
+def test_stale_claims_when_online_active_task_exceeds_runtime(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
+    db.claim_task(tid, "node-a")
+    db.heartbeat_node("node-a", live_state=json.dumps({
+        "v": 1,
+        "active_tasks": [tid],
+        "active_task_details": {
+            tid: {
+                "task_id": tid,
+                "phase": "running",
+                "started_at": "2000-01-01T00:00:00+00:00",
+            }
+        },
+        "slots_used": 1,
+        "slots_total": 2,
+    }))
+
+    stale = db.list_stale_claims(lease_sec=0, active_task_max_runtime_sec=60)
+    assert len(stale) == 1
+    assert stale[0]["id"] == tid
+    assert stale[0]["_stale_reason"] == "active_task_over_max_runtime"
 
 
 def test_stale_claims_when_node_offline(tmp_path):
@@ -179,7 +224,7 @@ def test_stale_claims_when_node_restarted_in_place(tmp_path):
     assert stale[0]["id"] == tid
 
 
-def test_no_stale_claims_when_same_incarnation(tmp_path):
+def test_no_stale_claims_when_same_incarnation_without_live_state(tmp_path):
     """Claim from the current process incarnation is not stale."""
     db = MeshDB(str(tmp_path / "mesh.db"))
     tid = _task_id()

@@ -41,7 +41,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
@@ -539,7 +539,80 @@ class MeshDB:
             logger.warning("event=db_release_node_claims_failed node_id=%s err=%s", node_id, e)
             return []
 
-    def list_stale_claims(self, lease_sec: int = 300) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _parse_dt(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except Exception:
+            try:
+                dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S.%f")
+            except Exception:
+                return None
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
+    @classmethod
+    def _stale_online_claim_reason(
+        cls,
+        row: sqlite3.Row,
+        now: datetime,
+        live_state_max_age_sec: int,
+        active_task_max_runtime_sec: int,
+    ) -> Optional[str]:
+        live_raw = row["live_state"] if "live_state" in row.keys() else None
+        updated_raw = row["live_state_updated_at"] if "live_state_updated_at" in row.keys() else None
+        if not live_raw or not updated_raw:
+            # Compatibility for old workers: without live_state, online still
+            # means unknown. Offline/incarnation checks remain active.
+            return None
+
+        updated = cls._parse_dt(updated_raw)
+        if updated is None or (now - updated).total_seconds() > live_state_max_age_sec:
+            return None
+
+        try:
+            live = json.loads(live_raw) if isinstance(live_raw, str) else (live_raw or {})
+        except Exception:
+            return None
+        if not isinstance(live, dict):
+            return None
+
+        task_id = row["id"]
+        active_ids = set(str(t) for t in (live.get("active_tasks") or []))
+        details = live.get("active_task_details") or {}
+        if isinstance(details, list):
+            details = {
+                str(item.get("task_id")): item
+                for item in details
+                if isinstance(item, dict) and item.get("task_id")
+            }
+        elif not isinstance(details, dict):
+            details = {}
+
+        if str(task_id) not in active_ids and str(task_id) not in details:
+            return "missing_from_live_state"
+
+        max_runtime = max(0, int(active_task_max_runtime_sec or 0))
+        if max_runtime <= 0:
+            return None
+
+        detail = details.get(str(task_id)) if isinstance(details, dict) else None
+        started_raw = detail.get("started_at") if isinstance(detail, dict) else None
+        started = cls._parse_dt(started_raw) or cls._parse_dt(row["claimed_at"])
+        if started is not None and (now - started).total_seconds() > max_runtime:
+            return "active_task_over_max_runtime"
+        return None
+
+    def list_stale_claims(
+        self,
+        lease_sec: int = 300,
+        *,
+        live_state_max_age_sec: int = 90,
+        active_task_max_runtime_sec: int = 1800,
+    ) -> List[Dict[str, Any]]:
         """Return claimed tasks whose claim has expired.
 
         A claim is stale when:
@@ -550,6 +623,10 @@ class MeshDB:
             from claimer_incarnation (node restarted in-place — new process,
             same node_id, same online status — the dead process's claim is
             orphaned and will never complete).
+          - the claiming node has fresh live_state and the task is not in that
+            live_state's active task set.
+          - the task is still active in fresh live_state but has exceeded the
+            active-task hard runtime cap.
 
         The incarnation mismatch condition catches the PM2-restart gap that the
         offline-only check misses: the old process is SIGKILLed, the new process
@@ -564,21 +641,12 @@ class MeshDB:
             conn.row_factory = _sqlite3.Row
             rows = conn.execute(
                 """
-                SELECT t.*, n.status AS node_status
+                SELECT t.*, n.status AS node_status, n.incarnation_id AS node_incarnation_id,
+                       n.live_state, n.live_state_updated_at
                 FROM mesh_tasks t
                 LEFT JOIN nodes n ON t.claimed_by = n.node_id
                 WHERE t.status = 'claimed'
                   AND t.claimed_at IS NOT NULL
-                  AND (
-                    n.node_id IS NULL
-                    OR n.status = 'offline'
-                    OR (
-                      n.status = 'online'
-                      AND t.claimer_incarnation IS NOT NULL
-                      AND n.incarnation_id IS NOT NULL
-                      AND n.incarnation_id != t.claimer_incarnation
-                    )
-                  )
                 """,
             ).fetchall()
             conn.close()
@@ -586,15 +654,38 @@ class MeshDB:
             cutoff = lease_sec
             result = []
             for r in rows:
-                claimed_str = r["claimed_at"]
-                try:
-                    claimed_dt = datetime.fromisoformat(claimed_str)
-                except Exception:
-                    claimed_dt = datetime.strptime(claimed_str, "%Y-%m-%d %H:%M:%S.%f")
+                claimed_dt = self._parse_dt(r["claimed_at"])
+                if claimed_dt is None:
+                    continue
                 age = (now - claimed_dt).total_seconds()
-                if age > cutoff:
+                if age <= cutoff:
+                    continue
+
+                node_status = r["node_status"]
+                reason = None
+                if node_status is None:
+                    reason = "node_missing"
+                elif node_status == "offline":
+                    reason = "node_offline"
+                elif (
+                    node_status == "online"
+                    and r["claimer_incarnation"] is not None
+                    and r["node_incarnation_id"] is not None
+                    and r["node_incarnation_id"] != r["claimer_incarnation"]
+                ):
+                    reason = "incarnation_mismatch"
+                elif node_status == "online":
+                    reason = self._stale_online_claim_reason(
+                        r,
+                        now,
+                        live_state_max_age_sec,
+                        active_task_max_runtime_sec,
+                    )
+
+                if reason:
                     d = dict(r)
                     d.pop("node_status", None)
+                    d["_stale_reason"] = reason
                     result.append(d)
             return result
         except Exception as e:
