@@ -613,6 +613,7 @@ class WorkerAgent:
         self._semaphore = asyncio.Semaphore(self.cfg.max_concurrent)
         self._slots_used: int = 0  # semaphore-acquired count; differs from len(_active) which includes queued tasks
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
+        self._canary = (os.getenv("WORKER_CANARY") or "").lower() in {"1", "true", "yes"}
 
     # ------------------------------------------------------------------
     # Registration
@@ -658,6 +659,7 @@ class WorkerAgent:
             "active_task_details": dict(self._active_meta),
             "slots_used": self._slots_used,
             "slots_total": self.cfg.max_concurrent,
+            "canary": self._canary,
         }
 
     async def _heartbeat_loop(self) -> None:
@@ -1049,8 +1051,13 @@ class WorkerAgent:
             )
         )
         heartbeat = asyncio.create_task(self._heartbeat_loop())
-        poller = asyncio.create_task(self._poll_loop())
-        job_watcher = asyncio.create_task(self._job_watcher_loop())
+        if self._canary:
+            logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
+            poller = asyncio.create_task(self._shutdown.wait())
+            job_watcher = asyncio.create_task(self._shutdown.wait())
+        else:
+            poller = asyncio.create_task(self._poll_loop())
+            job_watcher = asyncio.create_task(self._job_watcher_loop())
 
         # Install SIGTERM handler — loop.add_signal_handler is Unix-only.
         # On Windows fall back to signal.signal; if SIGTERM isn't supported

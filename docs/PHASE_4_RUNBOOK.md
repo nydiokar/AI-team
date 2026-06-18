@@ -133,13 +133,22 @@ python main.py health     # expect OK (telegram + a backend present)
    WORKER_BACKENDS=claude,opencode
    WORKER_PROJECTS_ROOT=C:/Users/Cicada38/Projects   # optional, enables repo discovery
    ```
-   Then:
+   First start:
    ```bash
    pm2 start ecosystem.config.js --only ai-team-worker --update-env    # on THIS PC
    pm2 logs ai-team-worker
    ```
    Expect, in order: `event=registered ... controller=http://<VPS_TS_IP>:9002`,
    then `event=nudge_listener_started`, then periodic `heartbeat`.
+
+   Future worker updates must use the canary deploy script, not a raw restart:
+   ```bash
+   python scripts/safe_worker_deploy.py
+   ```
+   The script starts `ai-team-worker-canary` with `WORKER_CANARY=true`, waits for
+   the controller to see that canary heartbeat, and only then restarts the real
+   `ai-team-worker`. If canary startup or heartbeat fails, the existing worker
+   stays untouched and the canary is removed.
 
 ---
 
