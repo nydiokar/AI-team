@@ -213,6 +213,7 @@ class JobDonePayload(BaseModel):
     node_id: str
     exit_code: int
     tail: str = ""
+    status: Optional[str] = None
 
 
 class JobStartPayload(BaseModel):
@@ -220,6 +221,15 @@ class JobStartPayload(BaseModel):
     pid: int
     pgid: int = 0
     log_path: Optional[str] = None
+    started_epoch: Optional[float] = None
+    observed_command: Optional[str] = None
+
+
+class JobProbePayload(BaseModel):
+    node_id: str
+    observed_command: Optional[str] = None
+    observed_started_epoch: Optional[float] = None
+    probe_error: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -663,8 +673,38 @@ def start_job(job_id: str, payload: JobStartPayload) -> Dict[str, str]:
             status_code=403,
             detail=f"Job {job_id!r} is owned by node {job.get('node_id')!r}",
         )
-    db.start_job(job_id, payload.pid, payload.pgid, payload.log_path)
+    db.start_job(
+        job_id,
+        payload.pid,
+        payload.pgid,
+        payload.log_path,
+        started_epoch=payload.started_epoch,
+        observed_command=payload.observed_command,
+    )
     return {"status": "started", "job_id": job_id}
+
+
+@app.post("/jobs/{job_id}/probe", dependencies=[Depends(_require_auth)])
+def record_job_probe(job_id: str, payload: JobProbePayload) -> Dict[str, str]:
+    """Worker records its latest liveness/identity probe for a running job."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    if job.get("node_id") != payload.node_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Job {job_id!r} is owned by node {job.get('node_id')!r}, not {payload.node_id!r}",
+        )
+    db.record_job_probe(
+        job_id,
+        observed_command=payload.observed_command,
+        observed_started_epoch=payload.observed_started_epoch,
+        probe_error=payload.probe_error,
+    )
+    return {"status": "recorded", "job_id": job_id}
 
 
 @app.post("/jobs/{job_id}/done", dependencies=[Depends(_require_auth)])
@@ -681,7 +721,13 @@ def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
             status_code=403,
             detail=f"Job {job_id!r} is owned by node {job.get('node_id')!r}, not {payload.node_id!r}",
         )
-    if payload.exit_code == 0:
+    if payload.status == "lost":
+        db.fail_job(
+            job_id,
+            payload.tail or "watched job process identity could not be verified",
+            status="lost",
+        )
+    elif payload.exit_code == 0:
         db.complete_job(job_id, payload.exit_code, payload.tail)
     else:
         err = f"exit code {payload.exit_code}"

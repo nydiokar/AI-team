@@ -22,47 +22,12 @@ history.
 | T1 auto-deploy | DONE | Pull-based PM2 deploy agent exists; operator activation may still be manual. |
 | T2 long Telegram output | DONE | Worker no longer silently truncates; Telegram splitter handles delivery. |
 | T3 watched jobs | DONE | `jobs` table, `/jobs` API, worker watcher, MCP registration, tests exist. |
+| T3.1 watched job process identity | DONE | Worker probes PID + process start/command, records `last_checked_at`, and marks mismatches `lost`. |
 | T4 worker-restart claim reclaim | DONE | Release endpoint, stale-claim reaper, startup sweep, late-result guard, tests exist. |
 
 ---
 
 ## Active / Next
-
-### T3.1 — Watched Job Resilience: Prove The Running Process Is Still The Same Job
-
-**Why:** watched jobs now store `job_id`, `node_id`, `pid`, `pgid`, `command`,
-`started_at`, `started_epoch`, and `log_path`. That is enough to identify a job,
-but after a worker restart the current reconciliation mostly asks "does this PID
-exist?". PID reuse or a replaced process can make a stale row look alive.
-
-**Goal:** make long-running watched jobs auditable after restarts. The worker
-should be able to say "this exact process still belongs to this job" or mark the
-job `lost`/`failed` instead of leaving the controller blind.
-
-**Recommended shape:**
-- Add durable liveness fields to `jobs`: `last_checked_at`, optionally
-  `last_seen_command`, `last_seen_started_epoch` / platform process creation
-  time, and maybe `last_probe_error`.
-- On each watcher pass, update `last_checked_at` for running jobs.
-- Verify PID identity with more than existence:
-  - Windows: query `Win32_Process` for `ProcessId`, `CreationDate`, `CommandLine`.
-  - Unix: use process start time from `/proc/<pid>/stat` or `ps`, plus command.
-- If PID exists but identity does not match the stored job, mark the job `lost`
-  and include the observed process details in `tail` or an error field.
-- Surface these fields in `GET /jobs`, Telegram `/jobs`, and/or the CLI query
-  operators use during incident checks.
-
-**Where to look:** `src/worker/agent.py` (`_job_watcher_loop`, `_pid_alive`),
-`src/control/db.py` (`jobs` migration/helpers), `src/control/task_server.py`
-(`/jobs` endpoints), `src/telegram/interface.py` (`/jobs` output), and
-`docs/WATCHED_JOBS_SPEC.md`.
-
-**Acceptance:**
-- A normal running watched job shows recent `last_checked_at` updates.
-- A worker restart can re-identify an existing job by PID + start identity.
-- A reused PID or mismatched command is marked `lost`/`failed`, not left
-  indefinitely `running`.
-- Tests use trivial long-lived processes only.
 
 ### P4 — Graceful Degradation / Fallback Audit
 
@@ -127,14 +92,15 @@ Implemented:
 - MCP `watch_job` registration path via `scripts/mcp_jobs.py`.
 - Completion notification from the task server.
 - `tests/test_watched_jobs.py`.
+- Resilience follow-up T3.1: `jobs` migration v10 adds
+  `last_checked_at`, `last_probe_error`, `last_seen_command`, and
+  `last_seen_started_epoch`; the worker probes process identity and reports
+  stale/reused PIDs as `lost`.
 
 Important operational detail: a watched job's durable identity is the `job_id`
 plus `node_id`, `pid`, `pgid`, `command`, and `log_path`. For a job running on
 `Horse`, process verification must happen on `Horse`; the controller only stores
 what the worker reports.
-
-Follow-up: T3.1 above improves post-restart liveness proof and stale PID
-detection.
 
 ### T2 — Long Telegram Output — DONE
 

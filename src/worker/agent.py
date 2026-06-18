@@ -118,6 +118,113 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _unix_boot_time() -> Optional[float]:
+    try:
+        for line in Path("/proc/stat").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1])
+    except Exception:
+        return None
+    return None
+
+
+def _process_identity(pid: int) -> Dict[str, Any]:
+    """Return best-effort process identity for a PID.
+
+    The watcher uses this only as a safety check after restarts. PID existence
+    alone is not enough because the OS may reuse a PID for an unrelated process.
+    """
+    if not _pid_alive(pid):
+        return {"alive": False, "error": "pid not found"}
+
+    if sys.platform == "win32":
+        try:
+            ps = (
+                "Get-CimInstance Win32_Process -Filter \"ProcessId=%d\" | "
+                "Select-Object -First 1 ProcessId,CreationDate,CommandLine | "
+                "ConvertTo-Json -Compress"
+            ) % pid
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+            )
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return {"alive": True, "error": proc.stderr.strip() or "windows process query returned no data"}
+            data = json.loads(proc.stdout)
+            creation = data.get("CreationDate")
+            started_epoch = None
+            if creation:
+                # CIM returns ISO-ish text on modern PowerShell; keep parsing
+                # conservative and tolerate failure by leaving the field empty.
+                try:
+                    started_epoch = datetime.fromisoformat(str(creation).replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    started_epoch = None
+            return {
+                "alive": True,
+                "command": data.get("CommandLine") or "",
+                "started_epoch": started_epoch,
+                "error": "",
+            }
+        except Exception as e:
+            return {"alive": True, "error": f"windows process query failed: {e}"}
+
+    stat_path = Path(f"/proc/{pid}/stat")
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    try:
+        stat = stat_path.read_text(encoding="utf-8", errors="replace")
+        # Field 2 can contain spaces inside parentheses, so split after the
+        # final ") ". starttime is field 22, index 19 in the remaining fields.
+        fields = stat.rsplit(") ", 1)[1].split()
+        start_ticks = int(fields[19])
+        ticks_per_sec = os.sysconf(os.sysconf_names.get("SC_CLK_TCK", "SC_CLK_TCK"))
+        boot_time = _unix_boot_time()
+        started_epoch = (boot_time + (start_ticks / ticks_per_sec)) if boot_time is not None else None
+        raw_cmd = cmdline_path.read_bytes()
+        command = raw_cmd.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+        if not command:
+            command = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="replace").strip()
+        return {
+            "alive": True,
+            "command": command,
+            "started_epoch": started_epoch,
+            "error": "",
+        }
+    except Exception as e:
+        return {"alive": True, "error": f"unix process query failed: {e}"}
+
+
+def _job_identity_mismatch(job: Dict[str, Any], identity: Dict[str, Any]) -> str:
+    """Return a human-readable mismatch reason, or empty string when acceptable."""
+    if not identity.get("alive"):
+        return identity.get("error") or "pid not found"
+
+    observed_started = identity.get("started_epoch")
+    expected_started = job.get("last_seen_started_epoch")
+    if expected_started is not None and observed_started is not None:
+        try:
+            if abs(float(observed_started) - float(expected_started)) > 1.0:
+                return (
+                    "pid start time changed: "
+                    f"expected {expected_started}, observed {observed_started}"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    expected_command = (job.get("last_seen_command") or "").strip()
+    observed_command = (identity.get("command") or "").strip()
+    if expected_command and observed_command and expected_command != observed_command:
+        return (
+            "pid command changed: "
+            f"expected {expected_command[:180]!r}, observed {observed_command[:180]!r}"
+        )
+
+    return ""
+
+
 def _read_log_tail(log_path: Optional[str], max_lines: int = 20, max_chars: int = 2000) -> str:
     """Read the last N lines of a log file for the completion notification."""
     if not log_path:
@@ -648,8 +755,63 @@ class WorkerAgent:
                         stored_proc = self._job_procs.get(job_id)
                         if stored_proc is not None:
                             alive = stored_proc.poll() is None
+                            if alive:
+                                identity = await asyncio.to_thread(_process_identity, int(pid))
+                                try:
+                                    await asyncio.to_thread(
+                                        self._http.post,
+                                        f"/jobs/{job_id}/probe",
+                                        {
+                                            "node_id": self.cfg.node_id,
+                                            "observed_command": identity.get("command"),
+                                            "observed_started_epoch": identity.get("started_epoch"),
+                                            "probe_error": identity.get("error", ""),
+                                        },
+                                    )
+                                except Exception as e:
+                                    logger.debug("event=job_probe_post_failed job_id=%s err=%s", job_id, e)
                         else:
-                            alive = await asyncio.to_thread(_pid_alive, pid)
+                            identity = await asyncio.to_thread(_process_identity, int(pid))
+                            mismatch = _job_identity_mismatch(job, identity)
+                            try:
+                                await asyncio.to_thread(
+                                    self._http.post,
+                                    f"/jobs/{job_id}/probe",
+                                    {
+                                        "node_id": self.cfg.node_id,
+                                        "observed_command": identity.get("command"),
+                                        "observed_started_epoch": identity.get("started_epoch"),
+                                        "probe_error": identity.get("error", ""),
+                                    },
+                                )
+                            except Exception as e:
+                                logger.debug("event=job_probe_post_failed job_id=%s err=%s", job_id, e)
+                            if mismatch:
+                                tail = _read_log_tail(job.get("log_path")) if job.get("log_path") else ""
+                                detail = mismatch
+                                if tail:
+                                    detail = f"{detail}\n\nLast log lines:\n{tail}"
+                                try:
+                                    await asyncio.to_thread(
+                                        self._http.post,
+                                        f"/jobs/{job_id}/done",
+                                        {
+                                            "node_id": self.cfg.node_id,
+                                            "exit_code": -1,
+                                            "status": "lost",
+                                            "tail": detail,
+                                        },
+                                    )
+                                    logger.warning(
+                                        "event=job_lost job_id=%s pid=%s reason=%s",
+                                        job_id,
+                                        pid,
+                                        mismatch,
+                                    )
+                                except Exception as e:
+                                    logger.warning("event=job_lost_post_failed job_id=%s err=%s", job_id, e)
+                                continue
+                            alive = bool(identity.get("alive"))
                         if not alive:
                             # Process exited — collect tail and exit code.
                             # Prefer proc.poll() from the stored Popen object: on Windows
@@ -715,6 +877,7 @@ class WorkerAgent:
                     pgid = _os.getpgid(proc.pid)
             except Exception:
                 pass
+            identity = await asyncio.to_thread(_process_identity, proc.pid)
 
             await asyncio.to_thread(
                 self._http.post,
@@ -724,6 +887,8 @@ class WorkerAgent:
                     "pid": proc.pid,
                     "pgid": pgid,
                     "log_path": log_path,
+                    "started_epoch": identity.get("started_epoch"),
+                    "observed_command": identity.get("command"),
                 },
             )
             self._job_procs[job_id] = proc  # keep handle alive so poll() can read exit code on Windows
