@@ -155,6 +155,16 @@ def test_model_set_callbacks_pin_session_id_and_fit_budget():
         assert len(cb.encode()) <= 64, f"callback over 64 bytes: {cb!r} ({len(cb.encode())})"
 
 
+def test_effective_model_label_strips_backticks():
+    """B9: a free-text model name with backticks must not break the Markdown
+    code span in the confirmation message."""
+    from src.telegram.interface import TelegramInterface
+    s = _mk("opencode", "weird`name`")
+    label = TelegramInterface._effective_model_label(s)
+    # exactly two backticks (the wrapping code span), none from the name
+    assert label.count("`") == 2
+
+
 def test_wizard_model_callbacks_are_index_only_and_fit_budget():
     """R7: wizard model buttons carry only the catalog index (selection stashed
     server-side), so they stay tiny regardless of node_id length."""

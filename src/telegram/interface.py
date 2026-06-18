@@ -2692,12 +2692,20 @@ class TelegramInterface:
 
     @staticmethod
     def _effective_model_label(session: Session) -> str:
-        """Human label for the model a session will actually use next turn."""
+        """Human label for the model a session will actually use next turn.
+
+        Model names are wrapped in Markdown code spans; backticks in a (free-text,
+        advisory) model name are stripped so they can't break the formatting (B9).
+        """
         from config.models import resolve_model
+
+        def _safe(name: str) -> str:
+            return str(name).replace("`", "")
+
         resolved = resolve_model(session) or "CLI default"
         if session.model:
-            return f"`{session.model}`"
-        return f"default (`{resolved}`)"
+            return f"`{_safe(session.model)}`"
+        return f"default (`{_safe(resolved)}`)"
 
     async def _handle_model_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/model [name] — show or set the model for the active session.
@@ -2718,15 +2726,20 @@ class TelegramInterface:
             return
 
         args = context.args or []
-        if args:
+        requested = " ".join(args).strip()
+        if requested:
             from config.models import validate, is_advisory
-            requested = " ".join(args).strip()
+            # An advisory backend would otherwise treat a blank/garbage arg as
+            # validate()->None and silently reset to default (B8). `requested`
+            # is already non-empty here; a truly empty arg falls through to the
+            # picker below instead of resetting.
             resolved = validate(session.backend, requested)
             if resolved is None and not is_advisory(session.backend):
                 from config.models import options
                 names = ", ".join(o.name for o in options(session.backend)) or "(none)"
+                safe_requested = requested.replace("`", "")
                 await update.message.reply_text(
-                    f"❌ Unknown {session.backend} model `{requested}`.\nKnown: {names}",
+                    f"❌ Unknown {session.backend} model `{safe_requested}`.\nKnown: {names}",
                     parse_mode="Markdown",
                 )
                 return
