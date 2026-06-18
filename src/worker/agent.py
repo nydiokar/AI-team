@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,6 +117,113 @@ def _pid_alive(pid: int) -> bool:
         return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def _unix_boot_time() -> Optional[float]:
+    try:
+        for line in Path("/proc/stat").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1])
+    except Exception:
+        return None
+    return None
+
+
+def _process_identity(pid: int) -> Dict[str, Any]:
+    """Return best-effort process identity for a PID.
+
+    The watcher uses this only as a safety check after restarts. PID existence
+    alone is not enough because the OS may reuse a PID for an unrelated process.
+    """
+    if not _pid_alive(pid):
+        return {"alive": False, "error": "pid not found"}
+
+    if sys.platform == "win32":
+        try:
+            ps = (
+                "Get-CimInstance Win32_Process -Filter \"ProcessId=%d\" | "
+                "Select-Object -First 1 ProcessId,CreationDate,CommandLine | "
+                "ConvertTo-Json -Compress"
+            ) % pid
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+            )
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return {"alive": True, "error": proc.stderr.strip() or "windows process query returned no data"}
+            data = json.loads(proc.stdout)
+            creation = data.get("CreationDate")
+            started_epoch = None
+            if creation:
+                # CIM returns ISO-ish text on modern PowerShell; keep parsing
+                # conservative and tolerate failure by leaving the field empty.
+                try:
+                    started_epoch = datetime.fromisoformat(str(creation).replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    started_epoch = None
+            return {
+                "alive": True,
+                "command": data.get("CommandLine") or "",
+                "started_epoch": started_epoch,
+                "error": "",
+            }
+        except Exception as e:
+            return {"alive": True, "error": f"windows process query failed: {e}"}
+
+    stat_path = Path(f"/proc/{pid}/stat")
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    try:
+        stat = stat_path.read_text(encoding="utf-8", errors="replace")
+        # Field 2 can contain spaces inside parentheses, so split after the
+        # final ") ". starttime is field 22, index 19 in the remaining fields.
+        fields = stat.rsplit(") ", 1)[1].split()
+        start_ticks = int(fields[19])
+        ticks_per_sec = os.sysconf(os.sysconf_names.get("SC_CLK_TCK", "SC_CLK_TCK"))
+        boot_time = _unix_boot_time()
+        started_epoch = (boot_time + (start_ticks / ticks_per_sec)) if boot_time is not None else None
+        raw_cmd = cmdline_path.read_bytes()
+        command = raw_cmd.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+        if not command:
+            command = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="replace").strip()
+        return {
+            "alive": True,
+            "command": command,
+            "started_epoch": started_epoch,
+            "error": "",
+        }
+    except Exception as e:
+        return {"alive": True, "error": f"unix process query failed: {e}"}
+
+
+def _job_identity_mismatch(job: Dict[str, Any], identity: Dict[str, Any]) -> str:
+    """Return a human-readable mismatch reason, or empty string when acceptable."""
+    if not identity.get("alive"):
+        return identity.get("error") or "pid not found"
+
+    observed_started = identity.get("started_epoch")
+    expected_started = job.get("last_seen_started_epoch")
+    if expected_started is not None and observed_started is not None:
+        try:
+            if abs(float(observed_started) - float(expected_started)) > 1.0:
+                return (
+                    "pid start time changed: "
+                    f"expected {expected_started}, observed {observed_started}"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    expected_command = (job.get("last_seen_command") or "").strip()
+    observed_command = (identity.get("command") or "").strip()
+    if expected_command and observed_command and expected_command != observed_command:
+        return (
+            "pid command changed: "
+            f"expected {expected_command[:180]!r}, observed {observed_command[:180]!r}"
+        )
+
+    return ""
 
 
 def _read_log_tail(log_path: Optional[str], max_lines: int = 20, max_chars: int = 2000) -> str:
@@ -223,8 +331,23 @@ class _HTTP:
 # Nudge listener — tiny asyncio HTTP server, just accepts POST /nudge
 # ---------------------------------------------------------------------------
 
-async def _run_nudge_listener(host: str, port: int, poll_event: asyncio.Event) -> None:
-    """Accept POST /nudge and set poll_event so the poll loop fires immediately."""
+def _mark_nudge_received(
+    poll_event: asyncio.Event,
+    heartbeat_event: Optional[asyncio.Event] = None,
+) -> None:
+    """Wake worker loops that should react immediately to a gateway nudge."""
+    poll_event.set()
+    if heartbeat_event is not None:
+        heartbeat_event.set()
+
+
+async def _run_nudge_listener(
+    host: str,
+    port: int,
+    poll_event: asyncio.Event,
+    heartbeat_event: Optional[asyncio.Event] = None,
+) -> None:
+    """Accept POST /nudge and wake polling plus heartbeat state publication."""
 
     async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -235,7 +358,7 @@ async def _run_nudge_listener(host: str, port: int, poll_event: asyncio.Event) -
             is_nudge = data.startswith(b"POST /nudge")
             if is_nudge:
                 response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
-                poll_event.set()
+                _mark_nudge_received(poll_event, heartbeat_event)
                 logger.debug("event=nudge_received")
             else:
                 response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
@@ -484,10 +607,15 @@ class WorkerAgent:
         self._http = _HTTP(self.cfg.controller_url, self.cfg.worker_token)
         self._backends = _make_backends()
         self._active: Dict[str, asyncio.Task] = {}   # task_id → asyncio.Task
+        self._active_meta: Dict[str, Dict[str, Any]] = {}
         self._shutdown = asyncio.Event()
         self._poll_now = asyncio.Event()
+        self._heartbeat_now = asyncio.Event()
         self._semaphore = asyncio.Semaphore(self.cfg.max_concurrent)
+        self._slots_used: int = 0  # semaphore-acquired count; differs from len(_active) which includes queued tasks
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
+        self._canary = (os.getenv("WORKER_CANARY") or "").lower() in {"1", "true", "yes"}
+        self._incarnation_id = uuid.uuid4().hex
 
     # ------------------------------------------------------------------
     # Registration
@@ -498,6 +626,7 @@ class WorkerAgent:
             "node_id": self.cfg.node_id,
             "tailscale_ip": self.cfg.tailscale_ip,
             "api_port": self.cfg.api_port,
+            "incarnation_id": self._incarnation_id,
             "capabilities": {
                 "backends": self.cfg.backends,
                 "max_concurrent": self.cfg.max_concurrent,
@@ -520,27 +649,42 @@ class WorkerAgent:
     # ------------------------------------------------------------------
 
     def _live_state(self) -> dict:
-        """Snapshot of current operational state for heartbeat reporting."""
+        """Snapshot of current operational state for heartbeat reporting.
+
+        slots_used counts semaphore-acquired tasks only. len(self._active)
+        also includes tasks queued but not yet scheduled, so it can exceed
+        max_concurrent when the poll loop fetches a batch larger than the
+        semaphore allows.
+        """
         return {
+            "v": 1,
             "active_tasks": list(self._active.keys()),
-            "slots_used": len(self._active),
+            "active_task_details": dict(self._active_meta),
+            "slots_used": self._slots_used,
             "slots_total": self.cfg.max_concurrent,
+            "canary": self._canary,
+            "incarnation_id": self._incarnation_id,
         }
 
     async def _heartbeat_loop(self) -> None:
+        _consecutive_failures = 0
+        _reregister_after = 3  # re-register after this many consecutive non-404 failures
         try:
             while not self._shutdown.is_set():
+                self._heartbeat_now.clear()
                 try:
-                    payload = {"node_id": self.cfg.node_id, **self._live_state()}
+                    live = self._live_state()
+                    payload = {"node_id": self.cfg.node_id, "live_state": live}
                     await asyncio.to_thread(
                         self._http.post, "/nodes/heartbeat", payload
                     )
+                    _consecutive_failures = 0
                     logger.debug(
                         "event=heartbeat_sent node_id=%s slots=%d/%d active=%s",
                         self.cfg.node_id,
-                        len(self._active),
-                        self.cfg.max_concurrent,
-                        list(self._active.keys()),
+                        live["slots_used"],
+                        live["slots_total"],
+                        live["active_tasks"],
                     )
                 except urllib.error.HTTPError as e:
                     if e.code == 404:
@@ -551,20 +695,51 @@ class WorkerAgent:
                             "event=heartbeat_node_unknown node_id=%s — re-registering",
                             self.cfg.node_id,
                         )
+                        _consecutive_failures = 0
                         try:
                             await asyncio.to_thread(self._register)
                         except Exception as re_err:
                             logger.warning("event=re_register_failed err=%s", re_err)
                     else:
+                        _consecutive_failures += 1
                         logger.warning("event=heartbeat_failed status=%s err=%s", e.code, e)
                 except Exception as e:
+                    _consecutive_failures += 1
                     logger.warning("event=heartbeat_failed err=%s", e)
-                try:
-                    await asyncio.wait_for(self._shutdown.wait(), timeout=30)
-                except asyncio.TimeoutError:
-                    pass
+
+                if _consecutive_failures >= _reregister_after:
+                    logger.warning(
+                        "event=heartbeat_repeated_failure node_id=%s failures=%d — re-registering",
+                        self.cfg.node_id, _consecutive_failures,
+                    )
+                    _consecutive_failures = 0
+                    try:
+                        await asyncio.to_thread(self._register)
+                    except Exception as re_err:
+                        logger.warning("event=re_register_failed err=%s", re_err)
+
+                await self._wait_for_next_heartbeat()
         except asyncio.CancelledError:
             pass
+
+    async def _wait_for_next_heartbeat(self) -> None:
+        """Wait for the normal interval, shutdown, or an on-demand heartbeat nudge."""
+        shutdown_wait = asyncio.create_task(self._shutdown.wait())
+        heartbeat_wait = asyncio.create_task(self._heartbeat_now.wait())
+        try:
+            _, pending = await asyncio.wait(
+                {shutdown_wait, heartbeat_wait},
+                timeout=30,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            for task in (shutdown_wait, heartbeat_wait):
+                if not task.done():
+                    task.cancel()
 
     # ------------------------------------------------------------------
     # Job watcher loop (T3 — Watched Jobs)
@@ -606,8 +781,63 @@ class WorkerAgent:
                         stored_proc = self._job_procs.get(job_id)
                         if stored_proc is not None:
                             alive = stored_proc.poll() is None
+                            if alive:
+                                identity = await asyncio.to_thread(_process_identity, int(pid))
+                                try:
+                                    await asyncio.to_thread(
+                                        self._http.post,
+                                        f"/jobs/{job_id}/probe",
+                                        {
+                                            "node_id": self.cfg.node_id,
+                                            "observed_command": identity.get("command"),
+                                            "observed_started_epoch": identity.get("started_epoch"),
+                                            "probe_error": identity.get("error", ""),
+                                        },
+                                    )
+                                except Exception as e:
+                                    logger.debug("event=job_probe_post_failed job_id=%s err=%s", job_id, e)
                         else:
-                            alive = await asyncio.to_thread(_pid_alive, pid)
+                            identity = await asyncio.to_thread(_process_identity, int(pid))
+                            mismatch = _job_identity_mismatch(job, identity)
+                            try:
+                                await asyncio.to_thread(
+                                    self._http.post,
+                                    f"/jobs/{job_id}/probe",
+                                    {
+                                        "node_id": self.cfg.node_id,
+                                        "observed_command": identity.get("command"),
+                                        "observed_started_epoch": identity.get("started_epoch"),
+                                        "probe_error": identity.get("error", ""),
+                                    },
+                                )
+                            except Exception as e:
+                                logger.debug("event=job_probe_post_failed job_id=%s err=%s", job_id, e)
+                            if mismatch:
+                                tail = _read_log_tail(job.get("log_path")) if job.get("log_path") else ""
+                                detail = mismatch
+                                if tail:
+                                    detail = f"{detail}\n\nLast log lines:\n{tail}"
+                                try:
+                                    await asyncio.to_thread(
+                                        self._http.post,
+                                        f"/jobs/{job_id}/done",
+                                        {
+                                            "node_id": self.cfg.node_id,
+                                            "exit_code": -1,
+                                            "status": "lost",
+                                            "tail": detail,
+                                        },
+                                    )
+                                    logger.warning(
+                                        "event=job_lost job_id=%s pid=%s reason=%s",
+                                        job_id,
+                                        pid,
+                                        mismatch,
+                                    )
+                                except Exception as e:
+                                    logger.warning("event=job_lost_post_failed job_id=%s err=%s", job_id, e)
+                                continue
+                            alive = bool(identity.get("alive"))
                         if not alive:
                             # Process exited — collect tail and exit code.
                             # Prefer proc.poll() from the stored Popen object: on Windows
@@ -634,28 +864,6 @@ class WorkerAgent:
                             except Exception as e:
                                 logger.warning("event=job_done_post_failed job_id=%s err=%s", job_id, e)
 
-                # Reconcile after restart: check if running PIDs still match
-                # (uses the same `running` list so no extra fetch needed)
-                for job in running:
-                    pid = job.get("pid")
-                    if pid is None:
-                        continue
-                    if job.get("id") in {j.get("id") for j in running if j.get("pid")}:
-                        continue
-                    alive = await asyncio.to_thread(_pid_alive, pid)
-                    if not alive:
-                        log_path = job.get("log_path")
-                        tail = _read_log_tail(log_path) if log_path else ""
-                        tail = f"[reconciled after worker restart] {tail}"
-                        try:
-                            await asyncio.to_thread(
-                                self._http.post,
-                                f"/jobs/{job.get('id')}/done",
-                                {"node_id": self.cfg.node_id, "exit_code": -1, "tail": tail},
-                            )
-                        except Exception:
-                            pass
-
                 try:
                     await asyncio.wait_for(self._shutdown.wait(), timeout=10)
                 except asyncio.TimeoutError:
@@ -665,6 +873,8 @@ class WorkerAgent:
 
     async def _spawn_job_process(self, job: Dict[str, Any]) -> None:
         """Spawn a detached process for a watched job."""
+        from src.core.process_utils import ensure_node_on_path
+
         command = job.get("command", "")
         job_id = job.get("id", "")
         label = job.get("label", job_id)
@@ -685,6 +895,7 @@ class WorkerAgent:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 cwd=job_cwd,
+                env=ensure_node_on_path(),
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
             )
             log_fh.close()
@@ -695,6 +906,7 @@ class WorkerAgent:
                     pgid = _os.getpgid(proc.pid)
             except Exception:
                 pass
+            identity = await asyncio.to_thread(_process_identity, proc.pid)
 
             await asyncio.to_thread(
                 self._http.post,
@@ -704,6 +916,8 @@ class WorkerAgent:
                     "pid": proc.pid,
                     "pgid": pgid,
                     "log_path": log_path,
+                    "started_epoch": identity.get("started_epoch"),
+                    "observed_command": identity.get("command"),
                 },
             )
             self._job_procs[job_id] = proc  # keep handle alive so poll() can read exit code on Windows
@@ -734,9 +948,16 @@ class WorkerAgent:
                         if self._shutdown.is_set():
                             break
                         task_id = row.get("id", "unknown")
+                        self._active_meta[task_id] = {
+                            "task_id": task_id,
+                            "backend": row.get("backend", ""),
+                            "action": row.get("action", ""),
+                            "phase": "scheduled",
+                            "started_at": datetime.now(tz=timezone.utc).isoformat(),
+                        }
                         t = asyncio.create_task(self._handle_task(row))
                         self._active[task_id] = t
-                        t.add_done_callback(lambda _t, tid=task_id: self._active.pop(tid, None))
+                        t.add_done_callback(lambda _t, tid=task_id: (self._active.pop(tid, None), self._active_meta.pop(tid, None)))
                     # Short pause to avoid hammering if tasks are always present
                     wait_sec = 2
                 else:
@@ -783,47 +1004,60 @@ class WorkerAgent:
         # Correlate every line + event for this task with task_id/session_id.
         set_log_context(task_id=task_id, session_id=session_id)
         async with self._semaphore:
-            # Claim — optimistic lock
+            self._slots_used += 1
             try:
-                await asyncio.to_thread(
-                    self._http.post,
-                    f"/tasks/{task_id}/claim",
-                    {"node_id": self.cfg.node_id},
-                )
-            except urllib.error.HTTPError as e:
-                if e.code == 409:
-                    logger.debug("claim_race (already claimed)")
-                else:
+                # Claim — optimistic lock
+                try:
+                    await asyncio.to_thread(
+                        self._http.post,
+                        f"/tasks/{task_id}/claim",
+                        {"node_id": self.cfg.node_id},
+                    )
+                except urllib.error.HTTPError as e:
+                    if e.code == 409:
+                        logger.debug("claim_race (already claimed)")
+                    else:
+                        logger.warning("claim_failed err=%s", e)
+                    return
+                except Exception as e:
                     logger.warning("claim_failed err=%s", e)
-                return
-            except Exception as e:
-                logger.warning("claim_failed err=%s", e)
-                return
+                    return
 
-            logger.info("task_claimed")
-            emit_event("task_claimed", backend=task_row.get("backend", ""))
+                logger.info("task_claimed")
+                meta = self._active_meta.setdefault(task_id, {"task_id": task_id})
+                meta.update({
+                    "backend": task_row.get("backend", ""),
+                    "action": task_row.get("action", ""),
+                    "phase": "running",
+                    "started_at": datetime.now(tz=timezone.utc).isoformat(),
+                })
+                emit_event("task_claimed", backend=task_row.get("backend", ""))
+                self._heartbeat_now.set()  # push slots_used immediately to the server
 
-            # Execute
-            result = await _execute_task(task_row, self._backends, self._http)
+                # Execute
+                result = await _execute_task(task_row, self._backends, self._http)
 
-            # Post result
-            try:
-                await asyncio.to_thread(
-                    self._http.post,
-                    f"/tasks/{task_id}/result",
-                    {"node_id": self.cfg.node_id, **result},
-                )
-                logger.info(
-                    "task_result_posted success=%s elapsed=%.1fs",
-                    result["success"], result["execution_time"],
-                )
-                emit_event(
-                    "task_result_posted",
-                    success=result["success"],
-                    duration_s=round(result.get("execution_time", 0.0), 3),
-                )
-            except Exception as e:
-                logger.error("result_post_failed err=%s", e)
+                # Post result
+                try:
+                    await asyncio.to_thread(
+                        self._http.post,
+                        f"/tasks/{task_id}/result",
+                        {"node_id": self.cfg.node_id, **result},
+                    )
+                    logger.info(
+                        "task_result_posted success=%s elapsed=%.1fs",
+                        result["success"], result["execution_time"],
+                    )
+                    emit_event(
+                        "task_result_posted",
+                        success=result["success"],
+                        duration_s=round(result.get("execution_time", 0.0), 3),
+                    )
+                except Exception as e:
+                    logger.error("result_post_failed err=%s", e)
+            finally:
+                self._slots_used -= 1
+                self._heartbeat_now.set()  # push slots_used=0 immediately after task ends
 
     # ------------------------------------------------------------------
     # Run
@@ -833,11 +1067,21 @@ class WorkerAgent:
         self._register()
 
         nudge_listener = asyncio.create_task(
-            _run_nudge_listener(self.cfg.tailscale_ip, self.cfg.api_port, self._poll_now)
+            _run_nudge_listener(
+                self.cfg.tailscale_ip,
+                self.cfg.api_port,
+                self._poll_now,
+                self._heartbeat_now,
+            )
         )
         heartbeat = asyncio.create_task(self._heartbeat_loop())
-        poller = asyncio.create_task(self._poll_loop())
-        job_watcher = asyncio.create_task(self._job_watcher_loop())
+        if self._canary:
+            logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
+            poller = asyncio.create_task(self._shutdown.wait())
+            job_watcher = asyncio.create_task(self._shutdown.wait())
+        else:
+            poller = asyncio.create_task(self._poll_loop())
+            job_watcher = asyncio.create_task(self._job_watcher_loop())
 
         # Install SIGTERM handler — loop.add_signal_handler is Unix-only.
         # On Windows fall back to signal.signal; if SIGTERM isn't supported

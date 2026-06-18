@@ -44,6 +44,23 @@ def test_build_cmd_resume_turn():
     assert "-C" not in cmd
 
 
+def test_resolve_exe_uses_child_env_path(monkeypatch):
+    child_path = r"C:\worker\npm"
+    shim = r"C:\worker\npm\codex.CMD"
+    calls = []
+
+    def fake_which(name, path=None):
+        calls.append((name, path))
+        if name == "codex" and path == child_path:
+            return shim
+        return None
+
+    monkeypatch.setattr("src.backends.codex.shutil.which", fake_which)
+
+    assert CodexBackend._resolve_exe({"Path": child_path}) == shim
+    assert calls[0] == ("codex", child_path)
+
+
 # ---------------------------------------------------------------------------
 # Output parsing
 # ---------------------------------------------------------------------------

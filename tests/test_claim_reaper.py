@@ -9,6 +9,7 @@ import uuid
 import pytest
 
 from src.control.db import MeshDB
+from src.control.node_registry import NodeCapabilities, NodeInfo, NodeRegistry
 
 
 def _task_id() -> str:
@@ -76,7 +77,7 @@ def test_release_task_noop_for_completed(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_no_stale_claims_when_node_online(tmp_path):
+def test_no_stale_claims_when_node_online_without_live_state(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     tid = _task_id()
     _enqueue_test_task(db, tid)
@@ -84,7 +85,52 @@ def test_no_stale_claims_when_node_online(tmp_path):
     # Register the node as online
     db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
     stale = db.list_stale_claims(lease_sec=0)  # 0 = everything is stale by time
-    assert len(stale) == 0  # node is online, so not stale
+    assert len(stale) == 0  # old workers without live_state preserve compatibility
+
+
+def test_stale_claims_when_online_live_state_missing_task(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
+    db.claim_task(tid, "node-a")
+    db.heartbeat_node("node-a", live_state=json.dumps({
+        "v": 1,
+        "active_tasks": [],
+        "slots_used": 0,
+        "slots_total": 2,
+    }))
+
+    stale = db.list_stale_claims(lease_sec=0)
+    assert len(stale) == 1
+    assert stale[0]["id"] == tid
+    assert stale[0]["_stale_reason"] == "missing_from_live_state"
+
+
+def test_stale_claims_when_online_active_task_exceeds_runtime(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online")
+    db.claim_task(tid, "node-a")
+    db.heartbeat_node("node-a", live_state=json.dumps({
+        "v": 1,
+        "active_tasks": [tid],
+        "active_task_details": {
+            tid: {
+                "task_id": tid,
+                "phase": "running",
+                "started_at": "2000-01-01T00:00:00+00:00",
+            }
+        },
+        "slots_used": 1,
+        "slots_total": 2,
+    }))
+
+    stale = db.list_stale_claims(lease_sec=0, active_task_max_runtime_sec=60)
+    assert len(stale) == 1
+    assert stale[0]["id"] == tid
+    assert stale[0]["_stale_reason"] == "active_task_over_max_runtime"
 
 
 def test_stale_claims_when_node_offline(tmp_path):
@@ -179,7 +225,7 @@ def test_stale_claims_when_node_restarted_in_place(tmp_path):
     assert stale[0]["id"] == tid
 
 
-def test_no_stale_claims_when_same_incarnation(tmp_path):
+def test_no_stale_claims_when_same_incarnation_without_live_state(tmp_path):
     """Claim from the current process incarnation is not stale."""
     db = MeshDB(str(tmp_path / "mesh.db"))
     tid = _task_id()
@@ -191,6 +237,123 @@ def test_no_stale_claims_when_same_incarnation(tmp_path):
 
     stale = db.list_stale_claims(lease_sec=0)
     assert len(stale) == 0
+
+
+def test_no_stale_claims_when_worker_reregisters_same_process_incarnation(tmp_path):
+    """Controller restart forces re-register, but same worker process is not stale."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online", incarnation_id="proc-1")
+    db.claim_task(tid, "node-a")
+
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online", incarnation_id="proc-1")
+
+    stale = db.list_stale_claims(lease_sec=0)
+    assert stale == []
+
+
+def test_stale_claims_when_worker_reregisters_new_process_incarnation(tmp_path):
+    """Actual worker process restart changes incarnation and makes old claim stale."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    tid = _task_id()
+    _enqueue_test_task(db, tid)
+
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online", incarnation_id="proc-1")
+    db.claim_task(tid, "node-a")
+
+    db.upsert_node("node-a", "127.0.0.1", 9001, ["claude"], 2, status="online", incarnation_id="proc-2")
+
+    stale = db.list_stale_claims(lease_sec=0)
+    assert [row["id"] for row in stale] == [tid]
+    assert stale[0]["_stale_reason"] == "incarnation_mismatch"
+
+
+def test_registry_reregister_same_incarnation_does_not_release_claim(tmp_path):
+    from config import config as cfg
+    import src.control.db as db_mod
+
+    cfg.mesh.db_path = str(tmp_path / "mesh.db")
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old:
+        old.close()
+
+    try:
+        registry = NodeRegistry()
+        registry.register(NodeInfo(
+            node_id="node-a",
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2),
+            incarnation_id="proc-1",
+        ))
+        db = db_mod.get_db()
+        tid = _task_id()
+        _enqueue_test_task(db, tid)
+        assert db.claim_task(tid, "node-a")
+
+        registry.register(NodeInfo(
+            node_id="node-a",
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2),
+            incarnation_id="proc-1",
+        ))
+
+        row = db.get_task(tid)
+        assert row["status"] == "claimed"
+        assert row["claimed_by"] == "node-a"
+        assert row["claimer_incarnation"] == "proc-1"
+    finally:
+        db_mod._db_instance = None
+        if old:
+            old.close()
+        db_mod._db_instance = old
+
+
+def test_registry_reregister_new_incarnation_releases_claim(tmp_path):
+    from config import config as cfg
+    import src.control.db as db_mod
+
+    cfg.mesh.db_path = str(tmp_path / "mesh.db")
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old:
+        old.close()
+
+    try:
+        registry = NodeRegistry()
+        registry.register(NodeInfo(
+            node_id="node-a",
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2),
+            incarnation_id="proc-1",
+        ))
+        db = db_mod.get_db()
+        tid = _task_id()
+        _enqueue_test_task(db, tid)
+        assert db.claim_task(tid, "node-a")
+
+        registry.register(NodeInfo(
+            node_id="node-a",
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2),
+            incarnation_id="proc-2",
+        ))
+
+        row = db.get_task(tid)
+        assert row["status"] == "pending"
+        assert row["claimed_by"] is None
+        assert row["claimer_incarnation"] is None
+    finally:
+        db_mod._db_instance = None
+        if old:
+            old.close()
+        db_mod._db_instance = old
 
 
 def test_stale_claims_incarnation_mismatch_respects_lease(tmp_path):
@@ -245,17 +408,15 @@ def test_release_node_claims_noop_when_none_claimed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# FastAPI TestClient — release endpoint + idempotency
+# FastAPI endpoint functions — release endpoint + idempotency
 # ---------------------------------------------------------------------------
 
 
-def test_release_endpoint_via_testclient(tmp_path):
-    from fastapi.testclient import TestClient
+def test_release_endpoint_function(tmp_path):
+    from fastapi import HTTPException
 
     from config import config as cfg
     cfg.mesh.db_path = str(tmp_path / "mesh_api.db")
-    shared_token = "test-token-t4"
-    cfg.mesh.worker_token = shared_token
     import src.control.db as db_mod
     old = db_mod._db_instance
     db_mod._db_instance = None
@@ -263,9 +424,7 @@ def test_release_endpoint_via_testclient(tmp_path):
         old.close()
 
     try:
-        from src.control.task_server import app
-        client = TestClient(app)
-        headers = {"Authorization": f"Bearer {shared_token}"}
+        from src.control.task_server import ClaimPayload, release_task
 
         # Enqueue + claim via DB directly
         db = db_mod.get_db()
@@ -275,9 +434,8 @@ def test_release_endpoint_via_testclient(tmp_path):
         db.claim_task(tid, "test-node")
 
         # Release via API
-        resp = client.post(f"/tasks/{tid}/release", json={"node_id": "test-node"}, headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "released"
+        resp = release_task(tid, ClaimPayload(node_id="test-node"))
+        assert resp["status"] == "released"
 
         # Verify released in DB
         row = db.get_task(tid)
@@ -285,8 +443,9 @@ def test_release_endpoint_via_testclient(tmp_path):
 
         # Wrong node cannot release
         db.claim_task(tid, "test-node")
-        resp = client.post(f"/tasks/{tid}/release", json={"node_id": "wrong-node"}, headers=headers)
-        assert resp.status_code == 409
+        with pytest.raises(HTTPException) as exc:
+            release_task(tid, ClaimPayload(node_id="wrong-node"))
+        assert exc.value.status_code == 409
 
     finally:
         db_mod._db_instance = None
@@ -295,14 +454,10 @@ def test_release_endpoint_via_testclient(tmp_path):
         db_mod._db_instance = old
 
 
-def test_submit_result_idempotency_via_testclient(tmp_path):
+def test_submit_result_idempotency_endpoint_function(tmp_path):
     """Late result after task is already terminal is accepted without error."""
-    from fastapi.testclient import TestClient
-
     from config import config as cfg
     cfg.mesh.db_path = str(tmp_path / "mesh_api_idem.db")
-    shared_token = "test-token-shared"
-    cfg.mesh.worker_token = shared_token
     import src.control.db as db_mod
     old = db_mod._db_instance
     db_mod._db_instance = None
@@ -310,9 +465,7 @@ def test_submit_result_idempotency_via_testclient(tmp_path):
         old.close()
 
     try:
-        from src.control.task_server import app
-        client = TestClient(app)
-        headers = {"Authorization": f"Bearer {shared_token}"}
+        from src.control.task_server import ExecutionResultPayload, submit_result
 
         db = db_mod.get_db()
         assert db is not None
@@ -321,22 +474,20 @@ def test_submit_result_idempotency_via_testclient(tmp_path):
         db.claim_task(tid, "worker-a")
 
         # First result goes through
-        resp = client.post(f"/tasks/{tid}/result", json={
-            "node_id": "worker-a",
-            "success": True,
-            "output": "first result",
-        }, headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "accepted"
+        resp = submit_result(tid, ExecutionResultPayload(
+            node_id="worker-a",
+            success=True,
+            output="first result",
+        ))
+        assert resp["status"] == "accepted"
 
         # Late result from same node (after completion) should not error
-        resp = client.post(f"/tasks/{tid}/result", json={
-            "node_id": "worker-a",
-            "success": True,
-            "output": "late duplicate",
-        }, headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "accepted (stale)"
+        resp = submit_result(tid, ExecutionResultPayload(
+            node_id="worker-a",
+            success=True,
+            output="late duplicate",
+        ))
+        assert resp["status"] == "accepted (stale)"
 
         # DB state still shows first result
         row = db.get_task(tid)

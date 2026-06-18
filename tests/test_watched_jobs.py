@@ -5,6 +5,7 @@ processes (echo, sleep) are used for watched jobs.
 """
 
 import json
+import os
 import time
 import uuid
 from datetime import datetime
@@ -65,10 +66,21 @@ def test_start_and_complete_job(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     jid = _job_id()
     db.register_job(job_id=jid, node_id="n1", label="l1")
-    db.start_job(jid, pid=12345, pgid=12345, log_path="/tmp/test.log")
+    db.start_job(
+        jid,
+        pid=12345,
+        pgid=12345,
+        log_path="/tmp/test.log",
+        started_epoch=111.25,
+        observed_command="sleep 30",
+    )
     job = db.get_job(jid)
     assert job["pid"] == 12345
     assert job["pgid"] == 12345
+    assert job["started_epoch"] == 111.25
+    assert job["last_checked_at"] is not None
+    assert job["last_seen_command"] == "sleep 30"
+    assert job["last_seen_started_epoch"] == 111.25
 
     db.complete_job(jid, exit_code=0, tail="all good")
     job = db.get_job(jid)
@@ -86,6 +98,24 @@ def test_fail_job(tmp_path):
     job = db.get_job(jid)
     assert job["status"] == "failed"
     assert "something broke" in job["tail"]
+
+
+def test_record_job_probe_updates_liveness_fields(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    jid = _job_id()
+    db.register_job(job_id=jid, node_id="n1", label="l1")
+    db.record_job_probe(
+        jid,
+        observed_command="python train.py",
+        observed_started_epoch=222.5,
+        probe_error="",
+    )
+
+    job = db.get_job(jid)
+    assert job["last_checked_at"] is not None
+    assert job["last_probe_error"] == ""
+    assert job["last_seen_command"] == "python train.py"
+    assert job["last_seen_started_epoch"] == 222.5
 
 
 def test_list_jobs_filters(tmp_path):
@@ -127,9 +157,8 @@ def test_list_jobs_limits(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_job_endpoints_via_testclient(tmp_path):
-    """Verify job CRUD endpoints using FastAPI's TestClient (no real server)."""
-    from fastapi.testclient import TestClient
+def test_job_endpoint_functions(tmp_path):
+    """Verify job CRUD endpoint functions without opening a real server."""
 
     # Point the DB singleton at a temp path
     from config import config as cfg
@@ -142,58 +171,90 @@ def test_job_endpoints_via_testclient(tmp_path):
         old.close()
 
     try:
-        from src.control.task_server import app
-        client = TestClient(app)
-        headers = {"Authorization": "Bearer test-token-api"}
+        from fastapi import HTTPException
+        from src.control.task_server import (
+            JobDonePayload,
+            JobProbePayload,
+            JobStartPayload,
+            RegisterJobPayload,
+            _require_auth,
+            get_job,
+            list_jobs,
+            record_job_probe,
+            register_job,
+            report_job_done,
+            start_job,
+        )
+        from fastapi.security import HTTPAuthorizationCredentials
 
         # Register a job
-        resp = client.post("/jobs", json={
-            "node_id": "test-node",
-            "label": "api-test",
-            "session_id": "sess_api",
-            "command": "echo ok",
-            "notify": True,
-        }, headers=headers)
-        assert resp.status_code == 200
-        data = resp.json()
+        data = register_job(RegisterJobPayload(
+            node_id="test-node",
+            label="api-test",
+            session_id="sess_api",
+            command="echo ok",
+            notify=True,
+        ))
         assert data["status"] == "registered"
         jid = data["job_id"]
         assert jid.startswith("job_")
 
         # GET /jobs/{id}
-        resp = client.get(f"/jobs/{jid}", headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "running"
+        assert get_job(jid)["status"] == "running"
 
         # Start the job
-        resp = client.post(f"/jobs/{jid}/start", json={
-            "node_id": "test-node",
-            "pid": 8888,
-            "pgid": 8888,
-        }, headers=headers)
-        assert resp.status_code == 200
+        resp = start_job(jid, JobStartPayload(
+            node_id="test-node",
+            pid=8888,
+            pgid=8888,
+            started_epoch=333.75,
+            observed_command="echo ok",
+        ))
+        assert resp["status"] == "started"
+
+        resp = record_job_probe(jid, JobProbePayload(
+            node_id="test-node",
+            observed_command="echo ok",
+            observed_started_epoch=333.75,
+            probe_error="",
+        ))
+        assert resp["status"] == "recorded"
 
         # Report done
-        resp = client.post(f"/jobs/{jid}/done", json={
-            "node_id": "test-node",
-            "exit_code": 0,
-            "tail": "api test passed",
-        }, headers=headers)
-        assert resp.status_code == 200
+        resp = report_job_done(jid, JobDonePayload(
+            node_id="test-node",
+            exit_code=0,
+            tail="api test passed",
+        ))
+        assert resp["status"] == "accepted"
 
         # Verify terminal state
-        resp = client.get(f"/jobs/{jid}", headers=headers)
-        assert resp.json()["status"] == "done"
-        assert resp.json()["exit_code"] == 0
+        job = get_job(jid)
+        assert job["status"] == "done"
+        assert job["exit_code"] == 0
 
         # GET /jobs lists it
-        resp = client.get("/jobs?node_id=test-node", headers=headers)
-        assert resp.status_code == 200
-        assert any(j["id"] == jid for j in resp.json())
+        assert any(j["id"] == jid for j in list_jobs(node_id="test-node"))
+
+        lost_data = register_job(RegisterJobPayload(
+            node_id="test-node",
+            label="lost-test",
+            command="sleep 10",
+        ))
+        lost_id = lost_data["job_id"]
+        resp = report_job_done(lost_id, JobDonePayload(
+            node_id="test-node",
+            exit_code=-1,
+            status="lost",
+            tail="pid start time changed",
+        ))
+        assert resp["status"] == "accepted"
+        assert get_job(lost_id)["status"] == "lost"
 
         # Auth failure
-        resp = client.get("/jobs", headers={"Authorization": "Bearer wrong-token"})
-        assert resp.status_code == 401
+        with pytest.raises(HTTPException) as exc:
+            _require_auth(HTTPAuthorizationCredentials(scheme="Bearer", credentials="wrong-token"))
+        assert exc.value.status_code == 401
 
     finally:
         db_mod._db_instance = None
@@ -210,6 +271,31 @@ def test_job_endpoints_via_testclient(tmp_path):
 def test_pid_alive_with_nonexistent_pid():
     from src.worker.agent import _pid_alive
     assert _pid_alive(999999999) is False
+
+
+def test_process_identity_for_current_process():
+    from src.worker.agent import _process_identity
+    ident = _process_identity(os.getpid())
+    assert ident["alive"] is True
+    assert "error" in ident
+
+
+def test_job_identity_mismatch_detects_reused_pid():
+    from src.worker.agent import _job_identity_mismatch
+    reason = _job_identity_mismatch(
+        {"last_seen_started_epoch": 100.0, "last_seen_command": "sleep 30"},
+        {"alive": True, "started_epoch": 200.0, "command": "python other.py"},
+    )
+    assert "start time changed" in reason
+
+
+def test_job_identity_mismatch_accepts_matching_identity():
+    from src.worker.agent import _job_identity_mismatch
+    reason = _job_identity_mismatch(
+        {"last_seen_started_epoch": 100.0, "last_seen_command": "sleep 30"},
+        {"alive": True, "started_epoch": 100.5, "command": "sleep 30"},
+    )
+    assert reason == ""
 
 
 def test_read_log_tail_with_missing_file():
