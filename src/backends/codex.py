@@ -39,7 +39,7 @@ def _mcp_jobs_configured() -> bool:
 class CodexBackend(CodingBackend):
 
     def __init__(self):
-        self._exe = shutil.which("codex") or "codex"
+        self._exe = self._resolve_exe(ensure_node_on_path())
         self._session_procs: dict[str, subprocess.Popen] = {}
         self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
@@ -72,7 +72,6 @@ class CodexBackend(CodingBackend):
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("codex")
         start = time.time()
-        cmd = self._build_cmd(resume_id, cwd)
 
         try:
             from config import config as _cfg
@@ -83,6 +82,9 @@ class CodexBackend(CodingBackend):
         proc_env = ensure_node_on_path()
         if session_key:
             proc_env["SESSION_ID"] = session_key
+
+        cmd = self._build_cmd(resume_id, cwd)
+        cmd[0] = self._resolve_exe(proc_env)
 
         if sys.platform == "win32":
             node_hint = os.getenv("CODEX_NODE_PATH") or os.getenv("NODE_EXE")
@@ -233,6 +235,13 @@ class CodexBackend(CodingBackend):
         finally:
             if proc is not None:
                 self._unregister_process(proc, session_key)
+
+    @staticmethod
+    def _resolve_exe(env: Optional[dict] = None) -> str:
+        path_value = ""
+        if env:
+            path_value = env.get("Path") or env.get("PATH") or ""
+        return shutil.which("codex", path=path_value or None) or shutil.which("codex") or "codex"
 
     def _build_cmd(self, resume_id: Optional[str], cwd: Optional[str]) -> List[str]:
         if resume_id:

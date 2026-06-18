@@ -42,16 +42,24 @@ def ensure_node_on_path(env: Optional[dict] = None) -> dict:
     if sys.platform != "win32":
         return env
 
-    path = env.get("PATH", "")
+    path_key = "Path" if "Path" in env else "PATH"
+    path = env.get(path_key) or env.get("PATH") or env.get("Path") or ""
     appdata = env.get("APPDATA", "")
-    node_dirs = [r"C:\Program Files\nodejs"]
+    node_dirs = []
+    node_hint = env.get("CODEX_NODE_PATH") or env.get("NODE_EXE")
+    if node_hint:
+        node_dirs.append(str(Path(node_hint).expanduser().parent))
+    node_dirs.append(r"C:\Program Files\nodejs")
     if appdata:
         node_dirs.append(os.path.join(appdata, "npm"))
 
     path_parts = path.split(os.pathsep)
     additions = [d for d in node_dirs if d not in path_parts]
     if additions:
-        env["PATH"] = os.pathsep.join(additions) + os.pathsep + path
+        path = os.pathsep.join(additions) + os.pathsep + path
+
+    env["PATH"] = path
+    env["Path"] = path
 
     return env
 
