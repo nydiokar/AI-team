@@ -27,7 +27,7 @@ from src.core import (
     AsyncFileWatcher, SessionStore, SessionStatus, PathResolver
 )
 from src.bridges import LlamaMediator
-from src.backends import ClaudeCodeBackend, CodexBackend, OpenCodeBackend, OpenCodeServerBackend
+from src.backends.registry import build_backends
 from config import config
 from src.validation.engine import ValidationEngine
 from src.core.notification_service import NotificationService
@@ -56,12 +56,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.file_watcher = AsyncFileWatcher(config.system.tasks_dir)
         self.llama_mediator = LlamaMediator()
         self.session_store = SessionStore()
-        self._backends = {
-            "claude": ClaudeCodeBackend(),
-            "codex": CodexBackend(),
-            "opencode": OpenCodeBackend(),
-            "opencode-server": OpenCodeServerBackend(),
-        }
+        self._backends = build_backends()
         
         # Task management
         self.task_queue = asyncio.Queue(maxsize=config.system.max_queue_size)

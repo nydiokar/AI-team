@@ -54,21 +54,34 @@ stay byte-identical. No DB migration. If you're adding capability users can see,
 
 ## Step 1 — Backend registry (consolidation, zero behavior change)
 
-- [ ] Create `src/backends/registry.py` per spec §3 A.1: name→factory map +
+- [x] Create `src/backends/registry.py` per spec §3 A.1: name→factory map +
       `build_backends()`, `valid_backend_names()`, `is_valid_backend()`, `DEFAULT_BACKEND`.
       **No icon/label fields** (display is a surface concern).
-- [ ] `orchestrator.py:59` → `self._backends = build_backends()`.
-- [ ] `worker/agent.py:385` `_make_backends()` → `return build_backends()`.
-- [ ] `telegram/interface.py:2252` and `:2380` → `_valid_backends = valid_backend_names()`.
-- [ ] New `tests/test_backend_registry.py`: keys == `valid_backend_names()`; every value is
+- [x] `orchestrator.py:59` → `self._backends = build_backends()`.
+- [x] `worker/agent.py:385` `_make_backends()` → `return build_backends()`.
+- [x] `telegram/interface.py:2252` and `:2380` → `_valid_backends = valid_backend_names()`.
+- [x] New `tests/test_backend_registry.py`: keys == `valid_backend_names()`; every value is
       a `CodingBackend`; `DEFAULT_BACKEND in valid_backend_names()`.
-- [ ] `pytest tests/ -k "backend or components" -q` green.
+- [x] `pytest tests/ -k "backend or components" -q` green.
 
 **Done = exactly:** backend set declared in one file; tests green.
 **Do NOT touch:** the `interface.py:800/829/852/874` icon branches (presentation — leave
 verbatim); the `CodingBackend` ABC; any adapter file.
 **Revert:** restore the two dict literals. Independent of later steps.
 **Notes:**
+- Real paths differ from the checklist's: orchestrator is `src/orchestrator.py` (not
+  `src/core/orchestrator.py`); the literal was at `orchestrator.py:59`, `_make_backends` at
+  `worker/agent.py:385`, the two valid-name tuples at `interface.py:2252/2380` — all matched.
+- Removed the now-unused `from src.backends import ...` class import in `orchestrator.py:30`
+  (replaced with `from src.backends.registry import build_backends`); the four classes had no
+  other reference there. `worker/agent.py` keeps its local import, now of `build_backends`.
+- Added `from src.backends.registry import valid_backend_names` to `interface.py`; both
+  tuples → `valid_backend_names()`. Order verified **identical** (`claude, codex, opencode,
+  opencode-server`), so the `backend not in _valid_backends` checks are unchanged.
+- Icon branches (`interface.py:800/829/852/874`), the `CodingBackend` ABC, and all adapter
+  files were **not touched**.
+- `pytest tests/ -k "backend or components" -q` → **74 passed, 0 failed**. (The pre-existing
+  `test_node_live_state_helpers_format_db_rows` failure is not matched by this `-k` filter.)
 
 ---
 
