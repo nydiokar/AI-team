@@ -9,6 +9,11 @@ from .interfaces import (
 from .task_parser import TaskParser
 from .path_resolver import PathResolver, PathResolution
 from .session_store import SessionStore
+from .result_text import (
+    extract_text_from_payload, session_reply_text, short_failure_reason,
+    format_file_change_lines,
+)
+from .notification_service import NotificationService
 
 try:
     from .file_watcher import FileWatcher, AsyncFileWatcher
@@ -33,4 +38,5 @@ __all__ = [
     "TaskParser", "FileWatcher", "AsyncFileWatcher",
     "PathResolver", "PathResolution",
     "SessionStore",
+    "NotificationService",
 ]
