@@ -67,6 +67,11 @@ class _DummyOrchestrator:
         self.created_tasks = []
         self.cancelled_tasks = []
         self._backends = {}
+        # Mirror the real orchestrator: a transport-neutral SessionService over a
+        # SessionStore. The store honors the test-isolated _SESSIONS_DIR/_BINDINGS_FILE
+        # monkeypatched by the isolated_session_store fixture.
+        from src.core.session_service import SessionService
+        self.session_service = SessionService(SessionStore())
 
     async def submit_instruction(self, description, task_type=None, target_files=None, session_id=None, cwd=None, source="runtime"):
         task_id = f"task_{len(self.created_tasks) + 1}"

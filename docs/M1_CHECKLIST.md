@@ -175,13 +175,14 @@ descriptive tag only.
 
 ## Step 4 — Point Telegram at the service (the ONLY behavior-touching edit)
 
-- [ ] Rewrite the **body** of `TelegramInterface._create_and_bind_session`
-      (`interface.py:1063`) to delegate to
+- [x] Rewrite the **body** of `TelegramInterface._create_and_bind_session`
+      (`interface.py:1064`) to delegate to
       `self.orchestrator.session_service.create_session(backend=..., repo_path=...,
       chat_id=..., owner_user_id=..., node_id=node_id, model=model)` and
       `return result.session`.
-- [ ] Keep the method **signature identical** → callers at `:2101/:2297/:2489` unchanged.
-- [ ] **Critical gate:** `pytest tests/test_telegram_session_flow.py -q` matches the Step 0
+- [x] Keep the method **signature identical** → callers (now `:2094/:2290/:2482` after the
+      Step 1 import shift) unchanged.
+- [x] **Critical gate:** `pytest tests/test_telegram_session_flow.py -q` matches the Step 0
       baseline, incl. `test_session_new_creates_session_and_guides_next_step`,
       `test_session_new_repo_callback_creates_session`,
       `test_session_new_remote_command_uses_db_node_repos` (node pinning), and the
@@ -193,6 +194,21 @@ any other handler. One method body changes; nothing else.
 **Revert:** restore the original 4-statement body. Service then sits unused (still valid for
 a future surface) — partial revert is safe.
 **Notes:**
+- Method body now delegates to `self.orchestrator.session_service.create_session(...)` and
+  returns `result.session`. Signature unchanged; all 3 production call sites untouched.
+- **Test harness change (necessary, not behavioral):** `_DummyOrchestrator` in
+  `test_telegram_session_flow.py` previously had no `session_service`. Since the wrapper now
+  reaches `self.orchestrator.session_service`, the dummy must mirror the real orchestrator:
+  it now constructs `SessionService(SessionStore())`. The store honors the test-isolated
+  `_SESSIONS_DIR`/`_BINDINGS_FILE` the `isolated_session_store` fixture monkeypatches, so the
+  test reads remain consistent. **No behavioral assertion in any test changed.**
+- **Gate result = exact Step 0 baseline:** `tests/test_telegram_session_flow.py` →
+  **21 passed, 1 failed** — the one failure is the pre-existing
+  `test_node_live_state_helpers_format_db_rows`. All four named gate tests **pass**.
+- Full suite: 260 passed, 15 skipped, **7 failed** — all 7 pre-existing on `main`
+  (6 are a `python-multipart`/FastAPI form-import `RuntimeError` in endpoint/heartbeat/mesh
+  tests, verified by re-running them on `main`; the 7th is the known live-state staleness
+  test). **Zero new failures introduced by M1.**
 
 ---
 
