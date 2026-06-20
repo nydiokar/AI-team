@@ -216,44 +216,57 @@ a future surface) — partial revert is safe.
 
 Write the doc per spec §6, grounded in what M1 actually shipped:
 
-- [ ] **Event envelope** — canonical fields from `observability.emit_event`; "unknown
+- [x] **Event envelope** — canonical fields from `observability.emit_event`; "unknown
       fields are opaque." Note the OpenClaw parallel and that the **DB read model is the
       gap-recovery path** (their "events not replayed" → our `db.list_*`).
-- [ ] **Event catalog** — grep `emit_event(`/`_emit_event(` in `orchestrator.py`,
+- [x] **Event catalog** — grep `emit_event(`/`_emit_event(` in `orchestrator.py`,
       `notification_service.py`, `task_server.py`; one line per event; mark Telegram-consumed.
-- [ ] **Inbound command surface** — the two entry points:
+- [x] **Inbound command surface** — the two entry points:
       `SessionService.{create_session,bind_active}` (lifecycle) and
       `orchestrator.submit_instruction(...)` (dispatch). Rule: *no transport writes session
       state directly; no transport puts prose in `CommandResult`.*
-- [ ] **`SessionOrigin`** — `channel`/`kind`, defaults, descriptive-not-routing (contrast
+- [x] **`SessionOrigin`** — `channel`/`kind`, defaults, descriptive-not-routing (contrast
       OpenClaw scoping, explicitly not adopted).
-- [ ] **Backend extension** — "add a backend = one edit in `src/backends/registry.py`."
-- [ ] **Read model pointer** — `db.list_sessions/list_tasks/list_nodes`; `SessionView`
+- [x] **Backend extension** — "add a backend = one edit in `src/backends/registry.py`."
+- [x] **Read model pointer** — `db.list_sessions/list_tasks/list_nodes`; `SessionView`
       marked *planned, built with the Web UI*.
-- [ ] **Reserved workflow events** — list `review.requested/completed`, `handoff.created`,
+- [x] **Reserved workflow events** — list `review.requested/completed`, `handoff.created`,
       `approval.requested/granted` as **reserved, not emitted yet**. No code.
 
 **Done = exactly:** a reader can answer "how do I add a surface / a backend / a workflow
 event?" from this doc alone.
 **Do NOT:** implement any reserved event, WS endpoint, or workflow command here. Doc only.
 **Notes:**
+- Wrote `docs/CONTROL_CONTRACT.md` (8 sections incl. a closing "How do I…" answer block).
+- Event catalog built from actual `emit_event(`/`_emit_event(` calls. Findings worth noting:
+  task dispatch start/finish are **dynamic** names `<backend>_started`/`<backend>_finished`
+  (via `_backend_event_name`), not literal strings; `task_server.py` emits exactly one
+  event (`task_failed`); the notifier emits `task_notification` (not "task_outcome" —
+  verified the literal in `notify_task_outcome`), `heartbeat`, `error_notification`.
+- Corrected one mid-draft error: `notify_completion` is a **Telegram-side** helper
+  (`interface.py` / `INotifier`), not a `NotificationService` method, and emits no event —
+  doc §3 now says so. All listed event names spot-checked against source.
+- No code emitted/changed by this step (doc only). Reserved §7 names carry no implementation.
 
 ---
 
 ## M1 Definition of Done (tick when all steps closed)
 
-- [ ] Backends declared in one place; adding one = one edit.
-- [ ] `Session` carries `origin`; old files/rows load; one additive defaulted column
+- [x] Backends declared in one place; adding one = one edit.
+- [x] `Session` carries `origin`; old files/rows load; one additive defaulted column
       (migration 12) — no destructive/behavior-changing migration. (See Step 2 FORK.)
-- [ ] `SessionService.create_session/bind_active` exist, tested, reuse the orchestrator store.
-- [ ] Telegram create flow routes through the service; `test_telegram_session_flow.py`
+- [x] `SessionService.create_session/bind_active` exist, tested, reuse the orchestrator store.
+- [x] Telegram create flow routes through the service; `test_telegram_session_flow.py`
       unchanged vs. baseline.
-- [ ] `CONTROL_CONTRACT.md` covers events, the two inbound entry points, `SessionOrigin`,
+- [x] `CONTROL_CONTRACT.md` covers events, the two inbound entry points, `SessionOrigin`,
       backend extension, read model, reserved workflow events.
-- [ ] **Exit check:** a Web UI author could create a session via
+- [x] **Exit check:** a Web UI author could create a session via
       `SessionService.create_session(origin=SessionOrigin("web"))`, dispatch via
       `submit_instruction`, and render `events.ndjson` + `db.list_*` — **with no further
-      core refactor.** (Verify by reasoning, not by building the UI.)
+      core refactor.** Verified by reasoning: create/bind is transport-neutral (Step 3/4),
+      `origin` persists through the DB-first read path (Step 2), dispatch already takes a
+      `source` tag, and the event envelope + `db.list_*` read model both pre-exist and are
+      documented (Step 5 §1/§4/§6). No core seam is missing for a second surface.
 
 ---
 
