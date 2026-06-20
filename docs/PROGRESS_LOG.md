@@ -1,5 +1,42 @@
 # Progress Log
 
+## 2026-06-21 — Cockpit M1: transport-neutral session core
+
+**Milestone: the gateway is ready for a second surface (Web UI) with no further
+core refactor.** A documented extraction, not a feature — Telegram behavior is
+byte-identical to the pre-M1 baseline (`tests/test_telegram_session_flow.py`
+gate). Branch: `feat/session-service-m1`. Built top-to-bottom against
+`docs/M1_CHECKLIST.md` (the anti-scope-escape mechanism); rationale in
+`docs/COCKPIT_REFACTOR_SPEC.md`.
+
+Shipped:
+- **Backend registry** (`src/backends/registry.py`) — the backend set is declared
+  once (`build_backends/valid_backend_names/is_valid_backend/DEFAULT_BACKEND`);
+  orchestrator, worker, and the Telegram validation paths all derive from it.
+  Adding a backend = one edit. (Adversarial review caught a *third* hardcoded
+  validation tuple at `interface.py:2085` the spec miscounted — now also routed
+  through `valid_backend_names()`.)
+- **`SessionOrigin`** — a descriptive `{channel, kind}` tag on `Session`
+  (defaults `telegram/user`). Persisted in JSON **and** the DB mirror via
+  **migration 12** (additive, defaulted column; old rows backfill; revert-safe).
+  The spec's "no DB column" premise was wrong — `SessionStore` reads DB-first, so
+  a JSON-only tag would have been inert. Descriptive, *not* routing — scoping
+  modes deliberately not adopted.
+- **`SessionService`** (`src/core/session_service.py`) — transport-neutral
+  lifecycle (`create_session`, `bind_active`) lifted off the Telegram class; the
+  inbound symmetry to `NotificationService`. Returns a machine-code
+  `CommandResult` (no prose). Wired into `orchestrator.__init__`, reusing the one
+  `SessionStore`. Telegram's `_create_and_bind_session` is now a thin wrapper.
+- **`docs/CONTROL_CONTRACT.md`** — the durable artifact: event envelope + catalog,
+  the two inbound entry points, `SessionOrigin`, backend extension, the `db.list_*`
+  read model (`SessionView` marked planned/M2), and reserved workflow event names.
+
+Deferred to M2+: `SessionView` DTO + read methods, WS/HTTP transport, workflow
+commands. New tests: `test_backend_registry.py`, `test_session_origin.py`,
+`test_session_service.py`. Tests: `pytest tests/test_telegram_session_flow.py
+tests/test_session_service.py tests/test_session_origin.py
+tests/test_backend_registry.py` (gate at baseline).
+
 ## 2026-06-18 — Watched job process-identity resilience
 
 T3.1 is complete. Watched jobs now persist worker probe fields

@@ -4,7 +4,7 @@
 Use `.ai/CONTEXT.md` for orientation and `docs/PROGRESS_LOG.md` for detailed
 history.
 
-**Last updated:** 2026-06-18
+**Last updated:** 2026-06-21
 **Plan of record:** `docs/STATE_SEPARATION_PLAN.md`
 
 > **Test cost guard:** normal test command is `pytest`. Tests must not invoke
@@ -24,6 +24,7 @@ history.
 | T3 watched jobs | DONE | `jobs` table, `/jobs` API, worker watcher, MCP registration, tests exist. |
 | T3.1 watched job process identity | DONE | Worker probes PID + process start/command, records `last_checked_at`, and marks mismatches `lost`. |
 | T4 worker-restart claim reclaim | DONE | Release endpoint, stale-claim reaper, startup sweep, late-result guard, tests exist. |
+| Cockpit M1 (session core) | DONE (branch) | `feat/session-service-m1`: backend `registry.py`, `SessionService` (create/bind), `SessionOrigin` (DB migration 12), `docs/CONTROL_CONTRACT.md`. Telegram byte-identical. Separate track from State Separation. See `docs/M1_CHECKLIST.md` + PROGRESS_LOG 2026-06-21. M2+ deferred. |
 
 ---
 

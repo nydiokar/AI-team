@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-06-11
+**Last Updated:** 2026-06-21
 **Branch:** `main`
 
 > This file is the **fast-orientation** doc: what the project is, how it's wired
@@ -30,13 +30,21 @@ the task server embedded on its own event loop.
 [Telegram] → [Gateway process]
   ├── src/telegram/interface.py     command surface (/status, /nodes, pickers…)
   ├── src/orchestrator.py           task queue, in-process workers, routing, recovery
+  ├── src/core/session_service.py   transport-neutral session lifecycle (create/bind) — M1 inbound seam
   ├── src/core/session_store.py     DB-first reads, dual-write to JSON + DB
   ├── src/control/db.py             SQLite mesh DB (WAL, busy_timeout=5000, migrations)
   ├── src/control/embedded_server.py task server, embedded (mesh on)
   ├── src/control/{task_server,node_registry}.py  HTTP API + node registry
   ├── src/worker/agent.py           worker daemon — runs as its own process on worker nodes (e.g. Horse)
-  └── src/backends/                 claude_code, codex, opencode, opencode-server
+  └── src/backends/                 claude_code, codex, opencode, opencode-server (set declared in registry.py — M1)
 ```
+
+**Control contract (M1):** the inbound/outbound boundary is now documented in
+`docs/CONTROL_CONTRACT.md` — the event envelope + catalog, the **two** inbound
+entry points (`SessionService.create_session/bind_active` for lifecycle,
+`orchestrator.submit_instruction` for dispatch), `SessionOrigin`, backend
+extension via `registry.py`, and the `db.list_*` read model. A second surface
+(Web UI) consumes this with no further core refactor.
 
 State layout:
 ```
@@ -67,6 +75,15 @@ Phases 0–3 are effectively complete.
 
 The only remaining plan work is **Phase 4 — graceful degradation / fallback**
 (see active plan + `.ai/NEXT_TASKS.md`).
+
+**Cockpit M1 (2026-06-21, `feat/session-service-m1`):** a separate, completed
+track preparing the gateway for a second surface (Web UI). It added a
+transport-neutral `SessionService` (lifecycle create/bind off the Telegram
+class), a single backend `registry.py`, a descriptive `SessionOrigin` tag on
+`Session` (persisted via DB migration 12), and `docs/CONTROL_CONTRACT.md`.
+Telegram behavior is byte-identical (gate matches the pre-M1 baseline). Scope
+discipline lived in `docs/M1_CHECKLIST.md`. M2+ (SessionView DTO, WS/HTTP
+transport, workflow events) remain deferred.
 
 History of every completed phase (8, 9, Step B/C, D1–D6) + the 2026-06-11
 restart-resilience milestone: `docs/PROGRESS_LOG.md`.
@@ -132,6 +149,8 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | Path | Purpose |
 |:-----|:--------|
 | `src/orchestrator.py` | runtime, task queue, workers, routing, recovery, mesh hooks |
+| `src/core/session_service.py` | transport-neutral session lifecycle (create/bind) — M1 inbound seam |
+| `src/backends/registry.py` | single declaration site for the backend set — M1 (add a backend = one edit here) |
 | `src/core/session_store.py` | DB-first session reads + JSON/DB dual-write |
 | `src/control/db.py` | SQLite mesh DB — canonical DB layer |
 | `src/control/task_server.py` | FastAPI task server (currently embedded) |
@@ -139,6 +158,8 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | `src/worker/agent.py` | worker daemon (runs as its own process on worker nodes) |
 | `src/telegram/interface.py` | Telegram command surface |
 | `config/settings.py` | all config incl. `MeshConfig` |
+| `docs/CONTROL_CONTRACT.md` | **M1** — event + inbound-command + backend + read-model contract for a 2nd surface |
+| `docs/COCKPIT_REFACTOR_SPEC.md` / `docs/M1_CHECKLIST.md` | M1 rationale + the executed build checklist |
 | `docs/STATE_SEPARATION_PLAN.md` | **active plan** |
 | `docs/AGENT_MESH_SPEC.md` | mesh design spec |
 | `docs/PHASE_4_RUNBOOK.md` | VPS cutover runbook (= State Sep end-state) |
