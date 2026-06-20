@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .interfaces import Session, SessionStatus
+from .interfaces import Session, SessionStatus, SessionOrigin
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +198,10 @@ class SessionStore:
             "telegram_thread_id": s.telegram_thread_id,
             "owner_user_id": s.owner_user_id,
             "task_history": s.task_history or [],
+            "origin": {
+                "channel": (s.origin or SessionOrigin()).channel,
+                "kind": (s.origin or SessionOrigin()).kind,
+            },
         }
 
     @staticmethod
@@ -210,6 +214,21 @@ class SessionStore:
                 except Exception:
                     return []
             return value or []
+
+        def _parse_origin(value):
+            """Read origin from a nested dict (JSON file) or JSON string (DB row);
+            absent/unparseable → default SessionOrigin (telegram/user)."""
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except Exception:
+                    value = None
+            if isinstance(value, dict):
+                return SessionOrigin(
+                    channel=value.get("channel", "telegram"),
+                    kind=value.get("kind", "user"),
+                )
+            return SessionOrigin()
 
         return Session(
             session_id=d["session_id"],
@@ -231,4 +250,5 @@ class SessionStore:
             telegram_thread_id=d.get("telegram_thread_id"),
             owner_user_id=d.get("owner_user_id"),
             task_history=_parse_list(d.get("task_history", [])),
+            origin=_parse_origin(d.get("origin")),
         )

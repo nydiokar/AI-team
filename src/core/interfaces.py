@@ -153,6 +153,18 @@ class SessionStatus(Enum):
     CANCELLED = "cancelled"
     CLOSED = "closed"
 
+@dataclass(frozen=True)
+class SessionOrigin:
+    """Transport-neutral tag describing where a session came from.
+
+    Adopted (concept only) from OpenClaw's sessionKey. Descriptive, not a
+    routing policy — see docs/COCKPIT_REFACTOR_SPEC.md §B.0. Defaults reproduce
+    today's behavior so existing sessions are unchanged.
+    """
+    channel: str = "telegram"   # "telegram" | "web" | "cli" | future surfaces
+    kind: str = "user"          # "user" | "cron" | "subagent" (future workflow)
+
+
 @dataclass
 class Session:
     """Gateway session — maps a Telegram conversation to a backend coding agent session."""
@@ -175,12 +187,15 @@ class Session:
     telegram_thread_id: Optional[int] = None
     owner_user_id: Optional[int] = None
     task_history: List[Dict[str, Any]] = None  # [{task_id, timestamp, success, execution_time}]
+    origin: Optional[SessionOrigin] = None      # where the session came from; defaults telegram/user
 
     def __post_init__(self):
         if self.last_files_modified is None:
             self.last_files_modified = []
         if self.task_history is None:
             self.task_history = []
+        if self.origin is None:
+            self.origin = SessionOrigin()
 
 
 @dataclass

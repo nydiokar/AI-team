@@ -22,7 +22,10 @@ acceptance line passes.
 5. Each step is its own commit and is independently revertible (the `Revert` line).
 
 **One-line invariant:** *M1 is an extraction + a doc, not a feature. Telegram behavior must
-stay byte-identical. No DB migration. If you're adding capability users can see, you've left M1.*
+stay byte-identical. If you're adding capability users can see, you've left M1.*
+(Originally said "No DB migration"; Step 2 added one **additive, defaulted** column —
+migration 12 for `origin` — after the no-migration premise proved false. See Step 2 FORK.
+No user-visible behavior change; old rows backfill to the prior default.)
 
 ---
 
@@ -87,26 +90,48 @@ verbatim); the `CodingBackend` ABC; any adapter file.
 
 ## Step 2 — `SessionOrigin` field (additive, back-compatible)
 
-- [ ] Add `SessionOrigin` dataclass to `src/core/interfaces.py` (spec §B.0):
+- [x] Add `SessionOrigin` dataclass to `src/core/interfaces.py` (spec §B.0):
       `channel="telegram"`, `kind="user"`.
-- [ ] Add `origin: Optional[SessionOrigin] = None` to `Session`; in `__post_init__`,
+- [x] Add `origin: Optional[SessionOrigin] = None` to `Session`; in `__post_init__`,
       default `None` → `SessionOrigin()`.
-- [ ] `session_store.py` `_to_dict`: write `"origin": {"channel":..., "kind":...}`.
+- [x] `session_store.py` `_to_dict`: write `"origin": {"channel":..., "kind":...}`.
       `_from_dict`: read it, defaulting to `SessionOrigin()` when the key is absent.
-- [ ] Verify `db.py:upsert_session` tolerates the extra key (it stores the session JSON
-      blob, like `task_history`). **No new DB column.** If it does NOT tolerate it →
-      record under Notes and update this step before proceeding.
-- [ ] Test (in `test_components.py` or `test_queue_persistence.py`): session with no origin
-      round-trips to `("telegram","user")`; a `("web","user")` origin survives save→load on
-      both JSON and DB mirror.
-- [ ] Load an existing pre-M1 session JSON from `state/sessions/` (or a fixture copy) —
-      confirm it still loads (back-compat).
+- [x] ~~Verify `db.py:upsert_session` tolerates the extra key~~ → **premise was wrong; added
+      DB column via migration 12 instead.** See FORK below.
+- [x] Test: session with no origin round-trips to `("telegram","user")`; a `("web","user")`
+      origin survives save→load on **both JSON and DB mirror**
+      (`tests/test_session_origin.py`).
+- [x] Load a pre-M1 session dict with no `origin` key — confirm it still loads (back-compat).
 
 **Done = exactly:** field persists both ways; old files still load; tests green.
 **Do NOT:** add scoping modes, a key-string format, or any routing logic — `origin` is a
-descriptive tag only. **No DB schema migration.**
-**Revert:** drop the field + serialization lines; old files unaffected.
-**Notes:**
+descriptive tag only.
+**Revert:** drop the field + serialization lines + migration 12; old files/rows unaffected.
+**Notes / FORK (operator-approved deviation from spec):**
+- **The "No DB schema migration / No new DB column" fence was based on a false premise.**
+  The checklist assumed `upsert_session` stores the Session as an opaque JSON blob "like
+  `task_history`." It does **not** — the `sessions` table has explicit named columns
+  (`db.py` CREATE TABLE + a hand-mapped INSERT); `model` itself needed migration 11.
+- **Why JSON-only could not work:** `SessionStore.get()`/`list_all()` read **DB-first** (the
+  mesh DB is canonical; `session_store.py:59`). With no `origin` column, a `("web","user")`
+  session would always reload as `("telegram","user")` whenever a DB row exists — i.e. in
+  all normal operation. The field would be silently inert. That fails this step's own
+  "survives on the DB mirror" test.
+- **Resolution (approved by operator 2026-06-21 — "if there's a reasonable long-term-good
+  solution, do it properly"):** added **migration 12**
+  `ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT
+  '{"channel":"telegram","kind":"user"}'`, bumped `_CURRENT_VERSION` to 12, following the
+  exact precedent of `model` (migration 11): the column is added by ALTER only, **not** in
+  CREATE TABLE, so fresh and existing DBs converge through the one migration path. Wired
+  `upsert_session` (INSERT + ON CONFLICT + `_origin_json` helper, duck-typed, no core import)
+  and the read side flows the JSON string through `_from_dict._parse_origin`.
+- Additive + defaulted → **old rows backfill to telegram/user; zero breakage.** Verified the
+  migration applies cleanly to a copy of the live `state/mesh.db` (origin column present,
+  schema_version=12).
+- **Test result:** `tests/test_session_origin.py` 4/4 green (incl. DB-mirror round-trip +
+  pre-M1 load). `test_components.py` + `test_queue_persistence.py` + `test_telegram_session_flow.py`
+  = 24 passed, 1 failed — the failure is the **pre-existing** `test_node_live_state_helpers_format_db_rows`
+  (Step 0 baseline), unchanged.
 
 ---
 
@@ -191,7 +216,8 @@ event?" from this doc alone.
 ## M1 Definition of Done (tick when all steps closed)
 
 - [ ] Backends declared in one place; adding one = one edit.
-- [ ] `Session` carries `origin`; old files load; no DB migration.
+- [ ] `Session` carries `origin`; old files/rows load; one additive defaulted column
+      (migration 12) — no destructive/behavior-changing migration. (See Step 2 FORK.)
 - [ ] `SessionService.create_session/bind_active` exist, tested, reuse the orchestrator store.
 - [ ] Telegram create flow routes through the service; `test_telegram_session_flow.py`
       unchanged vs. baseline.
