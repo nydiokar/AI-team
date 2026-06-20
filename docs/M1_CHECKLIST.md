@@ -137,21 +137,21 @@ descriptive tag only.
 
 ## Step 3 — `SessionService` (the seam) — create + bind only
 
-- [ ] Create `src/core/session_service.py` with `CommandResult` and `SessionService`
+- [x] Create `src/core/session_service.py` with `CommandResult` and `SessionService`
       (`__init__`, `create_session`, `bind_active`) per spec §B.1.
-- [ ] **Omit** the `*_view` methods and the `SessionView` import (needs deferred Move C).
-- [ ] `create_session` preserves all of: backend validation → `store.create` → set `model`
+- [x] **Omit** the `*_view` methods and the `SessionView` import (needs deferred Move C).
+- [x] `create_session` preserves all of: backend validation → `store.create` → set `model`
       → set `machine_id` from `node_id` → set `origin` → single `save` → optional `bind`.
-- [ ] `orchestrator.__init__`: `self.session_service = SessionService(self.session_store)`
+- [x] `orchestrator.__init__`: `self.session_service = SessionService(self.session_store)`
       — reuse the existing store; do **not** construct a second `SessionStore`.
-- [ ] New `tests/test_session_service.py` (no network/CLI):
-  - [ ] `create_session(backend="claude", repo_path=tmp)` → `ok`, persisted, bound.
-  - [ ] `create_session(node_id="LP-1")` → `session.machine_id == "LP-1"`.
-  - [ ] `create_session(model="opus")` → `session.model == "opus"`.
-  - [ ] `create_session(origin=SessionOrigin("web","user"))` → origin persisted.
-  - [ ] `create_session(backend="nope")` → `not ok`, `reason=="unknown_backend"`, nothing saved.
-  - [ ] `bind_active("unknown")` → `reason=="session_not_found"`.
-- [ ] `pytest tests/test_session_service.py -q` green.
+- [x] New `tests/test_session_service.py` (no network/CLI):
+  - [x] `create_session(backend="claude", repo_path=tmp)` → `ok`, persisted, bound.
+  - [x] `create_session(node_id="LP-1")` → `session.machine_id == "LP-1"`.
+  - [x] `create_session(model="opus")` → `session.model == "opus"`.
+  - [x] `create_session(origin=SessionOrigin("web","user"))` → origin persisted.
+  - [x] `create_session(backend="nope")` → `not ok`, `reason=="unknown_backend"`, nothing saved.
+  - [x] `bind_active("unknown")` → `reason=="session_not_found"`.
+- [x] `pytest tests/test_session_service.py -q` green.
 
 **Done = exactly:** service exists and is unit-tested independently of Telegram.
 **Do NOT:** add `switch_backend` (no such flow exists in the codebase), `delete_session`,
@@ -159,6 +159,17 @@ descriptive tag only.
 **Do NOT:** put user-facing prose in `CommandResult` — `reason` is a machine code.
 **Revert:** delete the file + the one orchestrator line. Nothing references it yet.
 **Notes:**
+- `session_service.py` imports `SessionService` directly into `orchestrator.py` (added
+  `from src.core.session_service import SessionService`); not re-exported from `src.core`
+  to keep the change minimal. Service constructed right after `self.session_store`,
+  reusing that instance (no second store).
+- `create_session` reproduces the original's set-then-single-`save` semantics: origin set
+  unconditionally, model/node_id set conditionally, then exactly one `save`, then optional
+  `bind`. `node_id == "__local__"` is treated as "no pin" and does **not** overwrite the
+  hostname `store.create` assigns.
+- `*_view` methods + `SessionView` import omitted (Move C deferred), as required.
+- Added one test beyond the listed set: `__local__` must not clobber the default
+  `machine_id` — guards the F1-class bug the spec calls out. **9 passed.**
 
 ---
 
