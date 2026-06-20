@@ -1071,25 +1071,17 @@ class TelegramInterface:
         node_id: str = "__local__",
         model: Optional[str] = None,
     ) -> Session:
-        import socket
-        session = self.session_store.create(
+        # Thin wrapper over the transport-neutral lifecycle service. Telegram no
+        # longer owns create/bind/node-pin/model-pin logic — it issues a command.
+        result = self.orchestrator.session_service.create_session(
             backend=backend,
             repo_path=repo_path,
-            telegram_chat_id=chat_id,
+            chat_id=chat_id,
             owner_user_id=user_id,
+            node_id=node_id,
+            model=model,
         )
-        # Pin model and/or remote node, then persist once.
-        dirty = False
-        if model:
-            session.model = model
-            dirty = True
-        if node_id and node_id != "__local__":
-            session.machine_id = node_id
-            dirty = True
-        if dirty:
-            self.session_store.save(session)
-        self.session_store.bind(chat_id, session.session_id)
-        return session
+        return result.session
 
     def _get_accessible_session(
         self,
