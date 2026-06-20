@@ -1,0 +1,204 @@
+# Milestone M1 — Execution Checklist
+
+Working doc for **building** M1. Rationale, blueprints, and the OpenClaw review live in
+`docs/COCKPIT_REFACTOR_SPEC.md` (§5 Move B, §3 Move A, §6 Move D). This file is the
+**ordered, tickable task list** — follow it top to bottom and tick each box when its
+acceptance line passes.
+
+---
+
+## How to use this doc (read once, then obey)
+
+1. **Do the boxes in order. Tick `- [x]` only when that box's acceptance passes.**
+2. **The checklist is the scope. If a change is not a box here, it is out of scope.**
+   Deferred ≠ "do a little of it." Don't start the Web UI, scoping modes, new tables,
+   caching, or neighboring refactors — those are M2+ (see bottom).
+3. **If a box is wrong or a detail is missing:** do **not** improvise around it. Edit this
+   doc — fix the box or add a sub-box — *then* implement. The doc converges; the code
+   doesn't drift. A doc edit is visible in the diff; silent improvisation is not.
+4. **If you hit a real fork the doc can't answer** (e.g. node pinning behaves differently
+   than the spec claims): stop, write what you found under that step's `Notes`, and surface
+   it. A surprised assumption is a signal, not a green light to redesign.
+5. Each step is its own commit and is independently revertible (the `Revert` line).
+
+**One-line invariant:** *M1 is an extraction + a doc, not a feature. Telegram behavior must
+stay byte-identical. No DB migration. If you're adding capability users can see, you've left M1.*
+
+---
+
+## Step 0 — Baseline (no production code)
+
+- [x] Branch `feat/session-service-m1` off `main`.
+- [x] Confirm cost guard active (`tests/conftest.py`, `test_cost_guard`) — no step may
+      invoke the paid CLI.
+- [x] Record green baseline: `pytest tests/test_telegram_session_flow.py -q` passes now.
+      Save the run; Step 4 must match it.
+
+**Done = exactly:** baseline recorded green. **Not:** any source edit yet.
+**Notes:**
+- Cost guard: `tests/conftest.py` forces `AI_TEAM_TEST_MODE=1` + `MESH_ENABLED=false` at
+  import time, and `src/core/test_guard.py` exists and blocks paid backend spawns. There is
+  **no test literally named `test_cost_guard`** — the guard is the conftest mechanism +
+  `test_guard.py` module. Box checked on that basis (the doc's parenthetical name is loose).
+- **Baseline is NOT fully green.** `pytest tests/test_telegram_session_flow.py -q` →
+  **21 passed, 1 failed**. The one failure is pre-existing on `main` (no source edited yet):
+  `test_node_live_state_helpers_format_db_rows` — asserts `_node_load_text(row) ==
+  "slots 2/4, active 2"` but the helper returns `"slots 2/4, active 2 (stale)"` because the
+  test's `row` fixture carries no heartbeat/`live_state_ts`, so the staleness check fires.
+  This is a **time-independent, deterministic** failure in the test fixture, unrelated to M1.
+- **Baseline of record for the Step 4 gate:** `21 passed, 1 failed
+  (test_node_live_state_helpers_format_db_rows)`. Step 4 must reproduce this exact set — the
+  four named create/node-pin/close tests must stay **passing** and no *new* failure may appear.
+
+---
+
+## Step 1 — Backend registry (consolidation, zero behavior change)
+
+- [ ] Create `src/backends/registry.py` per spec §3 A.1: name→factory map +
+      `build_backends()`, `valid_backend_names()`, `is_valid_backend()`, `DEFAULT_BACKEND`.
+      **No icon/label fields** (display is a surface concern).
+- [ ] `orchestrator.py:59` → `self._backends = build_backends()`.
+- [ ] `worker/agent.py:385` `_make_backends()` → `return build_backends()`.
+- [ ] `telegram/interface.py:2252` and `:2380` → `_valid_backends = valid_backend_names()`.
+- [ ] New `tests/test_backend_registry.py`: keys == `valid_backend_names()`; every value is
+      a `CodingBackend`; `DEFAULT_BACKEND in valid_backend_names()`.
+- [ ] `pytest tests/ -k "backend or components" -q` green.
+
+**Done = exactly:** backend set declared in one file; tests green.
+**Do NOT touch:** the `interface.py:800/829/852/874` icon branches (presentation — leave
+verbatim); the `CodingBackend` ABC; any adapter file.
+**Revert:** restore the two dict literals. Independent of later steps.
+**Notes:**
+
+---
+
+## Step 2 — `SessionOrigin` field (additive, back-compatible)
+
+- [ ] Add `SessionOrigin` dataclass to `src/core/interfaces.py` (spec §B.0):
+      `channel="telegram"`, `kind="user"`.
+- [ ] Add `origin: Optional[SessionOrigin] = None` to `Session`; in `__post_init__`,
+      default `None` → `SessionOrigin()`.
+- [ ] `session_store.py` `_to_dict`: write `"origin": {"channel":..., "kind":...}`.
+      `_from_dict`: read it, defaulting to `SessionOrigin()` when the key is absent.
+- [ ] Verify `db.py:upsert_session` tolerates the extra key (it stores the session JSON
+      blob, like `task_history`). **No new DB column.** If it does NOT tolerate it →
+      record under Notes and update this step before proceeding.
+- [ ] Test (in `test_components.py` or `test_queue_persistence.py`): session with no origin
+      round-trips to `("telegram","user")`; a `("web","user")` origin survives save→load on
+      both JSON and DB mirror.
+- [ ] Load an existing pre-M1 session JSON from `state/sessions/` (or a fixture copy) —
+      confirm it still loads (back-compat).
+
+**Done = exactly:** field persists both ways; old files still load; tests green.
+**Do NOT:** add scoping modes, a key-string format, or any routing logic — `origin` is a
+descriptive tag only. **No DB schema migration.**
+**Revert:** drop the field + serialization lines; old files unaffected.
+**Notes:**
+
+---
+
+## Step 3 — `SessionService` (the seam) — create + bind only
+
+- [ ] Create `src/core/session_service.py` with `CommandResult` and `SessionService`
+      (`__init__`, `create_session`, `bind_active`) per spec §B.1.
+- [ ] **Omit** the `*_view` methods and the `SessionView` import (needs deferred Move C).
+- [ ] `create_session` preserves all of: backend validation → `store.create` → set `model`
+      → set `machine_id` from `node_id` → set `origin` → single `save` → optional `bind`.
+- [ ] `orchestrator.__init__`: `self.session_service = SessionService(self.session_store)`
+      — reuse the existing store; do **not** construct a second `SessionStore`.
+- [ ] New `tests/test_session_service.py` (no network/CLI):
+  - [ ] `create_session(backend="claude", repo_path=tmp)` → `ok`, persisted, bound.
+  - [ ] `create_session(node_id="LP-1")` → `session.machine_id == "LP-1"`.
+  - [ ] `create_session(model="opus")` → `session.model == "opus"`.
+  - [ ] `create_session(origin=SessionOrigin("web","user"))` → origin persisted.
+  - [ ] `create_session(backend="nope")` → `not ok`, `reason=="unknown_backend"`, nothing saved.
+  - [ ] `bind_active("unknown")` → `reason=="session_not_found"`.
+- [ ] `pytest tests/test_session_service.py -q` green.
+
+**Done = exactly:** service exists and is unit-tested independently of Telegram.
+**Do NOT:** add `switch_backend` (no such flow exists in the codebase), `delete_session`,
+`list_views`, dispatch logic, or notification logic. Lifecycle create+bind only.
+**Do NOT:** put user-facing prose in `CommandResult` — `reason` is a machine code.
+**Revert:** delete the file + the one orchestrator line. Nothing references it yet.
+**Notes:**
+
+---
+
+## Step 4 — Point Telegram at the service (the ONLY behavior-touching edit)
+
+- [ ] Rewrite the **body** of `TelegramInterface._create_and_bind_session`
+      (`interface.py:1063`) to delegate to
+      `self.orchestrator.session_service.create_session(backend=..., repo_path=...,
+      chat_id=..., owner_user_id=..., node_id=node_id, model=model)` and
+      `return result.session`.
+- [ ] Keep the method **signature identical** → callers at `:2101/:2297/:2489` unchanged.
+- [ ] **Critical gate:** `pytest tests/test_telegram_session_flow.py -q` matches the Step 0
+      baseline, incl. `test_session_new_creates_session_and_guides_next_step`,
+      `test_session_new_repo_callback_creates_session`,
+      `test_session_new_remote_command_uses_db_node_repos` (node pinning), and the
+      session-close test. **Any output diff = stop, fix, do not merge.**
+
+**Done = exactly:** create flow routes through the service; Telegram output byte-identical.
+**Do NOT touch:** the node/repo picker, the model picker, `submit_instruction` dispatch, or
+any other handler. One method body changes; nothing else.
+**Revert:** restore the original 4-statement body. Service then sits unused (still valid for
+a future surface) — partial revert is safe.
+**Notes:**
+
+---
+
+## Step 5 — `docs/CONTROL_CONTRACT.md` (the durable artifact)
+
+Write the doc per spec §6, grounded in what M1 actually shipped:
+
+- [ ] **Event envelope** — canonical fields from `observability.emit_event`; "unknown
+      fields are opaque." Note the OpenClaw parallel and that the **DB read model is the
+      gap-recovery path** (their "events not replayed" → our `db.list_*`).
+- [ ] **Event catalog** — grep `emit_event(`/`_emit_event(` in `orchestrator.py`,
+      `notification_service.py`, `task_server.py`; one line per event; mark Telegram-consumed.
+- [ ] **Inbound command surface** — the two entry points:
+      `SessionService.{create_session,bind_active}` (lifecycle) and
+      `orchestrator.submit_instruction(...)` (dispatch). Rule: *no transport writes session
+      state directly; no transport puts prose in `CommandResult`.*
+- [ ] **`SessionOrigin`** — `channel`/`kind`, defaults, descriptive-not-routing (contrast
+      OpenClaw scoping, explicitly not adopted).
+- [ ] **Backend extension** — "add a backend = one edit in `src/backends/registry.py`."
+- [ ] **Read model pointer** — `db.list_sessions/list_tasks/list_nodes`; `SessionView`
+      marked *planned, built with the Web UI*.
+- [ ] **Reserved workflow events** — list `review.requested/completed`, `handoff.created`,
+      `approval.requested/granted` as **reserved, not emitted yet**. No code.
+
+**Done = exactly:** a reader can answer "how do I add a surface / a backend / a workflow
+event?" from this doc alone.
+**Do NOT:** implement any reserved event, WS endpoint, or workflow command here. Doc only.
+**Notes:**
+
+---
+
+## M1 Definition of Done (tick when all steps closed)
+
+- [ ] Backends declared in one place; adding one = one edit.
+- [ ] `Session` carries `origin`; old files load; no DB migration.
+- [ ] `SessionService.create_session/bind_active` exist, tested, reuse the orchestrator store.
+- [ ] Telegram create flow routes through the service; `test_telegram_session_flow.py`
+      unchanged vs. baseline.
+- [ ] `CONTROL_CONTRACT.md` covers events, the two inbound entry points, `SessionOrigin`,
+      backend extension, read model, reserved workflow events.
+- [ ] **Exit check:** a Web UI author could create a session via
+      `SessionService.create_session(origin=SessionOrigin("web"))`, dispatch via
+      `submit_instruction`, and render `events.ndjson` + `db.list_*` — **with no further
+      core refactor.** (Verify by reasoning, not by building the UI.)
+
+---
+
+## OUT OF M1 — do not start these here (they have their own milestone)
+
+- **M2:** `SessionView` DTO (Move C) + read methods + first read-only Web dashboard.
+- **M3:** WS/HTTP transport with handshake/auth — borrow OpenClaw's `req/res/event` framing then.
+- **M4:** workflow commands that emit the reserved events.
+- **Never (until pain proves otherwise):** new Task/Run/Review tables, layer re-org,
+  caching tiers, session scoping modes, plugin SDK, ACP/A2A bridges.
+
+If working on M1 surfaces a strong reason to pull one of these forward, that is a
+**proposal to the operator**, recorded under the relevant step's Notes — not a license to
+build it.
