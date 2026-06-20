@@ -1081,6 +1081,11 @@ class TelegramInterface:
             node_id=node_id,
             model=model,
         )
+        if not result.ok:
+            # Callers pre-validate the backend, so a rejection here is a
+            # programming error — fail loud instead of returning None and
+            # crashing with an opaque AttributeError at the call site.
+            raise ValueError(f"create_session rejected: {result.reason}")
         return result.session
 
     def _get_accessible_session(
@@ -2082,7 +2087,7 @@ class TelegramInterface:
             )
             return
         backend, repo_path = args[0].lower(), " ".join(args[1:])
-        if backend not in ("claude", "codex", "opencode", "opencode-server"):
+        if backend not in valid_backend_names():
             await update.message.reply_text("❌ Backend must be 'claude', 'codex', 'opencode', or 'opencode-server'.")
             return
         resolution = self._path_resolver().resolve_session_path(repo_path)
