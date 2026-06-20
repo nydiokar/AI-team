@@ -383,13 +383,8 @@ async def _run_nudge_listener(
 # ---------------------------------------------------------------------------
 
 def _make_backends() -> Dict[str, Any]:
-    from src.backends import ClaudeCodeBackend, CodexBackend, OpenCodeBackend, OpenCodeServerBackend
-    return {
-        "claude": ClaudeCodeBackend(),
-        "codex": CodexBackend(),
-        "opencode": OpenCodeBackend(),
-        "opencode-server": OpenCodeServerBackend(),
-    }
+    from src.backends.registry import build_backends
+    return build_backends()
 
 
 # ---------------------------------------------------------------------------

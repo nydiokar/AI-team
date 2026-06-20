@@ -22,6 +22,7 @@ from src.core.process_utils import (
 from src.core.session_store import SessionStore
 from src.core.interfaces import Session, SessionStatus
 from src.core.path_resolver import PathResolver, PathResolution
+from src.backends.registry import valid_backend_names
 
 try:
     from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -2249,7 +2250,7 @@ class TelegramInterface:
             )
             return
 
-        _valid_backends = ("claude", "codex", "opencode", "opencode-server")
+        _valid_backends = valid_backend_names()
         backend = args[0].lower()
         if backend not in _valid_backends:
             await update.message.reply_text("❌ Backend must be 'claude', 'codex', 'opencode', or 'opencode-server'.")
@@ -2377,7 +2378,7 @@ class TelegramInterface:
             return
 
         data = query.data or ""
-        _valid_backends = ("claude", "codex", "opencode", "opencode-server")
+        _valid_backends = valid_backend_names()
 
         # --- Cancel: bail out of the whole flow ---
         if data.startswith("session_new_cancel"):
