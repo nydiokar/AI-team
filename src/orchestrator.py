@@ -28,6 +28,7 @@ from src.core import (
 )
 from src.bridges import LlamaMediator
 from src.backends.registry import build_backends
+from src.core.session_service import SessionService
 from config import config
 from src.validation.engine import ValidationEngine
 from src.core.notification_service import NotificationService
@@ -56,6 +57,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.file_watcher = AsyncFileWatcher(config.system.tasks_dir)
         self.llama_mediator = LlamaMediator()
         self.session_store = SessionStore()
+        self.session_service = SessionService(self.session_store)
         self._backends = build_backends()
         
         # Task management
