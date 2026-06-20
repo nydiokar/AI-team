@@ -251,9 +251,21 @@ def emit_event(
     """Append one NDJSON event line to logs/events.ndjson. Never raises.
 
     IDs default from the current correlation context, then the module node_id,
-    so callers inside a `log_context(...)` block don't need to repeat them.
+    so callers inside a ``log_context(...)`` block don't need to repeat them.
     The envelope is a superset of the legacy schema (event/status/duration_s/
     task_type/error_class) so existing readers keep working.
+
+    Canonical envelope fields (consumers MAY rely on these):
+
+        timestamp    str   ISO-8601 (always present)
+        event        str   event name (always present)
+        node_id      str   hostname or WORKER_NODE_ID
+        task_id      str   when in a task context
+        session_id   str   when in a session context
+
+    Extra fields are passed as ``**fields`` and vary per event type.
+    All consumers should treat unknown fields as opaque and skip them.
+    This shape feeds both Telegram and the future Web UI / event stream.
     """
     try:
         ctx = _current_context()
