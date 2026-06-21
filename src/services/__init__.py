@@ -4,6 +4,7 @@ from .task_parser import TaskParser
 from .path_resolver import PathResolver, PathResolution
 from .session_store import SessionStore
 from .session_service import SessionService
+from .workflow_service import WorkflowService
 from .result_text import (
     extract_text_from_payload, session_reply_text, short_failure_reason,
     format_file_change_lines,
@@ -26,7 +27,7 @@ except ModuleNotFoundError as exc:
 __all__ = [
     "TaskParser",
     "PathResolver", "PathResolution",
-    "SessionStore", "SessionService",
+    "SessionStore", "SessionService", "WorkflowService",
     "extract_text_from_payload", "session_reply_text", "short_failure_reason",
     "format_file_change_lines",
     "NotificationService",

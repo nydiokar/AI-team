@@ -28,7 +28,7 @@ from src.core import (
 )
 from src.services import (
     TaskParser, AsyncFileWatcher, SessionStore, PathResolver,
-    SessionService, NotificationService,
+    SessionService, WorkflowService, NotificationService,
 )
 from src.bridges import LlamaMediator
 from src.backends.registry import build_backends
@@ -60,6 +60,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.llama_mediator = LlamaMediator()
         self.session_store = SessionStore()
         self.session_service = SessionService(self.session_store)
+        self.workflow_service = WorkflowService()
         self._backends = build_backends()
         
         # Task management

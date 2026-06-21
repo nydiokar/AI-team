@@ -1,6 +1,7 @@
 # Control Contract
 
-Status: v1 — shipped with Milestone M1 (`docs/M1_CHECKLIST.md`)
+Status: v2 — M1 (contract + SessionService) + M2 (SessionView) + M3 (read-only web
+dashboard) + M4 (workflow events) shipped on `feat/session-service-m1`.
 Audience: an author adding a **second surface** (Web UI), a **new backend**, or a future
 **review/handoff workflow** — without re-reading orchestrator internals.
 
@@ -110,6 +111,11 @@ These map to the **reserved** `run.completed` / `run.failed` workflow names (§7
 | `heartbeat` | long-running task still alive |
 | `error_notification` | an error was surfaced to the operator |
 
+### Workflow (`workflow_service.py`) — review / handoff / approval (M4)
+
+`review.requested` · `review.completed` · `handoff.created` · `approval.requested` ·
+`approval.granted` — emitted by `WorkflowService`; see §7 for fields and the binding rule.
+
 ---
 
 ## 3. Outbound transport boundary (already correct — do not refactor)
@@ -131,10 +137,10 @@ outbound symmetry to the inbound `SessionService` (§4).
 
 ## 4. Inbound command surface (the ONLY way a surface issues intent)
 
-There are exactly **two** transport-neutral entry points. A new surface calls these; it does
-**not** re-implement them.
+There are **three** transport-neutral entry points: lifecycle (4a), dispatch (4b), and
+workflow (4c, §7). A new surface calls these; it does **not** re-implement them.
 
-### 4a. Lifecycle — `SessionService` (`src/core/session_service.py`)
+### 4a. Lifecycle — `SessionService` (`src/services/session_service.py`)
 
 ```python
 SessionService.create_session(*, backend, repo_path,
@@ -161,11 +167,25 @@ orchestrator.submit_instruction(description, task_type=None, target_files=None,
 
 Already transport-neutral; set `source` to your surface name.
 
+### 4c. Workflow — `WorkflowService` (`src/services/workflow_service.py`)
+
+```python
+orchestrator.workflow_service.review_requested(*, session_id, task_id=None, reviewer="", note="")
+orchestrator.workflow_service.review_completed(*, session_id, verdict, task_id=None, ...)
+orchestrator.workflow_service.handoff_created(*, session_id, to, task_id=None, reason="")
+orchestrator.workflow_service.approval_requested(*, session_id, action, task_id=None, ...)
+orchestrator.workflow_service.approval_granted(*, session_id, action, granted=True, ...)
+```
+
+Stateless; emits the §7 workflow events correlated to the session/task. Returns the same
+`CommandResult` envelope. See §7 for the full field list, verdict values, and reject codes.
+
 ### The rule (binding on every transport)
 
 > **No transport writes session state directly.** Create/bind goes through `SessionService`;
-> dispatch goes through `submit_instruction`. **No transport puts user-facing prose in a
-> `CommandResult`** — `reason` is a stable code; wording lives in the surface.
+> dispatch goes through `submit_instruction`; workflow steps go through `WorkflowService`.
+> **No transport puts user-facing prose in a `CommandResult`** — `reason` is a stable code;
+> wording lives in the surface.
 
 This mirrors OpenClaw's structured `req/res` (`id` + `ok` + `error`, no prose in the
 protocol). Telegram's `_create_and_bind_session` is now a **thin wrapper** over 4a and is the
@@ -224,21 +244,35 @@ the Web UI (M3) renders `[v.to_dict() for v in session_service.list_views()]`.
 
 ---
 
-## 7. Reserved workflow events (NOT emitted yet — reserved vocabulary)
+## 7. Workflow events (implemented in M4)
 
-When a review/handoff/approval workflow is built (M4), it MUST emit from this one vocabulary
-so all surfaces share names. **None of these are emitted today. No code exists for them.**
+The review/handoff/approval vocabulary is emitted by **`WorkflowService`**
+(`src/services/workflow_service.py`), the **third** transport-neutral inbound entry point
+(beside §4a/§4b). All surfaces emit from this one vocabulary so names never fork — the
+constants live in that module (`EVENT_REVIEW_REQUESTED`, …) and `WORKFLOW_EVENTS` is the set.
 
-```
-review.requested     review.completed
-handoff.created
-approval.requested   approval.granted
-run.failed           run.completed     (map to existing <backend>_finished, §2)
-```
+| event | emitted by | key fields |
+|---|---|---|
+| `review.requested` | `WorkflowService.review_requested` | `reviewer`, `note` |
+| `review.completed` | `WorkflowService.review_completed` | `verdict` ∈ {approved, changes_requested, rejected}, `reviewer`, `note` |
+| `handoff.created` | `WorkflowService.handoff_created` | `to`, `handoff_reason` |
+| `approval.requested` | `WorkflowService.approval_requested` | `action`, `requested_by` |
+| `approval.granted` | `WorkflowService.approval_granted` | `action`, `granted` (false = denied), `approver` |
 
-**Rule for that future work:** *workflow steps emit events (§1) and call existing services
-(§4); they do not mutate state directly and do not require a workflow engine.* Reserving the
-names now keeps the eventual implementation consistent and costs nothing.
+Each is correlated to a `session_id` (required) and optional `task_id`. Every method returns
+a `CommandResult` (machine code, no prose) — `reason` ∈ `{"missing_session_id",
+"invalid_verdict", "missing_handoff_target", "missing_action"}` on reject. Reached via
+`orchestrator.workflow_service`.
+
+`run.failed` / `run.completed` are **not** separate events — they map to the existing
+`<backend>_finished` events the orchestrator already emits (§2); re-emitting would duplicate
+the stream.
+
+**The binding rule (honored literally):** *workflow steps emit events (§1) and call existing
+services (§4); they do NOT mutate state directly and do NOT require a workflow engine.*
+`WorkflowService` is stateless by construction — it holds no store and writes no tables;
+session-existence validation is a deliberate non-goal (these are provenance events). A
+surface that needs to *change* session state on a workflow step calls §4a/§4b in addition.
 
 ---
 
@@ -259,6 +293,8 @@ names now keeps the eventual implementation consistent and costs nothing.
   `src/backends/registry.py`. `build_backends()`, `valid_backend_names()`,
   `is_valid_backend()` all derive from it; `CodingBackend` (`src/core/interfaces.py`) is the
   contract. Display icons live in each surface, not the registry.
-- **Add a workflow event?** Use a reserved name from §7; emit via `emit_event` (§1); call
-  `SessionService` / `submit_instruction` for any state change (§4). Do not add tables or an
-  engine.
+- **Trigger a workflow step (review/handoff/approval)?** Call the matching
+  `orchestrator.workflow_service.*` method (§4c / §7) — it emits the canonical event. For any
+  *state* change alongside it, also call `SessionService` / `submit_instruction` (§4a/§4b).
+  Do not add tables or an engine. To add a *new* workflow event, add a constant + method to
+  `src/services/workflow_service.py` (extend `WORKFLOW_EVENTS`) — one vocabulary, one file.
