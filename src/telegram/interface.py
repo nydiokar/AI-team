@@ -1492,7 +1492,10 @@ class TelegramInterface:
         updated = row.get("live_state_updated_at")
         if live and updated:
             try:
-                age_s = (_dt.utcnow() - _dt.fromisoformat(str(updated))).total_seconds()
+                parsed_ts = _dt.fromisoformat(str(updated))
+                if parsed_ts.tzinfo is not None:
+                    parsed_ts = parsed_ts.replace(tzinfo=None)
+                age_s = (_dt.utcnow() - parsed_ts).total_seconds()
                 stale = age_s > 120
             except Exception:
                 stale = True
