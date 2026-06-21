@@ -297,6 +297,7 @@ async def test_help_lists_current_command_set(monkeypatch, isolated_session_stor
 
 
 def test_node_live_state_helpers_format_db_rows():
+    from datetime import datetime, timezone
     row = {
         "max_concurrent": 4,
         "live_state": json.dumps({
@@ -305,6 +306,7 @@ def test_node_live_state_helpers_format_db_rows():
             "slots_total": 4,
             "active_tasks": ["task_a", "task_b"],
         }),
+        "live_state_updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     assert TelegramInterface._node_live_state(row)["slots_used"] == 2
