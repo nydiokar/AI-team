@@ -106,7 +106,7 @@ class NodeInspector:
         node_id = self.is_remote(session)  # may raise InspectError for offline node
         if node_id is None:
             # Local path — byte-identical to the worker path via the shared module.
-            from src.core.inspect_ops import run_inspect_op
+            from src.services.inspect_ops import run_inspect_op
             return await asyncio.to_thread(run_inspect_op, op, repo_path, params)
 
         return await self._run_remote(session, node_id, op, repo_path, params)

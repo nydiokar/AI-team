@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .interfaces import Session, SessionStatus
+from src.core.interfaces import Session, SessionStatus, SessionOrigin
 
 logger = logging.getLogger(__name__)
 
@@ -97,13 +97,13 @@ class SessionStore:
         except Exception as e:
             logger.debug("shadow_write_failed session_id=%s err=%s", session.session_id, e)
 
-    def list_all(self) -> List[Session]:
+    def list_all(self, limit: int = 10000) -> List[Session]:
         # Read from DB first when available (DB is canonical state source).
         try:
             from src.control.db import get_db
             db = get_db()
             if db is not None:
-                rows = db.list_sessions(limit=10000)
+                rows = db.list_sessions(limit=limit)
                 sessions = []
                 for row in rows:
                     try:
@@ -120,6 +120,8 @@ class SessionStore:
         # Fall back to JSON directory scan when DB is unavailable.
         sessions = []
         for p in sorted(_SESSIONS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            if len(sessions) >= limit:
+                break
             try:
                 sessions.append(self._from_dict(json.loads(p.read_text(encoding="utf-8"))))
             except Exception:
@@ -198,6 +200,10 @@ class SessionStore:
             "telegram_thread_id": s.telegram_thread_id,
             "owner_user_id": s.owner_user_id,
             "task_history": s.task_history or [],
+            "origin": {
+                "channel": (s.origin or SessionOrigin()).channel,
+                "kind": (s.origin or SessionOrigin()).kind,
+            },
         }
 
     @staticmethod
@@ -210,6 +216,21 @@ class SessionStore:
                 except Exception:
                     return []
             return value or []
+
+        def _parse_origin(value):
+            """Read origin from a nested dict (JSON file) or JSON string (DB row);
+            absent/unparseable → default SessionOrigin (telegram/user)."""
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except Exception:
+                    value = None
+            if isinstance(value, dict):
+                return SessionOrigin(
+                    channel=value.get("channel", "telegram"),
+                    kind=value.get("kind", "user"),
+                )
+            return SessionOrigin()
 
         return Session(
             session_id=d["session_id"],
@@ -231,4 +252,5 @@ class SessionStore:
             telegram_thread_id=d.get("telegram_thread_id"),
             owner_user_id=d.get("owner_user_id"),
             task_history=_parse_list(d.get("task_history", [])),
+            origin=_parse_origin(d.get("origin")),
         )

@@ -10,7 +10,7 @@ import os
 from watchdog.observers import Observer as WatchdogObserver
 from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileModifiedEvent, FileMovedEvent
 
-from .interfaces import IFileWatcher
+from src.core.interfaces import IFileWatcher
 
 logger = logging.getLogger(__name__)
 

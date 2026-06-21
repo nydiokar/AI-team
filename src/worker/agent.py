@@ -383,13 +383,8 @@ async def _run_nudge_listener(
 # ---------------------------------------------------------------------------
 
 def _make_backends() -> Dict[str, Any]:
-    from src.backends import ClaudeCodeBackend, CodexBackend, OpenCodeBackend, OpenCodeServerBackend
-    return {
-        "claude": ClaudeCodeBackend(),
-        "codex": CodexBackend(),
-        "opencode": OpenCodeBackend(),
-        "opencode-server": OpenCodeServerBackend(),
-    }
+    from src.backends.registry import build_backends
+    return build_backends()
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +393,7 @@ def _make_backends() -> Dict[str, Any]:
 
 def _make_session_from_payload(payload: Dict[str, Any]) -> Any:
     """Reconstruct a Session-like object from the task payload."""
-    from src.core import SessionStore
+    from src.services import SessionStore
     from src.core.interfaces import Session, SessionStatus
 
     session_dict = payload.get("session")
@@ -484,7 +479,7 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any], http
     # repo, which lives on THIS worker. No backend needed — the gateway routes
     # these here precisely because it cannot touch the worker's filesystem.
     if action == "inspect":
-        from src.core.inspect_ops import run_inspect_op
+        from src.services.inspect_ops import run_inspect_op
         meta = payload.get("metadata") or {}
         op = meta.get("op", "")
         repo_path = meta.get("repo_path", "") or (payload.get("session") or {}).get("repo_path", "")

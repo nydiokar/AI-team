@@ -1,5 +1,122 @@
 # Progress Log
 
+## 2026-06-21 — Cockpit M4: workflow events (review / handoff / approval)
+
+**Milestone: the reserved workflow vocabulary (CONTROL_CONTRACT §7) is now a
+real, transport-neutral inbound entry point — the third beside SessionService
+(lifecycle) and submit_instruction (dispatch).** Branch: `feat/session-service-m1`.
+
+Shipped:
+- **`src/services/workflow_service.py`** — `WorkflowService`, stateless by
+  construction (no store, no tables, no engine — honors the §7 rule literally).
+  Five methods emit the canonical events `review.requested/completed`,
+  `handoff.created`, `approval.requested/granted`, each correlated to a
+  `session_id` (+ optional `task_id`) and returning a machine-code
+  `CommandResult`. The names live as constants + a `WORKFLOW_EVENTS` set so they
+  can't fork across surfaces. `run.*` from §7 is intentionally NOT re-emitted —
+  it maps to the existing `<backend>_finished` events.
+- Wired into `orchestrator.workflow_service`; exported from `src.services`.
+- The M3 dashboard surfaces these with no change (it renders any event).
+- **Design choices recorded:** review verdicts constrained to
+  {approved, changes_requested, rejected}; session-existence validation is a
+  deliberate non-goal (these are provenance events; coupling to the store would
+  break statelessness). A surface that must change state calls §4a/§4b too.
+
+Docs: `CONTROL_CONTRACT.md` updated — §2 catalog, §4 (now three entry points +
+4c), §7 (implemented, not reserved), §8, status → v2. New tests:
+`test_workflow_service.py` (12). Full suite = 308 passed, 7 pre-existing
+failures, 0 new.
+
+## 2026-06-21 — Cockpit M3: read-only web dashboard (the second surface)
+
+**Milestone: a second surface beside Telegram, proving the M1 contract holds —
+built entirely on the read model + event stream, with zero core change.**
+Branch: `feat/session-service-m1`.
+
+Shipped:
+- **`src/control/dashboard.py`** — a read-only FastAPI app. State from
+  `SessionService.list_views()` (M2 SessionView) + `db.list_tasks/list_nodes`;
+  live deltas from `events.ndjson`. JSON read endpoints (`/api/sessions|tasks|
+  nodes|events`) + a self-contained HTML shell at `/`. Bearer auth via
+  `DASHBOARD_TOKEN` (falls back to `WORKER_TOKEN`). **No inbound command path,
+  no forms** — which also sidesteps the optional `python-multipart` dep the task
+  server's upload routes need (the source of the 6 pre-existing suite failures).
+- **`observability.read_recent_events(limit, since_offset)`** — the canonical
+  read-side accessor for the event stream (inbound symmetry to `emit_event`).
+  Returns `{events, offset}`; the client polls `?since=<offset>` for deltas.
+  Per the contract, gap recovery is NOT a replay — the client refreshes state
+  from the read endpoints. Hardened against rotation: a stale offset past EOF
+  re-reads the tail instead of going silent.
+- **`dashboard_main.py`** (launcher, mirrors `server_main.py`) +
+  `MeshConfig.dashboard_port` (9003) / `dashboard_token` config.
+- XSS-safe client rendering (all event/session values escaped before innerHTML).
+
+Docs: `CONTROL_CONTRACT.md` §8 now points at the dashboard as the reference
+second-surface implementation. New tests: `test_dashboard.py` (13). Full suite =
+296 passed, 7 pre-existing failures, 0 new.
+
+## 2026-06-21 — Cockpit M2: SessionView read model (Move C)
+
+**Milestone: one read shape for "what the operator sees about a session."**
+Builds the deferred Move C now that M3's Web dashboard is the second reader that
+justifies it. Branch: `feat/session-service-m1` (continues the cockpit line).
+
+Shipped:
+- **`SessionView`** (`src/core/view_models.py`) — frozen DTO derived from
+  `Session`, never persisted. Carries the raw `backend` string + the derived
+  booleans every surface recomputes (`needs_input`, `is_active`) + the session
+  `origin` (channel/kind). Rendering (icons/labels) stays in each surface.
+  `to_dict()` is JSON-ready for the Web UI / WebSocket.
+- **`SessionService.list_views()` / `active_view(chat_id)`** — the read methods
+  the M1 service deliberately omitted; `active_view` delegates to
+  `store.get_active` so the stale-CLOSED-binding cleanup is preserved.
+- **Deviation from spec C.1 (recorded):** added `origin_channel`/`origin_kind`
+  to the DTO. The spec predates `SessionOrigin` being a real `Session` field
+  (M1 Step 2); a provenance-aware dashboard wants it, and it's pure read.
+
+Telegram list-handler adoption is opt-in (spec C.2) and intentionally NOT done —
+zero behavior change. `docs/CONTROL_CONTRACT.md` §6 updated (was "planned/M2").
+New tests: `test_view_models.py` (24). Tests: `pytest tests/test_view_models.py
+tests/test_session_service.py` green; full suite = 283 passed, 7 pre-existing
+failures (M1-baseline FastAPI form-import + live-state staleness), 0 new.
+
+## 2026-06-21 — Cockpit M1: transport-neutral session core
+
+**Milestone: the gateway is ready for a second surface (Web UI) with no further
+core refactor.** A documented extraction, not a feature — Telegram behavior is
+byte-identical to the pre-M1 baseline (`tests/test_telegram_session_flow.py`
+gate). Branch: `feat/session-service-m1`. Built top-to-bottom against
+`docs/M1_CHECKLIST.md` (the anti-scope-escape mechanism); rationale in
+`docs/COCKPIT_REFACTOR_SPEC.md`.
+
+Shipped:
+- **Backend registry** (`src/backends/registry.py`) — the backend set is declared
+  once (`build_backends/valid_backend_names/is_valid_backend/DEFAULT_BACKEND`);
+  orchestrator, worker, and the Telegram validation paths all derive from it.
+  Adding a backend = one edit. (Adversarial review caught a *third* hardcoded
+  validation tuple at `interface.py:2085` the spec miscounted — now also routed
+  through `valid_backend_names()`.)
+- **`SessionOrigin`** — a descriptive `{channel, kind}` tag on `Session`
+  (defaults `telegram/user`). Persisted in JSON **and** the DB mirror via
+  **migration 12** (additive, defaulted column; old rows backfill; revert-safe).
+  The spec's "no DB column" premise was wrong — `SessionStore` reads DB-first, so
+  a JSON-only tag would have been inert. Descriptive, *not* routing — scoping
+  modes deliberately not adopted.
+- **`SessionService`** (`src/services/session_service.py`) — transport-neutral
+  lifecycle (`create_session`, `bind_active`) lifted off the Telegram class; the
+  inbound symmetry to `NotificationService`. Returns a machine-code
+  `CommandResult` (no prose). Wired into `orchestrator.__init__`, reusing the one
+  `SessionStore`. Telegram's `_create_and_bind_session` is now a thin wrapper.
+- **`docs/CONTROL_CONTRACT.md`** — the durable artifact: event envelope + catalog,
+  the two inbound entry points, `SessionOrigin`, backend extension, the `db.list_*`
+  read model (`SessionView` marked planned/M2), and reserved workflow event names.
+
+Deferred to M2+: `SessionView` DTO + read methods, WS/HTTP transport, workflow
+commands. New tests: `test_backend_registry.py`, `test_session_origin.py`,
+`test_session_service.py`. Tests: `pytest tests/test_telegram_session_flow.py
+tests/test_session_service.py tests/test_session_origin.py
+tests/test_backend_registry.py` (gate at baseline).
+
 ## 2026-06-18 — Watched job process-identity resilience
 
 T3.1 is complete. Watched jobs now persist worker probe fields
