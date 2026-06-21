@@ -171,7 +171,11 @@ class NodeInspector:
                     raise InspectError(row.get("error") or f"Inspection {status} on node '{node_id}'.")
             first = False
             if time.time() >= deadline:
-                # Leave the row as-is; a late worker result just becomes stale.
+                # Mark the task failed so the reaper doesn't loop on it forever.
+                try:
+                    db.fail_task(task_id, f"inspect timed out waiting for node '{node_id}'", status="failed")
+                except Exception:
+                    pass
                 raise InspectError(
                     f"Node '{node_id}' did not answer the inspection within "
                     f"{_INSPECT_TIMEOUT_SEC}s (offline or busy)."

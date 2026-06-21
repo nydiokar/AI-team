@@ -280,13 +280,27 @@ class TaskOrchestrator(ITaskOrchestrator):
         if any(isinstance(e, str) and "interactive_prompt_detected" in e for e in (result.errors or [])):
             return "Claude needs interactive approval"
 
+        exit_code_text: Optional[str] = None
         for text in texts:
             low = text.lower()
             if low.startswith("claude exited with code "):
+                exit_code_text = text  # defer — prefer any richer error first
                 continue
             compact = " ".join(text.split())
             if compact:
                 return compact[:120]
+
+        # Surface raw_stderr before giving up — it often holds the real reason
+        raw_stderr = (getattr(result, "raw_stderr", "") or "").strip()
+        if raw_stderr:
+            first_line = next((ln.strip() for ln in raw_stderr.splitlines() if ln.strip()), "")
+            if first_line:
+                suffix = f" ({exit_code_text})" if exit_code_text else ""
+                return f"{first_line[:200]}{suffix}"
+
+        # At minimum, be honest about the exit code instead of "Claude failed"
+        if exit_code_text:
+            return exit_code_text[:120]
 
         return "Claude failed"
 
@@ -1187,6 +1201,34 @@ class TaskOrchestrator(ITaskOrchestrator):
         backend = self._backends.get(session.backend)
         if not backend:
             return ExecutionResult(success=False, output="", errors=[f"Unknown backend: {session.backend}"])
+
+        # If the session is pinned to a remote mesh node, dispatch there — running
+        # the backend locally would use the wrong cwd (the Pi doesn't have the
+        # Windows/remote path that session.repo_path points to).
+        if config.mesh.enabled and session.machine_id and session.machine_id != socket.gethostname():
+            compact_task = Task(
+                id=f"compact-{session_id[:8]}-{int(time.time())}",
+                type=TaskType.ANALYZE,
+                priority=TaskPriority.HIGH,
+                status=TaskStatus.PENDING,
+                created=datetime.now().isoformat(),
+                title="Compact session context",
+                target_files=[],
+                prompt="/compact",
+                success_criteria=["Context compacted"],
+                context="",
+                metadata={"session_id": session_id, "source": "compact", "task_origin": "runtime"},
+            )
+            backend_name = session.backend or "claude"
+            self._mesh_enqueue_task(compact_task, backend_name)
+            result = await self._process_task_remote(compact_task, session, time.time(), config.system.task_timeout)
+            from src.core.interfaces import ExecutionResult as ER
+            return ER(
+                success=result.success,
+                output=result.output,
+                errors=result.errors or [],
+            )
+
         return await asyncio.to_thread(backend.compact_session, session)
 
     def load_compact_context(self, task_id: str) -> Dict[str, Any]:
@@ -1903,6 +1945,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         else:
             session.status = SessionStatus.ERROR
         self.session_store.save(session)
+
+        # Annotate failure errors with the node name so users see *which* machine failed.
+        node_label = node.node_id if node is not None else session.machine_id
+        if not result.success and result.errors and node_label:
+            result.errors = [
+                f"[{node_label}] {e}" if not str(e).startswith(f"[{node_label}]") else e
+                for e in result.errors
+            ]
 
         first_error = result.errors[0] if result.errors else ""
         logger.info(
