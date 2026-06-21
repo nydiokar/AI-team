@@ -76,9 +76,14 @@ class SessionService:
 
     # --- queries (read) — one read shape for every surface (Move C / M2) ---
 
-    def list_views(self) -> List[SessionView]:
-        """All sessions as operator-facing read models (DB-first via the store)."""
-        return [SessionView.from_session(s) for s in self.store.list_all()]
+    def list_views(self, limit: int = 200) -> List[SessionView]:
+        """Sessions as operator-facing read models (DB-first, newest first).
+
+        Bounded by ``limit`` so a polling surface doesn't scan the whole table on
+        every request. Sessions come back ordered by ``updated_at`` desc from the
+        store, so the bound keeps the most recently active ones.
+        """
+        return [SessionView.from_session(s) for s in self.store.list_all(limit=limit)]
 
     def active_view(self, chat_id: int) -> Optional[SessionView]:
         """The session currently bound to ``chat_id``, or None.

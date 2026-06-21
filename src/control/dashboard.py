@@ -65,12 +65,22 @@ def _require_auth(creds: HTTPAuthorizationCredentials = Security(_bearer)) -> No
 # Read-model accessors (lazy — keep import side-effect-free / testable)
 # ---------------------------------------------------------------------------
 
-def _session_views() -> List[Dict[str, Any]]:
-    """SessionView dicts via the shared store (DB-first). Empty on any failure."""
-    try:
+_session_service = None  # lazily built once; the store holds no per-request state
+
+
+def _get_session_service():
+    global _session_service
+    if _session_service is None:
         from src.services.session_store import SessionStore
         from src.services.session_service import SessionService
-        return [v.to_dict() for v in SessionService(SessionStore()).list_views()]
+        _session_service = SessionService(SessionStore())
+    return _session_service
+
+
+def _session_views(limit: int) -> List[Dict[str, Any]]:
+    """SessionView dicts via the shared store (DB-first). Empty on any failure."""
+    try:
+        return [v.to_dict() for v in _get_session_service().list_views(limit=limit)]
     except Exception as e:
         logger.warning("dashboard_sessions_failed err=%s", e)
         return []
@@ -94,8 +104,8 @@ def health() -> Dict[str, str]:
 
 
 @app.get("/api/sessions", dependencies=[Depends(_require_auth)])
-def api_sessions() -> JSONResponse:
-    return JSONResponse({"sessions": _session_views()})
+def api_sessions(limit: int = Query(200, ge=1, le=1000)) -> JSONResponse:
+    return JSONResponse({"sessions": _session_views(limit)})
 
 
 @app.get("/api/tasks", dependencies=[Depends(_require_auth)])
@@ -109,7 +119,50 @@ def api_tasks(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
 def api_nodes() -> JSONResponse:
     db = _db()
     nodes = db.list_nodes() if db is not None else []
+    for n in nodes:
+        _annotate_node_liveness(n)
     return JSONResponse({"nodes": nodes})
+
+
+def _heartbeat_timeout_sec() -> int:
+    try:
+        from config import config as _cfg
+        return int(_cfg.mesh.node_heartbeat_timeout_sec)
+    except Exception:
+        return 90
+
+
+def _annotate_node_liveness(node: Dict[str, Any]) -> None:
+    """Derive a fresh ``live`` flag + ``heartbeat_age_sec`` from ``last_heartbeat``.
+
+    The stored ``status`` column is flipped to "offline" by the NodeRegistry's
+    expiry loop, which runs only in the gateway/server process — NOT here. So the
+    dashboard (a separate, read-only process) must derive liveness from the
+    heartbeat timestamp itself, using the same timeout the registry uses, instead
+    of trusting a column another process may not have updated yet.
+    """
+    from datetime import datetime, timezone  # noqa: F401  (timezone used below)
+
+    node["live"] = False
+    node["heartbeat_age_sec"] = None
+    raw = node.get("last_heartbeat")
+    if not raw:
+        return
+    try:
+        hb = datetime.fromisoformat(str(raw))
+        # DB timestamps (db._now -> datetime.utcnow().isoformat()) are naive but
+        # represent UTC. Normalise both sides to UTC so the age is correct
+        # regardless of the dashboard host's local timezone — otherwise every node
+        # reads "offline" by the local/UTC offset.
+        if hb.tzinfo is None:
+            hb = hb.replace(tzinfo=timezone.utc)
+        now = datetime.now(tz=timezone.utc)
+        age = (now - hb).total_seconds()
+        node["heartbeat_age_sec"] = round(age, 1)
+        node["live"] = age <= _heartbeat_timeout_sec()
+    except Exception:
+        # Unparseable timestamp -> leave live=False, age=None (treated as offline).
+        return
 
 
 @app.get("/api/events", dependencies=[Depends(_require_auth)])
@@ -215,8 +268,12 @@ async function refreshState() {
   rows($("sessions"), ["id","backend","status","model","repo"], s.sessions,
     d => [esc(d.session_id), esc(d.backend), statusPill(d.status), esc(d.model||"—"),
           `<span class="muted">${esc(d.repo_path)}</span>`]);
-  rows($("nodes"), ["node","status","backends"], n.nodes,
-    d => [esc(d.node_id), statusPill(d.status), esc((d.backends||"")).slice(0,40)]);
+  rows($("nodes"), ["node","live","backends","last hb"], n.nodes,
+    d => [esc(d.node_id),
+          `<span class="pill ${d.live?"ok":"err"}">${d.live?"live":"offline"}</span>`,
+          esc((d.backends||"")).slice(0,40),
+          d.heartbeat_age_sec==null?'<span class="muted">—</span>'
+            :`<span class="muted">${Math.round(d.heartbeat_age_sec)}s</span>`]);
   rows($("tasks"), ["id","status","session"], t.tasks,
     d => [esc(d.task_id||d.id), statusPill(d.status), esc(d.session_id)]);
 }

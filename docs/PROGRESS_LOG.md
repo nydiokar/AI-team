@@ -102,7 +102,7 @@ Shipped:
   The spec's "no DB column" premise was wrong — `SessionStore` reads DB-first, so
   a JSON-only tag would have been inert. Descriptive, *not* routing — scoping
   modes deliberately not adopted.
-- **`SessionService`** (`src/core/session_service.py`) — transport-neutral
+- **`SessionService`** (`src/services/session_service.py`) — transport-neutral
   lifecycle (`create_session`, `bind_active`) lifted off the Telegram class; the
   inbound symmetry to `NotificationService`. Returns a machine-code
   `CommandResult` (no prose). Wired into `orchestrator.__init__`, reusing the one
