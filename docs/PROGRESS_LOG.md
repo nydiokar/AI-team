@@ -1,5 +1,30 @@
 # Progress Log
 
+## 2026-06-21 — Cockpit M2: SessionView read model (Move C)
+
+**Milestone: one read shape for "what the operator sees about a session."**
+Builds the deferred Move C now that M3's Web dashboard is the second reader that
+justifies it. Branch: `feat/session-service-m1` (continues the cockpit line).
+
+Shipped:
+- **`SessionView`** (`src/core/view_models.py`) — frozen DTO derived from
+  `Session`, never persisted. Carries the raw `backend` string + the derived
+  booleans every surface recomputes (`needs_input`, `is_active`) + the session
+  `origin` (channel/kind). Rendering (icons/labels) stays in each surface.
+  `to_dict()` is JSON-ready for the Web UI / WebSocket.
+- **`SessionService.list_views()` / `active_view(chat_id)`** — the read methods
+  the M1 service deliberately omitted; `active_view` delegates to
+  `store.get_active` so the stale-CLOSED-binding cleanup is preserved.
+- **Deviation from spec C.1 (recorded):** added `origin_channel`/`origin_kind`
+  to the DTO. The spec predates `SessionOrigin` being a real `Session` field
+  (M1 Step 2); a provenance-aware dashboard wants it, and it's pure read.
+
+Telegram list-handler adoption is opt-in (spec C.2) and intentionally NOT done —
+zero behavior change. `docs/CONTROL_CONTRACT.md` §6 updated (was "planned/M2").
+New tests: `test_view_models.py` (24). Tests: `pytest tests/test_view_models.py
+tests/test_session_service.py` green; full suite = 283 passed, 7 pre-existing
+failures (M1-baseline FastAPI form-import + live-state staleness), 0 new.
+
 ## 2026-06-21 — Cockpit M1: transport-neutral session core
 
 **Milestone: the gateway is ready for a second surface (Web UI) with no further
