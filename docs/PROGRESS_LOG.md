@@ -1,5 +1,33 @@
 # Progress Log
 
+## 2026-06-21 — Cockpit M3: read-only web dashboard (the second surface)
+
+**Milestone: a second surface beside Telegram, proving the M1 contract holds —
+built entirely on the read model + event stream, with zero core change.**
+Branch: `feat/session-service-m1`.
+
+Shipped:
+- **`src/control/dashboard.py`** — a read-only FastAPI app. State from
+  `SessionService.list_views()` (M2 SessionView) + `db.list_tasks/list_nodes`;
+  live deltas from `events.ndjson`. JSON read endpoints (`/api/sessions|tasks|
+  nodes|events`) + a self-contained HTML shell at `/`. Bearer auth via
+  `DASHBOARD_TOKEN` (falls back to `WORKER_TOKEN`). **No inbound command path,
+  no forms** — which also sidesteps the optional `python-multipart` dep the task
+  server's upload routes need (the source of the 6 pre-existing suite failures).
+- **`observability.read_recent_events(limit, since_offset)`** — the canonical
+  read-side accessor for the event stream (inbound symmetry to `emit_event`).
+  Returns `{events, offset}`; the client polls `?since=<offset>` for deltas.
+  Per the contract, gap recovery is NOT a replay — the client refreshes state
+  from the read endpoints. Hardened against rotation: a stale offset past EOF
+  re-reads the tail instead of going silent.
+- **`dashboard_main.py`** (launcher, mirrors `server_main.py`) +
+  `MeshConfig.dashboard_port` (9003) / `dashboard_token` config.
+- XSS-safe client rendering (all event/session values escaped before innerHTML).
+
+Docs: `CONTROL_CONTRACT.md` §8 now points at the dashboard as the reference
+second-surface implementation. New tests: `test_dashboard.py` (13). Full suite =
+296 passed, 7 pre-existing failures, 0 new.
+
 ## 2026-06-21 — Cockpit M2: SessionView read model (Move C)
 
 **Milestone: one read shape for "what the operator sees about a session."**
