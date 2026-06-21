@@ -5,15 +5,16 @@ Web UI both call these methods instead of owning create/bind logic. Lifecycle
 only — task dispatch stays on orchestrator.submit_instruction(); outbound
 notifications stay on NotificationService.
 
-The read-side (*_view) methods depend on the deferred SessionView (Move C) and
-are intentionally omitted for M1 — the service is fully useful without them.
+Read-side (``list_views``/``active_view``) return SessionView DTOs (Move C / M2)
+so every surface consumes one read shape instead of re-deriving status logic.
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionOrigin
+from src.core.view_models import SessionView
 from src.backends.registry import is_valid_backend, DEFAULT_BACKEND
 
 
@@ -72,3 +73,18 @@ class SessionService:
             return CommandResult(False, reason="session_not_found")
         self.store.bind(chat_id, session_id)
         return CommandResult(True, session=s)
+
+    # --- queries (read) — one read shape for every surface (Move C / M2) ---
+
+    def list_views(self) -> List[SessionView]:
+        """All sessions as operator-facing read models (DB-first via the store)."""
+        return [SessionView.from_session(s) for s in self.store.list_all()]
+
+    def active_view(self, chat_id: int) -> Optional[SessionView]:
+        """The session currently bound to ``chat_id``, or None.
+
+        Delegates to ``store.get_active`` so the existing stale-binding cleanup
+        (a CLOSED session unbinds and reads as None) is preserved.
+        """
+        s = self.store.get_active(chat_id)
+        return SessionView.from_session(s) if s else None

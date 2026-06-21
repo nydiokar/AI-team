@@ -214,11 +214,13 @@ Authoritative state is the per-session JSON in `state/sessions/`; the **mesh DB*
 
 A Web UI dashboard renders `events.ndjson` for live deltas (§1) and these reads for state.
 
-**`SessionView` — planned, not built.** A read-side DTO (`SessionView.from_session(s)` →
-JSON-ready operator view, plus `SessionService.list_views()/active_view()`) is **deferred to
-M2** and intentionally not shipped in M1: it has no second reader yet (Move C in
-`docs/COCKPIT_REFACTOR_SPEC.md`). Build it **with** the Web UI, when a real consumer drives
-its shape. Until then, surfaces derive display state from `Session` + the read model above.
+**`SessionView` — shipped in M2.** A read-side DTO (`src/core/view_models.py`:
+`SessionView.from_session(s)` → JSON-ready operator view, plus
+`SessionService.list_views()` / `active_view(chat_id)`) gives every surface one read shape
+instead of re-deriving `status`/`needs_input`/`is_active` from `Session` ad hoc. It carries
+the raw `backend` string and the session's `origin` (channel/kind); rendering (icons/labels)
+stays in each surface. Telegram adoption is opt-in (handlers may switch incrementally);
+the Web UI (M3) renders `[v.to_dict() for v in session_service.list_views()]`.
 
 ---
 
