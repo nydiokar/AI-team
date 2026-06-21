@@ -121,7 +121,7 @@ These map to the **reserved** `run.completed` / `run.failed` workflow names (§7
 ## 3. Outbound transport boundary (already correct — do not refactor)
 
 Core never reaches into Telegram for outbound. It calls `NotificationService`
-(`src/core/notification_service.py`), which fans each notification to the registered
+(`src/services/notification_service.py`), which fans each notification to the registered
 channel(s):
 
 - `notify_task_outcome` (→ `task_notification`) · `notify_heartbeat` (→ `heartbeat`) ·

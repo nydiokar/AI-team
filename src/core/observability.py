@@ -305,45 +305,74 @@ def events_path() -> Path:
 def read_recent_events(limit: int = 100, *, since_offset: int = 0) -> Dict[str, Any]:
     """Read up to ``limit`` most-recent events from events.ndjson. Never raises.
 
-    Returns ``{"events": [...], "offset": <byte offset>}``. ``offset`` is the
-    byte length of the file at read time; pass it back as ``since_offset`` on the
-    next call to fetch only events appended since — the live-delta path a Web UI
-    polls. ``since_offset == 0`` (default) returns the tail of the whole file.
+    Returns ``{"events": [...], "offset": <byte offset>}``. ``offset`` is a **raw
+    byte position** in the file; pass it back as ``since_offset`` on the next call
+    to fetch only events appended since — the live-delta path a Web UI polls.
+    ``since_offset == 0`` (default) returns the tail of the whole file.
 
     This is the canonical read-side accessor for the event stream (the inbound
     symmetry to ``emit_event``); both the dashboard and any future surface use it
     so the NDJSON parsing lives in one place. Malformed lines are skipped.
+
+    Correctness notes (why binary mode):
+      * The file is opened in **binary** and seeked by real byte count. Text-mode
+        ``seek`` to an arbitrary byte is undefined (and on Windows CRLF translation
+        makes ``tell()`` not a byte count), which previously corrupted the offset
+        on any multi-byte/CRLF content. We decode per line instead.
+      * The returned offset is taken from ``f.tell()`` **after** reading — i.e. the
+        exact byte position consumed — not from a separate ``stat()`` before the
+        read. This closes the check-then-act race where an event appended between
+        ``stat`` and ``read`` would be skipped or double-counted.
+      * A partial trailing line (a writer mid-append) is not consumed; its bytes
+        are excluded from the returned offset so the next poll re-reads it whole.
     """
     result: Dict[str, Any] = {"events": [], "offset": since_offset}
     try:
         path = _events_path()
         if not path.exists():
             return result
-        size = path.stat().st_size
-        result["offset"] = size
-        if since_offset == size:
-            # Caught up — nothing new.
-            return result
-        # Rotation/truncation: the file is now smaller than the client's offset,
-        # so that offset is stale. Re-read the tail (treat like a cold start)
-        # instead of going silent.
-        rotated = bool(since_offset) and since_offset > size
-        incremental = bool(since_offset) and not rotated
-        with path.open("r", encoding="utf-8", errors="replace") as f:
+        with path.open("rb") as f:
+            f.seek(0, 2)            # SEEK_END
+            size = f.tell()
+            if since_offset == size:
+                result["offset"] = size
+                return result
+            # Incremental read only when the offset is a valid position inside the
+            # current file. A stale offset past EOF (rotation/truncation) falls back
+            # to a cold tail read instead of going silent.
+            incremental = 0 < since_offset < size
             if incremental:
                 f.seek(since_offset)
-                lines = f.readlines()
+                raw = f.read()
             else:
-                lines = f.readlines()[-limit:]
+                # Cold start / rotation: read the whole file, keep the tail below.
+                f.seek(0)
+                raw = f.read()
+            start = since_offset if incremental else 0
+
+        # Split on newline; a trailing fragment with no newline is an in-progress
+        # write — drop it and do NOT count its bytes toward the offset.
+        consumed = len(raw)
+        if raw and not raw.endswith(b"\n"):
+            nl = raw.rfind(b"\n")
+            if nl == -1:
+                # No complete line at all yet; report no progress past the start.
+                result["offset"] = start
+                return result
+            consumed = nl + 1
+            raw = raw[:consumed]
+
         events = []
-        for line in lines:
-            line = line.strip()
-            if not line:
+        for bline in raw.split(b"\n"):
+            bline = bline.strip()
+            if not bline:
                 continue
             try:
-                events.append(json.loads(line))
+                events.append(json.loads(bline.decode("utf-8", errors="replace")))
             except Exception:
                 continue
+
+        result["offset"] = start + consumed
         result["events"] = events if incremental else events[-limit:]
         return result
     except Exception:
