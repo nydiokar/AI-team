@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from src.orchestrator import TaskOrchestrator
 from src.core.interfaces import Task, TaskType, TaskPriority, TaskStatus, ExecutionResult
-from src.core.session_store import SessionStore
-import src.core.session_store as session_store_module
+from src.services.session_store import SessionStore
+import src.services.session_store as session_store_module
 from config import config
 
 

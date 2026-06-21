@@ -2,7 +2,7 @@ from pathlib import Path
 import shutil
 import uuid
 
-from src.core.path_resolver import PathResolver
+from src.services.path_resolver import PathResolver
 
 
 def _make_workspace() -> Path:

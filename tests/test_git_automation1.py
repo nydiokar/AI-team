@@ -39,7 +39,7 @@ def test_git_automation_service():
             print("  ⚠️  Signal-based timeout not available on Windows, using manual timeout")
         
         print("  📥 Importing GitAutomationService...")
-        from src.core.git_automation import GitAutomationService
+        from src.services.git_automation import GitAutomationService
         print("  ✅ Import successful")
         
         # Test initialization with timeout
@@ -117,7 +117,7 @@ def test_git_file_detector():
     
     try:
         print("  📥 Importing GitFileDetector...")
-        from src.core.git_file_detector import GitFileDetector
+        from src.services.git_file_detector import GitFileDetector
         print("  ✅ Import successful")
         
         # Test initialization
@@ -170,7 +170,7 @@ def test_integration_with_temp_repo():
         
         # Test GitFileDetector in temp repo
         print("  🔍 Testing GitFileDetector in temp repo...")
-        from src.core.git_file_detector import GitFileDetector
+        from src.services.git_file_detector import GitFileDetector
         detector = GitFileDetector(str(repo_path))
         
         changes = detector.detect_file_changes()
@@ -186,7 +186,7 @@ def test_integration_with_temp_repo():
         
         # Test GitAutomationService with timeout
         print("  🚀 Testing GitAutomationService commit...")
-        from src.core.git_automation import GitAutomationService
+        from src.services.git_automation import GitAutomationService
         service = GitAutomationService(str(repo_path))
         
         # Set timeout for commit operation (Windows-compatible)

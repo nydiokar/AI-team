@@ -20,7 +20,7 @@ def test_git_file_detector_basic():
     
     try:
         print("  📥 Importing GitFileDetector...")
-        from src.core.git_file_detector import GitFileDetector
+        from src.services.git_file_detector import GitFileDetector
         print("  ✅ Import successful")
         
         print("  🔧 Initializing detector...")
@@ -97,7 +97,7 @@ def test_temp_repo_basic():
         print("  ✅ Test file created")
         
         print("  🔍 Testing GitFileDetector in temp repo...")
-        from src.core.git_file_detector import GitFileDetector
+        from src.services.git_file_detector import GitFileDetector
         detector = GitFileDetector(str(repo_path))
         
         changes = detector.detect_file_changes()
@@ -173,8 +173,8 @@ def test_imports_only():
     print("\n🧪 Testing Module Imports...")
     
     modules = [
-        ("GitFileDetector", "src.core.git_file_detector"),
-        ("GitAutomationService", "src.core.git_automation"),
+        ("GitFileDetector", "src.services.git_file_detector"),
+        ("GitAutomationService", "src.services.git_automation"),
         ("LlamaMediator", "src.bridges.llama_mediator"),
     ]
     

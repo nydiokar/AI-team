@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 from pathlib import Path
 
-from .interfaces import ITaskParser, Task, TaskType, TaskPriority, TaskStatus
+from src.core.interfaces import ITaskParser, Task, TaskType, TaskPriority, TaskStatus
 
 class TaskParser(ITaskParser):
     """Parse `.task.md` files into `Task` objects.

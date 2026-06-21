@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 11
+_CURRENT_VERSION = 12
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     telegram_thread_id  INTEGER,
     owner_user_id       INTEGER,
     task_history        TEXT NOT NULL DEFAULT '[]'   -- JSON array of task history dicts
+    -- NOTE: `model` (migration 11) and `origin` (migration 12, {"channel","kind"}
+    -- JSON) are added by ALTER, not here, so fresh and existing DBs converge
+    -- through the same migration path. See _get_migrations().
 );
 
 -- Mesh task queue — one row per task dispatch turn.
@@ -309,13 +312,15 @@ class MeshDB:
                         created_at, updated_at, machine_id, backend_session_id, model,
                         last_task_id, last_artifact_path, last_summary,
                         last_user_message, last_result_summary, last_files_modified,
-                        telegram_chat_id, telegram_thread_id, owner_user_id, task_history
+                        telegram_chat_id, telegram_thread_id, owner_user_id, task_history,
+                        origin
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
                         :created_at, :updated_at, :machine_id, :backend_session_id, :model,
                         :last_task_id, :last_artifact_path, :last_summary,
                         :last_user_message, :last_result_summary, :last_files_modified,
-                        :telegram_chat_id, :telegram_thread_id, :owner_user_id, :task_history
+                        :telegram_chat_id, :telegram_thread_id, :owner_user_id, :task_history,
+                        :origin
                     )
                     ON CONFLICT(session_id) DO UPDATE SET
                         backend             = excluded.backend,
@@ -334,7 +339,8 @@ class MeshDB:
                         telegram_chat_id    = excluded.telegram_chat_id,
                         telegram_thread_id  = excluded.telegram_thread_id,
                         owner_user_id       = excluded.owner_user_id,
-                        task_history        = excluded.task_history
+                        task_history        = excluded.task_history,
+                        origin              = excluded.origin
                     """,
                     {
                         "session_id":          session.session_id,
@@ -356,6 +362,7 @@ class MeshDB:
                         "telegram_thread_id":  session.telegram_thread_id,
                         "owner_user_id":       session.owner_user_id,
                         "task_history":        json.dumps(session.task_history or []),
+                        "origin":              _origin_json(getattr(session, "origin", None)),
                     },
                 )
         except Exception as e:
@@ -1223,6 +1230,7 @@ def _get_migrations() -> List[tuple]:
             ALTER TABLE jobs ADD COLUMN last_seen_started_epoch REAL
         """),  # durable watched-job process identity probes
         (11, "ALTER TABLE sessions ADD COLUMN model TEXT"),  # per-session picked model; NULL = backend default
+        (12, "ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT '{\"channel\":\"telegram\",\"kind\":\"user\"}'"),  # transport-neutral origin tag {channel, kind}; old rows default to telegram/user
     ]
 
 
@@ -1232,6 +1240,17 @@ def _get_migrations() -> List[tuple]:
 
 def _now() -> str:
     return datetime.utcnow().isoformat()
+
+
+def _origin_json(origin: Any) -> str:
+    """Serialize a SessionOrigin (or None) to the stored {channel, kind} JSON.
+
+    db.py stays free of core imports, so this reads attributes duck-typed and
+    falls back to the telegram/user default when origin is missing.
+    """
+    channel = getattr(origin, "channel", None) or "telegram"
+    kind = getattr(origin, "kind", None) or "user"
+    return json.dumps({"channel": channel, "kind": kind})
 
 
 def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:

@@ -19,9 +19,10 @@ from src.core.process_utils import (
     process_matches_entrypoint,
     terminate_process_tree,
 )
-from src.core.session_store import SessionStore
+from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionStatus
-from src.core.path_resolver import PathResolver, PathResolution
+from src.services.path_resolver import PathResolver, PathResolution
+from src.backends.registry import valid_backend_names
 
 try:
     from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -1070,25 +1071,22 @@ class TelegramInterface:
         node_id: str = "__local__",
         model: Optional[str] = None,
     ) -> Session:
-        import socket
-        session = self.session_store.create(
+        # Thin wrapper over the transport-neutral lifecycle service. Telegram no
+        # longer owns create/bind/node-pin/model-pin logic — it issues a command.
+        result = self.orchestrator.session_service.create_session(
             backend=backend,
             repo_path=repo_path,
-            telegram_chat_id=chat_id,
+            chat_id=chat_id,
             owner_user_id=user_id,
+            node_id=node_id,
+            model=model,
         )
-        # Pin model and/or remote node, then persist once.
-        dirty = False
-        if model:
-            session.model = model
-            dirty = True
-        if node_id and node_id != "__local__":
-            session.machine_id = node_id
-            dirty = True
-        if dirty:
-            self.session_store.save(session)
-        self.session_store.bind(chat_id, session.session_id)
-        return session
+        if not result.ok:
+            # Callers pre-validate the backend, so a rejection here is a
+            # programming error — fail loud instead of returning None and
+            # crashing with an opaque AttributeError at the call site.
+            raise ValueError(f"create_session rejected: {result.reason}")
+        return result.session
 
     def _get_accessible_session(
         self,
@@ -2089,7 +2087,7 @@ class TelegramInterface:
             )
             return
         backend, repo_path = args[0].lower(), " ".join(args[1:])
-        if backend not in ("claude", "codex", "opencode", "opencode-server"):
+        if backend not in valid_backend_names():
             await update.message.reply_text("❌ Backend must be 'claude', 'codex', 'opencode', or 'opencode-server'.")
             return
         resolution = self._path_resolver().resolve_session_path(repo_path)
@@ -2249,7 +2247,7 @@ class TelegramInterface:
             )
             return
 
-        _valid_backends = ("claude", "codex", "opencode", "opencode-server")
+        _valid_backends = valid_backend_names()
         backend = args[0].lower()
         if backend not in _valid_backends:
             await update.message.reply_text("❌ Backend must be 'claude', 'codex', 'opencode', or 'opencode-server'.")
@@ -2377,7 +2375,7 @@ class TelegramInterface:
             return
 
         data = query.data or ""
-        _valid_backends = ("claude", "codex", "opencode", "opencode-server")
+        _valid_backends = valid_backend_names()
 
         # --- Cancel: bail out of the whole flow ---
         if data.startswith("session_new_cancel"):

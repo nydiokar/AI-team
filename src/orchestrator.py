@@ -23,11 +23,15 @@ import sys
 import os
 
 from src.core import (
-    ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskType, TaskPriority, TaskParser,
-    AsyncFileWatcher, SessionStore, SessionStatus, PathResolver
+    ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskType, TaskPriority,
+    SessionStatus,
+)
+from src.services import (
+    TaskParser, AsyncFileWatcher, SessionStore, PathResolver,
+    SessionService, WorkflowService, NotificationService,
 )
 from src.bridges import LlamaMediator
-from src.backends import ClaudeCodeBackend, CodexBackend, OpenCodeBackend, OpenCodeServerBackend
+from src.backends.registry import build_backends
 from config import config
 from src.validation.engine import ValidationEngine
 
@@ -55,12 +59,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.file_watcher = AsyncFileWatcher(config.system.tasks_dir)
         self.llama_mediator = LlamaMediator()
         self.session_store = SessionStore()
-        self._backends = {
-            "claude": ClaudeCodeBackend(),
-            "codex": CodexBackend(),
-            "opencode": OpenCodeBackend(),
-            "opencode-server": OpenCodeServerBackend(),
-        }
+        self.session_service = SessionService(self.session_store)
+        self.workflow_service = WorkflowService()
+        self._backends = build_backends()
         
         # Task management
         self.task_queue = asyncio.Queue(maxsize=config.system.max_queue_size)
@@ -122,6 +123,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self.telegram_interface = None
         else:
             logger.info("Telegram interface not configured (no bot token)")
+
+        # Notification dispatcher — single call site for all outbound
+        # notifications (Telegram today, Web UI tomorrow).  Passes self
+        # so the notifer reads ``self.telegram_interface`` dynamically.
+        self.notifier = NotificationService(orchestrator=self)
 
     @staticmethod
     def _extract_text_from_payload(payload: Any) -> str:
@@ -382,16 +388,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                 None,
                 {"session_id": session.session_id, "task_id": task_id, "backend": session.backend},
             )
-            if self.telegram_interface and session.telegram_chat_id:
-                try:
-                    await self.telegram_interface.notify_completion(
-                        task_id or session.session_id,
-                        "Task interrupted by gateway restart",
-                        success=False,
-                        chat_id=session.telegram_chat_id,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to notify interrupted session recovery: {e}")
+            await self.notifier.notify_error(
+                "Task interrupted by gateway restart",
+                task_id=task_id or session.session_id,
+                chat_id=session.telegram_chat_id,
+            )
 
     async def _recover_completed_session(self, session: Any, task_row: Dict[str, Any]) -> None:
         """Restore a session whose task completed in DB while the gateway was down."""
@@ -456,26 +457,13 @@ class TaskOrchestrator(ITaskOrchestrator):
             {"session_id": session.session_id, "task_id": task_row["id"], "backend": session.backend},
         )
 
-        if self.telegram_interface and session.telegram_chat_id:
-            try:
-                # Deliver the worker's ACTUAL output, not a placeholder. The task
-                # finished on the remote node while we were restarting; the user
-                # still needs the real answer. Mirror the live completion path:
-                # reply text + changed-file list, with a short restored prefix.
-                content = self._session_reply_text(result)
-                files = result.files_modified or []
-                if files:
-                    lines = self._format_file_change_lines(result, limit=20)
-                    content = content + "\n\n**Changed files:**\n" + "\n".join(lines)
-                content = "_(recovered after a gateway restart)_\n\n" + content
-                await self.telegram_interface.notify_completion(
-                    task_row["id"],
-                    content,
-                    success=True,
-                    chat_id=session.telegram_chat_id,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to notify recovered completed session: {e}")
+        await self.notifier.notify_task_outcome(
+            task_row["id"],
+            result,
+            session=session,
+            chat_id=session.telegram_chat_id,
+            prefix="_(recovered after a gateway restart)_\n\n",
+        )
 
     def _start_stale_busy_reconciler(self) -> None:
         """Start the periodic M3 reconciliation loop when mesh routing is active."""
@@ -631,16 +619,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                     None,
                     {"session_id": session.session_id, "task_id": task_id, "backend": session.backend},
                 )
-                if self.telegram_interface and session.telegram_chat_id:
-                    try:
-                        await self.telegram_interface.notify_completion(
-                            task_id,
-                            f"Task failed on remote node while gateway was restarting: {error_msg}",
-                            success=False,
-                            chat_id=session.telegram_chat_id,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to notify reattached failed session: {e}")
+                await self.notifier.notify_error(
+                    f"Task failed on remote node while gateway was restarting: {error_msg}",
+                    task_id=task_id,
+                    chat_id=session.telegram_chat_id,
+                )
                 return
             if status != "claimed" and time.time() >= pickup_deadline:
                 break
@@ -660,16 +643,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             "the task's outcome is unknown."
         )
         self.session_store.save(session)
-        if self.telegram_interface and session.telegram_chat_id:
-            try:
-                await self.telegram_interface.notify_completion(
-                    task_id,
-                    "Lost contact with the remote node after a restart; task outcome unknown.",
-                    success=False,
-                    chat_id=session.telegram_chat_id,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to notify reattach timeout: {e}")
+        await self.notifier.notify_error(
+            "Lost contact with the remote node after a restart; task outcome unknown.",
+            task_id=task_id,
+            chat_id=session.telegram_chat_id,
+        )
 
     async def _job_completion_poller(self) -> None:
         """Poll for terminal watched jobs and push Telegram notifications.
@@ -1373,32 +1351,23 @@ class TaskOrchestrator(ITaskOrchestrator):
                     {"status": status, "duration_s": result.execution_time, "error_class": getattr(result, "error_class", ""), "backend": finish_backend},
                 )
                 
-                # Send Telegram notification if available
-                if self.telegram_interface:
-                    try:
-                        session_id_for_notify = (task.metadata or {}).get("session_id", "").strip()
-                        notify_chat_id: Optional[int] = None
-                        if session_id_for_notify:
-                            _s = self.session_store.get(session_id_for_notify)
-                            if _s:
-                                notify_chat_id = _s.telegram_chat_id
+                # Send notification via the central notification dispatcher
+                try:
+                    session_id_for_notify = (task.metadata or {}).get("session_id", "").strip()
+                    notify_chat_id: Optional[int] = None
+                    if session_id_for_notify:
+                        _s = self.session_store.get(session_id_for_notify)
+                        if _s:
+                            notify_chat_id = _s.telegram_chat_id
 
-                        if result.success:
-                            # Use Claude's actual reply text for both session and one-off tasks.
-                            # The LLAMA summary wrapper is only useful for the artifact file, not the notification.
-                            content = self._session_reply_text(result)
-                            # Append changed-file list if any were detected
-                            files = result.files_modified or []
-                            if files:
-                                lines = self._format_file_change_lines(result, limit=20)
-                                content = content + "\n\n**Changed files:**\n" + "\n".join(lines)
-                            await self.telegram_interface.notify_completion(task.id, content, success=True, chat_id=notify_chat_id)
-                        else:
-                            short_reason = self._short_failure_reason(result)
-                            error_summary = f"Task failed: {short_reason}" if short_reason else "Task failed"
-                            await self.telegram_interface.notify_completion(task.id, error_summary, success=False, chat_id=notify_chat_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to send Telegram completion notification: {e}")
+                    await self.notifier.notify_task_outcome(
+                        task.id,
+                        result,
+                        session=self.session_store.get(session_id_for_notify) if session_id_for_notify else None,
+                        chat_id=notify_chat_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send completion notification: {e}")
                 
                 # Write artifacts
                 artifact_path: Optional[str] = None
@@ -2383,7 +2352,7 @@ Generated from user description: {description}
         interval_sec: int,
         timeout_s: int,
     ) -> None:
-        """Send periodic "still working" messages to Telegram for long-running tasks."""
+        """Send periodic "still working" messages via the notifier."""
         chat_id = session.telegram_chat_id if session else None
         if not chat_id:
             return
@@ -2392,20 +2361,16 @@ Generated from user description: {description}
             while True:
                 elapsed = time.time() - start_time
                 elapsed_min = int(elapsed // 60)
-                timeout_min = int(timeout_s // 60) if timeout_s else 0
                 remaining = timeout_s - elapsed if timeout_s else 0
                 remaining_min = max(0, int(remaining // 60))
-                session_ref = f"`{session.session_id}`" if session else ""
-                task_ref = f"`{task.id}`"
-                limit_note = f" ({remaining_min}m left before gateway timeout)" if remaining_min > 2 else " (approaching timeout)"
-                msg = (
-                    f"⏳ Still working… {elapsed_min}m elapsed{limit_note}\n"
-                    f"Session {session_ref} / task {task_ref}"
+
+                await self.notifier.notify_heartbeat(
+                    task.id,
+                    session=session,
+                    chat_id=chat_id,
+                    elapsed_min=elapsed_min,
+                    remaining_min=remaining_min,
                 )
-                try:
-                    await self.telegram_interface.app.bot.send_message(chat_id=chat_id, text=msg)
-                except Exception as e:
-                    logger.debug(f"heartbeat send failed task={task.id}: {e}")
                 await asyncio.sleep(interval_sec)
         except asyncio.CancelledError:
             pass
