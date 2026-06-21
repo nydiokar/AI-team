@@ -19,9 +19,9 @@ from src.core.process_utils import (
     process_matches_entrypoint,
     terminate_process_tree,
 )
-from src.core.session_store import SessionStore
+from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionStatus
-from src.core.path_resolver import PathResolver, PathResolution
+from src.services.path_resolver import PathResolver, PathResolution
 from src.backends.registry import valid_backend_names
 
 try:

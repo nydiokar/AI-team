@@ -58,7 +58,7 @@ def run_inspect_op(op: str, repo_path: str, params: Dict[str, Any] | None = None
 
 def _list_dirs(repo_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     import os
-    from src.core.path_resolver import PathResolver
+    from src.services.path_resolver import PathResolver
 
     limit = int(params.get("limit", 12))
     include_hidden = bool(params.get("include_hidden", False))
@@ -89,13 +89,13 @@ def _list_dirs(repo_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _git_status(repo_path: str) -> Dict[str, Any]:
-    from src.core.git_automation import GitAutomationService
+    from src.services.git_automation import GitAutomationService
 
     return GitAutomationService(repo_path).get_git_status_summary()
 
 
 def _commit(op: str, repo_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    from src.core.git_automation import GitAutomationService
+    from src.services.git_automation import GitAutomationService
 
     git_service = GitAutomationService(repo_path)
     kwargs = dict(

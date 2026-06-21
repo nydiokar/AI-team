@@ -97,7 +97,7 @@ def test_codex_build_cmd_model_placement():
 
 # --------------------------------------------------------------------------- persistence
 def test_store_dict_round_trip_preserves_model():
-    from src.core.session_store import SessionStore
+    from src.services.session_store import SessionStore
     s = _mk("codex", "gpt-5.5")
     restored = SessionStore._from_dict(SessionStore._to_dict(s))
     assert restored.model == "gpt-5.5"

@@ -18,7 +18,7 @@ pytestmark = pytest.mark.e2e
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.orchestrator import TaskOrchestrator
-from src.core.task_parser import TaskParser
+from src.services.task_parser import TaskParser
 from src.core.interfaces import TaskResult
 
 

@@ -7,8 +7,8 @@ bind_active. The conftest isolates the DB and forces test mode.
 import pytest
 
 from src.core.interfaces import SessionOrigin, SessionStatus
-from src.core.session_store import SessionStore
-from src.core.session_service import SessionService, CommandResult
+from src.services.session_store import SessionStore
+from src.services.session_service import SessionService, CommandResult
 
 
 @pytest.fixture

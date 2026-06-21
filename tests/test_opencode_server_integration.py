@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.backends.opencode import OpenCodeServerBackend
 from src.core.interfaces import Session, SessionStatus, ExecutionResult
-from src.core.session_store import SessionStore
+from src.services.session_store import SessionStore
 
 REPO = str(Path(__file__).resolve().parent.parent)  # this repo
 
@@ -236,7 +236,7 @@ def test_t10_concurrent_sessions(b: OpenCodeServerBackend) -> None:
 async def test_t11_orchestrator_submit(b: OpenCodeServerBackend) -> None:
     """Full orchestrator submit_instruction path — session create then resume."""
     from src.orchestrator import TaskOrchestrator
-    from src.core.session_store import SessionStore
+    from src.services.session_store import SessionStore
 
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
     orch.session_store = SessionStore()

@@ -8,7 +8,7 @@ DB-first read path.
 import json
 
 from src.core.interfaces import Session, SessionOrigin, SessionStatus
-from src.core.session_store import SessionStore
+from src.services.session_store import SessionStore
 
 
 def _new(store: SessionStore, **kw) -> Session:
@@ -48,7 +48,7 @@ def test_web_origin_survives_in_json_file(tmp_path):
     s.origin = SessionOrigin("web", "cron")
     store.save(s)
 
-    from src.core.session_store import _SESSIONS_DIR
+    from src.services.session_store import _SESSIONS_DIR
     raw = json.loads((_SESSIONS_DIR / f"{s.session_id}.json").read_text(encoding="utf-8"))
     assert raw["origin"] == {"channel": "web", "kind": "cron"}
 

@@ -14,7 +14,7 @@ pytestmark = pytest.mark.e2e
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from src.orchestrator import TaskOrchestrator
-from src.core.task_parser import TaskParser
+from src.services.task_parser import TaskParser
 
 async def test_full_pipeline():
     """Test complete task processing pipeline"""

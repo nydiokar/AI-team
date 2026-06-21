@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .interfaces import Session, SessionStatus, SessionOrigin
+from src.core.interfaces import Session, SessionStatus, SessionOrigin
 
 logger = logging.getLogger(__name__)
 

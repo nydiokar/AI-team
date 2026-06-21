@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from src.core import TaskParser, FileWatcher
+from src.services import TaskParser, FileWatcher
 
 
 async def test_task_parser():
