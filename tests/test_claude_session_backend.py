@@ -212,7 +212,7 @@ def test_recover_stale_busy_session_marks_error_and_notifies(monkeypatch):
         monkeypatch.setattr(config.system, "summaries_dir", str(summaries_dir), raising=False)
         monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
 
-        import src.core.session_store as session_store_module
+        import src.services.session_store as session_store_module
         monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", state_dir / "sessions", raising=False)
         monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", state_dir / "telegram" / "active_bindings.json", raising=False)
 
@@ -311,7 +311,7 @@ def test_write_artifacts_include_session_metadata_and_archive_copy(monkeypatch):
         monkeypatch.setattr(config.system, "summaries_dir", str(summaries_dir), raising=False)
         monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
 
-        import src.core.session_store as session_store_module
+        import src.services.session_store as session_store_module
         monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", state_dir / "sessions", raising=False)
         monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", state_dir / "telegram" / "active_bindings.json", raising=False)
 
@@ -383,7 +383,7 @@ def test_failed_backend_result_does_not_overwrite_session_id(monkeypatch):
         monkeypatch.setattr(config.system, "summaries_dir", str(summaries_dir), raising=False)
         monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
 
-        import src.core.session_store as session_store_module
+        import src.services.session_store as session_store_module
         monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", state_dir / "sessions", raising=False)
         monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", state_dir / "telegram" / "active_bindings.json", raising=False)
 
@@ -450,7 +450,7 @@ def test_missing_backend_conversation_recreates_session_and_retries(monkeypatch)
         monkeypatch.setattr(config.system, "summaries_dir", str(summaries_dir), raising=False)
         monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
 
-        import src.core.session_store as session_store_module
+        import src.services.session_store as session_store_module
         monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", state_dir / "sessions", raising=False)
         monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", state_dir / "telegram" / "active_bindings.json", raising=False)
 

@@ -38,7 +38,7 @@ os.environ["MESH_ENABLED"] = "false"
 sys.path.insert(0, str(_proj_root))
 
 from src.control.db import get_db, MeshDB
-from src.core.session_store import SessionStore
+from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionStatus
 
 FAILURES = []

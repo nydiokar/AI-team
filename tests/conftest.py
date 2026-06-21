@@ -84,7 +84,7 @@ def _disable_file_watcher(monkeypatch):
     background watcher is what historically caused live executions.
     """
     try:
-        from src.core.file_watcher import AsyncFileWatcher
+        from src.services.file_watcher import AsyncFileWatcher
 
         async def _noop_start_async(self, *a, **k):
             return None

@@ -19,7 +19,7 @@ Design rules (same as the rest of the codebase):
 import logging
 from typing import Any, Optional
 
-from src.core.result_text import session_reply_text, short_failure_reason, format_file_change_lines
+from src.services.result_text import session_reply_text, short_failure_reason, format_file_change_lines
 
 logger = logging.getLogger(__name__)
 

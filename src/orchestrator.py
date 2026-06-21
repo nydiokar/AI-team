@@ -23,15 +23,17 @@ import sys
 import os
 
 from src.core import (
-    ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskType, TaskPriority, TaskParser,
-    AsyncFileWatcher, SessionStore, SessionStatus, PathResolver
+    ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskType, TaskPriority,
+    SessionStatus,
+)
+from src.services import (
+    TaskParser, AsyncFileWatcher, SessionStore, PathResolver,
+    SessionService, NotificationService,
 )
 from src.bridges import LlamaMediator
 from src.backends.registry import build_backends
-from src.core.session_service import SessionService
 from config import config
 from src.validation.engine import ValidationEngine
-from src.core.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 

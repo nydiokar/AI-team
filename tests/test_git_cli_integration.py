@@ -275,7 +275,7 @@ class TestGitCLIIntegration:
 
             # Force _is_git_repo to return False so the detector treats this as
             # a non-git directory regardless of parent-dir traversal on this machine.
-            with patch('src.core.git_file_detector.subprocess.run') as mock_run:
+            with patch('src.services.git_file_detector.subprocess.run') as mock_run:
                 mock_run.return_value = Mock(returncode=1, stdout='', stderr='not a git repository')
                 from main import _handle_git_status
                 _handle_git_status()
@@ -288,7 +288,7 @@ class TestGitCLIIntegration:
         finally:
             os.chdir(original_cwd)
     
-    @patch('src.core.git_automation.GitAutomationService')
+    @patch('src.services.git_automation.GitAutomationService')
     def test_git_commands_service_unavailable(self, mock_service, capsys):
         """Test git commands when the service is unavailable"""
         # Mock the service to raise ImportError

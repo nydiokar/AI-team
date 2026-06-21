@@ -6,7 +6,7 @@ import tempfile
 import shutil
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
-from src.core.git_automation import GitAutomationService
+from src.services.git_automation import GitAutomationService
 
 
 class TestGitAutomationService:
@@ -53,7 +53,7 @@ class TestGitAutomationService:
     @pytest.fixture
     def mock_llama_mediator(self):
         """Mock LLAMA mediator for testing"""
-        with patch('src.core.git_automation.LlamaMediator') as mock:
+        with patch('src.services.git_automation.LlamaMediator') as mock:
             mock_instance = Mock()
             mock_instance.ollama_available = True
             mock_instance.model_installed = True
@@ -76,7 +76,7 @@ class TestGitAutomationService:
     
     def test_init_not_git_repo(self, tmp_path):
         """Test initialization with non-git directory"""
-        with patch('src.core.git_file_detector.subprocess.run') as mock_run:
+        with patch('src.services.git_file_detector.subprocess.run') as mock_run:
             mock_run.return_value = Mock(returncode=1, stdout='', stderr='not a git repository')
             service = GitAutomationService(str(tmp_path))
         assert service.git_detector.repo_path is None

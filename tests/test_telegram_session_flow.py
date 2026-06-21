@@ -8,10 +8,10 @@ import json
 import pytest
 
 from config import config
-from src.core.session_store import SessionStore
+from src.services.session_store import SessionStore
 from src.telegram import interface as telegram_interface_module
 from src.telegram.interface import TelegramInterface
-import src.core.session_store as session_store_module
+import src.services.session_store as session_store_module
 
 
 class _DummyMessage:
@@ -70,7 +70,7 @@ class _DummyOrchestrator:
         # Mirror the real orchestrator: a transport-neutral SessionService over a
         # SessionStore. The store honors the test-isolated _SESSIONS_DIR/_BINDINGS_FILE
         # monkeypatched by the isolated_session_store fixture.
-        from src.core.session_service import SessionService
+        from src.services.session_service import SessionService
         self.session_service = SessionService(SessionStore())
 
     async def submit_instruction(self, description, task_type=None, target_files=None, session_id=None, cwd=None, source="runtime"):
@@ -621,7 +621,7 @@ async def test_git_status_uses_active_session_repo(monkeypatch, isolated_session
                 }
 
         update = _DummyUpdate()
-        with patch("src.core.git_automation.GitAutomationService", _FakeGitService):
+        with patch("src.services.git_automation.GitAutomationService", _FakeGitService):
             await bot._handle_git_status(update, _DummyContext())
 
         text = update.message.replies[-1]
@@ -670,7 +670,7 @@ async def test_commit_uses_active_session_context_not_task_id(monkeypatch, isola
                 }
 
         update = _DummyUpdate()
-        with patch("src.core.git_automation.GitAutomationService", _FakeGitService):
+        with patch("src.services.git_automation.GitAutomationService", _FakeGitService):
             await bot._handle_git_commit(update, _DummyContext(["--push"]))
 
         text = update.message.replies[-1]

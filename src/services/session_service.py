@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from src.core.session_store import SessionStore
+from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionOrigin
 from src.backends.registry import is_valid_backend, DEFAULT_BACKEND
 

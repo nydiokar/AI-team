@@ -875,7 +875,7 @@ def _handle_git_commit(args):
     push_branch = "--push" in args
     
     try:
-        from src.core.git_automation import GitAutomationService
+        from src.services.git_automation import GitAutomationService
         git_service = GitAutomationService()
         
         # For CLI, we'll use a generic description since we don't have task context
@@ -923,7 +923,7 @@ def _handle_git_commit_all(args):
     push_branch = "--push" in args
     
     try:
-        from src.core.git_automation import GitAutomationService
+        from src.services.git_automation import GitAutomationService
         git_service = GitAutomationService()
         
         task_description = f"Task {task_id} changes"
@@ -957,7 +957,7 @@ def _handle_git_commit_all(args):
 def _handle_git_status():
     """Handle git-status command"""
     try:
-        from src.core.git_automation import GitAutomationService
+        from src.services.git_automation import GitAutomationService
         git_service = GitAutomationService()
         
         print("📊 Git Repository Status")
