@@ -1,5 +1,32 @@
 # Progress Log
 
+## 2026-06-21 — Cockpit M4: workflow events (review / handoff / approval)
+
+**Milestone: the reserved workflow vocabulary (CONTROL_CONTRACT §7) is now a
+real, transport-neutral inbound entry point — the third beside SessionService
+(lifecycle) and submit_instruction (dispatch).** Branch: `feat/session-service-m1`.
+
+Shipped:
+- **`src/services/workflow_service.py`** — `WorkflowService`, stateless by
+  construction (no store, no tables, no engine — honors the §7 rule literally).
+  Five methods emit the canonical events `review.requested/completed`,
+  `handoff.created`, `approval.requested/granted`, each correlated to a
+  `session_id` (+ optional `task_id`) and returning a machine-code
+  `CommandResult`. The names live as constants + a `WORKFLOW_EVENTS` set so they
+  can't fork across surfaces. `run.*` from §7 is intentionally NOT re-emitted —
+  it maps to the existing `<backend>_finished` events.
+- Wired into `orchestrator.workflow_service`; exported from `src.services`.
+- The M3 dashboard surfaces these with no change (it renders any event).
+- **Design choices recorded:** review verdicts constrained to
+  {approved, changes_requested, rejected}; session-existence validation is a
+  deliberate non-goal (these are provenance events; coupling to the store would
+  break statelessness). A surface that must change state calls §4a/§4b too.
+
+Docs: `CONTROL_CONTRACT.md` updated — §2 catalog, §4 (now three entry points +
+4c), §7 (implemented, not reserved), §8, status → v2. New tests:
+`test_workflow_service.py` (12). Full suite = 308 passed, 7 pre-existing
+failures, 0 new.
+
 ## 2026-06-21 — Cockpit M3: read-only web dashboard (the second surface)
 
 **Milestone: a second surface beside Telegram, proving the M1 contract holds —
