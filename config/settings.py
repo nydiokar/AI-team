@@ -153,6 +153,9 @@ class MeshConfig:
     # Mesh health sliding-window detection (Phase 4.1)
     mesh_health_window_size: int = 6         # MESH_HEALTH_WINDOW_SIZE
     mesh_health_failure_threshold: int = 3   # MESH_HEALTH_FAILURE_THRESHOLD
+    # Cockpit M3 read-only web dashboard (consumes db.list_* + events.ndjson).
+    dashboard_port: int = 9003               # DASHBOARD_PORT
+    dashboard_token: str = ""                # DASHBOARD_TOKEN — falls back to worker_token
 
 
 class Config:
@@ -426,6 +429,18 @@ class Config:
             v = os.getenv("MESH_EMBEDDED_SERVER")
             if v is not None:
                 self.mesh.embedded_server = v.lower() == "true"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("DASHBOARD_PORT")
+            if v is not None:
+                self.mesh.dashboard_port = int(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv("DASHBOARD_TOKEN")
+            if v:
+                self.mesh.dashboard_token = v
         except Exception:
             pass
         try:

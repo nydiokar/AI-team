@@ -248,6 +248,13 @@ names now keeps the eventual implementation consistent and costs nothing.
   `db.list_*` (§6); issue intent via `SessionService` (§4a) + `submit_instruction` (§4b);
   tag sessions with `SessionOrigin("web")` (§5). Add a delivery handler to
   `NotificationService` for outbound (§3). **No core refactor required.**
+  **Reference implementation (M3): `src/control/dashboard.py`** — a read-only FastAPI
+  surface that does exactly this. It renders `SessionService.list_views()` (§6) +
+  `db.list_tasks/list_nodes`, polls live deltas from `observability.read_recent_events`
+  (the canonical read-side accessor for the event stream, §1), and writes nothing — no
+  inbound command path. A write-capable surface adds calls to §4a/§4b; it does not bypass
+  them. Launch: `dashboard_main.py` (or `uvicorn src.control.dashboard:app`); auth via
+  `DASHBOARD_TOKEN` (falls back to `WORKER_TOKEN`).
 - **Add a backend?** One edit: add a `name → factory` entry in
   `src/backends/registry.py`. `build_backends()`, `valid_backend_names()`,
   `is_valid_backend()` all derive from it; `CodingBackend` (`src/core/interfaces.py`) is the

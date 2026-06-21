@@ -297,6 +297,59 @@ def emit_event(
         pass
 
 
+def events_path() -> Path:
+    """Public accessor for the active events.ndjson path (read-side consumers)."""
+    return _events_path()
+
+
+def read_recent_events(limit: int = 100, *, since_offset: int = 0) -> Dict[str, Any]:
+    """Read up to ``limit`` most-recent events from events.ndjson. Never raises.
+
+    Returns ``{"events": [...], "offset": <byte offset>}``. ``offset`` is the
+    byte length of the file at read time; pass it back as ``since_offset`` on the
+    next call to fetch only events appended since — the live-delta path a Web UI
+    polls. ``since_offset == 0`` (default) returns the tail of the whole file.
+
+    This is the canonical read-side accessor for the event stream (the inbound
+    symmetry to ``emit_event``); both the dashboard and any future surface use it
+    so the NDJSON parsing lives in one place. Malformed lines are skipped.
+    """
+    result: Dict[str, Any] = {"events": [], "offset": since_offset}
+    try:
+        path = _events_path()
+        if not path.exists():
+            return result
+        size = path.stat().st_size
+        result["offset"] = size
+        if since_offset == size:
+            # Caught up — nothing new.
+            return result
+        # Rotation/truncation: the file is now smaller than the client's offset,
+        # so that offset is stale. Re-read the tail (treat like a cold start)
+        # instead of going silent.
+        rotated = bool(since_offset) and since_offset > size
+        incremental = bool(since_offset) and not rotated
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            if incremental:
+                f.seek(since_offset)
+                lines = f.readlines()
+            else:
+                lines = f.readlines()[-limit:]
+        events = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except Exception:
+                continue
+        result["events"] = events if incremental else events[-limit:]
+        return result
+    except Exception:
+        return result
+
+
 def _maybe_rotate(path: Path, max_bytes: int = 1_000_000, backup_count: int = 3) -> None:
     """Size-based rotation mirroring the original orchestrator._emit_event logic."""
     try:
