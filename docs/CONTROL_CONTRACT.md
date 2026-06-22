@@ -288,11 +288,18 @@ surface that needs to *change* session state on a workflow step calls §4a/§4b 
   `EmbeddedControlServer` (`src/control/embedded_server.py`), so its handlers call the
   **live** `orchestrator.session_service.list_views()` (§6) and the in-process
   `NodeRegistry` directly — no separate process, no `state/mesh.db` side-read. It polls
-  live deltas from `observability.read_recent_events` (§1) and writes nothing — a
-  write-capable surface adds calls to §4a/§4b (U3); it does not bypass them. Served on
+  live deltas from `observability.read_recent_events` (§1). Served on
   `DASHBOARD_PORT` (default 9003) by the gateway when `CONTROL_API_ENABLED` (default true);
   auth via `DASHBOARD_TOKEN` (falls back to `WORKER_TOKEN`). The old standalone
   `dashboard.py` / `dashboard_main.py` process was retired (U2).
+  **Write surface (U3)** — thin adapters over the same services, never bypassing them:
+  `POST /api/instructions` (→ `submit_instruction`, `source="web_session"`/`"web_oneoff"`),
+  `POST /api/sessions` (→ `SessionService.create_session`, `origin=SessionOrigin("web")`),
+  `POST /api/sessions/{id}/bind|stop|compact` (→ `bind_active` / `cancel_task` /
+  `compact_session`). Create endpoints honor an `Idempotency-Key` header (bounded
+  in-process cache). Rejections return `{ok:false, reason:<machine code>}` with a mapped
+  4xx (`unknown_backend`→400, `session_not_found`→404) — **no user-facing prose in the
+  API**; each surface maps `reason` to its own wording. WS/SSE push is U4.
 - **Add a backend?** One edit: add a `name → factory` entry in
   `src/backends/registry.py`. `build_backends()`, `valid_backend_names()`,
   `is_valid_backend()` all derive from it; `CodingBackend` (`src/core/interfaces.py`) is the

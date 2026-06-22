@@ -12,8 +12,10 @@ process. A separate dashboard process could only re-read ``state/mesh.db`` and
 re-derive node liveness by hand; sharing the process removes that whole class of
 staleness. Telegram and this HTTP surface are now siblings over the same services.
 
-Read-only for U1. Write endpoints (``submit_instruction`` / ``SessionService``)
-arrive in U3; WS/SSE push in U4. The HTML shell and standalone launcher are gone.
+U3 adds the write surface: thin HTTP adapters over the SAME services Telegram
+calls (``submit_instruction`` / ``SessionService`` / ``cancel_task`` /
+``compact_session``) — no new business logic. Web sessions are tagged
+``SessionOrigin(channel="web")``. WS/SSE push is U4; static serving is U5.
 
 All ``/api/*`` endpoints require ``Authorization: Bearer {DASHBOARD_TOKEN}``
 (falls back to ``WORKER_TOKEN``).
@@ -21,13 +23,57 @@ All ``/api/*`` endpoints require ``Authorization: Bearer {DASHBOARD_TOKEN}``
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Security
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 
 from src.core import observability
+
+# Map a CommandResult.reason (stable machine code) to an HTTP status. The body
+# always still carries {ok, reason} so the client owns the wording (no prose here).
+_REASON_STATUS = {
+    "unknown_backend": 400,
+    "session_not_found": 404,
+}
+
+
+class InstructionBody(BaseModel):
+    description: str
+    session_id: Optional[str] = None
+    cwd: Optional[str] = None
+    target_files: Optional[List[str]] = None
+
+
+class CreateSessionBody(BaseModel):
+    backend: str
+    repo_path: str
+    model: Optional[str] = None
+    node_id: Optional[str] = None
+
+
+class BindBody(BaseModel):
+    chat_id: Optional[int] = None
+
+
+def _session_payload(session) -> Optional[Dict[str, Any]]:
+    """Render a Session as the canonical SessionView dict (or None)."""
+    if session is None:
+        return None
+    from src.core.view_models import SessionView
+    return SessionView.from_session(session).to_dict()
+
+
+def _command_envelope(result) -> Dict[str, Any]:
+    """Uniform JSON for a CommandResult: {ok, reason, session}."""
+    return {
+        "ok": result.ok,
+        "reason": result.reason,
+        "session": _session_payload(result.session),
+    }
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +151,23 @@ def build_control_api(orchestrator) -> FastAPI:
         if creds.credentials != token:
             raise HTTPException(status_code=401, detail="Invalid token")
 
+    # Bounded in-process idempotency cache {(<route>, <key>) -> response dict}.
+    # In-process is sufficient: the gateway is a single process (the point of U1).
+    _idem: "OrderedDict[tuple, Dict[str, Any]]" = OrderedDict()
+    _IDEM_MAX = 512
+
+    def _idem_get(route: str, key: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not key:
+            return None
+        return _idem.get((route, key))
+
+    def _idem_put(route: str, key: Optional[str], resp: Dict[str, Any]) -> None:
+        if not key:
+            return
+        _idem[(route, key)] = resp
+        while len(_idem) > _IDEM_MAX:
+            _idem.popitem(last=False)
+
     @app.get("/health")
     def health() -> Dict[str, str]:
         return {"status": "ok"}
@@ -142,6 +205,113 @@ def build_control_api(orchestrator) -> FastAPI:
         """
         data = observability.read_recent_events(limit=limit, since_offset=since)
         return JSONResponse(data)
+
+    # ----------------------------------------------------------------------
+    # Write surface (U3) — thin adapters over the same services Telegram calls.
+    # ----------------------------------------------------------------------
+
+    @app.post("/api/instructions", dependencies=[Depends(_require_auth)])
+    async def api_instructions(
+        body: InstructionBody,
+        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Submit an instruction. With session_id it mirrors the Telegram session
+        path (session → BUSY, source=web_session); otherwise a one-off."""
+        cached = _idem_get("instructions", idempotency_key)
+        if cached is not None:
+            return JSONResponse(cached)
+
+        from src.core.interfaces import SessionStatus
+
+        session = None
+        if body.session_id:
+            session = orchestrator.session_service.store.get(body.session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            session.last_user_message = body.description
+            session.status = SessionStatus.BUSY
+            orchestrator.session_service.store.save(session)
+            task_id = await orchestrator.submit_instruction(
+                description=body.description,
+                session_id=session.session_id,
+                cwd=session.repo_path or body.cwd,
+                target_files=body.target_files,
+                source="web_session",
+            )
+            session.last_task_id = task_id
+            orchestrator.session_service.store.save(session)
+        else:
+            task_id = await orchestrator.submit_instruction(
+                description=body.description,
+                cwd=body.cwd,
+                target_files=body.target_files,
+                source="web_oneoff",
+            )
+
+        resp = {"ok": True, "task_id": task_id, "session": _session_payload(session)}
+        _idem_put("instructions", idempotency_key, resp)
+        return JSONResponse(resp)
+
+    @app.post("/api/sessions", dependencies=[Depends(_require_auth)])
+    def api_create_session(
+        body: CreateSessionBody,
+        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        cached = _idem_get("create_session", idempotency_key)
+        if cached is not None:
+            return JSONResponse(cached)
+
+        from src.core.interfaces import SessionOrigin
+
+        result = orchestrator.session_service.create_session(
+            backend=body.backend,
+            repo_path=body.repo_path,
+            model=body.model,
+            node_id=body.node_id or "__local__",
+            origin=SessionOrigin(channel="web", kind="user"),
+            bind_chat=False,
+        )
+        env = _command_envelope(result)
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
+        _idem_put("create_session", idempotency_key, env)
+        return JSONResponse(env)
+
+    @app.post("/api/sessions/{session_id}/bind", dependencies=[Depends(_require_auth)])
+    def api_bind_session(session_id: str, body: BindBody) -> JSONResponse:
+        if body.chat_id is None:
+            # Web has no chat binding today; verify the session exists and echo it.
+            session = orchestrator.session_service.store.get(session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="session_not_found")
+            return JSONResponse({"ok": True, "reason": "", "session": _session_payload(session)})
+        result = orchestrator.session_service.bind_active(body.chat_id, session_id)
+        env = _command_envelope(result)
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
+        return JSONResponse(env)
+
+    @app.post("/api/sessions/{session_id}/stop", dependencies=[Depends(_require_auth)])
+    def api_stop_session(session_id: str) -> JSONResponse:
+        session = orchestrator.session_service.store.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        cancelled = False
+        if session.last_task_id:
+            cancelled = bool(orchestrator.cancel_task(session.last_task_id))
+        return JSONResponse({"ok": True, "cancelled": cancelled, "task_id": session.last_task_id})
+
+    @app.post("/api/sessions/{session_id}/compact", dependencies=[Depends(_require_auth)])
+    async def api_compact_session(session_id: str) -> JSONResponse:
+        session = orchestrator.session_service.store.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        result = await orchestrator.compact_session(session_id)
+        return JSONResponse({
+            "ok": bool(getattr(result, "success", False)),
+            "output": getattr(result, "output", ""),
+            "errors": list(getattr(result, "errors", []) or []),
+        })
 
     return app
 
