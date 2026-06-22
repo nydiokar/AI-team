@@ -2595,8 +2595,8 @@ class TelegramInterface:
             return
         ok = bool(self.orchestrator.cancel_task(session.last_task_id))
         if ok:
-            session.status = SessionStatus.CANCELLED
-            self.session_store.save(session)
+            self.orchestrator.session_service.mark_cancelled(session.session_id)
+            session = self.session_store.get(session.session_id) or session
             await update.message.reply_text(
                 f"Cancellation requested for `{session.last_task_id}` in session {self._session_tag(session.session_id)}."
             )

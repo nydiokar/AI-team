@@ -117,3 +117,20 @@ def test_set_model_clear_to_default(svc):
     svc.set_model(s.session_id, "opus")
     res = svc.set_model(s.session_id, None)
     assert res.ok and svc.store.get(s.session_id).model is None
+
+
+# --- mark_busy / mark_cancelled (dispatch-time status writes) ---------------
+
+def test_mark_busy_sets_status_and_message(svc):
+    s = _make(svc)
+    res = svc.mark_busy(s.session_id, last_user_message="hello")
+    assert res.ok
+    r = svc.store.get(s.session_id)
+    assert r.status == SessionStatus.BUSY and r.last_user_message == "hello"
+
+
+def test_mark_cancelled_sets_status(svc):
+    s = _make(svc)
+    svc.mark_busy(s.session_id)
+    res = svc.mark_cancelled(s.session_id)
+    assert res.ok and svc.store.get(s.session_id).status == SessionStatus.CANCELLED

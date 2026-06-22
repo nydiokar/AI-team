@@ -154,6 +154,9 @@ def test_stop_cancels_last_task(client, orch, tmp_path):
     r = client.post(f"/api/sessions/{s.session_id}/stop", headers=_auth())
     assert r.status_code == 200 and r.json()["cancelled"] is True
     assert orch.cancelled == ["task_running"]
+    # Parity with Telegram /session_cancel: session is marked CANCELLED.
+    from src.core.interfaces import SessionStatus
+    assert orch.session_service.store.get(s.session_id).status == SessionStatus.CANCELLED
 
 
 def test_compact_returns_result_shape(client, orch, tmp_path):

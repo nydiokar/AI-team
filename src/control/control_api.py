@@ -241,16 +241,15 @@ def build_control_api(orchestrator) -> FastAPI:
         if cached is not None:
             return JSONResponse(cached)
 
-        from src.core.interfaces import SessionStatus
-
         session = None
         if body.session_id:
             session = orchestrator.session_service.store.get(body.session_id)
             if session is None:
                 raise HTTPException(status_code=404, detail="session_not_found")
-            session.last_user_message = body.description
-            session.status = SessionStatus.BUSY
-            orchestrator.session_service.store.save(session)
+            # Status write (BUSY + last_user_message) lives on the service.
+            orchestrator.session_service.mark_busy(
+                session.session_id, last_user_message=body.description)
+            session = orchestrator.session_service.store.get(session.session_id)
             task_id = await orchestrator.submit_instruction(
                 description=body.description,
                 session_id=session.session_id,
@@ -319,6 +318,9 @@ def build_control_api(orchestrator) -> FastAPI:
         cancelled = False
         if session.last_task_id:
             cancelled = bool(orchestrator.cancel_task(session.last_task_id))
+            if cancelled:
+                # Status write lives on the service (parity with Telegram /session_cancel).
+                orchestrator.session_service.mark_cancelled(session_id)
         return JSONResponse({"ok": True, "cancelled": cancelled, "task_id": session.last_task_id})
 
     @app.post("/api/sessions/{session_id}/compact", dependencies=[Depends(_require_auth)])
