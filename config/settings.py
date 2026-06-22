@@ -156,6 +156,10 @@ class MeshConfig:
     # Cockpit M3 read-only web dashboard (consumes db.list_* + events.ndjson).
     dashboard_port: int = 9003               # DASHBOARD_PORT
     dashboard_token: str = ""                # DASHBOARD_TOKEN — falls back to worker_token
+    # Control API embedded in the gateway process (U1 — replaces dashboard_main).
+    # Serves the read API on dashboard_port from inside the gateway, sharing its
+    # live SessionService / NodeRegistry. Default on; set false to disable.
+    control_api_enabled: bool = True         # CONTROL_API_ENABLED
 
 
 class Config:
@@ -441,6 +445,12 @@ class Config:
             v = os.getenv("DASHBOARD_TOKEN")
             if v:
                 self.mesh.dashboard_token = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("CONTROL_API_ENABLED")
+            if v is not None:
+                self.mesh.control_api_enabled = v.lower() == "true"
         except Exception:
             pass
         try:
