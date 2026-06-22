@@ -295,11 +295,18 @@ surface that needs to *change* session state on a workflow step calls §4a/§4b 
   **Write surface (U3)** — thin adapters over the same services, never bypassing them:
   `POST /api/instructions` (→ `submit_instruction`, `source="web_session"`/`"web_oneoff"`),
   `POST /api/sessions` (→ `SessionService.create_session`, `origin=SessionOrigin("web")`),
-  `POST /api/sessions/{id}/bind|stop|compact` (→ `bind_active` / `cancel_task` /
-  `compact_session`). Create endpoints honor an `Idempotency-Key` header (bounded
-  in-process cache). Rejections return `{ok:false, reason:<machine code>}` with a mapped
-  4xx (`unknown_backend`→400, `session_not_found`→404) — **no user-facing prose in the
-  API**; each surface maps `reason` to its own wording. WS/SSE push is U4.
+  `POST /api/sessions/{id}/bind|stop|compact|close|restore|model` (→ `bind_active` /
+  `cancel_task` / `compact_session` / `close_session` / `restore_session` / `set_model`),
+  plus `POST /api/sessions/{id}/inspect` (NodeInspector, read), `GET /api/jobs`
+  (watched jobs), `POST /api/git/{status|commit|commit_all}` (GitAutomationService).
+  Create endpoints honor an `Idempotency-Key` header (bounded in-process cache).
+  Rejections return `{ok:false, reason:<machine code>}` with a mapped 4xx
+  (`unknown_backend`/`unknown_model`→400, `session_not_found`→404, `not_closed`→409) —
+  **no user-facing prose in the API**; each surface maps `reason` to its own wording.
+  **Parity (U3.5):** every Telegram action has a web equivalent; session *lifecycle*
+  (create/close/restore/model/bind) lives on `SessionService`, called by both Telegram
+  and web — no interface mutates `status`/`model`/`backend_session_id` directly. WS/SSE
+  push is U4.
 - **Add a backend?** One edit: add a `name → factory` entry in
   `src/backends/registry.py`. `build_backends()`, `valid_backend_names()`,
   `is_valid_backend()` all derive from it; `CodingBackend` (`src/core/interfaces.py`) is the

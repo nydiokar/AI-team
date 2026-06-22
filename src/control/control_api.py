@@ -65,6 +65,20 @@ class ModelBody(BaseModel):
     model: Optional[str] = None
 
 
+class InspectBody(BaseModel):
+    op: str
+    path: Optional[str] = None
+    limit: Optional[int] = None
+    sort_by_recent: Optional[bool] = None
+
+
+class GitCommitBody(BaseModel):
+    task_id: str
+    task_description: Optional[str] = None
+    create_branch: bool = True
+    push_branch: bool = False
+
+
 def _session_payload(session) -> Optional[Dict[str, Any]]:
     """Render a Session as the canonical SessionView dict (or None)."""
     if session is None:
@@ -348,6 +362,61 @@ def build_control_api(orchestrator) -> FastAPI:
         if not result.ok:
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
+
+    # --- inspect / jobs / git (U3.5 tier 2 — thin wraps over existing services) ---
+
+    @app.post("/api/sessions/{session_id}/inspect", dependencies=[Depends(_require_auth)])
+    async def api_inspect(session_id: str, body: InspectBody) -> JSONResponse:
+        """Run a repo inspection op routed to the session's owning node — the same
+        NodeInspector path Telegram uses. Read-only."""
+        session = orchestrator.session_service.store.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        params = {k: v for k, v in {
+            "path": body.path, "limit": body.limit, "sort_by_recent": body.sort_by_recent,
+        }.items() if v is not None}
+        from src.control.node_inspector import get_inspector, InspectError
+        try:
+            result = await get_inspector().run(session, body.op, params)
+        except InspectError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return JSONResponse(result)
+
+    @app.get("/api/jobs", dependencies=[Depends(_require_auth)])
+    def api_jobs(limit: int = Query(20, ge=1, le=50)) -> JSONResponse:
+        db = _db()
+        if db is None:
+            return JSONResponse({"running": [], "recent": []})
+        running = db.list_jobs(status="running", limit=limit)
+        recent = db.list_jobs(limit=limit)
+        return JSONResponse({"running": running, "recent": recent})
+
+    @app.post("/api/git/status", dependencies=[Depends(_require_auth)])
+    def api_git_status() -> JSONResponse:
+        from src.services.git_automation import GitAutomationService
+        return JSONResponse(GitAutomationService().get_git_status_summary())
+
+    @app.post("/api/git/commit", dependencies=[Depends(_require_auth)])
+    def api_git_commit(body: GitCommitBody) -> JSONResponse:
+        from src.services.git_automation import GitAutomationService
+        result = GitAutomationService().safe_commit_task(
+            task_id=body.task_id,
+            task_description=body.task_description or f"Task {body.task_id} changes",
+            create_branch=body.create_branch,
+            push_branch=body.push_branch,
+        )
+        return JSONResponse(result)
+
+    @app.post("/api/git/commit_all", dependencies=[Depends(_require_auth)])
+    def api_git_commit_all(body: GitCommitBody) -> JSONResponse:
+        from src.services.git_automation import GitAutomationService
+        result = GitAutomationService().commit_all_staged(
+            task_id=body.task_id,
+            task_description=body.task_description or f"Task {body.task_id} changes",
+            create_branch=body.create_branch,
+            push_branch=body.push_branch,
+        )
+        return JSONResponse(result)
 
     return app
 
