@@ -22,12 +22,13 @@ All ``/api/*`` endpoints require ``Authorization: Bearer {DASHBOARD_TOKEN}``
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Security
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Security
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -109,6 +110,61 @@ def _dashboard_token() -> str:
     except Exception:
         import os
         return os.getenv("DASHBOARD_TOKEN", "") or os.getenv("WORKER_TOKEN", "")
+
+
+async def event_stream_frames(
+    *,
+    since: int = 0,
+    is_disconnected=None,
+    sleep=None,
+    max_iterations: Optional[int] = None,
+):
+    """Async generator of SSE frame strings tailing events.ndjson (U4).
+
+    Extracted from the route so it is testable without the HTTP transport
+    (Starlette's TestClient buffers streaming responses and can't drive an endless
+    stream). ``is_disconnected`` is an async predicate to stop on client hangup;
+    ``sleep`` is the inter-poll await (injectable); ``max_iterations`` bounds the
+    loop in tests. Each frame is ``data: {...}\\n\\n`` or an SSE comment keep-alive.
+    """
+    import asyncio as _asyncio
+
+    if is_disconnected is None:
+        async def is_disconnected():  # pragma: no cover - default never disconnects
+            return False
+    if sleep is None:
+        sleep = lambda: _asyncio.sleep(1.0)  # noqa: E731
+
+    offset = since
+    data = observability.read_recent_events(since_offset=offset)
+    offset = data.get("offset", offset)
+    if data.get("events"):
+        yield f"data: {json.dumps(data)}\n\n"
+    else:
+        yield ": connected\n\n"
+
+    iterations = 0
+    while True:
+        if max_iterations is not None and iterations >= max_iterations:
+            break
+        iterations += 1
+        if await is_disconnected():
+            break
+        data = observability.read_recent_events(since_offset=offset)
+        if data.get("events"):
+            yield f"data: {json.dumps(data)}\n\n"
+            offset = data.get("offset", offset)
+        else:
+            yield ": keep-alive\n\n"
+        await sleep()
+
+
+def _bearer_from_header(request) -> Optional[str]:
+    """Extract a Bearer token from the Authorization header, if present."""
+    auth = request.headers.get("Authorization") or ""
+    if auth.startswith("Bearer "):
+        return auth[len("Bearer "):].strip()
+    return None
 
 
 def _heartbeat_timeout_sec() -> int:
@@ -225,6 +281,34 @@ def build_control_api(orchestrator) -> FastAPI:
         """
         data = observability.read_recent_events(limit=limit, since_offset=since)
         return JSONResponse(data)
+
+    @app.get("/api/events/stream")
+    async def api_events_stream(
+        request: Request,
+        since: int = Query(0, ge=0),
+        token: Optional[str] = Query(default=None),
+    ) -> StreamingResponse:
+        """Server-Sent Events stream of the event log (U4).
+
+        Tails ``events.ndjson`` via the same ``read_recent_events`` reader the poll
+        uses, so it sees ALL events — including remote worker events that only land
+        in the shared file (the forward-compatible seam for the future broker-backed
+        bus; see CONTROL_SURFACE_UNIFICATION §12). Auth is via the ``token`` query
+        param because the browser ``EventSource`` API cannot set an Authorization
+        header. Each frame: ``data: {"events": [...], "offset": N}``.
+        """
+        expected = _dashboard_token()
+        if not expected:
+            raise HTTPException(status_code=500, detail="DASHBOARD_TOKEN not configured")
+        supplied = token or _bearer_from_header(request)
+        if supplied != expected:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        return StreamingResponse(
+            event_stream_frames(since=since, is_disconnected=request.is_disconnected),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ----------------------------------------------------------------------
     # Write surface (U3) — thin adapters over the same services Telegram calls.

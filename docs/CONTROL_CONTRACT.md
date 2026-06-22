@@ -305,8 +305,14 @@ surface that needs to *change* session state on a workflow step calls §4a/§4b 
   **no user-facing prose in the API**; each surface maps `reason` to its own wording.
   **Parity (U3.5):** every Telegram action has a web equivalent; session *lifecycle*
   (create/close/restore/model/bind) lives on `SessionService`, called by both Telegram
-  and web — no interface mutates `status`/`model`/`backend_session_id` directly. WS/SSE
-  push is U4.
+  and web — no interface mutates `status`/`model`/`backend_session_id` directly.
+  **Live push (U4):** `GET /api/events/stream` is a Server-Sent Events stream tailing
+  `events.ndjson` (same reader as the `/api/events` poll), so it sees ALL events incl.
+  remote worker events. Auth via `?token=` query param (the browser `EventSource` API
+  can't set headers; a `Bearer` header also works for non-browser clients). Each frame:
+  `data: {"events":[...],"offset":N}`. The poll remains the gap-recovery fallback. The
+  file-tail backing is the forward-compatible seam for a future broker-backed bus
+  (`CONTROL_SURFACE_UNIFICATION §12`).
 - **Add a backend?** One edit: add a `name → factory` entry in
   `src/backends/registry.py`. `build_backends()`, `valid_backend_names()`,
   `is_valid_backend()` all derive from it; `CodingBackend` (`src/core/interfaces.py`) is the
