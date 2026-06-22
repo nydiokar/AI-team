@@ -23,12 +23,21 @@ class _FakeExecResult:
         self.errors = errors or []
 
 
+class _FakeBackend:
+    def __init__(self):
+        self.closed = []
+
+    def close(self, session):
+        self.closed.append(session.session_id)
+
+
 class _StubOrchestrator:
     def __init__(self):
         self.session_service = SessionService(SessionStore())
         self.submitted = []          # (description, session_id, cwd, source)
         self.cancelled = []          # task_ids
         self.compacted = []          # session_ids
+        self._backends = {"claude": _FakeBackend()}
         self._next_task_id = "task_web_1"
 
     async def submit_instruction(self, description, session_id=None, cwd=None,
@@ -159,3 +168,38 @@ def test_compact_returns_result_shape(client, orch, tmp_path):
 
 def test_stop_unknown_session_404(client):
     assert client.post("/api/sessions/nope/stop", headers=_auth()).status_code == 404
+
+
+# --- parity: close / restore / model (U3.5/P5) ------------------------------
+
+def test_close_then_restore(client, orch, tmp_path):
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    sid = res.session.session_id
+
+    rc = client.post(f"/api/sessions/{sid}/close", headers=_auth())
+    assert rc.status_code == 200 and rc.json()["session"]["status"] == "closed"
+
+    rr = client.post(f"/api/sessions/{sid}/restore", headers=_auth())
+    assert rr.status_code == 200 and rr.json()["session"]["status"] == "idle"
+
+
+def test_restore_non_closed_is_409(client, orch, tmp_path):
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    r = client.post(f"/api/sessions/{res.session.session_id}/restore", headers=_auth())
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "not_closed"
+
+
+def test_set_model_valid_and_unknown(client, orch, tmp_path):
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    sid = res.session.session_id
+
+    ok = client.post(f"/api/sessions/{sid}/model", headers=_auth(), json={"model": "opus"})
+    assert ok.status_code == 200 and ok.json()["session"]["model"] == "opus"
+
+    bad = client.post(f"/api/sessions/{sid}/model", headers=_auth(), json={"model": "nope-9000"})
+    assert bad.status_code == 400 and bad.json()["detail"]["reason"] == "unknown_model"
+
+
+def test_close_unknown_session_404(client):
+    assert client.post("/api/sessions/nope/close", headers=_auth()).status_code == 404

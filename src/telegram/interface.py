@@ -2669,13 +2669,12 @@ class TelegramInterface:
         args = context.args or []
         requested = " ".join(args).strip()
         if requested:
-            from config.models import validate, is_advisory
             # An advisory backend would otherwise treat a blank/garbage arg as
             # validate()->None and silently reset to default (B8). `requested`
             # is already non-empty here; a truly empty arg falls through to the
-            # picker below instead of resetting.
-            resolved = validate(session.backend, requested)
-            if resolved is None and not is_advisory(session.backend):
+            # picker below instead of resetting. set_model (P3) enforces this.
+            result = self.orchestrator.session_service.set_model(session.session_id, requested)
+            if not result.ok and result.reason == "unknown_model":
                 from config.models import options
                 names = ", ".join(o.name for o in options(session.backend)) or "(none)"
                 safe_requested = requested.replace("`", "")
@@ -2684,8 +2683,7 @@ class TelegramInterface:
                     parse_mode="Markdown",
                 )
                 return
-            session.model = resolved
-            self.session_store.save(session)
+            session = self.session_store.get(session.session_id) or session
             await update.message.reply_text(
                 f"✅ Model set to {self._effective_model_label(session)} — applies on the next turn.",
                 parse_mode="Markdown",
@@ -2720,15 +2718,16 @@ class TelegramInterface:
             await query.edit_message_text("❌ That session is closed.")
             return
         if choice == "__default__":
-            session.model = None
+            chosen = None
         else:
             from config.models import options
             try:
-                session.model = options(session.backend)[int(choice)].name
+                chosen = options(session.backend)[int(choice)].name
             except (ValueError, IndexError):
                 await query.edit_message_text("❌ Invalid model selection.")
                 return
-        self.session_store.save(session)
+        self.orchestrator.session_service.set_model(session.session_id, chosen)
+        session = self.session_store.get(session.session_id) or session
         await query.edit_message_text(
             f"✅ Model set to {self._effective_model_label(session)} — applies on the next turn.",
             parse_mode="Markdown",
@@ -2750,29 +2749,15 @@ class TelegramInterface:
         if not self._user_can_access_session(update.effective_user.id, session):
             await update.message.reply_text("❌ You do not own that session.")
             return
-        backend_session_id = session.backend_session_id
-        if backend_session_id:
-            backend = getattr(self.orchestrator, "_backends", {}).get(session.backend)
-            if backend and (not session.machine_id or session.machine_id == socket.gethostname()):
-                try:
-                    await asyncio.to_thread(backend.close, session)
-                except Exception as e:
-                    logger.warning(
-                        "event=session_backend_close_failed session_id=%s backend=%s err=%s",
-                        session.session_id,
-                        session.backend,
-                        e,
-                    )
-            elif session.machine_id and session.machine_id != socket.gethostname():
-                logger.info(
-                    "event=session_backend_close_remote_skipped session_id=%s backend=%s node=%s",
-                    session.session_id,
-                    session.backend,
-                    session.machine_id,
-                )
-            session.backend_session_id = ""
-        session.status = SessionStatus.CLOSED
-        self.session_store.save(session)
+        # Lifecycle (backend close + status + backend_session_id) lives on the
+        # transport-neutral service (U3.5/P1). backend.close may block, so run the
+        # service call off-thread. Chat unbinding below stays Telegram's concern.
+        await asyncio.to_thread(
+            self.orchestrator.session_service.close_session,
+            session.session_id,
+            backends=getattr(self.orchestrator, "_backends", {}),
+        )
+        session = self.session_store.get(session.session_id) or session
         active = self.session_store.get_active(update.effective_chat.id)
         if active and active.session_id == session.session_id:
             self.session_store.unbind(update.effective_chat.id)
@@ -2799,8 +2784,8 @@ class TelegramInterface:
             if session.status != SessionStatus.CLOSED:
                 await update.message.reply_text(f"Session {self._session_tag(session.session_id)} is already open ({session.status.value}).")
                 return
-            session.status = SessionStatus.IDLE
-            self.session_store.save(session)
+            self.orchestrator.session_service.restore_session(session.session_id)
+            session = self.session_store.get(session.session_id) or session
             self.session_store.bind(update.effective_chat.id, session.session_id)
             await update.message.reply_text(self._format_session_switched_message(session))
         else:
@@ -2842,8 +2827,8 @@ class TelegramInterface:
             )
             return
 
-        session.status = SessionStatus.IDLE
-        self.session_store.save(session)
+        self.orchestrator.session_service.restore_session(session.session_id)
+        session = self.session_store.get(session.session_id) or session
         self.session_store.bind(update.effective_chat.id, session.session_id)
         await query.edit_message_text(self._format_session_switched_message(session))
 

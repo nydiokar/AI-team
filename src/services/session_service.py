@@ -9,13 +9,17 @@ Read-side (``list_views``/``active_view``) return SessionView DTOs (Move C / M2)
 so every surface consumes one read shape instead of re-deriving status logic.
 """
 from __future__ import annotations
+import logging
+import socket
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from src.services.session_store import SessionStore
-from src.core.interfaces import Session, SessionOrigin
+from src.core.interfaces import Session, SessionOrigin, SessionStatus
 from src.core.view_models import SessionView
 from src.backends.registry import is_valid_backend, DEFAULT_BACKEND
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,81 @@ class SessionService:
         if not s:
             return CommandResult(False, reason="session_not_found")
         self.store.bind(chat_id, session_id)
+        return CommandResult(True, session=s)
+
+    def close_session(
+        self,
+        session_id: str,
+        *,
+        backends: Optional[Dict[str, Any]] = None,
+        host: Optional[str] = None,
+    ) -> CommandResult:
+        """Close a session — transport-neutral extraction of the Telegram close path.
+
+        If the session has a live ``backend_session_id`` and is local (no
+        ``machine_id`` or it equals this ``host``), call ``backend.close(session)``;
+        a remote session skips the backend close (the owning node will clean up).
+        Then clear ``backend_session_id``, set status CLOSED, save. Chat unbinding is
+        a transport concern and stays with the caller. ``backends`` is the name→adapter
+        map (the orchestrator's ``_backends``); omit it to skip the backend call.
+        """
+        s = self.store.get(session_id)
+        if not s:
+            return CommandResult(False, reason="session_not_found")
+        host = host or socket.gethostname()
+        if s.backend_session_id:
+            is_local = (not s.machine_id) or (s.machine_id == host)
+            backend = (backends or {}).get(s.backend)
+            if backend and is_local:
+                try:
+                    backend.close(s)
+                except Exception as e:
+                    logger.warning(
+                        "event=session_backend_close_failed session_id=%s backend=%s err=%s",
+                        s.session_id, s.backend, e,
+                    )
+            elif not is_local:
+                logger.info(
+                    "event=session_backend_close_remote_skipped session_id=%s backend=%s node=%s",
+                    s.session_id, s.backend, s.machine_id,
+                )
+            s.backend_session_id = ""
+        s.status = SessionStatus.CLOSED
+        self.store.save(s)
+        return CommandResult(True, session=s)
+
+    def restore_session(self, session_id: str) -> CommandResult:
+        """Reopen a CLOSED session (→ IDLE). Caller binds it to a chat if needed."""
+        s = self.store.get(session_id)
+        if not s:
+            return CommandResult(False, reason="session_not_found")
+        if s.status != SessionStatus.CLOSED:
+            return CommandResult(False, reason="not_closed", session=s)
+        s.status = SessionStatus.IDLE
+        self.store.save(s)
+        return CommandResult(True, session=s)
+
+    def set_model(self, session_id: str, model: Optional[str]) -> CommandResult:
+        """Pin (or clear) a session's model — extraction of the Telegram /model set path.
+
+        Resolves ``model`` via ``config.models.validate(backend, model)``. For
+        non-advisory backends an unresolved name is rejected (``unknown_model``);
+        advisory backends pass the value through. A falsy ``model`` clears to default
+        (None). Applies on the next turn. Picker UI / labels stay in the transport.
+        """
+        s = self.store.get(session_id)
+        if not s:
+            return CommandResult(False, reason="session_not_found")
+        if not model:
+            s.model = None
+            self.store.save(s)
+            return CommandResult(True, session=s)
+        from config.models import validate, is_advisory
+        resolved = validate(s.backend, model)
+        if resolved is None and not is_advisory(s.backend):
+            return CommandResult(False, reason="unknown_model", session=s)
+        s.model = resolved
+        self.store.save(s)
         return CommandResult(True, session=s)
 
     # --- queries (read) — one read shape for every surface (Move C / M2) ---
