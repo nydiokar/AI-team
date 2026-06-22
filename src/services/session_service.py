@@ -119,6 +119,31 @@ class SessionService:
         self.store.save(s)
         return CommandResult(True, session=s)
 
+    def mark_busy(self, session_id: str, *, last_user_message: Optional[str] = None) -> CommandResult:
+        """Set a session BUSY (and optionally record the user's message) before a
+        send. The status write lives on the service, not the interface."""
+        s = self.store.get(session_id)
+        if not s:
+            return CommandResult(False, reason="session_not_found")
+        if last_user_message is not None:
+            s.last_user_message = last_user_message
+        s.status = SessionStatus.BUSY
+        self.store.save(s)
+        return CommandResult(True, session=s)
+
+    def mark_cancelled(self, session_id: str) -> CommandResult:
+        """Set a session CANCELLED after its task cancel was requested.
+
+        The transport calls ``orchestrator.cancel_task`` (dispatch concern) and
+        then this, so the status write lives on the service, not the interface.
+        """
+        s = self.store.get(session_id)
+        if not s:
+            return CommandResult(False, reason="session_not_found")
+        s.status = SessionStatus.CANCELLED
+        self.store.save(s)
+        return CommandResult(True, session=s)
+
     def restore_session(self, session_id: str) -> CommandResult:
         """Reopen a CLOSED session (→ IDLE). Caller binds it to a chat if needed."""
         s = self.store.get(session_id)

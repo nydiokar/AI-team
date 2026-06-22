@@ -97,5 +97,16 @@ Parity gap (verified against interface.py handler registrations):
 **Acceptance gate:** every Telegram action has a web equivalent OR is explicitly
 documented as Telegram-only-by-design (e.g. chat-binding, message rendering). Lifecycle
 logic (create/close/restore/model/bind) lives on `SessionService`, not on any interface
-— grep proves no interface mutates `session.status`/`session.model`/`backend_session_id`
-directly except through the service. That grep IS U6.
+— grep proves no interface mutates `session.model`/`backend_session_id` directly, and
+status transitions go through service helpers (`mark_busy`/`mark_cancelled`). That grep
+IS U6.
+
+**Deliberate boundary (P11):** `close_session`/`restore_session`/`set_model`/
+`mark_cancelled` route through `SessionService` from BOTH interfaces. The web `/stop`
+now marks CANCELLED for parity with Telegram `/session_cancel`. The 4 Telegram
+`status = BUSY` sites are left inline: they set BUSY on the same Session object they
+immediately save with `last_task_id` (a single save in the dispatch path). `mark_busy`
+exists on the service (used by web `/instructions` and available to any new interface);
+forcing Telegram's hot send-path through it would add a redundant save+reload for no
+behavioral gain. BUSY is a dispatch-time transition owned by the sending path — not a
+standalone lifecycle op. This is a scope decision, not an oversight.
