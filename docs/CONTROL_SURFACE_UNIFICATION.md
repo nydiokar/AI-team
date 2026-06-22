@@ -294,3 +294,47 @@ both interfaces obtain identical capabilities.** That is the machine-checkable f
 > `CommandResult` contract, add a WS/SSE push beside the poll, and serve `web/dist` from
 > the gateway in prod. End state: `python main.py` is the only process; Telegram and Web
 > are equal thin interfaces over one gateway.
+
+---
+
+## 12. U4 decision — SSE-over-file now, broker-backed bus later (M-Mesh)
+
+**Decision (2026-06-22):** U4 ships **Server-Sent Events that tail `events.ndjson`**,
+reusing `observability.read_recent_events`. Rationale:
+
+- `events.ndjson` is *already* a primitive shared event space — the live U1 test showed
+  remote worker (`Horse`) events landing in it from another process. An in-process
+  `emit_event` WS hook would push instantly but **only see events emitted in the gateway
+  process**, missing all worker/remote events. SSE-over-file sees everything.
+- The HTTP contract (`GET /api/events/stream`, SSE frames carrying the same envelope as
+  `/api/events`) is **identical regardless of the backing store**. When the real bus
+  lands (below), the file reader is swapped for a broker subscriber behind the same
+  endpoint — SSE-over-file is *forward-compatible*, not throwaway.
+
+### M-Mesh (future milestone — DO NOT build until the app is operable)
+
+The operator's real goal: a **true peer mesh** — any node can become the server, the
+gateway can resurrect on another machine, one coherent low-latency event space across
+gateway + server + workers + remote events; no hard dependence on a single server box.
+
+That is a **distributed event-bus / leader-election** problem, and the load-bearing
+insight is: **the event bus cannot live inside the gateway** (it would die with it). It
+must be an external substrate every node connects to. Sketch for the rebuild:
+
+- **Shared event bus:** Redis Streams or NATS (JetStream) as the canonical event space.
+  Every node (gateway, server, workers) publishes and subscribes. `emit_event` gains a
+  bus-publish alongside (or instead of) the file append; `read_recent_events` / the SSE
+  endpoint read from the bus. The file becomes a local cache/fallback, not the source.
+- **State:** sessions/tasks/nodes already live in `state/mesh.db`; promote to a shared
+  store (Redis/Postgres) so any node sees the same state — the gateway becomes
+  effectively stateless over it.
+- **Server role = election, not a fixed box:** nodes elect a coordinator (or run
+  coordinator-less via the bus). "Gateway resurrects elsewhere" = any node can assume the
+  control role because state + events are external.
+- **Contract stability:** the Control API surface (read + write + `/api/events/stream`)
+  stays the same; only its backing substrate changes. Interfaces (Telegram/Web) don't
+  notice the upgrade — exactly the payoff of the transport-neutral service layer.
+
+This is captured so the vision survives; it is **explicitly deferred** under the same
+rule that governed the whole refactor: no speculative infra before a working app. SSE
+now unblocks the deployable UI; M-Mesh is the dedicated phase after.
