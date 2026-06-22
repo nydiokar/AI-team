@@ -1,0 +1,93 @@
+/**
+ * Raw backend payload shapes — EXACTLY as `src/control/dashboard.py` returns
+ * them. These are the snake_case rows that must NOT leak into components
+ * (spec §11.1); the adapters in this directory translate them into ../domain.
+ *
+ * Verified against dashboard.py + core/view_models.py + control/db.py
+ * (2026-06-22). If the backend shape changes, change it HERE and in the adapter,
+ * never in components.
+ */
+
+// GET /api/sessions → { sessions: RawSessionView[] }
+// Shape = core.view_models.SessionView.to_dict() (asdict of the dataclass).
+export interface RawSessionView {
+  session_id: string;
+  backend: string;
+  repo_path: string;
+  /** SessionStatus value: idle|busy|awaiting_input|error|cancelled|closed. */
+  status: string;
+  machine_id: string;
+  model: string | null;
+  last_task_id: string;
+  last_summary: string;
+  last_files_modified: string[];
+  needs_input: boolean; //  status == awaiting_input
+  is_active: boolean; //    status not in {closed,error,cancelled}
+  origin_channel: string;
+  origin_kind: string;
+  updated_at: string;
+}
+
+// GET /api/nodes → { nodes: RawNode[] }
+// db.list_nodes() rows + dashboard._annotate_node_liveness() derived fields.
+// NOTE: trust `live` + `heartbeat_age_sec` (derived per-request), NOT `status`
+// (a stale column another process owns) — gap-doc §2.
+export interface RawNode {
+  node_id: string;
+  tailscale_ip: string;
+  api_port: number;
+  /** JSON-encoded array string OR already-parsed — see adapter (defensive). */
+  backends: string | string[];
+  max_concurrent: number;
+  /** stale column — DO NOT use for liveness; here only for completeness. */
+  status: string;
+  last_heartbeat: string;
+  registered_at: string;
+  updated_at: string;
+  // ── derived by dashboard._annotate_node_liveness ──
+  live: boolean;
+  heartbeat_age_sec: number | null;
+}
+
+// GET /api/tasks → { tasks: RawTask[] }
+// db.list_tasks() = `SELECT * FROM mesh_tasks`. PK column is `id` (the dashboard
+// JS reads `task_id||id`); mesh status set: pending|claimed|completed|failed|
+// failed_node_offline (NOT the 4-state TaskStatus enum).
+export interface RawTask {
+  id: string;
+  session_id: string | null;
+  machine_id: string | null;
+  backend: string;
+  action: string; // create_session|resume_session|run_oneoff|cancel|compact_session
+  payload: string; // JSON
+  status: string; // mesh status
+  claimed_by: string | null;
+  claimed_at: string | null;
+  completed_at: string | null;
+  result: string | null; // JSON ExecutionResult
+  error: string | null;
+  artifact_path: string | null;
+  parent_task_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// GET /api/events?since=<offset> → RawEventsResponse
+// observability.read_recent_events(): events carry a snake_case `event` name and
+// correlation ids; `offset` is fed back as `since` to poll (no replay).
+export interface RawEvent {
+  /** snake_case operational event name, e.g. "task_received","mesh_dispatch". */
+  event: string;
+  timestamp: string;
+  session_id?: string | null;
+  task_id?: string | null;
+  node_id?: string | null;
+  /** any other operational fields ride along untyped. */
+  [k: string]: unknown;
+}
+
+export interface RawEventsResponse {
+  events: RawEvent[];
+  /** byte offset to pass back as ?since= on the next poll. */
+  offset: number;
+}
