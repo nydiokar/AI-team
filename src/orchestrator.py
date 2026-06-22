@@ -74,6 +74,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Embedded mesh task server (started only when MESH_ENABLED) — shares the
         # gateway event loop so get_registry() is the same singleton dispatch uses.
         self._embedded_task_server = None
+        # Embedded control API (read surface for the Web UI) — shares the gateway
+        # event loop so it reads the live SessionService / NodeRegistry. U1.
+        self._embedded_control_api = None
         
         # Component status
         self.component_status = {
@@ -790,6 +793,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Start the embedded mesh task server (no-op unless MESH_ENABLED)
         await self._start_embedded_task_server()
 
+        # Start the embedded control API (read surface for the Web UI)
+        await self._start_embedded_control_api()
+
         # Resume pending before starting watcher to avoid duplicate/racy processing
         try:
             for file_path in list(self._pending_files):
@@ -886,6 +892,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Stop the embedded mesh task server (no-op if it was never started)
         await self._stop_embedded_task_server()
 
+        # Stop the embedded control API (no-op if it was never started)
+        await self._stop_embedded_control_api()
+
         if self._stale_busy_reconcile_task and not self._stale_busy_reconcile_task.done():
             self._stale_busy_reconcile_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -949,6 +958,42 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.warning(f"event=embedded_task_server_stop_failed err={e}")
         finally:
             self._embedded_task_server = None
+
+    async def _start_embedded_control_api(self) -> None:
+        """Start the in-process Control API (read surface for the Web UI). U1.
+
+        Serves /api/sessions|tasks|nodes|events on dashboard_port from inside the
+        gateway, sharing this process's SessionService and NodeRegistry — the
+        replacement for the standalone dashboard_main.py process. Disabled by
+        CONTROL_API_ENABLED=false. A bind failure logs loudly but never takes the
+        gateway down (same posture as the embedded task server).
+        """
+        if not config.mesh.control_api_enabled:
+            logger.info("event=control_api_skipped reason=disabled (CONTROL_API_ENABLED=false)")
+            return
+        if self._embedded_control_api is not None:
+            return
+        host = "127.0.0.1"
+        port = config.mesh.dashboard_port
+        try:
+            from src.control.embedded_server import EmbeddedControlServer
+            server = EmbeddedControlServer(orchestrator=self, host=host, port=port)
+            await server.start()
+            self._embedded_control_api = server
+            logger.info(f"event=control_api_up host={host} port={port}")
+        except Exception as e:
+            logger.error(f"event=control_api_start_failed err={e}")
+            self._embedded_control_api = None
+
+    async def _stop_embedded_control_api(self) -> None:
+        if self._embedded_control_api is None:
+            return
+        try:
+            await self._embedded_control_api.stop()
+        except Exception as e:
+            logger.warning(f"event=control_api_stop_failed err={e}")
+        finally:
+            self._embedded_control_api = None
 
     async def reload_worker_pool(self):
         """Reload worker pool size from environment configuration at runtime"""

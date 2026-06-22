@@ -113,3 +113,95 @@ class EmbeddedTaskServer:
         logger.info("event=embedded_task_server_stopped")
         self._serve_task = None
         self._server = None
+
+
+class EmbeddedControlServer:
+    """Runs the gateway's Control API on the gateway event loop as a managed task.
+
+    Same pattern as EmbeddedTaskServer, but the app is built from the live
+    orchestrator (``build_control_api(orchestrator)``) so its read handlers share
+    the orchestrator's in-process SessionService / NodeRegistry — see
+    docs/CONTROL_SURFACE_UNIFICATION.md U1. Replaces the standalone dashboard
+    process. Lifecycle owned by the orchestrator (start on startup, stop on
+    shutdown).
+    """
+
+    def __init__(self, orchestrator, host: str, port: int) -> None:
+        self.orchestrator = orchestrator
+        self.host = host
+        self.port = port
+        self._server = None  # uvicorn.Server
+        self._serve_task: Optional[asyncio.Task] = None
+
+    async def start(self) -> None:
+        """Bind and start serving on the gateway's event loop. Idempotent."""
+        if self._serve_task is not None and not self._serve_task.done():
+            logger.warning("event=embedded_control_server_already_running")
+            return
+
+        import uvicorn
+        from src.control.control_api import build_control_api
+
+        app = build_control_api(self.orchestrator)
+        config = uvicorn.Config(
+            app,
+            host=self.host,
+            port=self.port,
+            log_level="warning",
+            lifespan="on",
+        )
+        self._server = uvicorn.Server(config)
+        # The gateway owns SIGINT/SIGTERM; uvicorn must not install its own.
+        self._server.install_signal_handlers = lambda: None
+
+        self._serve_task = asyncio.create_task(
+            self._serve(), name="embedded-control-server"
+        )
+
+        for _ in range(50):  # up to ~5s
+            if getattr(self._server, "started", False):
+                logger.info(
+                    "event=embedded_control_server_started host=%s port=%s",
+                    self.host,
+                    self.port,
+                )
+                return
+            if self._serve_task.done():
+                exc = self._serve_task.exception()
+                self._serve_task = None
+                self._server = None
+                raise RuntimeError(
+                    f"embedded control server failed to start on {self.host}:{self.port}: {exc}"
+                )
+            await asyncio.sleep(0.1)
+        logger.warning(
+            "event=embedded_control_server_start_timeout host=%s port=%s",
+            self.host,
+            self.port,
+        )
+
+    async def _serve(self) -> None:
+        try:
+            await self._server.serve()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.error("event=embedded_control_server_crashed err=%r", e)
+
+    async def stop(self) -> None:
+        """Signal uvicorn to shut down and await the serve task."""
+        if self._server is not None:
+            self._server.should_exit = True
+        if self._serve_task is not None and not self._serve_task.done():
+            try:
+                await asyncio.wait_for(self._serve_task, timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning("event=embedded_control_server_stop_timeout; cancelling")
+                self._serve_task.cancel()
+                try:
+                    await self._serve_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        logger.info("event=embedded_control_server_stopped")
+        self._serve_task = None
+        self._server = None
