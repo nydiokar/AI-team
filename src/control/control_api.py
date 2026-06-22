@@ -37,7 +37,9 @@ from src.core import observability
 # always still carries {ok, reason} so the client owns the wording (no prose here).
 _REASON_STATUS = {
     "unknown_backend": 400,
+    "unknown_model": 400,
     "session_not_found": 404,
+    "not_closed": 409,
 }
 
 
@@ -57,6 +59,10 @@ class CreateSessionBody(BaseModel):
 
 class BindBody(BaseModel):
     chat_id: Optional[int] = None
+
+
+class ModelBody(BaseModel):
+    model: Optional[str] = None
 
 
 def _session_payload(session) -> Optional[Dict[str, Any]]:
@@ -312,6 +318,36 @@ def build_control_api(orchestrator) -> FastAPI:
             "output": getattr(result, "output", ""),
             "errors": list(getattr(result, "errors", []) or []),
         })
+
+    @app.post("/api/sessions/{session_id}/close", dependencies=[Depends(_require_auth)])
+    async def api_close_session(session_id: str) -> JSONResponse:
+        # backend.close may block (local backend) → off-thread, like Telegram.
+        import asyncio
+        result = await asyncio.to_thread(
+            orchestrator.session_service.close_session,
+            session_id,
+            backends=getattr(orchestrator, "_backends", {}),
+        )
+        env = _command_envelope(result)
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
+        return JSONResponse(env)
+
+    @app.post("/api/sessions/{session_id}/restore", dependencies=[Depends(_require_auth)])
+    def api_restore_session(session_id: str) -> JSONResponse:
+        result = orchestrator.session_service.restore_session(session_id)
+        env = _command_envelope(result)
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
+        return JSONResponse(env)
+
+    @app.post("/api/sessions/{session_id}/model", dependencies=[Depends(_require_auth)])
+    def api_set_model(session_id: str, body: ModelBody) -> JSONResponse:
+        result = orchestrator.session_service.set_model(session_id, body.model)
+        env = _command_envelope(result)
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
+        return JSONResponse(env)
 
     return app
 
