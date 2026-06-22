@@ -282,13 +282,17 @@ surface that needs to *change* session state on a workflow step calls §4a/§4b 
   `db.list_*` (§6); issue intent via `SessionService` (§4a) + `submit_instruction` (§4b);
   tag sessions with `SessionOrigin("web")` (§5). Add a delivery handler to
   `NotificationService` for outbound (§3). **No core refactor required.**
-  **Reference implementation (M3): `src/control/dashboard.py`** — a read-only FastAPI
-  surface that does exactly this. It renders `SessionService.list_views()` (§6) +
-  `db.list_tasks/list_nodes`, polls live deltas from `observability.read_recent_events`
-  (the canonical read-side accessor for the event stream, §1), and writes nothing — no
-  inbound command path. A write-capable surface adds calls to §4a/§4b; it does not bypass
-  them. Launch: `dashboard_main.py` (or `uvicorn src.control.dashboard:app`); auth via
-  `DASHBOARD_TOKEN` (falls back to `WORKER_TOKEN`).
+  **Reference implementation: `src/control/control_api.py`** — the gateway's own
+  in-process read API (U1 of `docs/CONTROL_SURFACE_UNIFICATION.md`). Built by
+  `build_control_api(orchestrator)` and mounted on the gateway event loop via
+  `EmbeddedControlServer` (`src/control/embedded_server.py`), so its handlers call the
+  **live** `orchestrator.session_service.list_views()` (§6) and the in-process
+  `NodeRegistry` directly — no separate process, no `state/mesh.db` side-read. It polls
+  live deltas from `observability.read_recent_events` (§1) and writes nothing — a
+  write-capable surface adds calls to §4a/§4b (U3); it does not bypass them. Served on
+  `DASHBOARD_PORT` (default 9003) by the gateway when `CONTROL_API_ENABLED` (default true);
+  auth via `DASHBOARD_TOKEN` (falls back to `WORKER_TOKEN`). The old standalone
+  `dashboard.py` / `dashboard_main.py` process was retired (U2).
 - **Add a backend?** One edit: add a `name → factory` entry in
   `src/backends/registry.py`. `build_backends()`, `valid_backend_names()`,
   `is_valid_backend()` all derive from it; `CodingBackend` (`src/core/interfaces.py`) is the
