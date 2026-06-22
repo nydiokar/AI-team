@@ -1,0 +1,106 @@
+import { describe, it, expect } from "vitest";
+import { toSessions, deriveLifecycle, deriveOpState } from "./sessionAdapter";
+import { toTargets, deriveHealth } from "./nodeAdapter";
+import { toTasks } from "./taskAdapter";
+import { adaptEvents, adaptEvent } from "./eventAdapter";
+import {
+  rawSessions,
+  rawNodes,
+  rawTasks,
+  rawEvents,
+} from "../fixtures/rawFixtures";
+
+describe("sessionAdapter — lifecycle/op split (gap-doc §3)", () => {
+  it("splits the flat backend status into lifecycle + op state", () => {
+    const sessions = toSessions(rawSessions);
+    const busy = sessions.find((s) => s.id === "sess_gateway_ui")!;
+    expect(busy.lifecycle).toBe("open");
+    expect(busy.opState).toBe("running"); // busy → running
+    const closed = sessions.find((s) => s.id === "sess_closed_migration")!;
+    expect(closed.lifecycle).toBe("closed");
+  });
+
+  it("derives needsAttention only for open sessions needing a human", () => {
+    const sessions = toSessions(rawSessions);
+    expect(sessions.find((s) => s.id === "sess_review_build")!.needsAttention).toBe(true); // awaiting_input
+    expect(sessions.find((s) => s.id === "sess_deploy_failed")!.needsAttention).toBe(true); // error
+    expect(sessions.find((s) => s.id === "sess_gateway_ui")!.needsAttention).toBe(false); // busy
+  });
+
+  it("maps each backend status correctly", () => {
+    expect(deriveOpState({ status: "awaiting_input" } as never)).toBe("waiting_for_input");
+    expect(deriveOpState({ status: "error" } as never)).toBe("failed_attention");
+    expect(deriveLifecycle({ status: "cancelled" } as never)).toBe("closed");
+  });
+});
+
+describe("nodeAdapter — trust derived live, not stale status (gap-doc §2)", () => {
+  it("maps live/age to health, ignoring the stale status column", () => {
+    const targets = toTargets(rawNodes);
+    expect(targets.find((t) => t.id === "main-pc")!.health).toBe("online");
+    // pi5: status column says "online" but live=false by heartbeat age → offline
+    expect(targets.find((t) => t.id === "pi5")!.health).toBe("offline");
+    // laptop: never heard from (age null) → unknown
+    expect(targets.find((t) => t.id === "laptop")!.health).toBe("unknown");
+  });
+
+  it("parses the JSON-encoded backends string", () => {
+    const targets = toTargets(rawNodes);
+    expect(targets.find((t) => t.id === "main-pc")!.backends).toEqual(["claude", "codex"]);
+  });
+
+  it("deriveHealth boundary cases", () => {
+    expect(deriveHealth({ live: true } as never)).toBe("online");
+    expect(deriveHealth({ live: false, heartbeat_age_sec: null } as never)).toBe("unknown");
+    expect(deriveHealth({ live: false, heartbeat_age_sec: 200 } as never)).toBe("offline");
+  });
+});
+
+describe("taskAdapter — mesh status → TaskState (gap-doc §4)", () => {
+  it("maps mesh statuses to the canonical lifecycle subset", () => {
+    const tasks = toTasks(rawTasks);
+    const byId = Object.fromEntries(tasks.map((t) => [t.id, t]));
+    expect(byId["task_a1"].state).toBe("dispatching"); // claimed
+    expect(byId["task_b2"].state).toBe("queued"); // pending
+    expect(byId["task_c3"].state).toBe("failed");
+    expect(byId["task_d4"].state).toBe("succeeded"); // completed
+  });
+
+  it("carries no progress field (⛔ task.progress dropped)", () => {
+    const t = toTasks(rawTasks)[0] as unknown as Record<string, unknown>;
+    expect("progressPct" in t).toBe(false);
+    expect("progress" in t).toBe(false);
+  });
+});
+
+describe("eventAdapter — snake→dotted translation (gap-doc §6)", () => {
+  it("swallows heartbeat", () => {
+    expect(adaptEvent({ event: "heartbeat", timestamp: "t", node_id: "main-pc" })).toBeNull();
+  });
+
+  it("collapses task_received into a task.state_changed", () => {
+    const ev = adaptEvent({ event: "task_received", timestamp: "t", task_id: "task_a1" });
+    expect(ev).toEqual({ type: "task.state_changed", taskId: "task_a1", state: "running" });
+  });
+
+  it("routes operational job events to system.notice", () => {
+    const ev = adaptEvent({ event: "mesh_dispatch", timestamp: "t", task_id: "task_a1", node_id: "main-pc" });
+    expect(ev?.type).toBe("system.notice");
+  });
+
+  it("drops the heartbeat from a batch but keeps the rest", () => {
+    const out = adaptEvents(rawEvents);
+    expect(out.some((e) => e.type === "system.notice")).toBe(true);
+    expect(out.some((e) => e.type === "task.state_changed")).toBe(true);
+    // 8 raw events, 1 heartbeat swallowed → 7 out
+    expect(out).toHaveLength(7);
+  });
+
+  it("emits NO tool.* or task.progress types", () => {
+    const out = adaptEvents(rawEvents);
+    for (const e of out) {
+      expect(e.type.startsWith("tool.")).toBe(false);
+      expect(e.type).not.toBe("task.progress");
+    }
+  });
+});
