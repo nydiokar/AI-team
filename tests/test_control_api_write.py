@@ -203,3 +203,45 @@ def test_set_model_valid_and_unknown(client, orch, tmp_path):
 
 def test_close_unknown_session_404(client):
     assert client.post("/api/sessions/nope/close", headers=_auth()).status_code == 404
+
+
+# --- parity tier 2: inspect / jobs (U3.5/P6,P7) -----------------------------
+
+def test_inspect_routes_through_inspector(client, orch, monkeypatch, tmp_path):
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    sid = res.session.session_id
+
+    class _FakeInspector:
+        async def run(self, session, op, params):
+            assert op == "list_dirs"
+            return {"path": session.repo_path, "dirs": ["a", "b"]}
+
+    import src.control.node_inspector as ni
+    monkeypatch.setattr(ni, "get_inspector", lambda: _FakeInspector())
+
+    r = client.post(f"/api/sessions/{sid}/inspect", headers=_auth(),
+                    json={"op": "list_dirs", "limit": 12})
+    assert r.status_code == 200 and r.json()["dirs"] == ["a", "b"]
+
+
+def test_inspect_unknown_session_404(client):
+    assert client.post("/api/sessions/nope/inspect", headers=_auth(),
+                       json={"op": "list_dirs"}).status_code == 404
+
+
+def test_jobs_returns_running_and_recent(client, monkeypatch):
+    import src.control.control_api as capi
+
+    class _FakeDB:
+        def list_jobs(self, status=None, limit=20):
+            return [{"id": "j1", "status": status or "done"}]
+
+    monkeypatch.setattr(capi, "_db", lambda: _FakeDB())
+    r = client.get("/api/jobs", headers=_auth())
+    assert r.status_code == 200
+    body = r.json()
+    assert "running" in body and "recent" in body
+
+
+def test_jobs_requires_auth(client):
+    assert client.get("/api/jobs").status_code in (401, 403)

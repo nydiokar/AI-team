@@ -67,13 +67,13 @@ Parity gap (verified against interface.py handler registrations):
 
 ### Tier 2 — inspect / git / jobs (thin wraps over existing services).
 
-- [ ] **P6 — `POST /api/sessions/{id}/inspect`** body `{op, path?, limit?}`
+- [x] **P6 — `POST /api/sessions/{id}/inspect`** body `{op, path?, limit?}`
   Wrap the same inspect path Telegram uses (`inspect_ops` / NodeInspector, routed to the
   session's owning node). Ops: `list_dirs`, `git_status`, `session_dirs`. Read-only.
   - **Done =** list_dirs returns dirs for a local session; unknown op → 400.
   - **Revert =** remove route.
 
-- [ ] **P7 — `GET /api/jobs`** — watched-job listing (read), same source as `/jobs`.
+- [x] **P7 — `GET /api/jobs`** — watched-job listing (read), same source as `/jobs`.
   - **Done =** returns a list (possibly empty) under auth.  **Revert =** remove route.
 
 - [ ] **P8 — `POST /api/git/{commit|commit_all|status}`** over `GitAutomationService`
@@ -84,12 +84,12 @@ Parity gap (verified against interface.py handler registrations):
 
 ### Close-out
 
-- [ ] **P9 — Tests** `tests/test_session_service_lifecycle.py` (P1–P3 units) +
+- [x] **P9 — Tests** `tests/test_session_service_lifecycle.py` (P1–P3 units) +
   extend `tests/test_control_api_write.py` (P5 endpoints, P6 inspect happy path with a
   fake inspector). No paid CLI.
   - **Done =** all green + existing telegram/control tests green.
 
-- [ ] **P10 — Docs** update `CONTROL_CONTRACT.md` surface list + this checklist;
+- [x] **P10 — Docs** update `CONTROL_CONTRACT.md` surface list + this checklist;
   refresh the parity table in chat. **Done =** contract lists all parity endpoints.
 
 ---
