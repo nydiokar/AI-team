@@ -72,6 +72,20 @@ Baseline: branch `feat/control-surface-unify` off `main@5f246b7`.
 
 ---
 
+## U2 — Retire the standalone dashboard (done with U1)
+
+- [x] **U2.1** — `git rm dashboard_main.py src/control/dashboard.py`.
+- [x] **U2.2** — Preserve the unique `observability.read_recent_events` regression
+  suite: `test_dashboard.py` → `tests/test_observability_events.py`, stripped of the
+  HTTP-endpoint tests now covered by `test_control_api.py`.
+- [x] **U2.3** — `docs/CONTROL_CONTRACT.md` reference impl now points at
+  `control_api.py` / `EmbeddedControlServer`. No PM2 entry existed for the dashboard
+  (it was launched manually), so `ecosystem.config.js` needed no change.
+- **Done =** no live `from src.control import dashboard` / `dashboard:app` /
+  `dashboard_main`; only the gateway process. **Revert =** `git revert` the U2 commit.
+
+---
+
 **U1 acceptance gate (all boxes):** `python main.py` is sufficient to serve the read
 API the web UI needs; `dashboard_main.py` is no longer *required* (its deletion is U2);
 Telegram byte-identical; `_annotate_node_liveness` is provably unnecessary in the
