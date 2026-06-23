@@ -8,6 +8,23 @@ import { create } from "zustand";
 
 const STORAGE_KEY = "ai_team_dash_token";
 
+/**
+ * Initial token resolution (U5): when the gateway serves this UI over the tailnet
+ * it injects `window.__DASHBOARD_TOKEN__` into the page, so a trusted device skips
+ * the TokenGate entirely. Falls back to a previously stored token (manual entry in
+ * dev / vite). The injected token wins so a redeploy with a rotated token is picked
+ * up without the user clearing localStorage.
+ */
+function initialToken(): string {
+  const injected = (window as unknown as { __DASHBOARD_TOKEN__?: string })
+    .__DASHBOARD_TOKEN__;
+  if (typeof injected === "string" && injected.length > 0) {
+    localStorage.setItem(STORAGE_KEY, injected);
+    return injected;
+  }
+  return localStorage.getItem(STORAGE_KEY) ?? "";
+}
+
 interface AuthState {
   token: string;
   hasToken: boolean;
@@ -15,9 +32,11 @@ interface AuthState {
   clear: () => void;
 }
 
+const _initial = initialToken();
+
 export const useAuthStore = create<AuthState>((set) => ({
-  token: localStorage.getItem(STORAGE_KEY) ?? "",
-  hasToken: Boolean(localStorage.getItem(STORAGE_KEY)),
+  token: _initial,
+  hasToken: Boolean(_initial),
   setToken: (token) => {
     const t = token.trim();
     localStorage.setItem(STORAGE_KEY, t);
