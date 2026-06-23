@@ -76,6 +76,36 @@ def test_health_still_open(client):
     assert client.get("/health").json()["status"] == "ok"
 
 
+@pytest.mark.parametrize("attack", [
+    "/%2e%2e/%2e%2e/secret.txt",          # percent-encoded ../../
+    "/..%2f..%2fsecret.txt",               # mixed-encoded ../../
+    "/assets/%2e%2e/%2e%2e/secret.txt",    # escape from under /assets
+])
+def test_spa_fallback_blocks_path_traversal(monkeypatch, tmp_path, attack):
+    """The SPA file resolver must confine reads to web/dist. A traversal payload
+    (which the router does NOT normalize) must fall through to the SPA index, never
+    serve a file outside dist. Regression for the unauthenticated arbitrary-file-read
+    fixed in control_api._web_spa."""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text(
+        "<!doctype html><head></head><body>app</body>", encoding="utf-8")
+    # A secret sibling of dist (stands in for .env / config) that must never leak.
+    (tmp_path / "secret.txt").write_text("TOP_SECRET_TOKEN", encoding="utf-8")
+    monkeypatch.setattr(control_api, "_web_dist_dir", lambda: dist)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    c = TestClient(control_api.build_control_api(_StubOrchestrator()))
+    r = c.get(attack)
+    # The only hard guarantee: the secret outside dist is never served.
+    assert "TOP_SECRET_TOKEN" not in r.text
+    # Escapes routed to the SPA handler fall through to the index; escapes under
+    # the /assets StaticFiles mount are blocked by Starlette with a 404 — both safe.
+    if attack.startswith("/assets/"):
+        assert r.status_code == 404
+    else:
+        assert "__DASHBOARD_TOKEN__" in r.text
+
+
 def test_no_dist_skips_mount(monkeypatch, tmp_path):
     # When there is no built UI (dev), / is not served by the gateway.
     monkeypatch.setattr(control_api, "_web_dist_dir", lambda: tmp_path / "nope")

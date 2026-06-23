@@ -558,12 +558,22 @@ def _mount_web_ui(app: FastAPI) -> None:
         return HTMLResponse(_index_html())
 
     # SPA fallback: any non-/api, non-asset path returns index (client-side routing).
+    dist_resolved = dist.resolve()
+
     @app.get("/{full_path:path}", response_class=HTMLResponse)
     def _web_spa(full_path: str) -> HTMLResponse:
         # Let real files (favicon, manifest, …) resolve if present; else SPA index.
-        candidate = dist / full_path
-        if full_path and candidate.is_file():
-            return FileResponse(str(candidate))  # type: ignore[return-value]
+        # SECURITY: confine the resolved path to web/dist. ``full_path`` is
+        # attacker-controlled and may contain ``..`` / percent-encoded ``..`` that
+        # the router does not normalize; without this check, a request like
+        # ``/%2e%2e/%2e%2e/.env`` would escape web/dist and serve arbitrary files
+        # (unauthenticated — this route has no token). On any escape, fall through
+        # to the SPA index rather than serving the file.
+        if full_path:
+            candidate = (dist / full_path).resolve()
+            if (candidate == dist_resolved or dist_resolved in candidate.parents) \
+                    and candidate.is_file():
+                return FileResponse(str(candidate))  # type: ignore[return-value]
         return HTMLResponse(_index_html())
 
     logger.info("event=web_ui_mounted dir=%s", dist)

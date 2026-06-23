@@ -110,3 +110,34 @@ exists on the service (used by web `/instructions` and available to any new inte
 forcing Telegram's hot send-path through it would add a redundant save+reload for no
 behavioral gain. BUSY is a dispatch-time transition owned by the sending path — not a
 standalone lifecycle op. This is a scope decision, not an oversight.
+
+---
+
+### Pre-merge adversarial review (2026-06-23)
+
+Reviewed the 8 commits `main..feat/control-surface-unify`. Findings + dispositions:
+
+- [x] **SEC-1 (FIXED) — unauthenticated arbitrary file read via the SPA catch-all.**
+  `_web_spa` (U5) resolved `dist / full_path` and served any `is_file()` match. The
+  router does **not** normalize percent-encoded `..`, so
+  `GET /%2e%2e/%2e%2e/config/settings.py` (and `/%2e%2e/.env`) escaped `web/dist` and
+  returned the file with **no token** — leaking `.env`, which holds `DASHBOARD_TOKEN` /
+  `WORKER_TOKEN`, defeating the token defense-in-depth. Fixed by resolving the candidate
+  and requiring it to be inside `dist` (`candidate == dist or dist in candidate.parents`)
+  before `FileResponse`; escapes fall through to the SPA index. Regression test:
+  `test_control_api_webui.py::test_spa_fallback_blocks_path_traversal`. The `/assets`
+  StaticFiles mount was already traversal-safe (Starlette 404s). **Revert =** restore the
+  bare `dist / full_path` resolve (re-opens the hole — do not).
+
+- [ ] **DX-1 (accepted, not fixed) — unknown `GET /api/...` returns SPA HTML, not 404.**
+  An unmatched **GET** under `/api/` falls to the SPA catch-all and returns 200 HTML.
+  Not a security issue (auth'd routes are unaffected; only GETs that match no real route
+  are caught, by SPA design) — only a DX wart for a frontend hitting a wrong path. Left
+  as-is; adding an `/api/{p:path}` 404 shim adds surface for marginal gain.
+
+- [ ] **CONC-1 (accepted, documented) — idempotency cache is not concurrency-safe.**
+  `POST /api/instructions` is `async` and `await`s `submit_instruction` between the
+  cache miss and the cache put, so two *simultaneous* requests with the same
+  `Idempotency-Key` can both act. Idempotency keys are a retry mechanism (sequential),
+  not a concurrency lock; the cache is correctly bounded (`_IDEM_MAX=512`, FIFO). A
+  per-key lock would close it if concurrent dup-submits ever become real. Left as-is.
