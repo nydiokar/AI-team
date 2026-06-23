@@ -548,6 +548,14 @@ registries, native mobile.
 Rejected (no current pain, speculative): new Task/Run/Review/Handoff tables, full
 `interfaces/api/core/adapters` directory re-org, plugin SDK.
 
+> **2026-06-22 update — some deferrals/rejections are now RE-OPENED.** The rejections
+> above were correct under the rule "no speculative machinery without a consumer."
+> The mobile UI spec (`.ai/context/mobile_coding_gateway_product_ui_spec_v0.2.md`) is
+> now that consumer. The gap analysis (`docs/FRONTEND_BACKEND_GAP.md`) schedules the
+> moves below. Note we did NOT re-open everything — `tool.*` events, `task.progress`,
+> per-session connection state, and session `archived` were re-confirmed as **dropped**
+> (they fight the black-box-backend boundary or earn nothing at this scale). See §14.
+
 ## 10. Next smallest useful step after this spec is approved
 
 Implement **Move A** (backend registry) — it is pure consolidation, lowest risk, and
@@ -614,3 +622,46 @@ This is controlled by the *form* of `docs/M1_CHECKLIST.md`, not by exhortation:
 reference it from `CLAUDE.md` or paste its "How to use this doc" header at the top of the
 working prompt) so the invariant — *M1 is an extraction + a doc, not a feature* — is always
 present, not something to remember.
+
+---
+
+## 14. Re-opened moves for the Web UI (2026-06-22)
+
+M1 made the core transport-neutral. The mobile UI spec is now a real consumer, so the
+moves M1 deferred/rejected get scheduled here. Build order is **F → I → G′ → H**, each a
+backend milestone the frontend's phases (UI Phase 2/3) depend on. Each is independently
+shippable and additive; none requires a DB migration beyond its own table/columns.
+
+| Move | Name | Unblocks | Size | Why now (was: rejected/deferred) |
+|---|---|---|---|---|
+| **F** | Write + WS/SSE surface | UI Phase 2, log streaming | L | A *gateway* must accept commands; dashboard is read-only by design. Service methods exist (`submit_instruction`, `SessionService`); F adds the HTTP/WS surface only. |
+| **I** | Canonical event adapter | UI Phase 2 timeline | M | Backend emits snake_case operational events; UI consumes dotted typed events. I is rename + collapse scattered transitions into `task.state_changed`. **No** `tool.*`/`task.progress` (dropped). |
+| **G′** | Task lifecycle object | UI Phase 2 Tasks tab, Phase 3 | M | `TaskStatus` is 4 states; UI needs the supervised lifecycle. Was rejected as "no pain"; the Tasks inbox is the pain. Extend states + session parentage; reuse existing `tasks` table. |
+| **H** | Approval consumer | UI Phase 3 | M | M4 emits `approval.requested/granted` but nothing waits on them. H adds the object + pending queue + a path that *blocks* on the decision + a resolve endpoint. |
+
+**Explicitly still dropped (do NOT build):** `tool.*` events / tool-execution objects,
+`task.progress`, per-session `connection_unknown`, session `archived`, token streaming
+(`message.delta`). Rationale in `docs/FRONTEND_BACKEND_GAP.md` (⛔ DROP rows).
+
+### Milestone ladder (single source of truth for "what's next")
+
+Do not redefine these elsewhere. Each milestone = one shippable backend or frontend layer
+with a hard acceptance gate. UI milestones depend on the backend move named.
+
+| Milestone | Layer | Depends on | Done = (acceptance gate) |
+|---|---|---|---|
+| **M1** ✅ | Transport-neutral session core | — | `SessionService` + `CONTROL_CONTRACT.md`; Telegram byte-identical. (DONE) |
+| **UI-0** | Frontend domain + contract (TS types, fixtures) | M1 read API | Canonical TS types compile; every type tagged with gap-doc mark; fixtures for session/task/approval/reconnect. No ⛔ types emitted. |
+| **UI-1** | Mobile shell + Sessions + System (mocked timeline) | UI-0, read API | Sessions screen binds live `/api/sessions`; System binds live `/api/nodes`; all flows work at 360px; timeline/Tasks from fixtures. |
+| **F** | Write + WS/SSE backend surface | M1 | HTTP endpoints for `submit_instruction` + `SessionService` create/bind + stop/retry, all idempotency-keyed; WS/SSE event push beside the existing poll. Contract doc updated. |
+| **I** | Canonical event adapter (backend-side or in F) | F | Every currently-emitted event maps to a documented canonical type or is explicitly "opaque/operational"; `task.state_changed` is one typed transition. |
+| **UI-2** | Real session/task state + live transport | F, I | Send instruction → ack states; reconnect dedupes; session restore from server; stop/retry work; whole-message (no streaming). |
+| **G′** | Task lifecycle object | M1 | Task carries the UI lifecycle states + session parentage; `/api/tasks` returns sectioned (attention/running/queued/recent) data. |
+| **H** | Approval consumer | G′ | An execution path *blocks* on `approval.requested`; resolve endpoint approves/rejects; pending-approval queue queryable. |
+| **UI-3** | Attention workflows (approvals, notifications) | G′, H | One approval round-trips end-to-end from the phone; deep links land on exact event; in-app notification center. |
+| **UI-4** | Files & artifacts | artifact listing API | Artifact cards + unified diff review bind to a real listing endpoint. |
+| **UI-5** | Operational depth (logs/health/terminal) | F (log stream) | Live log viewer; health from `/api/nodes`; terminal optional/deferred. |
+| **UI-6** | Hardening, a11y, PWA, push | all above | UI spec §15 acceptance criteria pass at 360px; offline/reconnect tested. |
+
+**The immediate next step is UI-0 then UI-1** — both unblocked today. Backend Move F can
+proceed in parallel since it touches different files. Do not start UI-2+ until F + I land.
