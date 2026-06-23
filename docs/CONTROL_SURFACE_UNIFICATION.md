@@ -256,7 +256,15 @@ stay backend-side.
 
 ---
 
-## 9. Step U6 — Symmetry / enforcement pass (so this can't rot again)
+## 9. Step U6 — Symmetry / enforcement pass (so this can't rot again) ✅ DONE
+
+> Done 2026-06-23. The remaining Telegram direct-store lifecycle writes
+> (close/restore/model/cancel) were routed through `SessionService` in U3.5 (P1–P5),
+> and the enforcement grep is now a CI gate: `tests/test_u6_interface_enforcement.py`.
+> Control API has zero direct lifecycle mutations; Telegram is pinned to the 4
+> documented BUSY dispatch sites (P11). Deploy steps in
+> `docs/CONTROL_SURFACE_DEPLOY_RUNBOOK.md`.
+
 
 The abstraction is currently *available* but not *enforced* — Telegram still reaches
 into orchestrator internals in places (`orchestrator._backends`, direct

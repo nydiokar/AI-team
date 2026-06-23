@@ -99,7 +99,11 @@ documented as Telegram-only-by-design (e.g. chat-binding, message rendering). Li
 logic (create/close/restore/model/bind) lives on `SessionService`, not on any interface
 — grep proves no interface mutates `session.model`/`backend_session_id` directly, and
 status transitions go through service helpers (`mark_busy`/`mark_cancelled`). That grep
-IS U6.
+IS U6 — and it is now **codified as a CI gate**:
+`tests/test_u6_interface_enforcement.py` greps `src/telegram/interface.py` +
+`src/control/control_api.py`, asserts the Control API has zero direct lifecycle
+mutations, and pins Telegram to exactly the 4 documented inline BUSY dispatch sites.
+A new inline mutation, or a change in the BUSY count, fails the build.
 
 **Deliberate boundary (P11):** `close_session`/`restore_session`/`set_model`/
 `mark_cancelled` route through `SessionService` from BOTH interfaces. The web `/stop`
