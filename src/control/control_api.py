@@ -504,7 +504,69 @@ def build_control_api(orchestrator) -> FastAPI:
         )
         return JSONResponse(result)
 
+    # --- serve the built Web UI from the gateway (U5) ---------------------
+    _mount_web_ui(app)
+
     return app
+
+
+def _web_dist_dir() -> "Path":
+    """Path to the built Web UI (web/dist), relative to the repo root."""
+    from pathlib import Path
+    # control_api.py is src/control/control_api.py → repo root is parents[2].
+    return Path(__file__).resolve().parents[2] / "web" / "dist"
+
+
+def _mount_web_ui(app: FastAPI) -> None:
+    """Serve web/dist at / with the DASHBOARD_TOKEN injected into index.html (U5).
+
+    The gateway, reachable only over the tailnet (bind host), bakes the token into
+    the served page so a trusted device needs no token prompt — while /api/* still
+    enforces the token (defense in depth). The token is injected as
+    ``window.__DASHBOARD_TOKEN__``; the UI's auth store reads it and skips the gate.
+    A built UI is optional: if web/dist is absent (dev — vite serves the UI and
+    proxies /api here), the mount is skipped silently.
+    """
+    from pathlib import Path
+    from fastapi.responses import HTMLResponse, FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    dist = _web_dist_dir()
+    index_file = dist / "index.html"
+    if not index_file.exists():
+        logger.info("event=web_ui_not_mounted reason=no_dist dir=%s", dist)
+        return
+
+    def _index_html() -> str:
+        html = index_file.read_text(encoding="utf-8")
+        token = _dashboard_token() or ""
+        # Inject BEFORE the first <script> so the global exists before the app boots.
+        inject = (
+            f'<script>window.__DASHBOARD_TOKEN__ = {json.dumps(token)};</script>'
+        )
+        if "<head>" in html:
+            return html.replace("<head>", "<head>" + inject, 1)
+        return inject + html
+
+    # Static assets (JS/CSS/img) served directly from web/dist/assets.
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+
+    @app.get("/", response_class=HTMLResponse)
+    def _web_index() -> HTMLResponse:
+        return HTMLResponse(_index_html())
+
+    # SPA fallback: any non-/api, non-asset path returns index (client-side routing).
+    @app.get("/{full_path:path}", response_class=HTMLResponse)
+    def _web_spa(full_path: str) -> HTMLResponse:
+        # Let real files (favicon, manifest, …) resolve if present; else SPA index.
+        candidate = dist / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(str(candidate))  # type: ignore[return-value]
+        return HTMLResponse(_index_html())
+
+    logger.info("event=web_ui_mounted dir=%s", dist)
 
 
 def _live_nodes() -> List[Dict[str, Any]]:

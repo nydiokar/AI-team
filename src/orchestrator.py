@@ -973,7 +973,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             return
         if self._embedded_control_api is not None:
             return
-        host = "127.0.0.1"
+        # Bind host: CONTROL_API_HOST wins; else the Tailscale IP (reachable only by
+        # tailnet devices — the private-network auth layer); else localhost. Never
+        # default to 0.0.0.0 (that would expose the UI+API on every interface).
+        host = config.mesh.control_api_host or config.mesh.tailscale_ip or "127.0.0.1"
         port = config.mesh.dashboard_port
         try:
             from src.control.embedded_server import EmbeddedControlServer

@@ -235,13 +235,24 @@ stay backend-side.
 
 ---
 
-## 8. Step U5 — Serve `web/` from the gateway (prod)
+## 8. Step U5 — Serve `web/` from the gateway (prod) ✅ DONE
 
 - Dev stays as-is: `npm run dev` (vite, port 5180) proxies `/api` → gateway port.
-- Prod: gateway mounts `web/dist` as static files at `/` (FastAPI `StaticFiles`), so
-  one origin serves both the UI and the API. No vite, no separate web process in prod.
-- Done = open the gateway's port in a browser → the React app loads and talks to the
-  same origin's `/api`.
+- Prod: gateway mounts `web/dist` at `/` (`_mount_web_ui` in `control_api.py`), with
+  `/assets/*` static and an SPA catch-all. One origin serves UI + API. No vite/separate
+  web process in prod. If `web/dist` is absent (dev), the mount is skipped silently.
+- **Tailnet binding:** the Control API binds to `CONTROL_API_HOST` → else
+  `config.mesh.tailscale_ip` → else `127.0.0.1` (orchestrator `_start_embedded_control_api`).
+  Set it to the machine's Tailscale IP so only tailnet devices reach UI + API. **Never
+  `0.0.0.0`.** Being on the tailnet (WireGuard private net) is the outer auth layer.
+- **Token without a prompt:** the gateway injects `window.__DASHBOARD_TOKEN__` into the
+  served `index.html`; the UI's `authStore` reads it and skips `TokenGate`. So a trusted
+  tailnet device (phone) needs no token entry, while `/api/*` still enforces the token
+  (defense in depth). The token is readable by anyone who can load the page — acceptable
+  because only tailnet devices can reach it.
+- Done = `python main.py` serves the React app + API on one tailnet-bound port; phone
+  opens the URL → app loads token-authenticated, no prompt; `/api/*` still 403s without
+  the token. **Live-validated 2026-06-22.**
 
 ---
 

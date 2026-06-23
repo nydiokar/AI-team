@@ -160,6 +160,10 @@ class MeshConfig:
     # Serves the read API on dashboard_port from inside the gateway, sharing its
     # live SessionService / NodeRegistry. Default on; set false to disable.
     control_api_enabled: bool = True         # CONTROL_API_ENABLED
+    # Bind host for the Control API (UI + API). Empty → falls back to tailscale_ip,
+    # then 127.0.0.1. Set to the machine's Tailscale IP to expose only to the tailnet.
+    # Never set 0.0.0.0 unless you intend to expose it on every interface.
+    control_api_host: str = ""               # CONTROL_API_HOST
 
 
 class Config:
@@ -451,6 +455,12 @@ class Config:
             v = os.getenv("CONTROL_API_ENABLED")
             if v is not None:
                 self.mesh.control_api_enabled = v.lower() == "true"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("CONTROL_API_HOST")
+            if v is not None:
+                self.mesh.control_api_host = v.strip()
         except Exception:
             pass
         try:
