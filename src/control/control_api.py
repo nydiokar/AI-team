@@ -112,6 +112,16 @@ def _dashboard_token() -> str:
         return os.getenv("DASHBOARD_TOKEN", "") or os.getenv("WORKER_TOKEN", "")
 
 
+def _control_api_docs_enabled() -> bool:
+    """Whether to expose the interactive Swagger/ReDoc/OpenAPI endpoints.
+
+    Off by default — those endpoints are unauthenticated and leak the full API
+    shape. Set CONTROL_API_DOCS=true to re-enable them for local development.
+    """
+    import os
+    return os.getenv("CONTROL_API_DOCS", "").lower() == "true"
+
+
 async def event_stream_frames(
     *,
     since: int = 0,
@@ -217,7 +227,19 @@ def build_control_api(orchestrator) -> FastAPI:
     ``orchestrator`` must expose ``session_service`` (M1 SessionService). Node and
     task reads use the in-process registry / DB. No state is constructed here.
     """
-    app = FastAPI(title="AI-Team Control API", version="1.0")
+    # Disable FastAPI's built-in (unauthenticated) docs endpoints. /docs, /redoc and
+    # /openapi.json leak the full API shape to anyone who can reach the port and have
+    # no reason to be open even on the tailnet (defense in depth). The human-facing
+    # map lives in docs/ARCHITECTURE.md; a developer who wants live Swagger can flip
+    # CONTROL_API_DOCS=true to re-enable them locally.
+    _docs_on = _control_api_docs_enabled()
+    app = FastAPI(
+        title="AI-Team Control API",
+        version="1.0",
+        docs_url="/docs" if _docs_on else None,
+        redoc_url="/redoc" if _docs_on else None,
+        openapi_url="/openapi.json" if _docs_on else None,
+    )
     _bearer = HTTPBearer(auto_error=True)
 
     def _require_auth(creds: HTTPAuthorizationCredentials = Security(_bearer)) -> None:
@@ -553,14 +575,17 @@ def _mount_web_ui(app: FastAPI) -> None:
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
 
-    @app.get("/", response_class=HTMLResponse)
+    # include_in_schema=False: these serve HTML, not JSON, and their HTMLResponse
+    # return annotation breaks OpenAPI schema generation (the /openapi.json 500 seen
+    # when CONTROL_API_DOCS=true). Excluding them keeps the schema buildable.
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def _web_index() -> HTMLResponse:
         return HTMLResponse(_index_html())
 
     # SPA fallback: any non-/api, non-asset path returns index (client-side routing).
     dist_resolved = dist.resolve()
 
-    @app.get("/{full_path:path}", response_class=HTMLResponse)
+    @app.get("/{full_path:path}", response_class=HTMLResponse, include_in_schema=False)
     def _web_spa(full_path: str) -> HTMLResponse:
         # Let real files (favicon, manifest, …) resolve if present; else SPA index.
         # SECURITY: confine the resolved path to web/dist. ``full_path`` is
