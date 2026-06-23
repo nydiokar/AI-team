@@ -175,6 +175,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         # notifications (Telegram today, Web UI tomorrow).  Passes self
         # so the notifer reads ``self.telegram_interface`` dynamically.
         self.notifier = NotificationService(orchestrator=self)
+        try:
+            from src.services.quota_window_coordinator import build_quota_coordinator_from_config
+            self.quota_coordinator = build_quota_coordinator_from_config()
+        except Exception as e:
+            logger.warning(f"Failed to initialize quota coordinator: {e}")
+            self.quota_coordinator = None
 
     @staticmethod
     def _extract_text_from_payload(payload: Any) -> str:
@@ -1173,6 +1179,9 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         # Start the embedded mesh task server (no-op unless MESH_ENABLED)
         await self._start_embedded_task_server()
+        # Quota observation is disabled by default and observe-only when enabled.
+        if self.quota_coordinator is not None:
+            await self.quota_coordinator.start()
 
         # Start the embedded control API (read surface for the Web UI)
         await self._start_embedded_control_api()
@@ -1267,6 +1276,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception as e:
                 logger.error(f"Failed to stop Telegram interface: {e}")
         
+        if self.quota_coordinator is not None:
+            await self.quota_coordinator.stop()
         # Stop file watcher
         await self.file_watcher.stop_async()
         self.component_status["file_watcher_running"] = False
