@@ -44,6 +44,10 @@ CONTROL_API_HOST=<this box's tailscale ip>   # e.g. 100.x.y.z
 CONTROL_API_ENABLED=true                      # default; set false to disable the surface
 DASHBOARD_PORT=9003                           # default; the UI+API port
 DASHBOARD_TOKEN=<a strong secret>             # falls back to WORKER_TOKEN if unset
+# CONTROL_API_DOCS=true                        # OPTIONAL, dev only. Re-enables the
+#                                              # interactive /docs + /openapi.json,
+#                                              # which are OFF in prod (they leak the
+#                                              # full API shape). Leave unset in prod.
 ```
 
 Binding precedence (orchestrator `_start_embedded_control_api`):

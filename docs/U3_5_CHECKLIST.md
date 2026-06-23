@@ -133,6 +133,14 @@ Reviewed the 8 commits `main..feat/control-surface-unify`. Findings + dispositio
   StaticFiles mount was already traversal-safe (Starlette 404s). **Revert =** restore the
   bare `dist / full_path` resolve (re-opens the hole — do not).
 
+- [x] **SEC-2 (FIXED) — interactive API docs were unauthenticated (and crashing).**
+  `/docs`, `/redoc`, `/openapi.json` were exposed to anyone who could reach the port,
+  leaking the full API shape; `/openapi.json` additionally **500-crashed** on baseline
+  (the SPA routes' `HTMLResponse` annotation breaks schema generation). Disabled the
+  docs by default (`docs_url=None` etc.), re-enable for local dev with
+  `CONTROL_API_DOCS=true`, and fixed the schema crash by marking the HTML SPA routes
+  `include_in_schema=False`. **Revert =** restore the default `docs_url`/`openapi_url`.
+
 - [ ] **DX-1 (accepted, not fixed) — unknown `GET /api/...` returns SPA HTML, not 404.**
   An unmatched **GET** under `/api/` falls to the SPA catch-all and returns 200 HTML.
   Not a security issue (auth'd routes are unaffected; only GETs that match no real route
