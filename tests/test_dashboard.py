@@ -294,3 +294,12 @@ def test_events_endpoint(client, events_file):
     # Poll with the offset → no repeats.
     r2 = client.get(f"/api/events?since={body['offset']}", headers=_auth())
     assert r2.json()["events"] == []
+
+def test_quota_windows_endpoint_is_read_only_shape(client):
+    r = client.get("/api/quota-windows", headers=_auth())
+    assert r.status_code == 200
+    data = r.json()
+    assert data["mode"] == "observe_only"
+    assert isinstance(data["adapters"], list)
+    assert isinstance(data["buckets"], list)
+    assert isinstance(data["latest_snapshots"], list)

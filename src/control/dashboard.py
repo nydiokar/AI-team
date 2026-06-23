@@ -86,6 +86,14 @@ def _session_views(limit: int) -> List[Dict[str, Any]]:
         return []
 
 
+
+def _quota_status() -> Dict[str, Any]:
+    try:
+        from src.services.quota_window_coordinator import build_quota_coordinator_from_config
+        return build_quota_coordinator_from_config().read_status()
+    except Exception as e:
+        logger.warning("dashboard_quota_status_failed err=%s", e)
+        return {"enabled": False, "mode": "observe_only", "adapters": [], "buckets": [], "latest_snapshots": []}
 def _db():
     try:
         from src.control.db import get_db
@@ -165,6 +173,10 @@ def _annotate_node_liveness(node: Dict[str, Any]) -> None:
         return
 
 
+
+@app.get("/api/quota-windows", dependencies=[Depends(_require_auth)])
+def api_quota_windows() -> JSONResponse:
+    return JSONResponse(_quota_status())
 @app.get("/api/events", dependencies=[Depends(_require_auth)])
 def api_events(
     since: int = Query(0, ge=0),

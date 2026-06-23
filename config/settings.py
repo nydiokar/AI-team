@@ -158,6 +158,13 @@ class MeshConfig:
     dashboard_token: str = ""                # DASHBOARD_TOKEN — falls back to worker_token
 
 
+@dataclass
+class QuotaConfig:
+    """Observe-only quota coordinator configuration."""
+    enabled: bool = False                  # QUOTA_COORDINATOR_ENABLED
+    db_path: str = "state/quota_windows.db"  # QUOTA_DB_PATH
+    observe_interval_sec: int = 300        # QUOTA_OBSERVE_INTERVAL_SEC
+
 class Config:
     """Main configuration class"""
 
@@ -191,6 +198,7 @@ class Config:
         self.codex = CodexConfig()
         self.opencode = OpenCodeConfig()
         self.mesh = MeshConfig()
+        self.quota = QuotaConfig()
         # Apply env overrides for selected runtime-tunable settings
         self._apply_env_overrides()
         
@@ -392,6 +400,25 @@ class Config:
             v = os.getenv("OPENCODE_MODE")
             if v in ("cli", "server"):
                 self.opencode.mode = v
+        except Exception:
+            pass
+        # Quota coordinator env overrides (observe-only; disabled by default)
+        try:
+            v = os.getenv("QUOTA_COORDINATOR_ENABLED")
+            if v is not None:
+                self.quota.enabled = v.lower() == "true"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("QUOTA_DB_PATH")
+            if v:
+                self.quota.db_path = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("QUOTA_OBSERVE_INTERVAL_SEC")
+            if v is not None:
+                self.quota.observe_interval_sec = max(30, int(v))
         except Exception:
             pass
         # Mesh env overrides
