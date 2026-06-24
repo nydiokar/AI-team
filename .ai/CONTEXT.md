@@ -52,8 +52,8 @@ gateway is `docs/CONTROL_SURFACE_UNIFICATION.md` (U1..U6, all done).
 | **G′** | task lifecycle object + sectioned `/api/tasks` | ✅ done (`baba1d1`) |
 | **H + UI-3** | durable approval gate + approval card | ✅ done (`3dc00c7`) — **see priority note** |
 | **UI-4** | **Files & artifacts** | ✅ done — artifact listing API + live FilesScreen (`docs/UI4_CHECKLIST.md`) |
-| UI-5 | logs / health / terminal | ❌ not started — **next** |
-| UI-6 | hardening, a11y, PWA, push | ❌ not started |
+| UI-5 | logs / health / terminal | ✅ done — live activity feed on System screen off the SSE stream (`docs/UI5_CHECKLIST.md`) |
+| UI-6 | hardening, a11y, PWA, push | ❌ not started — **next (ships the phone cockpit)** |
 
 **⚠️ PRIORITY REFRAME (operator, 2026-06-24):** the spec ladder put `H/UI-3
 (approvals)` before `UI-4 (files)`. The operator has **reprioritized**: approvals
@@ -69,8 +69,13 @@ it.** The real remaining core-flow work to **ship** is:
   live artifact cards + per-file change rows (added/modified/deleted + ±lines).
   Diff hunks / file-content preview deliberately OUT (no backend source).
   Scope fence: `docs/UI4_CHECKLIST.md`.
-- **UI-5 (live logs off the SSE/event stream) — DO THIS NEXT.** Health is already
-  live from `/api/nodes`. Then **UI-6** (PWA/hardening) to actually ship to the phone.
+- ~~**UI-5 (live logs off the SSE/event stream)**~~ ✅ **DONE 2026-06-24.** A "Live
+  activity" feed on the System screen, projected from the already-live app-wide SSE
+  stream (`useActivityLog` → `eventLog.toLogLine`); NO new backend (the event spine
+  already flows). Health was already live from `/api/nodes`. Scope fence:
+  `docs/UI5_CHECKLIST.md`.
+- **UI-6 (PWA / hardening / a11y / push) — DO THIS NEXT.** This is the last rung —
+  it actually ships the cockpit to the phone (installable, offline shell, push).
 
 **Deferred to the workflow-automation track (NOT shipping-blockers):** auto-emitting
 approvals from real risky actions, review/handoff workflows, anything else on

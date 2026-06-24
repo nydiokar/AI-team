@@ -4,10 +4,13 @@
  * (gap-doc §2). Each target is an elevated card with a heartbeat readout.
  */
 import { Cpu, HeartPulse, Layers, Settings2 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { HealthChip } from "../components/ui/StatusChip";
 import { useTargets } from "../hooks/useLiveData";
+import { useActivityLog } from "../hooks/useActivityLog";
+import type { LogSeverity, LogLine } from "../transport/eventLog";
 
 function ageLabel(sec: number | null): string {
   if (sec == null) return "never seen";
@@ -16,8 +19,46 @@ function ageLabel(sec: number | null): string {
   return `${Math.round(sec / 3600)}h ago`;
 }
 
+// Same severity palette as the session timeline (SessionTimeline.tsx).
+const SEVERITY_DOT: Record<LogSeverity, string> = {
+  info: "bg-ink-muted",
+  success: "bg-ok",
+  warning: "bg-warn",
+  error: "bg-bad",
+};
+
+function clockLabel(at: string): string {
+  const d = new Date(at);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString();
+}
+
+/** Max rows rendered on the phone (the underlying stream is already bounded to 500). */
+const MAX_ROWS = 100;
+
+function ActivityRow({ line }: { line: LogLine }) {
+  return (
+    <div className="flex items-start gap-2.5 px-4 py-2 text-[13px]">
+      <span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${SEVERITY_DOT[line.severity]}`} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-ink-soft">{line.text}</p>
+        <div className="mt-0.5 flex items-center gap-2 text-[11px] text-ink-muted">
+          <span className="font-mono text-accent/80">{line.kind}</span>
+          {line.sessionId && (
+            <Link to={`/sessions/${line.sessionId}`} className="text-accent/80">
+              session
+            </Link>
+          )}
+          {clockLabel(line.at) && <span className="ml-auto">{clockLabel(line.at)}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SystemScreen() {
   const { data: targets, isLoading, error } = useTargets();
+  const { lines, connection } = useActivityLog();
+  const rows = lines.slice(0, MAX_ROWS);
 
   return (
     <div className="pb-8">
@@ -58,13 +99,26 @@ export function SystemScreen() {
         )}
       </div>
 
+      <SectionHeader label="Live activity" count={rows.length || undefined} />
+      <div className="card-elev mx-4 divide-y divide-hairline rounded-xl">
+        {rows.length === 0 ? (
+          <p className="px-4 py-6 text-center text-sm text-ink-muted">
+            {connection === "reconnecting"
+              ? "Reconnecting — showing last known activity…"
+              : "No activity yet."}
+          </p>
+        ) : (
+          rows.map((line) => <ActivityRow key={line.id} line={line} />)
+        )}
+      </div>
+
       <SectionHeader label="Settings" />
       <div className="px-4">
         <div className="card-elev flex items-start gap-3 rounded-xl px-4 py-3.5 text-ink-soft">
           <Settings2 className="mt-0.5 size-4 text-ink-muted" />
           <p className="text-[13px]">
-            Notifications, approval policy, security, and diagnostics arrive in
-            later phases (spec §7.10).
+            Notifications, approval policy, and security settings arrive in later
+            phases (spec §7.10).
           </p>
         </div>
       </div>
