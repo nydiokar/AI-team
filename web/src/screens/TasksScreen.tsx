@@ -1,14 +1,19 @@
 /**
- * Tasks screen — FIXTURES in UI-1 (🔵 MOCK-OK). Global cross-session inbox
- * (spec §7.4), sectioned Needs attention / Running / Queued / Recently completed.
- * Live sectioning over real lifecycle data is Move G′ (gap-doc §4).
+ * Tasks screen — LIVE flat in UI-2 (bound to /api/tasks via useTasks + the
+ * taskAdapter). Global cross-session inbox (spec §7.4), sectioned Needs attention
+ * / Running / Queued / Recently completed.
+ *
+ * NOTE: the sections derive from the mesh_tasks status subset the adapter can map
+ * today (queued/dispatching/running/succeeded/failed/cancelled). The richer
+ * supervised lifecycle (waiting_for_input / waiting_for_approval correctness) is
+ * still Move G′ (gap-doc §4) — those buckets stay empty until G′ lands.
  */
 import { Link } from "react-router-dom";
 import { ExternalLink } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { TaskStatusChip } from "../components/ui/StatusChip";
-import { taskFixtures } from "../fixtures/tasks";
+import { useTasks } from "../hooks/useLiveData";
 import type { Task } from "../domain/models";
 import type { TaskState } from "../domain/status";
 
@@ -59,17 +64,24 @@ function Section({ label, tasks, accent }: { label: string; tasks: Task[]; accen
 }
 
 export function TasksScreen() {
-  const tasks = taskFixtures;
+  const { data, isLoading, isError } = useTasks();
+  const tasks = data ?? [];
+  const attention = tasks.filter((t) => ATTENTION.includes(t.state));
+  const running = tasks.filter((t) => RUNNING.includes(t.state));
+  const queued = tasks.filter((t) => t.state === "queued");
+  const recent = tasks.filter((t) => t.state === "succeeded" || t.state === "cancelled");
+  const empty = !isLoading && !isError && tasks.length === 0;
+
   return (
     <div className="pb-8">
-      <CompactTopBar title="Tasks" subtitle="Mocked · live with Move G′" />
-      <Section label="Needs attention" accent="warn" tasks={tasks.filter((t) => ATTENTION.includes(t.state))} />
-      <Section label="Running" tasks={tasks.filter((t) => RUNNING.includes(t.state))} />
-      <Section label="Queued" tasks={tasks.filter((t) => t.state === "queued")} />
-      <Section
-        label="Recently completed"
-        tasks={tasks.filter((t) => t.state === "succeeded" || t.state === "cancelled")}
-      />
+      <CompactTopBar title="Tasks" subtitle="Live · richer states with Move G′" />
+      {isLoading && <p className="px-4 py-8 text-center text-sm text-ink-muted">Loading tasks…</p>}
+      {isError && <p className="px-4 py-8 text-center text-sm text-bad">Couldn’t load tasks.</p>}
+      {empty && <p className="px-4 py-8 text-center text-sm text-ink-muted">No tasks yet.</p>}
+      <Section label="Needs attention" accent="warn" tasks={attention} />
+      <Section label="Running" tasks={running} />
+      <Section label="Queued" tasks={queued} />
+      <Section label="Recently completed" tasks={recent} />
     </div>
   );
 }

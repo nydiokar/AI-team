@@ -1,26 +1,30 @@
 /**
  * Active session screen (spec §7.2) — compact header with live status, the
- * chronological timeline, and a composer with the mock's gradient send button.
- * Header binds LIVE; timeline renders from fixtures (whole-message).
+ * chronological timeline, and the live composer.
  *
- * Composer is DISABLED — write paths (send/stop) arrive with Move F (UI-2). The
- * backend is read-only in this scope; an enabled composer would promise a
- * delivery the gateway can't yet accept.
+ * UI-2: header + timeline + composer all LIVE. Timeline is assembled from the
+ * three real sources (optimistic user msgs · this session's SSE notices/task-
+ * state · polled turn summary) via useSessionTimeline — no fixtures. Composer
+ * sends through Move F's write surface; Stop appears while a task runs.
  */
 import { useParams, useNavigate } from "react-router-dom";
-import { ChevronLeft, Plus, ArrowUp } from "lucide-react";
+import { ChevronLeft } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
 import { SessionTimeline } from "../components/timeline/SessionTimeline";
-import { Button } from "../components/ui/Button";
+import { Composer } from "../components/timeline/Composer";
 import { useSessions } from "../hooks/useLiveData";
-import { timelineFixture } from "../fixtures/timeline";
+import { useEventStreamContext } from "../hooks/eventStreamContext";
+import { useSessionTimeline } from "../hooks/useSessionTimeline";
 
 export function SessionDetailScreen() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data } = useSessions();
   const session = data?.find((s) => s.id === id);
+  const { events } = useEventStreamContext();
+  const timeline = useSessionTimeline(id, session, events);
+  const running = session?.opState === "running";
 
   return (
     <div className="mx-auto flex h-full max-w-[480px] flex-col bg-base">
@@ -52,32 +56,18 @@ export function SessionDetailScreen() {
       />
 
       <div className="flex-1 overflow-y-auto overscroll-contain">
-        <SessionTimeline items={timelineFixture} />
+        {timeline.length > 0 ? (
+          <SessionTimeline items={timeline} />
+        ) : (
+          <p className="px-4 py-10 text-center text-sm text-ink-muted">
+            No activity yet. Send an instruction below to start.
+          </p>
+        )}
       </div>
 
-      {/* Composer — disabled in UI-1 (read-only backend; write = Move F). */}
-      <div
-        className="border-t border-hairline bg-surface-1/90 px-3 py-2.5 backdrop-blur-xl"
-        style={{ paddingBottom: "max(0.625rem, env(safe-area-inset-bottom))" }}
-      >
-        <div className="flex items-end gap-2 opacity-70">
-          <button
-            disabled
-            className="flex size-11 shrink-0 items-center justify-center rounded-full border border-hairline text-ink-muted"
-            aria-label="Attachments (UI-2)"
-          >
-            <Plus className="size-5" />
-          </button>
-          <input
-            disabled
-            placeholder="Sending arrives in UI-2 (Move F)…"
-            className="h-11 flex-1 rounded-full border border-hairline bg-base px-4 text-sm text-ink-muted outline-none"
-          />
-          <Button disabled size="icon" aria-label="Send">
-            <ArrowUp className="size-5" />
-          </Button>
-        </div>
-      </div>
+      {id && session?.lifecycle !== "closed" && (
+        <Composer sessionId={id} running={running} />
+      )}
     </div>
   );
 }
