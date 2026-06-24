@@ -194,6 +194,46 @@ def test_request_missing_action_is_400(client):
     assert r.status_code == 400 and r.json()["detail"]["reason"] == "missing_action"
 
 
+# --- UI-4: artifacts / files ------------------------------------------------
+
+def _seed_artifact(tmp_path, task_id, **fields):
+    import json
+    body = {"task_id": task_id, "success": True, "timestamp": "2026-06-24T00:00:00"}
+    body.update(fields)
+    (tmp_path / f"{task_id}.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_artifacts_list_and_detail(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(control_api, "_results_dir", lambda: tmp_path)
+    _seed_artifact(tmp_path, "task_a4", files_modified=["x.py", "y.py"])
+
+    r = client.get("/api/artifacts", headers=_auth())
+    assert r.status_code == 200
+    rows = r.json()["artifacts"]
+    assert any(a["task_id"] == "task_a4" and a["file_count"] == 2 for a in rows)
+
+    rd = client.get("/api/artifacts/task_a4", headers=_auth())
+    assert rd.status_code == 200
+    body = rd.json()
+    assert body["artifact"]["task_id"] == "task_a4"
+    assert [f["path"] for f in body["files"]] == ["x.py", "y.py"]
+    assert all(f["change"] == "modified" for f in body["files"])
+
+
+def test_artifact_missing_is_404(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(control_api, "_results_dir", lambda: tmp_path)
+    assert client.get("/api/artifacts/task_nope", headers=_auth()).status_code == 404
+    # Handler-level path confinement (a ``..`` task_id resolves to None rather than
+    # escaping results_dir) is covered directly by
+    # test_artifacts::test_get_rejects_traversal — the HTTP router normalizes a
+    # cross-segment ``..`` before it ever reaches this handler, so it can't be
+    # exercised through TestClient here.
+
+
+def test_artifacts_requires_auth(client):
+    assert client.get("/api/artifacts").status_code in (401, 403)
+
+
 # --- nodes: DB fallback annotates liveness when the registry is empty -------
 
 def test_nodes_fallback_annotates_live_when_registry_empty(client):
