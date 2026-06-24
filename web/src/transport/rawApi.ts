@@ -91,3 +91,24 @@ export interface RawEventsResponse {
   /** byte offset to pass back as ?since= on the next poll. */
   offset: number;
 }
+
+// GET /api/tasks?sectioned=true → RawTaskSectionsResponse (Move G′).
+// Each task is a RawTask + the backend-derived supervised lifecycle fields
+// (control_api.task_lifecycle): `ui_state` (the canonical UI TaskState) and
+// `section` (which bucket it belongs to). The backend owns the overlay (a task's
+// owning-session status overlaid on the mesh status), so the client trusts these.
+export interface RawSectionedTask extends RawTask {
+  /** Canonical UI TaskState (matches domain/status TaskState). */
+  ui_state: string;
+  /** attention | running | queued | recent. */
+  section: string;
+}
+
+export interface RawTaskSectionsResponse {
+  sections: {
+    attention: RawSectionedTask[];
+    running: RawSectionedTask[];
+    queued: RawSectionedTask[];
+    recent: RawSectionedTask[];
+  };
+}

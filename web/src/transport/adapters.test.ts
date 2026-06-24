@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { toSessions, deriveLifecycle, deriveOpState } from "./sessionAdapter";
 import { toTargets, deriveHealth } from "./nodeAdapter";
-import { toTasks } from "./taskAdapter";
+import { toTasks, toTaskSections } from "./taskAdapter";
 import { adaptEvents, adaptEvent } from "./eventAdapter";
 import {
   rawSessions,
@@ -70,6 +70,45 @@ describe("taskAdapter — mesh status → TaskState (gap-doc §4)", () => {
     const t = toTasks(rawTasks)[0] as unknown as Record<string, unknown>;
     expect("progressPct" in t).toBe(false);
     expect("progress" in t).toBe(false);
+  });
+});
+
+describe("taskAdapter — sectioned (Move G′): trust backend ui_state", () => {
+  it("maps each section and overrides state with the backend ui_state", () => {
+    const res = {
+      sections: {
+        attention: [
+          // mesh status 'claimed' would map to 'dispatching', but the backend
+          // overlaid the session → ui_state waiting_for_input. We must TRUST it.
+          {
+            ...rawTasks[0],
+            id: "t_attn",
+            status: "claimed",
+            ui_state: "waiting_for_input",
+            section: "attention",
+          },
+        ],
+        running: [
+          { ...rawTasks[0], id: "t_run", status: "processing", ui_state: "running", section: "running" },
+        ],
+        queued: [],
+        recent: [
+          { ...rawTasks[0], id: "t_done", status: "completed", ui_state: "succeeded", section: "recent" },
+        ],
+      },
+    };
+    const out = toTaskSections(res as never);
+    expect(out.attention[0].id).toBe("t_attn");
+    expect(out.attention[0].state).toBe("waiting_for_input"); // backend wins over mesh map
+    expect(out.running[0].state).toBe("running");
+    expect(out.queued).toHaveLength(0);
+    expect(out.recent[0].state).toBe("succeeded");
+  });
+
+  it("tolerates missing section arrays", () => {
+    const out = toTaskSections({ sections: {} } as never);
+    expect(out.attention).toEqual([]);
+    expect(out.recent).toEqual([]);
   });
 });
 

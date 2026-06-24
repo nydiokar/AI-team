@@ -8,7 +8,11 @@
  */
 import type { Task } from "../domain/models";
 import type { TaskState } from "../domain/status";
-import type { RawTask } from "./rawApi";
+import type {
+  RawTask,
+  RawSectionedTask,
+  RawTaskSectionsResponse,
+} from "./rawApi";
 
 /** mesh_tasks.status → canonical TaskState (gap-doc §4). */
 export function deriveTaskState(meshStatus: string): TaskState {
@@ -61,4 +65,33 @@ export function toTask(raw: RawTask): Task {
 
 export function toTasks(raws: RawTask[]): Task[] {
   return raws.map(toTask);
+}
+
+// ── Move G′: sectioned tasks ───────────────────────────────────────────────
+// The backend owns the supervised lifecycle (it overlays the owning session's
+// status onto the mesh status — control_api.task_lifecycle), so on the sectioned
+// path we TRUST its `ui_state` rather than re-derive from the mesh status alone.
+// The flat path (toTask above) still derives client-side for the plain /api/tasks.
+
+export interface TaskSections {
+  attention: Task[];
+  running: Task[];
+  queued: Task[];
+  recent: Task[];
+}
+
+function toSectionedTask(raw: RawSectionedTask): Task {
+  // Reuse the base row mapping, then override `state` with the backend's
+  // authoritative supervised state (the whole point of G′).
+  return { ...toTask(raw), state: raw.ui_state as TaskState };
+}
+
+export function toTaskSections(res: RawTaskSectionsResponse): TaskSections {
+  const s = res.sections;
+  return {
+    attention: (s.attention ?? []).map(toSectionedTask),
+    running: (s.running ?? []).map(toSectionedTask),
+    queued: (s.queued ?? []).map(toSectionedTask),
+    recent: (s.recent ?? []).map(toSectionedTask),
+  };
 }

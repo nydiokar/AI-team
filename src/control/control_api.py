@@ -281,10 +281,47 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse({"sessions": sessions})
 
     @app.get("/api/tasks", dependencies=[Depends(_require_auth)])
-    def api_tasks(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
+    def api_tasks(
+        limit: int = Query(50, ge=1, le=500),
+        sectioned: bool = Query(False),
+    ) -> JSONResponse:
+        """Task list. Default = flat ``{tasks:[...]}`` (UI-2 shape, unchanged).
+
+        ``?sectioned=true`` (Move G′) returns the supervised lifecycle: each task
+        gains a derived ``ui_state`` + ``section``, grouped into
+        ``{sections: {attention, running, queued, recent}}``. The supervised state
+        overlays the owning session's status onto the raw mesh status (e.g. an
+        in-flight task whose session AWAITING_INPUT → ``waiting_for_input``), which
+        the flat mesh status alone cannot express.
+        """
         db = _db()
         tasks = db.list_tasks(limit=limit) if db is not None else []
-        return JSONResponse({"tasks": tasks})
+        if not sectioned:
+            return JSONResponse({"tasks": tasks})
+
+        from src.core.task_lifecycle import derive_task_state, section_for_state
+
+        # One bounded read → {session_id: session_status} for the overlay. Avoids
+        # an N-query join; missing sessions (oneoff / pruned) overlay as None.
+        session_status: Dict[str, str] = {}
+        try:
+            for v in orchestrator.session_service.list_views(limit=500):
+                d = v.to_dict()
+                if d.get("session_id"):
+                    session_status[d["session_id"]] = d.get("status")
+        except Exception as e:
+            logger.warning("control_api_tasks_session_overlay_failed err=%s", e)
+
+        sections: Dict[str, List[Dict[str, Any]]] = {
+            "attention": [], "running": [], "queued": [], "recent": [],
+        }
+        for t in tasks:
+            sess_status = session_status.get(t.get("session_id")) if t.get("session_id") else None
+            ui_state = derive_task_state(t.get("status", ""), sess_status)
+            section = section_for_state(ui_state)
+            t = {**t, "ui_state": ui_state, "section": section}
+            sections[section].append(t)
+        return JSONResponse({"sections": sections})
 
     @app.get("/api/nodes", dependencies=[Depends(_require_auth)])
     def api_nodes() -> JSONResponse:
