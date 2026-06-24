@@ -3,14 +3,43 @@
  * using the derived `live` flag + heartbeat_age_sec, NOT the stale status column
  * (gap-doc §2). Each target is an elevated card with a heartbeat readout.
  */
-import { Cpu, HeartPulse, Layers, Settings2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Cpu, HeartPulse, Layers, Settings2, Download } from "lucide-react";
 import { Link } from "react-router-dom";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { HealthChip } from "../components/ui/StatusChip";
+import { Button } from "../components/ui/Button";
 import { useTargets } from "../hooks/useLiveData";
 import { useActivityLog } from "../hooks/useActivityLog";
 import type { LogSeverity, LogLine } from "../transport/eventLog";
+
+type BeforeInstallPromptEvent = Event & { prompt: () => Promise<void> };
+
+function useInstallPrompt() {
+  const promptRef = useRef<BeforeInstallPromptEvent | null>(null);
+  const [canInstall, setCanInstall] = useState(false);
+  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) && !(window.navigator as { standalone?: boolean }).standalone;
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      e.preventDefault();
+      promptRef.current = e as BeforeInstallPromptEvent;
+      setCanInstall(true);
+    };
+    window.addEventListener("beforeinstallprompt", handler);
+    return () => window.removeEventListener("beforeinstallprompt", handler);
+  }, []);
+
+  const install = async () => {
+    if (!promptRef.current) return;
+    await promptRef.current.prompt();
+    promptRef.current = null;
+    setCanInstall(false);
+  };
+
+  return { canInstall, isIos, install };
+}
 
 function ageLabel(sec: number | null): string {
   if (sec == null) return "never seen";
@@ -59,6 +88,7 @@ export function SystemScreen() {
   const { data: targets, isLoading, error } = useTargets();
   const { lines, connection } = useActivityLog();
   const rows = lines.slice(0, MAX_ROWS);
+  const { canInstall, isIos, install } = useInstallPrompt();
 
   return (
     <div className="pb-8">
@@ -113,7 +143,23 @@ export function SystemScreen() {
       </div>
 
       <SectionHeader label="Settings" />
-      <div className="px-4">
+      <div className="space-y-2.5 px-4">
+        {canInstall && (
+          <div className="card-elev flex items-center gap-3 rounded-xl px-4 py-3.5">
+            <Download className="size-4 shrink-0 text-accent" />
+            <p className="min-w-0 flex-1 text-[13px] text-ink-soft">Install as app for quick access.</p>
+            <Button size="sm" onClick={install}>Install</Button>
+          </div>
+        )}
+        {isIos && (
+          <div className="card-elev flex items-start gap-3 rounded-xl px-4 py-3.5">
+            <Download className="mt-0.5 size-4 shrink-0 text-accent" />
+            <p className="text-[13px] text-ink-soft">
+              Tap <strong className="text-ink">Share</strong> then{" "}
+              <strong className="text-ink">Add to Home Screen</strong> to install.
+            </p>
+          </div>
+        )}
         <div className="card-elev flex items-start gap-3 rounded-xl px-4 py-3.5 text-ink-soft">
           <Settings2 className="mt-0.5 size-4 text-ink-muted" />
           <p className="text-[13px]">

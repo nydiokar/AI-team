@@ -83,13 +83,14 @@ export function Composer({
           <button
             disabled
             className="flex size-11 shrink-0 items-center justify-center rounded-full border border-hairline text-ink-muted opacity-50"
-            aria-label="Attachments (UI-4)"
+            aria-label="Attachments (not available)"
           >
             <Plus className="size-5" />
           </button>
         )}
         <input
           value={text}
+          aria-label="Instruction text"
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {

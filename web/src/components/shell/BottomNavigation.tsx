@@ -17,6 +17,7 @@ const TABS = [
 export function BottomNavigation() {
   return (
     <nav
+      aria-label="Main navigation"
       className="sticky bottom-0 z-20 grid grid-cols-4 border-t border-hairline bg-surface-1/80 backdrop-blur-xl"
       style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
     >

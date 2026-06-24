@@ -85,6 +85,8 @@ export function SessionsScreen() {
             action={
               <button
                 onClick={toggleClosed}
+                aria-expanded={closedExpanded}
+                aria-label={closedExpanded ? "Collapse closed sessions" : "Expand closed sessions"}
                 className="flex items-center gap-1 text-[11px] text-ink-muted hover:text-ink-soft"
               >
                 {closedExpanded ? "Hide" : "Show"}

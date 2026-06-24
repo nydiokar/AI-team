@@ -26,6 +26,7 @@ export function TokenGate() {
           type="password"
           value={value}
           autoFocus
+          aria-label="Dashboard token"
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submit()}
           placeholder="DASHBOARD_TOKEN"

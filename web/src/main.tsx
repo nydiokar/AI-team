@@ -5,6 +5,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./App";
 import "./index.css";
 
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js", { scope: "/" });
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { staleTime: 1500, refetchOnWindowFocus: true },
