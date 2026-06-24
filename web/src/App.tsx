@@ -12,6 +12,7 @@ import { TasksScreen } from "./screens/TasksScreen";
 import { FilesScreen } from "./screens/FilesScreen";
 import { SessionDetailScreen } from "./screens/SessionDetailScreen";
 import { useAuthStore } from "./stores/authStore";
+import { EventStreamProvider } from "./hooks/eventStreamContext";
 
 export function App() {
   const hasToken = useAuthStore((s) => s.hasToken);
@@ -25,25 +26,27 @@ export function App() {
   }
 
   return (
-    <Routes>
-      {/* Full-screen detail — outside the bottom-nav shell. */}
-      <Route path="/sessions/:id" element={<SessionDetailScreen />} />
+    <EventStreamProvider>
+      <Routes>
+        {/* Full-screen detail — outside the bottom-nav shell. */}
+        <Route path="/sessions/:id" element={<SessionDetailScreen />} />
 
-      {/* Root tabs — inside the shell. */}
-      <Route
-        path="*"
-        element={
-          <MobileAppShell>
-            <Routes>
-              <Route path="/sessions" element={<SessionsScreen />} />
-              <Route path="/tasks" element={<TasksScreen />} />
-              <Route path="/files" element={<FilesScreen />} />
-              <Route path="/system" element={<SystemScreen />} />
-              <Route path="*" element={<Navigate to="/sessions" replace />} />
-            </Routes>
-          </MobileAppShell>
-        }
-      />
-    </Routes>
+        {/* Root tabs — inside the shell. */}
+        <Route
+          path="*"
+          element={
+            <MobileAppShell>
+              <Routes>
+                <Route path="/sessions" element={<SessionsScreen />} />
+                <Route path="/tasks" element={<TasksScreen />} />
+                <Route path="/files" element={<FilesScreen />} />
+                <Route path="/system" element={<SystemScreen />} />
+                <Route path="*" element={<Navigate to="/sessions" replace />} />
+              </Routes>
+            </MobileAppShell>
+          }
+        />
+      </Routes>
+    </EventStreamProvider>
   );
 }
