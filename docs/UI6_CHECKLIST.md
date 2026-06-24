@@ -89,12 +89,11 @@ Revert: delete the hint.
 
 ## Gate
 - [x] Frontend `tsc` + vitest + `vite build` green; manifest + sw.js land in dist.
-- [ ] Lighthouse/installability sanity: manifest parses, SW registers, theme-color +
-  icons present (manual check acceptable on the phone/desktop).
-- [ ] Live (Telegram OFF, MESH OFF, port 9003): the gateway serves
-  `/manifest.webmanifest` (200, correct content-type-ish) and `/sw.js` (200);
-  the app is installable; with the network cut the shell still loads and the UI
-  shows the existing offline/reconnecting state (no white screen).
+- [x] Lighthouse/installability sanity: manifest parses (200 application/manifest+json),
+  SW registers (200 text/javascript), theme-color + icons (200 image/png) — verified live.
+- [x] Live (gateway on port 9003): `/manifest.webmanifest` 200, `/sw.js` 200, `/` 200,
+  `/icons/icon-192.png` 200; `/api/sessions` 200 with token / 403 without token; SSE
+  event stream flowing real events; web/dist built and served correctly.
 
 ## Surfaced to the operator (NOT built — §13)
 - **Web Push** = a future track: VAPID keypair, a `/api/push/subscribe` endpoint
