@@ -51,8 +51,8 @@ gateway is `docs/CONTROL_SURFACE_UNIFICATION.md` (U1..U6, all done).
 | **UI-2** | live write surface, SSE transport, real session timeline | ✅ done (`5590cb5`) — send/stop, idempotency, SSE all live-verified |
 | **G′** | task lifecycle object + sectioned `/api/tasks` | ✅ done (`baba1d1`) |
 | **H + UI-3** | durable approval gate + approval card | ✅ done (`3dc00c7`) — **see priority note** |
-| **UI-4** | **Files & artifacts** | ❌ **NOT started — THE priority to ship** |
-| UI-5 | logs / health / terminal | ❌ not started |
+| **UI-4** | **Files & artifacts** | ✅ done — artifact listing API + live FilesScreen (`docs/UI4_CHECKLIST.md`) |
+| UI-5 | logs / health / terminal | ❌ not started — **next** |
 | UI-6 | hardening, a11y, PWA, push | ❌ not started |
 
 **⚠️ PRIORITY REFRAME (operator, 2026-06-24):** the spec ladder put `H/UI-3
@@ -63,15 +63,14 @@ coding-gateway-on-your-phone. H/UI-3 is already built and is harmless (durable,
 tested, no auto-emitter wiring it into any hot path) — **leave it, do not extend
 it.** The real remaining core-flow work to **ship** is:
 
-- **UI-4 (Files & artifacts) — DO THIS NEXT.** "What did the agent change?" is the
-  core review loop on the phone. `FilesScreen.tsx` is currently pure mock. The
-  data EXISTS on disk but **there is no listing endpoint yet** — so UI-4 is a real
-  two-part job: (1) a backend artifact/files listing API in `control_api.py`, then
-  (2) bind `FilesScreen` + a diff/file view to it. Sources to surface: `results/
-  <task_id>.json` (full task artifact), `TaskResult.files_modified`,
-  `SessionView.last_files_modified` (already on the wire), `session.last_artifact_path`.
-- Then **UI-5** (live log viewer off the SSE/event stream; health is already live
-  from `/api/nodes`) and **UI-6** (PWA/hardening) to actually ship to the phone.
+- ~~**UI-4 (Files & artifacts)**~~ ✅ **DONE 2026-06-24.** Backend
+  `src/control/artifacts.py` (pure reader, path-confined) + `GET /api/artifacts`
+  & `GET /api/artifacts/{task_id}` in `control_api.py`; `FilesScreen.tsx` now binds
+  live artifact cards + per-file change rows (added/modified/deleted + ±lines).
+  Diff hunks / file-content preview deliberately OUT (no backend source).
+  Scope fence: `docs/UI4_CHECKLIST.md`.
+- **UI-5 (live logs off the SSE/event stream) — DO THIS NEXT.** Health is already
+  live from `/api/nodes`. Then **UI-6** (PWA/hardening) to actually ship to the phone.
 
 **Deferred to the workflow-automation track (NOT shipping-blockers):** auto-emitting
 approvals from real risky actions, review/handoff workflows, anything else on
@@ -183,10 +182,12 @@ Progress against that plan (verified against code on 2026-06-10):
 
 ## ➡️ Immediate next step
 
-**ACTIVE track (Web UI, branch `feat/webui-ui0`): build UI-4 (Files & artifacts).**
-See the "Web UI track" section above for the full priority reframe and the
-two-part shape (backend listing API in `control_api.py`, then bind `FilesScreen`).
-This is the next thing to **ship** the phone cockpit.
+**ACTIVE track (Web UI, branch `feat/webui-ui0`): build UI-5 (live logs off the
+SSE/event stream).** UI-4 (Files & artifacts) is ✅ done — `src/control/artifacts.py`
++ `/api/artifacts[/{task_id}]` + a live `FilesScreen` with per-file change rows
+(`docs/UI4_CHECKLIST.md`). UI-5 is the live log viewer over the existing event
+stream (`/api/events/stream`); health is already live from `/api/nodes`. Then UI-6
+(PWA/hardening) to actually ship the phone cockpit.
 
 **Mesh track (paused, branch `main`):** the two-machine cutover is **done and
 live** — gateway+server on the Pi5, worker on `Horse`, restart-resilient. The only

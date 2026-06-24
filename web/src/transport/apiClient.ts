@@ -17,6 +17,8 @@ import type {
   RawEventsResponse,
   RawTaskSectionsResponse,
   RawApproval,
+  RawArtifactSummary,
+  RawArtifactDetailResponse,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -123,6 +125,26 @@ export const api = {
   ): Promise<RawTaskSectionsResponse> {
     return get<RawTaskSectionsResponse>(
       `/api/tasks?limit=${limit}&sectioned=true`,
+      token,
+    );
+  },
+
+  /** Newest-first artifact summaries (UI-4 — results/<task>.json headers). */
+  async artifacts(token: string, limit = 50): Promise<RawArtifactSummary[]> {
+    const data = await get<{ artifacts: RawArtifactSummary[] }>(
+      `/api/artifacts?limit=${limit}`,
+      token,
+    );
+    return data.artifacts ?? [];
+  },
+
+  /** One artifact's header + its normalized changed files (UI-4). */
+  async artifact(
+    token: string,
+    taskId: string,
+  ): Promise<RawArtifactDetailResponse> {
+    return get<RawArtifactDetailResponse>(
+      `/api/artifacts/${encodeURIComponent(taskId)}`,
       token,
     );
   },

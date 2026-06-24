@@ -240,6 +240,16 @@ def _db():
         return None
 
 
+def _results_dir() -> "Path":
+    """The artifact directory (config.system.results_dir), as a Path."""
+    from pathlib import Path
+    try:
+        from config import config as _cfg
+        return Path(_cfg.system.results_dir)
+    except Exception:
+        return Path("results")
+
+
 def build_control_api(orchestrator) -> FastAPI:
     """Build the gateway's read API bound to the live orchestrator.
 
@@ -346,6 +356,34 @@ def build_control_api(orchestrator) -> FastAPI:
     def api_nodes() -> JSONResponse:
         nodes = _live_nodes()
         return JSONResponse({"nodes": nodes})
+
+    # --- artifacts / files (UI-4) -----------------------------------------
+    # The phone review loop: "what did the agent change?" Reads the on-disk
+    # results/<task_id>.json artifacts via the pure src.control.artifacts helpers
+    # (confined to results_dir — path-traversal rejected like the SPA resolver).
+
+    @app.get("/api/artifacts", dependencies=[Depends(_require_auth)])
+    def api_artifacts(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
+        """Newest-first artifact summaries (results/*.json). Per-file detail is on
+        ``/api/artifacts/{task_id}``."""
+        from src.control import artifacts as _artifacts
+        rows = _artifacts.list_artifacts(_results_dir(), limit=limit)
+        return JSONResponse({"artifacts": rows})
+
+    @app.get("/api/artifacts/{task_id}", dependencies=[Depends(_require_auth)])
+    def api_artifact(task_id: str) -> JSONResponse:
+        """One artifact's full header + normalized changed files (RemoteFile rows).
+
+        404 (``not_found``) on a missing id OR a path-traversal escape — the
+        confined read collapses both to None (no signal that distinguishes them)."""
+        from src.control import artifacts as _artifacts
+        artifact = _artifacts.get_artifact(_results_dir(), task_id)
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        return JSONResponse({
+            "artifact": artifact,
+            "files": _artifacts.to_remote_files(artifact),
+        })
 
     @app.get("/api/events", dependencies=[Depends(_require_auth)])
     def api_events(

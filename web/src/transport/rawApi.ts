@@ -113,6 +113,60 @@ export interface RawTaskSectionsResponse {
   };
 }
 
+// GET /api/artifacts → { artifacts: RawArtifactSummary[] } (UI-4).
+// src.control.artifacts.list_artifacts() — newest-first shallow headers over the
+// on-disk results/<task_id>.json files. Per-file detail is on the {task_id} route.
+export interface RawArtifactSummary {
+  task_id: string;
+  artifact_path: string;
+  success: boolean;
+  /** Free-form artifact timestamp string (not always ISO). */
+  timestamp: string;
+  file_count: number;
+  files_modified: string[];
+  has_changes: boolean;
+  session_id: string | null;
+  parent_task_id: string | null;
+}
+
+// GET /api/artifacts/{task_id} → { artifact: RawArtifactDetail, files: RawRemoteFile[] }.
+// src.control.artifacts.get_artifact() + to_remote_files(). Raw stdout/stderr are
+// intentionally NOT surfaced here (UI-5 logs).
+export interface RawArtifactDetail {
+  task_id: string;
+  success: boolean;
+  timestamp: string;
+  execution_time: number | null;
+  errors: string[];
+  files_modified: string[];
+  /** Rich per-file shape when the artifact stored it; else null. */
+  file_changes:
+    | Array<{
+        path: string;
+        git_status?: string;
+        change_type?: string;
+        added_lines?: number | null;
+        deleted_lines?: number | null;
+      }>
+    | null;
+  session_id: string | null;
+  parent_task_id: string | null;
+}
+
+// Normalized changed-file row (artifacts.to_remote_files()). `change` is already
+// added|modified|deleted; line counts are null when the artifact didn't store them.
+export interface RawRemoteFile {
+  path: string;
+  change: string; // added|modified|deleted
+  added: number | null;
+  deleted: number | null;
+}
+
+export interface RawArtifactDetailResponse {
+  artifact: RawArtifactDetail;
+  files: RawRemoteFile[];
+}
+
 // GET /api/approvals → { approvals: RawApproval[] } (Move H).
 // Row from the `approvals` table (control_api). `reversible` is stored 0|1.
 export interface RawApproval {

@@ -12,6 +12,7 @@ import { toSessions } from "../transport/sessionAdapter";
 import { toTargets } from "../transport/nodeAdapter";
 import { toTasks, toTaskSections } from "../transport/taskAdapter";
 import { toApprovals } from "../transport/approvalAdapter";
+import { toArtifacts, toArtifactDetail } from "../transport/artifactAdapter";
 import { useAuthStore } from "../stores/authStore";
 
 const POLL_MS = 3000;
@@ -83,5 +84,33 @@ export function useApprovals(status = "pending") {
     queryFn: async () => toApprovals(await api.approvals(token, status)),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
+  });
+}
+
+/**
+ * Artifacts list (UI-4) — "what did the agent change?". Newest-first headers from
+ * /api/artifacts (the on-disk results/<task>.json files). Per-file detail is a
+ * separate per-artifact fetch (useArtifact) so the list stays cheap.
+ */
+export function useArtifacts(limit = 50) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["artifacts", limit],
+    queryFn: async () => toArtifacts(await api.artifacts(token, limit)),
+    enabled: Boolean(token),
+    refetchInterval: POLL_MS,
+  });
+}
+
+/**
+ * One artifact's changed files (UI-4) — fetched on demand when a card expands.
+ * Artifacts are immutable once written, so this does NOT poll.
+ */
+export function useArtifact(taskId: string | null) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["artifact", taskId],
+    queryFn: async () => toArtifactDetail(await api.artifact(token, taskId!)),
+    enabled: Boolean(token) && Boolean(taskId),
   });
 }
