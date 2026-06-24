@@ -187,12 +187,12 @@ Progress against that plan (verified against code on 2026-06-10):
 
 ## ➡️ Immediate next step
 
-**ACTIVE track (Web UI, branch `feat/webui-ui0`): build UI-5 (live logs off the
-SSE/event stream).** UI-4 (Files & artifacts) is ✅ done — `src/control/artifacts.py`
-+ `/api/artifacts[/{task_id}]` + a live `FilesScreen` with per-file change rows
-(`docs/UI4_CHECKLIST.md`). UI-5 is the live log viewer over the existing event
-stream (`/api/events/stream`); health is already live from `/api/nodes`. Then UI-6
-(PWA/hardening) to actually ship the phone cockpit.
+**ACTIVE track (Web UI, branch `feat/webui-ui0`): build UI-6 (PWA / hardening /
+a11y / push) — the LAST rung, ships the cockpit to the phone.** UI-4 (Files &
+artifacts) and UI-5 (live activity feed on System, off the SSE stream) are both ✅
+done (`docs/UI4_CHECKLIST.md`, `docs/UI5_CHECKLIST.md`). UI-6 = installable PWA
+(manifest + service worker / offline shell), a11y pass, and push notifications for
+attention events; see `docs/COCKPIT_REFACTOR_SPEC.md` §14.
 
 **Mesh track (paused, branch `main`):** the two-machine cutover is **done and
 live** — gateway+server on the Pi5, worker on `Horse`, restart-resilient. The only
