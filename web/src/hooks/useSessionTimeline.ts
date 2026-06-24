@@ -15,7 +15,7 @@
  */
 import { useMemo } from "react";
 import type { TimelineItem } from "../fixtures/timeline";
-import type { Session } from "../domain/models";
+import type { Session, ApprovalRequest } from "../domain/models";
 import type { StampedEvent } from "./useEventStream";
 import { useSentStore } from "../stores/sentStore";
 
@@ -23,6 +23,7 @@ export function useSessionTimeline(
   sessionId: string | undefined,
   session: Session | undefined,
   events: StampedEvent[],
+  approvals: ApprovalRequest[] = [],
 ): TimelineItem[] {
   const sent = useSentStore((s) =>
     sessionId ? s.bySession[sessionId] : undefined,
@@ -104,7 +105,14 @@ export function useSessionTimeline(
       });
     }
 
+    // 4 — live pending approvals for this session (Move H). These are durable
+    //     (survive restart) and round-trip via the approval card's buttons.
+    for (const appr of approvals) {
+      if (appr.sessionId !== sessionId) continue;
+      items.push({ kind: "approval", at: appr.createdAt, approval: appr });
+    }
+
     items.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
     return items;
-  }, [sessionId, session, events, sent]);
+  }, [sessionId, session, events, sent, approvals]);
 }

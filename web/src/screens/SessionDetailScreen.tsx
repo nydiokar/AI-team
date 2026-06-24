@@ -13,7 +13,7 @@ import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
 import { SessionTimeline } from "../components/timeline/SessionTimeline";
 import { Composer } from "../components/timeline/Composer";
-import { useSessions } from "../hooks/useLiveData";
+import { useSessions, useApprovals } from "../hooks/useLiveData";
 import { useEventStreamContext } from "../hooks/eventStreamContext";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
 
@@ -23,7 +23,8 @@ export function SessionDetailScreen() {
   const { data } = useSessions();
   const session = data?.find((s) => s.id === id);
   const { events } = useEventStreamContext();
-  const timeline = useSessionTimeline(id, session, events);
+  const { data: approvals } = useApprovals();
+  const timeline = useSessionTimeline(id, session, events, approvals ?? []);
   const running = session?.opState === "running";
 
   return (

@@ -14,9 +14,11 @@ import {
   Info,
 } from "lucide-react";
 import type { TimelineItem } from "../../fixtures/timeline";
+import type { ApprovalRequest } from "../../domain/models";
 import { TaskStatusChip } from "../ui/StatusChip";
 import { Button } from "../ui/Button";
 import { cn } from "../../lib/cn";
+import { useResolveApproval } from "../../hooks/useSessionActions";
 
 function time(at: string): string {
   return at.length >= 19 ? at.slice(11, 16) : at;
@@ -30,6 +32,62 @@ const NOTICE_TONE: Record<string, string> = {
   error: "text-bad",
 };
 const RISK_TONE: Record<string, string> = { low: "text-ink-soft", medium: "text-warn", high: "text-bad" };
+
+/**
+ * Live approval card (Move H / UI-3). The Approve/Reject buttons round-trip
+ * through useResolveApproval; the backend guard makes a double-resolve a no-op
+ * (409). While the mutation is in flight both buttons disable.
+ */
+function ApprovalCard({ approval, at }: { approval: ApprovalRequest; at: string }) {
+  const resolve = useResolveApproval();
+  const decide = (decision: "approved" | "rejected") =>
+    resolve.mutate({ approvalId: approval.id, decision });
+
+  return (
+    <div className="card-elev attention-glow mx-4 my-2 rounded-xl p-4">
+      <div className="flex items-center gap-2">
+        <ShieldQuestion className="size-4 text-warn" />
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-warn">
+          Approval required
+        </span>
+        <span className="ml-auto text-[10px] text-ink-muted">{time(at)}</span>
+      </div>
+      <p className="mt-2 text-[14px] text-ink">{approval.action}</p>
+      <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
+        <span className={RISK_TONE[approval.risk]}>{approval.risk} risk</span>
+        <span className="text-ink-muted">·</span>
+        <span className="text-ink-muted">
+          {approval.reversible ? "reversible" : "irreversible"}
+        </span>
+        {approval.stale && <span className="ml-auto text-warn">state may be stale</span>}
+      </div>
+      {resolve.isError && (
+        <p className="mt-2 text-[11px] text-bad">
+          Couldn’t resolve: {String(resolve.error?.message ?? "unknown")}.
+        </p>
+      )}
+      <div className="mt-3 flex gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          className="flex-1"
+          disabled={resolve.isPending}
+          onClick={() => decide("rejected")}
+        >
+          Reject
+        </Button>
+        <Button
+          size="sm"
+          className="flex-1"
+          disabled={resolve.isPending}
+          onClick={() => decide("approved")}
+        >
+          Approve
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 function Item({ item }: { item: TimelineItem }) {
   switch (item.kind) {
@@ -72,31 +130,7 @@ function Item({ item }: { item: TimelineItem }) {
       );
     }
     case "approval":
-      return (
-        <div className="card-elev attention-glow mx-4 my-2 rounded-xl p-4">
-          <div className="flex items-center gap-2">
-            <ShieldQuestion className="size-4 text-warn" />
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-warn">
-              Approval required
-            </span>
-            <span className="ml-auto text-[10px] text-ink-muted">{time(item.at)}</span>
-          </div>
-          <p className="mt-2 text-[14px] text-ink">{item.approval.action}</p>
-          <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
-            <span className={RISK_TONE[item.approval.risk]}>{item.approval.risk} risk</span>
-            <span className="text-ink-muted">·</span>
-            <span className="text-ink-muted">
-              {item.approval.reversible ? "reversible" : "irreversible"}
-            </span>
-            {item.approval.stale && <span className="ml-auto text-warn">state may be stale</span>}
-          </div>
-          <div className="mt-3 flex gap-2">
-            <Button size="sm" variant="outline" disabled className="flex-1">Reject</Button>
-            <Button size="sm" disabled className="flex-1">Approve</Button>
-          </div>
-          <p className="mt-2 text-[11px] text-ink-muted">Wired in UI-3 (Move H).</p>
-        </div>
-      );
+      return <ApprovalCard approval={item.approval} at={item.at} />;
     case "artifact":
       return (
         <div className="mx-4 my-1.5 flex items-center gap-2.5 rounded-xl border border-hairline bg-surface-1 px-3.5 py-2.5 text-[13px]">

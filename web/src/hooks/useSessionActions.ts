@@ -50,6 +50,26 @@ export function useSubmitInstruction() {
   });
 }
 
+/**
+ * Resolve a pending approval (Move H). Idempotency-keyed so a double-tap or retry
+ * can't double-resolve (the backend guard also returns 409, but the key avoids
+ * even sending the second request on a flaky network). Invalidates the approvals
+ * queue + sessions on settle.
+ */
+export function useResolveApproval() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { approvalId: string; decision: "approved" | "rejected" }) =>
+      api.resolveApproval(token, vars.approvalId, vars.decision, newIdempotencyKey()),
+    retry: false,
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["approvals"] });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
+}
+
 /** Stop the in-flight task on a session (control_api.api_stop_session). */
 export function useStopSession() {
   const token = useAuthStore((s) => s.token);
