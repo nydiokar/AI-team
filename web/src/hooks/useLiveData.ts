@@ -10,7 +10,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../transport/apiClient";
 import { toSessions } from "../transport/sessionAdapter";
 import { toTargets } from "../transport/nodeAdapter";
-import { toTasks } from "../transport/taskAdapter";
+import { toTasks, toTaskSections } from "../transport/taskAdapter";
 import { useAuthStore } from "../stores/authStore";
 
 const POLL_MS = 3000;
@@ -50,6 +50,22 @@ export function useTasks(limit = 50) {
   return useQuery({
     queryKey: ["tasks", limit],
     queryFn: async () => toTasks(await api.tasks(token, limit)),
+    enabled: Boolean(token),
+    refetchInterval: POLL_MS,
+  });
+}
+
+/**
+ * Sectioned tasks (Move G′) — the Tasks inbox bound to the backend's supervised
+ * lifecycle buckets (attention/running/queued/recent), not client-side bucketing.
+ * The backend overlays each task's owning-session status, so `waiting_for_input`
+ * lands in `attention` here where the flat status alone couldn't reach it.
+ */
+export function useTaskSections(limit = 50) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["task-sections", limit],
+    queryFn: async () => toTaskSections(await api.taskSections(token, limit)),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
   });

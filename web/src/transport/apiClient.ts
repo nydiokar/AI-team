@@ -15,6 +15,7 @@ import type {
   RawNode,
   RawTask,
   RawEventsResponse,
+  RawTaskSectionsResponse,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -112,6 +113,17 @@ export const api = {
       token,
     );
     return data.tasks ?? [];
+  },
+
+  /** Sectioned tasks (Move G′): backend-bucketed supervised lifecycle. */
+  async taskSections(
+    token: string,
+    limit = 50,
+  ): Promise<RawTaskSectionsResponse> {
+    return get<RawTaskSectionsResponse>(
+      `/api/tasks?limit=${limit}&sectioned=true`,
+      token,
+    );
   },
 
   /** Live event tail (poll). Pass the returned offset back as `since`. */

@@ -1,24 +1,20 @@
 /**
- * Tasks screen — LIVE flat in UI-2 (bound to /api/tasks via useTasks + the
- * taskAdapter). Global cross-session inbox (spec §7.4), sectioned Needs attention
- * / Running / Queued / Recently completed.
+ * Tasks screen — LIVE sectioned (Move G′). Bound to /api/tasks?sectioned=true via
+ * useTaskSections; the backend owns the supervised lifecycle bucketing
+ * (attention/running/queued/recent) by overlaying each task's owning-session
+ * status onto the mesh status. So `waiting_for_input` now correctly lands in
+ * `attention` — the bucket the flat mesh status couldn't reach in UI-2.
  *
- * NOTE: the sections derive from the mesh_tasks status subset the adapter can map
- * today (queued/dispatching/running/succeeded/failed/cancelled). The richer
- * supervised lifecycle (waiting_for_input / waiting_for_approval correctness) is
- * still Move G′ (gap-doc §4) — those buckets stay empty until G′ lands.
+ * Approvals (`waiting_for_approval`) remain gated on Move H — the backend names
+ * the state but has no live source for it yet.
  */
 import { Link } from "react-router-dom";
 import { ExternalLink } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { TaskStatusChip } from "../components/ui/StatusChip";
-import { useTasks } from "../hooks/useLiveData";
+import { useTaskSections } from "../hooks/useLiveData";
 import type { Task } from "../domain/models";
-import type { TaskState } from "../domain/status";
-
-const ATTENTION: TaskState[] = ["waiting_for_input", "waiting_for_approval", "failed", "connection_unknown"];
-const RUNNING: TaskState[] = ["running", "dispatching"];
 
 function TaskCard({ task }: { task: Task }) {
   const body = (
@@ -64,24 +60,22 @@ function Section({ label, tasks, accent }: { label: string; tasks: Task[]; accen
 }
 
 export function TasksScreen() {
-  const { data, isLoading, isError } = useTasks();
-  const tasks = data ?? [];
-  const attention = tasks.filter((t) => ATTENTION.includes(t.state));
-  const running = tasks.filter((t) => RUNNING.includes(t.state));
-  const queued = tasks.filter((t) => t.state === "queued");
-  const recent = tasks.filter((t) => t.state === "succeeded" || t.state === "cancelled");
-  const empty = !isLoading && !isError && tasks.length === 0;
+  const { data, isLoading, isError } = useTaskSections();
+  const total = data
+    ? data.attention.length + data.running.length + data.queued.length + data.recent.length
+    : 0;
+  const empty = !isLoading && !isError && total === 0;
 
   return (
     <div className="pb-8">
-      <CompactTopBar title="Tasks" subtitle="Live · richer states with Move G′" />
+      <CompactTopBar title="Tasks" subtitle="Live · supervised lifecycle" />
       {isLoading && <p className="px-4 py-8 text-center text-sm text-ink-muted">Loading tasks…</p>}
       {isError && <p className="px-4 py-8 text-center text-sm text-bad">Couldn’t load tasks.</p>}
       {empty && <p className="px-4 py-8 text-center text-sm text-ink-muted">No tasks yet.</p>}
-      <Section label="Needs attention" accent="warn" tasks={attention} />
-      <Section label="Running" tasks={running} />
-      <Section label="Queued" tasks={queued} />
-      <Section label="Recently completed" tasks={recent} />
+      <Section label="Needs attention" accent="warn" tasks={data?.attention ?? []} />
+      <Section label="Running" tasks={data?.running ?? []} />
+      <Section label="Queued" tasks={data?.queued ?? []} />
+      <Section label="Recently completed" tasks={data?.recent ?? []} />
     </div>
   );
 }

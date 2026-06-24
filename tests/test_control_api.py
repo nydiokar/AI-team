@@ -101,6 +101,50 @@ def test_tasks_limit_validation(client):
     assert client.get("/api/tasks?limit=99999", headers=_auth()).status_code == 422
 
 
+# --- Move G′: sectioned /api/tasks + session-status overlay ------------------
+
+def test_tasks_sectioned_returns_four_buckets(client):
+    r = client.get("/api/tasks?sectioned=true", headers=_auth())
+    assert r.status_code == 200
+    sections = r.json()["sections"]
+    assert set(sections) == {"attention", "running", "queued", "recent"}
+    assert all(isinstance(v, list) for v in sections.values())
+
+
+def test_tasks_flat_shape_unchanged_by_default(client):
+    # Backward-compat: no ?sectioned → the UI-2 flat shape, byte-for-byte.
+    body = client.get("/api/tasks", headers=_auth()).json()
+    assert "tasks" in body and "sections" not in body
+
+
+def test_tasks_sectioned_overlays_session_status(client, orch, tmp_path):
+    """An in-flight task whose session AWAITING_INPUT lands in `attention` as
+    waiting_for_input — the bucket the flat mesh status alone can't reach."""
+    from src.core.interfaces import SessionStatus
+    from src.control.db import get_db
+
+    res = orch.session_service.create_session(
+        backend="claude", repo_path=str(tmp_path), chat_id=7,
+    )
+    assert res.ok
+    sid = res.session.session_id
+    # Drive the session to AWAITING_INPUT via the store (the overlay source).
+    sess = orch.session_service.store.get(sid)
+    sess.status = SessionStatus.AWAITING_INPUT
+    orch.session_service.store.save(sess)
+    # An active (pending) task pointing at that session.
+    get_db().enqueue_task(
+        task_id="task_overlay", session_id=sid, machine_id=None,
+        backend="claude", action="run_oneoff", payload={"prompt": "x"},
+    )
+
+    sections = client.get("/api/tasks?sectioned=true", headers=_auth()).json()["sections"]
+    found = next((t for t in sections["attention"] if t["id"] == "task_overlay"), None)
+    assert found is not None, "overlaid task should be in attention"
+    assert found["ui_state"] == "waiting_for_input"
+    assert found["section"] == "attention"
+
+
 # --- nodes: DB fallback annotates liveness when the registry is empty -------
 
 def test_nodes_fallback_annotates_live_when_registry_empty(client):
