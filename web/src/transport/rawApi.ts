@@ -112,3 +112,21 @@ export interface RawTaskSectionsResponse {
     recent: RawSectionedTask[];
   };
 }
+
+// GET /api/approvals → { approvals: RawApproval[] } (Move H).
+// Row from the `approvals` table (control_api). `reversible` is stored 0|1.
+export interface RawApproval {
+  id: string;
+  session_id: string | null;
+  task_id: string | null;
+  action: string;
+  risk: string; // low|medium|high
+  reversible: number; // 0 | 1 (SQLite int)
+  status: string; // pending|approved|rejected|expired
+  requested_by: string;
+  resolved_by: string | null;
+  payload: string | null; // JSON
+  created_at: string;
+  resolved_at: string | null;
+  expires_at: string | null;
+}

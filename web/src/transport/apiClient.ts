@@ -16,6 +16,7 @@ import type {
   RawTask,
   RawEventsResponse,
   RawTaskSectionsResponse,
+  RawApproval,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -180,6 +181,30 @@ export const api = {
     sessionId: string,
   ): Promise<{ ok: boolean; cancelled: boolean; task_id: string | null }> {
     return post(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, token, {});
+  },
+
+  /** Pending approval queue (Move H). status="" lists all. */
+  async approvals(token: string, status = "pending"): Promise<RawApproval[]> {
+    const data = await get<{ approvals: RawApproval[] }>(
+      `/api/approvals?status=${encodeURIComponent(status)}`,
+      token,
+    );
+    return data.approvals ?? [];
+  },
+
+  /** Resolve a pending approval (control_api.api_resolve_approval). */
+  async resolveApproval(
+    token: string,
+    approvalId: string,
+    decision: "approved" | "rejected",
+    idempotencyKey: string,
+  ): Promise<{ ok: boolean; approval: RawApproval | null }> {
+    return post(
+      `/api/approvals/${encodeURIComponent(approvalId)}/resolve`,
+      token,
+      { decision },
+      idempotencyKey,
+    );
   },
 
   /** Create a web-origin session (control_api.api_create_session). */

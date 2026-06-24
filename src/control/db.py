@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 12
+_CURRENT_VERSION = 13
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +819,101 @@ class MeshDB:
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # Approvals (Move H) — durable approval gate. A pending approval is a
+    # promise of a NOT-yet-dispatched action; resolving it is what triggers
+    # dispatch. Persisting it here is what lets it survive a gateway restart
+    # (an in-memory asyncio.Event would not) and rebuild the pending queue.
+    # ------------------------------------------------------------------
+
+    def create_approval(
+        self,
+        approval_id: str,
+        action: str,
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        risk: str = "medium",
+        reversible: bool = True,
+        requested_by: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+        expires_at: Optional[str] = None,
+    ) -> None:
+        """Insert a new pending approval."""
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO approvals (
+                        id, session_id, task_id, action, risk, reversible,
+                        status, requested_by, payload, created_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                    """,
+                    (
+                        approval_id, session_id, task_id, action, risk,
+                        1 if reversible else 0, requested_by,
+                        json.dumps(payload) if payload is not None else None,
+                        now, expires_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed: approvals.id" in str(e):
+                logger.debug("event=db_create_approval_duplicate id=%s", approval_id)
+            else:
+                logger.warning("event=db_create_approval_integrity_failed id=%s err=%s", approval_id, e)
+        except Exception as e:
+            logger.warning("event=db_create_approval_failed id=%s err=%s", approval_id, e)
+
+    def get_approval(self, approval_id: str) -> Optional[Dict[str, Any]]:
+        row = self._conn().execute(
+            "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_approvals(
+        self, status: Optional[str] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        clauses, params = [], []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        rows = self._conn().execute(
+            f"SELECT * FROM approvals {where} ORDER BY created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolve_approval(
+        self, approval_id: str, status: str, resolved_by: str = ""
+    ) -> bool:
+        """Guarded transition: only a PENDING approval moves to a terminal status.
+
+        Returns True iff exactly this call performed the transition. The
+        ``status = 'pending'`` guard in the WHERE makes the resolve atomic — a
+        concurrent double-resolve (two surfaces racing) results in exactly one
+        True; the loser sees False (caller maps to already_resolved). This is the
+        same optimistic-claim pattern as ``claim_task``.
+        """
+        if status not in ("approved", "rejected", "expired"):
+            return False
+        now = _now()
+        try:
+            with self._write() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE approvals
+                       SET status = ?, resolved_by = ?, resolved_at = ?
+                     WHERE id = ? AND status = 'pending'
+                    """,
+                    (status, resolved_by, now, approval_id),
+                )
+                return cur.rowcount == 1
+        except Exception as e:
+            logger.warning("event=db_resolve_approval_failed id=%s err=%s", approval_id, e)
+            return False
+
+    # ------------------------------------------------------------------
     # Task events
     # ------------------------------------------------------------------
 
@@ -1231,6 +1326,25 @@ def _get_migrations() -> List[tuple]:
         """),  # durable watched-job process identity probes
         (11, "ALTER TABLE sessions ADD COLUMN model TEXT"),  # per-session picked model; NULL = backend default
         (12, "ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT '{\"channel\":\"telegram\",\"kind\":\"user\"}'"),  # transport-neutral origin tag {channel, kind}; old rows default to telegram/user
+        (13, """
+            CREATE TABLE IF NOT EXISTS approvals (
+                id           TEXT PRIMARY KEY,
+                session_id   TEXT,
+                task_id      TEXT,
+                action       TEXT NOT NULL,
+                risk         TEXT NOT NULL DEFAULT 'medium',
+                reversible   INTEGER NOT NULL DEFAULT 1,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                requested_by TEXT NOT NULL DEFAULT '',
+                resolved_by  TEXT,
+                payload      TEXT,
+                created_at   TEXT NOT NULL,
+                resolved_at  TEXT,
+                expires_at   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id)
+        """),  # Move H — durable approval gate (pending → approved|rejected|expired)
     ]
 
 

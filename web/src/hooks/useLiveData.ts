@@ -11,6 +11,7 @@ import { api, ApiError } from "../transport/apiClient";
 import { toSessions } from "../transport/sessionAdapter";
 import { toTargets } from "../transport/nodeAdapter";
 import { toTasks, toTaskSections } from "../transport/taskAdapter";
+import { toApprovals } from "../transport/approvalAdapter";
 import { useAuthStore } from "../stores/authStore";
 
 const POLL_MS = 3000;
@@ -66,6 +67,20 @@ export function useTaskSections(limit = 50) {
   return useQuery({
     queryKey: ["task-sections", limit],
     queryFn: async () => toTaskSections(await api.taskSections(token, limit)),
+    enabled: Boolean(token),
+    refetchInterval: POLL_MS,
+  });
+}
+
+/**
+ * Pending approval queue (Move H / UI-3). Polls /api/approvals; the queue is
+ * what rebuilds the UI after a gateway restart (the pending rows are durable).
+ */
+export function useApprovals(status = "pending") {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["approvals", status],
+    queryFn: async () => toApprovals(await api.approvals(token, status)),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
   });

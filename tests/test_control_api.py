@@ -145,6 +145,55 @@ def test_tasks_sectioned_overlays_session_status(client, orch, tmp_path):
     assert found["section"] == "attention"
 
 
+# --- Move H: approvals (durable gate) ---------------------------------------
+
+def test_approvals_list_empty_by_default(client):
+    r = client.get("/api/approvals", headers=_auth())
+    assert r.status_code == 200 and r.json()["approvals"] == []
+
+
+def test_approval_request_then_pending_then_resolve(client):
+    # request → pending shows it
+    rq = client.post("/api/approvals", headers=_auth(),
+                     json={"action": "deploy to prod", "session_id": "s1", "risk": "high"})
+    assert rq.status_code == 200
+    appr = rq.json()["approval"]
+    assert appr["status"] == "pending" and appr["action"] == "deploy to prod"
+    appr_id = appr["id"]
+
+    pend = client.get("/api/approvals?status=pending", headers=_auth()).json()["approvals"]
+    assert any(a["id"] == appr_id for a in pend)
+
+    # resolve approved → leaves the queue
+    rr = client.post(f"/api/approvals/{appr_id}/resolve", headers=_auth(),
+                     json={"decision": "approved", "resolved_by": "me"})
+    assert rr.status_code == 200 and rr.json()["approval"]["status"] == "approved"
+    pend2 = client.get("/api/approvals?status=pending", headers=_auth()).json()["approvals"]
+    assert not any(a["id"] == appr_id for a in pend2)
+
+
+def test_resolve_twice_is_409(client):
+    appr_id = client.post("/api/approvals", headers=_auth(),
+                          json={"action": "x", "session_id": "s1"}).json()["approval"]["id"]
+    assert client.post(f"/api/approvals/{appr_id}/resolve", headers=_auth(),
+                       json={"decision": "approved"}).status_code == 200
+    again = client.post(f"/api/approvals/{appr_id}/resolve", headers=_auth(),
+                        json={"decision": "rejected"})
+    assert again.status_code == 409
+    assert again.json()["detail"]["reason"] == "already_resolved"
+
+
+def test_resolve_missing_is_404(client):
+    r = client.post("/api/approvals/nope/resolve", headers=_auth(),
+                    json={"decision": "approved"})
+    assert r.status_code == 404 and r.json()["detail"]["reason"] == "not_found"
+
+
+def test_request_missing_action_is_400(client):
+    r = client.post("/api/approvals", headers=_auth(), json={"action": "", "session_id": "s1"})
+    assert r.status_code == 400 and r.json()["detail"]["reason"] == "missing_action"
+
+
 # --- nodes: DB fallback annotates liveness when the registry is empty -------
 
 def test_nodes_fallback_annotates_live_when_registry_empty(client):

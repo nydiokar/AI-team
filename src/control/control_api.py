@@ -41,6 +41,11 @@ _REASON_STATUS = {
     "unknown_model": 400,
     "session_not_found": 404,
     "not_closed": 409,
+    # Move H — approvals
+    "not_found": 404,
+    "already_resolved": 409,
+    "invalid_decision": 400,
+    "missing_action": 400,
 }
 
 
@@ -64,6 +69,20 @@ class BindBody(BaseModel):
 
 class ModelBody(BaseModel):
     model: Optional[str] = None
+
+
+class ApprovalRequestBody(BaseModel):
+    action: str
+    session_id: Optional[str] = None
+    task_id: Optional[str] = None
+    risk: str = "medium"
+    reversible: bool = True
+    requested_by: str = ""
+
+
+class ApprovalResolveBody(BaseModel):
+    decision: str  # "approved" | "rejected"
+    resolved_by: str = ""
 
 
 class InspectBody(BaseModel):
@@ -507,6 +526,72 @@ def build_control_api(orchestrator) -> FastAPI:
         if not result.ok:
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
+
+    # --- approvals (Move H) — durable approval gate -----------------------
+
+    def _approval_service():
+        """The orchestrator's ApprovalService if it wired one (with a real
+        on-approve dispatch callback); else a queue-only service over the shared
+        DB. Built lazily so the stub orchestrator in tests works too."""
+        svc = getattr(orchestrator, "approval_service", None)
+        if svc is not None:
+            return svc
+        db = _db()
+        if db is None:
+            return None
+        from src.services.approval_service import ApprovalService
+        return ApprovalService(db)
+
+    @app.get("/api/approvals", dependencies=[Depends(_require_auth)])
+    def api_list_approvals(
+        status: Optional[str] = Query(default="pending"),
+        limit: int = Query(50, ge=1, le=200),
+    ) -> JSONResponse:
+        """The queryable pending queue (rebuilds the UI after a restart). Pass
+        ``status=`` (empty) to list all."""
+        svc = _approval_service()
+        if svc is None:
+            return JSONResponse({"approvals": []})
+        approvals = svc.list(status=status or None, limit=limit)
+        return JSONResponse({"approvals": approvals})
+
+    @app.post("/api/approvals", dependencies=[Depends(_require_auth)])
+    def api_request_approval(
+        body: ApprovalRequestBody,
+        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """Record a pending approval (the seam a gated action calls). Exposed so the
+        queue is exercisable end-to-end before a backend emits these natively."""
+        cached = _idem_get("request_approval", idempotency_key)
+        if cached is not None:
+            return JSONResponse(cached)
+        svc = _approval_service()
+        if svc is None:
+            raise HTTPException(status_code=503, detail="approvals_unavailable")
+        result = svc.request(
+            action=body.action, session_id=body.session_id, task_id=body.task_id,
+            risk=body.risk, reversible=body.reversible, requested_by=body.requested_by,
+        )
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400),
+                                detail={"ok": False, "reason": result.reason})
+        approval_id = result.reason  # request() carries the id on reason
+        resp = {"ok": True, "approval": svc.get(approval_id)}
+        _idem_put("request_approval", idempotency_key, resp)
+        return JSONResponse(resp)
+
+    @app.post("/api/approvals/{approval_id}/resolve", dependencies=[Depends(_require_auth)])
+    async def api_resolve_approval(approval_id: str, body: ApprovalResolveBody) -> JSONResponse:
+        """Approve or reject a pending approval. The guarded transition makes a
+        double-resolve return 409 (already_resolved), not a second dispatch."""
+        svc = _approval_service()
+        if svc is None:
+            raise HTTPException(status_code=503, detail="approvals_unavailable")
+        result = await svc.resolve(approval_id, body.decision, resolved_by=body.resolved_by)
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400),
+                                detail={"ok": False, "reason": result.reason})
+        return JSONResponse({"ok": True, "reason": "", "approval": svc.get(approval_id)})
 
     # --- inspect / jobs / git (U3.5 tier 2 — thin wraps over existing services) ---
 

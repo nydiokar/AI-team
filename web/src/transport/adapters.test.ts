@@ -3,6 +3,7 @@ import { toSessions, deriveLifecycle, deriveOpState } from "./sessionAdapter";
 import { toTargets, deriveHealth } from "./nodeAdapter";
 import { toTasks, toTaskSections } from "./taskAdapter";
 import { adaptEvents, adaptEvent } from "./eventAdapter";
+import { toApproval } from "./approvalAdapter";
 import {
   rawSessions,
   rawNodes,
@@ -109,6 +110,31 @@ describe("taskAdapter — sectioned (Move G′): trust backend ui_state", () => 
     const out = toTaskSections({ sections: {} } as never);
     expect(out.attention).toEqual([]);
     expect(out.recent).toEqual([]);
+  });
+});
+
+describe("approvalAdapter — RawApproval → ApprovalRequest (Move H)", () => {
+  const raw = {
+    id: "appr_1", session_id: "s1", task_id: null, action: "deploy to prod",
+    risk: "high", reversible: 0, status: "pending", requested_by: "agent",
+    resolved_by: null, payload: null, created_at: "2026-06-24T10:00:00Z",
+    resolved_at: null, expires_at: null,
+  };
+
+  it("maps the int reversible to a bool and narrows risk", () => {
+    const a = toApproval(raw as never);
+    expect(a.reversible).toBe(false);
+    expect(a.risk).toBe("high");
+    expect(a.sessionId).toBe("s1");
+    expect(a.action).toBe("deploy to prod");
+  });
+
+  it("defaults an unknown risk to medium", () => {
+    expect(toApproval({ ...raw, risk: "weird" } as never).risk).toBe("medium");
+  });
+
+  it("treats reversible=1 as true", () => {
+    expect(toApproval({ ...raw, reversible: 1 } as never).reversible).toBe(true);
   });
 });
 
