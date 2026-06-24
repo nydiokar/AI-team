@@ -150,7 +150,7 @@ function Item({ item }: { item: TimelineItem }) {
 
 export function SessionTimeline({ items }: { items: TimelineItem[] }) {
   return (
-    <div className="py-3">
+    <div role="feed" aria-label="Session timeline" className="py-3">
       {items.map((it, i) => (
         <Item key={i} item={it} />
       ))}

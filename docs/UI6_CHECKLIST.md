@@ -36,28 +36,28 @@ NO new domain types, NO new API route, NO push backend. Edit-the-checklist-first
 
 ---
 
-## Box 1 — web app manifest + icons
-- [ ] `web/public/manifest.webmanifest`: name, short_name "AI-Team", start_url "/",
+## Box 1 — web app manifest + icons ✅ DONE
+- [x] `web/public/manifest.webmanifest`: name, short_name "AI-Team", start_url "/",
   display "standalone", background/theme `#0b0e14` (matches index.html theme-color),
   icons (192 + 512, maskable). orientation any.
-- [ ] Icons in `web/public/` (192/512 png + a maskable). A simple generated mark is
+- [x] Icons in `web/public/` (192/512 png + a maskable). A simple generated mark is
   fine (cockpit cyan on near-black) — committed as real files.
-- [ ] `index.html`: `<link rel="manifest">` + apple-touch-icon + apple-mobile-web-app
+- [x] `index.html`: `<link rel="manifest">` + apple-touch-icon + apple-mobile-web-app
   meta (iOS standalone). Keep the existing viewport-fit=cover / theme-color.
 
 Done = exactly: manifest + icons + the head links. No SW yet.
 Do NOT touch: vite.config plugins, the build pipeline.
 Revert: delete public/ additions + the head links.
 
-## Box 2 — service worker (offline app-shell)
-- [ ] `web/public/sw.js`: precache the app shell on install (index + built assets are
+## Box 2 — service worker (offline app-shell) ✅ DONE
+- [x] `web/public/sw.js`: precache the app shell on install (index + built assets are
   hashed, so cache-on-fetch); **network-first** for navigations + `/api/*` (never
   serve stale data as if live — falls back to cached shell only when offline);
   **cache-first** for hashed `/assets/*`. Versioned cache name; clean old caches on
   activate. NO precache of /api responses (data must be live or visibly offline).
-- [ ] Register the SW from the app entry (main.tsx) behind
+- [x] Register the SW from the app entry (main.tsx) behind
   `'serviceWorker' in navigator`, production-only (don't fight the dev server).
-- [ ] Confirm the SPA file resolver serves `/sw.js` + `/manifest.webmanifest` from
+- [x] Confirm the SPA file resolver serves `/sw.js` + `/manifest.webmanifest` from
   dist (it already serves real files; verify scope `/`).
 
 Done = exactly: SW file + registration; app loads offline (shell), /api shows the
@@ -66,20 +66,20 @@ Do NOT touch: useEventStream/poll logic (offline is surfaced by the EXISTING
 connection state, not new code).
 Revert: delete sw.js + the registration block.
 
-## Box 3 — a11y + hardening pass
-- [ ] Bottom-nav links + icon-only buttons get aria-labels; the live status pill
+## Box 3 — a11y + hardening pass ✅ DONE
+- [x] Bottom-nav links + icon-only buttons get aria-labels; the live status pill
   already carries a text label (no color-only meaning — acceptance #13, keep it).
-- [ ] Focus-visible rings on interactive elements; the activity feed + lists are
+- [x] Focus-visible rings on interactive elements; the activity feed + lists are
   keyboard-reachable. Respect `prefers-reduced-motion` for the breathing dot.
-- [ ] `lang` is set (it is, on <html>); confirm tap targets ≥44px (nav already is).
-- [ ] No console errors on load; remove any dead placeholder copy uncovered.
+- [x] `lang` is set (it is, on <html>); confirm tap targets ≥44px (nav already is).
+- [x] No console errors on load; remove any dead placeholder copy uncovered.
 
 Done = exactly: an a11y/hardening sweep of the shipped screens (no new feature).
 Do NOT touch: data flow, adapters, endpoints.
 Revert: per-change.
 
-## Box 4 — install affordance (optional, only if one-liner)
-- [ ] Capture `beforeinstallprompt` → a small "Install" hint in System Settings card,
+## Box 4 — install affordance ✅ DONE
+- [x] Capture `beforeinstallprompt` → a small "Install" hint in System Settings card,
   triggering the prompt. iOS has no event → show a one-line "Add to Home Screen" note
   on iOS Safari. Skip entirely if it can't stay small.
 
@@ -88,7 +88,7 @@ Do NOT touch: the rest of System screen.
 Revert: delete the hint.
 
 ## Gate
-- [ ] Frontend `tsc` + vitest + `vite build` green; manifest + sw.js land in dist.
+- [x] Frontend `tsc` + vitest + `vite build` green; manifest + sw.js land in dist.
 - [ ] Lighthouse/installability sanity: manifest parses, SW registers, theme-color +
   icons present (manual check acceptable on the phone/desktop).
 - [ ] Live (Telegram OFF, MESH OFF, port 9003): the gateway serves

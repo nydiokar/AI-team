@@ -78,6 +78,8 @@ function ArtifactCard({ artifact }: { artifact: Artifact }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={open ? `Collapse ${artifact.name}` : `Expand ${artifact.name}`}
         className="flex w-full items-center gap-2 text-left"
       >
         <ChevronRight
