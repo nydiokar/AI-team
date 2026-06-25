@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ChevronLeft,
   MoreVertical,
@@ -262,7 +262,15 @@ export function SessionDetailScreen() {
     (messagesError || messagesFetchStatus === "paused") &&
     !loading;
 
-  const [tab, setTab] = useState<SessionTab>("chat");
+  // Deep-link target: the Activity feed sends ?tab=files for an artifact event,
+  // so the tap lands where that event's content actually lives (not an empty
+  // Chat). Defaults to chat.
+  const [searchParams] = useSearchParams();
+  const initialTab = ((): SessionTab => {
+    const t = searchParams.get("tab");
+    return t === "files" || t === "info" ? t : "chat";
+  })();
+  const [tab, setTab] = useState<SessionTab>(initialTab);
   const [menuOpen, setMenuOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
