@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 12
+_CURRENT_VERSION = 13
 
 
 # ---------------------------------------------------------------------------
@@ -1231,6 +1231,148 @@ def _get_migrations() -> List[tuple]:
         """),  # durable watched-job process identity probes
         (11, "ALTER TABLE sessions ADD COLUMN model TEXT"),  # per-session picked model; NULL = backend default
         (12, "ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT '{\"channel\":\"telegram\",\"kind\":\"user\"}'"),  # transport-neutral origin tag {channel, kind}; old rows default to telegram/user
+        (13, """
+            CREATE TABLE IF NOT EXISTS llm_turns (
+                turn_id TEXT PRIMARY KEY,
+                session_id TEXT,
+                task_id TEXT NOT NULL,
+                gateway_node_id TEXT,
+                execution_node_id TEXT,
+                backend TEXT,
+                backend_session_id_start TEXT,
+                backend_session_id_end TEXT,
+                requested_model TEXT,
+                observed_models TEXT NOT NULL DEFAULT '[]',
+                started_at TEXT,
+                ended_at TEXT,
+                final_status TEXT NOT NULL DEFAULT 'running',
+                timeout_status TEXT NOT NULL DEFAULT 'none',
+                final_exit_code INTEGER,
+                final_invocation_id TEXT,
+                metrics_json TEXT NOT NULL DEFAULT '{}',
+                coverage_json TEXT NOT NULL DEFAULT '{}',
+                data_quality_json TEXT NOT NULL DEFAULT '[]',
+                projection_version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS llm_invocations (
+                invocation_id TEXT PRIMARY KEY,
+                turn_id TEXT NOT NULL,
+                parent_invocation_id TEXT,
+                retry_of_invocation_id TEXT,
+                duplicate_of_invocation_id TEXT,
+                attempt INTEGER NOT NULL,
+                spawn_reason TEXT NOT NULL,
+                action TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                requested_model TEXT,
+                observed_model TEXT,
+                process_instance_id TEXT,
+                pid INTEGER,
+                process_started_at TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                status TEXT NOT NULL,
+                timeout_kind TEXT,
+                exit_code INTEGER,
+                signal INTEGER,
+                retry_reason TEXT,
+                model_request_count INTEGER,
+                tool_call_count INTEGER,
+                subagent_count INTEGER,
+                usage_json TEXT NOT NULL DEFAULT '{}',
+                coverage_json TEXT NOT NULL DEFAULT '{}',
+                data_quality_json TEXT NOT NULL DEFAULT '[]',
+                FOREIGN KEY(turn_id) REFERENCES llm_turns(turn_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS llm_processes (
+                process_instance_id TEXT PRIMARY KEY,
+                node_id TEXT NOT NULL,
+                pid INTEGER,
+                parent_process_instance_id TEXT,
+                process_role TEXT NOT NULL,
+                backend TEXT,
+                executable_name TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                exit_code INTEGER,
+                signal INTEGER,
+                status TEXT NOT NULL,
+                data_quality_json TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE TABLE IF NOT EXISTS llm_invocation_processes (
+                invocation_id TEXT NOT NULL,
+                process_instance_id TEXT NOT NULL,
+                relationship TEXT NOT NULL,
+                PRIMARY KEY(invocation_id, process_instance_id),
+                FOREIGN KEY(invocation_id) REFERENCES llm_invocations(invocation_id) ON DELETE CASCADE,
+                FOREIGN KEY(process_instance_id) REFERENCES llm_processes(process_instance_id)
+            );
+            CREATE TABLE IF NOT EXISTS llm_model_requests (
+                model_request_id TEXT PRIMARY KEY,
+                invocation_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                provider_request_id TEXT,
+                model TEXT,
+                work_category TEXT NOT NULL DEFAULT 'unknown',
+                started_at TEXT,
+                ended_at TEXT,
+                status TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cache_read_tokens INTEGER,
+                cache_creation_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                context_tokens INTEGER,
+                input_token_semantics TEXT NOT NULL DEFAULT 'unknown',
+                usage_granularity TEXT NOT NULL,
+                usage_source TEXT,
+                usage_coverage TEXT NOT NULL,
+                is_duplicate INTEGER NOT NULL DEFAULT 0,
+                data_quality_json TEXT NOT NULL DEFAULT '[]',
+                FOREIGN KEY(invocation_id) REFERENCES llm_invocations(invocation_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS llm_events (
+                event_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                event_name TEXT NOT NULL,
+                event_time TEXT NOT NULL,
+                observed_time TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                emitter_process_instance_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_sequence INTEGER,
+                session_id TEXT,
+                turn_id TEXT NOT NULL,
+                invocation_id TEXT,
+                model_request_id TEXT,
+                tool_call_id TEXT,
+                subagent_id TEXT,
+                backend TEXT,
+                model TEXT,
+                pid INTEGER,
+                attributes TEXT NOT NULL DEFAULT '{}',
+                received_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_llm_events_turn
+                ON llm_events(turn_id, event_time, source_sequence);
+            CREATE INDEX IF NOT EXISTS idx_llm_events_invocation
+                ON llm_events(invocation_id, event_time);
+            CREATE INDEX IF NOT EXISTS idx_llm_events_session
+                ON llm_events(session_id, event_time);
+            CREATE INDEX IF NOT EXISTS idx_llm_events_name
+                ON llm_events(event_name, event_time);
+            CREATE INDEX IF NOT EXISTS idx_llm_invocations_turn
+                ON llm_invocations(turn_id, attempt);
+            CREATE INDEX IF NOT EXISTS idx_llm_model_requests_turn
+                ON llm_model_requests(turn_id, invocation_id, sequence);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_model_provider_request
+                ON llm_model_requests(invocation_id, provider_request_id)
+                WHERE provider_request_id IS NOT NULL
+        """),
     ]
 
 

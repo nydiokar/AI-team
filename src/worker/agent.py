@@ -459,7 +459,13 @@ async def _fetch_staged_file(
     return str(dest)
 
 
-async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any], http: Optional["_HTTP"] = None) -> Dict[str, Any]:
+async def _execute_task(
+    task_row: Dict[str, Any],
+    backends: Dict[str, Any],
+    http: Optional["_HTTP"] = None,
+    telemetry_sink: Any = None,
+    node_id: str = "",
+) -> Dict[str, Any]:
     """Execute one task row from mesh_tasks. Returns an ExecutionResultPayload-compatible dict."""
     payload = task_row.get("payload") or {}
     if isinstance(payload, str):
@@ -523,24 +529,117 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any], http
 
     prompt = payload.get("prompt", "")
     start = time.monotonic()
+    from src.control.telemetry_sink import NullTelemetrySink
+    from src.core.telemetry import (
+        EMITTER_PROCESS_INSTANCE_ID,
+        TelemetryContext,
+        build_event,
+    )
+    sink = telemetry_sink or NullTelemetrySink()
+    session_payload = payload.get("session") or {}
+    telemetry_meta = payload.get("telemetry") or {}
+    turn_id = str(telemetry_meta.get("turn_id") or task_row.get("id") or "")
+    session_id = str(telemetry_meta.get("session_id") or task_row.get("session_id") or "") or None
+    model = session_payload.get("model") or None
+    context = (
+        TelemetryContext.create(
+            turn_id=turn_id,
+            node_id=node_id or str(task_row.get("claimed_by") or "worker"),
+            session_id=session_id,
+            backend=backend_name,
+            model=model,
+            source="worker",
+            attempt=int(telemetry_meta.get("attempt") or 1),
+            spawn_reason=str(telemetry_meta.get("spawn_reason") or "initial"),
+            retry_of_invocation_id=telemetry_meta.get("retry_of_invocation_id") or None,
+        )
+        if turn_id
+        else None
+    )
+
+    def _emit(name: str, attributes: Dict[str, Any]) -> None:
+        if context is None:
+            return
+        try:
+            sink.emit(
+                build_event(
+                    name,
+                    turn_id=context.turn_id,
+                    session_id=context.session_id,
+                    node_id=context.node_id,
+                    emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                    source="worker",
+                    invocation_id=context.invocation_id,
+                    backend=context.backend,
+                    model=context.model,
+                    attributes=attributes,
+                )
+            )
+        except Exception:
+            logger.warning("event=worker_telemetry_emit_failed", exc_info=True)
+
+    _emit(
+        "invocation.created",
+        {
+            "attempt": context.attempt if context else 1,
+            "spawn_reason": context.spawn_reason if context else "initial",
+            "action": action,
+            "retry_of_invocation_id": context.retry_of_invocation_id if context else None,
+        },
+    )
+    _emit("invocation.started", {"action": action})
 
     try:
         from src.core.interfaces import ExecutionResult as _ER
+        from src.core.backend_call import call_backend
 
         if action in ("create_session", "resume_session"):
             session = _make_session_from_payload(payload)
             if session is None:
                 raise ValueError("Session payload missing for session action")
             if action == "create_session" or not session.backend_session_id:
-                raw = await asyncio.to_thread(backend.create_session, session)
+                raw = await asyncio.to_thread(
+                    call_backend,
+                    backend.create_session,
+                    session,
+                    telemetry_context=context,
+                    telemetry_sink=sink,
+                )
             else:
-                raw = await asyncio.to_thread(backend.resume_session, session, prompt)
+                raw = await asyncio.to_thread(
+                    call_backend,
+                    backend.resume_session,
+                    session,
+                    prompt,
+                    telemetry_context=context,
+                    telemetry_sink=sink,
+                )
         else:
             cwd = payload.get("metadata", {}).get("cwd", "")
-            raw = await asyncio.to_thread(backend.run_oneoff, cwd, prompt)
+            raw = await asyncio.to_thread(
+                call_backend,
+                backend.run_oneoff,
+                cwd,
+                prompt,
+                telemetry_context=context,
+                telemetry_sink=sink,
+            )
 
         elapsed = time.monotonic() - start
         if isinstance(raw, _ER):
+            _emit(
+                "invocation.completed",
+                {
+                    "status": "success" if raw.success else "failed",
+                    "duration_ms": round(elapsed * 1000),
+                    "exit_code": getattr(raw, "return_code", 0),
+                    "error_code": getattr(raw, "error_class", "") or None,
+                },
+            )
+            try:
+                sink.flush()
+            except Exception:
+                pass
             return {
                 "success": raw.success,
                 "output": _bound_output(raw.output or ""),
@@ -550,8 +649,17 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any], http
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "return_code": getattr(raw, "return_code", 0),
                 "backend_session_id": raw.backend_session_id or "",
+                "telemetry_invocation_id": context.invocation_id if context else "",
             }
         # Fallback for legacy return types
+        _emit(
+            "invocation.completed",
+            {"status": "success", "duration_ms": round(elapsed * 1000), "exit_code": 0},
+        )
+        try:
+            sink.flush()
+        except Exception:
+            pass
         return {
             "success": True,
             "output": _bound_output(str(raw)),
@@ -560,6 +668,7 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any], http
             "execution_time": elapsed,
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "return_code": 0,
+            "telemetry_invocation_id": context.invocation_id if context else "",
         }
     except Exception as e:
         elapsed = time.monotonic() - start
@@ -568,6 +677,19 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any], http
         detail = _tb.format_exc()
         error_class = type(e).__name__
         concise = f"{error_class}: {e}"
+        _emit(
+            "invocation.completed",
+            {
+                "status": "failed",
+                "duration_ms": round(elapsed * 1000),
+                "exit_code": 1,
+                "error_code": error_class,
+            },
+        )
+        try:
+            sink.flush()
+        except Exception:
+            pass
         task_id = task_row.get("id")
         # Full traceback to the worker log (not just str(e)) so failures are
         # actually diagnosable — this is the core D2 fix.
@@ -589,6 +711,7 @@ async def _execute_task(task_row: Dict[str, Any], backends: Dict[str, Any], http
             "execution_time": elapsed,
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "return_code": 1,
+            "telemetry_invocation_id": context.invocation_id if context else "",
         }
 
 
@@ -601,6 +724,19 @@ class WorkerAgent:
         from src.worker.config import WorkerConfig
         self.cfg = WorkerConfig.from_env()
         self._http = _HTTP(self.cfg.controller_url, self.cfg.worker_token)
+        from src.control.telemetry_sink import build_runtime_telemetry_sink
+        self._telemetry_sink = build_runtime_telemetry_sink(
+            node_id=self.cfg.node_id,
+            base_url=self.cfg.controller_url,
+            token=self.cfg.worker_token,
+            logs_dir="logs",
+        )
+        try:
+            replay = getattr(self._telemetry_sink, "replay_spool", None)
+            if callable(replay):
+                replay()
+        except Exception:
+            logger.warning("event=telemetry_spool_replay_failed", exc_info=True)
         self._backends = _make_backends()
         self._active: Dict[str, asyncio.Task] = {}   # task_id → asyncio.Task
         self._active_meta: Dict[str, Dict[str, Any]] = {}
@@ -1031,7 +1167,13 @@ class WorkerAgent:
                 self._heartbeat_now.set()  # push slots_used immediately to the server
 
                 # Execute
-                result = await _execute_task(task_row, self._backends, self._http)
+                result = await _execute_task(
+                    task_row,
+                    self._backends,
+                    self._http,
+                    telemetry_sink=self._telemetry_sink,
+                    node_id=self.cfg.node_id,
+                )
 
                 # Post result
                 try:

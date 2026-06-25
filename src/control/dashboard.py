@@ -94,6 +94,14 @@ def _db():
         return None
 
 
+def _telemetry_store():
+    db = _db()
+    if db is None:
+        return None
+    from src.control.telemetry_store import TelemetryStore
+    return TelemetryStore(db)
+
+
 # ---------------------------------------------------------------------------
 # JSON API (read-only)
 # ---------------------------------------------------------------------------
@@ -180,6 +188,63 @@ def api_events(
     return JSONResponse(data)
 
 
+@app.get("/api/turns", dependencies=[Depends(_require_auth)])
+def api_turns(
+    session_id: Optional[str] = None,
+    status: Optional[str] = None,
+    backend: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+) -> JSONResponse:
+    store = _telemetry_store()
+    turns = (
+        store.list_turns(
+            session_id=session_id, status=status, backend=backend, limit=limit
+        )
+        if store is not None
+        else []
+    )
+    return JSONResponse({"turns": turns})
+
+
+@app.get("/api/turns/{turn_id}", dependencies=[Depends(_require_auth)])
+def api_turn_detail(turn_id: str) -> JSONResponse:
+    store = _telemetry_store()
+    turn = store.get_turn(turn_id) if store is not None else None
+    if turn is None:
+        raise HTTPException(status_code=404, detail="Turn not found")
+    return JSONResponse(turn)
+
+
+@app.get("/api/turns/{turn_id}/diagnostics", dependencies=[Depends(_require_auth)])
+def api_turn_diagnostics(turn_id: str) -> JSONResponse:
+    store = _telemetry_store()
+    diagnostics = store.diagnostics(turn_id) if store is not None else None
+    if diagnostics is None:
+        raise HTTPException(status_code=404, detail="Turn not found")
+    return JSONResponse(diagnostics)
+
+
+@app.get("/api/turns/{turn_id}/graph", dependencies=[Depends(_require_auth)])
+def api_turn_graph(turn_id: str, expand_tools: bool = False) -> JSONResponse:
+    store = _telemetry_store()
+    graph = store.graph(turn_id, expand_tools=expand_tools) if store is not None else None
+    if graph is None:
+        raise HTTPException(status_code=404, detail="Turn not found")
+    return JSONResponse(graph)
+
+
+@app.get("/api/turns/{turn_id}/events", dependencies=[Depends(_require_auth)])
+def api_turn_events(
+    turn_id: str,
+    after: Optional[str] = None,
+    limit: int = Query(500, ge=1, le=5000),
+) -> JSONResponse:
+    store = _telemetry_store()
+    if store is None or store.get_turn(turn_id) is None:
+        raise HTTPException(status_code=404, detail="Turn not found")
+    return JSONResponse({"events": store.list_events(turn_id, after=after, limit=limit)})
+
+
 # ---------------------------------------------------------------------------
 # HTML shell — carries no data; fetches the APIs client-side
 # ---------------------------------------------------------------------------
@@ -209,6 +274,7 @@ _INDEX_HTML = """<!doctype html>
   section { background:#161b22; border:1px solid #30363d; border-radius:8px;
             padding:10px; overflow:auto; max-height:46vh; }
   section.wide { grid-column:1 / -1; max-height:30vh; }
+  section.turn-detail { grid-column:1 / -1; max-height:none; }
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em;
        color:#8b949e; margin:0 0 8px; }
   table { width:100%; border-collapse:collapse; }
@@ -219,6 +285,10 @@ _INDEX_HTML = """<!doctype html>
   .ok{background:#238636;color:#fff}.busy{background:#9e6a03;color:#fff}
   .err{background:#da3633;color:#fff}.idle{background:#30363d;color:#c9d1d9}
   #events div { padding:2px 0; border-bottom:1px solid #21262d; }
+  #turnTimeline div { padding:2px 0; border-bottom:1px solid #21262d; }
+  #turnGraph { width:100%; min-height:150px; background:#0d1117; border-radius:6px; }
+  .clickable { cursor:pointer; color:#58a6ff; }
+  .coverage { color:#d29922; margin:4px 0 8px; }
   .ev-name { color:#58a6ff; }
   .muted{color:#8b949e}
 </style>
@@ -233,7 +303,15 @@ _INDEX_HTML = """<!doctype html>
   <section><h2>Sessions</h2><table id="sessions"></table></section>
   <section><h2>Nodes</h2><table id="nodes"></table></section>
   <section><h2>Tasks</h2><table id="tasks"></table></section>
+  <section><h2>LLM turns</h2><table id="turns"></table></section>
   <section class="wide"><h2>Live events</h2><div id="events"></div></section>
+  <section class="turn-detail">
+    <h2>Turn diagnostic</h2>
+    <div id="turnCoverage" class="coverage">select a turn</div>
+    <svg id="turnGraph" viewBox="0 0 1000 180"></svg>
+    <h2>Diagnostic table</h2><table id="turnDiagnostics"></table>
+    <h2>Timeline</h2><div id="turnTimeline"></div>
+  </section>
 </main>
 <script>
 let token = localStorage.getItem("dash_token") || "";
@@ -253,7 +331,7 @@ async function api(path) {
 }
 function statusPill(s) {
   const k = (s||"").toLowerCase();
-  const cls = k==="busy"?"busy":["error","cancelled"].includes(k)?"err":
+  const cls = k==="busy"||k==="running"?"busy":["error","cancelled","failed","timed_out"].includes(k)?"err":
               k==="closed"?"idle":k==="idle"||k==="awaiting_input"?"ok":"idle";
   return `<span class="pill ${cls}">${s||""}</span>`;
 }
@@ -264,7 +342,10 @@ function rows(el, headers, data, cells) {
 function esc(x){ return String(x==null?"":x).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
 async function refreshState() {
-  const [s, n, t] = await Promise.all([api("/api/sessions"), api("/api/nodes"), api("/api/tasks?limit=50")]);
+  const [s, n, t, turns] = await Promise.all([
+    api("/api/sessions"), api("/api/nodes"), api("/api/tasks?limit=50"),
+    api("/api/turns?limit=50")
+  ]);
   rows($("sessions"), ["id","backend","status","model","repo"], s.sessions,
     d => [esc(d.session_id), esc(d.backend), statusPill(d.status), esc(d.model||"—"),
           `<span class="muted">${esc(d.repo_path)}</span>`]);
@@ -276,6 +357,67 @@ async function refreshState() {
             :`<span class="muted">${Math.round(d.heartbeat_age_sec)}s</span>`]);
   rows($("tasks"), ["id","status","session"], t.tasks,
     d => [esc(d.task_id||d.id), statusPill(d.status), esc(d.session_id)]);
+  rows($("turns"), ["turn","status","backend","tokens","requests"], turns.turns,
+    d => [`<span class="clickable" onclick="loadTurn(decodeURIComponent('${encodeURIComponent(d.turn_id).replace(/'/g,"%27")}'))">${esc(d.turn_id)}</span>`,
+          statusPill(d.final_status), esc(d.backend||"—"),
+          esc((d.metrics||{}).total_token_work ?? "—"),
+          esc((d.metrics||{}).model_request_count ?? "—")]);
+}
+async function loadTurn(turnId) {
+  const [diag, graph, timeline] = await Promise.all([
+    api("/api/turns/" + encodeURIComponent(turnId) + "/diagnostics"),
+    api("/api/turns/" + encodeURIComponent(turnId) + "/graph"),
+    api("/api/turns/" + encodeURIComponent(turnId) + "/events?limit=1000")
+  ]);
+  const cov = diag.turn.coverage || {};
+  $("turnCoverage").textContent = Object.keys(cov).length
+    ? Object.entries(cov).map(([k,v]) => `${k}: ${v.coverage||"unknown"}`).join(" · ")
+    : "coverage unavailable";
+  renderGraph(graph);
+  const allRows = [{attempt:"turn", spawn_reason:"total", backend:diag.turn.backend,
+    observed_model:(diag.turn.observed_models||[]).join(", "),
+    status:diag.turn.final_status, pid:"—", usage:diag.turn.metrics,
+    model_request_count:(diag.turn.metrics||{}).model_request_count,
+    tool_call_count:(diag.turn.metrics||{}).tool_call_count,
+    subagent_count:(diag.turn.metrics||{}).subagent_count,
+    exit_code:diag.turn.final_exit_code}].concat(diag.invocations);
+  rows($("turnDiagnostics"),
+    ["attempt","reason","backend/model","pid","input","output","cache","requests","tools","subagents","exit","status"],
+    allRows, d => [esc(d.attempt),esc(d.spawn_reason),esc((d.backend||"—")+" / "+(d.observed_model||"—")),
+      esc(d.pid??"—"),esc((d.usage||{}).input_tokens??"—"),esc((d.usage||{}).output_tokens??"—"),
+      esc((d.usage||{}).cache_read_tokens??"—"),esc(d.model_request_count??"—"),
+      esc(d.tool_call_count??"—"),esc(d.subagent_count??"—"),esc(d.exit_code??"—"),
+      statusPill(d.status)]);
+  const box = $("turnTimeline"); box.innerHTML = "";
+  for (const ev of timeline.events) {
+    const div = document.createElement("div");
+    div.innerHTML = `<span class="muted">${esc(ev.event_time||"")}</span> ` +
+      `<span class="ev-name">${esc(ev.event_name)}</span> ` +
+      `<span class="muted">${esc(ev.invocation_id||ev.tool_call_id||"")}</span>`;
+    box.appendChild(div);
+  }
+}
+function renderGraph(graph) {
+  const svg = $("turnGraph");
+  const nodes = graph.nodes || [], edges = graph.edges || [];
+  const positions = {};
+  const width = 940, y = 90, step = nodes.length > 1 ? width/(nodes.length-1) : width;
+  nodes.forEach((n,i) => positions[n.id] = {x:30+i*step,y:y});
+  let html = "";
+  for (const e of edges) {
+    if (!positions[e.from] || !positions[e.to]) continue;
+    html += `<line x1="${positions[e.from].x}" y1="${positions[e.from].y}" ` +
+      `x2="${positions[e.to].x}" y2="${positions[e.to].y}" stroke="#484f58" stroke-width="2"/>`;
+  }
+  for (const n of nodes) {
+    const p=positions[n.id], color=n.status==="success"||n.status==="exited"?"#238636":
+      n.status==="failed"||n.status==="timed_out"?"#da3633":
+      n.kind==="model_request"||n.kind==="aggregate_usage"?"#1f6feb":
+      n.kind==="tool_group"||n.kind==="tool_call"?"#0891b2":"#9e6a03";
+    html += `<circle cx="${p.x}" cy="${p.y}" r="16" fill="${color}"/>` +
+      `<text x="${p.x}" y="${p.y+30}" fill="#c9d1d9" text-anchor="middle" font-size="10">${esc(n.label).slice(0,22)}</text>`;
+  }
+  svg.innerHTML = html;
 }
 async function refreshEvents() {
   const data = await api("/api/events?since=" + offset);
