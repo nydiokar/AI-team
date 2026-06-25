@@ -1,3 +1,5 @@
+import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from src.control.db import MeshDB
@@ -85,3 +87,24 @@ def test_duplicate_batch_upload_does_not_duplicate_accounting(tmp_path, monkeypa
     assert second["duplicates"] == 1
     count = db._conn().execute("SELECT COUNT(*) FROM llm_events").fetchone()[0]
     assert count == 1
+
+
+def test_encoded_payload_size_is_enforced_without_content_length(
+    tmp_path, monkeypatch
+):
+    from config import config
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr("src.control.task_server.get_db", lambda: db)
+    monkeypatch.setattr(config.telemetry, "enabled", True)
+    monkeypatch.setattr(config.telemetry, "upload_max_bytes", 100)
+    payload = TelemetryBatchPayload(
+        batch_id="batch_too_large",
+        node_id="worker-a",
+        events=[_event()],
+    )
+
+    with pytest.raises(HTTPException) as error:
+        submit_telemetry_batch(payload, _request())
+
+    assert error.value.status_code == 413

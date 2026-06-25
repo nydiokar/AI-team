@@ -287,6 +287,11 @@ def submit_telemetry_batch(
                 raise HTTPException(status_code=413, detail="Telemetry batch too large")
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid Content-Length")
+    encoded_size = len(
+        payload.model_dump_json(exclude_none=False).encode("utf-8")
+    )
+    if encoded_size > max_bytes:
+        raise HTTPException(status_code=413, detail="Telemetry batch too large")
 
     db = get_db()
     if db is None:
