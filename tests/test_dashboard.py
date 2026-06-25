@@ -5,9 +5,10 @@ SessionView, the events poll endpoint (cold tail + incremental since-offset),
 and the observability.read_recent_events reader it sits on.
 """
 import json
+import asyncio
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from src.control import dashboard
 from src.core import observability
@@ -16,11 +17,28 @@ from src.core import observability
 TOKEN = "test-dash-token"
 
 
+class ASGITestClient:
+    """Synchronous test facade over HTTPX's in-process ASGI transport."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def get(self, path, **kwargs):
+        async def request():
+            transport = httpx.ASGITransport(app=self.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                return await client.get(path, **kwargs)
+
+        return asyncio.run(request())
+
+
 @pytest.fixture
 def client(monkeypatch):
     # Force a known token regardless of env/config.
     monkeypatch.setattr(dashboard, "_dashboard_token", lambda: TOKEN)
-    return TestClient(dashboard.app)
+    return ASGITestClient(dashboard.app)
 
 
 def _auth(token=TOKEN):
@@ -51,7 +69,7 @@ def test_api_rejects_bad_token(client):
 
 def test_missing_server_token_is_500(monkeypatch):
     monkeypatch.setattr(dashboard, "_dashboard_token", lambda: "")
-    c = TestClient(dashboard.app)
+    c = ASGITestClient(dashboard.app)
     r = c.get("/api/sessions", headers=_auth("anything"))
     assert r.status_code == 500
 
@@ -139,6 +157,17 @@ def test_turn_graph_diagnostics_and_timeline_endpoints(client):
                 },
                 **common,
             ),
+            build_event(
+                "telemetry.coverage",
+                event_time=start + timedelta(seconds=1),
+                observed_time=start + timedelta(seconds=1),
+                attributes={
+                    "area": "usage",
+                    "coverage": "aggregate_only",
+                    "reason_code": "codex_turn_total_only",
+                },
+                **common,
+            ),
         ]
     )
 
@@ -153,9 +182,11 @@ def test_turn_graph_diagnostics_and_timeline_endpoints(client):
     assert turns.status_code == 200
     assert any(turn["turn_id"] == "turn_dashboard" for turn in turns.json()["turns"])
     assert detail.json()["final_status"] == "success"
+    assert detail.json()["coverage"]["usage"]["coverage"] == "aggregate_only"
     assert len(diagnostics.json()["invocations"]) == 1
+    assert diagnostics.json()["turn"]["metrics"]["model_request_count"] is None
     assert graph.json()["nodes"][0]["kind"] == "turn"
-    assert len(timeline.json()["events"]) == 3
+    assert len(timeline.json()["events"]) == 4
 
 
 def test_sessions_limit_validation_and_bound(client, tmp_path):

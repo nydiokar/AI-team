@@ -64,3 +64,24 @@ def test_disabled_telemetry_accepts_no_writes(tmp_path, monkeypatch):
     assert result["accepted"] == 0
     count = db._conn().execute("SELECT COUNT(*) FROM llm_events").fetchone()[0]
     assert count == 0
+
+
+def test_duplicate_batch_upload_does_not_duplicate_accounting(tmp_path, monkeypatch):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr("src.control.task_server.get_db", lambda: db)
+    event = _event()
+    payload = TelemetryBatchPayload(
+        batch_id="batch_duplicate",
+        node_id="worker-a",
+        events=[event],
+    )
+
+    first = submit_telemetry_batch(payload, _request())
+    second = submit_telemetry_batch(payload, _request())
+
+    assert first["accepted"] == 1
+    assert first["duplicates"] == 0
+    assert second["accepted"] == 0
+    assert second["duplicates"] == 1
+    count = db._conn().execute("SELECT COUNT(*) FROM llm_events").fetchone()[0]
+    assert count == 1

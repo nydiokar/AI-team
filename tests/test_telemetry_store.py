@@ -384,3 +384,101 @@ def test_retention_prunes_events_then_deletes_expired_summaries(tmp_path):
     after_late = store.get_turn("turn_prune_events")
     assert after_late["metrics"] == preserved_metrics
     assert "late_event_after_retention" in after_late["data_quality"]
+
+
+def test_ordinary_aggregate_turn_has_process_and_unknown_request_granularity(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    store = TelemetryStore(db)
+    start = utc_now()
+    common = {
+        "turn_id": "turn_acceptance_ordinary",
+        "node_id": "worker-a",
+        "emitter_process_instance_id": "worker_proc",
+        "source": "worker",
+        "backend": "codex",
+    }
+    store.insert_events(
+        [
+            build_event(
+                "turn.started", event_time=start, observed_time=start, **common
+            ),
+            build_event(
+                "invocation.created",
+                event_time=start,
+                observed_time=start,
+                invocation_id="inv_acceptance",
+                attributes={
+                    "attempt": 1,
+                    "spawn_reason": "initial",
+                    "action": "run_oneoff",
+                },
+                **common,
+            ),
+            build_event(
+                "process.spawned",
+                event_time=start,
+                observed_time=start,
+                invocation_id="inv_acceptance",
+                pid=321,
+                attributes={
+                    "process_instance_id": "proc_acceptance",
+                    "process_role": "agent",
+                    "executable_name": "codex",
+                },
+                **common,
+            ),
+            build_event(
+                "model.request.usage",
+                event_time=start + timedelta(seconds=1),
+                observed_time=start + timedelta(seconds=1),
+                invocation_id="inv_acceptance",
+                attributes={
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "input_token_semantics": "includes_cache",
+                    "usage_granularity": "invocation_total",
+                    "usage_source": "turn.completed.usage",
+                    "usage_coverage": "aggregate_only",
+                    "work_category": "primary",
+                },
+                **common,
+            ),
+            build_event(
+                "process.exited",
+                event_time=start + timedelta(seconds=2),
+                observed_time=start + timedelta(seconds=2),
+                invocation_id="inv_acceptance",
+                pid=321,
+                attributes={
+                    "process_instance_id": "proc_acceptance",
+                    "exit_code": 0,
+                    "signal": None,
+                    "duration_ms": 2000,
+                },
+                **common,
+            ),
+            build_event(
+                "turn.completed",
+                event_time=start + timedelta(seconds=2),
+                observed_time=start + timedelta(seconds=2),
+                invocation_id="inv_acceptance",
+                attributes={
+                    "status": "success",
+                    "timeout_status": "none",
+                    "exit_code": 0,
+                },
+                **common,
+            ),
+        ]
+    )
+
+    diagnostics = store.diagnostics("turn_acceptance_ordinary")
+
+    assert diagnostics["turn"]["final_status"] == "success"
+    assert diagnostics["turn"]["final_exit_code"] == 0
+    assert diagnostics["turn"]["metrics"]["total_token_work"] == 110
+    assert diagnostics["turn"]["metrics"]["peak_context_tokens"] is None
+    assert diagnostics["turn"]["metrics"]["model_request_count"] is None
+    assert len(diagnostics["invocations"]) == 1
+    assert len(diagnostics["processes"]) == 1
+    assert diagnostics["processes"][0]["status"] == "exited"
