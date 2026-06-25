@@ -227,17 +227,25 @@ class CodingBackend(ABC):
     """Protocol for coding agent backends (Claude Code, Codex, …)."""
 
     @abstractmethod
-    def create_session(self, session: "Session") -> ExecutionResult:
+    def create_session(
+        self, session: "Session", *, telemetry_context: Any = None, telemetry_sink: Any = None
+    ) -> ExecutionResult:
         """Start a new session — runs the first turn with no prior context."""
         pass
 
     @abstractmethod
-    def resume_session(self, session: "Session", message: str) -> ExecutionResult:
+    def resume_session(
+        self, session: "Session", message: str, *, telemetry_context: Any = None,
+        telemetry_sink: Any = None
+    ) -> ExecutionResult:
         """Continue an existing session using the backend's native resume mechanism."""
         pass
 
     @abstractmethod
-    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
+    def run_oneoff(
+        self, cwd: str, message: str, *, telemetry_context: Any = None,
+        telemetry_sink: Any = None
+    ) -> ExecutionResult:
         """Run a single stateless turn with no session tracking."""
         pass
 

@@ -240,14 +240,14 @@ class ClaudeCodeBackend(CodingBackend):
         self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
 
-    def create_session(self, session: Session) -> ExecutionResult:
+    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         session_id = session.backend_session_id or str(uuid.uuid4())
         return self._run(session.repo_path, session.last_user_message, resume_id=None, session_id=session_id, session_key=session.session_id, model=_resolve_model(session))
 
-    def resume_session(self, session: Session, message: str) -> ExecutionResult:
+    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_id=None, session_key=session.session_id, model=_resolve_model(session))
 
-    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
+    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         return self._run(cwd, message, resume_id=None, session_id=None, session_key=None, model=None)
 
     def cancel(self, session: Session) -> None:

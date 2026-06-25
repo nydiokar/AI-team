@@ -167,7 +167,7 @@ class OpenCodeBackend(CodingBackend):
     # CodingBackend interface
     # ------------------------------------------------------------------
 
-    def create_session(self, session: Session) -> ExecutionResult:
+    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         return self._run(
             cwd=session.repo_path,
             message=session.last_user_message,
@@ -178,7 +178,7 @@ class OpenCodeBackend(CodingBackend):
             session_key=session.session_id,
         )
 
-    def resume_session(self, session: Session, message: str) -> ExecutionResult:
+    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         oc_session_id = session.backend_session_id
         if not oc_session_id:
             # No session ID — fall back to a fresh session rather than dead-ending.
@@ -198,7 +198,7 @@ class OpenCodeBackend(CodingBackend):
             session_key=session.session_id,
         )
 
-    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
+    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         return self._run(
             cwd=cwd,
             message=message,
@@ -924,7 +924,7 @@ class OpenCodeServerBackend(CodingBackend):
     # CodingBackend interface
     # ------------------------------------------------------------------
 
-    def create_session(self, session: Session) -> ExecutionResult:
+    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         start = time.time()
         key = self._server_key(session.repo_path)
         err = self._ensure_server(key, session.repo_path)
@@ -969,7 +969,7 @@ class OpenCodeServerBackend(CodingBackend):
             result.backend_session_id = ""
         return result
 
-    def resume_session(self, session: Session, message: str) -> ExecutionResult:
+    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         start = time.time()
         oc_session_id = session.backend_session_id
         key = self._server_key(session.repo_path)
@@ -1015,7 +1015,7 @@ class OpenCodeServerBackend(CodingBackend):
             result.backend_session_id = ""
         return result
 
-    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
+    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         start = time.time()
         key = self._server_key(cwd)
         err = self._ensure_server(key, cwd)

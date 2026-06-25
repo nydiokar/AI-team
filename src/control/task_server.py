@@ -31,6 +31,8 @@ _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploa
 from src.control.db import get_db
 from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
+from src.control.telemetry_store import TelemetryStore
+from src.core.telemetry import TelemetryEvent
 
 logger = logging.getLogger(__name__)
 
@@ -195,8 +197,15 @@ class ExecutionResultPayload(BaseModel):
     return_code: int = 0
     artifact_path: Optional[str] = None
     backend_session_id: str = ""  # worker echoes back the native session ID for affinity continuity
+    telemetry_invocation_id: str = ""
     error_detail: str = ""  # full traceback when the worker caught an exception (D2)
     inspect: Optional[Dict[str, Any]] = None  # repo inspection op result (action=='inspect')
+
+
+class TelemetryBatchPayload(BaseModel):
+    batch_id: str = Field(min_length=1, max_length=96)
+    node_id: str = Field(min_length=1, max_length=128)
+    events: List[TelemetryEvent] = Field(default_factory=list, max_length=200)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +260,24 @@ def health() -> Dict[str, Any]:
         "status": "ok",
         "db": stats,
         "mesh_health": mesh_health.stats(),
+    }
+
+
+@app.post("/telemetry/batches", dependencies=[Depends(_require_auth)])
+def submit_telemetry_batch(payload: TelemetryBatchPayload) -> Dict[str, Any]:
+    """Validate and idempotently persist one gateway/worker telemetry batch."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Telemetry database unavailable")
+    mismatched = [event.event_id for event in payload.events if event.node_id != payload.node_id]
+    if mismatched:
+        raise HTTPException(status_code=422, detail="Event node_id does not match batch node_id")
+    result = TelemetryStore(db).insert_events(payload.events)
+    return {
+        "batch_id": payload.batch_id,
+        "accepted": result["accepted"],
+        "duplicates": result["duplicates"],
+        "rejected": result["rejected"],
     }
 
 
@@ -498,6 +525,7 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         "timestamp": payload.timestamp,
         "return_code": payload.return_code,
         "backend_session_id": payload.backend_session_id,
+        "telemetry_invocation_id": payload.telemetry_invocation_id,
         "error_detail": payload.error_detail,
         "inspect": payload.inspect,
     }

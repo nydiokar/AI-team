@@ -95,6 +95,69 @@ def test_tasks_limit_validation(client):
     assert client.get("/api/tasks?limit=99999", headers=_auth()).status_code == 422
 
 
+def test_turn_graph_diagnostics_and_timeline_endpoints(client):
+    from datetime import timedelta
+    from src.control.db import get_db
+    from src.control.telemetry_store import TelemetryStore
+    from src.core.telemetry import build_event, utc_now
+
+    db = get_db()
+    assert db is not None
+    store = TelemetryStore(db)
+    start = utc_now()
+    common = {
+        "turn_id": "turn_dashboard",
+        "node_id": "gateway",
+        "emitter_process_instance_id": "gateway_proc",
+        "source": "gateway",
+        "backend": "codex",
+    }
+    store.insert_events(
+        [
+            build_event("turn.started", event_time=start, observed_time=start, **common),
+            build_event(
+                "invocation.created",
+                event_time=start,
+                observed_time=start,
+                invocation_id="inv_dashboard",
+                attributes={
+                    "attempt": 1,
+                    "spawn_reason": "initial",
+                    "action": "run_oneoff",
+                },
+                **common,
+            ),
+            build_event(
+                "turn.completed",
+                event_time=start + timedelta(seconds=1),
+                observed_time=start + timedelta(seconds=1),
+                invocation_id="inv_dashboard",
+                attributes={
+                    "status": "success",
+                    "timeout_status": "none",
+                    "exit_code": 0,
+                },
+                **common,
+            ),
+        ]
+    )
+
+    turns = client.get("/api/turns", headers=_auth())
+    detail = client.get("/api/turns/turn_dashboard", headers=_auth())
+    diagnostics = client.get(
+        "/api/turns/turn_dashboard/diagnostics", headers=_auth()
+    )
+    graph = client.get("/api/turns/turn_dashboard/graph", headers=_auth())
+    timeline = client.get("/api/turns/turn_dashboard/events", headers=_auth())
+
+    assert turns.status_code == 200
+    assert any(turn["turn_id"] == "turn_dashboard" for turn in turns.json()["turns"])
+    assert detail.json()["final_status"] == "success"
+    assert len(diagnostics.json()["invocations"]) == 1
+    assert graph.json()["nodes"][0]["kind"] == "turn"
+    assert len(timeline.json()["events"]) == 3
+
+
 def test_sessions_limit_validation_and_bound(client, tmp_path):
     from src.services.session_store import SessionStore
     from src.services.session_service import SessionService
