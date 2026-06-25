@@ -38,6 +38,7 @@ CONNECTION_UNKNOWN = "connection_unknown"
 SECTION_ATTENTION = "attention"
 SECTION_RUNNING = "running"
 SECTION_QUEUED = "queued"
+SECTION_FAILED = "failed"
 SECTION_RECENT = "recent"
 
 # Mesh dispatch status → base UI state (the session-independent half). This is
@@ -82,12 +83,21 @@ def derive_task_state(
 
 
 def section_for_state(state: str) -> str:
-    """Map a canonical UI state to its Tasks-inbox section."""
-    if state in (WAITING_FOR_INPUT, WAITING_FOR_APPROVAL, FAILED, CONNECTION_UNKNOWN):
+    """Map a canonical UI state to its Tasks-inbox section.
+
+    "Attention" is reserved for work that is genuinely BLOCKED on a human and is
+    still actionable from the inbox (waiting for input/approval, or a stale
+    connection that may resume). A FAILED task is terminal — it isn't waiting on
+    you, it's done badly — so it gets its OWN section, separate from the act-now
+    queue, instead of permanently bloating attention with dead-ends.
+    """
+    if state in (WAITING_FOR_INPUT, WAITING_FOR_APPROVAL, CONNECTION_UNKNOWN):
         return SECTION_ATTENTION
     if state in (RUNNING, DISPATCHING):
         return SECTION_RUNNING
     if state == QUEUED:
         return SECTION_QUEUED
+    if state == FAILED:
+        return SECTION_FAILED
     # succeeded / cancelled → recently completed
     return SECTION_RECENT

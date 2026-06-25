@@ -103,11 +103,11 @@ def test_tasks_limit_validation(client):
 
 # --- Move G′: sectioned /api/tasks + session-status overlay ------------------
 
-def test_tasks_sectioned_returns_four_buckets(client):
+def test_tasks_sectioned_returns_five_buckets(client):
     r = client.get("/api/tasks?sectioned=true", headers=_auth())
     assert r.status_code == 200
     sections = r.json()["sections"]
-    assert set(sections) == {"attention", "running", "queued", "recent"}
+    assert set(sections) == {"attention", "running", "queued", "failed", "recent"}
     assert all(isinstance(v, list) for v in sections.values())
 
 

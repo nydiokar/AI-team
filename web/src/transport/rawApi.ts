@@ -104,7 +104,7 @@ export interface RawEventsResponse {
 export interface RawSectionedTask extends RawTask {
   /** Canonical UI TaskState (matches domain/status TaskState). */
   ui_state: string;
-  /** attention | running | queued | recent. */
+  /** attention | running | queued | failed | recent. */
   section: string;
 }
 
@@ -113,6 +113,7 @@ export interface RawTaskSectionsResponse {
     attention: RawSectionedTask[];
     running: RawSectionedTask[];
     queued: RawSectionedTask[];
+    failed: RawSectionedTask[];
     recent: RawSectionedTask[];
   };
 }
