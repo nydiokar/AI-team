@@ -163,7 +163,7 @@ export const api = {
   async sessionMessages(
     token: string,
     sessionId: string,
-    limit = 50,
+    limit = 1000,
   ): Promise<RawTranscriptTurn[]> {
     const data = await get<{ messages: RawTranscriptTurn[] }>(
       `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}`,

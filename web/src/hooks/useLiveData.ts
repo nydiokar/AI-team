@@ -115,6 +115,10 @@ export function useSessionMessages(sessionId: string | undefined) {
     queryFn: async () => api.sessionMessages(token, sessionId!),
     enabled: Boolean(token) && Boolean(sessionId),
     refetchInterval: POLL_MS,
+    // The poll is the freshness guarantee, but a persisted cache can paint old
+    // turns on a cold/offline open — refetch the moment the network returns so
+    // we never sit on stale data longer than necessary.
+    refetchOnReconnect: true,
     // Keep previous data visible during refetch so the chat doesn't flash to a
     // loading spinner every 3 s poll cycle.
     placeholderData: (prev) => prev,

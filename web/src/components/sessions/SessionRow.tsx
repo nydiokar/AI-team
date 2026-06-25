@@ -1,7 +1,10 @@
 import { Link } from "react-router-dom";
 import { ChevronRight, GitBranch, Clock } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import type { Session } from "../../domain/models";
 import { SessionStatusChip } from "../ui/StatusChip";
+import { api } from "../../transport/apiClient";
+import { useAuthStore } from "../../stores/authStore";
 import { cn } from "../../lib/cn";
 
 /** Extract just the project/repo name from any path. */
@@ -31,9 +34,24 @@ export function SessionRow({ session }: { session: Session }) {
   const proj = projectName(session.workspace.path);
   const age = relativeTime(session.updatedAt);
 
+  const qc = useQueryClient();
+  const token = useAuthStore((s) => s.token);
+
+  // Warm the conversation before navigation so the detail screen renders the
+  // chat immediately instead of flashing a spinner. Fires on pointerdown (before
+  // the click that navigates); matches the useSessionMessages query key exactly.
+  const prefetch = () => {
+    if (!token) return;
+    qc.prefetchQuery({
+      queryKey: ["session-messages", session.id],
+      queryFn: () => api.sessionMessages(token, session.id),
+    });
+  };
+
   return (
     <Link
       to={`/sessions/${session.id}`}
+      onPointerDown={prefetch}
       className={cn(
         "card-elev group block rounded-2xl px-4 py-4 transition-transform active:scale-[0.99]",
         session.needsAttention && "attention-glow",

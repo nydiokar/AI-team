@@ -1,4 +1,4 @@
-const CACHE = "ai-team-shell-v1";
+const CACHE = "ai-team-shell-v2";
 const SHELL = ["/", "/index.html"];
 
 self.addEventListener("install", (e) => {

@@ -462,7 +462,7 @@ def build_control_api(orchestrator) -> FastAPI:
     @app.get("/api/sessions/{session_id}/messages", dependencies=[Depends(_require_auth)])
     def api_session_messages(
         session_id: str,
-        limit: int = Query(50, ge=1, le=200),
+        limit: int = Query(200, ge=1, le=1000),
     ) -> JSONResponse:
         """The session's real conversation, reconstructed from on-disk artifacts +
         summary (src.control.transcript). Each turn = user instruction → assistant
