@@ -10,6 +10,19 @@
 > active plan (Web UI) is the ladder in `docs/COCKPIT_REFACTOR_SPEC.md` §14 — see
 > the "Web UI track" section below.
 
+> ⚠️ **TEST COST GUARD — READ BEFORE RUNNING ANYTHING.** This project's tests can
+> invoke the **live, paid Claude CLI** and previously burned millions of tokens.
+> A guard now prevents it, but you must respect the rules:
+> - Run tests with plain `pytest` only. Claude is physically unreachable from tests.
+> - **NEVER** run the full e2e suite "to verify." Prefer cheap targeted checks
+>   (import smoke, direct function calls, `--collect-only`, single skipped-test).
+> - Real e2e is OpenCode-only: `AI_TEAM_ALLOW_OPENCODE_E2E=1 pytest --run-e2e`.
+> - **Do NOT run `python main.py status`** — it acquires the gateway lock and
+>   KILLS the live PM2 gateway. Use `curl http://<tailscale-ip>:9002/health`
+>   (or `/metrics` with the WORKER_TOKEN bearer) to check the running gateway.
+> - Always spawn the gateway process ONLY trough **pm2 (ecosystem.config)** and use
+>   **`python main.py`**
+
 > **TWO PARALLEL TRACKS are in flight — do not conflate them:**
 > 1. **Mesh / State Separation** (on `main`) — the runtime/distribution work
 >    documented in most of this file below. Only Phase 4 remains. Untouched recently.
@@ -177,10 +190,6 @@ Progress against that plan (verified against code on 2026-06-10):
 
 | Phase | Goal | Status |
 |-------|------|--------|
-| 0 | Prereq checks + DB trust cleanup | **DONE (2026-06-10)** — orphan tasks failed; shadow-write `create()` bug fixed; DB purged from 418→**162 real sessions** (all with task history; 256 test/empty rows removed). Remaining: operator sets real `MESH_TAILSCALE_IP` in `.env` before enabling mesh. |
-| 1 | DB as canonical read source + smart recovery | **DONE** — `session_store.get` reads DB-first; `db.get_task_by_session` exists; `_recover_stale_busy_sessions` uses DB (orchestrator.py:299) |
-| 2 | Standalone `ai-team-server` process + `TaskServerClient` in gateway | **DONE (2026-06-10)** — `server_main.py` + `TaskServerClient` + `ai-team-server` PM2 entry. `MESH_EMBEDDED_SERVER` (default off) makes standalone the norm; remote dispatch was already DB-backed so no rewrite needed. Cutover-tested; 138 tests green. |
-| 3 | Standalone `ai-team-worker` process; gateway workers → fallback | **DONE (2026-06-11)** — worker daemon runs in prod on `Horse`; real machine-to-machine dispatch + gateway-restart resilience proven live. Tidy-ups (shrink gateway pool toward the 1 fallback, wire dead `_dispatch_or_run_local`) folded into Phase 4. |
 | 4 | Graceful degradation: 1 embedded fallback worker + JSON when mesh down | **Not started — the only remaining work on the (paused) mesh track** |
 
 ---
