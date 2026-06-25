@@ -100,6 +100,7 @@ class CodexBackend(CodingBackend):
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("codex")
         start = time.time()
+        start_monotonic = time.monotonic()
 
         try:
             from config import config as _cfg
@@ -346,7 +347,9 @@ class CodexBackend(CodingBackend):
                                 "process_instance_id": process_instance_id,
                                 "exit_code": returncode,
                                 "signal": abs(returncode) if returncode < 0 else None,
-                                "duration_ms": round((time.time() - start) * 1000),
+                                "duration_ms": round(
+                                    (time.monotonic() - start_monotonic) * 1000
+                                ),
                             },
                         )
                     )
