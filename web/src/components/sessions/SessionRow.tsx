@@ -24,11 +24,6 @@ function relativeTime(iso: string): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-/** Short display name: last 8 chars of session ID (readable, still unique-ish). */
-function sessionLabel(id: string): string {
-  return id.length > 8 ? `…${id.slice(-8)}` : id;
-}
-
 export function SessionRow({ session }: { session: Session }) {
   const closed = session.lifecycle === "closed";
   const proj = projectName(session.workspace.path);
@@ -83,7 +78,8 @@ export function SessionRow({ session }: { session: Session }) {
         )}
       </div>
 
-      {/* Row 3: last activity summary + session ID */}
+      {/* Row 3: last activity summary. The session hash is detail for the opened
+          view, not the overview — keeping it here was machine noise. */}
       <div className="mt-2.5 flex items-start gap-1.5">
         <div className="min-w-0 flex-1">
           {session.lastSummary ? (
@@ -93,7 +89,6 @@ export function SessionRow({ session }: { session: Session }) {
           ) : (
             <p className="text-[13px] leading-snug text-ink-muted italic">No activity yet</p>
           )}
-          <p className="mt-0.5 font-mono text-[10px] text-ink-muted">{sessionLabel(session.id)}</p>
         </div>
         <ChevronRight className="mt-0.5 size-4 shrink-0 text-ink-muted transition-transform group-hover:translate-x-0.5" />
       </div>

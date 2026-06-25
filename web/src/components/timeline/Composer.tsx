@@ -141,7 +141,7 @@ export function Composer({
             }
           }}
           placeholder={running ? "Task running…" : "Send an instruction…"}
-          className="h-11 flex-1 rounded-full border border-hairline bg-base px-4 text-sm text-ink outline-none placeholder:text-ink-muted focus:border-accent/50"
+          className="h-11 flex-1 rounded-full bg-surface-2 px-4 text-[15px] text-ink outline-none ring-1 ring-inset ring-transparent transition-shadow placeholder:text-ink-muted focus:ring-accent/50"
         />
         <Button
           size="icon"

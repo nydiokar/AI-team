@@ -26,8 +26,8 @@ export function SectionHeader({
 }) {
   const labelEl = (
     <h2
-      className={`text-[11px] font-semibold uppercase tracking-[0.1em] ${
-        accent === "warn" ? "text-warn" : "text-ink-muted"
+      className={`text-[13px] font-semibold tracking-tight ${
+        accent === "warn" ? "text-warn" : "text-ink-soft"
       }`}
     >
       {label}

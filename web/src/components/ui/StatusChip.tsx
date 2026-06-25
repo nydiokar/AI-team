@@ -14,12 +14,14 @@ import type {
 
 type Role = "running" | "ok" | "warn" | "bad" | "idle";
 
-const ROLE: Record<Role, { dot: string; text: string; ring: string; pulse: boolean }> = {
-  running: { dot: "bg-running text-running", text: "text-running", ring: "ring-running/25", pulse: true },
-  ok: { dot: "bg-ok text-ok", text: "text-ok", ring: "ring-ok/25", pulse: false },
-  warn: { dot: "bg-warn text-warn", text: "text-warn", ring: "ring-warn/30", pulse: true },
-  bad: { dot: "bg-bad text-bad", text: "text-bad", ring: "ring-bad/30", pulse: false },
-  idle: { dot: "bg-ink-muted text-ink-muted", text: "text-ink-soft", ring: "ring-hairline", pulse: false },
+// Each role is a tinted TOKEN: a faint role-colored fill + matching text, not an
+// outline around empty space. The status reads as a small colored object.
+const ROLE: Record<Role, { dot: string; text: string; fill: string; pulse: boolean }> = {
+  running: { dot: "bg-running text-running", text: "text-running", fill: "bg-running/12", pulse: true },
+  ok: { dot: "bg-ok text-ok", text: "text-ok", fill: "bg-ok/12", pulse: false },
+  warn: { dot: "bg-warn text-warn", text: "text-warn", fill: "bg-warm-dim/70", pulse: true },
+  bad: { dot: "bg-bad text-bad", text: "text-bad", fill: "bg-bad/12", pulse: false },
+  idle: { dot: "bg-ink-muted text-ink-muted", text: "text-ink-soft", fill: "bg-surface-3/70", pulse: false },
 };
 
 function opMap(s: SessionOpState): { role: Role; label: string } {
@@ -59,9 +61,9 @@ function Pill({ role, label }: { role: Role; label: string }) {
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center gap-1.5 rounded-full bg-surface-2/60 py-1 pl-2 pr-2.5 text-[11px] font-medium ring-1 ring-inset",
+        "inline-flex shrink-0 items-center gap-1.5 rounded-full py-1 pl-2 pr-2.5 text-[11px] font-medium",
+        r.fill,
         r.text,
-        r.ring,
       )}
     >
       <span className={cn("size-1.5 rounded-full", r.dot, r.pulse && "pulse-dot")} />

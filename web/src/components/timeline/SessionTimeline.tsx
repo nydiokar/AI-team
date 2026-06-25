@@ -50,7 +50,7 @@ function ApprovalCard({ approval, at }: { approval: ApprovalRequest; at: string 
     <div className="card-elev attention-glow mx-4 my-3 rounded-xl p-4">
       <div className="flex items-center gap-2">
         <ShieldQuestion className="size-4 text-warn" />
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-warn">
+        <span className="text-[13px] font-semibold tracking-tight text-warn">
           Approval required
         </span>
         <span className="ml-auto text-[10px] text-ink-muted">{timeLabel(at)}</span>
@@ -163,18 +163,19 @@ function MessageBubble({
         </span>
       )}
 
-      {/* Bubble */}
+      {/* Bubble. Assistant = a calm tonal surface with generous padding (not a
+          heavy outlined slab); user = a soft, lightly-tinted accent container. */}
       <div
         className={cn(
-          "max-w-[85%] px-3.5 py-2.5 text-[14px] leading-relaxed",
+          "max-w-[90%] px-4 py-3 text-[15px] leading-relaxed",
           // Shape: rounded on all corners except the "tail" corner (only first bubble)
           mine
             ? cn(
-                "bg-accent-dim/70 text-ink ring-1 ring-accent/25",
+                "bg-accent-dim/60 text-ink",
                 isFirst ? "rounded-2xl rounded-tr-md" : "rounded-2xl",
               )
             : cn(
-                "card-elev text-ink",
+                "bg-surface-2 text-ink",
                 isFirst ? "rounded-2xl rounded-tl-md" : "rounded-2xl",
               ),
         )}
@@ -247,10 +248,10 @@ export function SessionTimeline({ items }: { items: TimelineItem[] }) {
               <Icon
                 className={cn("size-3 shrink-0", NOTICE_TONE[item.notice.severity])}
               />
-              <span className="font-mono text-[10px] uppercase tracking-wide text-ink-muted">
+              <span className="text-[11px] font-medium text-ink-muted">
                 {item.notice.kind}
               </span>
-              <span className="min-w-0 flex-1 truncate text-[12px] text-ink-muted">
+              <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-muted">
                 {item.notice.text}
               </span>
               <span className="shrink-0 text-[10px] text-ink-muted">
