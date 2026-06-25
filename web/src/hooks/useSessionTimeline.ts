@@ -72,9 +72,19 @@ export function useSessionTimeline(
 
     // 2 — optimistic user messages not yet reflected in the transcript. Dedupe
     //     against transcript instructions so a sent message doesn't double once
-    //     its turn completes and the poll picks it up.
+    //     its turn completes and the poll picks it up. Match is truncation-tolerant
+    //     in BOTH directions: an artifact's instruction can be a truncated prefix
+    //     of the full optimistic text (task.title cap), or — with the summary
+    //     overlay — an exact match. So treat them as the same turn if either is a
+    //     prefix of the other (after trimming any trailing ellipsis).
+    const norm = (s: string) => s.trim().replace(/[.…]+$/, "").trim();
+    const seen = [...seenInstructions].map(norm);
+    const isDup = (text: string) => {
+      const t = norm(text);
+      return seen.some((s) => s.startsWith(t) || t.startsWith(s));
+    };
     for (const m of sent ?? []) {
-      if (seenInstructions.has(m.text.trim())) continue;
+      if (isDup(m.text)) continue;
       items.push({
         kind: "message",
         at: m.createdAt,

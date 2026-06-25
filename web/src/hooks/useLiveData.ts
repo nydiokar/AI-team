@@ -130,3 +130,46 @@ export function useArtifact(taskId: string | null) {
     enabled: Boolean(token) && Boolean(taskId),
   });
 }
+
+/**
+ * Discoverable repos for a node — used by the repo picker in NewSessionSheet.
+ * Stale for 30 s (repo list doesn't change often). Does NOT poll.
+ */
+export function useProjects(nodeId = "__local__") {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["projects", nodeId],
+    queryFn: () => api.projects(token, nodeId),
+    enabled: Boolean(token),
+    staleTime: 30_000,
+    retry: (count, err) =>
+      !(err instanceof ApiError && [401, 500].includes(err.status)) && count < 2,
+  });
+}
+
+/**
+ * Model catalog for a backend — drives the web model picker (parity with /model).
+ * Static server-side catalog; stale forever (never changes at runtime).
+ */
+export function useModels(backend: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["models", backend],
+    queryFn: () => api.models(token, backend!),
+    enabled: Boolean(token) && Boolean(backend),
+    staleTime: Infinity,
+  });
+}
+
+/**
+ * Watched jobs — running + recently finished. Polls at the same rate as tasks.
+ */
+export function useJobs(limit = 20) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["jobs", limit],
+    queryFn: () => api.jobs(token, limit),
+    enabled: Boolean(token),
+    refetchInterval: POLL_MS,
+  });
+}

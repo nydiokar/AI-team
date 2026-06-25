@@ -20,6 +20,10 @@ import type {
   RawArtifactSummary,
   RawArtifactDetailResponse,
   RawTranscriptTurn,
+  RawProject,
+  RawModelOption,
+  RawUploadResult,
+  RawJob,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -283,5 +287,83 @@ export const api = {
       },
       idempotencyKey,
     );
+  },
+
+  // ── parity endpoints (Telegram feature port) ─────────────────────────────
+
+  /** GET /api/projects — discoverable repos for a node (local filesystem scan or DB). */
+  async projects(token: string, nodeId = "__local__"): Promise<RawProject[]> {
+    const data = await get<{ projects: RawProject[] }>(
+      `/api/projects?node_id=${encodeURIComponent(nodeId)}`,
+      token,
+    );
+    return data.projects ?? [];
+  },
+
+  /** GET /api/models — model catalog for a backend (config/models.py). */
+  async models(token: string, backend: string): Promise<RawModelOption[]> {
+    const data = await get<{ backend: string; models: RawModelOption[] }>(
+      `/api/models?backend=${encodeURIComponent(backend)}`,
+      token,
+    );
+    return data.models ?? [];
+  },
+
+  /** POST /api/sessions/{id}/upload — multipart file upload to session's uploads/ dir. */
+  async uploadFile(token: string, sessionId: string, file: File): Promise<RawUploadResult> {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: fd,
+    });
+    const data = await res.json().catch(() => ({}) as Record<string, unknown>);
+    if (!res.ok) {
+      const reason =
+        (data as { detail?: string }).detail ?? `${res.status} ${res.statusText}`;
+      throw new ApiError(res.status, String(reason));
+    }
+    return data as RawUploadResult;
+  },
+
+  /** POST /api/sessions/{id}/compact — collapse Claude context window. */
+  async compactSession(
+    token: string,
+    sessionId: string,
+  ): Promise<{ ok: boolean; output: string; errors: string[] }> {
+    return post(
+      `/api/sessions/${encodeURIComponent(sessionId)}/compact`,
+      token,
+      {},
+    );
+  },
+
+  /** POST /api/sessions/{id}/model — set model for a session. */
+  async setModel(token: string, sessionId: string, model: string | null): Promise<CommandEnvelope> {
+    return post<CommandEnvelope>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/model`,
+      token,
+      { model },
+    );
+  },
+
+  /** POST /api/sessions/{id}/inspect — run a repo inspection op routed to the owning node. */
+  async inspectSession(
+    token: string,
+    sessionId: string,
+    op: string,
+    params: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    return post(
+      `/api/sessions/${encodeURIComponent(sessionId)}/inspect`,
+      token,
+      { op, ...params },
+    );
+  },
+
+  /** GET /api/jobs — watched jobs: running + recent. */
+  async jobs(token: string, limit = 20): Promise<{ running: RawJob[]; recent: RawJob[] }> {
+    return get(`/api/jobs?limit=${limit}`, token);
   },
 };

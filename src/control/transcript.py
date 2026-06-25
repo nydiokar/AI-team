@@ -109,6 +109,34 @@ def _turn_from_artifact(art: Dict[str, Any], path: Path) -> Dict[str, Any]:
     }
 
 
+def _parse_summary_md(text: str) -> Dict[str, str]:
+    """Pull the clean ``## Last instruction`` + ``## Last result (tail)`` sections
+    out of a ``state/summaries/<id>.md`` (orchestrator._write_session_summary).
+
+    This is the SAME clean text Telegram shows — the backend already ran the raw
+    payload through result_text extraction before writing it here (so opencode's
+    JSON-lines stream is already collapsed to prose, and the user input is the
+    FULL message, not the truncated artifact task.title). We prefer this over the
+    artifact for the latest turn."""
+    sections: Dict[str, List[str]] = {}
+    current: Optional[str] = None
+    for raw in text.splitlines():
+        if raw.startswith("## "):
+            current = raw[3:].strip().lower()
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(raw)
+
+    def _val(key: str) -> str:
+        body = "\n".join(sections.get(key, [])).strip()
+        return "" if body == "(none)" else body
+
+    return {
+        "instruction": _val("last instruction"),
+        "result": _val("last result (tail)"),
+    }
+
+
 def get_transcript(
     results_dir: Path,
     summaries_dir: Path,
@@ -146,4 +174,34 @@ def get_transcript(
     turns.sort(key=lambda t: t.get("timestamp") or "")
     if limit and len(turns) > limit:
         turns = turns[-limit:]  # keep the most recent N
+
+    # The summary .md is the AUTHORITATIVE source for the latest turn: it holds the
+    # full user message + the clean (already result_text-extracted) assistant reply
+    # — the same text Telegram renders. Artifacts truncate the instruction
+    # (task.title) and may carry a raw backend stream (opencode JSON-lines) as
+    # output. So overlay the summary onto the most recent turn, and if there are no
+    # artifact turns yet (e.g. an in-flight first turn), synthesize one from it.
+    summary_path = _confined(summaries_dir, session_id, ".md")
+    if summary_path is not None and summary_path.is_file():
+        try:
+            summ = _parse_summary_md(summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            summ = {"instruction": "", "result": ""}
+        if summ.get("instruction") or summ.get("result"):
+            if turns:
+                latest = turns[-1]
+                if summ.get("instruction"):
+                    latest["instruction"] = summ["instruction"]
+                if summ.get("result"):
+                    latest["result"] = summ["result"]
+            else:
+                turns.append({
+                    "task_id": "summary",
+                    "timestamp": "",
+                    "success": True,
+                    "instruction": summ.get("instruction", ""),
+                    "result": summ.get("result", ""),
+                    "file_count": 0,
+                })
+
     return turns

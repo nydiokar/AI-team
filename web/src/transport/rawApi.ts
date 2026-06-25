@@ -180,6 +180,43 @@ export interface RawArtifactDetailResponse {
   files: RawRemoteFile[];
 }
 
+// GET /api/projects?node_id=<id> → { projects: RawProject[] }
+// _list_projects_for_node() in control_api.py. Local: filesystem scan. Remote: DB repos JSON.
+export interface RawProject {
+  name: string;
+  path: string;
+}
+
+// GET /api/models?backend=<b> → { backend: string, models: RawModelOption[] }
+// config/models.py BACKEND_MODELS catalog.
+export interface RawModelOption {
+  name: string;
+  is_default: boolean;
+}
+
+// POST /api/sessions/{id}/upload (multipart) → RawUploadResult
+export interface RawUploadResult {
+  ok: boolean;
+  filename: string;
+  size: number;
+  /** Relative to repo root: "uploads/<filename>" */
+  path: string;
+}
+
+// GET /api/jobs → { running: RawJob[], recent: RawJob[] }
+// db.list_jobs() rows from mesh_jobs table.
+export interface RawJob {
+  id: string;
+  label: string | null;
+  status: string; // running|done|failed|lost
+  pid: number | null;
+  last_checked_at: string | null;
+  last_probe_error: string | null;
+  exit_code: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // GET /api/approvals → { approvals: RawApproval[] } (Move H).
 // Row from the `approvals` table (control_api). `reversible` is stored 0|1.
 export interface RawApproval {
