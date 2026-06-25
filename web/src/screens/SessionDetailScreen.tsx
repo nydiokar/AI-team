@@ -1,11 +1,4 @@
-/**
- * Active session screen — compact header with live status + full action menu,
- * session info panel, real conversation timeline, and the live composer.
- *
- * Action menu covers: Stop · Close/Restore · Compact · Change model · Git
- * All parity with the Telegram command surface on a single session.
- */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ChevronLeft,
@@ -16,68 +9,302 @@ import {
   Minimize2,
   Sliders,
   GitBranch,
+  Bot,
+  Loader2,
+  FolderGit2,
+  Info,
+  FilePlus2,
+  FilePen,
+  FileMinus2,
+  ChevronDown,
+  X,
 } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
 import { SessionTimeline } from "../components/timeline/SessionTimeline";
 import { Composer } from "../components/timeline/Composer";
-import { SessionInfoPanel } from "../components/sessions/SessionInfoPanel";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
-import { useSessions, useApprovals, useSessionMessages } from "../hooks/useLiveData";
+import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact } from "../hooks/useLiveData";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
 import {
   useStopSession,
   useCloseSession,
   useRestoreSession,
   useCompactSession,
+  useInspectSession,
 } from "../hooks/useSessionActions";
+import { cn } from "../lib/cn";
+import type { Artifact, RemoteFile } from "../domain/models";
+
+type SidePanel = "files" | "info" | null;
+
+function projectName(p: string): string {
+  const parts = p.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] || p;
+}
+
+// ── Session-scoped Files tab ──────────────────────────────────────────────────
+
+const CHANGE_ICON = {
+  added: FilePlus2,
+  modified: FilePen,
+  deleted: FileMinus2,
+} as const;
+
+const CHANGE_COLOR = {
+  added: "text-ok",
+  modified: "text-warn",
+  deleted: "text-bad",
+} as const;
+
+function ArtifactRow({ artifact }: { artifact: Artifact }) {
+  const [open, setOpen] = useState(false);
+  const { data, isLoading } = useArtifact(open ? (artifact.taskId ?? artifact.id) : null);
+
+  const dateStr = artifact.createdAt
+    ? new Date(artifact.createdAt).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+
+  const taskShort = artifact.name.startsWith("task_")
+    ? `#${artifact.name.slice(5, 13)}`
+    : artifact.name;
+
+  return (
+    <div className="border-b border-hairline last:border-0">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left"
+      >
+        <ChevronDown
+          className={cn("size-3.5 shrink-0 text-ink-muted transition-transform", !open && "-rotate-90")}
+        />
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[12.5px] font-medium text-ink">{taskShort}</p>
+          {dateStr && <p className="text-[11px] text-ink-muted">{dateStr}</p>}
+        </div>
+      </button>
+      {open && (
+        <div className="px-4 pb-3">
+          {isLoading && <p className="text-xs text-ink-muted">Loading…</p>}
+          {data && data.files.length === 0 && (
+            <p className="text-xs text-ink-muted">No files changed.</p>
+          )}
+          {data && data.files.map((f: RemoteFile, i: number) => {
+            const Icon = CHANGE_ICON[f.change];
+            const col = CHANGE_COLOR[f.change];
+            const filename = f.path.split(/[/\\]/).pop() ?? f.path;
+            const dir = f.path.slice(0, f.path.length - filename.length).replace(/[/\\]$/, "");
+            const lc = data.lineCounts[i];
+            return (
+              <div key={f.path} className="flex items-start gap-2 py-1.5">
+                <Icon className={cn("mt-0.5 size-3.5 shrink-0", col)} />
+                <div className="min-w-0 flex-1">
+                  <span className="font-mono text-[12px] text-ink">{filename}</span>
+                  {dir && <p className="truncate font-mono text-[10px] text-ink-muted">{dir}</p>}
+                </div>
+                {(lc?.added != null || lc?.deleted != null) && (
+                  <span className="shrink-0 font-mono text-[11px] tabular-nums">
+                    {lc.added != null && <span className="text-ok">+{lc.added}</span>}
+                    {lc.deleted != null && <span className="ml-1 text-bad">−{lc.deleted}</span>}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionFilesTab({ sessionId }: { sessionId: string }) {
+  const { data: allArtifacts, isLoading } = useArtifacts(50);
+  const sessionArtifacts = (allArtifacts ?? []).filter(
+    (a) => a.sessionId === sessionId,
+  );
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-16 text-ink-muted">
+        <Loader2 className="size-5 animate-spin" />
+      </div>
+    );
+  }
+
+  if (sessionArtifacts.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-3 px-6 py-20 text-center">
+        <div className="flex size-12 items-center justify-center rounded-2xl bg-surface-1 ring-1 ring-hairline">
+          <FolderGit2 className="size-6 text-ink-muted" />
+        </div>
+        <div>
+          <p className="text-[14px] font-medium text-ink-soft">No file changes yet</p>
+          <p className="mt-1 text-sm text-ink-muted">Files modified by tasks will appear here.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card-elev mx-4 my-4 overflow-hidden rounded-xl divide-y divide-hairline">
+      {sessionArtifacts.map((a) => (
+        <ArtifactRow key={a.id} artifact={a} />
+      ))}
+    </div>
+  );
+}
+
+// ── Session Info tab ──────────────────────────────────────────────────────────
+
+function SessionInfoTab({ sessionId }: { sessionId: string }) {
+  const { data: sessions } = useSessions();
+  const session = sessions?.find((s) => s.id === sessionId);
+  const [dirs, setDirs] = useState<string[] | null>(null);
+  const inspect = useInspectSession();
+
+  useEffect(() => {
+    inspect.mutate(
+      { sessionId, op: "list_dirs", params: { limit: 12, sort_by_recent: true } },
+      {
+        onSuccess: (r) => {
+          const res = r as { dirs?: string[] };
+          setDirs(res.dirs ?? []);
+        },
+      },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  if (!session) return null;
+
+  const rows = [
+    { label: "Backend", value: session.backend },
+    { label: "Model", value: session.model ?? "(backend default)" },
+    { label: "Machine", value: session.workspace.targetId },
+    { label: "Path", value: session.workspace.path },
+    ...(session.lastTaskId ? [{ label: "Last task", value: session.lastTaskId }] : []),
+  ];
+
+  return (
+    <div className="px-4 py-4 space-y-4">
+      <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
+        {rows.map(({ label, value }) => (
+          <div key={label} className="flex items-start gap-3 px-4 py-3">
+            <span className="w-20 shrink-0 text-[11px] text-ink-muted pt-0.5">{label}</span>
+            <span className="min-w-0 flex-1 break-all font-mono text-[12px] text-ink">{value}</span>
+          </div>
+        ))}
+      </div>
+
+      {dirs !== null && dirs.length > 0 && (
+        <div>
+          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">
+            Subdirectories
+          </p>
+          <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
+            {dirs.map((d) => (
+              <div key={d} className="px-4 py-2.5 font-mono text-[12px] text-ink-soft">
+                {d.split("/").pop() ?? d}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {inspect.isPending && dirs === null && (
+        <p className="text-center text-sm text-ink-muted">Loading directories…</p>
+      )}
+    </div>
+  );
+}
+
+// ── Main Screen ───────────────────────────────────────────────────────────────
 
 export function SessionDetailScreen() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { data } = useSessions();
+  const { data, isLoading: sessionsLoading } = useSessions();
   const session = data?.find((s) => s.id === id);
-  const { data: turns } = useSessionMessages(id);
+  const { data: turns, isLoading: messagesLoading, isFetched: messagesFetched } = useSessionMessages(id);
   const { data: approvals } = useApprovals();
   const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? []);
   const running = session?.opState === "running";
   const closed = session?.lifecycle === "closed";
+  // Only treat as "loading" on the very first fetch — subsequent polls use
+  // placeholderData so they never wipe the existing conversation.
+  const loading = sessionsLoading || (messagesLoading && !messagesFetched);
 
+  const [sidePanel, setSidePanel] = useState<SidePanel>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
   const [compactBanner, setCompactBanner] = useState<string | null>(null);
+
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    bottomRef.current?.scrollIntoView({ behavior, block: "end" });
+  }, []);
+
+  const prevLengthRef = useRef(0);
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el || tab !== "chat") return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    const grew = timeline.length > prevLengthRef.current;
+    prevLengthRef.current = timeline.length;
+    if (grew && nearBottom) scrollToBottom();
+  }, [timeline.length, scrollToBottom, tab]);
+
+  useEffect(() => {
+    if (!loading && timeline.length > 0 && tab === "chat") {
+      scrollToBottom("instant" as ScrollBehavior);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
 
   const stop = useStopSession();
   const close = useCloseSession();
   const restore = useRestoreSession();
   const compact = useCompactSession();
 
-  // Auto-dismiss compact result banner after 4 s.
   useEffect(() => {
     if (!compactBanner) return;
     const t = setTimeout(() => setCompactBanner(null), 4000);
     return () => clearTimeout(t);
   }, [compactBanner]);
 
-  const act = (fn: () => void) => {
-    setMenuOpen(false);
-    fn();
-  };
+  const act = (fn: () => void) => { setMenuOpen(false); fn(); };
+
+  const proj = session ? projectName(session.workspace.path) : null;
+
+  const TABS: { key: SessionTab; label: string; Icon: React.ElementType }[] = [
+    { key: "chat", label: "Chat", Icon: MessagesSquare },
+    { key: "files", label: "Files", Icon: FolderGit2 },
+    { key: "info", label: "Info", Icon: Info },
+  ];
 
   return (
     <div className="mx-auto flex h-full max-w-[480px] flex-col bg-base">
+      {/* ── Fixed header ── */}
       <CompactTopBar
-        title={session?.id ?? id ?? "Session"}
+        title={proj ?? session?.id ?? id ?? "Session"}
         subtitle={
           session ? (
-            <span className="font-mono">
-              {session.backend} · {session.workspace.targetId}
+            <span className="font-mono text-[11px] text-ink-muted">
+              {session.backend}
+              {session.model ? ` · ${session.model}` : ""}
             </span>
-          ) : (
-            "loading…"
-          )
+          ) : loading ? (
+            <span className="text-[11px] text-ink-muted">loading…</span>
+          ) : undefined
         }
         left={
           <button
@@ -89,7 +316,7 @@ export function SessionDetailScreen() {
           </button>
         }
         right={
-          session && (
+          session ? (
             <div className="flex items-center gap-1.5">
               <SessionStatusChip state={session.opState} closed={closed} />
               <div className="relative">
@@ -104,11 +331,11 @@ export function SessionDetailScreen() {
                 {menuOpen && (
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-                    <div className="card-elev absolute right-0 z-50 mt-1 w-48 overflow-hidden rounded-xl py-1 text-[13px]">
+                    <div className="card-elev absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-xl py-1 text-[13px] shadow-xl">
                       {running && (
                         <button
                           onClick={() => act(() => id && stop.mutate(id))}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-warn hover:bg-surface-2"
+                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-bad hover:bg-surface-2"
                         >
                           <Square className="size-4" /> Stop task
                         </button>
@@ -120,11 +347,7 @@ export function SessionDetailScreen() {
                               id &&
                               compact.mutate(id, {
                                 onSuccess: (r) =>
-                                  setCompactBanner(
-                                    r.ok
-                                      ? "Context compacted."
-                                      : `Compaction failed: ${r.errors?.[0] ?? "unknown"}`,
-                                  ),
+                                  setCompactBanner(r.ok ? "Context compacted." : `Compaction failed: ${r.errors?.[0] ?? "unknown"}`),
                                 onError: (e) =>
                                   setCompactBanner(`Compaction failed: ${String(e.message)}`),
                               }),
@@ -151,17 +374,18 @@ export function SessionDetailScreen() {
                           <GitBranch className="size-4" /> Git
                         </button>
                       )}
+                      <div className="my-1 border-t border-hairline" />
                       {!closed ? (
                         <button
                           onClick={() => act(() => id && close.mutate(id))}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
                         >
                           <Archive className="size-4" /> Close session
                         </button>
                       ) : (
                         <button
                           onClick={() => act(() => id && restore.mutate(id))}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
                         >
                           <RotateCcw className="size-4" /> Restore session
                         </button>
@@ -171,33 +395,86 @@ export function SessionDetailScreen() {
                 )}
               </div>
             </div>
-          )
+          ) : null
         }
       />
 
-      {/* Compact result banner */}
+      {/* ── Session-level tab bar ── */}
+      <div className="flex border-b border-hairline bg-base/80 backdrop-blur-sm">
+        {TABS.map(({ key, label, Icon }) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={cn(
+              "relative flex flex-1 items-center justify-center gap-1.5 py-2.5 text-[12px] font-medium transition-colors",
+              tab === key ? "text-accent" : "text-ink-muted hover:text-ink-soft",
+            )}
+          >
+            {tab === key && (
+              <span className="absolute bottom-0 left-1/2 h-0.5 w-8 -translate-x-1/2 rounded-full bg-accent" />
+            )}
+            <Icon className="size-3.5" strokeWidth={tab === key ? 2.2 : 1.8} />
+            {label}
+          </button>
+        ))}
+      </div>
+
       {compactBanner && (
         <div className="border-b border-hairline bg-surface-1 px-4 py-2 text-[12px] text-ink-soft">
           {compactBanner}
         </div>
       )}
 
-      {/* Session info panel (expandable, lazy dirs fetch) */}
-      {session && id && <SessionInfoPanel session={session} sessionId={id} />}
+      {/* ── Tab content ── */}
+      {tab === "chat" && (
+        <div ref={timelineRef} className="flex-1 overflow-y-auto overscroll-contain">
+          {loading && timeline.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-3 py-20 text-ink-muted">
+              <Loader2 className="size-6 animate-spin" />
+              <p className="text-sm">Loading conversation…</p>
+            </div>
+          ) : timeline.length > 0 ? (
+            <>
+              <SessionTimeline items={timeline} />
+              <div ref={bottomRef} className="h-px" />
+            </>
+          ) : (
+            <div className="flex flex-col items-center justify-center gap-3 px-6 py-20 text-center">
+              <div className="flex size-12 items-center justify-center rounded-2xl bg-surface-1 ring-1 ring-hairline">
+                <Bot className="size-6 text-ink-muted" />
+              </div>
+              <div>
+                <p className="text-[14px] font-medium text-ink-soft">Session ready</p>
+                <p className="mt-1 text-sm text-ink-muted">Send an instruction to start.</p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
-      <div className="flex-1 overflow-y-auto overscroll-contain">
-        {timeline.length > 0 ? (
-          <SessionTimeline items={timeline} />
-        ) : (
-          <p className="px-4 py-10 text-center text-sm text-ink-muted">
-            No messages yet. Send an instruction below to start.
-          </p>
-        )}
-      </div>
+      {tab === "files" && id && (
+        <div className="flex-1 overflow-y-auto overscroll-contain">
+          <SessionFilesTab sessionId={id} />
+        </div>
+      )}
 
-      {id && !closed && <Composer sessionId={id} running={running} />}
+      {tab === "info" && id && (
+        <div className="flex-1 overflow-y-auto overscroll-contain">
+          <SessionInfoTab sessionId={id} />
+        </div>
+      )}
 
-      {/* Sheets */}
+      {/* ── Composer (chat tab only, open sessions only) ── */}
+      {tab === "chat" && id && !closed && (
+        <Composer sessionId={id} running={running} />
+      )}
+
+      {tab === "chat" && closed && (
+        <div className="border-t border-hairline bg-surface-1/70 px-4 py-3 text-center text-[12px] text-ink-muted">
+          Session closed · open the menu to restore
+        </div>
+      )}
+
       {modelPickerOpen && session && id && (
         <ModelPickerSheet
           sessionId={id}

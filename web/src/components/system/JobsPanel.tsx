@@ -5,7 +5,6 @@
  */
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
-import { Link } from "react-router-dom";
 import { useJobs } from "../../hooks/useLiveData";
 import { cn } from "../../lib/cn";
 

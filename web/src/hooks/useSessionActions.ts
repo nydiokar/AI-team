@@ -98,12 +98,13 @@ export function useCreateSession() {
     mutationFn: (vars: {
       backend: string;
       repoPath: string;
+      nodeId?: string;
       model?: string;
       idempotencyKey?: string;
     }) =>
       api.createSession(
         token,
-        { backend: vars.backend, repoPath: vars.repoPath, model: vars.model },
+        { backend: vars.backend, repoPath: vars.repoPath, model: vars.model, nodeId: vars.nodeId },
         vars.idempotencyKey ?? newIdempotencyKey(),
       ),
     retry: (count, err) =>

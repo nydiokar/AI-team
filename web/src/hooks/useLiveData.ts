@@ -115,6 +115,9 @@ export function useSessionMessages(sessionId: string | undefined) {
     queryFn: async () => api.sessionMessages(token, sessionId!),
     enabled: Boolean(token) && Boolean(sessionId),
     refetchInterval: POLL_MS,
+    // Keep previous data visible during refetch so the chat doesn't flash to a
+    // loading spinner every 3 s poll cycle.
+    placeholderData: (prev) => prev,
   });
 }
 
