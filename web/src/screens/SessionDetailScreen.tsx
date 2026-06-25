@@ -17,7 +17,7 @@ import {
   FilePen,
   FileMinus2,
   ChevronDown,
-  X,
+  MessagesSquare,
 } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
@@ -37,11 +37,18 @@ import {
 import { cn } from "../lib/cn";
 import type { Artifact, RemoteFile } from "../domain/models";
 
-type SidePanel = "files" | "info" | null;
+type SessionTab = "chat" | "files" | "info";
 
 function projectName(p: string): string {
   const parts = p.split(/[/\\]/).filter(Boolean);
   return parts[parts.length - 1] || p;
+}
+
+/** Display the running model — the explicit one, or which model is the default. */
+function modelLabel(model: string | null, defaultModel: string | null): string {
+  if (model) return model;
+  if (defaultModel) return `${defaultModel} (default)`;
+  return "(backend default)";
 }
 
 // ── Session-scoped Files tab ──────────────────────────────────────────────────
@@ -184,8 +191,10 @@ function SessionInfoTab({ sessionId }: { sessionId: string }) {
   if (!session) return null;
 
   const rows = [
+    { label: "Session ID", value: session.id },
+    { label: "Backend session", value: session.backendSessionId ?? "(not yet captured)" },
     { label: "Backend", value: session.backend },
-    { label: "Model", value: session.model ?? "(backend default)" },
+    { label: "Model", value: modelLabel(session.model, session.defaultModel) },
     { label: "Machine", value: session.workspace.targetId },
     { label: "Path", value: session.workspace.path },
     ...(session.lastTaskId ? [{ label: "Last task", value: session.lastTaskId }] : []),
@@ -231,7 +240,13 @@ export function SessionDetailScreen() {
   const navigate = useNavigate();
   const { data, isLoading: sessionsLoading } = useSessions();
   const session = data?.find((s) => s.id === id);
-  const { data: turns, isLoading: messagesLoading, isFetched: messagesFetched } = useSessionMessages(id);
+  const {
+    data: turns,
+    isLoading: messagesLoading,
+    isFetched: messagesFetched,
+    isError: messagesError,
+    fetchStatus: messagesFetchStatus,
+  } = useSessionMessages(id);
   const { data: approvals } = useApprovals();
   const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? []);
   const running = session?.opState === "running";
@@ -239,8 +254,15 @@ export function SessionDetailScreen() {
   // Only treat as "loading" on the very first fetch — subsequent polls use
   // placeholderData so they never wipe the existing conversation.
   const loading = sessionsLoading || (messagesLoading && !messagesFetched);
+  // We're showing turns but the live poll can't reach the backend (error, or
+  // paused while offline). Warn that what's on screen may be stale rather than
+  // letting persisted/cached turns look confidently current.
+  const messagesStale =
+    messagesFetched &&
+    (messagesError || messagesFetchStatus === "paused") &&
+    !loading;
 
-  const [sidePanel, setSidePanel] = useState<SidePanel>(null);
+  const [tab, setTab] = useState<SessionTab>("chat");
   const [menuOpen, setMenuOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
@@ -299,8 +321,7 @@ export function SessionDetailScreen() {
         subtitle={
           session ? (
             <span className="font-mono text-[11px] text-ink-muted">
-              {session.backend}
-              {session.model ? ` · ${session.model}` : ""}
+              {session.backend} · {modelLabel(session.model, session.defaultModel)}
             </span>
           ) : loading ? (
             <span className="text-[11px] text-ink-muted">loading…</span>
@@ -332,6 +353,22 @@ export function SessionDetailScreen() {
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
                     <div className="card-elev absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-xl py-1 text-[13px] shadow-xl">
+                      {/* View switcher — Chat / Files / Info live here (rarely
+                          visited, so they don't need permanent tab real estate). */}
+                      {TABS.map(({ key, label, Icon }) => (
+                        <button
+                          key={key}
+                          onClick={() => act(() => setTab(key))}
+                          className={cn(
+                            "flex w-full items-center gap-2.5 px-3.5 py-2.5 hover:bg-surface-2",
+                            tab === key ? "text-accent" : "text-ink-soft",
+                          )}
+                        >
+                          <Icon className="size-4" /> {label}
+                          {tab === key && <span className="ml-auto text-[11px]">●</span>}
+                        </button>
+                      ))}
+                      <div className="my-1 border-t border-hairline" />
                       {running && (
                         <button
                           onClick={() => act(() => id && stop.mutate(id))}
@@ -399,29 +436,28 @@ export function SessionDetailScreen() {
         }
       />
 
-      {/* ── Session-level tab bar ── */}
-      <div className="flex border-b border-hairline bg-base/80 backdrop-blur-sm">
-        {TABS.map(({ key, label, Icon }) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            className={cn(
-              "relative flex flex-1 items-center justify-center gap-1.5 py-2.5 text-[12px] font-medium transition-colors",
-              tab === key ? "text-accent" : "text-ink-muted hover:text-ink-soft",
-            )}
-          >
-            {tab === key && (
-              <span className="absolute bottom-0 left-1/2 h-0.5 w-8 -translate-x-1/2 rounded-full bg-accent" />
-            )}
-            <Icon className="size-3.5" strokeWidth={tab === key ? 2.2 : 1.8} />
-            {label}
-          </button>
-        ))}
-      </div>
+      {/* ── Contextual sub-header — only when off Chat (Files/Info are opened
+            from the menu). Gives a title + one-tap return to the conversation. ── */}
+      {tab !== "chat" && (
+        <button
+          onClick={() => setTab("chat")}
+          className="flex items-center gap-2 border-b border-hairline bg-base/80 px-4 py-2.5 text-[12px] font-medium text-ink-soft backdrop-blur-sm hover:bg-surface-2"
+        >
+          <ChevronLeft className="size-4" />
+          <span>{TABS.find((t) => t.key === tab)?.label}</span>
+          <span className="ml-auto text-[11px] text-ink-muted">Back to chat</span>
+        </button>
+      )}
 
       {compactBanner && (
         <div className="border-b border-hairline bg-surface-1 px-4 py-2 text-[12px] text-ink-soft">
           {compactBanner}
+        </div>
+      )}
+
+      {messagesStale && (
+        <div className="border-b border-hairline bg-warn-dim/40 px-4 py-2 text-[12px] text-warn">
+          Reconnecting… showing the last loaded messages.
         </div>
       )}
 
