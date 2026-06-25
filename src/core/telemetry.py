@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import itertools
 import re
 import socket
 import uuid
@@ -37,6 +38,7 @@ def new_telemetry_id(prefix: str) -> str:
 # Stable for the lifetime of this Python process. It identifies the emitter,
 # not a child backend process.
 EMITTER_PROCESS_INSTANCE_ID = new_telemetry_id("proc")
+_SOURCE_SEQUENCE = itertools.count(1)
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,19 @@ class TelemetryContext:
             parent_invocation_id=parent_invocation_id or None,
             retry_of_invocation_id=retry_of_invocation_id or None,
         )
+
+
+def telemetry_subprocess_env(context: Optional[TelemetryContext]) -> Dict[str, str]:
+    """Return the non-sensitive correlation variables allowed in child processes."""
+    if context is None:
+        return {}
+    values = {
+        "AI_TEAM_SESSION_ID": context.session_id,
+        "AI_TEAM_TURN_ID": context.turn_id,
+        "AI_TEAM_INVOCATION_ID": context.invocation_id,
+        "AI_TEAM_NODE_ID": context.node_id,
+    }
+    return {key: value for key, value in values.items() if value}
 
 
 _telemetry_context: contextvars.ContextVar[Optional[TelemetryContext]] = (
@@ -190,12 +205,20 @@ EVENT_ATTRIBUTE_ALLOWLIST: Dict[str, frozenset[str]] = {
 
 
 def _validate_scalar(value: Any) -> JsonScalar | list[JsonScalar]:
+    if isinstance(value, str) and len(value) > 256:
+        raise ValueError("telemetry string attributes must be at most 256 characters")
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    if isinstance(value, list) and all(
-        item is None or isinstance(item, (str, int, float, bool)) for item in value
-    ):
-        return value
+    if isinstance(value, list):
+        if len(value) > 16:
+            raise ValueError("telemetry list attributes must contain at most 16 items")
+        if all(
+            item is None
+            or isinstance(item, (int, float, bool))
+            or isinstance(item, str) and len(item) <= 256
+            for item in value
+        ):
+            return value
     raise ValueError("telemetry attributes must be scalar or flat scalar lists")
 
 
@@ -237,6 +260,7 @@ class TelemetryEvent(BaseModel):
     emitter_process_instance_id: str = Field(min_length=1, max_length=96)
     source: Literal["gateway", "worker", "backend", "hook", "reconciler"]
     source_sequence: Optional[int] = Field(default=None, ge=0)
+    clock_quality: Literal["local", "ntp_synced", "unknown"] = "unknown"
 
     session_id: Optional[str] = Field(default=None, max_length=256)
     turn_id: str = Field(min_length=1, max_length=256)
@@ -276,6 +300,7 @@ def build_event(
     event_time: Optional[datetime] = None,
     observed_time: Optional[datetime] = None,
     source_sequence: Optional[int] = None,
+    clock_quality: Literal["local", "ntp_synced", "unknown"] = "unknown",
     session_id: Optional[str] = None,
     invocation_id: Optional[str] = None,
     model_request_id: Optional[str] = None,
@@ -296,7 +321,10 @@ def build_event(
         node_id=node_id,
         emitter_process_instance_id=emitter_process_instance_id,
         source=source,
-        source_sequence=source_sequence,
+        source_sequence=(
+            source_sequence if source_sequence is not None else next(_SOURCE_SEQUENCE)
+        ),
+        clock_quality=clock_quality,
         session_id=session_id or None,
         turn_id=turn_id,
         invocation_id=invocation_id or None,

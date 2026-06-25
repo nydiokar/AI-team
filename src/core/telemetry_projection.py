@@ -27,13 +27,19 @@ def _timestamp(value: Any) -> Optional[datetime]:
         return None
 
 
-def _duration_ms(start: Any, end: Any) -> Optional[int]:
+def _duration_ms(
+    start: Any, end: Any, *, flags: Optional[List[str]] = None
+) -> Optional[int]:
     start_dt = _timestamp(start)
     end_dt = _timestamp(end)
     if start_dt is None or end_dt is None:
         return None
     duration = (end_dt - start_dt).total_seconds() * 1000
-    return round(duration) if duration >= 0 else None
+    if duration < 0:
+        if flags is not None:
+            flags.append("clock_skew")
+        return None
+    return round(duration)
 
 
 def _non_negative_int(value: Any, flags: List[str], field: str) -> Optional[int]:
@@ -381,6 +387,11 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
     ]
     usage_rows = [row for row in model_requests.values() if not row["is_duplicate"]]
     for invocation_id, invocation in invocations.items():
+        _duration_ms(
+            invocation.get("started_at"),
+            invocation.get("ended_at"),
+            flags=invocation["data_quality"],
+        )
         request_count = sum(
             1 for row in request_rows if row["invocation_id"] == invocation_id
         )
@@ -534,7 +545,9 @@ def _turn_metrics(
             if usage.get("context_tokens") and usage.get("output_tokens") is not None
             else None
         ),
-        "wall_time_ms": _duration_ms(turn.get("started_at"), turn.get("ended_at")),
+        "wall_time_ms": _duration_ms(
+            turn.get("started_at"), turn.get("ended_at"), flags=flags
+        ),
         "telemetry_event_count": event_count,
         "metric_quality": (
             "request" if request_rows else "aggregate_only" if usage_rows else "unavailable"

@@ -70,6 +70,11 @@ def test_schema_migration_creates_telemetry_tables(tmp_path):
         "llm_model_requests",
         "llm_events",
     }.issubset(names)
+    event_columns = {
+        row[1]
+        for row in db._conn().execute("PRAGMA table_info(llm_events)").fetchall()
+    }
+    assert "clock_quality" in event_columns
 
 
 def test_event_insert_is_idempotent_and_projection_is_queryable(tmp_path):

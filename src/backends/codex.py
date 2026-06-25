@@ -29,6 +29,7 @@ from src.core.telemetry import (
     TelemetryContext,
     build_event,
     new_telemetry_id,
+    telemetry_subprocess_env,
 )
 from src.core.telemetry_adapters.codex import CodexTelemetryAdapter
 
@@ -108,6 +109,7 @@ class CodexBackend(CodingBackend):
         proc_env = ensure_node_on_path()
         if session_key:
             proc_env["SESSION_ID"] = session_key
+        proc_env.update(telemetry_subprocess_env(telemetry_context))
 
         cmd = self._build_cmd(resume_id, cwd, model)
         cmd[0] = self._resolve_exe(proc_env)

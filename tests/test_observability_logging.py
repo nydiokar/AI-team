@@ -34,6 +34,26 @@ def test_bracketed_formatter_includes_exception_type_message_and_traceback(monke
     assert "RuntimeError: polling conflict" in output
 
 
+def test_turn_context_adds_accounting_fields_and_task_alias(monkeypatch):
+    monkeypatch.setattr(observability, "_NODE_ID", "gateway-1")
+    with observability.log_context(
+        turn_id="turn-1",
+        invocation_id="inv-1",
+        backend="codex",
+        session_id="session-1",
+    ):
+        record = logging.LogRecord(
+            "test", logging.INFO, __file__, 1, "hello", (), None
+        )
+        output = observability._BracketedFormatter().format(record)
+        context = observability._current_context()
+
+    assert context["task_id"] == "turn-1"
+    assert "task=turn-1" in output
+    assert "invocation=inv-1" in output
+    assert "backend=codex" in output
+
+
 def test_bracketed_formatter_redacts_secrets_from_exception_text(monkeypatch):
     monkeypatch.setattr(observability, "_NODE_ID", "gateway-1")
     secret = "123456789:ABC_private_token"

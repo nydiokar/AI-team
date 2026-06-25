@@ -55,13 +55,20 @@ _log_context: "contextvars.ContextVar[Dict[str, str]]" = contextvars.ContextVar(
 # ---------------------------------------------------------------------------
 
 def set_log_context(**fields: str) -> "contextvars.Token":
-    """Merge correlation fields (task_id, session_id, ...) into the current context.
+    """Merge correlation fields into the current context.
 
     Returns a token; pass it to `reset_log_context` to restore the prior context.
     Use the `log_context(...)` context manager for the common scoped case.
+
+    Supported accounting fields include ``turn_id``, ``invocation_id``, and
+    ``backend``. ``task_id`` remains the compatibility alias for ``turn_id``.
     """
     current = dict(_log_context.get())
     current.update({k: v for k, v in fields.items() if v})
+    if current.get("turn_id") and not current.get("task_id"):
+        current["task_id"] = current["turn_id"]
+    elif current.get("task_id") and not current.get("turn_id"):
+        current["turn_id"] = current["task_id"]
     return _log_context.set(current)
 
 
@@ -159,6 +166,12 @@ class _BracketedFormatter(logging.Formatter):
             parts.append(f"node={_NODE_ID}")
         if ctx.get("task_id"):
             parts.append(f"task={ctx['task_id']}")
+        if ctx.get("turn_id") and ctx.get("turn_id") != ctx.get("task_id"):
+            parts.append(f"turn={ctx['turn_id']}")
+        if ctx.get("invocation_id"):
+            parts.append(f"invocation={ctx['invocation_id']}")
+        if ctx.get("backend"):
+            parts.append(f"backend={ctx['backend']}")
         if ctx.get("session_id"):
             parts.append(f"session={ctx['session_id']}")
         ctx_block = f"[{' '.join(parts)}]" if parts else ""
@@ -291,10 +304,16 @@ def emit_event(
         }
         sid = session_id or ctx.get("session_id")
         tid = task_id or ctx.get("task_id")
+        turn_id = ctx.get("turn_id") or tid
         if sid:
             payload["session_id"] = sid
         if tid:
             payload["task_id"] = tid
+        if turn_id:
+            payload["turn_id"] = turn_id
+        for key in ("invocation_id", "backend"):
+            if ctx.get(key):
+                payload[key] = ctx[key]
         if fields:
             payload.update(fields)
 

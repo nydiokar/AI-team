@@ -47,10 +47,11 @@ class TelemetryStore:
                     INSERT OR IGNORE INTO llm_events (
                         event_id, schema_version, event_name, event_time, observed_time,
                         node_id, emitter_process_instance_id, source, source_sequence,
+                        clock_quality,
                         session_id, turn_id, invocation_id, model_request_id,
                         tool_call_id, subagent_id, backend, model, pid, attributes,
                         received_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         payload["event_id"],
@@ -62,6 +63,7 @@ class TelemetryStore:
                         payload["emitter_process_instance_id"],
                         payload["source"],
                         payload["source_sequence"],
+                        payload["clock_quality"],
                         payload["session_id"],
                         payload["turn_id"],
                         payload["invocation_id"],

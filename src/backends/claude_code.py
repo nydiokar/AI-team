@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
+from src.core.telemetry import TelemetryContext, telemetry_subprocess_env
 
 logger = logging.getLogger(__name__)
 
@@ -242,13 +243,13 @@ class ClaudeCodeBackend(CodingBackend):
 
     def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         session_id = session.backend_session_id or str(uuid.uuid4())
-        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_id=session_id, session_key=session.session_id, model=_resolve_model(session))
+        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_id=session_id, session_key=session.session_id, model=_resolve_model(session), telemetry_context=telemetry_context)
 
     def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_id=None, session_key=session.session_id, model=_resolve_model(session))
+        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_id=None, session_key=session.session_id, model=_resolve_model(session), telemetry_context=telemetry_context)
 
     def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(cwd, message, resume_id=None, session_id=None, session_key=None, model=None)
+        return self._run(cwd, message, resume_id=None, session_id=None, session_key=None, model=None, telemetry_context=telemetry_context)
 
     def cancel(self, session: Session) -> None:
         with self._proc_lock:
@@ -264,7 +265,16 @@ class ClaudeCodeBackend(CodingBackend):
             procs = list(self._session_procs.values()) + list(self._oneoff_procs)
         terminate_many_popen(procs)
 
-    def _run(self, cwd: str, message: str, resume_id: Optional[str], session_id: Optional[str], session_key: Optional[str], model: Optional[str] = None) -> ExecutionResult:
+    def _run(
+        self,
+        cwd: str,
+        message: str,
+        resume_id: Optional[str],
+        session_id: Optional[str],
+        session_key: Optional[str],
+        model: Optional[str] = None,
+        telemetry_context: Optional[TelemetryContext] = None,
+    ) -> ExecutionResult:
         # Cost guard: refuse to spawn the (paid) Claude CLI under test mode.
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
@@ -283,6 +293,7 @@ class ClaudeCodeBackend(CodingBackend):
         proc_env = ensure_node_on_path()
         if session_id:
             proc_env["SESSION_ID"] = session_id
+        proc_env.update(telemetry_subprocess_env(telemetry_context))
 
         proc: Optional[subprocess.Popen] = None
         try:
