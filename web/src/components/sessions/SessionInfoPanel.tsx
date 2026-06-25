@@ -59,7 +59,11 @@ export function SessionInfoPanel({ session, sessionId }: Props) {
       {expanded && (
         <div className="rounded-xl border border-hairline bg-surface-1 px-4 py-3 text-[13px] space-y-1.5">
           <InfoRow label="Backend" value={session.backend} mono />
-          <InfoRow label="Model" value={session.model ?? "(backend default)"} mono />
+          <InfoRow
+            label="Model"
+            value={session.model ?? (session.defaultModel ? `${session.defaultModel} (default)` : "(backend default)")}
+            mono
+          />
           <InfoRow label="Machine" value={session.workspace.targetId} mono />
           <InfoRow label="Path" value={session.workspace.path} mono />
           {session.lastTaskId && (

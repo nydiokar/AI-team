@@ -97,6 +97,21 @@ def _result_text_from_artifact(art: Dict[str, Any]) -> str:
     return ""
 
 
+def _usage_from_artifact(art: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Token usage for the turn (codex turn.completed), from parsed_output or the
+    raw NDJSON stdout. None when the backend didn't report usage."""
+    parsed = art.get("parsed_output")
+    if isinstance(parsed, dict) and parsed.get("type") == "turn.completed":
+        usage = parsed.get("usage")
+        if isinstance(usage, dict):
+            return usage
+    try:
+        from src.services.result_text import extract_usage_from_ndjson
+        return extract_usage_from_ndjson(art.get("raw_stdout") or "")
+    except Exception:
+        return None
+
+
 def _turn_from_artifact(art: Dict[str, Any], path: Path) -> Dict[str, Any]:
     task_id = art.get("task_id") or path.stem
     return {
@@ -106,6 +121,7 @@ def _turn_from_artifact(art: Dict[str, Any], path: Path) -> Dict[str, Any]:
         "instruction": _instruction_from_artifact(art),
         "result": _result_text_from_artifact(art),
         "file_count": len(art.get("file_changes") or art.get("files_modified") or []),
+        "usage": _usage_from_artifact(art),
     }
 
 
@@ -175,12 +191,17 @@ def get_transcript(
     if limit and len(turns) > limit:
         turns = turns[-limit:]  # keep the most recent N
 
-    # The summary .md is the AUTHORITATIVE source for the latest turn: it holds the
-    # full user message + the clean (already result_text-extracted) assistant reply
-    # — the same text Telegram renders. Artifacts truncate the instruction
-    # (task.title) and may carry a raw backend stream (opencode JSON-lines) as
-    # output. So overlay the summary onto the most recent turn, and if there are no
-    # artifact turns yet (e.g. an in-flight first turn), synthesize one from it.
+    # The summary .md holds the FULL user message (artifacts truncate the
+    # instruction to task.title), so it's authoritative for the latest turn's
+    # *instruction*. Its result, however, is only the TAIL ("## Last result
+    # (tail)" — session.last_result_summary), so it must NEVER overwrite a full
+    # artifact result: doing so showed the user only the end of the model's reply.
+    # Rule:
+    #   - instruction: always prefer the summary (it's the full text).
+    #   - result: only use the summary tail as a FALLBACK when the artifact turn
+    #     produced no clean result text (e.g. an in-flight first turn with no
+    #     artifact yet, or an artifact whose result extraction came back empty).
+    # And if there are no artifact turns at all, synthesize one from the summary.
     summary_path = _confined(summaries_dir, session_id, ".md")
     if summary_path is not None and summary_path.is_file():
         try:
@@ -192,7 +213,8 @@ def get_transcript(
                 latest = turns[-1]
                 if summ.get("instruction"):
                     latest["instruction"] = summ["instruction"]
-                if summ.get("result"):
+                # Only fall back to the tail when the artifact had no full result.
+                if summ.get("result") and not latest.get("result"):
                     latest["result"] = summ["result"]
             else:
                 turns.append({

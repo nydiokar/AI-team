@@ -56,6 +56,7 @@ export function useSessionTimeline(
         });
       }
       if (t.result) {
+        const u = t.usage;
         items.push({
           kind: "message",
           at,
@@ -66,6 +67,14 @@ export function useSessionTimeline(
             text: t.result,
             createdAt: at,
           },
+          usage: u
+            ? {
+                inputTokens: u.input_tokens,
+                cachedInputTokens: u.cached_input_tokens,
+                outputTokens: u.output_tokens,
+                reasoningOutputTokens: u.reasoning_output_tokens,
+              }
+            : null,
         });
       }
     }
