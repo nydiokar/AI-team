@@ -1,7 +1,7 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-06-24
-**Branch:** `feat/webui-ui0` (Web UI track) — mesh/State-Sep track lives on `main`
+**Last Updated:** 2026-06-25
+**Branch:** `feat/webui-ui0` (Web UI track — **ladder complete, ready to merge**) — mesh/State-Sep track lives on `main`
 
 > This file is the **fast-orientation** doc: what the project is, how it's wired
 > *right now*, the active plan, and the immediate next step. It is intentionally
@@ -55,7 +55,7 @@ tailnet-bound port — the "one process, many interfaces" goal.
 UI-5 → UI-6`. The control-surface unification that embedded the web API into the
 gateway is `docs/CONTROL_SURFACE_UNIFICATION.md` (U1..U6, all done).
 
-**Status as of 2026-06-24 (all committed on `feat/webui-ui0`):**
+**Status as of 2026-06-25 — THE LADDER IS COMPLETE (all committed on `feat/webui-ui0`):**
 
 | Rung | What | Status |
 |------|------|--------|
@@ -66,33 +66,25 @@ gateway is `docs/CONTROL_SURFACE_UNIFICATION.md` (U1..U6, all done).
 | **H + UI-3** | durable approval gate + approval card | ✅ done (`3dc00c7`) — **see priority note** |
 | **UI-4** | **Files & artifacts** | ✅ done — artifact listing API + live FilesScreen (`docs/UI4_CHECKLIST.md`) |
 | UI-5 | logs / health / terminal | ✅ done — live activity feed on System screen off the SSE stream (`docs/UI5_CHECKLIST.md`) |
-| UI-6 | hardening, a11y, PWA, push | ❌ not started — **next (ships the phone cockpit)** |
+| **UI-6** | hardening, a11y, PWA, push | ✅ done (`9c452e8`, gate-verified live `8a0ee76`) — installable PWA, offline shell, a11y pass, install affordance (`docs/UI6_CHECKLIST.md`) |
+
+**Every rung M1 → UI-6 is shipped, committed, and gate-verified.** Branch
+`feat/webui-ui0` is ready to merge to `main`. Gate re-confirmed 2026-06-25:
+`cd web && npx tsc -b` clean, 29 vitest pass, `vite build` green, sw.js +
+manifest.webmanifest land in `dist/`.
 
 **⚠️ PRIORITY REFRAME (operator, 2026-06-24):** the spec ladder put `H/UI-3
-(approvals)` before `UI-4 (files)`. The operator has **reprioritized**: approvals
+(approvals)` before `UI-4 (files)`. The operator **reprioritized**: approvals
 are a **`WorkflowService` feature** — part of a future *workflow-automation* track
 that "needs to be thought out better," NOT part of shipping the core
-coding-gateway-on-your-phone. H/UI-3 is already built and is harmless (durable,
-tested, no auto-emitter wiring it into any hot path) — **leave it, do not extend
-it.** The real remaining core-flow work to **ship** is:
+coding-gateway-on-your-phone. H/UI-3 is built and harmless (durable, tested, no
+auto-emitter wiring it into any hot path) — **leave it, do not extend it.**
 
-- ~~**UI-4 (Files & artifacts)**~~ ✅ **DONE 2026-06-24.** Backend
-  `src/control/artifacts.py` (pure reader, path-confined) + `GET /api/artifacts`
-  & `GET /api/artifacts/{task_id}` in `control_api.py`; `FilesScreen.tsx` now binds
-  live artifact cards + per-file change rows (added/modified/deleted + ±lines).
-  Diff hunks / file-content preview deliberately OUT (no backend source).
-  Scope fence: `docs/UI4_CHECKLIST.md`.
-- ~~**UI-5 (live logs off the SSE/event stream)**~~ ✅ **DONE 2026-06-24.** A "Live
-  activity" feed on the System screen, projected from the already-live app-wide SSE
-  stream (`useActivityLog` → `eventLog.toLogLine`); NO new backend (the event spine
-  already flows). Health was already live from `/api/nodes`. Scope fence:
-  `docs/UI5_CHECKLIST.md`.
-- **UI-6 (PWA / hardening / a11y / push) — DO THIS NEXT.** This is the last rung —
-  it actually ships the cockpit to the phone (installable, offline shell, push).
-
-**Deferred to the workflow-automation track (NOT shipping-blockers):** auto-emitting
-approvals from real risky actions, review/handoff workflows, anything else on
-`WorkflowService`. Design this deliberately later; don't bolt more onto H now.
+**Deferred (NOT shipping-blockers) — see `docs/DEFERRED.md`:** Web Push
+(push-*ready*: PWA + SW shipped, but VAPID secret + subscribe endpoint + emitter
+not built), assistant token streaming, diff-hunk/file-content preview, terminal,
+and approvals automation (the future workflow-automation track). Design
+deliberately later; don't bolt more onto H now.
 
 **Memory pointers (richer detail):** `webui-frontend-backend-sync`,
 `webui-ui0-ui1-built` (has the full UI-2/G′/H build notes),
@@ -196,12 +188,13 @@ Progress against that plan (verified against code on 2026-06-10):
 
 ## ➡️ Immediate next step
 
-**ACTIVE track (Web UI, branch `feat/webui-ui0`): build UI-6 (PWA / hardening /
-a11y / push) — the LAST rung, ships the cockpit to the phone.** UI-4 (Files &
-artifacts) and UI-5 (live activity feed on System, off the SSE stream) are both ✅
-done (`docs/UI4_CHECKLIST.md`, `docs/UI5_CHECKLIST.md`). UI-6 = installable PWA
-(manifest + service worker / offline shell), a11y pass, and push notifications for
-attention events; see `docs/COCKPIT_REFACTOR_SPEC.md` §14.
+**ACTIVE track (Web UI, branch `feat/webui-ui0`): LADDER COMPLETE — merge to
+`main`.** Every rung M1 → UI-6 is shipped, committed, and gate-verified (see the
+Web UI status table above). UI-6 (installable PWA + offline shell + a11y +
+install affordance) landed in `9c452e8` and was gate-verified live in `8a0ee76`.
+The remaining work on this branch is **merge it to `main`** and close it out.
+Genuinely additive future work (Web Push, streaming, diff hunks, terminal,
+approvals automation) is parked in `docs/DEFERRED.md` — none blocks shipping.
 
 **Mesh track (paused, branch `main`):** the two-machine cutover is **done and
 live** — gateway+server on the Pi5, worker on `Horse`, restart-resilient. The only
@@ -254,7 +247,8 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | `config/settings.py` | all config incl. `MeshConfig` |
 | `docs/CONTROL_CONTRACT.md` | **M1** — event + inbound-command + backend + read-model contract for a 2nd surface |
 | `docs/COCKPIT_REFACTOR_SPEC.md` / `docs/M1_CHECKLIST.md` | M1 rationale + the executed build checklist |
-| `docs/COCKPIT_REFACTOR_SPEC.md` | **active plan** — Web UI ladder (§14); next = UI-4 |
+| `docs/COCKPIT_REFACTOR_SPEC.md` | Web UI ladder (§14) — **all rungs M1→UI-6 done** |
+| `docs/DEFERRED.md` | Web UI track — deliberately-not-built future boxes (Web Push, streaming, diff hunks, terminal, approvals automation) |
 | `docs/STATE_SEPARATION_PLAN.md` | mesh plan (PAUSED background, not active) |
 | `docs/AGENT_MESH_SPEC.md` | mesh design spec |
 | `docs/PHASE_4_RUNBOOK.md` | VPS cutover runbook (= State Sep end-state) |

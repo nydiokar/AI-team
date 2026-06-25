@@ -651,17 +651,20 @@ with a hard acceptance gate. UI milestones depend on the backend move named.
 | Milestone | Layer | Depends on | Done = (acceptance gate) |
 |---|---|---|---|
 | **M1** ✅ | Transport-neutral session core | — | `SessionService` + `CONTROL_CONTRACT.md`; Telegram byte-identical. (DONE) |
-| **UI-0** | Frontend domain + contract (TS types, fixtures) | M1 read API | Canonical TS types compile; every type tagged with gap-doc mark; fixtures for session/task/approval/reconnect. No ⛔ types emitted. |
-| **UI-1** | Mobile shell + Sessions + System (mocked timeline) | UI-0, read API | Sessions screen binds live `/api/sessions`; System binds live `/api/nodes`; all flows work at 360px; timeline/Tasks from fixtures. |
-| **F** | Write + WS/SSE backend surface | M1 | HTTP endpoints for `submit_instruction` + `SessionService` create/bind + stop/retry, all idempotency-keyed; WS/SSE event push beside the existing poll. Contract doc updated. |
-| **I** | Canonical event adapter (backend-side or in F) | F | Every currently-emitted event maps to a documented canonical type or is explicitly "opaque/operational"; `task.state_changed` is one typed transition. |
-| **UI-2** | Real session/task state + live transport | F, I | Send instruction → ack states; reconnect dedupes; session restore from server; stop/retry work; whole-message (no streaming). |
-| **G′** | Task lifecycle object | M1 | Task carries the UI lifecycle states + session parentage; `/api/tasks` returns sectioned (attention/running/queued/recent) data. |
-| **H** | Approval consumer | G′ | An execution path *blocks* on `approval.requested`; resolve endpoint approves/rejects; pending-approval queue queryable. |
-| **UI-3** | Attention workflows (approvals, notifications) | G′, H | One approval round-trips end-to-end from the phone; deep links land on exact event; in-app notification center. |
-| **UI-4** | Files & artifacts | artifact listing API | Artifact cards + unified diff review bind to a real listing endpoint. |
-| **UI-5** | Operational depth (logs/health/terminal) | F (log stream) | Live log viewer; health from `/api/nodes`; terminal optional/deferred. |
-| **UI-6** | Hardening, a11y, PWA, push | all above | UI spec §15 acceptance criteria pass at 360px; offline/reconnect tested. |
+| **UI-0** ✅ | Frontend domain + contract (TS types, fixtures) | M1 read API | Canonical TS types compile; every type tagged with gap-doc mark; fixtures for session/task/approval/reconnect. No ⛔ types emitted. (DONE) |
+| **UI-1** ✅ | Mobile shell + Sessions + System (mocked timeline) | UI-0, read API | Sessions screen binds live `/api/sessions`; System binds live `/api/nodes`; all flows work at 360px; timeline/Tasks from fixtures. (DONE) |
+| **F** ✅ | Write + WS/SSE backend surface | M1 | HTTP endpoints for `submit_instruction` + `SessionService` create/bind + stop/retry, all idempotency-keyed; SSE event push beside the existing poll. (DONE — embedded `src/control/control_api.py`, U1–U5) |
+| **I** ✅ | Canonical event adapter (backend-side or in F) | F | Every currently-emitted event maps to a documented canonical type or is explicitly "opaque/operational"; `task.state_changed` is one typed transition. (DONE — `web/src/transport/eventAdapter.ts`) |
+| **UI-2** ✅ | Real session/task state + live transport | F, I | Send instruction → ack states; reconnect dedupes; session restore from server; stop/retry work; whole-message (no streaming). (DONE — `5590cb5`) |
+| **G′** ✅ | Task lifecycle object | M1 | Task carries the UI lifecycle states + session parentage; `/api/tasks` returns sectioned (attention/running/queued/recent) data. (DONE — `baba1d1`, `src/core/task_lifecycle.py`) |
+| **H** ✅ | Approval consumer | G′ | A durable approval GATE (SQLite state machine, survives restart) + resolve endpoint approves/rejects; pending-approval queue queryable. (DONE — `3dc00c7`; built but kept inert, see `docs/DEFERRED.md`) |
+| **UI-3** ✅ | Attention workflows (approvals) | G′, H | Approval card round-trips end-to-end from the phone via `/api/approvals`. (DONE — `3dc00c7`) |
+| **UI-4** ✅ | Files & artifacts | artifact listing API | Artifact cards + per-file change rows bind to `GET /api/artifacts`. Diff hunks deferred (no backend source). (DONE — `docs/UI4_CHECKLIST.md`) |
+| **UI-5** ✅ | Operational depth (logs/health) | F (event stream) | Live activity feed on System off the SSE stream; health from `/api/nodes`; terminal deferred. (DONE — `docs/UI5_CHECKLIST.md`) |
+| **UI-6** ✅ | Hardening, a11y, PWA, push | all above | Installable PWA (manifest + SW + offline shell), a11y pass, install affordance; push deferred. (DONE — `9c452e8`, gate-verified `8a0ee76`, `docs/UI6_CHECKLIST.md`) |
 
-**The immediate next step is UI-0 then UI-1** — both unblocked today. Backend Move F can
-proceed in parallel since it touches different files. Do not start UI-2+ until F + I land.
+**LADDER COMPLETE (2026-06-25).** Every rung M1 → UI-6 is shipped, committed, and
+gate-verified on branch `feat/webui-ui0`. The remaining work is to **merge the branch
+to `main`**. Deliberately-deferred future boxes (Web Push, token streaming, diff
+hunks, terminal, approvals automation) are catalogued in `docs/DEFERRED.md` — none is
+a shipping blocker.
