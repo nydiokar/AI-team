@@ -1,5 +1,37 @@
 # Progress Log
 
+## 2026-06-25 — LLM turn observability M1/M2 release candidate
+
+Implemented the privacy-preserving turn accounting system specified in
+`docs/LLM_TURN_OBSERVABILITY_SPEC.md`.
+
+Shipped:
+
+- typed allowlisted telemetry events and immutable correlation context;
+- local and mesh Codex turn/invocation/process lifecycle;
+- streaming Codex tool and aggregate usage adapter;
+- SQLite event store and deterministic turn projections;
+- retry, timeout, duplicate-process, coverage, and context-continuity metrics;
+- authenticated turn APIs plus graph, diagnostic table, and timeline dashboard;
+- idempotent HTTP batching, bounded spool/replay, retention, and reconciliation;
+- maintenance commands:
+  `python main.py telemetry-reconcile [--turn-id ID] [--since HOURS]` and
+  `python main.py telemetry-cleanup [--event-days N] [--summary-days N]`.
+
+Validation: 76 focused observability/dashboard/mesh tests pass, including the
+real worker `_execute_task` path with a telemetry-aware fake backend. No paid
+backend or external network is used by these tests.
+
+Next release gates:
+
+1. additional deployed-Codex sanitized fixtures;
+2. real local and mesh Codex smoke tests;
+3. ingestion/query/concurrency performance measurements;
+4. then M3 Claude adapter work under the existing schema.
+
+Handoff warning: preserve the unrelated uncommitted
+`src/core/process_utils.py` modification.
+
 ## 2026-06-21 — Cockpit M4: workflow events (review / handoff / approval)
 
 **Milestone: the reserved workflow vocabulary (CONTROL_CONTRACT §7) is now a

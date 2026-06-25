@@ -66,6 +66,8 @@ Telegram -> active chat binding -> gateway session -> Claude Code / Codex native
 - `python main.py health`
 - `python main.py tail-events`
 - `python main.py stats`
+- `python main.py telemetry-reconcile [--turn-id ID] [--since HOURS]`
+- `python main.py telemetry-cleanup [--event-days N] [--summary-days N]`
 - `pm2 start ecosystem.config.js --only ai-team-gateway --update-env`
 - `pm2 restart ai-team-gateway --update-env`
 
@@ -86,6 +88,24 @@ CLAUDE_MAX_TURNS=0
 
 `CLAUDE_BASE_CWD` and `CLAUDE_ALLOWED_ROOT` should usually point to the parent workspace that contains every repo the gateway is allowed to touch. Do not set them so narrowly that the gateway cannot access intended repos, including itself if self-editing is expected.
 
+Turn observability is enabled by default. Its primary settings are:
+
+```env
+TELEMETRY_ENABLED=true
+TELEMETRY_DETAILED_EVENTS=true
+TELEMETRY_UPLOAD_BATCH_SIZE=50
+TELEMETRY_UPLOAD_INTERVAL_MS=1000
+TELEMETRY_UPLOAD_MAX_BYTES=524288
+TELEMETRY_SPOOL_MAX_BYTES=268435456
+TELEMETRY_EVENT_RETENTION_DAYS=30
+TELEMETRY_SUMMARY_RETENTION_DAYS=180
+TELEMETRY_TASK_SERVER_URL=
+```
+
+Durable accounting lives in `state/mesh.db`; `logs/events.ndjson` remains the
+operational event tail. Failed remote uploads spool under
+`logs/telemetry_spool/`.
+
 ## Current Production Status
 
 The session-first architecture is implemented.
@@ -105,3 +125,5 @@ The main production gate that still matters is a live end-to-end validation:
 - [OPERATIONS_PM2.md](C:/Users/Cicada38/Projects/AI-team/docs/OPERATIONS_PM2.md)
 - [ROADMAP.md](C:/Users/Cicada38/Projects/AI-team/docs/ROADMAP.md)
 - [CLAUDE_HOOK_IDEAS.md](C:/Users/Cicada38/Projects/AI-team/docs/CLAUDE_HOOK_IDEAS.md)
+- [LLM_TURN_OBSERVABILITY_SPEC.md](LLM_TURN_OBSERVABILITY_SPEC.md)
+- [PROGRESS_LOG.md](PROGRESS_LOG.md)

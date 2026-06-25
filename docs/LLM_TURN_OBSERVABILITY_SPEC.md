@@ -1,10 +1,89 @@
 # LLM Turn Observability and Usage Accounting Specification
 
-Status: implementation-ready v1
-Date: 2026-06-24
-Target repository: `AI-team` at commit `5f246b7`
+Status: M1/M2 release candidate; implementation handoff below
+Date: 2026-06-25
+Original design baseline: `AI-team` commit `5f246b7`
 Primary implementation backend: Codex CLI
 Later adapters: Claude Code, OpenCode CLI, OpenCode server
+
+---
+
+## Implementation handoff — 2026-06-25
+
+The M0–M2 architecture in this specification is implemented on `main` through
+commit `86cd4d7`. The implementation was delivered as these reviewable
+checkpoints:
+
+- `36d1166` — telemetry contracts, Codex adapter, persistence, APIs, and UI;
+- `3f2647e` — lifecycle propagation and transport hardening;
+- `4536f82` — stale-turn reconciliation and duplicate-process signaling;
+- `6b3455f` — required turn-accounting metrics and continuity rules;
+- `90c05c3` — retention, reduced-detail behavior, and cleanup controls;
+- `f6dd83f` — dashboard/API integration coverage;
+- `393ed48` — real worker-path mesh correlation test;
+- `e49e30e` — permanent rejection and cancellation lifecycle hardening;
+- `86cd4d7` — explicit LLAMA postprocess coverage gap and monotonic Codex duration.
+
+### Implemented
+
+- typed, default-deny telemetry envelope and immutable invocation context;
+- gateway, worker, backend, process, retry, timeout, result, and exit correlation;
+- streaming Codex JSONL parsing with aggregate-only token semantics;
+- idempotent controller ingestion, bounded upload batches, spool/replay, and expiry;
+- deterministic SQLite projection and all required v1 metric keys;
+- raw and deduplicated token-work totals;
+- backend-session-aware cross-turn context growth;
+- authenticated turn list/detail/graph/diagnostic/timeline APIs and dashboard views;
+- transactional detailed-event and summary retention;
+- `telemetry-reconcile` and `telemetry-cleanup` maintenance commands;
+- explicit unknown/unsupported coverage for unavailable facts and LLAMA postprocessing.
+
+Validation currently passes:
+
+```text
+76 focused observability, dashboard, ingestion, storage, privacy, and mesh tests
+```
+
+Re-run the focused gate with:
+
+```bash
+.venv/bin/pytest -q \
+  tests/test_telemetry_*.py \
+  tests/test_dashboard.py \
+  tests/test_backend_call.py \
+  tests/test_observability_logging.py \
+  tests/test_codex_telemetry_adapter.py \
+  tests/test_codex_duplicate_process.py
+```
+
+The real worker execution path is covered by
+`tests/test_telemetry_mesh_integration.py` without network access or paid
+backend calls.
+
+### Remaining release validation
+
+These are the next tasks. They are validation/capability work, not permission to
+redesign the schema:
+
+1. Capture additional sanitized fixtures from the deployed Codex version:
+   plain answer, MCP tool, retry/failure, and subagent if supported.
+2. Add cumulative-counter/reset fixtures if a deployed backend emits cumulative
+   usage. Keep aggregate-only semantics if Codex exposes only final totals.
+3. Run one controlled real local Codex smoke test and one controlled real mesh
+   Codex smoke test; inspect all three dashboard views and scan DB/spool/API
+   output for privacy sentinels.
+4. Run the §16.5 SQLite ingestion/query/concurrency benchmarks and record actual
+   numbers. Fix batching/indexing before considering sampling.
+5. After those gates pass, mark M1/M2 shipped and begin M3 Claude support.
+
+Do not start M3/M4 by changing the turn model or dashboard contracts. Add
+backend adapters and coverage states under the existing schema.
+
+### Working-tree warning
+
+At this handoff, `src/core/process_utils.py` has a pre-existing unrelated
+uncommitted modification. Preserve it unless its owner explicitly asks for it
+to be changed or committed.
 
 ---
 
