@@ -270,6 +270,15 @@ def submit_telemetry_batch(
     """Validate and idempotently persist one gateway/worker telemetry batch."""
     from config import config
 
+    if not config.telemetry.enabled:
+        return {
+            "batch_id": payload.batch_id,
+            "accepted": 0,
+            "duplicates": 0,
+            "rejected": 0,
+            "rejections": [],
+            "disabled": True,
+        }
     max_bytes = int(config.telemetry.upload_max_bytes)
     content_length = request.headers.get("content-length")
     if content_length:

@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 14
+_CURRENT_VERSION = 15
 
 
 # ---------------------------------------------------------------------------
@@ -1374,6 +1374,7 @@ def _get_migrations() -> List[tuple]:
                 WHERE provider_request_id IS NOT NULL
         """),
         (14, "ALTER TABLE llm_events ADD COLUMN clock_quality TEXT NOT NULL DEFAULT 'unknown'"),
+        (15, "ALTER TABLE llm_turns ADD COLUMN events_pruned_at TEXT"),
     ]
 
 

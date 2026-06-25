@@ -311,3 +311,76 @@ def test_context_growth_between_turns_requires_backend_session_continuity(tmp_pa
         third["metrics"]["context_discontinuity_reason"]
         == "backend_session_changed"
     )
+
+
+def test_retention_prunes_events_then_deletes_expired_summaries(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    store = TelemetryStore(db)
+    now = utc_now()
+
+    def terminal_events(turn_id, at):
+        common = {
+            "turn_id": turn_id,
+            "node_id": "worker-a",
+            "emitter_process_instance_id": "worker_proc",
+            "source": "worker",
+            "backend": "codex",
+        }
+        return [
+            build_event(
+                "turn.started", event_time=at, observed_time=at, **common
+            ),
+            build_event(
+                "turn.completed",
+                event_time=at + timedelta(seconds=1),
+                observed_time=at + timedelta(seconds=1),
+                attributes={
+                    "status": "success",
+                    "timeout_status": "none",
+                    "exit_code": 0,
+                },
+                **common,
+            ),
+        ]
+
+    store.insert_events(
+        terminal_events("turn_prune_events", now - timedelta(days=40))
+    )
+    store.insert_events(
+        terminal_events("turn_delete_summary", now - timedelta(days=200))
+    )
+    preserved_metrics = store.get_turn("turn_prune_events")["metrics"]
+
+    result = store.cleanup(
+        event_retention_days=30,
+        summary_retention_days=180,
+        now=now,
+    )
+
+    assert result["event_turns_pruned"] == 1
+    assert result["summaries_deleted"] == 1
+    retained = store.get_turn("turn_prune_events")
+    assert retained is not None
+    assert retained["metrics"] == preserved_metrics
+    assert retained["events_pruned_at"] is not None
+    assert "detailed_events_pruned" in retained["data_quality"]
+    assert store.list_events("turn_prune_events") == []
+    assert store.get_turn("turn_delete_summary") is None
+    assert store.list_events("turn_delete_summary") == []
+
+    store.insert_events(
+        [
+            build_event(
+                "telemetry.coverage",
+                turn_id="turn_prune_events",
+                node_id="worker-a",
+                emitter_process_instance_id="worker_proc",
+                source="worker",
+                backend="codex",
+                attributes={"area": "usage", "coverage": "partial"},
+            )
+        ]
+    )
+    after_late = store.get_turn("turn_prune_events")
+    assert after_late["metrics"] == preserved_metrics
+    assert "late_event_after_retention" in after_late["data_quality"]

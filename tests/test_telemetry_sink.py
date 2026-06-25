@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import urllib.error
 
@@ -155,3 +156,30 @@ def test_schema_rejection_is_not_retried_immediately(tmp_path, monkeypatch):
 
     assert sink._post_batch(sink._batch_body([_event("invalid")])) is False
     assert len(attempts) == 1
+
+
+def test_expired_spool_files_are_removed_before_replay(tmp_path, monkeypatch):
+    sink = BufferedHttpTelemetrySink(
+        "http://controller",
+        "token",
+        node_id="worker-a",
+        spool_dir=tmp_path,
+        spool_max_age_days=7,
+    )
+    expired = tmp_path / "expired.json"
+    expired.write_text(
+        json.dumps(sink._batch_body([_event("expired")])),
+        encoding="utf-8",
+    )
+    old = time.time() - 8 * 86400
+    os.utime(expired, (old, old))
+    monkeypatch.setattr(
+        sink,
+        "_post_batch",
+        lambda _body: (_ for _ in ()).throw(
+            AssertionError("expired batches must not be uploaded")
+        ),
+    )
+
+    assert sink.replay_spool() == 0
+    assert not expired.exists()

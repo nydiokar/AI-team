@@ -44,3 +44,23 @@ def test_batch_validates_events_independently(tmp_path, monkeypatch):
         {"index": 1, "code": "schema_invalid"},
         {"index": 2, "code": "node_id_mismatch"},
     ]
+
+
+def test_disabled_telemetry_accepts_no_writes(tmp_path, monkeypatch):
+    from config import config
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr("src.control.task_server.get_db", lambda: db)
+    monkeypatch.setattr(config.telemetry, "enabled", False)
+    payload = TelemetryBatchPayload(
+        batch_id="batch_disabled",
+        node_id="worker-a",
+        events=[_event()],
+    )
+
+    result = submit_telemetry_batch(payload, _request())
+
+    assert result["disabled"] is True
+    assert result["accepted"] == 0
+    count = db._conn().execute("SELECT COUNT(*) FROM llm_events").fetchone()[0]
+    assert count == 0

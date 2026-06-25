@@ -308,6 +308,46 @@ def _telemetry_reconcile(args=None):
     )
 
 
+def _telemetry_cleanup(args=None):
+    """Apply configured telemetry event and summary retention."""
+    args = list(args or [])
+    event_days = config.telemetry.event_retention_days
+    summary_days = config.telemetry.summary_retention_days
+    index = 0
+    while index < len(args):
+        if args[index] == "--event-days" and index + 1 < len(args):
+            try:
+                event_days = max(1, int(args[index + 1]))
+            except ValueError:
+                print("--event-days must be a positive integer")
+                return
+            index += 2
+            continue
+        if args[index] == "--summary-days" and index + 1 < len(args):
+            try:
+                summary_days = max(1, int(args[index + 1]))
+            except ValueError:
+                print("--summary-days must be a positive integer")
+                return
+            index += 2
+            continue
+        print(f"Unknown telemetry-cleanup argument: {args[index]}")
+        return
+
+    from src.control.db import get_db
+    from src.control.telemetry_store import TelemetryStore
+
+    db = get_db()
+    if db is None:
+        print("Telemetry database is unavailable")
+        return
+    result = TelemetryStore(db).cleanup(
+        event_retention_days=event_days,
+        summary_retention_days=summary_days,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def main():
     """Main entry point"""
     
@@ -346,6 +386,9 @@ def main():
             return
         if command == "telemetry-reconcile":
             _telemetry_reconcile(sys.argv[2:])
+            return
+        if command == "telemetry-cleanup":
+            _telemetry_cleanup(sys.argv[2:])
             return
         if command == "reload-workers":
             asyncio.run(_reload_workers())
@@ -388,6 +431,7 @@ Usage:
     python main.py health [--json]          Print machine-readable local health and exit non-zero on failure
     python main.py tail-events [--task TASK_ID] [--lines N]   Show recent NDJSON events
     python main.py telemetry-reconcile [--turn-id ID] [--since HOURS]
+    python main.py telemetry-cleanup [--event-days N] [--summary-days N]
     python main.py reload-workers  Reload worker pool from environment
     python main.py git-commit <task_id> [--no-branch] [--push]  Commit task changes safely
     python main.py git-commit-all <task_id> [--no-branch] [--push]  Commit all staged changes

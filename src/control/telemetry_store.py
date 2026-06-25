@@ -89,7 +89,10 @@ class TelemetryStore:
 
         if rebuild:
             for turn_id in turn_ids:
-                self.rebuild_turn(turn_id)
+                if self._turn_events_pruned(turn_id):
+                    self._flag_late_event_after_retention(turn_id)
+                else:
+                    self.rebuild_turn(turn_id)
             session_ids = sorted(
                 {
                     event.session_id
@@ -378,6 +381,114 @@ class TelemetryStore:
                 item["attributes"] = {}
             result.append(item)
         return result
+
+    def cleanup(
+        self,
+        *,
+        event_retention_days: int,
+        summary_retention_days: int,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, int]:
+        """Apply detailed-event and summary retention transactionally per turn."""
+        current = now or datetime.now(tz=timezone.utc)
+        event_cutoff = current.timestamp() - max(1, event_retention_days) * 86400
+        summary_cutoff = current.timestamp() - max(1, summary_retention_days) * 86400
+        event_cutoff_text = datetime.fromtimestamp(
+            event_cutoff, tz=timezone.utc
+        ).isoformat()
+        summary_cutoff_text = datetime.fromtimestamp(
+            summary_cutoff, tz=timezone.utc
+        ).isoformat()
+        summary_rows = self.db._conn().execute(
+            """
+            SELECT turn_id
+            FROM llm_turns
+            WHERE COALESCE(ended_at, updated_at) < ?
+            ORDER BY turn_id
+            """,
+            (summary_cutoff_text,),
+        ).fetchall()
+        summary_turn_ids = [str(row["turn_id"]) for row in summary_rows]
+        for expired_turn_id in summary_turn_ids:
+            with self.db._write() as conn:
+                conn.execute(
+                    "DELETE FROM llm_events WHERE turn_id = ?", (expired_turn_id,)
+                )
+                conn.execute(
+                    "DELETE FROM llm_model_requests WHERE turn_id = ?",
+                    (expired_turn_id,),
+                )
+                conn.execute(
+                    """
+                    DELETE FROM llm_invocation_processes
+                    WHERE invocation_id IN (
+                        SELECT invocation_id
+                        FROM llm_invocations
+                        WHERE turn_id = ?
+                    )
+                    """,
+                    (expired_turn_id,),
+                )
+                conn.execute(
+                    "DELETE FROM llm_invocations WHERE turn_id = ?",
+                    (expired_turn_id,),
+                )
+                conn.execute(
+                    "DELETE FROM llm_turns WHERE turn_id = ?", (expired_turn_id,)
+                )
+
+        event_rows = self.db._conn().execute(
+            """
+            SELECT turn_id, data_quality_json
+            FROM llm_turns
+            WHERE final_status NOT IN ('queued', 'running')
+              AND events_pruned_at IS NULL
+              AND COALESCE(ended_at, updated_at) < ?
+            ORDER BY turn_id
+            """,
+            (event_cutoff_text,),
+        ).fetchall()
+        pruned_turn_ids: List[str] = []
+        for row in event_rows:
+            retained_turn_id = str(row["turn_id"])
+            flags = self._decode_flags(row["data_quality_json"])
+            flags.add("detailed_events_pruned")
+            with self.db._write() as conn:
+                conn.execute(
+                    "DELETE FROM llm_events WHERE turn_id = ?",
+                    (retained_turn_id,),
+                )
+                conn.execute(
+                    """
+                    UPDATE llm_turns
+                    SET events_pruned_at = ?, data_quality_json = ?, updated_at = ?
+                    WHERE turn_id = ?
+                    """,
+                    (
+                        current.isoformat(),
+                        _json(sorted(flags)),
+                        current.isoformat(),
+                        retained_turn_id,
+                    ),
+                )
+            pruned_turn_ids.append(retained_turn_id)
+
+        with self.db._write() as conn:
+            orphaned = conn.execute(
+                """
+                DELETE FROM llm_processes
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM llm_invocation_processes ip
+                    WHERE ip.process_instance_id = llm_processes.process_instance_id
+                )
+                """
+            ).rowcount
+        return {
+            "summaries_deleted": len(summary_turn_ids),
+            "event_turns_pruned": len(pruned_turn_ids),
+            "orphan_processes_deleted": max(0, orphaned),
+        }
 
     def get_turn(self, turn_id: str) -> Optional[Dict[str, Any]]:
         row = self.db._conn().execute(
@@ -790,6 +901,40 @@ class TelemetryStore:
             (turn_id,),
         ).fetchone()
         return str(row["invocation_id"]) if row else None
+
+    def _turn_events_pruned(self, turn_id: str) -> bool:
+        row = self.db._conn().execute(
+            "SELECT events_pruned_at FROM llm_turns WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        return bool(row and row["events_pruned_at"])
+
+    def _flag_late_event_after_retention(self, turn_id: str) -> None:
+        row = self.db._conn().execute(
+            "SELECT data_quality_json FROM llm_turns WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        if row is None:
+            return
+        flags = self._decode_flags(row["data_quality_json"])
+        flags.add("late_event_after_retention")
+        with self.db._write() as conn:
+            conn.execute(
+                """
+                UPDATE llm_turns
+                SET data_quality_json = ?, updated_at = ?
+                WHERE turn_id = ?
+                """,
+                (_json(sorted(flags)), _now(), turn_id),
+            )
+
+    @staticmethod
+    def _decode_flags(value: Any) -> set[str]:
+        try:
+            decoded = json.loads(value or "[]")
+        except (TypeError, json.JSONDecodeError):
+            decoded = []
+        return {str(item) for item in decoded if item}
 
     def _enrich_cross_turn_context(self, turn: Dict[str, Any]) -> None:
         """Compare context only when session and backend-session continuity is proven."""

@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Iterable, List, Protocol
 
 from src.control.telemetry_store import TelemetryStore
-from src.core.telemetry import TelemetryEvent, new_telemetry_id
+from src.core.telemetry import (
+    TelemetryEvent,
+    filter_events_for_detail_level,
+    new_telemetry_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +75,8 @@ class BufferedHttpTelemetrySink:
         upload_max_bytes: int = 524_288,
         upload_max_attempts: int = 3,
         retry_backoff_seconds: float = 0.25,
+        detailed_events: bool = True,
+        spool_max_age_days: int = 7,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
@@ -83,11 +89,19 @@ class BufferedHttpTelemetrySink:
         self.upload_max_bytes = max(65_536, int(upload_max_bytes))
         self.upload_max_attempts = max(1, int(upload_max_attempts))
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+        self.detailed_events = bool(detailed_events)
+        self.spool_max_age_days = max(1, int(spool_max_age_days))
         self._events: List[TelemetryEvent] = []
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
 
     def emit(self, event: TelemetryEvent) -> None:
+        filtered = filter_events_for_detail_level(
+            [event], detailed=self.detailed_events
+        )
+        if not filtered:
+            return
+        event = filtered[0]
         should_flush = False
         timer_to_start: threading.Timer | None = None
         with self._lock:
@@ -125,6 +139,7 @@ class BufferedHttpTelemetrySink:
 
     def replay_spool(self) -> int:
         replayed = 0
+        self._remove_expired_spool_files()
         try:
             paths = sorted(self.spool_dir.glob("*.json"))
         except Exception:
@@ -142,6 +157,24 @@ class BufferedHttpTelemetrySink:
                     pass
                 replayed += 1
         return replayed
+
+    def _remove_expired_spool_files(self) -> int:
+        cutoff = time.time() - self.spool_max_age_days * 86400
+        removed = 0
+        try:
+            for path in self.spool_dir.glob("*.json"):
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+        except Exception:
+            logger.warning("event=telemetry_spool_expiry_failed", exc_info=True)
+        if removed:
+            logger.error(
+                "event=telemetry_spool_expired node_id=%s dropped_batches=%d",
+                self.node_id,
+                removed,
+            )
+        return removed
 
     def _batch_body(self, events: List[TelemetryEvent]) -> dict:
         return {
@@ -288,6 +321,7 @@ def build_runtime_telemetry_sink(
             flush_interval_ms=config.telemetry.upload_interval_ms,
             spool_max_bytes=config.telemetry.spool_max_bytes,
             upload_max_bytes=config.telemetry.upload_max_bytes,
+            detailed_events=config.telemetry.detailed_events,
         )
     except Exception:
         return NullTelemetrySink()
