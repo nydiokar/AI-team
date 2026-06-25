@@ -90,6 +90,15 @@ class TelemetryStore:
         if rebuild:
             for turn_id in turn_ids:
                 self.rebuild_turn(turn_id)
+            session_ids = sorted(
+                {
+                    event.session_id
+                    for event in validated
+                    if event.session_id is not None
+                }
+            )
+            for session_id in session_ids:
+                self._refresh_session_context_growth(session_id)
         return {
             "accepted": accepted,
             "duplicates": duplicates,
@@ -137,6 +146,7 @@ class TelemetryStore:
             return None
         projection = project_turn(events)
         turn = projection["turn"]
+        self._enrich_cross_turn_context(turn)
         now = _now()
 
         with self.db._write() as conn:
@@ -780,6 +790,81 @@ class TelemetryStore:
             (turn_id,),
         ).fetchone()
         return str(row["invocation_id"]) if row else None
+
+    def _enrich_cross_turn_context(self, turn: Dict[str, Any]) -> None:
+        """Compare context only when session and backend-session continuity is proven."""
+        metrics = turn["metrics"]
+        session_id = turn.get("session_id")
+        if not session_id:
+            metrics["context_growth_between_turns"] = None
+            metrics["context_discontinuity_reason"] = "no_session"
+            return
+
+        current_backend_session = turn.get("backend_session_id_start")
+        if not current_backend_session:
+            metrics["context_growth_between_turns"] = None
+            metrics[
+                "context_discontinuity_reason"
+            ] = "backend_session_identity_unavailable"
+            return
+
+        row = self.db._conn().execute(
+            """
+            SELECT backend_session_id_end, metrics_json
+            FROM llm_turns
+            WHERE session_id = ?
+              AND turn_id != ?
+              AND COALESCE(ended_at, '') <= COALESCE(?, '')
+            ORDER BY COALESCE(ended_at, created_at) DESC
+            LIMIT 1
+            """,
+            (session_id, turn["turn_id"], turn.get("started_at")),
+        ).fetchone()
+        if row is None:
+            metrics["context_growth_between_turns"] = None
+            metrics["context_discontinuity_reason"] = "no_previous_turn"
+            return
+        if row["backend_session_id_end"] != current_backend_session:
+            metrics["context_growth_between_turns"] = None
+            metrics["context_discontinuity_reason"] = "backend_session_changed"
+            return
+
+        try:
+            previous_metrics = json.loads(row["metrics_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            previous_metrics = {}
+        current_entry = metrics.get("turn_entry_context_tokens")
+        previous_exit = previous_metrics.get("turn_exit_context_tokens")
+        if current_entry is None or previous_exit is None:
+            metrics["context_growth_between_turns"] = None
+            metrics["context_discontinuity_reason"] = "context_usage_unavailable"
+            return
+        metrics["context_growth_between_turns"] = current_entry - previous_exit
+        metrics["context_discontinuity_reason"] = None
+
+    def _refresh_session_context_growth(self, session_id: str) -> None:
+        """Recompute continuity metrics in order after late events or rebuilds."""
+        rows = self.db._conn().execute(
+            """
+            SELECT *
+            FROM llm_turns
+            WHERE session_id = ?
+            ORDER BY COALESCE(started_at, created_at), turn_id
+            """,
+            (session_id,),
+        ).fetchall()
+        for row in rows:
+            turn = self._decode_turn(dict(row))
+            self._enrich_cross_turn_context(turn)
+            with self.db._write() as conn:
+                conn.execute(
+                    """
+                    UPDATE llm_turns
+                    SET metrics_json = ?, updated_at = ?
+                    WHERE turn_id = ?
+                    """,
+                    (_json(turn["metrics"]), _now(), turn["turn_id"]),
+                )
 
     @staticmethod
     def _decode_turn(row: Dict[str, Any]) -> Dict[str, Any]:
