@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 logger = logging.getLogger(__name__)
 
 # Safety bound on the output we store in the DB result, NOT a content-truncation
@@ -151,6 +153,7 @@ def _process_identity(pid: int) -> Dict[str, Any]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=5,
+                creationflags=_NO_WINDOW,
             )
             if proc.returncode != 0 or not proc.stdout.strip():
                 return {"alive": True, "error": proc.stderr.strip() or "windows process query returned no data"}
@@ -892,7 +895,7 @@ class WorkerAgent:
                 stdin=subprocess.DEVNULL,
                 cwd=job_cwd,
                 env=ensure_node_on_path(),
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | _NO_WINDOW) if sys.platform == "win32" else 0,
             )
             log_fh.close()
             pgid = proc.pid  # On Windows, process group = pid

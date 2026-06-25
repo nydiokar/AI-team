@@ -23,6 +23,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
@@ -67,6 +69,7 @@ def _run_git(cwd: str, args: List[str], timeout: int = 10) -> Optional[str]:
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
+            creationflags=_NO_WINDOW,
         )
         if result.returncode != 0:
             return None
@@ -293,6 +296,7 @@ class ClaudeCodeBackend(CodingBackend):
                 stderr=subprocess.PIPE,
                 cwd=cwd or None,
                 env=proc_env,
+                creationflags=_NO_WINDOW,
             )
             self._register_process(proc, session_key)
 

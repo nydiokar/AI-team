@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
@@ -131,6 +133,7 @@ class CodexBackend(CodingBackend):
                 stderr=subprocess.PIPE,
                 cwd=cwd or None,
                 env=proc_env,
+                creationflags=_NO_WINDOW,
             )
             self._register_process(proc, session_key)
 
