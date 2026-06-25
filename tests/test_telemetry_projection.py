@@ -216,3 +216,20 @@ def test_retry_remains_one_turn_with_two_invocations():
     assert projection["turn"]["metrics"]["invocations_per_turn"] == 2
     assert projection["turn"]["metrics"]["retry_count"] == 1
     assert projection["turn"]["metrics"]["failed_invocation_count"] == 1
+
+
+def test_negative_turn_duration_is_unknown_and_flagged_as_clock_skew():
+    start = utc_now()
+    events = [
+        _event("turn.started", at=start),
+        _event(
+            "turn.completed",
+            at=start - timedelta(seconds=1),
+            attributes={"status": "success", "timeout_status": "none", "exit_code": 0},
+        ),
+    ]
+
+    turn = project_turn(events)["turn"]
+
+    assert turn["metrics"]["wall_time_ms"] is None
+    assert "clock_skew" in turn["data_quality"]

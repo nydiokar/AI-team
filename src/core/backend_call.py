@@ -5,6 +5,8 @@ from __future__ import annotations
 import inspect
 from typing import Any, Callable
 
+from src.core.interfaces import ExecutionResult, ExecutionTelemetry
+
 
 def call_backend(
     method: Callable[..., Any],
@@ -32,4 +34,13 @@ def call_backend(
         kwargs["telemetry_context"] = telemetry_context
     if accepts_kwargs or "telemetry_sink" in names:
         kwargs["telemetry_sink"] = telemetry_sink
-    return method(*args, **kwargs)
+    result = method(*args, **kwargs)
+    if (
+        isinstance(result, ExecutionResult)
+        and telemetry_context is not None
+        and result.telemetry is None
+    ):
+        result.telemetry = ExecutionTelemetry(
+            invocation_id=telemetry_context.invocation_id
+        )
+    return result

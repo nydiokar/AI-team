@@ -21,10 +21,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Security, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
@@ -205,7 +205,7 @@ class ExecutionResultPayload(BaseModel):
 class TelemetryBatchPayload(BaseModel):
     batch_id: str = Field(min_length=1, max_length=96)
     node_id: str = Field(min_length=1, max_length=128)
-    events: List[TelemetryEvent] = Field(default_factory=list, max_length=200)
+    events: List[Dict[str, Any]] = Field(default_factory=list, max_length=200)
 
 
 # ---------------------------------------------------------------------------
@@ -264,20 +264,45 @@ def health() -> Dict[str, Any]:
 
 
 @app.post("/telemetry/batches", dependencies=[Depends(_require_auth)])
-def submit_telemetry_batch(payload: TelemetryBatchPayload) -> Dict[str, Any]:
+def submit_telemetry_batch(
+    payload: TelemetryBatchPayload, request: Request
+) -> Dict[str, Any]:
     """Validate and idempotently persist one gateway/worker telemetry batch."""
+    from config import config
+
+    max_bytes = int(config.telemetry.upload_max_bytes)
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                raise HTTPException(status_code=413, detail="Telemetry batch too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Telemetry database unavailable")
-    mismatched = [event.event_id for event in payload.events if event.node_id != payload.node_id]
-    if mismatched:
-        raise HTTPException(status_code=422, detail="Event node_id does not match batch node_id")
-    result = TelemetryStore(db).insert_events(payload.events)
+
+    valid: List[TelemetryEvent] = []
+    rejections: List[Dict[str, Any]] = []
+    for index, raw_event in enumerate(payload.events):
+        try:
+            event = TelemetryEvent.model_validate(raw_event)
+        except ValidationError:
+            rejections.append({"index": index, "code": "schema_invalid"})
+            continue
+        if event.node_id != payload.node_id:
+            rejections.append({"index": index, "code": "node_id_mismatch"})
+            continue
+        valid.append(event)
+
+    result = TelemetryStore(db).insert_events(valid)
     return {
         "batch_id": payload.batch_id,
         "accepted": result["accepted"],
         "duplicates": result["duplicates"],
-        "rejected": result["rejected"],
+        "rejected": len(rejections),
+        "rejections": rejections,
     }
 
 

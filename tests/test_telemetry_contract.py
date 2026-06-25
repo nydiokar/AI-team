@@ -10,6 +10,7 @@ from src.core.telemetry import (
     new_telemetry_id,
     sanitize_attributes,
     sanitize_tool_name,
+    telemetry_subprocess_env,
     telemetry_context,
     current_telemetry_context,
 )
@@ -33,6 +34,25 @@ def test_context_is_immutable_and_scoped():
         spawn_reason="retry",
     )
     assert current_telemetry_context() is None
+
+
+def test_subprocess_environment_contains_only_correlation_values():
+    context = TelemetryContext(
+        turn_id="turn_1",
+        invocation_id="inv_1",
+        node_id="worker-a",
+        session_id="session-a",
+        backend="codex",
+        model="model-is-not-exported",
+    )
+
+    assert telemetry_subprocess_env(context) == {
+        "AI_TEAM_SESSION_ID": "session-a",
+        "AI_TEAM_TURN_ID": "turn_1",
+        "AI_TEAM_INVOCATION_ID": "inv_1",
+        "AI_TEAM_NODE_ID": "worker-a",
+    }
+    assert telemetry_subprocess_env(None) == {}
     with telemetry_context(context):
         assert current_telemetry_context() == context
     assert current_telemetry_context() is None
@@ -59,6 +79,16 @@ def test_default_deny_rejects_prompt_and_raw_payload_fields():
 def test_nested_attributes_are_rejected():
     with pytest.raises(ValueError):
         sanitize_attributes("telemetry.coverage", {"area": {"nested": "bad"}})
+
+
+def test_attribute_values_are_bounded():
+    with pytest.raises(ValueError):
+        sanitize_attributes("telemetry.coverage", {"reason_code": "x" * 257})
+    with pytest.raises(ValueError):
+        sanitize_attributes(
+            "telemetry.coverage",
+            {"reason_code": ["x"] * 17},
+        )
 
 
 def test_tool_name_is_sanitized_and_bounded():
@@ -97,6 +127,27 @@ def test_build_event_keeps_only_approved_operational_fields():
     assert payload["turn_id"] == "task_1"
     assert payload["attributes"]["input_tokens"] == 100
     assert "prompt" not in str(payload).lower()
+
+
+def test_build_event_assigns_process_monotonic_sequence_and_clock_quality():
+    first = build_event(
+        "turn.started",
+        turn_id="turn_seq",
+        node_id="node",
+        emitter_process_instance_id="proc",
+        source="gateway",
+    )
+    second = build_event(
+        "turn.completed",
+        turn_id="turn_seq",
+        node_id="node",
+        emitter_process_instance_id="proc",
+        source="gateway",
+        attributes={"status": "success", "timeout_status": "none", "exit_code": 0},
+    )
+
+    assert second.source_sequence > first.source_sequence
+    assert first.clock_quality == "unknown"
 
 
 def test_naive_timestamps_are_rejected():

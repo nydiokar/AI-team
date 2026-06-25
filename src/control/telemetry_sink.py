@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Iterable, List, Protocol
@@ -66,6 +68,9 @@ class BufferedHttpTelemetrySink:
         timeout: int = 10,
         flush_interval_ms: int = 1000,
         spool_max_bytes: int = 268_435_456,
+        upload_max_bytes: int = 524_288,
+        upload_max_attempts: int = 3,
+        retry_backoff_seconds: float = 0.25,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
@@ -75,6 +80,9 @@ class BufferedHttpTelemetrySink:
         self.timeout = max(1, int(timeout))
         self.flush_interval_ms = max(100, int(flush_interval_ms))
         self.spool_max_bytes = max(1_048_576, int(spool_max_bytes))
+        self.upload_max_bytes = max(65_536, int(upload_max_bytes))
+        self.upload_max_attempts = max(1, int(upload_max_attempts))
+        self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
         self._events: List[TelemetryEvent] = []
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
@@ -110,9 +118,10 @@ class BufferedHttpTelemetrySink:
                 return
             events = self._events
             self._events = []
-        body = self._batch_body(events)
-        if not self._post_batch(body):
-            self._spool(body)
+        for batch_events in self._split_batches(events):
+            body = self._batch_body(batch_events)
+            if not self._post_batch(body):
+                self._spool(body)
 
     def replay_spool(self) -> int:
         replayed = 0
@@ -141,6 +150,32 @@ class BufferedHttpTelemetrySink:
             "events": [event.model_dump(mode="json") for event in events],
         }
 
+    def _split_batches(
+        self, events: List[TelemetryEvent]
+    ) -> List[List[TelemetryEvent]]:
+        """Bound batches by both event count and encoded request size."""
+        batches: List[List[TelemetryEvent]] = []
+        current: List[TelemetryEvent] = []
+        for event in events:
+            candidate = current + [event]
+            body = self._batch_body(candidate)
+            encoded_size = len(
+                json.dumps(
+                    body, ensure_ascii=False, separators=(",", ":")
+                ).encode("utf-8")
+            )
+            if current and (
+                len(candidate) > self.batch_size
+                or encoded_size > self.upload_max_bytes
+            ):
+                batches.append(current)
+                current = [event]
+            else:
+                current = candidate
+        if current:
+            batches.append(current)
+        return batches
+
     def _post_batch(self, body: dict) -> bool:
         if not self.base_url or not self.token:
             return False
@@ -154,17 +189,32 @@ class BufferedHttpTelemetrySink:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                response.read()
-            return True
-        except Exception as exc:
+        for attempt in range(1, self.upload_max_attempts + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    response.read()
+                return True
+            except urllib.error.HTTPError as exc:
+                if 400 <= exc.code < 500:
+                    logger.error(
+                        "event=telemetry_upload_rejected node_id=%s status=%d",
+                        self.node_id,
+                        exc.code,
+                    )
+                    return False
+                error_class = f"HTTP_{exc.code}"
+            except Exception as exc:
+                error_class = type(exc).__name__
+
             logger.warning(
-                "event=telemetry_upload_failed node_id=%s error_class=%s",
+                "event=telemetry_upload_failed node_id=%s error_class=%s attempt=%d",
                 self.node_id,
-                type(exc).__name__,
+                error_class,
+                attempt,
             )
-            return False
+            if attempt < self.upload_max_attempts and self.retry_backoff_seconds:
+                time.sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
+        return False
 
     def _spool(self, body: dict) -> None:
         try:
@@ -237,6 +287,7 @@ def build_runtime_telemetry_sink(
             batch_size=config.telemetry.upload_batch_size,
             flush_interval_ms=config.telemetry.upload_interval_ms,
             spool_max_bytes=config.telemetry.spool_max_bytes,
+            upload_max_bytes=config.telemetry.upload_max_bytes,
         )
     except Exception:
         return NullTelemetrySink()

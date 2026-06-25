@@ -1359,6 +1359,21 @@ class TaskOrchestrator(ITaskOrchestrator):
                     task.status = TaskStatus.FAILED
                     logger.info(f"event=cancelled_before_start worker={worker_name} task_id={task.id}")
                     self._emit_event("cancelled", task, {"worker": worker_name, "when": "before_start"})
+                    self._emit_turn_telemetry(
+                        "turn.cancel_requested",
+                        task,
+                        {"reason_code": "cancelled_before_start"},
+                    )
+                    self._emit_turn_telemetry(
+                        "turn.completed",
+                        task,
+                        {
+                            "status": "cancelled",
+                            "timeout_status": "none",
+                            "exit_code": None,
+                        },
+                        flush=True,
+                    )
                     self.task_queue.task_done()
                     # Release inflight locks and pending state, similar to completion path
                     try:
@@ -1428,6 +1443,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                     else "cancelled"
                     if any("cancelled" in str(error).lower() for error in (result.errors or []))
                     else "failed"
+                )
+                self._emit_turn_telemetry(
+                    "turn.result_recorded",
+                    task,
+                    {
+                        "status": final_status,
+                        "error_code": getattr(result, "error_class", "") or None,
+                    },
+                    invocation_id=getattr(result, "telemetry_invocation_id", None),
+                    backend=finish_backend,
                 )
                 self._emit_turn_telemetry(
                     "turn.completed",
@@ -1765,10 +1790,29 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 return_code=getattr(raw, "return_code", 0),
                             )
                             setattr(result, "backend_name", backend_name)
+                            if raw.telemetry is not None:
+                                setattr(
+                                    result,
+                                    "telemetry_invocation_id",
+                                    raw.telemetry.invocation_id,
+                                )
                         else:
                             result = raw
                     elif cancel_waiter and cancel_waiter in done:
                         # Cooperative cancellation
+                        self._emit_turn_telemetry(
+                            "turn.cancel_requested",
+                            task,
+                            {
+                                "reason_code": (
+                                    "gateway_shutdown"
+                                    if task.id in self._shutdown_interrupted_tasks
+                                    else "user_cancel"
+                                )
+                            },
+                            invocation_id=telemetry_context.invocation_id,
+                            backend=backend_name,
+                        )
                         if session:
                             with contextlib.suppress(Exception):
                                 backend.cancel(session)
