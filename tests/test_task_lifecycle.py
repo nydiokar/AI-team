@@ -4,7 +4,8 @@ from src.core.task_lifecycle import (
     section_for_state,
     QUEUED, DISPATCHING, RUNNING, WAITING_FOR_INPUT,
     SUCCEEDED, FAILED, CANCELLED, CONNECTION_UNKNOWN,
-    SECTION_ATTENTION, SECTION_RUNNING, SECTION_QUEUED, SECTION_RECENT,
+    SECTION_ATTENTION, SECTION_RUNNING, SECTION_QUEUED, SECTION_FAILED,
+    SECTION_RECENT,
 )
 
 
@@ -50,9 +51,13 @@ class TestSessionOverlay:
 
 class TestSectioning:
     def test_attention_section(self):
+        # Attention = genuinely BLOCKED on a human, still actionable. FAILED is
+        # terminal (its own section), NOT attention — see test_failed_section.
         assert section_for_state(WAITING_FOR_INPUT) == SECTION_ATTENTION
-        assert section_for_state(FAILED) == SECTION_ATTENTION
         assert section_for_state(CONNECTION_UNKNOWN) == SECTION_ATTENTION
+
+    def test_failed_section(self):
+        assert section_for_state(FAILED) == SECTION_FAILED
 
     def test_running_section(self):
         assert section_for_state(RUNNING) == SECTION_RUNNING

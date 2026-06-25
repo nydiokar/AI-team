@@ -77,6 +77,7 @@ export interface TaskSections {
   attention: Task[];
   running: Task[];
   queued: Task[];
+  failed: Task[];
   recent: Task[];
 }
 
@@ -92,6 +93,7 @@ export function toTaskSections(res: RawTaskSectionsResponse): TaskSections {
     attention: (s.attention ?? []).map(toSectionedTask),
     running: (s.running ?? []).map(toSectionedTask),
     queued: (s.queued ?? []).map(toSectionedTask),
+    failed: (s.failed ?? []).map(toSectionedTask),
     recent: (s.recent ?? []).map(toSectionedTask),
   };
 }

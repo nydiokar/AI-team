@@ -392,7 +392,7 @@ def build_control_api(orchestrator) -> FastAPI:
 
         ``?sectioned=true`` (Move G′) returns the supervised lifecycle: each task
         gains a derived ``ui_state`` + ``section``, grouped into
-        ``{sections: {attention, running, queued, recent}}``. The supervised state
+        ``{sections: {attention, running, queued, failed, recent}}``. The supervised state
         overlays the owning session's status onto the raw mesh status (e.g. an
         in-flight task whose session AWAITING_INPUT → ``waiting_for_input``), which
         the flat mesh status alone cannot express.
@@ -416,7 +416,7 @@ def build_control_api(orchestrator) -> FastAPI:
             logger.warning("control_api_tasks_session_overlay_failed err=%s", e)
 
         sections: Dict[str, List[Dict[str, Any]]] = {
-            "attention": [], "running": [], "queued": [], "recent": [],
+            "attention": [], "running": [], "queued": [], "failed": [], "recent": [],
         }
         for t in tasks:
             sess_status = session_status.get(t.get("session_id")) if t.get("session_id") else None
