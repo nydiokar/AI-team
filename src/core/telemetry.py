@@ -140,11 +140,13 @@ class telemetry_context:
 EVENT_ATTRIBUTE_ALLOWLIST: Dict[str, frozenset[str]] = {
     "turn.accepted": frozenset({"task_id", "source"}),
     "turn.queued": frozenset({"priority"}),
-    "turn.started": frozenset(),
+    "turn.started": frozenset({"backend_session_id_start"}),
     "turn.timeout_requested": frozenset({"timeout_kind", "timeout_ms"}),
     "turn.cancel_requested": frozenset({"reason_code"}),
     "turn.result_recorded": frozenset({"status", "error_code"}),
-    "turn.completed": frozenset({"status", "timeout_status", "exit_code"}),
+    "turn.completed": frozenset({
+        "status", "timeout_status", "exit_code", "backend_session_id_end",
+    }),
     "invocation.created": frozenset({
         "attempt", "spawn_reason", "action", "parent_invocation_id",
         "retry_of_invocation_id",

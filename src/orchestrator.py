@@ -2520,6 +2520,23 @@ created: {task.created}
             from src.core.telemetry import EMITTER_PROCESS_INSTANCE_ID, build_event
             session_id = str((task.metadata or {}).get("session_id") or "") or None
             session = self.session_store.get(session_id) if session_id else None
+            event_attributes = dict(attributes or {})
+            if (
+                name == "turn.started"
+                and session is not None
+                and session.backend_session_id
+            ):
+                event_attributes.setdefault(
+                    "backend_session_id_start", session.backend_session_id
+                )
+            elif (
+                name == "turn.completed"
+                and session is not None
+                and session.backend_session_id
+            ):
+                event_attributes.setdefault(
+                    "backend_session_id_end", session.backend_session_id
+                )
             self._telemetry_sink.emit(
                 build_event(
                     name,
@@ -2531,7 +2548,7 @@ created: {task.created}
                     invocation_id=invocation_id,
                     backend=backend or (session.backend if session else self._resolve_task_backend(task)),
                     model=model or (session.model if session else None),
-                    attributes=attributes or {},
+                    attributes=event_attributes,
                 )
             )
             if flush:

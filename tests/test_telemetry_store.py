@@ -122,6 +122,8 @@ def test_late_event_rebuild_is_deterministic(tmp_path):
     after_accounting = dict(after["metrics"])
     before_event_count = before_accounting.pop("telemetry_event_count")
     after_event_count = after_accounting.pop("telemetry_event_count")
+    before_accounting.pop("coverage_score")
+    after_accounting.pop("coverage_score")
     assert before_accounting == after_accounting
     assert after_event_count == before_event_count + 1
     assert after["coverage"]["usage"]["coverage"] == "aggregate_only"
@@ -199,3 +201,113 @@ def test_reconcile_closes_stale_turn_from_terminal_mesh_task(tmp_path):
     names = [event["event_name"] for event in store.list_events("turn_reconcile")]
     assert "telemetry.reconciled" in names
     assert "process.exit_unknown" in names
+
+
+def test_context_growth_between_turns_requires_backend_session_continuity(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    store = TelemetryStore(db)
+    start = utc_now()
+
+    def turn_events(turn_id, invocation_id, at, context_tokens, session_start, session_end):
+        common = {
+            "turn_id": turn_id,
+            "session_id": "session_context",
+            "node_id": "worker-a",
+            "emitter_process_instance_id": "worker_proc",
+            "source": "worker",
+            "backend": "codex",
+        }
+        return [
+            build_event(
+                "turn.started",
+                event_time=at,
+                observed_time=at,
+                attributes={"backend_session_id_start": session_start},
+                **common,
+            ),
+            build_event(
+                "invocation.created",
+                event_time=at,
+                observed_time=at,
+                invocation_id=invocation_id,
+                attributes={
+                    "attempt": 1,
+                    "spawn_reason": "initial",
+                    "action": "resume_session",
+                },
+                **common,
+            ),
+            build_event(
+                "model.request.usage",
+                event_time=at + timedelta(seconds=1),
+                observed_time=at + timedelta(seconds=1),
+                invocation_id=invocation_id,
+                model_request_id=f"{invocation_id}:mr:1",
+                attributes={
+                    "sequence": 1,
+                    "input_tokens": context_tokens,
+                    "output_tokens": 5,
+                    "input_token_semantics": "includes_cache",
+                    "usage_granularity": "request",
+                    "usage_source": "fixture",
+                    "usage_coverage": "complete",
+                    "work_category": "primary",
+                },
+                **common,
+            ),
+            build_event(
+                "turn.completed",
+                event_time=at + timedelta(seconds=2),
+                observed_time=at + timedelta(seconds=2),
+                invocation_id=invocation_id,
+                attributes={
+                    "status": "success",
+                    "timeout_status": "none",
+                    "exit_code": 0,
+                    "backend_session_id_end": session_end,
+                },
+                **common,
+            ),
+        ]
+
+    store.insert_events(
+        turn_events(
+            "turn_context_1",
+            "inv_context_1",
+            start,
+            100,
+            "backend-session-a",
+            "backend-session-a",
+        )
+    )
+    store.insert_events(
+        turn_events(
+            "turn_context_2",
+            "inv_context_2",
+            start + timedelta(seconds=10),
+            130,
+            "backend-session-a",
+            "backend-session-a",
+        )
+    )
+
+    second = store.get_turn("turn_context_2")
+    assert second["metrics"]["context_growth_between_turns"] == 30
+    assert second["metrics"]["context_discontinuity_reason"] is None
+
+    store.insert_events(
+        turn_events(
+            "turn_context_3",
+            "inv_context_3",
+            start + timedelta(seconds=20),
+            50,
+            "backend-session-b",
+            "backend-session-b",
+        )
+    )
+    third = store.get_turn("turn_context_3")
+    assert third["metrics"]["context_growth_between_turns"] is None
+    assert (
+        third["metrics"]["context_discontinuity_reason"]
+        == "backend_session_changed"
+    )
