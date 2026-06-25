@@ -525,7 +525,10 @@ def _turn_metrics(
             if entry_context is not None and exit_context is not None
             else None
         ),
-        "invocations_per_turn": len(invocations),
+        "invocations_per_turn": sum(
+            1 for invocation in invocations
+            if not invocation["duplicate_of_invocation_id"]
+        ),
         "model_request_count": len(request_rows) if request_rows else None,
         "tool_call_count": len(set().union(*tool_ids.values())) if tool_ids else None,
         "subagent_count": (

@@ -125,3 +125,77 @@ def test_late_event_rebuild_is_deterministic(tmp_path):
     assert before_accounting == after_accounting
     assert after_event_count == before_event_count + 1
     assert after["coverage"]["usage"]["coverage"] == "aggregate_only"
+
+
+def test_reconcile_closes_stale_turn_from_terminal_mesh_task(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    store = TelemetryStore(db)
+    start = utc_now()
+    common = {
+        "turn_id": "turn_reconcile",
+        "session_id": "session_reconcile",
+        "node_id": "worker-a",
+        "emitter_process_instance_id": "worker_proc",
+        "source": "worker",
+        "backend": "codex",
+    }
+    store.insert_events(
+        [
+            build_event(
+                "turn.started", event_time=start, observed_time=start, **common
+            ),
+            build_event(
+                "invocation.created",
+                event_time=start,
+                observed_time=start,
+                invocation_id="inv_reconcile",
+                attributes={
+                    "attempt": 1,
+                    "spawn_reason": "initial",
+                    "action": "run_oneoff",
+                },
+                **common,
+            ),
+            build_event(
+                "process.spawned",
+                event_time=start,
+                observed_time=start,
+                invocation_id="inv_reconcile",
+                pid=123,
+                attributes={
+                    "process_instance_id": "proc_reconcile",
+                    "process_role": "agent",
+                    "executable_name": "codex",
+                },
+                **common,
+            ),
+        ]
+    )
+    db.enqueue_task(
+        "turn_reconcile",
+        None,
+        "worker-a",
+        "codex",
+        "run_oneoff",
+        {"prompt": "not read by reconciliation"},
+    )
+    db.complete_task(
+        "turn_reconcile",
+        {
+            "success": True,
+            "return_code": 0,
+            "telemetry_invocation_id": "inv_reconcile",
+        },
+    )
+
+    result = store.reconcile(turn_id="turn_reconcile", since_hours=0)
+
+    assert result["reconciled"] == ["turn_reconcile"]
+    turn = store.get_turn("turn_reconcile")
+    assert turn["final_status"] == "success"
+    assert turn["final_invocation_id"] == "inv_reconcile"
+    processes = store.get_processes("turn_reconcile")
+    assert processes[0]["status"] == "unknown"
+    names = [event["event_name"] for event in store.list_events("turn_reconcile")]
+    assert "telemetry.reconciled" in names
+    assert "process.exit_unknown" in names
