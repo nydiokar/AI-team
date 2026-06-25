@@ -103,6 +103,22 @@ export function useArtifacts(limit = 50) {
 }
 
 /**
+ * The session's real conversation (instruction → result turns), reconstructed
+ * server-side from on-disk artifacts. This is what makes a Telegram-started
+ * session show its actual messages instead of "No activity yet". Polls so a turn
+ * that completes while you watch appears.
+ */
+export function useSessionMessages(sessionId: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["session-messages", sessionId],
+    queryFn: async () => api.sessionMessages(token, sessionId!),
+    enabled: Boolean(token) && Boolean(sessionId),
+    refetchInterval: POLL_MS,
+  });
+}
+
+/**
  * One artifact's changed files (UI-4) — fetched on demand when a card expands.
  * Artifacts are immutable once written, so this does NOT poll.
  */

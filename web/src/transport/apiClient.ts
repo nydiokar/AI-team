@@ -19,6 +19,7 @@ import type {
   RawApproval,
   RawArtifactSummary,
   RawArtifactDetailResponse,
+  RawTranscriptTurn,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -149,6 +150,24 @@ export const api = {
     );
   },
 
+  /**
+   * The session's real conversation, reconstructed server-side from on-disk
+   * artifacts + summary (control_api.api_session_messages). Each turn = user
+   * instruction → assistant result, oldest→newest. This is the source the
+   * timeline was missing — without it a Telegram-started session looked empty.
+   */
+  async sessionMessages(
+    token: string,
+    sessionId: string,
+    limit = 50,
+  ): Promise<RawTranscriptTurn[]> {
+    const data = await get<{ messages: RawTranscriptTurn[] }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}`,
+      token,
+    );
+    return data.messages ?? [];
+  },
+
   /** Live event tail (poll). Pass the returned offset back as `since`. */
   async events(token: string, since = 0, limit = 100): Promise<RawEventsResponse> {
     return get<RawEventsResponse>(
@@ -203,6 +222,24 @@ export const api = {
     sessionId: string,
   ): Promise<{ ok: boolean; cancelled: boolean; task_id: string | null }> {
     return post(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, token, {});
+  },
+
+  /** Close a session (control_api.api_close_session). */
+  async closeSession(token: string, sessionId: string): Promise<CommandEnvelope> {
+    return post<CommandEnvelope>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/close`,
+      token,
+      {},
+    );
+  },
+
+  /** Restore a closed session (control_api.api_restore_session). */
+  async restoreSession(token: string, sessionId: string): Promise<CommandEnvelope> {
+    return post<CommandEnvelope>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/restore`,
+      token,
+      {},
+    );
   },
 
   /** Pending approval queue (Move H). status="" lists all. */

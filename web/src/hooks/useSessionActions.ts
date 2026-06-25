@@ -84,3 +84,52 @@ export function useStopSession() {
     },
   });
 }
+
+/**
+ * Create a new session (control_api.api_create_session). Web-origin, unbound.
+ * Idempotency-keyed so a double-tap can't create two sessions. Invalidates the
+ * sessions list so the new one appears.
+ */
+export function useCreateSession() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: (vars: {
+      backend: string;
+      repoPath: string;
+      model?: string;
+      idempotencyKey?: string;
+    }) =>
+      api.createSession(
+        token,
+        { backend: vars.backend, repoPath: vars.repoPath, model: vars.model },
+        vars.idempotencyKey ?? newIdempotencyKey(),
+      ),
+    retry: (count, err) =>
+      !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 2,
+    onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+}
+
+/** Close a session (control_api.api_close_session). */
+export function useCloseSession() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sessionId: string) => api.closeSession(token, sessionId),
+    retry: false,
+    onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+}
+
+/** Restore a closed session (control_api.api_restore_session). */
+export function useRestoreSession() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sessionId: string) => api.restoreSession(token, sessionId),
+    retry: false,
+    onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+}

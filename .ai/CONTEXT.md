@@ -20,8 +20,6 @@
 > - **Do NOT run `python main.py status`** — it acquires the gateway lock and
 >   KILLS the live PM2 gateway. Use `curl http://<tailscale-ip>:9002/health`
 >   (or `/metrics` with the WORKER_TOKEN bearer) to check the running gateway.
-> - Always spawn the gateway process ONLY trough **pm2 (ecosystem.config)** and use
->   **`python main.py`**
 
 > **TWO PARALLEL TRACKS are in flight — do not conflate them:**
 > 1. **Mesh / State Separation** (on `main`) — the runtime/distribution work
