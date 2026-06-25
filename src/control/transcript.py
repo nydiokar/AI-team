@@ -1,0 +1,149 @@
+"""Session transcript reader — the conversation source the Web UI was missing.
+
+The original UI-2 timeline had no source for the real conversation: it only showed
+(a) messages optimistically typed in the web app this load, (b) live SSE
+operational events, and (c) one ``lastSummary`` line. So a session opened from
+Telegram looked empty. This module reconstructs the real per-turn conversation
+from what is actually on disk, with NO FastAPI dependency (pure, unit-testable),
+mirroring ``artifacts.py``.
+
+Sources, in order of richness:
+  1. ``results/task_*.json`` artifacts whose ``session_id`` matches — each is ONE
+     turn: the user instruction (``task.title`` / source) → the assistant result
+     text (via the existing ``result_text.extract_text_from_payload``), timestamped.
+  2. ``state/summaries/<id>.md`` — the clean "Last instruction / Last result (tail)"
+     Telegram shows; used as the authoritative latest turn (artifact ``content`` is
+     often a raw backend stream, the summary is the human-readable distillation).
+
+SECURITY: ``session_id`` is confined exactly like ``artifacts._artifact_path`` /
+the SPA resolver — a ``..`` or absolute path resolves to None, never an arbitrary
+read.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+_INDEX_NAME = "index.json"
+
+
+def _read_json(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.debug("transcript_read_failed path=%s err=%s", path, e)
+        return None
+
+
+def _confined(base_dir: Path, name: str, suffix: str) -> Optional[Path]:
+    """Resolve ``base_dir/<name><suffix>`` confined to ``base_dir`` (no traversal).
+
+    A session id is an opaque token (hex slug) — it must never contain a path
+    separator or ``..``. Reject those outright, then verify the resolved path is
+    still under ``base_dir`` (defense in depth, same as the SPA resolver)."""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return None
+    base = base_dir.resolve()
+    candidate = (base_dir / f"{name}{suffix}").resolve()
+    if base in candidate.parents:
+        return candidate
+    return None
+
+
+def _instruction_from_artifact(art: Dict[str, Any]) -> str:
+    """The user-side text of a turn. ``task.title`` is the instruction Telegram set
+    (often prefixed 'Task: '); fall back to a few known fields."""
+    task = art.get("task") or {}
+    title = (task.get("title") or "").strip()
+    if title.lower().startswith("task:"):
+        title = title[5:].strip()
+    if title:
+        return title
+    for k in ("instruction", "objective", "prompt"):
+        v = (art.get(k) or "").strip() if isinstance(art.get(k), str) else ""
+        if v:
+            return v
+    return ""
+
+
+def _result_text_from_artifact(art: Dict[str, Any]) -> str:
+    """Clean, user-visible result text for a turn, reusing the same extractor the
+    Telegram reply path uses. Falls back to a short failure note on error turns."""
+    try:
+        from src.services.result_text import extract_text_from_payload
+    except Exception:
+        extract_text_from_payload = None  # type: ignore
+
+    parsed = art.get("parsed_output")
+    text = ""
+    if extract_text_from_payload is not None:
+        for src in (parsed, art.get("result"), art.get("raw_stdout")):
+            if src:
+                text = extract_text_from_payload(src) or ""
+                if text:
+                    break
+    if text:
+        return text.strip()
+    # No clean text (timeout / killed / empty) — be HONEST about it, don't fabricate.
+    if not art.get("success", False):
+        errs = art.get("errors") or []
+        if errs:
+            return f"(no output — {errs[0]})"
+        return "(task failed — no output)"
+    return ""
+
+
+def _turn_from_artifact(art: Dict[str, Any], path: Path) -> Dict[str, Any]:
+    task_id = art.get("task_id") or path.stem
+    return {
+        "task_id": task_id,
+        "timestamp": art.get("timestamp") or "",
+        "success": bool(art.get("success")),
+        "instruction": _instruction_from_artifact(art),
+        "result": _result_text_from_artifact(art),
+        "file_count": len(art.get("file_changes") or art.get("files_modified") or []),
+    }
+
+
+def get_transcript(
+    results_dir: Path,
+    summaries_dir: Path,
+    session_id: str,
+    limit: int = 50,
+) -> Optional[List[Dict[str, Any]]]:
+    """Reconstruct a session's conversation as an oldest→newest list of turns.
+
+    Returns None only on a path-traversal attempt (so the endpoint can 404).
+    A session with no artifacts yet returns ``[]`` (a real, empty conversation).
+    Each turn: ``{task_id, timestamp, success, instruction, result, file_count}``.
+    """
+    # Confinement check on the session id itself (used to match, and to read the .md).
+    if _confined(summaries_dir, session_id, ".md") is None:
+        return None
+    if not results_dir.is_dir():
+        return []
+
+    turns: List[Dict[str, Any]] = []
+    for p in results_dir.glob("*.json"):
+        if p.name == _INDEX_NAME or not p.is_file():
+            continue
+        art = _read_json(p)
+        if art is None:
+            continue
+        # session_id lives nested under "session" in the artifact schema
+        # (verified against disk: 481/481 artifacts use session.session_id, none
+        # top-level). Accept the top-level too in case the schema ever flattens.
+        art_sid = (art.get("session") or {}).get("session_id") or art.get("session_id")
+        if art_sid != session_id:
+            continue
+        turns.append(_turn_from_artifact(art, p))
+
+    # Oldest→newest by timestamp (a conversation reads top-to-bottom). Stable.
+    turns.sort(key=lambda t: t.get("timestamp") or "")
+    if limit and len(turns) > limit:
+        turns = turns[-limit:]  # keep the most recent N
+    return turns

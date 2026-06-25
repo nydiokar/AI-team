@@ -129,6 +129,19 @@ export interface RawArtifactSummary {
   parent_task_id: string | null;
 }
 
+// GET /api/sessions/{id}/messages → { messages: RawTranscriptTurn[] }.
+// src.control.transcript.get_transcript() — one turn per task artifact, oldest→
+// newest. `result` is "" when there genuinely was no output, or an honest
+// "(no output — …)" / "(task failed …)" note on a failed turn (never fabricated).
+export interface RawTranscriptTurn {
+  task_id: string;
+  timestamp: string;
+  success: boolean;
+  instruction: string;
+  result: string;
+  file_count: number;
+}
+
 // GET /api/artifacts/{task_id} → { artifact: RawArtifactDetail, files: RawRemoteFile[] }.
 // src.control.artifacts.get_artifact() + to_remote_files(). Raw stdout/stderr are
 // intentionally NOT surfaced here (UI-5 logs).

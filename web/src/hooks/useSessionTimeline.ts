@@ -1,28 +1,32 @@
 /**
- * Real session timeline (UI-2) — un-mocks SessionDetailScreen within what the
- * backend actually emits (gap-doc §6: whole-turn, no message/streaming events).
+ * Real session timeline — the conversation, honestly.
  *
- * Three real sources, merged into the existing TimelineItem[] the SessionTimeline
- * component already renders:
- *   1. Optimistic USER messages   — useSentStore (what you typed; no backend echo).
- *   2. Live NOTICES + TASK-STATE  — this session's events from the SSE stream,
- *      already canonical (eventAdapter): system.notice → notice card,
- *      task.state_changed → task_state card, run.cancelled → notice.
- *   3. Assistant TURN SUMMARY     — the polled session's lastSummary, surfaced as
- *      a single whole-message assistant bubble (no streaming, no per-token).
+ * REWRITTEN after live review found the old version showed no actual messages
+ * (only optimistic-typed text + raw SSE operational events rendered as chat, with
+ * stale "Running" pills). The conversation now comes from the server-reconstructed
+ * transcript (GET /api/sessions/{id}/messages): each turn → a USER instruction
+ * bubble + an ASSISTANT result bubble. That is the ChatGPT-style thread.
  *
- * Items are sorted by timestamp so the three streams interleave correctly.
+ * Sources, in render order:
+ *   1. Transcript turns (real history)        — user instruction → assistant result.
+ *   2. Optimistic user messages not yet in the transcript (just-typed, no backend
+ *      echo yet) — so a send shows instantly, then de-dupes once the turn lands.
+ *   3. Pending approvals for this session (Move H) — actionable cards.
+ *   4. A SINGLE live "running" indicator, ONLY when session.opState === "running"
+ *      RIGHT NOW. We no longer splice the rolling SSE buffer into the chat — that
+ *      was the source of stale/false "Running" rows and operational bloat. The raw
+ *      event feed lives on the System screen (UI-5), not in the conversation.
  */
 import { useMemo } from "react";
 import type { TimelineItem } from "../fixtures/timeline";
 import type { Session, ApprovalRequest } from "../domain/models";
-import type { StampedEvent } from "./useEventStream";
+import type { RawTranscriptTurn } from "../transport/rawApi";
 import { useSentStore } from "../stores/sentStore";
 
 export function useSessionTimeline(
   sessionId: string | undefined,
   session: Session | undefined,
-  events: StampedEvent[],
+  turns: RawTranscriptTurn[] = [],
   approvals: ApprovalRequest[] = [],
 ): TimelineItem[] {
   const sent = useSentStore((s) =>
@@ -33,8 +37,44 @@ export function useSessionTimeline(
     if (!sessionId) return [];
     const items: TimelineItem[] = [];
 
-    // 1 — optimistic user messages
+    // 1 — real conversation turns. Each task is one exchange.
+    const seenInstructions = new Set<string>();
+    for (const t of turns) {
+      const at = t.timestamp || "";
+      if (t.instruction) {
+        seenInstructions.add(t.instruction.trim());
+        items.push({
+          kind: "message",
+          at,
+          message: {
+            id: `${t.task_id}-u`,
+            sessionId,
+            role: "user",
+            text: t.instruction,
+            createdAt: at,
+          },
+        });
+      }
+      if (t.result) {
+        items.push({
+          kind: "message",
+          at,
+          message: {
+            id: `${t.task_id}-a`,
+            sessionId,
+            role: "assistant",
+            text: t.result,
+            createdAt: at,
+          },
+        });
+      }
+    }
+
+    // 2 — optimistic user messages not yet reflected in the transcript. Dedupe
+    //     against transcript instructions so a sent message doesn't double once
+    //     its turn completes and the poll picks it up.
     for (const m of sent ?? []) {
+      if (seenInstructions.has(m.text.trim())) continue;
       items.push({
         kind: "message",
         at: m.createdAt,
@@ -48,71 +88,26 @@ export function useSessionTimeline(
       });
     }
 
-    // 2 — this session's live events (notices / task-state / cancellations)
-    for (const ev of events) {
-      const e = ev.event;
-      if (e.type === "system.notice") {
-        if (e.notice.sessionId && e.notice.sessionId !== sessionId) continue;
-        // task-correlated notices with no session id still belong if they match
-        // the session's last task — but without that link we keep session-scoped
-        // notices only, to avoid leaking other sessions' operational chatter.
-        if (!e.notice.sessionId) continue;
-        items.push({ kind: "notice", at: ev.at, notice: e.notice });
-      } else if (e.type === "task.state_changed") {
-        if (session?.lastTaskId && e.taskId !== session.lastTaskId) continue;
-        items.push({
-          kind: "task_state",
-          at: ev.at,
-          taskId: e.taskId,
-          state: e.state,
-          objective: session?.lastSummary || "Task update",
-        });
-      } else if (e.type === "run.cancelled") {
-        if (session?.lastTaskId && e.runId !== session.lastTaskId) continue;
-        items.push({
-          kind: "notice",
-          at: ev.at,
-          notice: {
-            id: `cancel-${e.runId}`,
-            sessionId,
-            taskId: e.runId,
-            kind: "run_cancelled",
-            text: "Run cancelled",
-            severity: "warning",
-            timestamp: ev.at,
-          },
-        });
-      }
-    }
-
-    // 3 — assistant turn summary (whole-message). Only when idle/done and a
-    //     summary exists; while running we let the live task_state card carry it.
-    if (
-      session?.lastSummary &&
-      session.opState !== "running" &&
-      session.opState !== "waiting_for_input"
-    ) {
-      items.push({
-        kind: "message",
-        at: session.updatedAt,
-        message: {
-          id: `summary-${session.lastTaskId ?? session.updatedAt}`,
-          sessionId,
-          role: "assistant",
-          text: session.lastSummary,
-          createdAt: session.updatedAt,
-        },
-      });
-    }
-
-    // 4 — live pending approvals for this session (Move H). These are durable
-    //     (survive restart) and round-trip via the approval card's buttons.
+    // 3 — pending approvals (durable, round-trip via the card buttons).
     for (const appr of approvals) {
       if (appr.sessionId !== sessionId) continue;
       items.push({ kind: "approval", at: appr.createdAt, approval: appr });
     }
 
     items.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+
+    // 4 — ONE live running indicator, only if the session is actually running
+    //     now (honest state from the live snapshot — never a buffered event).
+    if (session?.opState === "running") {
+      items.push({
+        kind: "task_state",
+        at: session.updatedAt,
+        taskId: session.lastTaskId ?? "current",
+        state: "running",
+        objective: "Working…",
+      });
+    }
+
     return items;
-  }, [sessionId, session, events, sent, approvals]);
+  }, [sessionId, session, turns, sent, approvals]);
 }

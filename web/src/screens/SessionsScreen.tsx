@@ -3,13 +3,14 @@
  * attention / Open / Closed, derived from is_active + needs_input (gap-doc §3),
  * with target filtering. Attention first, only when non-empty. Closed collapsed.
  */
-import { useMemo } from "react";
-import { ChevronDown, Inbox } from "lucide-react";
+import { useMemo, useState } from "react";
+import { ChevronDown, Inbox, Plus } from "lucide-react";
 import { motion } from "framer-motion";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { TargetSelector } from "../components/shell/TargetSelector";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { SessionRow } from "../components/sessions/SessionRow";
+import { NewSessionSheet } from "../components/sessions/NewSessionSheet";
 import { useSessions } from "../hooks/useLiveData";
 import { useUiStore } from "../stores/uiStore";
 import type { Session } from "../domain/models";
@@ -37,6 +38,7 @@ export function SessionsScreen() {
   const targetFilter = useUiStore((s) => s.targetFilter);
   const closedExpanded = useUiStore((s) => s.closedExpanded);
   const toggleClosed = useUiStore((s) => s.toggleClosed);
+  const [newOpen, setNewOpen] = useState(false);
 
   const groups = useMemo(() => {
     const all = (data ?? []).filter(
@@ -53,8 +55,21 @@ export function SessionsScreen() {
 
   return (
     <div className="pb-8">
-      <CompactTopBar title="Sessions" subtitle="Live · persistent context" />
+      <CompactTopBar
+        title="Sessions"
+        subtitle="Live · persistent context"
+        right={
+          <button
+            onClick={() => setNewOpen(true)}
+            className="flex size-9 items-center justify-center rounded-full bg-accent-dim/60 text-accent ring-1 ring-accent/30 hover:bg-accent-dim"
+            aria-label="New session"
+          >
+            <Plus className="size-5" />
+          </button>
+        }
+      />
       <TargetSelector />
+      {newOpen && <NewSessionSheet onClose={() => setNewOpen(false)} />}
 
       {isLoading && (
         <p className="px-4 py-10 text-center text-sm text-ink-muted">Loading sessions…</p>
@@ -104,7 +119,13 @@ export function SessionsScreen() {
         <div className="flex flex-col items-center gap-2 px-4 py-16 text-center">
           <Inbox className="size-8 text-ink-muted" />
           <p className="text-sm text-ink-soft">No sessions yet.</p>
-          <p className="text-xs text-ink-muted">Start one from Telegram and it appears here.</p>
+          <button
+            onClick={() => setNewOpen(true)}
+            className="mt-1 text-xs font-medium text-accent hover:underline"
+          >
+            + New session
+          </button>
+          <p className="text-xs text-ink-muted">or start one from Telegram.</p>
         </div>
       )}
     </div>

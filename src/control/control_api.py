@@ -250,6 +250,16 @@ def _results_dir() -> "Path":
         return Path("results")
 
 
+def _summaries_dir() -> "Path":
+    """The per-session summary directory (config.system.summaries_dir), as a Path."""
+    from pathlib import Path
+    try:
+        from config import config as _cfg
+        return Path(_cfg.system.summaries_dir)
+    except Exception:
+        return Path("state/summaries")
+
+
 def build_control_api(orchestrator) -> FastAPI:
     """Build the gateway's read API bound to the live orchestrator.
 
@@ -384,6 +394,23 @@ def build_control_api(orchestrator) -> FastAPI:
             "artifact": artifact,
             "files": _artifacts.to_remote_files(artifact),
         })
+
+    @app.get("/api/sessions/{session_id}/messages", dependencies=[Depends(_require_auth)])
+    def api_session_messages(
+        session_id: str,
+        limit: int = Query(50, ge=1, le=200),
+    ) -> JSONResponse:
+        """The session's real conversation, reconstructed from on-disk artifacts +
+        summary (src.control.transcript). Each turn = user instruction → assistant
+        result, oldest→newest. 404 only on a path-traversal escape; a session with
+        no turns yet returns ``{"messages": []}`` (a real empty conversation)."""
+        from src.control import transcript as _transcript
+        turns = _transcript.get_transcript(
+            _results_dir(), _summaries_dir(), session_id, limit=limit
+        )
+        if turns is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        return JSONResponse({"messages": turns})
 
     @app.get("/api/events", dependencies=[Depends(_require_auth)])
     def api_events(

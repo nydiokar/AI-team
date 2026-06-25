@@ -51,6 +51,13 @@ def _artifact_path(results_dir: Path, task_id: str) -> Optional[Path]:
     return None
 
 
+def _session_id_of(artifact: Dict[str, Any]) -> Optional[str]:
+    """Artifacts carry the session id nested under ``session`` (verified against
+    disk: none store it top-level). Accept the top-level too, in case the schema
+    ever flattens."""
+    return (artifact.get("session") or {}).get("session_id") or artifact.get("session_id")
+
+
 def _summary(artifact: Dict[str, Any], artifact_path: Path) -> Dict[str, Any]:
     files = artifact.get("files_modified") or []
     file_changes = artifact.get("file_changes") or []
@@ -62,7 +69,7 @@ def _summary(artifact: Dict[str, Any], artifact_path: Path) -> Dict[str, Any]:
         "file_count": len(file_changes) if file_changes else len(files),
         "files_modified": list(files),
         "has_changes": bool(file_changes) or bool(files),
-        "session_id": artifact.get("session_id"),
+        "session_id": _session_id_of(artifact),
         "parent_task_id": artifact.get("parent_task_id"),
     }
 
@@ -111,7 +118,7 @@ def get_artifact(results_dir: Path, task_id: str) -> Optional[Dict[str, Any]]:
         "errors": list(artifact.get("errors") or []),
         "files_modified": list(artifact.get("files_modified") or []),
         "file_changes": artifact.get("file_changes") or None,
-        "session_id": artifact.get("session_id"),
+        "session_id": _session_id_of(artifact),
         "parent_task_id": artifact.get("parent_task_id"),
     }
 
