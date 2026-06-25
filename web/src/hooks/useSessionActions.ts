@@ -133,3 +133,49 @@ export function useRestoreSession() {
     onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
   });
 }
+
+/** Upload a file to the session's uploads/ directory. */
+export function useUploadFile() {
+  const token = useAuthStore((s) => s.token);
+  return useMutation({
+    mutationFn: (vars: { sessionId: string; file: File }) =>
+      api.uploadFile(token, vars.sessionId, vars.file),
+    retry: false,
+  });
+}
+
+/** Compact the session's Claude context window (POST /api/sessions/{id}/compact). */
+export function useCompactSession() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sessionId: string) => api.compactSession(token, sessionId),
+    retry: false,
+    onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+}
+
+/** Set the model for a session (POST /api/sessions/{id}/model). */
+export function useSetModel() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { sessionId: string; model: string | null }) =>
+      api.setModel(token, vars.sessionId, vars.model),
+    retry: false,
+    onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+}
+
+/** Run a repo inspection op on a session (git_status, list_dirs, commit, commit_all). */
+export function useInspectSession() {
+  const token = useAuthStore((s) => s.token);
+  return useMutation({
+    mutationFn: (vars: {
+      sessionId: string;
+      op: string;
+      params?: Record<string, unknown>;
+    }) => api.inspectSession(token, vars.sessionId, vars.op, vars.params),
+    retry: false,
+  });
+}

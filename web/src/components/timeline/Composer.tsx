@@ -1,5 +1,5 @@
 /**
- * Composer (UI-2) — the live send surface. Replaces the UI-1 disabled stub.
+ * Composer (UI-2) — the live send surface + file upload (Telegram parity).
  *
  * Flow (spec §9.2 optimistic + ack): on send we (1) push an optimistic user
  * message into the sent store with a client id that DOUBLES as the idempotency
@@ -8,14 +8,21 @@
  * rejected → shows the stable reason). A failed send keeps the typed text so the
  * user can retry — the same key dedupes server-side.
  *
- * Stop is shown instead of attachments while a task is in flight, wired to
- * useStopSession (gate: "stop/retry work").
+ * File upload (parity with Telegram _handle_document): the Plus button opens a
+ * native file picker. On select, the file is POSTed to /api/sessions/{id}/upload.
+ * If the user has text in the composer, it is sent as the instruction after the
+ * upload succeeds (file reference prepended). If no text, the upload lands silently
+ * so the user can reference it in their next message.
  */
-import { useState } from "react";
-import { ArrowUp, Square, Plus } from "lucide-react";
+import { useState, useRef } from "react";
+import { ArrowUp, Square, Paperclip } from "lucide-react";
 import { Button } from "../ui/Button";
 import { newIdempotencyKey } from "../../transport/apiClient";
-import { useSubmitInstruction, useStopSession } from "../../hooks/useSessionActions";
+import {
+  useSubmitInstruction,
+  useStopSession,
+  useUploadFile,
+} from "../../hooks/useSessionActions";
 import { useSentStore } from "../../stores/sentStore";
 
 export function Composer({
@@ -26,13 +33,17 @@ export function Composer({
   running: boolean;
 }) {
   const [text, setText] = useState("");
+  const [uploadBanner, setUploadBanner] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const submit = useSubmitInstruction();
   const stop = useStopSession();
+  const upload = useUploadFile();
   const addSent = useSentStore((s) => s.add);
   const updateSent = useSentStore((s) => s.update);
 
-  const send = () => {
-    const body = text.trim();
+  const send = (overrideText?: string) => {
+    const body = (overrideText ?? text).trim();
     if (!body || submit.isPending) return;
     const id = newIdempotencyKey();
     addSent({
@@ -51,7 +62,40 @@ export function Composer({
           updateSent(id, { delivery: "acknowledged", taskId: res.task_id }),
         onError: () => {
           updateSent(id, { delivery: "rejected" });
-          setText(body); // restore so the user can retry (same idempotency seam)
+          setText(body);
+        },
+      },
+    );
+  };
+
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+
+    setUploadBanner(`Uploading ${file.name}…`);
+    upload.mutate(
+      { sessionId, file },
+      {
+        onSuccess: (res) => {
+          setUploadBanner(null);
+          const fileRef = `📎 File: ${res.path}`;
+          const instruction = text.trim()
+            ? `${text.trim()}\n\n${fileRef}`
+            : null;
+          if (instruction) {
+            setText("");
+            send(instruction);
+          } else {
+            // No text — just show confirmation; user types instruction next.
+            setUploadBanner(`Saved ${res.filename} (${Math.round(res.size / 1024)} KB). Type an instruction to work with it.`);
+            setTimeout(() => setUploadBanner(null), 5000);
+          }
+        },
+        onError: (err) => {
+          setUploadBanner(null);
+          // Surface error inline — will be cleared on next user action.
+          setText(`Upload failed: ${String(err.message)}. `);
         },
       },
     );
@@ -64,7 +108,10 @@ export function Composer({
       className="border-t border-hairline bg-surface-1/90 px-3 py-2.5 backdrop-blur-xl"
       style={{ paddingBottom: "max(0.625rem, env(safe-area-inset-bottom))" }}
     >
-      {rejected && (
+      {uploadBanner && (
+        <p className="mb-1.5 px-1 text-[11px] text-ink-soft">{uploadBanner}</p>
+      )}
+      {rejected && !uploadBanner && (
         <p className="mb-1.5 px-1 text-[11px] text-bad">
           Send failed: {String(submit.error?.message ?? "unknown")}. Tap send to retry.
         </p>
@@ -80,13 +127,23 @@ export function Composer({
             <Square className="size-4" fill="currentColor" />
           </button>
         ) : (
-          <button
-            disabled
-            className="flex size-11 shrink-0 items-center justify-center rounded-full border border-hairline text-ink-muted opacity-50"
-            aria-label="Attachments (not available)"
-          >
-            <Plus className="size-5" />
-          </button>
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              onChange={handleFile}
+              aria-hidden
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={upload.isPending}
+              className="flex size-11 shrink-0 items-center justify-center rounded-full border border-hairline text-ink-muted hover:bg-surface-2 disabled:opacity-50"
+              aria-label="Upload file"
+            >
+              <Paperclip className="size-5" />
+            </button>
+          </>
         )}
         <input
           value={text}
@@ -105,7 +162,7 @@ export function Composer({
           size="icon"
           aria-label="Send"
           disabled={!text.trim() || submit.isPending}
-          onClick={send}
+          onClick={() => send()}
         >
           <ArrowUp className="size-5" />
         </Button>

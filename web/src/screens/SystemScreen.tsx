@@ -1,7 +1,6 @@
 /**
- * System screen — LIVE (UI-1 gate). Target list binds /api/nodes via useTargets,
- * using the derived `live` flag + heartbeat_age_sec, NOT the stale status column
- * (gap-doc §2). Each target is an elevated card with a heartbeat readout.
+ * System screen — targets, jobs, live activity, settings.
+ * Parity additions: node detail sheet on tap, Jobs panel (collapsible).
  */
 import { useEffect, useRef, useState } from "react";
 import { Cpu, HeartPulse, Layers, Settings2, Download } from "lucide-react";
@@ -10,8 +9,11 @@ import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { HealthChip } from "../components/ui/StatusChip";
 import { Button } from "../components/ui/Button";
+import { NodeDetailSheet } from "../components/system/NodeDetailSheet";
+import { JobsPanel } from "../components/system/JobsPanel";
 import { useTargets } from "../hooks/useLiveData";
 import { useActivityLog } from "../hooks/useActivityLog";
+import type { Target } from "../domain/models";
 import type { LogSeverity, LogLine } from "../transport/eventLog";
 
 type BeforeInstallPromptEvent = Event & { prompt: () => Promise<void> };
@@ -48,7 +50,6 @@ function ageLabel(sec: number | null): string {
   return `${Math.round(sec / 3600)}h ago`;
 }
 
-// Same severity palette as the session timeline (SessionTimeline.tsx).
 const SEVERITY_DOT: Record<LogSeverity, string> = {
   info: "bg-ink-muted",
   success: "bg-ok",
@@ -61,7 +62,6 @@ function clockLabel(at: string): string {
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString();
 }
 
-/** Max rows rendered on the phone (the underlying stream is already bounded to 500). */
 const MAX_ROWS = 100;
 
 function ActivityRow({ line }: { line: LogLine }) {
@@ -89,6 +89,7 @@ export function SystemScreen() {
   const { lines, connection } = useActivityLog();
   const rows = lines.slice(0, MAX_ROWS);
   const { canInstall, isIos, install } = useInstallPrompt();
+  const [selectedTarget, setSelectedTarget] = useState<Target | null>(null);
 
   return (
     <div className="pb-8">
@@ -100,7 +101,12 @@ export function SystemScreen() {
         {error && <p className="py-6 text-center text-sm text-bad">Couldn't load nodes.</p>}
 
         {(targets ?? []).map((t) => (
-          <div key={t.id} className="card-elev rounded-xl px-4 py-3.5">
+          <button
+            key={t.id}
+            className="card-elev w-full rounded-xl px-4 py-3.5 text-left"
+            onClick={() => setSelectedTarget(t)}
+            aria-label={`View details for ${t.id}`}
+          >
             <div className="flex items-center gap-2">
               <Cpu className="size-4 text-ink-muted" />
               <span className="min-w-0 flex-1 truncate text-[15px] font-medium text-ink">
@@ -121,13 +127,17 @@ export function SystemScreen() {
               )}
               <span>max {t.maxConcurrent}</span>
             </div>
-          </div>
+          </button>
         ))}
 
         {!isLoading && !error && (targets ?? []).length === 0 && (
           <p className="py-6 text-center text-sm text-ink-muted">No registered nodes.</p>
         )}
       </div>
+
+      {/* Jobs panel (collapsible) */}
+      <SectionHeader label="Jobs" />
+      <JobsPanel />
 
       <SectionHeader label="Live activity" count={rows.length || undefined} />
       <div className="card-elev mx-4 divide-y divide-hairline rounded-xl">
@@ -168,6 +178,14 @@ export function SystemScreen() {
           </p>
         </div>
       </div>
+
+      {/* Node detail sheet */}
+      {selectedTarget && (
+        <NodeDetailSheet
+          target={selectedTarget}
+          onClose={() => setSelectedTarget(null)}
+        />
+      )}
     </div>
   );
 }

@@ -27,7 +27,7 @@ import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Security
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Security, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -46,6 +46,10 @@ _REASON_STATUS = {
     "already_resolved": 409,
     "invalid_decision": 400,
     "missing_action": 400,
+    # Upload
+    "no_repo_path": 400,
+    "dangerous_extension": 400,
+    "file_too_large": 413,
 }
 
 
@@ -97,6 +101,13 @@ class GitCommitBody(BaseModel):
     task_description: Optional[str] = None
     create_branch: bool = True
     push_branch: bool = False
+
+
+class UploadResult(BaseModel):
+    ok: bool
+    filename: str
+    size: int
+    path: str
 
 
 def _session_payload(session) -> Optional[Dict[str, Any]]:
@@ -251,13 +262,66 @@ def _results_dir() -> "Path":
 
 
 def _summaries_dir() -> "Path":
-    """The per-session summary directory (config.system.summaries_dir), as a Path."""
+    """The per-session summary directory.
+
+    NOTE: orchestrator._write_session_summary hardcodes ``<project_root>/state/
+    summaries`` (it does NOT use config.system.summaries_dir, whose default
+    'summaries' resolves elsewhere). We anchor on the same place the summaries are
+    actually written, so the transcript reader sees them — using the config value
+    would read an empty directory and silently lose the clean Telegram-grade text.
+    """
     from pathlib import Path
-    try:
-        from config import config as _cfg
-        return Path(_cfg.system.summaries_dir)
-    except Exception:
-        return Path("state/summaries")
+    project_root = Path(__file__).resolve().parent.parent.parent
+    return project_root / "state" / "summaries"
+
+
+def _list_projects_for_node(node_id: str, limit: int = 20) -> list:
+    """List discoverable repos for a node. Mirrors TelegramInterface._repo_choices_for_node.
+
+    Local (__local__): scans PathResolver root for git dirs (same logic as the Telegram
+    wizard). Remote: reads the DB node row's `repos` JSON (populated by the worker's
+    heartbeat). Returns [{name, path}].
+    """
+    if node_id == "__local__":
+        try:
+            from src.services.path_resolver import PathResolver
+            from pathlib import Path as _Path
+            resolver = PathResolver.from_config()
+            root = resolver.base_cwd or resolver.allowed_root
+            if not root:
+                return []
+            root_path = _Path(root).resolve()
+            children = [
+                c for c in root_path.iterdir()
+                if c.is_dir() and not c.name.startswith(".")
+            ]
+            children.sort(key=lambda c: c.stat().st_mtime, reverse=True)
+            repos = [c for c in children if (c / ".git").exists()]
+            if len(repos) < limit:
+                seen = {c.resolve() for c in repos}
+                for c in children:
+                    if c.resolve() not in seen:
+                        repos.append(c)
+                        seen.add(c.resolve())
+                        if len(repos) >= limit:
+                            break
+            return [{"name": c.name, "path": str(c.resolve())} for c in repos[:limit]]
+        except Exception as e:
+            logger.warning("_list_projects_for_node local err=%s", e)
+            return []
+    else:
+        try:
+            import json as _json
+            db = _db()
+            if db is None:
+                return []
+            row = db.get_node(node_id)
+            if row:
+                repos = _json.loads(row.get("repos") or "[]")
+                return [{"name": r["name"], "path": r["path"]} for r in repos[:limit]]
+        except Exception as e:
+            logger.warning("_list_projects_for_node remote node=%s err=%s", node_id, e)
+        return []
 
 
 def build_control_api(orchestrator) -> FastAPI:
@@ -657,6 +721,104 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400),
                                 detail={"ok": False, "reason": result.reason})
         return JSONResponse({"ok": True, "reason": "", "approval": svc.get(approval_id)})
+
+    # --- projects / models / upload (Telegram parity) ---
+
+    @app.get("/api/projects", dependencies=[Depends(_require_auth)])
+    def api_projects(
+        node_id: str = Query("__local__"),
+        limit: int = Query(20, ge=1, le=50),
+    ) -> JSONResponse:
+        """Discoverable repos for a node. Drives the web repo picker (parity with
+        the Telegram /session_new guided wizard). Local: scans WORKER_PROJECTS_ROOT /
+        PathResolver root. Remote: reads the node's advertised repos from the DB."""
+        projects = _list_projects_for_node(node_id, limit=limit)
+        return JSONResponse({"projects": projects})
+
+    @app.get("/api/models", dependencies=[Depends(_require_auth)])
+    def api_models(
+        backend: Optional[str] = Query(default=None),
+    ) -> JSONResponse:
+        """Model catalog for a backend (or all backends). Drives the web model picker
+        (parity with Telegram /model). Static catalog from config/models.py."""
+        from config.models import BACKEND_MODELS, options as _options
+        if backend:
+            opts = _options(backend)
+            return JSONResponse({
+                "backend": backend,
+                "models": [{"name": o.name, "is_default": o.is_default} for o in opts],
+            })
+        result = {}
+        for be, opts_list in BACKEND_MODELS.items():
+            result[be] = [{"name": o.name, "is_default": o.is_default} for o in opts_list]
+        return JSONResponse({"models": result})
+
+    @app.post("/api/sessions/{session_id}/upload", dependencies=[Depends(_require_auth)])
+    async def api_upload_file(session_id: str, file: UploadFile) -> JSONResponse:
+        """Upload a file to session.repo_path/uploads/ (local sessions). Mirrors
+        TelegramInterface._handle_document for local sessions. Remote (mesh) sessions
+        are not supported in v1 — the client should check session.workspace.targetId."""
+        import re as _re
+        import os as _os
+        from pathlib import Path as _Path
+
+        session = orchestrator.session_service.store.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        if not session.repo_path:
+            raise HTTPException(status_code=400, detail="no_repo_path")
+
+        raw_name = file.filename or "upload"
+        ext = _os.path.splitext(raw_name)[1].lower()
+        _BLOCKED_EXTS = {
+            ".exe", ".bat", ".cmd", ".com", ".msi", ".msp", ".scr", ".pif",
+            ".vbs", ".vbe", ".ps1", ".psm1", ".psd1", ".wsf", ".wsh", ".hta",
+            ".jar", ".dll", ".reg", ".lnk",
+        }
+        if ext in _BLOCKED_EXTS:
+            raise HTTPException(status_code=400, detail="dangerous_extension")
+
+        try:
+            from config import config as _cfg
+            max_mb = getattr(_cfg.telegram, "upload_max_mb", 0)
+        except Exception:
+            max_mb = 0
+
+        safe_name = _re.sub(r"[^\w.\-]", "_", raw_name)[:200] or "upload"
+        if not safe_name.strip("._"):
+            safe_name = "upload"
+
+        upload_dir = _Path(session.repo_path) / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        dest = (upload_dir / safe_name).resolve()
+
+        # Path-traversal guard: dest must stay inside upload_dir.
+        if not str(dest).startswith(str(upload_dir.resolve())):
+            raise HTTPException(status_code=400, detail="dangerous_extension")
+
+        content = await file.read()
+        if max_mb > 0 and len(content) > max_mb * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="file_too_large")
+
+        # Deduplicate filename if it already exists.
+        if dest.exists():
+            stem, suffix = _os.path.splitext(safe_name)
+            counter = 1
+            while dest.exists():
+                dest = (upload_dir / f"{stem}_{counter}{suffix}").resolve()
+                counter += 1
+            safe_name = dest.name
+
+        dest.write_bytes(content)
+        logger.info(
+            "event=web_upload session=%s file=%s size=%d", session_id, safe_name, len(content)
+        )
+        return JSONResponse({
+            "ok": True,
+            "filename": safe_name,
+            "size": len(content),
+            "path": f"uploads/{safe_name}",
+        })
 
     # --- inspect / jobs / git (U3.5 tier 2 — thin wraps over existing services) ---
 
