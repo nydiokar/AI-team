@@ -9,7 +9,6 @@ import { TokenGate } from "./components/shell/TokenGate";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { SystemScreen } from "./screens/SystemScreen";
 import { TasksScreen } from "./screens/TasksScreen";
-import { FilesScreen } from "./screens/FilesScreen";
 import { SessionDetailScreen } from "./screens/SessionDetailScreen";
 import { useAuthStore } from "./stores/authStore";
 import { EventStreamProvider } from "./hooks/eventStreamContext";
@@ -39,7 +38,6 @@ export function App() {
               <Routes>
                 <Route path="/sessions" element={<SessionsScreen />} />
                 <Route path="/tasks" element={<TasksScreen />} />
-                <Route path="/files" element={<FilesScreen />} />
                 <Route path="/system" element={<SystemScreen />} />
                 <Route path="*" element={<Navigate to="/sessions" replace />} />
               </Routes>

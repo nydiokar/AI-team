@@ -10,6 +10,8 @@
    ─────────────────────────────────────────────────────────────────────────── */
 
 @theme {
+  /* Touch target minimum height (44px = Apple HIG minimum). */
+  --spacing-touch: 44px;
   /* Type — Geist (UI) + Geist Mono (paths/IDs/backends/logs). Loaded below. */
   --font-sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
