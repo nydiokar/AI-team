@@ -22,6 +22,8 @@ import contextlib
 import sys
 import os
 
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 from src.core import (
     ITaskOrchestrator, Task, TaskResult, TaskStatus, TaskType, TaskPriority,
     SessionStatus,
@@ -1128,6 +1130,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
                 timeout=10,
+                creationflags=_NO_WINDOW,
             )
             return result.returncode == 0
         except Exception:

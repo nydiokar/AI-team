@@ -7,9 +7,12 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import logging
 from pathlib import Path
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # Add src to path after site-packages to avoid shadowing third-party modules (e.g., telegram)
 src_path = Path(__file__).parent / "src"

@@ -31,6 +31,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 
@@ -70,6 +72,7 @@ def _run_git(cwd: str, args: List[str], timeout: int = 10) -> Optional[str]:
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
+            creationflags=_NO_WINDOW,
         )
         if result.returncode != 0:
             return None
@@ -323,6 +326,7 @@ class OpenCodeBackend(CodingBackend):
                 stderr=subprocess.PIPE,
                 cwd=cwd or None,
                 env=proc_env,
+                creationflags=_NO_WINDOW,
             )
             self._register_process(proc, session_key)
 
@@ -676,6 +680,7 @@ class OpenCodeBackend(CodingBackend):
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
                 timeout=15,
+                creationflags=_NO_WINDOW,
             )
             if result.returncode != 0:
                 return None
@@ -740,6 +745,7 @@ class OpenCodeBackend(CodingBackend):
                 cwd=cwd,
                 capture_output=True,
                 timeout=30,
+                creationflags=_NO_WINDOW,
             )
             if add.returncode != 0:
                 logger.warning("event=opencode_auto_commit_add_failed cwd=%s", cwd)
@@ -750,6 +756,7 @@ class OpenCodeBackend(CodingBackend):
                 cwd=cwd,
                 capture_output=True,
                 timeout=30,
+                creationflags=_NO_WINDOW,
             )
             if commit.returncode == 0:
                 logger.info("event=opencode_auto_committed cwd=%s label=%s", cwd, label)
@@ -1272,6 +1279,7 @@ class OpenCodeServerBackend(CodingBackend):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,   # capture for diagnostics
                     env=proc_env,
+                    creationflags=_NO_WINDOW,
                 )
             except Exception as e:
                 return f"Failed to start opencode server: {e}"
