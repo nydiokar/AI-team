@@ -1813,6 +1813,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                             invocation_id=telemetry_context.invocation_id,
                             backend=backend_name,
                         )
+                        self._emit_turn_telemetry(
+                            "process.termination_requested",
+                            task,
+                            {"reason_code": "gateway_cancel"},
+                            invocation_id=telemetry_context.invocation_id,
+                            backend=backend_name,
+                        )
                         if session:
                             with contextlib.suppress(Exception):
                                 backend.cancel(session)
@@ -1850,6 +1857,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                         return result
                     else:
                         # Timeout
+                        self._emit_turn_telemetry(
+                            "process.termination_requested",
+                            task,
+                            {"reason_code": "gateway_timeout"},
+                            invocation_id=telemetry_context.invocation_id,
+                            backend=backend_name,
+                        )
                         if session:
                             with contextlib.suppress(Exception):
                                 backend.cancel(session)

@@ -94,6 +94,7 @@ class BufferedHttpTelemetrySink:
         self._events: List[TelemetryEvent] = []
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
+        self._last_failure_retryable = True
 
     def emit(self, event: TelemetryEvent) -> None:
         filtered = filter_events_for_detail_level(
@@ -135,7 +136,14 @@ class BufferedHttpTelemetrySink:
         for batch_events in self._split_batches(events):
             body = self._batch_body(batch_events)
             if not self._post_batch(body):
-                self._spool(body)
+                if self._last_failure_retryable:
+                    self._spool(body)
+                else:
+                    logger.error(
+                        "event=telemetry_batch_rejected node_id=%s batch_id=%s",
+                        self.node_id,
+                        body["batch_id"],
+                    )
 
     def replay_spool(self) -> int:
         replayed = 0
@@ -156,6 +164,11 @@ class BufferedHttpTelemetrySink:
                 except OSError:
                     pass
                 replayed += 1
+            elif not self._last_failure_retryable:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
         return replayed
 
     def _remove_expired_spool_files(self) -> int:
@@ -210,6 +223,7 @@ class BufferedHttpTelemetrySink:
         return batches
 
     def _post_batch(self, body: dict) -> bool:
+        self._last_failure_retryable = True
         if not self.base_url or not self.token:
             return False
         data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -229,6 +243,7 @@ class BufferedHttpTelemetrySink:
                 return True
             except urllib.error.HTTPError as exc:
                 if 400 <= exc.code < 500:
+                    self._last_failure_retryable = False
                     logger.error(
                         "event=telemetry_upload_rejected node_id=%s status=%d",
                         self.node_id,

@@ -158,6 +158,25 @@ def test_schema_rejection_is_not_retried_immediately(tmp_path, monkeypatch):
     assert len(attempts) == 1
 
 
+def test_schema_rejection_is_not_spooled_for_future_retry(tmp_path, monkeypatch):
+    sink = BufferedHttpTelemetrySink(
+        "http://controller",
+        "token",
+        node_id="worker-a",
+        spool_dir=tmp_path,
+        batch_size=1,
+    )
+
+    def urlopen(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 422, "invalid", {}, None)
+
+    monkeypatch.setattr("src.control.telemetry_sink.urllib.request.urlopen", urlopen)
+
+    sink.emit(_event("permanent"))
+
+    assert list(tmp_path.glob("*.json")) == []
+
+
 def test_expired_spool_files_are_removed_before_replay(tmp_path, monkeypatch):
     sink = BufferedHttpTelemetrySink(
         "http://controller",
