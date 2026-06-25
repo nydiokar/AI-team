@@ -16,7 +16,7 @@ import socket
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Literal, Mapping, Optional
+from typing import Any, Dict, Iterable, Literal, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -205,6 +205,27 @@ EVENT_ATTRIBUTE_ALLOWLIST: Dict[str, frozenset[str]] = {
     "telemetry.reconciled": frozenset({"reason_code", "status"}),
 }
 
+SUMMARY_EVENT_NAMES = frozenset(
+    {
+        "turn.accepted",
+        "turn.queued",
+        "turn.started",
+        "turn.timeout_requested",
+        "turn.cancel_requested",
+        "turn.result_recorded",
+        "turn.completed",
+        "invocation.created",
+        "invocation.started",
+        "invocation.retry_scheduled",
+        "invocation.duplicate_detected",
+        "invocation.completed",
+        "model.request.usage",
+        "telemetry.coverage",
+        "telemetry.batch_dropped",
+        "telemetry.reconciled",
+    }
+)
+
 
 def _validate_scalar(value: Any) -> JsonScalar | list[JsonScalar]:
     if isinstance(value, str) and len(value) > 256:
@@ -248,6 +269,33 @@ def sanitize_attributes(event_name: str, attributes: Mapping[str, Any]) -> Dict[
             normalized = sanitize_tool_name(normalized)
         clean[key] = normalized
     return clean
+
+
+def filter_events_for_detail_level(
+    events: Iterable["TelemetryEvent"], *, detailed: bool
+) -> list["TelemetryEvent"]:
+    """Retain summary events and make intentionally reduced coverage explicit."""
+    materialized = list(events)
+    if detailed:
+        return materialized
+
+    result: list[TelemetryEvent] = []
+    for event in materialized:
+        if event.event_name not in SUMMARY_EVENT_NAMES:
+            continue
+        if event.event_name == "telemetry.coverage":
+            area = event.attributes.get("area")
+            if area in ("tools", "subagents"):
+                attributes = dict(event.attributes)
+                attributes.update(
+                    {
+                        "coverage": "partial",
+                        "reason_code": "detailed_events_disabled",
+                    }
+                )
+                event = event.model_copy(update={"attributes": attributes})
+        result.append(event)
+    return result
 
 
 class TelemetryEvent(BaseModel):

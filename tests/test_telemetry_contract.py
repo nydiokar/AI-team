@@ -7,6 +7,7 @@ from src.core.telemetry import (
     TelemetryContext,
     TelemetryEvent,
     build_event,
+    filter_events_for_detail_level,
     new_telemetry_id,
     sanitize_attributes,
     sanitize_tool_name,
@@ -174,3 +175,52 @@ def test_unknown_event_is_rejected():
             emitter_process_instance_id="proc",
             source="backend",
         )
+
+
+def test_reduced_detail_retains_summaries_and_marks_coverage_partial():
+    common = {
+        "turn_id": "turn_detail",
+        "node_id": "worker-a",
+        "emitter_process_instance_id": "proc",
+        "source": "backend",
+        "invocation_id": "inv_detail",
+        "backend": "codex",
+    }
+    events = [
+        build_event(
+            "process.spawned",
+            pid=123,
+            attributes={
+                "process_instance_id": "proc_detail",
+                "process_role": "agent",
+                "executable_name": "codex",
+            },
+            **common,
+        ),
+        build_event(
+            "model.request.usage",
+            attributes={
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "input_token_semantics": "includes_cache",
+                "usage_granularity": "invocation_total",
+                "usage_source": "fixture",
+                "usage_coverage": "aggregate_only",
+            },
+            **common,
+        ),
+        build_event(
+            "telemetry.coverage",
+            attributes={"area": "tools", "coverage": "complete"},
+            **common,
+        ),
+    ]
+
+    filtered = filter_events_for_detail_level(events, detailed=False)
+
+    assert [event.event_name for event in filtered] == [
+        "model.request.usage",
+        "telemetry.coverage",
+    ]
+    assert filtered[1].attributes["coverage"] == "partial"
+    assert filtered[1].attributes["reason_code"] == "detailed_events_disabled"
