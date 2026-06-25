@@ -59,8 +59,11 @@ function useInstallPrompt() {
   return { canInstall, isIos, install };
 }
 
+// Routine lifecycle chatter (started/running) is quieted so the eye lands on
+// what MATTERS (a success, a block, a failure). We keep every event — honesty
+// is the point of this feed — but stop giving them all equal weight.
 const SEVERITY_TEXT: Record<LogSeverity, string> = {
-  info: "text-ink-soft",
+  info: "text-ink-muted",
   success: "text-ok",
   warning: "text-warn",
   error: "text-bad",
@@ -100,7 +103,11 @@ function ActivityRow({ e, showTime }: { e: EnrichedLine; showTime: boolean }) {
       <span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${SEVERITY_DOT[line.severity]}`} />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
-          <p className={`min-w-0 flex-1 truncate leading-snug ${SEVERITY_TEXT[line.severity]}`}>
+          <p
+            className={`min-w-0 flex-1 truncate leading-snug ${SEVERITY_TEXT[line.severity]} ${
+              line.severity === "info" ? "" : "font-medium"
+            }`}
+          >
             {e.title}
           </p>
           {showTime && clockLabel(line.at) && (
@@ -218,7 +225,7 @@ export function SystemScreen() {
 
   return (
     <div className="pb-8">
-      <CompactTopBar title="System" subtitle="Operational status" />
+      <CompactTopBar title="System" subtitle="Nodes and live activity" />
 
       {/* ── Jobs — one collapsible header; hidden entirely when there's none ── */}
       {(jobs.total > 0 || jobsExpanded) && (

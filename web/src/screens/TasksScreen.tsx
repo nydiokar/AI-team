@@ -304,8 +304,8 @@ function SectionHead({
       {icon}
       <h2
         className={cn(
-          "text-[11px] font-semibold uppercase tracking-widest", 
-          tone === "warn" ? "text-warn" : "text-ink-muted",
+          "text-[13px] font-semibold tracking-tight",
+          tone === "warn" ? "text-warn" : "text-ink-soft",
         )}
       >
         {label}
@@ -356,7 +356,7 @@ export function TasksScreen() {
 
   return (
     <div className="pb-8">
-      <CompactTopBar title="Tasks" subtitle="Operational inbox · all sessions" />
+      <CompactTopBar title="Tasks" subtitle="From every session" />
 
       {isLoading && (
         <div className="space-y-2.5 px-4 pt-4">
@@ -381,23 +381,27 @@ export function TasksScreen() {
       )}
 
       {empty && (
-        <div className="flex flex-col items-center gap-2 px-4 py-20 text-center">
-          <Inbox className="size-8 text-ink-muted" />
-          <p className="text-[15px] font-medium text-ink-soft">No tasks yet</p>
-          <p className="text-sm text-ink-muted">
-            Tasks appear here when sessions run work.
+        <div className="flex flex-col items-center gap-3 px-4 py-20 text-center">
+          <span className="flex size-14 items-center justify-center rounded-full bg-surface-2">
+            <Inbox className="size-7 text-ink-muted" />
+          </span>
+          <p className="text-[16px] font-semibold text-ink">No tasks yet</p>
+          <p className="max-w-xs text-[14px] leading-relaxed text-ink-soft">
+            When a session runs work, it shows up here so you can keep an eye on it.
           </p>
         </div>
       )}
 
       {/* Inbox-zero: nothing needs you, but history exists. Reassure, don't blank. */}
       {inboxZero && (
-        <div className="mx-4 mt-4 flex items-center gap-3 rounded-xl border border-hairline bg-surface-1/40 px-4 py-3">
-          <CheckCircle2 className="size-5 shrink-0 text-ok" />
+        <div className="mx-4 mt-4 flex items-center gap-3.5 rounded-2xl bg-ok/8 px-5 py-4 ring-1 ring-inset ring-ok/15">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-ok/12">
+            <CheckCircle2 className="size-6 text-ok" />
+          </span>
           <div>
-            <p className="text-[13.5px] font-medium text-ink">Nothing needs you</p>
-            <p className="text-[11.5px] text-ink-muted">
-              No running, blocked, or waiting work. {recent.length} recently completed below.
+            <p className="text-[15px] font-semibold text-ink">All clear</p>
+            <p className="mt-0.5 text-[13px] text-ink-soft">
+              Nothing needs you right now — {recent.length} finished recently, below.
             </p>
           </div>
         </div>
@@ -451,7 +455,7 @@ export function TasksScreen() {
         <>
           <div className="flex items-center gap-2 px-4 pb-2 pt-6">
             <XCircle className="size-3.5 text-bad" />
-            <h2 className="text-[11px] font-semibold uppercase tracking-widest text-bad">
+            <h2 className="text-[13px] font-semibold tracking-tight text-bad">
               Failed
             </h2>
             <span className="rounded-full bg-surface-2 px-1.5 text-[11px] font-medium text-ink-soft">

@@ -1,12 +1,14 @@
 @import "tailwindcss";
 
 /* ───────────────────────────────────────────────────────────────────────────
-   AI-Team Gateway — "Cockpit" design system (Tailwind v4, CSS-first @theme).
+   AI-Team Gateway — "Workshop" design system (Tailwind v4, CSS-first @theme).
 
-   Thesis: an operational control surface for coding agents on remote machines.
-   The loudest thing on screen is STATUS. Dense but breathable; instrument-panel
-   palette; the signature element is the live status system (pulse dot + the
-   attention edge-glow). Grounded in spec §8 + dark_ui_app_interface_mockup.png.
+   Thesis: a calm, capable workshop for coding agents on remote machines — an
+   operational surface you can pleasantly inhabit, not a command bunker. Depth
+   comes from a warm graphite surface ramp (tonal layering, not outlines); cyan
+   is reserved for brand/nav/actions while a warm accent carries waiting states
+   and small moments of personality. The signature element is still the live
+   status system (pulse dot + the warm attention glow). Grounded in spec §8.
    ─────────────────────────────────────────────────────────────────────────── */
 
 @theme {
@@ -16,26 +18,39 @@
   --font-sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
-  /* Surfaces — near-black base, two charcoal elevations, hairline border. */
-  --color-base: #0a0c10;
-  --color-surface-1: #13161d;
-  --color-surface-2: #1a1e27;
-  --color-hairline: #242935;
+  /* Surfaces — a warm graphite ramp with FOUR recognizable levels. Tonal
+     layering (not borders) is the primary way depth and place are established;
+     each level has a stable job: page → low → card → raised. Warmer & lighter
+     than the old near-black so the room reads "workshop", not "bunker". */
+  --color-base: #101318;       /* page background */
+  --color-surface-1: #181d24;  /* low: insets, quiet wells, log rows */
+  --color-surface-2: #202733;  /* card: the default elevated surface */
+  --color-surface-3: #28313d;  /* raised: floating sheets, hover/active */
+  --color-hairline: #303946;
 
-  /* Text. */
-  --color-ink: #e8edf4;
-  --color-ink-soft: #aab3c2;
-  --color-ink-muted: #5f6b7e;
+  /* Text — clearly stepped; muted lifted to stay legible on lighter surfaces
+     (the old #5f6b7e failed AA on small text — don't shrink metadata onto it). */
+  --color-ink: #f4f6f8;
+  --color-ink-soft: #a7b0bc;
+  --color-ink-muted: #8793a3;
 
-  /* Accent — calm blue-cyan, tuned to the mock (muted, not neon). */
-  --color-accent: #56c7d6;
-  --color-accent-dim: #18313a;
+  /* Accent — calm blue-cyan. Reserved for brand, navigation, primary actions
+     and links. It no longer doubles as "running" (see below) so one hue stops
+     carrying the entire personality. */
+  --color-accent: #66d9e8;
+  --color-accent-dim: #163a40;
 
-  /* Semantic state — slightly desaturated to read calm on near-black. */
-  --color-running: #56c7d6;
-  --color-ok: #3ad29b;
-  --color-warn: #f5c451;
-  --color-bad: #f4768a;
+  /* Warm second accent — sparingly, for waiting/attention and small moments of
+     personality. The counterweight that keeps the UI from feeling electric. */
+  --color-warm: #f3b66a;
+  --color-warm-dim: #3a2b18;
+
+  /* Semantic state — calm on the graphite ramp. `running` is its own teal-green
+     (decoupled from --accent) so "live" reads as a state, not as chrome. */
+  --color-running: #4dd6a0;
+  --color-ok: #4dd6a0;
+  --color-warn: #f3c969;
+  --color-bad: #ff6f91;
 
   /* Radii — moderate, per spec §8. */
   --radius-sm: 6px;
@@ -123,23 +138,27 @@ body {
   animation: pulse-dot 2s var(--ease-out-soft) infinite;
 }
 
+/* Attention uses the WARM accent now — a gentle "this is waiting on you" glow,
+   not an alarm. Warmth invites; it doesn't shout. */
 .attention-glow {
   box-shadow:
-    inset 0 0 0 1px color-mix(in oklab, var(--color-warn) 40%, transparent),
-    0 0 24px -8px color-mix(in oklab, var(--color-warn) 50%, transparent);
+    inset 0 0 0 1px color-mix(in oklab, var(--color-warm) 45%, transparent),
+    0 0 28px -10px color-mix(in oklab, var(--color-warm) 55%, transparent);
 }
 
-/* Hairline top-light on elevated cards — the subtle depth the mock has. */
+/* Elevated card. Separation now comes from TONE (a lighter surface than the
+   page) with a faint top-light for depth; the border is a barely-there hint,
+   not a defensive outline around every box. */
 .card-elev {
   background: linear-gradient(
     180deg,
-    color-mix(in oklab, var(--color-surface-2) 100%, transparent),
-    var(--color-surface-1)
+    color-mix(in oklab, var(--color-surface-3) 55%, var(--color-surface-2)),
+    var(--color-surface-2)
   );
-  border: 1px solid var(--color-hairline);
+  border: 1px solid color-mix(in oklab, var(--color-hairline) 60%, transparent);
   box-shadow:
-    0 1px 0 0 color-mix(in oklab, #ffffff 4%, transparent) inset,
-    0 8px 24px -16px #000;
+    0 1px 0 0 color-mix(in oklab, #ffffff 5%, transparent) inset,
+    0 10px 30px -18px #000;
 }
 
 /* Global focus-visible ring for interactive elements not using Button.tsx */

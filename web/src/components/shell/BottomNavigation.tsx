@@ -21,17 +21,23 @@ export function BottomNavigation() {
           to={to}
           className={({ isActive }) =>
             cn(
-              "relative flex min-h-touch flex-col items-center justify-center gap-1 py-2.5 text-[11px] transition-colors",
-              isActive ? "text-accent" : "text-ink-muted hover:text-ink-soft",
+              "relative flex min-h-touch flex-col items-center justify-center gap-1 py-2 text-[11px] font-medium transition-colors",
+              isActive ? "text-accent" : "text-ink-soft hover:text-ink",
             )
           }
         >
           {({ isActive }) => (
             <>
-              {isActive && (
-                <span className="absolute top-0 h-0.5 w-8 rounded-full bg-accent" />
-              )}
-              <Icon className="size-5" strokeWidth={isActive ? 2.2 : 1.8} />
+              {/* Material-3 active indicator: a soft tinted pill behind the icon,
+                  not a thin technical tab line above it. */}
+              <span
+                className={cn(
+                  "flex h-7 w-14 items-center justify-center rounded-full transition-colors",
+                  isActive ? "bg-accent-dim" : "bg-transparent",
+                )}
+              >
+                <Icon className="size-5" strokeWidth={isActive ? 2.4 : 1.8} />
+              </span>
               {label}
             </>
           )}
