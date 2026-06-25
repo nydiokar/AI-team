@@ -2565,6 +2565,26 @@ created: {task.created}
                     attributes=event_attributes,
                 )
             )
+            if name == "turn.started" and session is None:
+                self._telemetry_sink.emit(
+                    build_event(
+                        "telemetry.coverage",
+                        turn_id=task.id,
+                        session_id=None,
+                        node_id=socket.gethostname(),
+                        emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                        source="gateway",
+                        invocation_id=invocation_id,
+                        backend=backend or self._resolve_task_backend(task),
+                        model=model,
+                        attributes={
+                            "area": "postprocess",
+                            "coverage": "unsupported",
+                            "reason_code": "llama_postprocess_uninstrumented",
+                            "adapter_version": "gateway-v1",
+                        },
+                    )
+                )
             if flush:
                 self._telemetry_sink.flush()
         except Exception:

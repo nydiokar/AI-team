@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -15,6 +16,7 @@ from src.core.telemetry import (
     telemetry_context,
     current_telemetry_context,
 )
+from src.orchestrator import TaskOrchestrator
 
 
 def test_ids_are_opaque_and_unique():
@@ -224,3 +226,35 @@ def test_reduced_detail_retains_summaries_and_marks_coverage_partial():
     ]
     assert filtered[1].attributes["coverage"] == "partial"
     assert filtered[1].attributes["reason_code"] == "detailed_events_disabled"
+
+
+def test_oneoff_turn_declares_uninstrumented_postprocess_coverage():
+    class Sink:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event):
+            self.events.append(event)
+
+        def flush(self):
+            return None
+
+    orchestrator = TaskOrchestrator.__new__(TaskOrchestrator)
+    orchestrator._telemetry_sink = Sink()
+    orchestrator.session_store = SimpleNamespace(get=lambda _session_id: None)
+    orchestrator._resolve_task_backend = lambda _task: "codex"
+    task = SimpleNamespace(id="turn_oneoff", metadata={"session_id": ""})
+
+    orchestrator._emit_turn_telemetry("turn.started", task)
+
+    assert [event.event_name for event in orchestrator._telemetry_sink.events] == [
+        "turn.started",
+        "telemetry.coverage",
+    ]
+    coverage = orchestrator._telemetry_sink.events[1]
+    assert coverage.attributes == {
+        "area": "postprocess",
+        "coverage": "unsupported",
+        "reason_code": "llama_postprocess_uninstrumented",
+        "adapter_version": "gateway-v1",
+    }
