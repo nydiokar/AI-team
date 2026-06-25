@@ -53,7 +53,9 @@ def _dashboard_token() -> str:
         return os.getenv("DASHBOARD_TOKEN", "") or os.getenv("WORKER_TOKEN", "")
 
 
-def _require_auth(creds: HTTPAuthorizationCredentials = Security(_bearer)) -> None:
+async def _require_auth(
+    creds: HTTPAuthorizationCredentials = Security(_bearer),
+) -> None:
     token = _dashboard_token()
     if not token:
         raise HTTPException(status_code=500, detail="DASHBOARD_TOKEN not configured")
@@ -107,24 +109,24 @@ def _telemetry_store():
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
-def health() -> Dict[str, str]:
+async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/api/sessions", dependencies=[Depends(_require_auth)])
-def api_sessions(limit: int = Query(200, ge=1, le=1000)) -> JSONResponse:
+async def api_sessions(limit: int = Query(200, ge=1, le=1000)) -> JSONResponse:
     return JSONResponse({"sessions": _session_views(limit)})
 
 
 @app.get("/api/tasks", dependencies=[Depends(_require_auth)])
-def api_tasks(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
+async def api_tasks(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
     db = _db()
     tasks = db.list_tasks(limit=limit) if db is not None else []
     return JSONResponse({"tasks": tasks})
 
 
 @app.get("/api/nodes", dependencies=[Depends(_require_auth)])
-def api_nodes() -> JSONResponse:
+async def api_nodes() -> JSONResponse:
     db = _db()
     nodes = db.list_nodes() if db is not None else []
     for n in nodes:
@@ -174,7 +176,7 @@ def _annotate_node_liveness(node: Dict[str, Any]) -> None:
 
 
 @app.get("/api/events", dependencies=[Depends(_require_auth)])
-def api_events(
+async def api_events(
     since: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
 ) -> JSONResponse:
@@ -189,7 +191,7 @@ def api_events(
 
 
 @app.get("/api/turns", dependencies=[Depends(_require_auth)])
-def api_turns(
+async def api_turns(
     session_id: Optional[str] = None,
     status: Optional[str] = None,
     backend: Optional[str] = None,
@@ -207,7 +209,7 @@ def api_turns(
 
 
 @app.get("/api/turns/{turn_id}", dependencies=[Depends(_require_auth)])
-def api_turn_detail(turn_id: str) -> JSONResponse:
+async def api_turn_detail(turn_id: str) -> JSONResponse:
     store = _telemetry_store()
     turn = store.get_turn(turn_id) if store is not None else None
     if turn is None:
@@ -216,7 +218,7 @@ def api_turn_detail(turn_id: str) -> JSONResponse:
 
 
 @app.get("/api/turns/{turn_id}/diagnostics", dependencies=[Depends(_require_auth)])
-def api_turn_diagnostics(turn_id: str) -> JSONResponse:
+async def api_turn_diagnostics(turn_id: str) -> JSONResponse:
     store = _telemetry_store()
     diagnostics = store.diagnostics(turn_id) if store is not None else None
     if diagnostics is None:
@@ -225,7 +227,9 @@ def api_turn_diagnostics(turn_id: str) -> JSONResponse:
 
 
 @app.get("/api/turns/{turn_id}/graph", dependencies=[Depends(_require_auth)])
-def api_turn_graph(turn_id: str, expand_tools: bool = False) -> JSONResponse:
+async def api_turn_graph(
+    turn_id: str, expand_tools: bool = False
+) -> JSONResponse:
     store = _telemetry_store()
     graph = store.graph(turn_id, expand_tools=expand_tools) if store is not None else None
     if graph is None:
@@ -234,7 +238,7 @@ def api_turn_graph(turn_id: str, expand_tools: bool = False) -> JSONResponse:
 
 
 @app.get("/api/turns/{turn_id}/events", dependencies=[Depends(_require_auth)])
-def api_turn_events(
+async def api_turn_events(
     turn_id: str,
     after: Optional[str] = None,
     limit: int = Query(500, ge=1, le=5000),
@@ -250,7 +254,7 @@ def api_turn_events(
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> HTMLResponse:
+async def index() -> HTMLResponse:
     return HTMLResponse(_INDEX_HTML)
 
 
