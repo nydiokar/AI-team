@@ -14,6 +14,8 @@ import type {
 export const rawSessions: RawSessionView[] = [
   {
     session_id: "sess_gateway_ui",
+    backend_session_id: "be_8f3a21",
+    default_model: "claude-opus-4-8",
     backend: "claude",
     repo_path: "C:/Users/Cicada38/Projects/AI-team",
     status: "busy",
@@ -30,6 +32,8 @@ export const rawSessions: RawSessionView[] = [
   },
   {
     session_id: "sess_review_build",
+    backend_session_id: "",
+    default_model: "gpt-5-codex",
     backend: "codex",
     repo_path: "/home/pi/narrative-engine",
     status: "awaiting_input",
@@ -46,6 +50,8 @@ export const rawSessions: RawSessionView[] = [
   },
   {
     session_id: "sess_deploy_failed",
+    backend_session_id: "be_c19d04",
+    default_model: "claude-opus-4-8",
     backend: "claude",
     repo_path: "/srv/gateway",
     status: "error",
@@ -62,6 +68,8 @@ export const rawSessions: RawSessionView[] = [
   },
   {
     session_id: "sess_idle_notes",
+    backend_session_id: "be_77ee10",
+    default_model: "qwen3-coder",
     backend: "opencode",
     repo_path: "/home/pi/notes",
     status: "idle",
@@ -78,6 +86,8 @@ export const rawSessions: RawSessionView[] = [
   },
   {
     session_id: "sess_closed_migration",
+    backend_session_id: "be_5b2c88",
+    default_model: "claude-opus-4-8",
     backend: "claude",
     repo_path: "C:/Users/Cicada38/Projects/AI-team",
     status: "closed",

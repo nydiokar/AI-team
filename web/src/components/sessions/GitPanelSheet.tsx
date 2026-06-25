@@ -64,6 +64,11 @@ export function GitPanelSheet({ sessionId, onClose }: Props) {
     );
   };
 
+  // Full file lists — never truncated. You need to see exactly what you're about
+  // to commit, so every path is listed (the <pre> scrolls if long).
+  const fileBlock = (label: string, files: string[]) =>
+    files.length > 0 ? `${label} (${files.length}):\n${files.map((f) => `  ${f}`).join("\n")}` : "";
+
   const formatStatus = (s: GitStatus) => {
     if (s.error) return `Error: ${s.error}`;
     const lines: string[] = [`Branch: ${s.current_branch ?? "?"}`];
@@ -71,15 +76,20 @@ export function GitPanelSheet({ sessionId, onClose }: Props) {
       lines.push("Working directory: clean");
     } else {
       const c = s.changes ?? { modified: [], created: [], deleted: [], total: 0 };
-      lines.push(`Modified: ${c.modified.length}  Created: ${c.created.length}  Deleted: ${c.deleted.length}`);
-      if ((s.staged_files ?? []).length > 0) {
-        lines.push(`Staged: ${s.staged_files!.slice(0, 5).join(", ")}${s.staged_files!.length > 5 ? ` +${s.staged_files!.length - 5} more` : ""}`);
-      }
-      if ((s.unstaged_files ?? []).length > 0) {
-        lines.push(`Unstaged: ${s.unstaged_files!.slice(0, 3).join(", ")}${s.unstaged_files!.length > 3 ? ` +${s.unstaged_files!.length - 3} more` : ""}`);
-      }
+      const modified = c.modified ?? [];
+      const created = c.created ?? [];
+      const deleted = c.deleted ?? [];
+      lines.push(`Modified: ${modified.length}  Created: ${created.length}  Deleted: ${deleted.length}`);
+      const blocks = [
+        fileBlock("Modified", modified),
+        fileBlock("Created", created),
+        fileBlock("Deleted", deleted),
+        fileBlock("Staged", s.staged_files ?? []),
+        fileBlock("Unstaged", s.unstaged_files ?? []),
+      ].filter(Boolean);
+      if (blocks.length) lines.push("", blocks.join("\n"));
       if (s.safety?.has_sensitive_files) {
-        lines.push(`⚠ Sensitive files: ${s.safety.sensitive_files.slice(0, 3).join(", ")}`);
+        lines.push("", `⚠ Sensitive files (${s.safety.sensitive_files.length}):`, ...s.safety.sensitive_files.map((f) => `  ${f}`));
       }
     }
     return lines.join("\n");
@@ -89,8 +99,9 @@ export function GitPanelSheet({ sessionId, onClose }: Props) {
     if (!r.success) {
       return `Failed: ${(r.errors ?? [r.error ?? "unknown error"]).join("; ")}`;
     }
-    const files = r.files_committed?.length ?? 0;
-    return `✅ Committed ${files} file${files !== 1 ? "s" : ""}${r.branch_name ? ` on ${r.branch_name}` : ""}`;
+    const files = r.files_committed ?? [];
+    const head = `✅ Committed ${files.length} file${files.length !== 1 ? "s" : ""}${r.branch_name ? ` on ${r.branch_name}` : ""}`;
+    return files.length ? `${head}\n${files.map((f) => `  ${f}`).join("\n")}` : head;
   };
 
   return (
@@ -171,14 +182,14 @@ export function GitPanelSheet({ sessionId, onClose }: Props) {
         </div>
 
         {commitResult && (
-          <p className={`text-[12px] ${commitResult.success ? "text-ok" : "text-bad"}`}>
+          <pre className={`whitespace-pre-wrap font-mono text-[12px] ${commitResult.success ? "text-ok" : "text-bad"}`}>
             {formatCommitResult(commitResult)}
-          </p>
+          </pre>
         )}
         {commitAllResult && (
-          <p className={`text-[12px] ${commitAllResult.success ? "text-ok" : "text-bad"}`}>
+          <pre className={`whitespace-pre-wrap font-mono text-[12px] ${commitAllResult.success ? "text-ok" : "text-bad"}`}>
             {formatCommitResult(commitAllResult)}
-          </p>
+          </pre>
         )}
       </div>
     </div>

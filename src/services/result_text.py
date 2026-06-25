@@ -15,12 +15,179 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
+def _text_from_content_blocks(content: Any) -> str:
+    """Join the ``text`` of a claude-style content block array (skip tool_use etc.)."""
+    if not isinstance(content, list):
+        return ""
+    out: List[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            t = (block.get("text") or "").strip()
+            if t:
+                out.append(t)
+    return "\n".join(out).strip()
+
+
+def _extract_from_ndjson(text: str) -> str:
+    """Pull the agent's reply out of a newline-delimited JSON event stream.
+
+    Handles all three backends' streams:
+      • codex    — ``item.completed`` of type ``agent_message`` (``item.text``).
+      • claude   — terminal ``result`` event (``result`` string), else the last
+                   ``assistant`` event's ``message.content`` text blocks.
+      • opencode — flat ``message``/``assistant`` events carrying ``text``.
+    Returns "" when the blob isn't an event stream we recognise, so callers fall
+    back to the structured/raw paths. The terminal ``result`` text, when present,
+    wins over accumulated assistant chunks (it is the final, deduped answer)."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2 or not all(ln.startswith("{") for ln in lines):
+        return ""
+    parts: List[str] = []
+    result_text = ""
+    saw_event = False
+    for ln in lines:
+        try:
+            ev = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(ev, dict) or "type" not in ev:
+            continue
+        saw_event = True
+        etype = ev.get("type")
+        if etype == "item.completed":  # codex
+            item = ev.get("item") or {}
+            if item.get("type") == "agent_message":
+                t = (item.get("text") or "").strip()
+                if t:
+                    parts.append(t)
+        elif etype == "result":  # claude terminal event (authoritative)
+            r = ev.get("result")
+            if isinstance(r, str) and r.strip():
+                result_text = r.strip()
+        elif etype == "assistant":  # claude assistant turn (content blocks)
+            t = _text_from_content_blocks((ev.get("message") or {}).get("content"))
+            if not t and ev.get("text"):
+                t = str(ev["text"]).strip()
+            if t:
+                parts.append(t)
+        elif etype == "text":  # opencode — text lives at part.text (or flat text)
+            part = ev.get("part") or {}
+            t = (part.get("text") if isinstance(part, dict) else None) or ev.get("text") or ""
+            t = str(t).strip()
+            if t:
+                parts.append(t)
+        elif etype == "message" and ev.get("text"):  # generic flat shape
+            parts.append(str(ev["text"]).strip())
+    if not saw_event:
+        return ""
+    # Prefer the terminal result string; else the accumulated assistant text.
+    return result_text or "\n".join(parts).strip()
+
+
+def _int(v: Any) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return 0
+
+
+def _normalize_usage(
+    input_tokens: int = 0,
+    cached_input_tokens: int = 0,
+    output_tokens: int = 0,
+    reasoning_output_tokens: int = 0,
+) -> Optional[Dict[str, int]]:
+    """One canonical usage shape across all backends (codex key names — the Web UI
+    already maps these). Returns None when there's nothing meaningful to show."""
+    if input_tokens + output_tokens + reasoning_output_tokens <= 0:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+    }
+
+
+def extract_usage_from_ndjson(text: str) -> Optional[Dict[str, Any]]:
+    """Pull per-turn token usage out of any backend's NDJSON event stream, or None.
+
+    Normalizes the THREE backend shapes into one canonical dict:
+      • codex    ``turn.completed`` → ``usage: {input_tokens, cached_input_tokens,
+                 output_tokens, reasoning_output_tokens}``
+      • claude   ``result`` (subtype success) → ``usage: {input_tokens, output_tokens,
+                 cache_read_input_tokens, cache_creation_input_tokens}``
+      • opencode ``step_finish`` → ``part.tokens: {input, output, reasoning,
+                 cache:{read,write}}``
+    The last usage-bearing event in the stream wins (the final turn total)."""
+    if not isinstance(text, str):
+        return None
+    result: Optional[Dict[str, Any]] = None
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln.startswith("{") or ("usage" not in ln and "tokens" not in ln):
+            continue
+        try:
+            ev = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        etype = ev.get("type")
+
+        if etype == "turn.completed":  # codex
+            u = ev.get("usage") or {}
+            if isinstance(u, dict):
+                got = _normalize_usage(
+                    input_tokens=_int(u.get("input_tokens")),
+                    cached_input_tokens=_int(u.get("cached_input_tokens")),
+                    output_tokens=_int(u.get("output_tokens")),
+                    reasoning_output_tokens=_int(u.get("reasoning_output_tokens")),
+                )
+                if got:
+                    result = got
+
+        elif etype in ("result", "assistant"):  # claude
+            u = ev.get("usage") or (ev.get("message") or {}).get("usage") or {}
+            if isinstance(u, dict):
+                got = _normalize_usage(
+                    input_tokens=_int(u.get("input_tokens")),
+                    cached_input_tokens=_int(u.get("cache_read_input_tokens"))
+                    + _int(u.get("cache_creation_input_tokens")),
+                    output_tokens=_int(u.get("output_tokens")),
+                )
+                if got:
+                    result = got
+
+        elif etype == "step_finish":  # opencode
+            tok = (ev.get("part") or {}).get("tokens") or ev.get("tokens") or {}
+            if isinstance(tok, dict):
+                cache = tok.get("cache") or {}
+                got = _normalize_usage(
+                    input_tokens=_int(tok.get("input")),
+                    cached_input_tokens=_int(cache.get("read")) + _int(cache.get("write"))
+                    if isinstance(cache, dict)
+                    else 0,
+                    output_tokens=_int(tok.get("output")),
+                    reasoning_output_tokens=_int(tok.get("reasoning")),
+                )
+                if got:
+                    result = got
+
+    return result
+
+
 def extract_text_from_payload(payload: Any) -> str:
     """Best-effort extraction of a user-visible answer from structured payloads."""
     if isinstance(payload, str):
         text = payload.strip()
         if not text:
             return ""
+        # NDJSON event stream (codex/opencode) — parse the agent_message events
+        # rather than dumping the raw JSON lines into the conversation.
+        ndjson = _extract_from_ndjson(text)
+        if ndjson:
+            return ndjson
         if text.startswith("{") or text.startswith("["):
             try:
                 return extract_text_from_payload(json.loads(text))

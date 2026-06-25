@@ -52,12 +52,16 @@ export interface Session {
   /** Raw backend name (claude|codex|opencode…). Rendering is the surface's job. */
   backend: string;
   workspace: Workspace;
+  /** Native backend session id (resume key); null when not yet captured. */
+  backendSessionId: string | null;
   /** lifecycle ≠ operational state (spec §3.3 / acceptance #4). */
   lifecycle: SessionLifecycle;
   opState: SessionOpState;
   /** True when opState needs a human (waiting_for_input/approval, failed). */
   needsAttention: boolean;
   model: string | null;
+  /** The backend's default model — shown when `model` is null. */
+  defaultModel: string | null;
   lastTaskId: string | null;
   /** Short human summary of the last turn (last_result_summary || last_summary). */
   lastSummary: string;

@@ -17,7 +17,11 @@ export interface RawSessionView {
   /** SessionStatus value: idle|busy|awaiting_input|error|cancelled|closed. */
   status: string;
   machine_id: string;
+  /** Native session id the backend returned (resume key) — "" when not captured. */
+  backend_session_id: string;
   model: string | null;
+  /** The backend's default model — shown when `model` is null. */
+  default_model: string | null;
   last_task_id: string;
   last_summary: string;
   last_files_modified: string[];
@@ -133,6 +137,13 @@ export interface RawArtifactSummary {
 // src.control.transcript.get_transcript() — one turn per task artifact, oldest→
 // newest. `result` is "" when there genuinely was no output, or an honest
 // "(no output — …)" / "(task failed …)" note on a failed turn (never fabricated).
+export interface RawTokenUsage {
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  output_tokens?: number;
+  reasoning_output_tokens?: number;
+}
+
 export interface RawTranscriptTurn {
   task_id: string;
   timestamp: string;
@@ -140,6 +151,8 @@ export interface RawTranscriptTurn {
   instruction: string;
   result: string;
   file_count: number;
+  /** Token usage for the turn (codex turn.completed); null when not reported. */
+  usage: RawTokenUsage | null;
 }
 
 // GET /api/artifacts/{task_id} → { artifact: RawArtifactDetail, files: RawRemoteFile[] }.

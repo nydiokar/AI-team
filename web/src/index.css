@@ -75,6 +75,14 @@ body,
   height: 100%;
 }
 
+/* On mobile the URL bar collapses on scroll; static `100%`/`100vh` keeps the
+   layout viewport at its taller size, leaving a strip of page background below
+   the app column. `100dvh` tracks the *visible* viewport so the app always fills
+   exactly the screen — no background band at the bottom. */
+#root {
+  height: 100dvh;
+}
+
 body {
   margin: 0;
   background: var(--color-base);

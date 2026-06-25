@@ -68,10 +68,14 @@ export function Composer({
             setText("");
             send(instruction);
           } else {
+            // No instruction yet — show a transient banner with the saved path.
+            // We do NOT inject a fake chat bubble: it isn't a backend event, so it
+            // would refresh away and sort out of order. The path is auto-appended
+            // to the next instruction the user sends (see fileRef above).
             setUploadBanner(
-              `Saved ${res.filename} (${Math.round(res.size / 1024)} KB). Type an instruction to work with it.`,
+              `Saved ${res.filename} (${Math.round(res.size / 1024)} KB) → ${res.path}. Type an instruction to use it.`,
             );
-            setTimeout(() => setUploadBanner(null), 5000);
+            setTimeout(() => setUploadBanner(null), 8000);
           }
         },
         onError: (err) => {

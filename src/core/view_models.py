@@ -28,7 +28,9 @@ class SessionView:
     repo_path: str
     status: str                 # SessionStatus value
     machine_id: str
+    backend_session_id: str     # native session ID the backend returned (resume key)
     model: Optional[str]
+    default_model: Optional[str]  # the backend's default model (shown when model is None)
     last_task_id: str
     last_summary: str
     last_files_modified: List[str]
@@ -41,13 +43,20 @@ class SessionView:
     @classmethod
     def from_session(cls, s: Session) -> "SessionView":
         origin = s.origin
+        try:
+            from config.models import default_model as _default_model
+            resolved_default = _default_model(s.backend)
+        except Exception:
+            resolved_default = None
         return cls(
             session_id=s.session_id,
             backend=s.backend,
             repo_path=s.repo_path,
             status=s.status.value,
             machine_id=s.machine_id,
+            backend_session_id=s.backend_session_id or "",
             model=s.model,
+            default_model=resolved_default,
             last_task_id=s.last_task_id,
             last_summary=s.last_result_summary or s.last_summary,
             last_files_modified=list(s.last_files_modified or []),

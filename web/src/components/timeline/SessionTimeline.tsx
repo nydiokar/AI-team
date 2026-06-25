@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   CircleDot,
   ShieldQuestion,
@@ -6,8 +7,9 @@ import {
   AlertCircle,
   Info,
   Loader2,
+  Coins,
 } from "lucide-react";
-import type { TimelineItem } from "../../fixtures/timeline";
+import type { TimelineItem, TokenUsage } from "../../fixtures/timeline";
 import type { ApprovalRequest } from "../../domain/models";
 import { TaskStatusChip } from "../ui/StatusChip";
 import { Button } from "../ui/Button";
@@ -90,6 +92,41 @@ function ApprovalCard({ approval, at }: { approval: ApprovalRequest; at: string 
   );
 }
 
+function fmtTokens(n: number | undefined): string {
+  if (n == null) return "0";
+  if (n < 1000) return String(n);
+  return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
+}
+
+/**
+ * Subtle token-usage badge: a quiet count next to the timestamp; tap to reveal
+ * the full input/cached/output breakdown. Hidden entirely when no usage.
+ */
+function TokenBadge({ usage }: { usage: TokenUsage }) {
+  const [open, setOpen] = useState(false);
+  const total = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+  if (total === 0) return null;
+  return (
+    <button
+      onClick={() => setOpen((v) => !v)}
+      className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink-soft"
+      aria-label="Token usage"
+    >
+      <Coins className="size-3 opacity-60" />
+      {open ? (
+        <span className="tabular-nums">
+          in {fmtTokens(usage.inputTokens)}
+          {usage.cachedInputTokens ? ` (cached ${fmtTokens(usage.cachedInputTokens)})` : ""} · out{" "}
+          {fmtTokens(usage.outputTokens)}
+          {usage.reasoningOutputTokens ? ` · reasoning ${fmtTokens(usage.reasoningOutputTokens)}` : ""}
+        </span>
+      ) : (
+        <span className="tabular-nums">{fmtTokens(total)} tok</span>
+      )}
+    </button>
+  );
+}
+
 /**
  * Grouped message bubble. When consecutive messages share a role we tighten
  * vertical spacing and suppress the role label on all but the first. The
@@ -101,12 +138,14 @@ function MessageBubble({
   at,
   isFirst,
   isLast,
+  usage,
 }: {
   role: "user" | "assistant";
   text: string;
   at: string;
   isFirst: boolean;
   isLast: boolean;
+  usage?: TokenUsage | null;
 }) {
   const mine = role === "user";
   return (
@@ -143,9 +182,12 @@ function MessageBubble({
         <p className="whitespace-pre-wrap break-words">{text}</p>
       </div>
 
-      {/* Timestamp — only on last in a group */}
-      {isLast && at && (
-        <span className="mt-1 text-[10px] text-ink-muted">{timeLabel(at)}</span>
+      {/* Timestamp (+ subtle token badge) — only on last in a group */}
+      {isLast && (at || usage) && (
+        <span className="mt-1 flex items-center gap-1.5 text-[10px] text-ink-muted">
+          {at && timeLabel(at)}
+          {usage && <TokenBadge usage={usage} />}
+        </span>
       )}
     </div>
   );
@@ -171,6 +213,7 @@ export function SessionTimeline({ items }: { items: TimelineItem[] }) {
               at={item.at}
               isFirst={!prevSameRole}
               isLast={!nextSameRole}
+              usage={item.usage}
             />
           );
         }

@@ -8,8 +8,15 @@ import type { Message, ApprovalRequest, Artifact } from "../domain/models";
 import type { SystemNotice } from "../domain/events";
 import type { TaskState } from "../domain/status";
 
+export interface TokenUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningOutputTokens?: number;
+}
+
 export type TimelineItem =
-  | { kind: "message"; at: string; message: Message }
+  | { kind: "message"; at: string; message: Message; usage?: TokenUsage | null }
   | { kind: "task_state"; at: string; taskId: string; state: TaskState; objective: string }
   | { kind: "notice"; at: string; notice: SystemNotice }
   | { kind: "approval"; at: string; approval: ApprovalRequest }
