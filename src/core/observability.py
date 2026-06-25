@@ -100,28 +100,35 @@ def _current_context() -> Dict[str, str]:
 # Redaction — moved here from main.py so the worker gets it too
 # ---------------------------------------------------------------------------
 
+_REDACTION_PATTERNS = (
+    # Telegram bot token in URL path: /bot<token>/...
+    (re.compile(r"/bot[0-9A-Za-z:_-]+"), "/bot<REDACTED>"),
+    # Authorization: Bearer <token>
+    (re.compile(r"(Authorization:\s*Bearer\s+)[^\s]+", flags=re.IGNORECASE), r"\1<REDACTED>"),
+    # GATEWAY_TELEGRAM_BOT_TOKEN=...
+    (re.compile(r"(GATEWAY_TELEGRAM_BOT_TOKEN=)[^\s]+", flags=re.IGNORECASE), r"\1<REDACTED>"),
+    # WORKER_TOKEN=...
+    (re.compile(r"(WORKER_TOKEN=)[^\s]+", flags=re.IGNORECASE), r"\1<REDACTED>"),
+)
+
+
+def _redact_text(value: str) -> str:
+    redacted = value
+    for pattern, replacement in _REDACTION_PATTERNS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
 class RedactFilter(logging.Filter):
     """Best-effort redaction of secrets in log messages."""
 
     def __init__(self) -> None:
         super().__init__(name="redact")
-        self._patterns = [
-            # Telegram bot token in URL path: /bot<token>/...
-            (re.compile(r"/bot[0-9A-Za-z:_-]+"), "/bot<REDACTED>"),
-            # Authorization: Bearer <token>
-            (re.compile(r"(Authorization:\s*Bearer\s+)[^\s]+", flags=re.IGNORECASE), r"\1<REDACTED>"),
-            # GATEWAY_TELEGRAM_BOT_TOKEN=...
-            (re.compile(r"(GATEWAY_TELEGRAM_BOT_TOKEN=)[^\s]+", flags=re.IGNORECASE), r"\1<REDACTED>"),
-            # WORKER_TOKEN=...
-            (re.compile(r"(WORKER_TOKEN=)[^\s]+", flags=re.IGNORECASE), r"\1<REDACTED>"),
-        ]
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = record.getMessage()
-            redacted = msg
-            for pat, repl in self._patterns:
-                redacted = pat.sub(repl, redacted)
+            redacted = _redact_text(msg)
             if redacted != msg:
                 record.msg = redacted
                 record.args = ()
@@ -159,7 +166,15 @@ class _BracketedFormatter(logging.Formatter):
         header = f"{ts} {record.levelname:<5} {ctx_block}".rstrip()
         # Indent the message on a continuation line for readability; include the
         # module name so the source is still discoverable.
-        return f"{header}\n  {record.name}: {msg}"
+        formatted = f"{header}\n  {record.name}: {msg}"
+        if record.exc_info:
+            formatted = f"{formatted}\n{self.formatException(record.exc_info)}"
+        if record.stack_info:
+            formatted = f"{formatted}\n{self.formatStack(record.stack_info)}"
+        # Filters can redact the log message before formatting, but exception
+        # and stack text are rendered here. Redact the complete output as the
+        # final boundary so credentials embedded in an exception cannot leak.
+        return _redact_text(formatted)
 
 
 # ---------------------------------------------------------------------------
