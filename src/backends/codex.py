@@ -59,6 +59,7 @@ class CodexBackend(CodingBackend):
     def __init__(self):
         self._exe = self._resolve_exe(ensure_node_on_path())
         self._session_procs: dict[str, subprocess.Popen] = {}
+        self._session_telemetry: dict[str, TelemetryContext] = {}
         self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
 
@@ -164,7 +165,12 @@ class CodexBackend(CodingBackend):
                 cwd=cwd or None,
                 env=proc_env,
             )
-            self._register_process(proc, session_key)
+            self._register_process(
+                proc,
+                session_key,
+                telemetry_context=telemetry_context,
+                emit=_emit,
+            )
             if telemetry_context is not None:
                 process_instance_id = new_telemetry_id("proc")
                 adapter = CodexTelemetryAdapter(
@@ -433,15 +439,50 @@ class CodexBackend(CodingBackend):
         cmd.append("-")
         return cmd
 
-    def _register_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
+    def _register_process(
+        self,
+        proc: subprocess.Popen,
+        session_key: Optional[str],
+        *,
+        telemetry_context: Optional[TelemetryContext] = None,
+        emit=None,
+    ) -> None:
         stale_proc: Optional[subprocess.Popen] = None
+        stale_context: Optional[TelemetryContext] = None
         with self._proc_lock:
             if session_key:
                 stale_proc = self._session_procs.get(session_key)
+                stale_context = self._session_telemetry.get(session_key)
                 self._session_procs[session_key] = proc
+                if telemetry_context is not None:
+                    self._session_telemetry[session_key] = telemetry_context
             else:
                 self._oneoff_procs.add(proc)
         if stale_proc is not None and stale_proc is not proc:
+            if (
+                emit is not None
+                and telemetry_context is not None
+                and stale_context is not None
+                and stale_context.invocation_id != telemetry_context.invocation_id
+            ):
+                emit(
+                    build_event(
+                        "invocation.duplicate_detected",
+                        turn_id=telemetry_context.turn_id,
+                        session_id=telemetry_context.session_id,
+                        node_id=telemetry_context.node_id,
+                        emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                        source=telemetry_context.source,
+                        invocation_id=telemetry_context.invocation_id,
+                        backend="codex",
+                        model=telemetry_context.model,
+                        attributes={
+                            "duplicate_of_invocation_id": stale_context.invocation_id,
+                            "confidence": "probable",
+                            "rule": "session_process_replacement",
+                        },
+                    )
+                )
             terminate_many_popen([stale_proc])
 
     def _unregister_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
@@ -450,6 +491,7 @@ class CodexBackend(CodingBackend):
                 current = self._session_procs.get(session_key)
                 if current is proc:
                     self._session_procs.pop(session_key, None)
+                    self._session_telemetry.pop(session_key, None)
             else:
                 self._oneoff_procs.discard(proc)
 

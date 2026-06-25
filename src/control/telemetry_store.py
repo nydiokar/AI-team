@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import socket
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from src.control.db import MeshDB
-from src.core.telemetry import TelemetryEvent
+from src.core.telemetry import (
+    EMITTER_PROCESS_INSTANCE_ID,
+    TelemetryEvent,
+    build_event,
+)
 from src.core.telemetry_projection import project_turn
 
 
@@ -624,6 +629,157 @@ class TelemetryStore:
             "coverage": turn["coverage"],
             "data_quality": turn["data_quality"],
         }
+
+    def reconcile(
+        self,
+        *,
+        turn_id: Optional[str] = None,
+        since_hours: float = 1.0,
+    ) -> Dict[str, Any]:
+        """Close stale running turns from authoritative terminal mesh-task state."""
+        params: List[Any] = []
+        where = ["t.final_status IN ('queued', 'running')"]
+        if turn_id:
+            where.append("t.turn_id = ?")
+            params.append(turn_id)
+        if since_hours > 0:
+            cutoff = datetime.now(tz=timezone.utc).timestamp() - since_hours * 3600
+            cutoff_text = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+            where.append("COALESCE(e.latest_received_at, t.updated_at) <= ?")
+            params.append(cutoff_text)
+        rows = self.db._conn().execute(
+            f"""
+            SELECT t.turn_id
+            FROM llm_turns t
+            LEFT JOIN (
+                SELECT turn_id, MAX(received_at) AS latest_received_at
+                FROM llm_events
+                GROUP BY turn_id
+            ) e ON e.turn_id = t.turn_id
+            WHERE {' AND '.join(where)}
+            ORDER BY t.updated_at, t.turn_id
+            """,
+            params,
+        ).fetchall()
+
+        reconciled: List[str] = []
+        skipped: List[Dict[str, str]] = []
+        for row in rows:
+            candidate_id = str(row["turn_id"])
+            task = self.db.get_task(candidate_id)
+            if not task or task.get("status") not in (
+                "completed",
+                "failed",
+                "failed_node_offline",
+            ):
+                skipped.append(
+                    {"turn_id": candidate_id, "reason": "mesh_task_not_terminal"}
+                )
+                continue
+
+            result: Dict[str, Any] = {}
+            try:
+                result = json.loads(task.get("result") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                result = {}
+            success = task.get("status") == "completed" and bool(
+                result.get("success", True)
+            )
+            status = "success" if success else "failed"
+            invocation_id = (
+                result.get("telemetry_invocation_id")
+                or self._latest_invocation_id(candidate_id)
+            )
+            backend = task.get("backend") or None
+            node_id = socket.gethostname()
+            events: List[TelemetryEvent] = []
+
+            for process in self.get_processes(candidate_id):
+                if process.get("status") in ("spawned", "running"):
+                    events.append(
+                        build_event(
+                            "process.exit_unknown",
+                            turn_id=candidate_id,
+                            session_id=task.get("session_id") or None,
+                            node_id=node_id,
+                            emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                            source="reconciler",
+                            invocation_id=process.get("invocation_id"),
+                            backend=backend,
+                            pid=process.get("pid"),
+                            attributes={
+                                "process_instance_id": process[
+                                    "process_instance_id"
+                                ],
+                                "reason_code": "reconciled_after_restart",
+                            },
+                        )
+                    )
+
+            events.extend(
+                [
+                    build_event(
+                        "telemetry.reconciled",
+                        turn_id=candidate_id,
+                        session_id=task.get("session_id") or None,
+                        node_id=node_id,
+                        emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                        source="reconciler",
+                        invocation_id=invocation_id,
+                        backend=backend,
+                        attributes={
+                            "reason_code": "terminal_mesh_task",
+                            "status": status,
+                        },
+                    ),
+                    build_event(
+                        "turn.result_recorded",
+                        turn_id=candidate_id,
+                        session_id=task.get("session_id") or None,
+                        node_id=node_id,
+                        emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                        source="reconciler",
+                        invocation_id=invocation_id,
+                        backend=backend,
+                        attributes={
+                            "status": status,
+                            "error_code": None if success else "reconciled_failure",
+                        },
+                    ),
+                    build_event(
+                        "turn.completed",
+                        turn_id=candidate_id,
+                        session_id=task.get("session_id") or None,
+                        node_id=node_id,
+                        emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                        source="reconciler",
+                        invocation_id=invocation_id,
+                        backend=backend,
+                        attributes={
+                            "status": status,
+                            "timeout_status": "none",
+                            "exit_code": result.get("return_code"),
+                        },
+                    ),
+                ]
+            )
+            self.insert_events(events)
+            reconciled.append(candidate_id)
+
+        return {"reconciled": reconciled, "skipped": skipped}
+
+    def _latest_invocation_id(self, turn_id: str) -> Optional[str]:
+        row = self.db._conn().execute(
+            """
+            SELECT invocation_id
+            FROM llm_invocations
+            WHERE turn_id = ?
+            ORDER BY attempt DESC, COALESCE(started_at, '') DESC
+            LIMIT 1
+            """,
+            (turn_id,),
+        ).fetchone()
+        return str(row["invocation_id"]) if row else None
 
     @staticmethod
     def _decode_turn(row: Dict[str, Any]) -> Dict[str, Any]:
