@@ -10,6 +10,7 @@ import pytest
 
 from src.control.db import MeshDB
 from src.control.node_registry import NodeCapabilities, NodeInfo, NodeRegistry
+from src.core.telemetry import build_event, utc_now
 
 
 def _task_id() -> str:
@@ -493,6 +494,93 @@ def test_submit_result_idempotency_endpoint_function(tmp_path):
         row = db.get_task(tid)
         result = json.loads(row["result"])
         assert result["output"] == "first result"
+
+    finally:
+        db_mod._db_instance = None
+        if old is not None:
+            old.close()
+        db_mod._db_instance = old
+
+
+def test_submit_result_reconciles_failed_telemetry_turn(tmp_path):
+    """A terminal failed mesh task must not leave its telemetry turn running."""
+    from config import config as cfg
+    cfg.mesh.db_path = str(tmp_path / "mesh_api_reconcile.db")
+    import src.control.db as db_mod
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old is not None:
+        old.close()
+
+    try:
+        from src.control.task_server import ExecutionResultPayload, submit_result
+        from src.control.telemetry_store import TelemetryStore
+
+        db = db_mod.get_db()
+        assert db is not None
+        store = TelemetryStore(db)
+        tid = _task_id()
+        invocation_id = "inv_reconcile_failed"
+        _enqueue_test_task(db, tid)
+        db.claim_task(tid, "worker-a")
+
+        start = utc_now()
+        common = {
+            "turn_id": tid,
+            "session_id": "session_reconcile_failed",
+            "node_id": "worker-a",
+            "emitter_process_instance_id": "worker_proc",
+            "source": "worker",
+            "backend": "codex",
+            "invocation_id": invocation_id,
+        }
+        store.insert_events(
+            [
+                build_event(
+                    "invocation.created",
+                    event_time=start,
+                    observed_time=start,
+                    attributes={"attempt": 1, "spawn_reason": "initial"},
+                    **common,
+                ),
+                build_event(
+                    "process.spawned",
+                    event_time=start,
+                    observed_time=start,
+                    pid=123,
+                    attributes={
+                        "process_instance_id": "proc_reconcile_failed",
+                        "process_role": "agent",
+                        "executable_name": "codex",
+                    },
+                    **common,
+                ),
+                build_event(
+                    "invocation.completed",
+                    event_time=start,
+                    observed_time=start,
+                    attributes={"status": "failed", "exit_code": 1},
+                    **common,
+                ),
+            ]
+        )
+        assert store.get_turn(tid)["final_status"] == "running"
+
+        resp = submit_result(tid, ExecutionResultPayload(
+            node_id="worker-a",
+            success=False,
+            errors=["codex exited with code 1"],
+            return_code=1,
+            telemetry_invocation_id=invocation_id,
+        ))
+
+        assert resp["status"] == "accepted"
+        turn = store.get_turn(tid)
+        assert turn["final_status"] == "failed"
+        assert turn["final_exit_code"] == 1
+        assert "telemetry.reconciled" in [
+            event["event_name"] for event in store.list_events(tid)
+        ]
 
     finally:
         db_mod._db_instance = None

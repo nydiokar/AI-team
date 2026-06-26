@@ -730,6 +730,8 @@ class MeshDB:
         task_id: str,
         error: str,
         status: str = "failed",
+        result: Optional[Dict[str, Any]] = None,
+        artifact_path: Optional[str] = None,
     ) -> None:
         """Mark a task as failed. status can be 'failed' or 'failed_node_offline'."""
         now = _now()
@@ -738,10 +740,20 @@ class MeshDB:
                 conn.execute(
                     """
                     UPDATE mesh_tasks
-                    SET status = ?, error = ?, completed_at = ?, updated_at = ?
+                    SET status = ?, error = ?, result = COALESCE(?, result),
+                        artifact_path = COALESCE(?, artifact_path),
+                        completed_at = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (status, error, now, now, task_id),
+                    (
+                        status,
+                        error,
+                        json.dumps(result) if result is not None else None,
+                        artifact_path,
+                        now,
+                        now,
+                        task_id,
+                    ),
                 )
         except Exception as e:
             logger.warning("event=db_fail_task_failed task_id=%s err=%s", task_id, e)

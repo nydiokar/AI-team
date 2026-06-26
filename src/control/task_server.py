@@ -588,7 +588,7 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
             )
     else:
         error_str = "; ".join(payload.errors) if payload.errors else "worker reported failure"
-        db.fail_task(task_id, error_str)
+        db.fail_task(task_id, error_str, result=result_dict, artifact_path=payload.artifact_path)
         if session_id:
             db.append_event(
                 session_id=session_id,
@@ -613,6 +613,10 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
             )
         except Exception:
             pass
+    try:
+        TelemetryStore(db).reconcile(turn_id=task_id, since_hours=0)
+    except Exception:
+        logger.debug("event=telemetry_reconcile_after_result_failed task_id=%s", task_id, exc_info=True)
     return {"status": "accepted"}
 
 
