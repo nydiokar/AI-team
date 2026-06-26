@@ -1119,6 +1119,7 @@ class WorkerAgent:
                     "node_id": self.cfg.node_id,
                     "backends": ",".join(self.cfg.backends),
                     "limit": str(self.cfg.max_concurrent * 2),
+                    "accept_unpinned": "true" if self.cfg.accept_unpinned else "false",
                 },
             )
         except Exception as e:
