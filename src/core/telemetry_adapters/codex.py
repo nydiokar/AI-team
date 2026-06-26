@@ -123,7 +123,7 @@ class CodexTelemetryAdapter:
         if not isinstance(item, dict):
             return []
         item_type = str(item.get("type") or "")
-        mapping = _TOOL_TYPES.get(item_type)
+        mapping = self._tool_mapping(item_type, item)
         if mapping is None:
             return []
         tool_name, category = mapping
@@ -235,3 +235,15 @@ class CodexTelemetryAdapter:
             event_time=event_time,
             attributes=attributes,
         )
+
+    @staticmethod
+    def _tool_mapping(item_type: str, item: Dict[str, Any]) -> Optional[tuple[str, str]]:
+        if item_type == "mcp_tool_call":
+            server = str(item.get("server") or "").strip()
+            tool = str(item.get("tool") or "").strip()
+            if server and tool:
+                return (f"{server}.{tool}", "mcp")
+            if tool:
+                return (tool, "mcp")
+            return ("mcp_tool_call", "mcp")
+        return _TOOL_TYPES.get(item_type)
