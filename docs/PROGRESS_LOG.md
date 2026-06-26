@@ -1,5 +1,46 @@
 # Progress Log
 
+## 2026-06-26 — M1/M2 live worker closure
+
+Follow-up after the autonomous validation pass: ran the real embedded gateway
+task server plus a separate PM2 worker process on this host.
+
+Closed:
+
+- Started `ai-team-worker` as `kanebra-smoke` with
+  `WORKER_ACCEPT_UNPINNED=false`, `WORKER_BACKENDS=codex`, and
+  `WORKER_MAX_CONCURRENT=1`, so it can only claim tasks explicitly pinned to
+  that node.
+- Verified gateway health after restart: `/health` was `ok`, no claimed tasks,
+  and `kanebra-smoke` was registered/heartbeating independently of the gateway.
+- Proved pinned-only isolation: `kanebra-smoke` claimed the smoke tasks and no
+  unrelated live queue rows.
+- Found and fixed a live M2 bug: failed mesh tasks marked the queue row
+  terminal, but the telemetry turn could remain `running` because
+  `/tasks/{id}/result` did not reconcile the exact turn after accepting the
+  worker result. Failed results also did not preserve structured result JSON,
+  losing return code and telemetry invocation id.
+- Added regression coverage in `tests/test_claim_reaper.py`.
+- Live failed smoke: `task_smoke_20260626160459` pinned to `kanebra-smoke`
+  failed because this ChatGPT account does not support `gpt-5.2-codex`; the
+  patched gateway persisted the structured result and projected
+  `final_status=failed`, `final_exit_code=1`, with `telemetry.reconciled` and
+  `turn.completed`.
+- Live success smoke: `task_smoke_success_20260626160547` pinned to
+  `kanebra-smoke` completed via `gpt-5.5` in ~7.6s, returned exactly
+  `WORKER_SMOKE_OK`, projected `final_status=success`, `final_exit_code=0`,
+  and captured aggregate usage (`input_tokens=11681`, `output_tokens=9`,
+  `cache_read_tokens=4992`) with usage coverage `aggregate_only`.
+- Full test gate after the fix: `384 passed, 15 skipped`.
+
+Operational note:
+
+- The PM2 worker process gives execution persistence for claimed work, but it
+  does not make the gateway conversation itself restart-proof while the task
+  server remains embedded in `ai-team-gateway`. Proper gateway/server process
+  separation remains the next hardening step before doing frequent live
+  restarts.
+
 ## 2026-06-26 — M1/M2 observability autonomous validation pass
 
 Follow-up validation on the M1/M2 release candidate from 2026-06-25.
