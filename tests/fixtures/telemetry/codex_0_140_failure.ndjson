@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"thread_failure"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"API_KEY_SECRET_DO_NOT_STORE"}}
+{"type":"turn.started"}
+{"type":"error","message":"PROMPT_SECRET_DO_NOT_STORE"}
+{"type":"turn.failed","error":{"message":"MODEL_RESPONSE_SECRET_DO_NOT_STORE"}}

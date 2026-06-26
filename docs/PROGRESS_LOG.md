@@ -1,5 +1,52 @@
 # Progress Log
 
+## 2026-06-26 — M1/M2 observability autonomous validation pass
+
+Follow-up validation on the M1/M2 release candidate from 2026-06-25.
+
+Closed during this pass:
+
+- Re-ran the focused observability gate after changes:
+  `80 passed in 2.50s`.
+- Captured real Codex CLI 0.140 JSONL shapes for:
+  plain answer, shell tool, MCP tool, and invalid-model failure.
+- Added sanitized deployed-shape fixtures under `tests/fixtures/telemetry/`.
+- Extended the Codex adapter to map deployed `mcp_tool_call` events to
+  `tool.call.*` telemetry using only bounded `server.tool` names and category
+  `mcp`; arguments/results are still discarded.
+- Ran a real local Codex backend smoke through `CodexBackend` +
+  `DatabaseTelemetrySink`: process spawn/exit, shell tool lifecycle, aggregate
+  usage, and projection metrics were persisted.
+- Ran a real worker-path smoke through `src.worker.agent._execute_task` with
+  Codex: invocation lifecycle, process lifecycle, shell tool lifecycle, usage,
+  and projected metrics were persisted in one turn.
+- Privacy scan over generated telemetry SQLite DBs and existing spool files
+  found none of the sentinel strings (`PROMPT_SECRET`, `SOURCE_SECRET`,
+  `TOOL_ARG_SECRET`, `TOOL_RESULT_SECRET`, `MODEL_RESPONSE_SECRET`,
+  `API_KEY_SECRET`).
+
+Performance measurements:
+
+- One 1,000-event SQLite ingestion batch: ~16,392 events/sec.
+- 5,000-event dashboard detail reads: `list_events` ~84.5 ms,
+  `diagnostics` ~0.6 ms, `graph` ~88.7 ms.
+- Repeated controller-side 50-event batches with projection rebuild on each
+  batch are slower than the aspirational `<5 ms p95` batch-overhead target
+  (`p95` ~160.6 ms at 5,000 accumulated events). Larger 200-event batches do
+  not remove the rebuild cost (`p95` ~248.6 ms). This is not worker task
+  blocking, but high-cardinality production telemetry should get incremental or
+  deferred projection rebuild before relying on very large detailed tool streams.
+
+Remaining before calling this fully deployed:
+
+1. Run a true two-process/two-node mesh smoke with the task server and worker
+   processes online. This host currently has only `ai-team-gateway` in PM2, so
+   the autonomous pass validated the worker execution path locally rather than a
+   live controller/worker topology.
+2. Decide whether to optimize controller projection rebuild before M3, or accept
+   the current behavior for normal Codex aggregate/tool volumes and track the
+   high-cardinality case separately.
+
 ## 2026-06-25 — LLM turn observability M1/M2 release candidate
 
 Implemented the privacy-preserving turn accounting system specified in
