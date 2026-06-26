@@ -18,6 +18,7 @@ class WorkerConfig:
     api_port: int = 9001
     max_concurrent: int = 2
     projects_root: str = ""
+    accept_unpinned: bool = True
 
     @classmethod
     def from_env(cls) -> "WorkerConfig":
@@ -30,6 +31,10 @@ class WorkerConfig:
         api_port = int(os.getenv("WORKER_API_PORT") or 9001)
         max_concurrent = int(os.getenv("WORKER_MAX_CONCURRENT") or 2)
         projects_root = os.getenv("WORKER_PROJECTS_ROOT", "")
+        accept_unpinned = (
+            os.getenv("WORKER_ACCEPT_UNPINNED", "true").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
         return cls(
             node_id=node_id,
             worker_token=token,
@@ -39,6 +44,7 @@ class WorkerConfig:
             api_port=api_port,
             max_concurrent=max_concurrent,
             projects_root=projects_root,
+            accept_unpinned=accept_unpinned,
         )
 
     def list_repos(self) -> List[dict]:

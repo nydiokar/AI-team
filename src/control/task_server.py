@@ -471,6 +471,7 @@ def _fire_nudge(node: NodeInfo) -> None:
 def get_pending_tasks(
     node_id: Optional[str] = None,
     backends: Optional[str] = None,
+    accept_unpinned: bool = True,
     limit: int = 10,
 ) -> List[Dict[str, Any]]:
     """Return pending tasks routable to this node.
@@ -478,13 +479,19 @@ def get_pending_tasks(
     Query params:
       node_id  — filters by session affinity (machine_id IS NULL OR machine_id = node_id)
       backends — comma-separated list of backend names the worker supports
+      accept_unpinned — when false, only return tasks pinned to node_id
       limit    — max rows returned (default 10)
     """
     db = get_db()
     if db is None:
         return []
     backend_list = [b.strip() for b in backends.split(",") if b.strip()] if backends else None
-    rows = db.get_pending_tasks(node_id=node_id, backends=backend_list, limit=limit)
+    rows = db.get_pending_tasks(
+        node_id=node_id,
+        backends=backend_list,
+        accept_unpinned=accept_unpinned,
+        limit=limit,
+    )
     # Deserialise JSON payload column for convenience
     for row in rows:
         if isinstance(row.get("payload"), str):

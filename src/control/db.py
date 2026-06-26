@@ -750,6 +750,7 @@ class MeshDB:
         self,
         node_id: Optional[str] = None,
         backends: Optional[List[str]] = None,
+        accept_unpinned: bool = True,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """Return pending tasks routable to this node.
@@ -760,7 +761,10 @@ class MeshDB:
         params: List[Any] = []
         machine_clause = ""
         if node_id:
-            machine_clause = "AND (machine_id IS NULL OR machine_id = ?)"
+            if accept_unpinned:
+                machine_clause = "AND (machine_id IS NULL OR machine_id = ?)"
+            else:
+                machine_clause = "AND machine_id = ?"
             params.append(node_id)
 
         backend_clause = ""
