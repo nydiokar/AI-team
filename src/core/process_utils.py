@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import ntpath
 import os
 import signal
 import subprocess
@@ -48,10 +49,13 @@ def ensure_node_on_path(env: Optional[dict] = None) -> dict:
     node_dirs = []
     node_hint = env.get("CODEX_NODE_PATH") or env.get("NODE_EXE")
     if node_hint:
-        node_dirs.append(str(Path(node_hint).expanduser().parent))
+        # Use Windows path semantics even when this branch is unit-tested on a
+        # non-Windows host. pathlib.Path would interpret backslashes as plain
+        # characters and incorrectly return "." as the parent.
+        node_dirs.append(ntpath.dirname(node_hint))
     node_dirs.append(r"C:\Program Files\nodejs")
     if appdata:
-        node_dirs.append(os.path.join(appdata, "npm"))
+        node_dirs.append(ntpath.join(appdata, "npm"))
 
     path_parts = path.split(os.pathsep)
     additions = [d for d in node_dirs if d not in path_parts]

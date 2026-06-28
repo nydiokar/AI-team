@@ -21,16 +21,18 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Security, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
 from src.control.db import get_db
 from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
+from src.control.telemetry_store import TelemetryStore
+from src.core.telemetry import TelemetryEvent
 
 logger = logging.getLogger(__name__)
 
@@ -195,8 +197,15 @@ class ExecutionResultPayload(BaseModel):
     return_code: int = 0
     artifact_path: Optional[str] = None
     backend_session_id: str = ""  # worker echoes back the native session ID for affinity continuity
+    telemetry_invocation_id: str = ""
     error_detail: str = ""  # full traceback when the worker caught an exception (D2)
     inspect: Optional[Dict[str, Any]] = None  # repo inspection op result (action=='inspect')
+
+
+class TelemetryBatchPayload(BaseModel):
+    batch_id: str = Field(min_length=1, max_length=96)
+    node_id: str = Field(min_length=1, max_length=128)
+    events: List[Dict[str, Any]] = Field(default_factory=list, max_length=200)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +260,63 @@ def health() -> Dict[str, Any]:
         "status": "ok",
         "db": stats,
         "mesh_health": mesh_health.stats(),
+    }
+
+
+@app.post("/telemetry/batches", dependencies=[Depends(_require_auth)])
+def submit_telemetry_batch(
+    payload: TelemetryBatchPayload, request: Request
+) -> Dict[str, Any]:
+    """Validate and idempotently persist one gateway/worker telemetry batch."""
+    from config import config
+
+    if not config.telemetry.enabled:
+        return {
+            "batch_id": payload.batch_id,
+            "accepted": 0,
+            "duplicates": 0,
+            "rejected": 0,
+            "rejections": [],
+            "disabled": True,
+        }
+    max_bytes = int(config.telemetry.upload_max_bytes)
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                raise HTTPException(status_code=413, detail="Telemetry batch too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+    encoded_size = len(
+        payload.model_dump_json(exclude_none=False).encode("utf-8")
+    )
+    if encoded_size > max_bytes:
+        raise HTTPException(status_code=413, detail="Telemetry batch too large")
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Telemetry database unavailable")
+
+    valid: List[TelemetryEvent] = []
+    rejections: List[Dict[str, Any]] = []
+    for index, raw_event in enumerate(payload.events):
+        try:
+            event = TelemetryEvent.model_validate(raw_event)
+        except ValidationError:
+            rejections.append({"index": index, "code": "schema_invalid"})
+            continue
+        if event.node_id != payload.node_id:
+            rejections.append({"index": index, "code": "node_id_mismatch"})
+            continue
+        valid.append(event)
+
+    result = TelemetryStore(db).insert_events(valid)
+    return {
+        "batch_id": payload.batch_id,
+        "accepted": result["accepted"],
+        "duplicates": result["duplicates"],
+        "rejected": len(rejections),
+        "rejections": rejections,
     }
 
 
@@ -405,6 +471,7 @@ def _fire_nudge(node: NodeInfo) -> None:
 def get_pending_tasks(
     node_id: Optional[str] = None,
     backends: Optional[str] = None,
+    accept_unpinned: bool = True,
     limit: int = 10,
 ) -> List[Dict[str, Any]]:
     """Return pending tasks routable to this node.
@@ -412,13 +479,19 @@ def get_pending_tasks(
     Query params:
       node_id  — filters by session affinity (machine_id IS NULL OR machine_id = node_id)
       backends — comma-separated list of backend names the worker supports
+      accept_unpinned — when false, only return tasks pinned to node_id
       limit    — max rows returned (default 10)
     """
     db = get_db()
     if db is None:
         return []
     backend_list = [b.strip() for b in backends.split(",") if b.strip()] if backends else None
-    rows = db.get_pending_tasks(node_id=node_id, backends=backend_list, limit=limit)
+    rows = db.get_pending_tasks(
+        node_id=node_id,
+        backends=backend_list,
+        accept_unpinned=accept_unpinned,
+        limit=limit,
+    )
     # Deserialise JSON payload column for convenience
     for row in rows:
         if isinstance(row.get("payload"), str):
@@ -498,6 +571,7 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         "timestamp": payload.timestamp,
         "return_code": payload.return_code,
         "backend_session_id": payload.backend_session_id,
+        "telemetry_invocation_id": payload.telemetry_invocation_id,
         "error_detail": payload.error_detail,
         "inspect": payload.inspect,
     }
@@ -514,7 +588,7 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
             )
     else:
         error_str = "; ".join(payload.errors) if payload.errors else "worker reported failure"
-        db.fail_task(task_id, error_str)
+        db.fail_task(task_id, error_str, result=result_dict, artifact_path=payload.artifact_path)
         if session_id:
             db.append_event(
                 session_id=session_id,
@@ -539,6 +613,10 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
             )
         except Exception:
             pass
+    try:
+        TelemetryStore(db).reconcile(turn_id=task_id, since_hours=0)
+    except Exception:
+        logger.debug("event=telemetry_reconcile_after_result_failed task_id=%s", task_id, exc_info=True)
     return {"status": "accepted"}
 
 

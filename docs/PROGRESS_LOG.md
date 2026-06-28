@@ -1,5 +1,125 @@
 # Progress Log
 
+## 2026-06-26 — M1/M2 live worker closure
+
+Follow-up after the autonomous validation pass: ran the real embedded gateway
+task server plus a separate PM2 worker process on this host.
+
+Closed:
+
+- Started `ai-team-worker` as `kanebra-smoke` with
+  `WORKER_ACCEPT_UNPINNED=false`, `WORKER_BACKENDS=codex`, and
+  `WORKER_MAX_CONCURRENT=1`, so it can only claim tasks explicitly pinned to
+  that node.
+- Verified gateway health after restart: `/health` was `ok`, no claimed tasks,
+  and `kanebra-smoke` was registered/heartbeating independently of the gateway.
+- Proved pinned-only isolation: `kanebra-smoke` claimed the smoke tasks and no
+  unrelated live queue rows.
+- Found and fixed a live M2 bug: failed mesh tasks marked the queue row
+  terminal, but the telemetry turn could remain `running` because
+  `/tasks/{id}/result` did not reconcile the exact turn after accepting the
+  worker result. Failed results also did not preserve structured result JSON,
+  losing return code and telemetry invocation id.
+- Added regression coverage in `tests/test_claim_reaper.py`.
+- Live failed smoke: `task_smoke_20260626160459` pinned to `kanebra-smoke`
+  failed because this ChatGPT account does not support `gpt-5.2-codex`; the
+  patched gateway persisted the structured result and projected
+  `final_status=failed`, `final_exit_code=1`, with `telemetry.reconciled` and
+  `turn.completed`.
+- Live success smoke: `task_smoke_success_20260626160547` pinned to
+  `kanebra-smoke` completed via `gpt-5.5` in ~7.6s, returned exactly
+  `WORKER_SMOKE_OK`, projected `final_status=success`, `final_exit_code=0`,
+  and captured aggregate usage (`input_tokens=11681`, `output_tokens=9`,
+  `cache_read_tokens=4992`) with usage coverage `aggregate_only`.
+- Full test gate after the fix: `384 passed, 15 skipped`.
+
+Operational note:
+
+- The PM2 worker process gives execution persistence for claimed work, but it
+  does not make the gateway conversation itself restart-proof while the task
+  server remains embedded in `ai-team-gateway`. Proper gateway/server process
+  separation remains the next hardening step before doing frequent live
+  restarts.
+
+## 2026-06-26 — M1/M2 observability autonomous validation pass
+
+Follow-up validation on the M1/M2 release candidate from 2026-06-25.
+
+Closed during this pass:
+
+- Re-ran the focused observability gate after changes:
+  `80 passed in 2.50s`.
+- Captured real Codex CLI 0.140 JSONL shapes for:
+  plain answer, shell tool, MCP tool, and invalid-model failure.
+- Added sanitized deployed-shape fixtures under `tests/fixtures/telemetry/`.
+- Extended the Codex adapter to map deployed `mcp_tool_call` events to
+  `tool.call.*` telemetry using only bounded `server.tool` names and category
+  `mcp`; arguments/results are still discarded.
+- Ran a real local Codex backend smoke through `CodexBackend` +
+  `DatabaseTelemetrySink`: process spawn/exit, shell tool lifecycle, aggregate
+  usage, and projection metrics were persisted.
+- Ran a real worker-path smoke through `src.worker.agent._execute_task` with
+  Codex: invocation lifecycle, process lifecycle, shell tool lifecycle, usage,
+  and projected metrics were persisted in one turn.
+- Privacy scan over generated telemetry SQLite DBs and existing spool files
+  found none of the sentinel strings (`PROMPT_SECRET`, `SOURCE_SECRET`,
+  `TOOL_ARG_SECRET`, `TOOL_RESULT_SECRET`, `MODEL_RESPONSE_SECRET`,
+  `API_KEY_SECRET`).
+
+Performance measurements:
+
+- One 1,000-event SQLite ingestion batch: ~16,392 events/sec.
+- 5,000-event dashboard detail reads: `list_events` ~84.5 ms,
+  `diagnostics` ~0.6 ms, `graph` ~88.7 ms.
+- Repeated controller-side 50-event batches with projection rebuild on each
+  batch are slower than the aspirational `<5 ms p95` batch-overhead target
+  (`p95` ~160.6 ms at 5,000 accumulated events). Larger 200-event batches do
+  not remove the rebuild cost (`p95` ~248.6 ms). This is not worker task
+  blocking, but high-cardinality production telemetry should get incremental or
+  deferred projection rebuild before relying on very large detailed tool streams.
+
+Remaining before calling this fully deployed:
+
+1. Run a true two-process/two-node mesh smoke with the task server and worker
+   processes online. This host currently has only `ai-team-gateway` in PM2, so
+   the autonomous pass validated the worker execution path locally rather than a
+   live controller/worker topology.
+2. Decide whether to optimize controller projection rebuild before M3, or accept
+   the current behavior for normal Codex aggregate/tool volumes and track the
+   high-cardinality case separately.
+
+## 2026-06-25 — LLM turn observability M1/M2 release candidate
+
+Implemented the privacy-preserving turn accounting system specified in
+`docs/LLM_TURN_OBSERVABILITY_SPEC.md`.
+
+Shipped:
+
+- typed allowlisted telemetry events and immutable correlation context;
+- local and mesh Codex turn/invocation/process lifecycle;
+- streaming Codex tool and aggregate usage adapter;
+- SQLite event store and deterministic turn projections;
+- retry, timeout, duplicate-process, coverage, and context-continuity metrics;
+- authenticated turn APIs plus graph, diagnostic table, and timeline dashboard;
+- idempotent HTTP batching, bounded spool/replay, retention, and reconciliation;
+- maintenance commands:
+  `python main.py telemetry-reconcile [--turn-id ID] [--since HOURS]` and
+  `python main.py telemetry-cleanup [--event-days N] [--summary-days N]`.
+
+Validation: 76 focused observability/dashboard/mesh tests pass, including the
+real worker `_execute_task` path with a telemetry-aware fake backend. No paid
+backend or external network is used by these tests.
+
+Next release gates:
+
+1. additional deployed-Codex sanitized fixtures;
+2. real local and mesh Codex smoke tests;
+3. ingestion/query/concurrency performance measurements;
+4. then M3 Claude adapter work under the existing schema.
+
+Handoff warning: preserve the unrelated uncommitted
+`src/core/process_utils.py` modification.
+
 ## 2026-06-21 — Cockpit M4: workflow events (review / handoff / approval)
 
 **Milestone: the reserved workflow vocabulary (CONTROL_CONTRACT §7) is now a
