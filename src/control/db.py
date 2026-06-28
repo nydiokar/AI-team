@@ -929,6 +929,8 @@ class MeshDB:
         task_id: str,
         error: str,
         status: str = "failed",
+        result: Optional[Dict[str, Any]] = None,
+        artifact_path: Optional[str] = None,
     ) -> None:
         """Mark a task as failed. status can be 'failed' or 'failed_node_offline'."""
         now = _now()
@@ -937,10 +939,20 @@ class MeshDB:
                 conn.execute(
                     """
                     UPDATE mesh_tasks
-                    SET status = ?, error = ?, completed_at = ?, updated_at = ?
+                    SET status = ?, error = ?, result = COALESCE(?, result),
+                        artifact_path = COALESCE(?, artifact_path),
+                        completed_at = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (status, error, now, now, task_id),
+                    (
+                        status,
+                        error,
+                        json.dumps(result) if result is not None else None,
+                        artifact_path,
+                        now,
+                        now,
+                        task_id,
+                    ),
                 )
         except Exception as e:
             logger.warning("event=db_fail_task_failed task_id=%s err=%s", task_id, e)
@@ -949,6 +961,7 @@ class MeshDB:
         self,
         node_id: Optional[str] = None,
         backends: Optional[List[str]] = None,
+        accept_unpinned: bool = True,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """Return pending tasks routable to this node.
@@ -959,7 +972,10 @@ class MeshDB:
         params: List[Any] = []
         machine_clause = ""
         if node_id:
-            machine_clause = "AND (machine_id IS NULL OR machine_id = ?)"
+            if accept_unpinned:
+                machine_clause = "AND (machine_id IS NULL OR machine_id = ?)"
+            else:
+                machine_clause = "AND machine_id = ?"
             params.append(node_id)
 
         backend_clause = ""
