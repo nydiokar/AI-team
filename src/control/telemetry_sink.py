@@ -320,6 +320,16 @@ def build_runtime_telemetry_sink(
         from config import config
         if not config.telemetry.enabled:
             return NullTelemetrySink()
+        # Gateway path: write directly to the local DB — no HTTP round-trip to ourselves.
+        # Workers don't have a local DB (shadow_write=false), so they fall through to HTTP.
+        try:
+            from src.control.db import get_db
+            from src.control.telemetry_store import TelemetryStore
+            db = get_db()
+            if db is not None:
+                return DatabaseTelemetrySink(TelemetryStore(db))
+        except Exception:
+            pass
         resolved_url = (base_url or config.telemetry.task_server_url).rstrip("/")
         if not resolved_url:
             host = config.mesh.tailscale_ip or "127.0.0.1"
