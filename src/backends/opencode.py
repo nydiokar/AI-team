@@ -35,6 +35,7 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
+from src.core.telemetry import TelemetryContext, telemetry_subprocess_env
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ class OpenCodeBackend(CodingBackend):
     # CodingBackend interface
     # ------------------------------------------------------------------
 
-    def create_session(self, session: Session) -> ExecutionResult:
+    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         return self._run(
             cwd=session.repo_path,
             message=session.last_user_message,
@@ -179,9 +180,10 @@ class OpenCodeBackend(CodingBackend):
             model=self._session_model(session),
             agent=self._session_agent(session),
             session_key=session.session_id,
+            telemetry_context=telemetry_context,
         )
 
-    def resume_session(self, session: Session, message: str) -> ExecutionResult:
+    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         oc_session_id = session.backend_session_id
         if not oc_session_id:
             # No session ID — fall back to a fresh session rather than dead-ending.
@@ -190,7 +192,11 @@ class OpenCodeBackend(CodingBackend):
                 session.session_id,
             )
             session.last_user_message = message
-            return self.create_session(session)
+            return self.create_session(
+                session,
+                telemetry_context=telemetry_context,
+                telemetry_sink=telemetry_sink,
+            )
         return self._run(
             cwd=session.repo_path,
             message=message,
@@ -199,9 +205,10 @@ class OpenCodeBackend(CodingBackend):
             model=self._session_model(session),
             agent=self._session_agent(session),
             session_key=session.session_id,
+            telemetry_context=telemetry_context,
         )
 
-    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
+    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         return self._run(
             cwd=cwd,
             message=message,
@@ -210,6 +217,7 @@ class OpenCodeBackend(CodingBackend):
             model=None,
             agent=None,
             session_key=None,
+            telemetry_context=telemetry_context,
         )
 
     def cancel(self, session: Session) -> None:
@@ -239,6 +247,7 @@ class OpenCodeBackend(CodingBackend):
         model: Optional[str],
         agent: Optional[str],
         session_key: Optional[str],
+        telemetry_context: Optional[TelemetryContext] = None,
     ) -> ExecutionResult:
         start = time.time()
 
@@ -269,6 +278,7 @@ class OpenCodeBackend(CodingBackend):
                 agent=agent,
                 session_key=session_key,
                 start=start,
+                telemetry_context=telemetry_context,
             )
         finally:
             repo_lock.release()
@@ -283,6 +293,7 @@ class OpenCodeBackend(CodingBackend):
         agent: Optional[str],
         session_key: Optional[str],
         start: float,
+        telemetry_context: Optional[TelemetryContext] = None,
     ) -> ExecutionResult:
         # Cost guard: blocked under test mode unless OpenCode e2e is opted in.
         from src.core.test_guard import assert_live_calls_allowed
@@ -317,6 +328,7 @@ class OpenCodeBackend(CodingBackend):
         proc_env = ensure_node_on_path()
         if session_key:
             proc_env["SESSION_ID"] = session_key
+        proc_env.update(telemetry_subprocess_env(telemetry_context))
 
         try:
             proc = subprocess.Popen(
@@ -931,7 +943,7 @@ class OpenCodeServerBackend(CodingBackend):
     # CodingBackend interface
     # ------------------------------------------------------------------
 
-    def create_session(self, session: Session) -> ExecutionResult:
+    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         start = time.time()
         key = self._server_key(session.repo_path)
         err = self._ensure_server(key, session.repo_path)
@@ -976,7 +988,7 @@ class OpenCodeServerBackend(CodingBackend):
             result.backend_session_id = ""
         return result
 
-    def resume_session(self, session: Session, message: str) -> ExecutionResult:
+    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         start = time.time()
         oc_session_id = session.backend_session_id
         key = self._server_key(session.repo_path)
@@ -1022,7 +1034,7 @@ class OpenCodeServerBackend(CodingBackend):
             result.backend_session_id = ""
         return result
 
-    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
+    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         start = time.time()
         key = self._server_key(cwd)
         err = self._ensure_server(key, cwd)

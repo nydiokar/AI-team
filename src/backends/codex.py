@@ -25,6 +25,15 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
+from src.control.telemetry_sink import NullTelemetrySink
+from src.core.telemetry import (
+    EMITTER_PROCESS_INSTANCE_ID,
+    TelemetryContext,
+    build_event,
+    new_telemetry_id,
+    telemetry_subprocess_env,
+)
+from src.core.telemetry_adapters.codex import CodexTelemetryAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -52,17 +61,18 @@ class CodexBackend(CodingBackend):
     def __init__(self):
         self._exe = self._resolve_exe(ensure_node_on_path())
         self._session_procs: dict[str, subprocess.Popen] = {}
+        self._session_telemetry: dict[str, TelemetryContext] = {}
         self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
 
-    def create_session(self, session: Session) -> ExecutionResult:
-        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_key=session.session_id, model=_resolve_model(session))
+    def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_key=session.session_id, model=_resolve_model(session), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
-    def resume_session(self, session: Session, message: str) -> ExecutionResult:
-        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_key=session.session_id, model=_resolve_model(session))
+    def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_key=session.session_id, model=_resolve_model(session), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
-    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
-        return self._run(cwd, message, resume_id=None, session_key=None, model=None)
+    def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        return self._run(cwd, message, resume_id=None, session_key=None, model=None, telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
     def cancel(self, session: Session) -> None:
         with self._proc_lock:
@@ -78,11 +88,21 @@ class CodexBackend(CodingBackend):
             procs = list(self._session_procs.values()) + list(self._oneoff_procs)
         terminate_many_popen(procs)
 
-    def _run(self, cwd: str, message: str, resume_id: Optional[str], session_key: Optional[str], model: Optional[str] = None) -> ExecutionResult:
+    def _run(
+        self,
+        cwd: str,
+        message: str,
+        resume_id: Optional[str],
+        session_key: Optional[str],
+        model: Optional[str] = None,
+        telemetry_context: Optional[TelemetryContext] = None,
+        telemetry_sink=None,
+    ) -> ExecutionResult:
         # Cost guard: refuse to spawn the Codex CLI under test mode.
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("codex")
         start = time.time()
+        start_monotonic = time.monotonic()
 
         try:
             from config import config as _cfg
@@ -93,6 +113,7 @@ class CodexBackend(CodingBackend):
         proc_env = ensure_node_on_path()
         if session_key:
             proc_env["SESSION_ID"] = session_key
+        proc_env.update(telemetry_subprocess_env(telemetry_context))
 
         cmd = self._build_cmd(resume_id, cwd, model)
         cmd[0] = self._resolve_exe(proc_env)
@@ -124,6 +145,19 @@ class CodexBackend(CodingBackend):
             session_key or "(oneoff)",
         )
 
+        sink = telemetry_sink or NullTelemetrySink()
+        process_instance_id: Optional[str] = None
+        adapter: Optional[CodexTelemetryAdapter] = None
+
+        def _emit(events) -> None:
+            try:
+                if isinstance(events, list):
+                    sink.emit_many(events)
+                else:
+                    sink.emit(events)
+            except Exception:
+                logger.warning("event=codex_telemetry_emit_failed", exc_info=True)
+
         proc: Optional[subprocess.Popen] = None
         try:
             proc = subprocess.Popen(
@@ -135,7 +169,38 @@ class CodexBackend(CodingBackend):
                 env=proc_env,
                 creationflags=_NO_WINDOW,
             )
-            self._register_process(proc, session_key)
+            self._register_process(
+                proc,
+                session_key,
+                telemetry_context=telemetry_context,
+                emit=_emit,
+            )
+            if telemetry_context is not None:
+                process_instance_id = new_telemetry_id("proc")
+                adapter = CodexTelemetryAdapter(
+                    telemetry_context,
+                    emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                )
+                _emit(
+                    build_event(
+                        "process.spawned",
+                        turn_id=telemetry_context.turn_id,
+                        session_id=telemetry_context.session_id,
+                        node_id=telemetry_context.node_id,
+                        emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                        source=telemetry_context.source,
+                        invocation_id=telemetry_context.invocation_id,
+                        backend="codex",
+                        model=telemetry_context.model,
+                        pid=proc.pid,
+                        attributes={
+                            "process_instance_id": process_instance_id,
+                            "process_role": "agent",
+                            "executable_name": "codex",
+                        },
+                    )
+                )
+                _emit(adapter.coverage_events())
 
             proc.stdin.write(message.encode())
             proc.stdin.close()
@@ -170,6 +235,13 @@ class CodexBackend(CodingBackend):
                             stdout_done = True
                         else:
                             stdout_lines.append(item)
+                            if adapter is not None:
+                                try:
+                                    _emit(adapter.consume_line(item.decode(errors="replace")))
+                                except Exception:
+                                    logger.warning(
+                                        "event=codex_telemetry_parse_failed", exc_info=True
+                                    )
                     except queue.Empty:
                         logger.warning(
                             "codex inactivity timeout after %.0fs (no stdout) — terminating pid=%s",
@@ -177,6 +249,40 @@ class CodexBackend(CodingBackend):
                             proc.pid,
                         )
                         killed_for_inactivity = True
+                        if telemetry_context is not None:
+                            _emit(
+                                build_event(
+                                    "process.timeout_detected",
+                                    turn_id=telemetry_context.turn_id,
+                                    session_id=telemetry_context.session_id,
+                                    node_id=telemetry_context.node_id,
+                                    emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                                    source=telemetry_context.source,
+                                    invocation_id=telemetry_context.invocation_id,
+                                    backend="codex",
+                                    model=telemetry_context.model,
+                                    pid=proc.pid,
+                                    attributes={
+                                        "timeout_kind": "backend_inactivity_timeout",
+                                        "timeout_ms": inactivity_sec * 1000,
+                                    },
+                                )
+                            )
+                            _emit(
+                                build_event(
+                                    "process.termination_requested",
+                                    turn_id=telemetry_context.turn_id,
+                                    session_id=telemetry_context.session_id,
+                                    node_id=telemetry_context.node_id,
+                                    emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                                    source=telemetry_context.source,
+                                    invocation_id=telemetry_context.invocation_id,
+                                    backend="codex",
+                                    model=telemetry_context.model,
+                                    pid=proc.pid,
+                                    attributes={"reason_code": "inactivity_timeout"},
+                                )
+                            )
                         terminate_many_popen([proc])
                         stdout_done = True
 
@@ -201,6 +307,8 @@ class CodexBackend(CodingBackend):
                             item = q_ref.get_nowait()
                             if item is not _SENTINEL:
                                 lines_ref.append(item)
+                                if q_ref is stdout_q and adapter is not None:
+                                    _emit(adapter.consume_line(item.decode(errors="replace")))
                         except queue.Empty:
                             break
                 else:
@@ -210,17 +318,63 @@ class CodexBackend(CodingBackend):
                             if item is _SENTINEL:
                                 break
                             lines_ref.append(item)
+                            if q_ref is stdout_q and adapter is not None:
+                                _emit(adapter.consume_line(item.decode(errors="replace")))
                         except queue.Empty:
                             break
 
             stdout_thread.join(timeout=5.0)
             stderr_thread.join(timeout=5.0)
 
+            reaped = True
             try:
                 proc.wait(timeout=10.0)
             except subprocess.TimeoutExpired:
-                pass
+                reaped = False
             returncode = proc.returncode if proc.returncode is not None else -1
+            if telemetry_context is not None and process_instance_id is not None:
+                if reaped:
+                    _emit(
+                        build_event(
+                            "process.exited",
+                            turn_id=telemetry_context.turn_id,
+                            session_id=telemetry_context.session_id,
+                            node_id=telemetry_context.node_id,
+                            emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                            source=telemetry_context.source,
+                            invocation_id=telemetry_context.invocation_id,
+                            backend="codex",
+                            model=telemetry_context.model,
+                            pid=proc.pid,
+                            attributes={
+                                "process_instance_id": process_instance_id,
+                                "exit_code": returncode,
+                                "signal": abs(returncode) if returncode < 0 else None,
+                                "duration_ms": round(
+                                    (time.monotonic() - start_monotonic) * 1000
+                                ),
+                            },
+                        )
+                    )
+                else:
+                    _emit(
+                        build_event(
+                            "process.exit_unknown",
+                            turn_id=telemetry_context.turn_id,
+                            session_id=telemetry_context.session_id,
+                            node_id=telemetry_context.node_id,
+                            emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                            source=telemetry_context.source,
+                            invocation_id=telemetry_context.invocation_id,
+                            backend="codex",
+                            model=telemetry_context.model,
+                            pid=proc.pid,
+                            attributes={
+                                "process_instance_id": process_instance_id,
+                                "reason_code": "wait_timeout",
+                            },
+                        )
+                    )
 
             stdout = b"".join(stdout_lines).decode(errors="replace")
             stderr = b"".join(stderr_lines).decode(errors="replace")
@@ -255,6 +409,10 @@ class CodexBackend(CodingBackend):
         finally:
             if proc is not None:
                 self._unregister_process(proc, session_key)
+            try:
+                sink.flush()
+            except Exception:
+                logger.warning("event=codex_telemetry_flush_failed", exc_info=True)
 
     @staticmethod
     def _resolve_exe(env: Optional[dict] = None) -> str:
@@ -287,15 +445,50 @@ class CodexBackend(CodingBackend):
         cmd.append("-")
         return cmd
 
-    def _register_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
+    def _register_process(
+        self,
+        proc: subprocess.Popen,
+        session_key: Optional[str],
+        *,
+        telemetry_context: Optional[TelemetryContext] = None,
+        emit=None,
+    ) -> None:
         stale_proc: Optional[subprocess.Popen] = None
+        stale_context: Optional[TelemetryContext] = None
         with self._proc_lock:
             if session_key:
                 stale_proc = self._session_procs.get(session_key)
+                stale_context = self._session_telemetry.get(session_key)
                 self._session_procs[session_key] = proc
+                if telemetry_context is not None:
+                    self._session_telemetry[session_key] = telemetry_context
             else:
                 self._oneoff_procs.add(proc)
         if stale_proc is not None and stale_proc is not proc:
+            if (
+                emit is not None
+                and telemetry_context is not None
+                and stale_context is not None
+                and stale_context.invocation_id != telemetry_context.invocation_id
+            ):
+                emit(
+                    build_event(
+                        "invocation.duplicate_detected",
+                        turn_id=telemetry_context.turn_id,
+                        session_id=telemetry_context.session_id,
+                        node_id=telemetry_context.node_id,
+                        emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                        source=telemetry_context.source,
+                        invocation_id=telemetry_context.invocation_id,
+                        backend="codex",
+                        model=telemetry_context.model,
+                        attributes={
+                            "duplicate_of_invocation_id": stale_context.invocation_id,
+                            "confidence": "probable",
+                            "rule": "session_process_replacement",
+                        },
+                    )
+                )
             terminate_many_popen([stale_proc])
 
     def _unregister_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
@@ -304,6 +497,7 @@ class CodexBackend(CodingBackend):
                 current = self._session_procs.get(session_key)
                 if current is proc:
                     self._session_procs.pop(session_key, None)
+                    self._session_telemetry.pop(session_key, None)
             else:
                 self._oneoff_procs.discard(proc)
 

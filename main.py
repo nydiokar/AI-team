@@ -265,6 +265,92 @@ async def test_telegram_interface():
     except Exception as e:
         print(f"❌ Failed to send test notification: {e}")
 
+
+def _telemetry_reconcile(args=None):
+    """Repair stale turn projections from terminal mesh-task state."""
+    args = list(args or [])
+    turn_id = None
+    since_hours = 1.0
+    index = 0
+    while index < len(args):
+        if args[index] == "--turn-id" and index + 1 < len(args):
+            turn_id = args[index + 1]
+            index += 2
+            continue
+        if args[index] == "--since" and index + 1 < len(args):
+            try:
+                since_hours = max(0.0, float(args[index + 1]))
+            except ValueError:
+                print("--since must be a non-negative number of hours")
+                return
+            index += 2
+            continue
+        print(f"Unknown telemetry-reconcile argument: {args[index]}")
+        return
+
+    from src.control.db import get_db
+    from src.control.telemetry_store import TelemetryStore
+
+    db = get_db()
+    if db is None:
+        print("Telemetry database is unavailable")
+        return
+    result = TelemetryStore(db).reconcile(
+        turn_id=turn_id,
+        since_hours=since_hours,
+    )
+    print(
+        json.dumps(
+            {
+                "reconciled": result["reconciled"],
+                "skipped": result["skipped"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def _telemetry_cleanup(args=None):
+    """Apply configured telemetry event and summary retention."""
+    args = list(args or [])
+    event_days = config.telemetry.event_retention_days
+    summary_days = config.telemetry.summary_retention_days
+    index = 0
+    while index < len(args):
+        if args[index] == "--event-days" and index + 1 < len(args):
+            try:
+                event_days = max(1, int(args[index + 1]))
+            except ValueError:
+                print("--event-days must be a positive integer")
+                return
+            index += 2
+            continue
+        if args[index] == "--summary-days" and index + 1 < len(args):
+            try:
+                summary_days = max(1, int(args[index + 1]))
+            except ValueError:
+                print("--summary-days must be a positive integer")
+                return
+            index += 2
+            continue
+        print(f"Unknown telemetry-cleanup argument: {args[index]}")
+        return
+
+    from src.control.db import get_db
+    from src.control.telemetry_store import TelemetryStore
+
+    db = get_db()
+    if db is None:
+        print("Telemetry database is unavailable")
+        return
+    result = TelemetryStore(db).cleanup(
+        event_retention_days=event_days,
+        summary_retention_days=summary_days,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def main():
     """Main entry point"""
     
@@ -300,6 +386,12 @@ def main():
             return
         if command == "tail-events":
             _tail_events(sys.argv[2:])
+            return
+        if command == "telemetry-reconcile":
+            _telemetry_reconcile(sys.argv[2:])
+            return
+        if command == "telemetry-cleanup":
+            _telemetry_cleanup(sys.argv[2:])
             return
         if command == "reload-workers":
             asyncio.run(_reload_workers())
@@ -341,6 +433,8 @@ Usage:
     python main.py doctor                    Print effective config and CLI availability
     python main.py health [--json]          Print machine-readable local health and exit non-zero on failure
     python main.py tail-events [--task TASK_ID] [--lines N]   Show recent NDJSON events
+    python main.py telemetry-reconcile [--turn-id ID] [--since HOURS]
+    python main.py telemetry-cleanup [--event-days N] [--summary-days N]
     python main.py reload-workers  Reload worker pool from environment
     python main.py git-commit <task_id> [--no-branch] [--push]  Commit task changes safely
     python main.py git-commit-all <task_id> [--no-branch] [--push]  Commit all staged changes

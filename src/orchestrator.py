@@ -64,6 +64,15 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.session_service = SessionService(self.session_store)
         self.workflow_service = WorkflowService()
         self._backends = build_backends()
+        from src.control.telemetry_sink import build_runtime_telemetry_sink
+        self._telemetry_sink = build_runtime_telemetry_sink(
+            node_id=socket.gethostname(),
+            logs_dir=config.system.logs_dir,
+        )
+        with contextlib.suppress(Exception):
+            replay = getattr(self._telemetry_sink, "replay_spool", None)
+            if callable(replay):
+                replay()
         
         # Task management
         self.task_queue = asyncio.Queue(maxsize=config.system.max_queue_size)
@@ -1196,10 +1205,23 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info(f"event=task_created task_id={task.id} source={(task.metadata or {}).get('source', 'runtime')}")
         self._emit_event("task_created", task, {"source": (task.metadata or {}).get("source", "runtime")})
         self._emit_event("parsed", task)
+        self._emit_turn_telemetry(
+            "turn.accepted",
+            task,
+            {
+                "task_id": task.id,
+                "source": (task.metadata or {}).get("source", "runtime"),
+            },
+        )
 
         try:
             self.task_queue.put_nowait(task)
             self.active_tasks[task.id] = task
+            self._emit_turn_telemetry(
+                "turn.queued",
+                task,
+                {"priority": getattr(task.priority, "value", str(task.priority))},
+            )
             logger.info(f"Queued runtime task: {task.id} ({task.type.value}, {task.priority.value})")
         except asyncio.QueueFull:
             priority_val = getattr(task.priority, "value", str(task.priority))
@@ -1212,6 +1234,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             try:
                 await asyncio.wait_for(self.task_queue.put(task), timeout=5.0)
                 self.active_tasks[task.id] = task
+                self._emit_turn_telemetry(
+                    "turn.queued",
+                    task,
+                    {"priority": priority_val},
+                )
                 logger.info(f"Queued throttled runtime task: {task.id} ({task.type.value}, {priority_val})")
             except asyncio.TimeoutError as exc:
                 logger.error(f"event=dropped_after_throttle task_id={task.id}")
@@ -1383,6 +1410,21 @@ class TaskOrchestrator(ITaskOrchestrator):
                     task.status = TaskStatus.FAILED
                     logger.info(f"event=cancelled_before_start worker={worker_name} task_id={task.id}")
                     self._emit_event("cancelled", task, {"worker": worker_name, "when": "before_start"})
+                    self._emit_turn_telemetry(
+                        "turn.cancel_requested",
+                        task,
+                        {"reason_code": "cancelled_before_start"},
+                    )
+                    self._emit_turn_telemetry(
+                        "turn.completed",
+                        task,
+                        {
+                            "status": "cancelled",
+                            "timeout_status": "none",
+                            "exit_code": None,
+                        },
+                        flush=True,
+                    )
                     self.task_queue.task_done()
                     # Release inflight locks and pending state, similar to completion path
                     try:
@@ -1398,6 +1440,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 start_event = self._backend_event_name(backend_name, "started")
                 logger.info(f"event={start_event} worker={worker_name} task_id={task.id}")
                 self._emit_event(start_event, task, {"worker": worker_name, "backend": backend_name})
+                self._emit_turn_telemetry("turn.started", task, backend=backend_name)
                 self._mesh_enqueue_task(task, backend_name)
 
                 # Process the task
@@ -1442,6 +1485,39 @@ class TaskOrchestrator(ITaskOrchestrator):
                     finish_event,
                     task,
                     {"status": status, "duration_s": result.execution_time, "error_class": getattr(result, "error_class", ""), "backend": finish_backend},
+                )
+                final_status = (
+                    "success"
+                    if result.success
+                    else "timed_out"
+                    if getattr(result, "error_class", "") == "timeout"
+                    else "cancelled"
+                    if any("cancelled" in str(error).lower() for error in (result.errors or []))
+                    else "failed"
+                )
+                self._emit_turn_telemetry(
+                    "turn.result_recorded",
+                    task,
+                    {
+                        "status": final_status,
+                        "error_code": getattr(result, "error_class", "") or None,
+                    },
+                    invocation_id=getattr(result, "telemetry_invocation_id", None),
+                    backend=finish_backend,
+                )
+                self._emit_turn_telemetry(
+                    "turn.completed",
+                    task,
+                    {
+                        "status": final_status,
+                        "timeout_status": (
+                            "gateway_timeout" if final_status == "timed_out" else "none"
+                        ),
+                        "exit_code": getattr(result, "return_code", None),
+                    },
+                    invocation_id=getattr(result, "telemetry_invocation_id", None),
+                    backend=finish_backend,
+                    flush=True,
                 )
                 
                 # Send notification via the central notification dispatcher
@@ -1595,6 +1671,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             attempt = 0
             last_result: Optional[TaskResult] = None
             session_recreated = False
+            next_spawn_reason = "initial"
             # Per-task timeout override via frontmatter metadata `timeout_sec`, else system default
             try:
                 timeout_s = int(task.metadata.get("timeout_sec", config.system.task_timeout)) if getattr(task, "metadata", None) else config.system.task_timeout
@@ -1622,6 +1699,51 @@ class TaskOrchestrator(ITaskOrchestrator):
 
             while not route_remote:
                 attempt += 1
+                from src.core.telemetry import TelemetryContext
+                local_action = (
+                    "resume_session"
+                    if session and session.backend_session_id
+                    else "create_session"
+                    if session
+                    else "run_oneoff"
+                )
+                telemetry_context = TelemetryContext.create(
+                    turn_id=task.id,
+                    node_id=socket.gethostname(),
+                    session_id=session_id or None,
+                    backend=session.backend if session else self._resolve_task_backend(task),
+                    model=session.model if session else None,
+                    source="gateway",
+                    attempt=attempt,
+                    spawn_reason=next_spawn_reason,
+                    retry_of_invocation_id=(
+                        getattr(last_result, "telemetry_invocation_id", None)
+                        if last_result is not None
+                        else None
+                    ),
+                )
+                next_spawn_reason = "retry"
+                self._emit_turn_telemetry(
+                    "invocation.created",
+                    task,
+                    {
+                        "attempt": attempt,
+                        "spawn_reason": telemetry_context.spawn_reason,
+                        "action": local_action,
+                        "retry_of_invocation_id": telemetry_context.retry_of_invocation_id,
+                    },
+                    invocation_id=telemetry_context.invocation_id,
+                    backend=telemetry_context.backend,
+                    model=telemetry_context.model,
+                )
+                self._emit_turn_telemetry(
+                    "invocation.started",
+                    task,
+                    {"action": local_action},
+                    invocation_id=telemetry_context.invocation_id,
+                    backend=telemetry_context.backend,
+                    model=telemetry_context.model,
+                )
                 # Run execution as a task to allow timeout/cancel
                 # Use session backend (with native resume) when task belongs to a session.
                 # For non-session tasks, use the native backend directly instead of
@@ -1633,12 +1755,27 @@ class TaskOrchestrator(ITaskOrchestrator):
                     backend = self._backends.get(backend_name, self._backends["claude"])
                     session.last_user_message = task.prompt
                     if session.backend_session_id:
+                        from src.core.backend_call import call_backend
                         exec_task = asyncio.create_task(
-                            asyncio.to_thread(backend.resume_session, session, task.prompt)
+                            asyncio.to_thread(
+                                call_backend,
+                                backend.resume_session,
+                                session,
+                                task.prompt,
+                                telemetry_context=telemetry_context,
+                                telemetry_sink=self._telemetry_sink,
+                            )
                         )
                     else:
+                        from src.core.backend_call import call_backend
                         exec_task = asyncio.create_task(
-                            asyncio.to_thread(backend.create_session, session)
+                            asyncio.to_thread(
+                                call_backend,
+                                backend.create_session,
+                                session,
+                                telemetry_context=telemetry_context,
+                                telemetry_sink=self._telemetry_sink,
+                            )
                         )
                 else:
                     backend_name = str((task.metadata or {}).get("backend") or "claude").strip().lower()
@@ -1646,8 +1783,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                     cwd_override = str((task.metadata or {}).get("cwd") or "").strip()
                     if not cwd_override:
                         cwd_override = str(getattr(config.claude, "base_cwd", "") or "").strip()
+                    from src.core.backend_call import call_backend
                     exec_task = asyncio.create_task(
-                        asyncio.to_thread(backend.run_oneoff, cwd_override, task.prompt)
+                        asyncio.to_thread(
+                            call_backend,
+                            backend.run_oneoff,
+                            cwd_override,
+                            task.prompt,
+                            telemetry_context=telemetry_context,
+                            telemetry_sink=self._telemetry_sink,
+                        )
                     )
                 self._running_exec_tasks[task.id] = exec_task
                 # Wait for whichever happens first
@@ -1696,10 +1841,36 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 return_code=getattr(raw, "return_code", 0),
                             )
                             setattr(result, "backend_name", backend_name)
+                            if raw.telemetry is not None:
+                                setattr(
+                                    result,
+                                    "telemetry_invocation_id",
+                                    raw.telemetry.invocation_id,
+                                )
                         else:
                             result = raw
                     elif cancel_waiter and cancel_waiter in done:
                         # Cooperative cancellation
+                        self._emit_turn_telemetry(
+                            "turn.cancel_requested",
+                            task,
+                            {
+                                "reason_code": (
+                                    "gateway_shutdown"
+                                    if task.id in self._shutdown_interrupted_tasks
+                                    else "user_cancel"
+                                )
+                            },
+                            invocation_id=telemetry_context.invocation_id,
+                            backend=backend_name,
+                        )
+                        self._emit_turn_telemetry(
+                            "process.termination_requested",
+                            task,
+                            {"reason_code": "gateway_cancel"},
+                            invocation_id=telemetry_context.invocation_id,
+                            backend=backend_name,
+                        )
                         if session:
                             with contextlib.suppress(Exception):
                                 backend.cancel(session)
@@ -1722,9 +1893,28 @@ class TaskOrchestrator(ITaskOrchestrator):
                             timestamp=datetime.now().isoformat(),
                         )
                         setattr(result, "backend_name", backend_name)
+                        setattr(result, "telemetry_invocation_id", telemetry_context.invocation_id)
+                        self._emit_turn_telemetry(
+                            "invocation.completed",
+                            task,
+                            {
+                                "status": "failed",
+                                "duration_ms": round(execution_time * 1000),
+                                "error_code": "cancelled",
+                            },
+                            invocation_id=telemetry_context.invocation_id,
+                            backend=backend_name,
+                        )
                         return result
                     else:
                         # Timeout
+                        self._emit_turn_telemetry(
+                            "process.termination_requested",
+                            task,
+                            {"reason_code": "gateway_timeout"},
+                            invocation_id=telemetry_context.invocation_id,
+                            backend=backend_name,
+                        )
                         if session:
                             with contextlib.suppress(Exception):
                                 backend.cancel(session)
@@ -1733,6 +1923,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                             await exec_task
                         execution_time = time.time() - start_time
                         self._emit_event("timeout", task, {"timeout_s": timeout_s})
+                        self._emit_turn_telemetry(
+                            "turn.timeout_requested",
+                            task,
+                            {
+                                "timeout_kind": "gateway_timeout",
+                                "timeout_ms": timeout_s * 1000,
+                            },
+                            invocation_id=telemetry_context.invocation_id,
+                            backend=backend_name,
+                        )
                         if session:
                             session.status = SessionStatus.ERROR
                             self.session_store.save(session)
@@ -1754,6 +1954,18 @@ class TaskOrchestrator(ITaskOrchestrator):
                             timestamp=datetime.now().isoformat(),
                         )
                         setattr(result, "backend_name", backend_name)
+                        setattr(result, "telemetry_invocation_id", telemetry_context.invocation_id)
+                        self._emit_turn_telemetry(
+                            "invocation.completed",
+                            task,
+                            {
+                                "status": "failed",
+                                "duration_ms": round(execution_time * 1000),
+                                "error_code": "timeout",
+                            },
+                            invocation_id=telemetry_context.invocation_id,
+                            backend=backend_name,
+                        )
                         return result
                 finally:
                     # Cancel any pending helper waiters
@@ -1763,6 +1975,20 @@ class TaskOrchestrator(ITaskOrchestrator):
                 error_class = self._classify_error(result)
                 result.error_class = error_class
                 result.retries = attempt - 1
+                setattr(result, "telemetry_invocation_id", telemetry_context.invocation_id)
+                self._emit_turn_telemetry(
+                    "invocation.completed",
+                    task,
+                    {
+                        "status": "success" if result.success else "failed",
+                        "duration_ms": round((result.execution_time or 0.0) * 1000),
+                        "exit_code": getattr(result, "return_code", None),
+                        "error_code": error_class or None,
+                    },
+                    invocation_id=telemetry_context.invocation_id,
+                    backend=backend_name,
+                    model=telemetry_context.model,
+                )
 
                 if session and not result.success and not session_recreated and self._is_missing_backend_conversation(result):
                     stale_id = session.backend_session_id
@@ -1781,6 +2007,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                         {"stale_backend_session_id": stale_id, "reason": "missing_conversation"},
                     )
                     last_result = result
+                    next_spawn_reason = "session_recreate"
                     continue
 
                 # Determine retry strategy per error class
@@ -1794,9 +2021,22 @@ class TaskOrchestrator(ITaskOrchestrator):
                     delay = max(0.0, retry_delay * jitter)
                     logger.warning(f"event=retry task_id={task.id} attempt={attempt} class={error_class} delay_s={delay:.2f}")
                     self._emit_event("retry", task, {"attempt": attempt, "class": error_class, "delay_s": delay})
+                    self._emit_turn_telemetry(
+                        "invocation.retry_scheduled",
+                        task,
+                        {
+                            "retry_reason": error_class,
+                            "delay_ms": round(delay * 1000),
+                            "next_attempt": attempt + 1,
+                            "retry_of_invocation_id": telemetry_context.invocation_id,
+                        },
+                        invocation_id=telemetry_context.invocation_id,
+                        backend=backend_name,
+                    )
                     await asyncio.sleep(delay)
                     retry_delay = retry_delay * backoff_mult if retry_delay > 0 else strategy.get("initial_delay", 1.0) * backoff_mult
                     last_result = result
+                    next_spawn_reason = "retry"
                     continue
                 last_result = result
                 break
@@ -2328,6 +2568,78 @@ created: {task.created}
             fields.update(extra)
         task_id = fields.pop("task_id", task_id)
         _emit(name, task_id=task_id, **fields)
+
+    def _emit_turn_telemetry(
+        self,
+        name: str,
+        task: Task,
+        attributes: Optional[Dict[str, Any]] = None,
+        *,
+        invocation_id: Optional[str] = None,
+        backend: Optional[str] = None,
+        model: Optional[str] = None,
+        flush: bool = False,
+    ) -> None:
+        """Best-effort normalized telemetry through the controller sink."""
+        try:
+            from src.core.telemetry import EMITTER_PROCESS_INSTANCE_ID, build_event
+            session_id = str((task.metadata or {}).get("session_id") or "") or None
+            session = self.session_store.get(session_id) if session_id else None
+            event_attributes = dict(attributes or {})
+            if (
+                name == "turn.started"
+                and session is not None
+                and session.backend_session_id
+            ):
+                event_attributes.setdefault(
+                    "backend_session_id_start", session.backend_session_id
+                )
+            elif (
+                name == "turn.completed"
+                and session is not None
+                and session.backend_session_id
+            ):
+                event_attributes.setdefault(
+                    "backend_session_id_end", session.backend_session_id
+                )
+            self._telemetry_sink.emit(
+                build_event(
+                    name,
+                    turn_id=task.id,
+                    session_id=session_id,
+                    node_id=socket.gethostname(),
+                    emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                    source="gateway",
+                    invocation_id=invocation_id,
+                    backend=backend or (session.backend if session else self._resolve_task_backend(task)),
+                    model=model or (session.model if session else None),
+                    attributes=event_attributes,
+                )
+            )
+            if name == "turn.started" and session is None:
+                self._telemetry_sink.emit(
+                    build_event(
+                        "telemetry.coverage",
+                        turn_id=task.id,
+                        session_id=None,
+                        node_id=socket.gethostname(),
+                        emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                        source="gateway",
+                        invocation_id=invocation_id,
+                        backend=backend or self._resolve_task_backend(task),
+                        model=model,
+                        attributes={
+                            "area": "postprocess",
+                            "coverage": "unsupported",
+                            "reason_code": "llama_postprocess_uninstrumented",
+                            "adapter_version": "gateway-v1",
+                        },
+                    )
+                )
+            if flush:
+                self._telemetry_sink.flush()
+        except Exception:
+            logger.warning("event=gateway_telemetry_emit_failed", exc_info=True)
     
     # Simulation execution removed: system now always runs real Claude Code CLI
     
@@ -2774,6 +3086,11 @@ Generated from user description: {description}
                         raw_stdout=worker_output,
                     )
                     setattr(result, "backend_name", row.get("backend", "claude"))
+                    setattr(
+                        result,
+                        "telemetry_invocation_id",
+                        r.get("telemetry_invocation_id") or None,
+                    )
                     return result
 
                 if status in ("failed", "failed_node_offline"):
@@ -3017,6 +3334,14 @@ Generated from user description: {description}
                 "task_id": task.id,
                 "action": action,
                 "metadata": task.metadata or {},
+                "telemetry": {
+                    "schema_version": 1,
+                    "turn_id": task.id,
+                    "session_id": session_id,
+                    "gateway_node_id": host,
+                    "attempt": 1,
+                    "spawn_reason": "initial",
+                },
             }
             if session:
                 payload["session"] = {

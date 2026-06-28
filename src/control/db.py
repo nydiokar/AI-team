@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 13
+_CURRENT_VERSION = 16
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +193,171 @@ CREATE INDEX IF NOT EXISTS idx_jobs_session
     ON jobs(session_id);
 """
 
+_APPROVALS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS approvals (
+    id           TEXT PRIMARY KEY,
+    session_id   TEXT,
+    task_id      TEXT,
+    action       TEXT NOT NULL,
+    risk         TEXT NOT NULL DEFAULT 'medium',
+    reversible   INTEGER NOT NULL DEFAULT 1,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    requested_by TEXT NOT NULL DEFAULT '',
+    resolved_by  TEXT,
+    payload      TEXT,
+    created_at   TEXT NOT NULL,
+    resolved_at  TEXT,
+    expires_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id)
+"""
+
+_LLM_TELEMETRY_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS llm_turns (
+    turn_id TEXT PRIMARY KEY,
+    session_id TEXT,
+    task_id TEXT NOT NULL,
+    gateway_node_id TEXT,
+    execution_node_id TEXT,
+    backend TEXT,
+    backend_session_id_start TEXT,
+    backend_session_id_end TEXT,
+    requested_model TEXT,
+    observed_models TEXT NOT NULL DEFAULT '[]',
+    started_at TEXT,
+    ended_at TEXT,
+    final_status TEXT NOT NULL DEFAULT 'running',
+    timeout_status TEXT NOT NULL DEFAULT 'none',
+    final_exit_code INTEGER,
+    final_invocation_id TEXT,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    coverage_json TEXT NOT NULL DEFAULT '{}',
+    data_quality_json TEXT NOT NULL DEFAULT '[]',
+    projection_version INTEGER NOT NULL DEFAULT 1,
+    events_pruned_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS llm_invocations (
+    invocation_id TEXT PRIMARY KEY,
+    turn_id TEXT NOT NULL,
+    parent_invocation_id TEXT,
+    retry_of_invocation_id TEXT,
+    duplicate_of_invocation_id TEXT,
+    attempt INTEGER NOT NULL,
+    spawn_reason TEXT NOT NULL,
+    action TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    requested_model TEXT,
+    observed_model TEXT,
+    process_instance_id TEXT,
+    pid INTEGER,
+    process_started_at TEXT,
+    started_at TEXT,
+    ended_at TEXT,
+    status TEXT NOT NULL,
+    timeout_kind TEXT,
+    exit_code INTEGER,
+    signal INTEGER,
+    retry_reason TEXT,
+    model_request_count INTEGER,
+    tool_call_count INTEGER,
+    subagent_count INTEGER,
+    usage_json TEXT NOT NULL DEFAULT '{}',
+    coverage_json TEXT NOT NULL DEFAULT '{}',
+    data_quality_json TEXT NOT NULL DEFAULT '[]',
+    FOREIGN KEY(turn_id) REFERENCES llm_turns(turn_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS llm_processes (
+    process_instance_id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL,
+    pid INTEGER,
+    parent_process_instance_id TEXT,
+    process_role TEXT NOT NULL,
+    backend TEXT,
+    executable_name TEXT,
+    started_at TEXT,
+    ended_at TEXT,
+    exit_code INTEGER,
+    signal INTEGER,
+    status TEXT NOT NULL,
+    data_quality_json TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS llm_invocation_processes (
+    invocation_id TEXT NOT NULL,
+    process_instance_id TEXT NOT NULL,
+    relationship TEXT NOT NULL,
+    PRIMARY KEY(invocation_id, process_instance_id),
+    FOREIGN KEY(invocation_id) REFERENCES llm_invocations(invocation_id) ON DELETE CASCADE,
+    FOREIGN KEY(process_instance_id) REFERENCES llm_processes(process_instance_id)
+);
+CREATE TABLE IF NOT EXISTS llm_model_requests (
+    model_request_id TEXT PRIMARY KEY,
+    invocation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    provider_request_id TEXT,
+    model TEXT,
+    work_category TEXT NOT NULL DEFAULT 'unknown',
+    started_at TEXT,
+    ended_at TEXT,
+    status TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cache_creation_tokens INTEGER,
+    reasoning_tokens INTEGER,
+    context_tokens INTEGER,
+    input_token_semantics TEXT NOT NULL DEFAULT 'unknown',
+    usage_granularity TEXT NOT NULL,
+    usage_source TEXT,
+    usage_coverage TEXT NOT NULL,
+    is_duplicate INTEGER NOT NULL DEFAULT 0,
+    data_quality_json TEXT NOT NULL DEFAULT '[]',
+    FOREIGN KEY(invocation_id) REFERENCES llm_invocations(invocation_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS llm_events (
+    event_id TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL,
+    event_name TEXT NOT NULL,
+    event_time TEXT NOT NULL,
+    observed_time TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    emitter_process_instance_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_sequence INTEGER,
+    clock_quality TEXT NOT NULL DEFAULT 'unknown',
+    session_id TEXT,
+    turn_id TEXT NOT NULL,
+    invocation_id TEXT,
+    model_request_id TEXT,
+    tool_call_id TEXT,
+    subagent_id TEXT,
+    backend TEXT,
+    model TEXT,
+    pid INTEGER,
+    attributes TEXT NOT NULL DEFAULT '{}',
+    received_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_events_turn
+    ON llm_events(turn_id, event_time, source_sequence);
+CREATE INDEX IF NOT EXISTS idx_llm_events_invocation
+    ON llm_events(invocation_id, event_time);
+CREATE INDEX IF NOT EXISTS idx_llm_events_session
+    ON llm_events(session_id, event_time);
+CREATE INDEX IF NOT EXISTS idx_llm_events_name
+    ON llm_events(event_name, event_time);
+CREATE INDEX IF NOT EXISTS idx_llm_invocations_turn
+    ON llm_invocations(turn_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_llm_model_requests_turn
+    ON llm_model_requests(turn_id, invocation_id, sequence);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_model_provider_request
+    ON llm_model_requests(invocation_id, provider_request_id)
+    WHERE provider_request_id IS NOT NULL
+"""
+
 
 # ---------------------------------------------------------------------------
 # MeshDB — the public interface
@@ -267,6 +432,7 @@ class MeshDB:
             conn.execute("BEGIN IMMEDIATE;")
             try:
                 self._run_migrations(conn)
+                self._ensure_merged_schema(conn)
                 conn.execute("COMMIT;")
             except Exception:
                 try:
@@ -296,6 +462,39 @@ class MeshDB:
                     (version, _now()),
                 )
                 logger.info("event=db_migration_applied version=%d", version)
+
+    def _ensure_merged_schema(self, conn: sqlite3.Connection) -> None:
+        """Repair the merged Web UI/main schema across divergent migration 13s.
+
+        Web UI used migration 13 for approvals; main used migration 13 for LLM
+        telemetry and then 14/15 for telemetry columns. This idempotent pass
+        preserves both lineages without relying on a DB having taken only one
+        exact branch path.
+        """
+        for sql in (_APPROVALS_SCHEMA_SQL, _LLM_TELEMETRY_SCHEMA_SQL):
+            for statement in filter(None, (s.strip() for s in sql.split(";"))):
+                conn.execute(statement)
+        self._add_column_if_missing(
+            conn,
+            "llm_events",
+            "clock_quality",
+            "TEXT NOT NULL DEFAULT 'unknown'",
+        )
+        self._add_column_if_missing(conn, "llm_turns", "events_pruned_at", "TEXT")
+
+    def _add_column_if_missing(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        columns = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     # ------------------------------------------------------------------
     # Sessions
@@ -1326,25 +1525,10 @@ def _get_migrations() -> List[tuple]:
         """),  # durable watched-job process identity probes
         (11, "ALTER TABLE sessions ADD COLUMN model TEXT"),  # per-session picked model; NULL = backend default
         (12, "ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT '{\"channel\":\"telegram\",\"kind\":\"user\"}'"),  # transport-neutral origin tag {channel, kind}; old rows default to telegram/user
-        (13, """
-            CREATE TABLE IF NOT EXISTS approvals (
-                id           TEXT PRIMARY KEY,
-                session_id   TEXT,
-                task_id      TEXT,
-                action       TEXT NOT NULL,
-                risk         TEXT NOT NULL DEFAULT 'medium',
-                reversible   INTEGER NOT NULL DEFAULT 1,
-                status       TEXT NOT NULL DEFAULT 'pending',
-                requested_by TEXT NOT NULL DEFAULT '',
-                resolved_by  TEXT,
-                payload      TEXT,
-                created_at   TEXT NOT NULL,
-                resolved_at  TEXT,
-                expires_at   TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, created_at);
-            CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id)
-        """),  # Move H — durable approval gate (pending → approved|rejected|expired)
+        (13, _APPROVALS_SCHEMA_SQL),  # Web UI lineage: durable approval gate
+        (14, _LLM_TELEMETRY_SCHEMA_SQL),  # main lineage: durable LLM telemetry
+        (15, ""),  # marker retained for main telemetry history compatibility
+        (16, ""),  # merged-lineage marker; _ensure_merged_schema repairs both paths
     ]
 
 

@@ -251,6 +251,14 @@ def _db():
         return None
 
 
+def _telemetry_store():
+    db = _db()
+    if db is None:
+        return None
+    from src.control.telemetry_store import TelemetryStore
+    return TelemetryStore(db)
+
+
 def _results_dir() -> "Path":
     """The artifact directory (config.system.results_dir), as a Path."""
     from pathlib import Path
@@ -488,6 +496,61 @@ def build_control_api(orchestrator) -> FastAPI:
         """
         data = observability.read_recent_events(limit=limit, since_offset=since)
         return JSONResponse(data)
+
+    @app.get("/api/turns", dependencies=[Depends(_require_auth)])
+    def api_turns(
+        session_id: Optional[str] = None,
+        status: Optional[str] = None,
+        backend: Optional[str] = None,
+        limit: int = Query(100, ge=1, le=1000),
+    ) -> JSONResponse:
+        store = _telemetry_store()
+        turns = (
+            store.list_turns(
+                session_id=session_id,
+                status=status,
+                backend=backend,
+                limit=limit,
+            )
+            if store is not None
+            else []
+        )
+        return JSONResponse({"turns": turns})
+
+    @app.get("/api/turns/{turn_id}", dependencies=[Depends(_require_auth)])
+    def api_turn_detail(turn_id: str) -> JSONResponse:
+        store = _telemetry_store()
+        turn = store.get_turn(turn_id) if store is not None else None
+        if turn is None:
+            raise HTTPException(status_code=404, detail="turn_not_found")
+        return JSONResponse(turn)
+
+    @app.get("/api/turns/{turn_id}/diagnostics", dependencies=[Depends(_require_auth)])
+    def api_turn_diagnostics(turn_id: str) -> JSONResponse:
+        store = _telemetry_store()
+        diagnostics = store.diagnostics(turn_id) if store is not None else None
+        if diagnostics is None:
+            raise HTTPException(status_code=404, detail="turn_not_found")
+        return JSONResponse(diagnostics)
+
+    @app.get("/api/turns/{turn_id}/graph", dependencies=[Depends(_require_auth)])
+    def api_turn_graph(turn_id: str, expand_tools: bool = False) -> JSONResponse:
+        store = _telemetry_store()
+        graph = store.graph(turn_id, expand_tools=expand_tools) if store is not None else None
+        if graph is None:
+            raise HTTPException(status_code=404, detail="turn_not_found")
+        return JSONResponse(graph)
+
+    @app.get("/api/turns/{turn_id}/events", dependencies=[Depends(_require_auth)])
+    def api_turn_events(
+        turn_id: str,
+        after: Optional[str] = None,
+        limit: int = Query(500, ge=1, le=5000),
+    ) -> JSONResponse:
+        store = _telemetry_store()
+        if store is None or store.get_turn(turn_id) is None:
+            raise HTTPException(status_code=404, detail="turn_not_found")
+        return JSONResponse({"events": store.list_events(turn_id, after=after, limit=limit)})
 
     @app.get("/api/events/stream")
     async def api_events_stream(

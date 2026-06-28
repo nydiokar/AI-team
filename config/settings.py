@@ -166,6 +166,20 @@ class MeshConfig:
     control_api_host: str = ""               # CONTROL_API_HOST
 
 
+@dataclass
+class TelemetryConfig:
+    enabled: bool = True
+    detailed_events: bool = True
+    upload_batch_size: int = 50
+    upload_interval_ms: int = 1000
+    upload_max_bytes: int = 524_288
+    spool_max_bytes: int = 268_435_456
+    event_retention_days: int = 30
+    summary_retention_days: int = 180
+    task_server_url: str = ""
+    otlp_endpoint: str = ""
+
+
 class Config:
     """Main configuration class"""
 
@@ -199,6 +213,7 @@ class Config:
         self.codex = CodexConfig()
         self.opencode = OpenCodeConfig()
         self.mesh = MeshConfig()
+        self.telemetry = TelemetryConfig()
         # Apply env overrides for selected runtime-tunable settings
         self._apply_env_overrides()
         
@@ -521,6 +536,66 @@ class Config:
             v = os.getenv("MESH_HEALTH_FAILURE_THRESHOLD")
             if v is not None:
                 self.mesh.mesh_health_failure_threshold = max(1, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_ENABLED")
+            if v is not None:
+                self.telemetry.enabled = v.lower() != "false"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_DETAILED_EVENTS")
+            if v is not None:
+                self.telemetry.detailed_events = v.lower() != "false"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_UPLOAD_BATCH_SIZE")
+            if v is not None:
+                self.telemetry.upload_batch_size = max(1, min(200, int(v)))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_UPLOAD_INTERVAL_MS")
+            if v is not None:
+                self.telemetry.upload_interval_ms = max(100, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_UPLOAD_MAX_BYTES")
+            if v is not None:
+                self.telemetry.upload_max_bytes = max(65_536, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_SPOOL_MAX_BYTES")
+            if v is not None:
+                self.telemetry.spool_max_bytes = max(1_048_576, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_EVENT_RETENTION_DAYS")
+            if v is not None:
+                self.telemetry.event_retention_days = max(1, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_SUMMARY_RETENTION_DAYS")
+            if v is not None:
+                self.telemetry.summary_retention_days = max(1, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_TASK_SERVER_URL")
+            if v:
+                self.telemetry.task_server_url = v.rstrip("/")
+        except Exception:
+            pass
+        try:
+            v = os.getenv("TELEMETRY_OTLP_ENDPOINT")
+            if v:
+                self.telemetry.otlp_endpoint = v
         except Exception:
             pass
 

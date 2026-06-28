@@ -3,7 +3,7 @@ Core interfaces for the Telegram Coding Gateway.
 """
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 class TaskType(Enum):
@@ -199,6 +199,15 @@ class Session:
 
 
 @dataclass
+class ExecutionTelemetry:
+    """Bounded telemetry summary returned alongside a backend result."""
+
+    invocation_id: str
+    events: List[Dict[str, Any]] = field(default_factory=list)
+    coverage: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class ExecutionResult:
     """Result returned by a CodingBackend after one turn."""
     success: bool
@@ -213,6 +222,7 @@ class ExecutionResult:
     return_code: int = 0
     file_changes: List[Dict[str, Any]] = None
     error_class: str = ""   # categorised failure reason, e.g. "permission_block"
+    telemetry: Optional[ExecutionTelemetry] = None
 
     def __post_init__(self):
         if self.files_modified is None:
@@ -227,17 +237,25 @@ class CodingBackend(ABC):
     """Protocol for coding agent backends (Claude Code, Codex, …)."""
 
     @abstractmethod
-    def create_session(self, session: "Session") -> ExecutionResult:
+    def create_session(
+        self, session: "Session", *, telemetry_context: Any = None, telemetry_sink: Any = None
+    ) -> ExecutionResult:
         """Start a new session — runs the first turn with no prior context."""
         pass
 
     @abstractmethod
-    def resume_session(self, session: "Session", message: str) -> ExecutionResult:
+    def resume_session(
+        self, session: "Session", message: str, *, telemetry_context: Any = None,
+        telemetry_sink: Any = None
+    ) -> ExecutionResult:
         """Continue an existing session using the backend's native resume mechanism."""
         pass
 
     @abstractmethod
-    def run_oneoff(self, cwd: str, message: str) -> ExecutionResult:
+    def run_oneoff(
+        self, cwd: str, message: str, *, telemetry_context: Any = None,
+        telemetry_sink: Any = None
+    ) -> ExecutionResult:
         """Run a single stateless turn with no session tracking."""
         pass
 
