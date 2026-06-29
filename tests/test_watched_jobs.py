@@ -268,6 +268,121 @@ def test_job_endpoint_functions(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_report_job_done_does_not_call_telegram_api(tmp_path, monkeypatch):
+    """The task server records terminal jobs; the gateway routes notifications."""
+    from config import config as cfg
+    cfg.mesh.db_path = str(tmp_path / "mesh_api.db")
+    cfg.mesh.worker_token = "test-token-api"
+    cfg.telegram.bot_token = "test-bot-token"
+    cfg.telegram.allowed_users = [123]
+    cfg.telegram.notification_chat_id = None
+    import src.control.db as db_mod
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old is not None:
+        old.close()
+
+    def _urlopen_should_not_run(*args, **kwargs):
+        raise AssertionError("task server must not call Telegram directly")
+
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen_should_not_run)
+
+    try:
+        from src.control.task_server import JobDonePayload, RegisterJobPayload, register_job, report_job_done
+
+        data = register_job(RegisterJobPayload(
+            node_id="test-node",
+            label="api-test",
+            command="echo ok",
+            notify=True,
+        ))
+        resp = report_job_done(data["job_id"], JobDonePayload(
+            node_id="test-node",
+            exit_code=0,
+            tail="api test passed",
+        ))
+        assert resp["status"] == "accepted"
+    finally:
+        db_mod._db_instance = None
+        if old is not None:
+            old.close()
+        db_mod._db_instance = old
+
+
+@pytest.mark.asyncio
+async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeypatch):
+    import src.services.session_store as session_store_module
+    from src.control import transcript
+    from src.orchestrator import TaskOrchestrator
+    from src.services.session_store import SessionStore
+
+    state_dir = tmp_path / "state"
+    sessions_dir = state_dir / "sessions"
+    monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", sessions_dir, raising=False)
+    monkeypatch.setattr(
+        session_store_module,
+        "_BINDINGS_FILE",
+        state_dir / "telegram" / "active_bindings.json",
+        raising=False,
+    )
+
+    store = SessionStore()
+    session = store.create("codex", str(tmp_path), telegram_chat_id=100, owner_user_id=1)
+
+    class _Notifier:
+        def __init__(self):
+            self.calls = []
+
+        async def notify_task_outcome(self, task_id, result, *, session=None, chat_id=None, prefix=""):
+            self.calls.append({
+                "task_id": task_id,
+                "output": result.output,
+                "chat_id": chat_id,
+                "session_id": session.session_id if session else None,
+            })
+
+    notifier = _Notifier()
+    submitted = []
+
+    async def _submit_instruction(description, **kwargs):
+        submitted.append({"description": description, **kwargs})
+        return "task_followup"
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch.session_store = store
+    orch.notifier = notifier
+    orch.submit_instruction = _submit_instruction
+
+    await orch._process_terminal_job({
+        "id": "job_test123",
+        "session_id": session.session_id,
+        "node_id": "worker-a",
+        "label": "npm test",
+        "status": "done",
+        "exit_code": 0,
+        "tail": "all tests passed",
+        "notify": 1,
+        "notify_agent": 1,
+    })
+
+    assert notifier.calls == [{
+        "task_id": "job_test123",
+        "output": "Watched job `npm test` done.\nExit code: `0`\n\nLast log lines:\n```\nall tests passed\n```",
+        "chat_id": 100,
+        "session_id": session.session_id,
+    }]
+    assert submitted[0]["session_id"] == session.session_id
+    assert submitted[0]["source"] == "watched_job"
+    assert submitted[0]["extra_metadata"] == {"job_id": "job_test123", "source": "watched_job"}
+    assert "all tests passed" in submitted[0]["description"]
+
+    turns = transcript.get_transcript(tmp_path / "results", sessions_dir, session.session_id)
+    assert turns is not None
+    assert turns[-1]["task_id"] == "job_test123"
+    assert turns[-1]["instruction"] == "Watched job finished: npm test"
+    assert "all tests passed" in turns[-1]["result"]
+
+
 def test_pid_alive_with_nonexistent_pid():
     from src.worker.agent import _pid_alive
     assert _pid_alive(999999999) is False

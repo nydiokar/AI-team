@@ -75,28 +75,6 @@ def _send_job_telegram_notification(job: Dict[str, Any], exit_code: int, tail: s
         lines.append(f"\n```\n{tail[-1500:]}\n```")
     text = "\n".join(lines)
 
-    import urllib.request
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    for target in targets:
-        try:
-            data = json.dumps(
-                {"chat_id": target, "text": text, "parse_mode": "Markdown"}
-            ).encode()
-            req = urllib.request.Request(
-                url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
-            logger.info(
-                "event=job_notify_sent job_id=%s chat_id=%s", job.get("id"), target
-            )
-        except Exception as e:
-            logger.warning(
-                "event=job_notify_failed job_id=%s chat_id=%s err=%s",
-                job.get("id"),
-                target,
-                e,
-            )
 
 
 @asynccontextmanager
@@ -838,11 +816,6 @@ def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
         if payload.tail:
             err = f"{err}: {payload.tail[:500]}"
         db.fail_job(job_id, err)
-
-    # Notify directly from the authoritative completion point. The gateway's
-    # job poller skips jobs without a session_id, which silently dropped these
-    # notifications; sending here guarantees end-to-end delivery.
-    _send_job_telegram_notification(job, payload.exit_code, payload.tail)
 
     return {"status": "accepted", "job_id": job_id}
 
