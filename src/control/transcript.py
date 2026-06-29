@@ -208,20 +208,48 @@ def get_transcript(
             summ = _parse_summary_md(summary_path.read_text(encoding="utf-8"))
         except Exception:
             summ = {"instruction": "", "result": ""}
-        if summ.get("instruction") or summ.get("result"):
+        s_instr = summ.get("instruction") or ""
+        if s_instr or summ.get("result"):
+            # The summary describes the session's MOST RECENT turn (the orchestrator
+            # sets last_user_message at submit time and rewrites the .md on each
+            # completion). It carries no task_id/timestamp, so we must be careful
+            # NOT to staple it onto an *earlier* artifact turn: that corrupts the
+            # history (clobbers an earlier instruction with the latest one) whenever
+            # the newest turn's artifact hasn't landed yet — e.g. a 2nd message
+            # sent while the 1st is the only completed turn.
+            #
+            # Rule: the summary belongs to turns[-1] ONLY when it is the *same* turn
+            # — i.e. the artifact's (truncated) instruction is a prefix of the full
+            # summary instruction (task.title is capped). If it isn't a match, the
+            # summary describes an in-flight turn with no artifact yet → append it
+            # as its own turn instead of overwriting the last completed one.
+            def _norm(t: str) -> str:
+                return t.strip().rstrip(".… ").strip()
+
+            belongs_to_last = False
             if turns:
+                last_instr = _norm(turns[-1].get("instruction") or "")
+                s_norm = _norm(s_instr)
+                # Same turn if either instruction is a prefix of the other (the
+                # artifact title is the truncated head of the full summary text).
+                belongs_to_last = bool(last_instr) and bool(s_norm) and (
+                    s_norm.startswith(last_instr) or last_instr.startswith(s_norm)
+                )
+
+            if belongs_to_last:
                 latest = turns[-1]
-                if summ.get("instruction"):
-                    latest["instruction"] = summ["instruction"]
+                if s_instr:
+                    latest["instruction"] = s_instr  # full text > truncated title
                 # Only fall back to the tail when the artifact had no full result.
                 if summ.get("result") and not latest.get("result"):
                     latest["result"] = summ["result"]
             else:
+                # In-flight / unmatched latest turn — its own row, never an overwrite.
                 turns.append({
                     "task_id": "summary",
                     "timestamp": "",
                     "success": True,
-                    "instruction": summ.get("instruction", ""),
+                    "instruction": s_instr,
                     "result": summ.get("result", ""),
                     "file_count": 0,
                 })

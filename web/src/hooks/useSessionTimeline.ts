@@ -113,7 +113,17 @@ export function useSessionTimeline(
       items.push({ kind: "approval", at: appr.createdAt, approval: appr });
     }
 
-    items.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    // Chronological, oldest→newest. A turn with no timestamp (the in-flight
+    // "summary" turn, or a just-typed optimistic message) is the LATEST turn, so
+    // an empty `at` must sort to the END — never the start (where "" < any ISO
+    // string would otherwise place it, dragging the newest turn above history).
+    // Array#sort is stable, so user→assistant order within a turn is preserved.
+    const rank = (at: string) => at || "￿";
+    items.sort((a, b) => {
+      const ra = rank(a.at);
+      const rb = rank(b.at);
+      return ra < rb ? -1 : ra > rb ? 1 : 0;
+    });
 
     // 4 — ONE live running indicator, only if the session is actually running
     //     now (honest state from the live snapshot — never a buffered event).

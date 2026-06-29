@@ -46,7 +46,7 @@
 |---|---|---|---|
 | 30 | **Typing field expands upward** — ✅ `<input>` → `<textarea>`, auto-resize via `useLayoutEffect`, capped at 160px, Enter sends / Shift+Enter newline | `CONTEXT.md` | Frontend ✅ |
 | 31 | **Rich formatter for agent output** — format code references ``text``, plain links, and source refs like `(path:line)` into clickable LINK representations with visual differentiation. E.g. ``AudioProcessor.kt:25`` → linked, ``text`` visually distinct from URLs | `CONTEXT.md` | Frontend |
-| 32 | **Session model header hide-on-scroll** — ✅ header wrapper translates up on scroll-down past 40px, reveals on scroll-up past 8px threshold or near the top | `CONTEXT.md` | Frontend ✅ |
+| 32 | **Session model header hide-on-scroll** — ✅ sticky header inside scroll container, translates up on scroll-down past 40px, reveals on scroll-up (no negative margin hack) | `CONTEXT.md` | Frontend ✅ |
 | 33 | **Compact context confirmation** — ✅ bottom-sheet confirm dialog before compact mutation fires | `CONTEXT.md` | Frontend ✅ |
 | 34 | **Backend usage limits view** — surface current backends (Codex, Claude) account info + usage limits (daily, weekly, reset time). Either in System page or a dedicated page | `CONTEXT.md` | Backend + Frontend |
 | 35 | **Context % in Session** — show context usage percentage in Session view if easily reachable from the API | `CONTEXT.md` | Frontend |
