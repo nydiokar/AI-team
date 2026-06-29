@@ -537,12 +537,36 @@ class CodexBackend(CodingBackend):
         if not output:
             output = stdout.strip()
 
+        # Collect error-type events from stdout JSON stream.
+        error_events: List[str] = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if event.get("type") in ("error", "session.error", "turn.error"):
+                msg = (
+                    event.get("message")
+                    or event.get("error", {}).get("message")
+                    or str(event)
+                )
+                if msg:
+                    error_events.append(msg)
+
         errors: List[str] = []
         if not success:
             if stderr:
                 errors.append(stderr.strip())
+            for msg in error_events:
+                if msg not in errors:
+                    errors.append(msg)
             if not errors:
-                errors.append(f"codex exited with code {returncode}")
+                # Last resort: surface raw stdout so the real error isn't hidden.
+                raw = stdout.strip()
+                errors.append(raw if raw else f"codex exited with code {returncode}")
 
         return ExecutionResult(
             success=success,

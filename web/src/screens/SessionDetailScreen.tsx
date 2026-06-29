@@ -464,8 +464,9 @@ export function SessionDetailScreen() {
         </>
       )}
 
-      {/* ── Chat tab: header + timeline + composer all inside one scroll container ── */}
+      {/* ── Chat tab: header + timeline in scroll, composer pinned outside ── */}
       {tab === "chat" && (
+        <div className="flex flex-1 flex-col overflow-hidden">
         <div
           ref={timelineRef}
           className="flex-1 overflow-y-auto overscroll-contain"
@@ -597,7 +598,7 @@ export function SessionDetailScreen() {
             </div>
           )}
 
-          <div className="pb-[76px]">
+          <div>
             {loading && timeline.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-3 py-20 text-ink-muted">
                 <Loader2 className="size-6 animate-spin" />
@@ -621,16 +622,16 @@ export function SessionDetailScreen() {
             )}
           </div>
 
-          {/* Composer (or closed state) — sticky at the bottom of the scroll area */}
-          {id && !closed ? (
-            <div className="sticky bottom-0 z-10">
-              <Composer sessionId={id} running={running} />
-            </div>
-          ) : (
-            <div className="sticky bottom-0 border-t border-hairline bg-surface-1/70 px-4 py-3 text-center text-[12px] text-ink-muted">
-              Session closed · open the menu to restore
-            </div>
-          )}
+        </div>
+
+        {/* Composer pinned outside the scroll container so it always sits at the true bottom */}
+        {id && !closed ? (
+          <Composer sessionId={id} running={running} />
+        ) : (
+          <div className="border-t border-hairline bg-surface-1/70 px-4 py-3 text-center text-[12px] text-ink-muted">
+            Session closed · open the menu to restore
+          </div>
+        )}
         </div>
       )}
 

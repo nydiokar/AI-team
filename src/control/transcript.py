@@ -70,22 +70,79 @@ def _clean_result(text: str, success: bool, errors: Optional[List[str]] = None) 
 # ── Artifact fallback (old turns only) ────────────────────────────────────────
 
 
+def _extract_result_from_ndjson(raw_stdout: str) -> str:
+    """Extract full assistant reply text from backend NDJSON raw_stdout.
+
+    Handles two backend formats:
+
+    claude-code: emits ``{"type":"result","result":"<full text>"}`` as the last line.
+
+    codex: emits multiple ``{"type":"item.completed","item":{"type":"agent_message",
+    "text":"..."}}`` lines — each is one paragraph/thought; join them to get the
+    full reply. The ``turn.completed`` line has usage but no text.
+    """
+    result_text = ""
+    codex_parts: List[str] = []
+
+    for line in raw_stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        t = obj.get("type")
+        # claude-code: single result line wins immediately
+        if t == "result":
+            r = obj.get("result") or ""
+            if r:
+                result_text = r
+        # codex: accumulate agent_message items
+        elif t == "item.completed":
+            item = obj.get("item") or {}
+            if item.get("type") == "agent_message":
+                txt = item.get("text") or ""
+                if txt:
+                    codex_parts.append(txt)
+
+    if result_text:
+        return result_text
+    if codex_parts:
+        return "\n\n".join(codex_parts)
+    return ""
+
+
 def _result_text_from_artifact(art: Dict[str, Any]) -> str:
-    """Clean, user-visible result text for a turn, reusing the same extractor the
-    Telegram reply path uses."""
+    """Full untruncated result text from an artifact file.
+
+    Priority:
+    1. NDJSON raw_stdout result line — always the complete claude-code reply.
+    2. extract_text_from_payload on parsed_output — works for some backends.
+    3. Empty string (caller decides fallback).
+    """
+    # 1. raw_stdout result line (claude-code backend — most sessions)
+    raw_stdout = art.get("raw_stdout") or ""
+    if raw_stdout:
+        text = _extract_result_from_ndjson(raw_stdout)
+        if text:
+            return _clean_result(text, bool(art.get("success")), art.get("errors") or [])
+
+    # 2. parsed_output via extract_text_from_payload (other backends / old schema)
     try:
         from src.services.result_text import extract_text_from_payload
     except Exception:
         extract_text_from_payload = None  # type: ignore
 
-    parsed = art.get("parsed_output")
     text = ""
     if extract_text_from_payload is not None:
-        for src in (parsed, art.get("result"), art.get("raw_stdout")):
+        parsed = art.get("parsed_output")
+        for src in (parsed, art.get("result")):
             if src:
                 text = extract_text_from_payload(src) or ""
                 if text:
                     break
+
     return _clean_result(text, bool(art.get("success")), art.get("errors") or [])
 
 
@@ -162,8 +219,14 @@ def _turn_from_history(
     if not instruction and art is not None:
         instruction = _instruction_from_artifact(art)
     result = _clean_result(result, success, None)
-    if not result and art is not None:
-        result = _result_text_from_artifact(art)
+    if art is not None:
+        # Always try the artifact — it has the full untruncated text. Only keep
+        # the task_history summary if it's longer (i.e. artifact fallback failed).
+        artifact_result = _result_text_from_artifact(art)
+        if artifact_result and len(artifact_result) > len(result):
+            result = artifact_result
+    if not result:
+        result = _clean_result("", success, None)
 
     return {
         "task_id": task_id,
@@ -206,12 +269,10 @@ def get_transcript(
     if not isinstance(history, list) or not history:
         return []
 
-    # Artifact index is only needed if some entry lacks full text — load lazily.
-    needs_artifacts = any(
-        isinstance(e, dict) and not (e.get("user_message") or e.get("result_summary"))
-        for e in history
-    )
-    artifacts = _load_artifact_index(results_dir, session_id) if needs_artifacts else {}
+    # Always load artifacts — they hold the full untruncated result text and are
+    # needed both as a fallback for old turns (no user_message) and to override
+    # any task_history result_summary that was written truncated (pre-fix turns).
+    artifacts = _load_artifact_index(results_dir, session_id)
 
     turns: List[Dict[str, Any]] = []
     for entry in history:

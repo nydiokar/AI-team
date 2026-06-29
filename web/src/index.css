@@ -90,10 +90,19 @@ body,
   height: 100%;
 }
 
-/* On mobile the URL bar collapses on scroll; static `100%`/`100vh` keeps the
-   layout viewport at its taller size, leaving a strip of page background below
-   the app column. `100dvh` tracks the *visible* viewport so the app always fills
-   exactly the screen — no background band at the bottom. */
+/* PWA / mobile keyboard fix:
+   - html/body are overflow:hidden so the page itself never scrolls or shifts
+     when the virtual keyboard opens — all scrolling happens inside the app's
+     own overflow-y-auto containers.
+   - #root uses 100dvh (dynamic viewport) so it fills exactly the visible screen
+     including when the URL bar collapses. The overflow:hidden on body means the
+     browser shrinks the root inward (reducing the scroll area height) rather than
+     pushing the whole layout up from the top, which was eating the header. */
+html,
+body {
+  overflow: hidden;
+}
+
 #root {
   height: 100dvh;
 }

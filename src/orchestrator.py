@@ -443,7 +443,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             exec_time = 0.0
 
         session.status = SessionStatus.AWAITING_INPUT
-        session.last_result_summary = (result_dict.get("output", "") or "")[-400:] or "Task completed (recovered)"
+        full_out = (result_dict.get("output", "") or "").strip() or "Task completed (recovered)"
+        session.last_result_summary = full_out[-400:] if len(full_out) > 400 else full_out
         session.last_files_modified = result_dict.get("files_modified") or []
         # Propagate the backend_session_id the worker established, exactly as the
         # live dispatch path does (_dispatch_to_node). Without this the recovered
@@ -461,7 +462,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             "success": True,
             "execution_time": round(exec_time, 2),
             "user_message": session.last_user_message,
-            "result_summary": session.last_result_summary,
+            "result_summary": full_out,
             "files_modified": session.last_files_modified[:20],
         })
         session.task_history = session.task_history[-20:]
@@ -1558,12 +1559,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                         if session:
                             session.last_task_id = task.id
                             if not result.success:
-                                session.last_result_summary = self._short_failure_reason(result) or "(failed)"
+                                full_out = self._short_failure_reason(result) or "(failed)"
                             else:
-                                # Take the last ~400 chars (the conclusion) rather than
-                                # the first 200 (always mid-explanation for session turns).
-                                out = self._session_reply_text(result).strip()
-                                session.last_result_summary = out[-400:] if len(out) > 400 else out
+                                full_out = self._session_reply_text(result).strip()
+                            # last_result_summary is a short preview used by Telegram
+                            # and the session list — keep it brief (last 400 chars).
+                            session.last_result_summary = full_out[-400:] if len(full_out) > 400 else full_out
                             session.last_summary = session.last_result_summary
                             session.last_files_modified = result.files_modified or []
                             artifact_path = str(Path(config.system.results_dir) / f"{task.id}.json")
@@ -1574,7 +1575,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 "success": result.success,
                                 "execution_time": round(result.execution_time or 0.0, 2),
                                 "user_message": session.last_user_message,
-                                "result_summary": session.last_result_summary,
+                                "result_summary": full_out,
                                 "files_modified": session.last_files_modified[:20],
                             })
                             session.task_history = session.task_history[-20:]
