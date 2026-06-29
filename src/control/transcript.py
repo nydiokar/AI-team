@@ -1,23 +1,24 @@
-"""Session transcript reader — the conversation source the Web UI was missing.
+"""Session transcript reader — the real conversation, full-text.
 
-The original UI-2 timeline had no source for the real conversation: it only showed
-(a) messages optimistically typed in the web app this load, (b) live SSE
-operational events, and (c) one ``lastSummary`` line. So a session opened from
-Telegram looked empty. This module reconstructs the real per-turn conversation
-from what is actually on disk, with NO FastAPI dependency (pure, unit-testable),
-mirroring ``artifacts.py``.
+The conversation comes from ONE authoritative source: the session record's
+``task_history`` (``state/sessions/<id>.json``). Each entry is one turn and holds
+the COMPLETE, untruncated user message + the result summary + a real timestamp +
+the task id. This is what the orchestrator records per turn and what the agent's
+own memory is keyed to — so it reads top-to-bottom like a normal chat app.
 
-Sources, in order of richness:
-  1. ``results/task_*.json`` artifacts whose ``session_id`` matches — each is ONE
-     turn: the user instruction (``task.title`` / source) → the assistant result
-     text (via the existing ``result_text.extract_text_from_payload``), timestamped.
-  2. ``state/summaries/<id>.md`` — the clean "Last instruction / Last result (tail)"
-     Telegram shows; used as the authoritative latest turn (artifact ``content`` is
-     often a raw backend stream, the summary is the human-readable distillation).
+We deliberately do NOT use:
+  * ``results/task_*.json`` artifact ``task.title`` — that is a truncated display
+    label (``f"Task: {description[:50]}..."``), an execution/debug record, never
+    the conversation. Reading it clipped every historical message to ~50 chars.
+  * ``state/summaries/<id>.md`` — a Telegram-era SINGLE-turn snapshot that could
+    only describe the latest turn and corrupted earlier turns when overlaid.
 
-SECURITY: ``session_id`` is confined exactly like ``artifacts._artifact_path`` /
-the SPA resolver — a ``..`` or absolute path resolves to None, never an arbitrary
-read.
+The artifact is consulted ONLY as a degraded fallback for *old* turns whose
+``task_history`` entry predates the rich schema (no ``user_message``) — purely so
+ancient turns aren't blank. New turns never touch it.
+
+SECURITY: ``session_id`` is an opaque hex slug — a ``..`` or path separator
+resolves to None, never an arbitrary read (same as the SPA resolver).
 """
 from __future__ import annotations
 
@@ -54,39 +55,24 @@ def _confined(base_dir: Path, name: str, suffix: str) -> Optional[Path]:
     return None
 
 
-def _instruction_from_artifact(art: Dict[str, Any]) -> str:
-    """The user-side text of a turn — the FULL instruction.
+def _clean_result(text: str, success: bool, errors: Optional[List[str]] = None) -> str:
+    """Normalize a stored result string; be honest about empty/failed turns."""
+    t = (text or "").strip()
+    if t:
+        return t
+    if not success:
+        if errors:
+            return f"(no output — {errors[0]})"
+        return "(task failed — no output)"
+    return ""
 
-    ``task.prompt`` holds the complete user message (orchestrator stores it
-    verbatim); ``task.title`` is only a truncated display label
-    (``f"Task: {description[:50]}..."``) so it must NOT be the primary source —
-    using it clipped every historical turn to ~50 chars. Prefer prompt, fall
-    back to the truncated title (and a couple of legacy fields) only when there
-    is no full prompt."""
-    task = art.get("task") or {}
 
-    prompt = (task.get("prompt") or "").strip() if isinstance(task.get("prompt"), str) else ""
-    if prompt:
-        return prompt
-
-    # Fallbacks (older artifacts without task.prompt): top-level legacy fields…
-    for k in ("instruction", "objective", "prompt"):
-        v = (art.get(k) or "").strip() if isinstance(art.get(k), str) else ""
-        if v:
-            return v
-
-    # …then the truncated title as a last resort (better a clipped label than blank).
-    title = (task.get("title") or "").strip()
-    if title.lower().startswith("task:"):
-        title = title[5:].strip()
-    # Drop the synthetic trailing ellipsis the title cap appends, so the summary
-    # full-text overlay still prefix-matches cleanly.
-    return title
+# ── Artifact fallback (old turns only) ────────────────────────────────────────
 
 
 def _result_text_from_artifact(art: Dict[str, Any]) -> str:
     """Clean, user-visible result text for a turn, reusing the same extractor the
-    Telegram reply path uses. Falls back to a short failure note on error turns."""
+    Telegram reply path uses."""
     try:
         from src.services.result_text import extract_text_from_payload
     except Exception:
@@ -100,15 +86,7 @@ def _result_text_from_artifact(art: Dict[str, Any]) -> str:
                 text = extract_text_from_payload(src) or ""
                 if text:
                     break
-    if text:
-        return text.strip()
-    # No clean text (timeout / killed / empty) — be HONEST about it, don't fabricate.
-    if not art.get("success", False):
-        errs = art.get("errors") or []
-        if errs:
-            return f"(no output — {errs[0]})"
-        return "(task failed — no output)"
-    return ""
+    return _clean_result(text, bool(art.get("success")), art.get("errors") or [])
 
 
 def _usage_from_artifact(art: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -126,146 +104,127 @@ def _usage_from_artifact(art: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _turn_from_artifact(art: Dict[str, Any], path: Path) -> Dict[str, Any]:
-    task_id = art.get("task_id") or path.stem
-    return {
-        "task_id": task_id,
-        "timestamp": art.get("timestamp") or "",
-        "success": bool(art.get("success")),
-        "instruction": _instruction_from_artifact(art),
-        "result": _result_text_from_artifact(art),
-        "file_count": len(art.get("file_changes") or art.get("files_modified") or []),
-        "usage": _usage_from_artifact(art),
-    }
+def _instruction_from_artifact(art: Dict[str, Any]) -> str:
+    """Best-effort instruction text from an artifact (FALLBACK only).
+
+    Prefers ``task.prompt`` (full, written for turns created after the fix); falls
+    back to the truncated ``task.title`` so an ancient turn shows *something*
+    rather than blank."""
+    task = art.get("task") or {}
+    prompt = task.get("prompt")
+    if isinstance(prompt, str) and prompt.strip():
+        return prompt.strip()
+    title = (task.get("title") or "").strip()
+    if title.lower().startswith("task:"):
+        title = title[5:].strip()
+    return title
 
 
-def _parse_summary_md(text: str) -> Dict[str, str]:
-    """Pull the clean ``## Last instruction`` + ``## Last result (tail)`` sections
-    out of a ``state/summaries/<id>.md`` (orchestrator._write_session_summary).
-
-    This is the SAME clean text Telegram shows — the backend already ran the raw
-    payload through result_text extraction before writing it here (so opencode's
-    JSON-lines stream is already collapsed to prose, and the user input is the
-    FULL message, not the truncated artifact task.title). We prefer this over the
-    artifact for the latest turn."""
-    sections: Dict[str, List[str]] = {}
-    current: Optional[str] = None
-    for raw in text.splitlines():
-        if raw.startswith("## "):
-            current = raw[3:].strip().lower()
-            sections[current] = []
-        elif current is not None:
-            sections[current].append(raw)
-
-    def _val(key: str) -> str:
-        body = "\n".join(sections.get(key, [])).strip()
-        return "" if body == "(none)" else body
-
-    return {
-        "instruction": _val("last instruction"),
-        "result": _val("last result (tail)"),
-    }
-
-
-def get_transcript(
-    results_dir: Path,
-    summaries_dir: Path,
-    session_id: str,
-    limit: int = 50,
-) -> Optional[List[Dict[str, Any]]]:
-    """Reconstruct a session's conversation as an oldest→newest list of turns.
-
-    Returns None only on a path-traversal attempt (so the endpoint can 404).
-    A session with no artifacts yet returns ``[]`` (a real, empty conversation).
-    Each turn: ``{task_id, timestamp, success, instruction, result, file_count}``.
-    """
-    # Confinement check on the session id itself (used to match, and to read the .md).
-    if _confined(summaries_dir, session_id, ".md") is None:
-        return None
+def _load_artifact_index(results_dir: Path, session_id: str) -> Dict[str, Dict[str, Any]]:
+    """Map task_id → artifact dict for this session (used only as a fallback for
+    old turns). Read lazily/once; tolerant of a missing results dir."""
+    index: Dict[str, Dict[str, Any]] = {}
     if not results_dir.is_dir():
-        return []
-
-    turns: List[Dict[str, Any]] = []
+        return index
     for p in results_dir.glob("*.json"):
         if p.name == _INDEX_NAME or not p.is_file():
             continue
         art = _read_json(p)
         if art is None:
             continue
-        # session_id lives nested under "session" in the artifact schema
-        # (verified against disk: 481/481 artifacts use session.session_id, none
-        # top-level). Accept the top-level too in case the schema ever flattens.
         art_sid = (art.get("session") or {}).get("session_id") or art.get("session_id")
         if art_sid != session_id:
             continue
-        turns.append(_turn_from_artifact(art, p))
+        tid = art.get("task_id") or p.stem
+        index[tid] = art
+    return index
 
-    # Oldest→newest by timestamp (a conversation reads top-to-bottom). Stable.
+
+# ── Primary source: session task_history ──────────────────────────────────────
+
+
+def _turn_from_history(
+    entry: Dict[str, Any],
+    artifacts: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """One conversation turn from a session ``task_history`` entry.
+
+    Full ``user_message`` and ``result_summary`` when present (the rich schema);
+    otherwise fall back to the artifact for that ``task_id`` so old turns aren't
+    blank."""
+    task_id = entry.get("task_id") or ""
+    success = bool(entry.get("success", True))
+    instruction = (entry.get("user_message") or "").strip()
+    result = (entry.get("result_summary") or "").strip()
+    files = entry.get("files_modified") or []
+
+    art = artifacts.get(task_id) if task_id else None
+    if not instruction and art is not None:
+        instruction = _instruction_from_artifact(art)
+    result = _clean_result(result, success, None)
+    if not result and art is not None:
+        result = _result_text_from_artifact(art)
+
+    return {
+        "task_id": task_id,
+        "timestamp": entry.get("timestamp") or "",
+        "success": success,
+        "instruction": instruction,
+        "result": result,
+        "file_count": len(files) if isinstance(files, (list, tuple)) else 0,
+        "usage": _usage_from_artifact(art) if art is not None else None,
+    }
+
+
+def get_transcript(
+    results_dir: Path,
+    sessions_dir: Path,
+    session_id: str,
+    limit: int = 50,
+) -> Optional[List[Dict[str, Any]]]:
+    """Reconstruct a session's conversation, oldest→newest, full-text.
+
+    Source of truth is ``sessions_dir/<id>.json`` → ``task_history``. ``results_dir``
+    is used only to backfill text for old turns whose history entry predates the
+    rich schema.
+
+    Returns None on a path-traversal attempt (endpoint → 404). A session with no
+    history yet returns ``[]``. Each turn:
+    ``{task_id, timestamp, success, instruction, result, file_count, usage}``.
+    """
+    session_path = _confined(sessions_dir, session_id, ".json")
+    if session_path is None:
+        return None  # traversal attempt
+    if not session_path.is_file():
+        return []
+
+    record = _read_json(session_path)
+    if record is None:
+        return []
+
+    history = record.get("task_history") or []
+    if not isinstance(history, list) or not history:
+        return []
+
+    # Artifact index is only needed if some entry lacks full text — load lazily.
+    needs_artifacts = any(
+        isinstance(e, dict) and not (e.get("user_message") or e.get("result_summary"))
+        for e in history
+    )
+    artifacts = _load_artifact_index(results_dir, session_id) if needs_artifacts else {}
+
+    turns: List[Dict[str, Any]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        turn = _turn_from_history(entry, artifacts)
+        # Skip a fully-empty turn (no instruction and no result) — it's noise.
+        if not turn["instruction"] and not turn["result"]:
+            continue
+        turns.append(turn)
+
+    # Oldest→newest (a conversation reads top-to-bottom). Stable on equal ts.
     turns.sort(key=lambda t: t.get("timestamp") or "")
     if limit and len(turns) > limit:
-        turns = turns[-limit:]  # keep the most recent N
-
-    # The summary .md holds the FULL user message (artifacts truncate the
-    # instruction to task.title), so it's authoritative for the latest turn's
-    # *instruction*. Its result, however, is only the TAIL ("## Last result
-    # (tail)" — session.last_result_summary), so it must NEVER overwrite a full
-    # artifact result: doing so showed the user only the end of the model's reply.
-    # Rule:
-    #   - instruction: always prefer the summary (it's the full text).
-    #   - result: only use the summary tail as a FALLBACK when the artifact turn
-    #     produced no clean result text (e.g. an in-flight first turn with no
-    #     artifact yet, or an artifact whose result extraction came back empty).
-    # And if there are no artifact turns at all, synthesize one from the summary.
-    summary_path = _confined(summaries_dir, session_id, ".md")
-    if summary_path is not None and summary_path.is_file():
-        try:
-            summ = _parse_summary_md(summary_path.read_text(encoding="utf-8"))
-        except Exception:
-            summ = {"instruction": "", "result": ""}
-        s_instr = summ.get("instruction") or ""
-        if s_instr or summ.get("result"):
-            # The summary describes the session's MOST RECENT turn (the orchestrator
-            # sets last_user_message at submit time and rewrites the .md on each
-            # completion). It carries no task_id/timestamp, so we must be careful
-            # NOT to staple it onto an *earlier* artifact turn: that corrupts the
-            # history (clobbers an earlier instruction with the latest one) whenever
-            # the newest turn's artifact hasn't landed yet — e.g. a 2nd message
-            # sent while the 1st is the only completed turn.
-            #
-            # Rule: the summary belongs to turns[-1] ONLY when it is the *same* turn
-            # — i.e. the artifact's (truncated) instruction is a prefix of the full
-            # summary instruction (task.title is capped). If it isn't a match, the
-            # summary describes an in-flight turn with no artifact yet → append it
-            # as its own turn instead of overwriting the last completed one.
-            def _norm(t: str) -> str:
-                return t.strip().rstrip(".… ").strip()
-
-            belongs_to_last = False
-            if turns:
-                last_instr = _norm(turns[-1].get("instruction") or "")
-                s_norm = _norm(s_instr)
-                # Same turn if either instruction is a prefix of the other (the
-                # artifact title is the truncated head of the full summary text).
-                belongs_to_last = bool(last_instr) and bool(s_norm) and (
-                    s_norm.startswith(last_instr) or last_instr.startswith(s_norm)
-                )
-
-            if belongs_to_last:
-                latest = turns[-1]
-                if s_instr:
-                    latest["instruction"] = s_instr  # full text > truncated title
-                # Only fall back to the tail when the artifact had no full result.
-                if summ.get("result") and not latest.get("result"):
-                    latest["result"] = summ["result"]
-            else:
-                # In-flight / unmatched latest turn — its own row, never an overwrite.
-                turns.append({
-                    "task_id": "summary",
-                    "timestamp": "",
-                    "success": True,
-                    "instruction": s_instr,
-                    "result": summ.get("result", ""),
-                    "file_count": 0,
-                })
-
+        turns = turns[-limit:]
     return turns

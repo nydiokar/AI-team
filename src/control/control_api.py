@@ -269,18 +269,16 @@ def _results_dir() -> "Path":
         return Path("results")
 
 
-def _summaries_dir() -> "Path":
-    """The per-session summary directory.
+def _sessions_dir() -> "Path":
+    """The per-session record directory (``state/sessions/<id>.json``).
 
-    NOTE: orchestrator._write_session_summary hardcodes ``<project_root>/state/
-    summaries`` (it does NOT use config.system.summaries_dir, whose default
-    'summaries' resolves elsewhere). We anchor on the same place the summaries are
-    actually written, so the transcript reader sees them — using the config value
-    would read an empty directory and silently lose the clean Telegram-grade text.
+    Anchored the same way SessionStore does (``<project_root>/state/sessions``).
+    This is the conversation source of truth — each record's ``task_history`` holds
+    the full per-turn user_message + result_summary the transcript reader serves.
     """
     from pathlib import Path
     project_root = Path(__file__).resolve().parent.parent.parent
-    return project_root / "state" / "summaries"
+    return project_root / "state" / "sessions"
 
 
 def _list_projects_for_node(node_id: str, limit: int = 20) -> list:
@@ -472,13 +470,13 @@ def build_control_api(orchestrator) -> FastAPI:
         session_id: str,
         limit: int = Query(200, ge=1, le=1000),
     ) -> JSONResponse:
-        """The session's real conversation, reconstructed from on-disk artifacts +
-        summary (src.control.transcript). Each turn = user instruction → assistant
-        result, oldest→newest. 404 only on a path-traversal escape; a session with
-        no turns yet returns ``{"messages": []}`` (a real empty conversation)."""
+        """The session's real conversation, from the session record's task_history
+        (src.control.transcript) — full per-turn user_message → result_summary,
+        oldest→newest. 404 only on a path-traversal escape; a session with no turns
+        yet returns ``{"messages": []}`` (a real empty conversation)."""
         from src.control import transcript as _transcript
         turns = _transcript.get_transcript(
-            _results_dir(), _summaries_dir(), session_id, limit=limit
+            _results_dir(), _sessions_dir(), session_id, limit=limit
         )
         if turns is None:
             raise HTTPException(status_code=404, detail="not_found")

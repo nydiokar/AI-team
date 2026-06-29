@@ -135,9 +135,10 @@ export interface RawArtifactSummary {
 }
 
 // GET /api/sessions/{id}/messages → { messages: RawTranscriptTurn[] }.
-// src.control.transcript.get_transcript() — one turn per task artifact, oldest→
-// newest. `result` is "" when there genuinely was no output, or an honest
-// "(no output — …)" / "(task failed …)" note on a failed turn (never fabricated).
+// src.control.transcript.get_transcript() — one turn per session task_history
+// entry (FULL user_message → result_summary), oldest→newest. `result` is "" when
+// there genuinely was no output, or an honest "(no output — …)" / "(task failed
+// …)" note on a failed turn (never fabricated).
 export interface RawTokenUsage {
   input_tokens?: number;
   cached_input_tokens?: number;
