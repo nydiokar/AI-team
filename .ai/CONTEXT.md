@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-06-29
+**Last Updated:** 2026-06-29 (tasks #30–#39 added)
 
 ## Remaining work across all open specs (swept from unarchived docs)
 
@@ -38,13 +38,22 @@
 | # | Task | Source | Depends on | Scope |
 |---|---|---|---|---|
 | 10 | **M3** — Claude adapter (stream-json parser, hook integration, coverage UI) | §9.5 | #9 | Backend |
-| 11 | **M4** — OpenCode CLI/server + LLAMA postprocessing | §9.6–9.7 | #10 | Backend |
+| 11 | **M4** — OpenCode CLI/server| §9.6–9.7 | #10 | Backend |
 
-### Telegram UX Parity — remaining gaps
+### Web UI Feature Requests / UX Issues
 
-| # | Task | Source | Scope |
+| # | Task | Notes | Scope |
 |---|---|---|---|
-| 12 | **Help / onboarding** — info drawer or `/help` route (Items 12–19 are already ✅ built: repo picker, file upload, model picker, compact context, git actions, session info, node detail, jobs panel) | `docs/TELEGRAM_UX_PARITY.md` §4 P9 | Frontend |
+| 30 | **Typing field expands upward** — ✅ `<input>` → `<textarea>`, auto-resize via `useLayoutEffect`, capped at 160px, Enter sends / Shift+Enter newline | `CONTEXT.md` | Frontend ✅ |
+| 31 | **Rich formatter for agent output** — format code references ``text``, plain links, and source refs like `(path:line)` into clickable LINK representations with visual differentiation. E.g. ``AudioProcessor.kt:25`` → linked, ``text`` visually distinct from URLs | `CONTEXT.md` | Frontend |
+| 32 | **Session model header hide-on-scroll** — ✅ header wrapper translates up on scroll-down past 40px, reveals on scroll-up past 8px threshold or near the top | `CONTEXT.md` | Frontend ✅ |
+| 33 | **Compact context confirmation** — ✅ bottom-sheet confirm dialog before compact mutation fires | `CONTEXT.md` | Frontend ✅ |
+| 34 | **Backend usage limits view** — surface current backends (Codex, Claude) account info + usage limits (daily, weekly, reset time). Either in System page or a dedicated page | `CONTEXT.md` | Backend + Frontend |
+| 35 | **Context % in Session** — show context usage percentage in Session view if easily reachable from the API | `CONTEXT.md` | Frontend |
+| 36 | **Watched jobs notify user + agent in-session** — watched jobs currently stop the session flow and nothing continues it. Jobs should notify both the user AND the agent within the same session so the flow can continue | `CONTEXT.md` | Backend |
+| 37 | **LLM turn observability in WebUI** — LLM turn observability is already exposed via API. Surface it in the WebUI | `CONTEXT.md` | Frontend |
+| 38 | **Fail early on bad session directory** — failure state (non-existing directory) should be caught before the session is created, not after the session UI is opened and only surfaced when the first message is sent | `CONTEXT.md` | Backend |
+| 39 | **Job notification routing** — jobs are currently delivering to Telegram instead of the WebUI. Determine whether the MCP is configured to send to Telegram specifically, or to the server (which should dispatch to the correct surface) | `CONTEXT.md` | Backend + Infra |
 
 ### Deliberately deferred (from `docs/DEFERRED.md`)
 

@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useLayoutEffect } from "react";
 import { ArrowUp, Square, Paperclip } from "lucide-react";
 import { Button } from "../ui/Button";
 import { newIdempotencyKey } from "../../transport/apiClient";
@@ -19,6 +19,14 @@ export function Composer({
   const [text, setText] = useState("");
   const [uploadBanner, setUploadBanner] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + "px";
+  }, [text]);
 
   const submit = useSubmitInstruction();
   const stop = useStopSession();
@@ -130,7 +138,8 @@ export function Composer({
             </button>
           </>
         )}
-        <input
+        <textarea
+          ref={textareaRef}
           value={text}
           aria-label="Instruction text"
           onChange={(e) => setText(e.target.value)}
@@ -141,7 +150,8 @@ export function Composer({
             }
           }}
           placeholder={running ? "Task running…" : "Send an instruction…"}
-          className="h-11 flex-1 rounded-full bg-surface-2 px-4 text-[15px] text-ink outline-none ring-1 ring-inset ring-transparent transition-shadow placeholder:text-ink-muted focus:ring-accent/50"
+          rows={1}
+          className="min-h-[44px] max-h-[160px] flex-1 resize-none rounded-2xl bg-surface-2 px-4 py-3 text-[15px] text-ink outline-none ring-1 ring-inset ring-transparent transition-shadow placeholder:text-ink-muted focus:ring-accent/50"
         />
         <Button
           size="icon"

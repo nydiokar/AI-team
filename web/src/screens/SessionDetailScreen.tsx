@@ -274,10 +274,26 @@ export function SessionDetailScreen() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
+  const [compactConfirm, setCompactConfirm] = useState(false);
   const [compactBanner, setCompactBanner] = useState<string | null>(null);
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
+  const [headerHidden, setHeaderHidden] = useState(false);
+  const lastScrollYRef = useRef(0);
+
+  const handleHeaderScroll = useCallback(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const scrollY = el.scrollTop;
+    if (scrollY > 40 && scrollY > lastScrollYRef.current + 8) {
+      setHeaderHidden(true);
+    } else if (scrollY < lastScrollYRef.current - 8 || scrollY < 20) {
+      setHeaderHidden(false);
+    }
+    lastScrollYRef.current = scrollY;
+  }, []);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     bottomRef.current?.scrollIntoView({ behavior, block: "end" });
@@ -323,28 +339,32 @@ export function SessionDetailScreen() {
 
   return (
     <div className="mx-auto flex h-full max-w-[480px] flex-col bg-base">
-      {/* ── Fixed header ── */}
-      <CompactTopBar
-        title={proj ?? session?.id ?? id ?? "Session"}
-        subtitle={
-          session ? (
-            <span className="font-mono text-[11px] text-ink-muted">
-              {session.backend} · {modelLabel(session.model, session.defaultModel)}
-            </span>
-          ) : loading ? (
-            <span className="text-[11px] text-ink-muted">loading…</span>
-          ) : undefined
-        }
-        left={
-          <button
-            onClick={() => navigate("/sessions")}
-            className="-ml-1 flex size-9 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
-            aria-label="Back to sessions"
-          >
-            <ChevronLeft className="size-5" />
-          </button>
-        }
-        right={
+      {/* ── Fixed header (hide-on-scroll down) ── */}
+      <div
+        ref={headerRef}
+        className={`transition-transform duration-300 will-change-transform ${tab === "chat" && headerHidden ? "-translate-y-full" : ""}`}
+      >
+        <CompactTopBar
+          title={proj ?? session?.id ?? id ?? "Session"}
+          subtitle={
+            session ? (
+              <span className="font-mono text-[11px] text-ink-muted">
+                {session.backend} · {modelLabel(session.model, session.defaultModel)}
+              </span>
+            ) : loading ? (
+              <span className="text-[11px] text-ink-muted">loading…</span>
+            ) : undefined
+          }
+          left={
+            <button
+              onClick={() => navigate("/sessions")}
+              className="-ml-1 flex size-9 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
+              aria-label="Back to sessions"
+            >
+              <ChevronLeft className="size-5" />
+            </button>
+          }
+          right={
           session ? (
             <div className="flex items-center gap-1.5">
               <SessionStatusChip state={session.opState} closed={closed} />
@@ -387,17 +407,7 @@ export function SessionDetailScreen() {
                       )}
                       {!closed && !running && (
                         <button
-                          onClick={() =>
-                            act(() =>
-                              id &&
-                              compact.mutate(id, {
-                                onSuccess: (r) =>
-                                  setCompactBanner(r.ok ? "Context compacted." : `Compaction failed: ${r.errors?.[0] ?? "unknown"}`),
-                                onError: (e) =>
-                                  setCompactBanner(`Compaction failed: ${String(e.message)}`),
-                              }),
-                            )
-                          }
+                          onClick={() => act(() => setCompactConfirm(true))}
                           className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
                         >
                           <Minimize2 className="size-4" /> Compact context
@@ -441,8 +451,9 @@ export function SessionDetailScreen() {
               </div>
             </div>
           ) : null
-        }
-      />
+          }
+        />
+      </div>
 
       {/* ── Contextual sub-header — only when off Chat (Files/Info are opened
             from the menu). Gives a title + one-tap return to the conversation. ── */}
@@ -471,7 +482,12 @@ export function SessionDetailScreen() {
 
       {/* ── Tab content ── */}
       {tab === "chat" && (
-        <div ref={timelineRef} className="flex-1 overflow-y-auto overscroll-contain">
+        <div
+          ref={timelineRef}
+          className="flex-1 overflow-y-auto overscroll-contain"
+          onScroll={handleHeaderScroll}
+          style={headerHidden ? { marginTop: -(headerRef.current?.offsetHeight ?? 0) } : undefined}
+        >
           {loading && timeline.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 py-20 text-ink-muted">
               <Loader2 className="size-6 animate-spin" />
@@ -529,6 +545,47 @@ export function SessionDetailScreen() {
       )}
       {gitPanelOpen && id && (
         <GitPanelSheet sessionId={id} onClose={() => setGitPanelOpen(false)} />
+      )}
+
+      {compactConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/50"
+          onClick={() => setCompactConfirm(false)}
+        >
+          <div
+            className="card-elev w-full max-w-[480px] rounded-t-2xl p-5 pb-8"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-2 text-base font-semibold text-ink">Compact context?</h2>
+            <p className="mb-5 text-sm text-ink-soft leading-relaxed">
+              This trims the conversation history to free up context window space.
+              Older turns will be summarized and may lose detail.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setCompactConfirm(false)}
+                className="flex-1 rounded-xl border border-hairline bg-surface-1 py-3 text-[14px] font-medium text-ink-soft hover:bg-surface-2"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setCompactConfirm(false);
+                  id &&
+                    compact.mutate(id, {
+                      onSuccess: (r) =>
+                        setCompactBanner(r.ok ? "Context compacted." : `Compaction failed: ${r.errors?.[0] ?? "unknown"}`),
+                      onError: (e) =>
+                        setCompactBanner(`Compaction failed: ${String(e.message)}`),
+                    });
+                }}
+                className="flex-1 rounded-xl bg-warn py-3 text-[14px] font-medium text-white hover:brightness-110"
+              >
+                Compact
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
