@@ -168,6 +168,56 @@ def test_idempotency_key_dedupes_instruction(client, orch):
     assert len(orch.submitted) == 1  # second call did not re-act
 
 
+def test_idempotency_key_is_concurrency_safe(monkeypatch, orch):
+    """CONC-1: two genuinely concurrent requests sharing an Idempotency-Key must
+    collapse to a single side effect. We drive the ASGI app directly with
+    asyncio.gather so both requests are in-flight on one event loop at once (the
+    TestClient serializes requests through a single portal and cannot reproduce
+    this). Without the per-key guard the second request misses the cache mid-flight
+    and submits a duplicate; with it, the second blocks on the asyncio.Lock and then
+    serves the first's cached response.
+
+    Regression guard: an event-loop deadlock would also surface here (the test
+    would time out) if the async path ever held a blocking threading.Lock across
+    its ``await``."""
+    import asyncio
+    import httpx
+
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    app = control_api.build_control_api(orch)
+
+    # Force interleave: the first submit yields control mid-flight so the second
+    # request runs before the first stores its idempotent response.
+    barrier = asyncio.Event()
+    orig = orch.submit_instruction
+    first = {"seen": False}
+
+    async def slow_submit(*a, **k):
+        if not first["seen"]:
+            first["seen"] = True
+            # Let the gather's second coroutine reach the guard before we finish.
+            await asyncio.sleep(0.05)
+        return await orig(*a, **k)
+
+    orch.submit_instruction = slow_submit
+
+    async def _run():
+        h = {**_auth(), "Idempotency-Key": "race"}
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+            r1, r2 = await asyncio.gather(
+                ac.post("/api/instructions", headers=h, json={"description": "once"}),
+                ac.post("/api/instructions", headers=h, json={"description": "once"}),
+            )
+            return r1.json(), r2.json()
+
+    j1, j2 = asyncio.run(asyncio.wait_for(_run(), timeout=5))
+
+    # Exactly one real submission despite two concurrent identical requests.
+    assert len(orch.submitted) == 1
+    assert j1 == j2
+
+
 # --- stop / compact ---------------------------------------------------------
 
 def test_stop_cancels_last_task(client, orch, tmp_path):

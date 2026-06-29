@@ -20,8 +20,8 @@
 
 | # | Item | Source | Scope |
 |---|---|---|---|
-| 3 | **DX-1** — Unknown `GET /api/...` returns SPA HTML not 404 (unmatched GETs under `/api/` fall to SPA catch-all) | `docs/U3_5_CHECKLIST.md` | DX |
-| 4 | **CONC-1** — Idempotency cache not concurrency-safe (sequential retry assumption) | `docs/U3_5_CHECKLIST.md` | Race condition |
+| 3 | **DX-1** — ✅ fixed: unmatched `GET /api/...` now returns a real 404 JSON (SPA catch-all in `control_api._web_spa` rejects `api/` paths before falling to the index). Regression test in `test_control_api_webui.py` | `docs/U3_5_CHECKLIST.md` | DX ✅ |
+| 4 | **CONC-1** — ✅ fixed: idempotency cache is now concurrency-safe. Per-key lock serializes the whole get→execute→put (sync `_idem_guard` + async `_idem_guard_async`); held locks are never evicted. Concurrency test in `test_control_api_write.py` | `docs/U3_5_CHECKLIST.md` | Race condition ✅ |
 
 ### LLM Turn Observability — remaining validation (M1/M2)
 
@@ -45,7 +45,7 @@
 | # | Task | Notes | Scope |
 |---|---|---|---|
 | 30 | **Typing field expands upward** — ✅ `<input>` → `<textarea>`, auto-resize via `useLayoutEffect`, capped at 160px, Enter sends / Shift+Enter newline | `CONTEXT.md` | Frontend ✅ |
-| 31 | **Rich formatter for agent output** — format code references ``text``, plain links, and source refs like `(path:line)` into clickable LINK representations with visual differentiation. E.g. ``AudioProcessor.kt:25`` → linked, ``text`` visually distinct from URLs | `CONTEXT.md` | Frontend |
+| 31 | **Rich formatter for agent output** — ✅ `lib/richText.ts` tokenizes assistant text into inline `code`, URLs, and source refs (`path:line`, also inside backticks/parens); `timeline/RichText.tsx` renders three visually-distinct styles (code chip / underlined URL link / accent monospace source ref). Wired into assistant bubbles in `SessionTimeline`. 11 vitest cases in `richText.test.ts` | `CONTEXT.md` | Frontend ✅ |
 | 32 | **Session model header hide-on-scroll** — ✅ sticky header inside scroll container, translates up on scroll-down past 40px, reveals on scroll-up (no negative margin hack) | `CONTEXT.md` | Frontend ✅ |
 | 33 | **Compact context confirmation** — ✅ bottom-sheet confirm dialog before compact mutation fires | `CONTEXT.md` | Frontend ✅ |
 | 34 | **Backend usage limits view** — surface current backends (Codex, Claude) account info + usage limits (daily, weekly, reset time). Either in System page or a dedicated page | `CONTEXT.md` | Backend + Frontend |
@@ -54,6 +54,7 @@
 | 37 | **LLM turn observability in WebUI** — ✅ Session Info tab now lists `/api/turns` rows (status, model, duration, token accounting) via `SessionTurns` + `useSessionTurns` | `CONTEXT.md` | Frontend ✅ |
 | 38 | **Fail early on bad session directory** — ✅ `SessionService.create_session` validates LOCAL `repo_path` up front (injectable `repo_path_validator`, real default = `PathResolver`); rejects with `invalid_repo_path` + human `detail`; `POST /api/sessions` → 400; web NewSessionSheet surfaces the message. Remote (mesh) paths skipped (can't stat off-host) | `CONTEXT.md` | Backend ✅ |
 | 39 | **Job notification routing** — jobs are currently delivering to Telegram instead of the WebUI. Determine whether the MCP is configured to send to Telegram specifically, or to the server (which should dispatch to the correct surface) | `CONTEXT.md` | Backend + Infra |
+| 40 | Dont' forget to review and further turn this load_compact_context into something useful | 
 
 ### Deliberately deferred (from `docs/DEFERRED.md`)
 

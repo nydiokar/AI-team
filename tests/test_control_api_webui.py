@@ -57,6 +57,14 @@ def test_spa_fallback_returns_index(client):
     assert "__DASHBOARD_TOKEN__" in r.text
 
 
+def test_unknown_api_get_returns_404_not_spa(client):
+    # DX-1: an unmatched GET under /api/ must 404, not fall through to the SPA
+    # index (which would 200 with HTML and hide the missing endpoint).
+    r = client.get("/api/does-not-exist")
+    assert r.status_code == 404
+    assert "__DASHBOARD_TOKEN__" not in r.text
+
+
 def test_real_static_file_served(client):
     r = client.get("/favicon.ico")
     assert r.status_code == 200 and r.text == "icon"

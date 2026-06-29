@@ -22,9 +22,12 @@ All ``/api/*`` endpoints require ``Authorization: Bearer {DASHBOARD_TOKEN}``
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 from collections import OrderedDict
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Security, UploadFile
@@ -365,20 +368,98 @@ def build_control_api(orchestrator) -> FastAPI:
 
     # Bounded in-process idempotency cache {(<route>, <key>) -> response dict}.
     # In-process is sufficient: the gateway is a single process (the point of U1).
+    #
+    # CONC-1: the prior implementation was check-then-act (get → miss → execute →
+    # put) with no locking, which assumed retries arrive sequentially. FastAPI runs
+    # sync (and awaits async) endpoints concurrently, so two requests sharing a key
+    # could both miss the cache and both execute the side effect. Fixing get/put
+    # atomicity alone is NOT enough — the whole get→execute→put sequence must be
+    # serialized PER KEY. We hand out a per-key lock (created under a small registry
+    # lock); same-key requests serialize on it so the second caller blocks until the
+    # first stores its response, then hits the cache. Different keys never contend.
     _idem: "OrderedDict[tuple, Dict[str, Any]]" = OrderedDict()
     _IDEM_MAX = 512
-
-    def _idem_get(route: str, key: Optional[str]) -> Optional[Dict[str, Any]]:
-        if not key:
-            return None
-        return _idem.get((route, key))
+    _idem_registry_lock = threading.Lock()
+    _idem_key_locks: "OrderedDict[tuple, threading.Lock]" = OrderedDict()
 
     def _idem_put(route: str, key: Optional[str], resp: Dict[str, Any]) -> None:
         if not key:
             return
-        _idem[(route, key)] = resp
-        while len(_idem) > _IDEM_MAX:
-            _idem.popitem(last=False)
+        with _idem_registry_lock:
+            _idem[(route, key)] = resp
+            while len(_idem) > _IDEM_MAX:
+                _idem.popitem(last=False)
+
+    def _lock_is_free(lock: Any) -> bool:
+        """True if the lock is not currently held. Both threading.Lock and
+        asyncio.Lock expose .locked(); default to 'held' if some exotic lock
+        doesn't, so we never evict something we can't prove is free."""
+        try:
+            return not lock.locked()
+        except Exception:
+            return False
+
+    def _idem_lock_for(route: str, key: str, factory) -> Any:
+        """Fetch-or-create the per-key lock for (route, key) under the registry lock.
+
+        ``factory`` builds the lock (threading.Lock for sync endpoints, asyncio.Lock
+        for the async one) so the same registry serves both without holding the wrong
+        lock type across an ``await``."""
+        rk = (route, key)
+        with _idem_registry_lock:
+            lock = _idem_key_locks.get(rk)
+            if lock is None:
+                lock = factory()
+                # Move-to-end so a freshly created/used lock is the youngest.
+                _idem_key_locks[rk] = lock
+                # Bound the registry, but NEVER evict a lock that is currently held
+                # — evicting it would let a concurrent same-key request mint a fresh
+                # lock and run in parallel, defeating the guard. We scan from oldest
+                # and drop only free locks; a registry full of held locks is allowed
+                # to exceed _IDEM_MAX transiently (it drains as work completes).
+                if len(_idem_key_locks) > _IDEM_MAX:
+                    for ek in list(_idem_key_locks.keys()):
+                        if len(_idem_key_locks) <= _IDEM_MAX:
+                            break
+                        if ek == rk:
+                            continue
+                        el = _idem_key_locks[ek]
+                        if _lock_is_free(el):
+                            del _idem_key_locks[ek]
+            else:
+                _idem_key_locks.move_to_end(rk)
+            return lock
+
+    @contextmanager
+    def _idem_guard(route: str, key: Optional[str]):
+        """Serialize the check-execute-store sequence for a single (route, key) in a
+        SYNC endpoint (FastAPI runs these in a threadpool, so a blocking lock is safe).
+
+        Yields the cached response if one already exists (caller returns it), else
+        None (caller executes, then calls _idem_put). Holding the per-key lock across
+        the caller's work is what makes idempotency concurrency-safe."""
+        if not key:
+            yield None
+            return
+        lock = _idem_lock_for(route, key, threading.Lock)
+        with lock:
+            with _idem_registry_lock:
+                cached = _idem.get((route, key))
+            yield cached
+
+    @asynccontextmanager
+    async def _idem_guard_async(route: str, key: Optional[str]):
+        """Async counterpart of _idem_guard for ``async def`` endpoints, which run ON
+        the event loop. A threading.Lock held across ``await`` would block the loop
+        thread and deadlock a second same-key request; an asyncio.Lock yields instead."""
+        if not key:
+            yield None
+            return
+        lock = _idem_lock_for(route, key, asyncio.Lock)
+        async with lock:
+            with _idem_registry_lock:
+                cached = _idem.get((route, key))
+            yield cached
 
     @app.get("/health")
     def health() -> Dict[str, str]:
@@ -601,64 +682,64 @@ def build_control_api(orchestrator) -> FastAPI:
     ) -> JSONResponse:
         """Submit an instruction. With session_id it mirrors the Telegram session
         path (session → BUSY, source=web_session); otherwise a one-off."""
-        cached = _idem_get("instructions", idempotency_key)
-        if cached is not None:
-            return JSONResponse(cached)
+        async with _idem_guard_async("instructions", idempotency_key) as cached:
+            if cached is not None:
+                return JSONResponse(cached)
 
-        session = None
-        if body.session_id:
-            session = orchestrator.session_service.store.get(body.session_id)
-            if session is None:
-                raise HTTPException(status_code=404, detail="session_not_found")
-            # Status write (BUSY + last_user_message) lives on the service.
-            orchestrator.session_service.mark_busy(
-                session.session_id, last_user_message=body.description)
-            session = orchestrator.session_service.store.get(session.session_id)
-            task_id = await orchestrator.submit_instruction(
-                description=body.description,
-                session_id=session.session_id,
-                cwd=session.repo_path or body.cwd,
-                target_files=body.target_files,
-                source="web_session",
-            )
-            session.last_task_id = task_id
-            orchestrator.session_service.store.save(session)
-        else:
-            task_id = await orchestrator.submit_instruction(
-                description=body.description,
-                cwd=body.cwd,
-                target_files=body.target_files,
-                source="web_oneoff",
-            )
+            session = None
+            if body.session_id:
+                session = orchestrator.session_service.store.get(body.session_id)
+                if session is None:
+                    raise HTTPException(status_code=404, detail="session_not_found")
+                # Status write (BUSY + last_user_message) lives on the service.
+                orchestrator.session_service.mark_busy(
+                    session.session_id, last_user_message=body.description)
+                session = orchestrator.session_service.store.get(session.session_id)
+                task_id = await orchestrator.submit_instruction(
+                    description=body.description,
+                    session_id=session.session_id,
+                    cwd=session.repo_path or body.cwd,
+                    target_files=body.target_files,
+                    source="web_session",
+                )
+                session.last_task_id = task_id
+                orchestrator.session_service.store.save(session)
+            else:
+                task_id = await orchestrator.submit_instruction(
+                    description=body.description,
+                    cwd=body.cwd,
+                    target_files=body.target_files,
+                    source="web_oneoff",
+                )
 
-        resp = {"ok": True, "task_id": task_id, "session": _session_payload(session)}
-        _idem_put("instructions", idempotency_key, resp)
-        return JSONResponse(resp)
+            resp = {"ok": True, "task_id": task_id, "session": _session_payload(session)}
+            _idem_put("instructions", idempotency_key, resp)
+            return JSONResponse(resp)
 
     @app.post("/api/sessions", dependencies=[Depends(_require_auth)])
     def api_create_session(
         body: CreateSessionBody,
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
-        cached = _idem_get("create_session", idempotency_key)
-        if cached is not None:
-            return JSONResponse(cached)
+        with _idem_guard("create_session", idempotency_key) as cached:
+            if cached is not None:
+                return JSONResponse(cached)
 
-        from src.core.interfaces import SessionOrigin
+            from src.core.interfaces import SessionOrigin
 
-        result = orchestrator.session_service.create_session(
-            backend=body.backend,
-            repo_path=body.repo_path,
-            model=body.model,
-            node_id=body.node_id or "__local__",
-            origin=SessionOrigin(channel="web", kind="user"),
-            bind_chat=False,
-        )
-        env = _command_envelope(result)
-        if not result.ok:
-            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
-        _idem_put("create_session", idempotency_key, env)
-        return JSONResponse(env)
+            result = orchestrator.session_service.create_session(
+                backend=body.backend,
+                repo_path=body.repo_path,
+                model=body.model,
+                node_id=body.node_id or "__local__",
+                origin=SessionOrigin(channel="web", kind="user"),
+                bind_chat=False,
+            )
+            env = _command_envelope(result)
+            if not result.ok:
+                raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
+            _idem_put("create_session", idempotency_key, env)
+            return JSONResponse(env)
 
     @app.post("/api/sessions/{session_id}/bind", dependencies=[Depends(_require_auth)])
     def api_bind_session(session_id: str, body: BindBody) -> JSONResponse:
@@ -764,23 +845,23 @@ def build_control_api(orchestrator) -> FastAPI:
     ) -> JSONResponse:
         """Record a pending approval (the seam a gated action calls). Exposed so the
         queue is exercisable end-to-end before a backend emits these natively."""
-        cached = _idem_get("request_approval", idempotency_key)
-        if cached is not None:
-            return JSONResponse(cached)
-        svc = _approval_service()
-        if svc is None:
-            raise HTTPException(status_code=503, detail="approvals_unavailable")
-        result = svc.request(
-            action=body.action, session_id=body.session_id, task_id=body.task_id,
-            risk=body.risk, reversible=body.reversible, requested_by=body.requested_by,
-        )
-        if not result.ok:
-            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400),
-                                detail={"ok": False, "reason": result.reason})
-        approval_id = result.reason  # request() carries the id on reason
-        resp = {"ok": True, "approval": svc.get(approval_id)}
-        _idem_put("request_approval", idempotency_key, resp)
-        return JSONResponse(resp)
+        with _idem_guard("request_approval", idempotency_key) as cached:
+            if cached is not None:
+                return JSONResponse(cached)
+            svc = _approval_service()
+            if svc is None:
+                raise HTTPException(status_code=503, detail="approvals_unavailable")
+            result = svc.request(
+                action=body.action, session_id=body.session_id, task_id=body.task_id,
+                risk=body.risk, reversible=body.reversible, requested_by=body.requested_by,
+            )
+            if not result.ok:
+                raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400),
+                                    detail={"ok": False, "reason": result.reason})
+            approval_id = result.reason  # request() carries the id on reason
+            resp = {"ok": True, "approval": svc.get(approval_id)}
+            _idem_put("request_approval", idempotency_key, resp)
+            return JSONResponse(resp)
 
     @app.post("/api/approvals/{approval_id}/resolve", dependencies=[Depends(_require_auth)])
     async def api_resolve_approval(approval_id: str, body: ApprovalResolveBody) -> JSONResponse:
@@ -1009,6 +1090,13 @@ def _mount_web_ui(app: FastAPI) -> None:
 
     @app.get("/{full_path:path}", response_class=HTMLResponse, include_in_schema=False)
     def _web_spa(full_path: str) -> HTMLResponse:
+        # DX-1: an unmatched GET under /api/ is a missing endpoint, not a client
+        # route — return a real 404 JSON error instead of letting it fall through
+        # to the SPA index (which would 200 with HTML and mask the bug). The named
+        # /api/* routes above are registered first and still win; only genuinely
+        # unknown /api paths reach here.
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
         # Let real files (favicon, manifest, …) resolve if present; else SPA index.
         # SECURITY: confine the resolved path to web/dist. ``full_path`` is
         # attacker-controlled and may contain ``..`` / percent-encoded ``..`` that
