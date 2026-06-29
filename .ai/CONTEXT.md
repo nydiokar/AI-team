@@ -1,13 +1,71 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-06-25
+**Last Updated:** 2026-06-29
+
+## Remaining work across all open specs (swept from unarchived docs)
+
+### Open checklist items
+
+| # | Task | Source | Depends on | Scope |
+|---|---|---|---|---|
+| 1 | **U1.5** — Merge `feat/webui-ui0` into `main` (2 commits pending). Dev proxy already points at `:9003`; README already references the gateway port. | `docs/U1_CHECKLIST.md` | Branch merge | Process |
+
+### Mesh / State-Separation — remaining work (paused track)
+
+| # | Task | Source | Depends on | Scope |
+|---|---|---|---|---|
+| 7 | **Phase 4** — Graceful degradation: 1 embedded fallback worker + JSON-only mode when task server / mesh workers are unreachable; health-check loop to rejoin mesh. See `STATE_SEPARATION_PLAN.md` §Phase 4 and `.ai/NEXT_TASKS.md` §Phase 4. | `STATE_SEPARATION_PLAN.md` §4 | None (additive) | Backend |
+
+### Accepted warts (known, not fixed)
+
+| # | Item | Source | Scope |
+|---|---|---|---|
+| 3 | **DX-1** — Unknown `GET /api/...` returns SPA HTML not 404 (unmatched GETs under `/api/` fall to SPA catch-all) | `docs/U3_5_CHECKLIST.md` | DX |
+| 4 | **CONC-1** — Idempotency cache not concurrency-safe (sequential retry assumption) | `docs/U3_5_CHECKLIST.md` | Race condition |
+
+### LLM Turn Observability — remaining validation (M1/M2)
+
+| # | Task | Source | Depends on | Scope |
+|---|---|---|---|---|
+| 5 | Capture sanitized fixtures from deployed Codex (plain answer, MCP, retry, subagent) | `docs/LLM_TURN_OBSERVABILITY_SPEC.md` §handoff | Deployed Codex | Testing |
+| 6 | Add cumulative-counter/reset fixtures if backend emits cumulative usage | §handoff #2 | #5 | Testing |
+| 7 | Real local + mesh Codex smoke tests; inspect dashboard + privacy scan | §handoff #3 | #5, #6 | Validation |
+| 8 | SQLite ingestion/query/concurrency benchmarks (§16.5) | §handoff #4 | #7 | Perf ✅ done — 16k evt/s ingestion, ~85ms query; projection rebuild below aspirational target (noted for M3) |
+| 9 | After #5–#8 pass, mark M1/M2 shipped, begin M3 | §handoff #5 | #5–#8 | Process |
+
+### LLM Turn Observability — future milestones (not started)
+
+| # | Task | Source | Depends on | Scope |
+|---|---|---|---|---|
+| 10 | **M3** — Claude adapter (stream-json parser, hook integration, coverage UI) | §9.5 | #9 | Backend |
+| 11 | **M4** — OpenCode CLI/server + LLAMA postprocessing | §9.6–9.7 | #10 | Backend |
+
+### Telegram UX Parity — remaining gaps
+
+| # | Task | Source | Scope |
+|---|---|---|---|
+| 12 | **Help / onboarding** — info drawer or `/help` route (Items 12–19 are already ✅ built: repo picker, file upload, model picker, compact context, git actions, session info, node detail, jobs panel) | `docs/TELEGRAM_UX_PARITY.md` §4 P9 | Frontend |
+
+### Deliberately deferred (from `docs/DEFERRED.md`)
+
+| # | Task | Notes | Scope |
+|---|---|---|---|
+| 21 | **Web Push notifications** — VAPID keypair, subscribe endpoint, event emitter. PWA is push-ready. | `docs/DEFERRED.md` | Backend + Frontend |
+| 22 | **Token streaming** (`message.delta`) — dropped for v1; timeline shows per-turn summary | ⛔ DROP `docs/FRONTEND_BACKEND_GAP.md` | Frontend |
+| 23 | **Diff hunks / file-content preview** — no backend source | `docs/DEFERRED.md` | Backend + Frontend |
+| 24 | **Terminal / raw stdout-stderr line stream** — out (security) | `docs/DEFERRED.md` | Backend + Frontend |
+| 25 | **Approvals automation** — durable gate exists but inert; auto-emit deferred | `docs/DEFERRED.md` | Backend |
+
+---
+
+**Last Updated:** 2026-06-29
 **Branch:** `feat/webui-ui0` (Web UI track — **ladder complete, ready to merge**) — mesh/State-Sep track lives on `main`
 
 > This file is the **fast-orientation** doc: what the project is, how it's wired
 > *right now*, the active plan, and the immediate next step. It is intentionally
-> short. Per-phase build history lives in `docs/PROGRESS_LOG.md`. The detailed
+> short. Per-phase build history lives in `docs/archive/progress/PROGRESS_LOG.md`. The detailed
 > task breakdown for the **paused mesh** plan lives in `.ai/NEXT_TASKS.md`. The
-> active plan (Web UI) is the ladder in `docs/COCKPIT_REFACTOR_SPEC.md` §14 — see
+> active plan (Web UI) is the ladder in `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` §14 — see
 > the "Web UI track" section below.
 
 > ⚠️ **TEST COST GUARD — READ BEFORE RUNNING ANYTHING.** This project's tests can
@@ -48,10 +106,10 @@ surface over the same gateway**, consuming the M1 control contract. The gateway
 serves it in-process: `python main.py` serves `web/dist` at `/` + `/api/*` on one
 tailnet-bound port — the "one process, many interfaces" goal.
 
-**Plan of record / ladder (single source of truth):** `docs/COCKPIT_REFACTOR_SPEC.md`
+**Plan of record / ladder (single source of truth):** `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md`
 §14. Build order was `M1 → UI-0 → UI-1 → F → I → UI-2 → G′ → H → UI-3 → UI-4 →
 UI-5 → UI-6`. The control-surface unification that embedded the web API into the
-gateway is `docs/CONTROL_SURFACE_UNIFICATION.md` (U1..U6, all done).
+gateway is `docs/archive/control-surface-unification/CONTROL_SURFACE_UNIFICATION.md` (U1..U6, all done).
 
 **Status as of 2026-06-25 — THE LADDER IS COMPLETE (all committed on `feat/webui-ui0`):**
 
@@ -149,7 +207,7 @@ worker's real result to Telegram (no fabricated "Task failed"). State Separation
 Phases 0–3 are effectively complete.
 
 The only remaining work **on this (paused) mesh track** is **Phase 4 — graceful
-degradation / fallback** (see the mesh plan + `.ai/NEXT_TASKS.md`). It is not
+degradation / fallback** (see the mesh plan + `.ai/NEXT_TASKS.md`). (Mesh plan doc archived at `docs/archive/STATE_SEPARATION_PLAN.md`.) It is not
 scheduled against the current Web UI work.
 
 **Cockpit M1 (2026-06-21, `feat/session-service-m1`):** a separate, completed
@@ -158,11 +216,11 @@ transport-neutral `SessionService` (lifecycle create/bind off the Telegram
 class), a single backend `registry.py`, a descriptive `SessionOrigin` tag on
 `Session` (persisted via DB migration 12), and `docs/CONTROL_CONTRACT.md`.
 Telegram behavior is byte-identical (gate matches the pre-M1 baseline). Scope
-discipline lived in `docs/M1_CHECKLIST.md`. M2+ (SessionView DTO, WS/HTTP
+discipline lived in `docs/archive/m1/M1_CHECKLIST.md`. M2+ (SessionView DTO, WS/HTTP
 transport, workflow events) remain deferred.
 
 History of every completed phase (8, 9, Step B/C, D1–D6) + the 2026-06-11
-restart-resilience milestone: `docs/PROGRESS_LOG.md`.
+restart-resilience milestone: `docs/archive/progress/PROGRESS_LOG.md`.
 
 ---
 
@@ -171,7 +229,7 @@ restart-resilience milestone: `docs/PROGRESS_LOG.md`.
 > Reference only — the **active plan is the Web UI track** (top of file). This is
 > the parked mesh plan, kept for the runtime picture.
 
-**Plan of record (for the mesh track):** `docs/STATE_SEPARATION_PLAN.md`. This
+**Plan of record (for the mesh track):** `docs/archive/STATE_SEPARATION_PLAN.md`. This
 **supersedes** the old
 standalone "VPS migration Phase 4" — VPS migration is now simply the end-state of
 this plan's Phases 2–3 (server on the VPS, workers on local machines).
@@ -244,13 +302,13 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | `src/telegram/interface.py` | Telegram command surface |
 | `config/settings.py` | all config incl. `MeshConfig` |
 | `docs/CONTROL_CONTRACT.md` | **M1** — event + inbound-command + backend + read-model contract for a 2nd surface |
-| `docs/COCKPIT_REFACTOR_SPEC.md` / `docs/M1_CHECKLIST.md` | M1 rationale + the executed build checklist |
-| `docs/COCKPIT_REFACTOR_SPEC.md` | Web UI ladder (§14) — **all rungs M1→UI-6 done** |
+| `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` / `docs/archive/m1/M1_CHECKLIST.md` | M1 rationale + the executed build checklist |
+| `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` | Web UI ladder (§14) — **all rungs M1→UI-6 done** |
 | `docs/DEFERRED.md` | Web UI track — deliberately-not-built future boxes (Web Push, streaming, diff hunks, terminal, approvals automation) |
-| `docs/STATE_SEPARATION_PLAN.md` | mesh plan (PAUSED background, not active) |
-| `docs/AGENT_MESH_SPEC.md` | mesh design spec |
+| `docs/archive/STATE_SEPARATION_PLAN.md` | mesh plan (PAUSED background, not active) |
+| `docs/archive/AGENT_MESH_SPEC.md` | mesh design spec |
 | `docs/PHASE_4_RUNBOOK.md` | VPS cutover runbook (= State Sep end-state) |
-| `docs/PROGRESS_LOG.md` | completed-work history |
+| `docs/archive/progress/PROGRESS_LOG.md` | completed-work history |
 | `ecosystem.config.js` | PM2 supervisor config |
 
 ---
@@ -262,3 +320,13 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 - Codex end-to-end validation.
 - OpenCode server cross-machine sessions (needs shared DB mount).
 - Postgres migration — trigger: >5 nodes or observed SQLite write contention.
+- **M-Mesh** — distributed event bus (Redis/NATS), shared state store, leader election.
+  "DO NOT build until the app is operable." (`docs/archive/control-surface-unification/CONTROL_SURFACE_UNIFICATION.md` §12)
+- **ACP / A2A bridges** — deferred from cockpit spec; no consuming surface.
+  (`docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` §9)
+- **Supervisor agents & workflow engine** — deferred; needs workflow-automation design.
+  (`COCKPIT_REFACTOR_SPEC.md` §9)
+- **Transport / role / prompt / tool registries** — deferred; no present pain beyond
+  `BackendRegistry`. (`COCKPIT_REFACTOR_SPEC.md` §9)
+- **Native mobile** — deferred; Web UI is the mobile surface for v1.
+  (`COCKPIT_REFACTOR_SPEC.md` §9)
