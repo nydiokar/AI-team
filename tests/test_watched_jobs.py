@@ -367,7 +367,7 @@ async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeyp
 
     assert notifier.calls == [{
         "task_id": "job_test123",
-        "output": "Watched job `npm test` done.\nExit code: `0`\n\nLast log lines:\n```\nall tests passed\n```",
+        "output": "Watched job `npm test` done.\nExit code: `0`\nAgent continuation requested.\n\nLast log lines:\n```\nall tests passed\n```",
         "chat_id": 100,
         "session_id": session.session_id,
     }]

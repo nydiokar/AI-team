@@ -45,11 +45,13 @@ function JobRow({ job, running }: { job: RawJob; running?: boolean }) {
               {job.last_probe_error && (
                 <span className="max-w-[160px] truncate text-bad">{job.last_probe_error}</span>
               )}
+              {Boolean(job.notify_agent) && <span className="text-accent">agent</span>}
             </>
           ) : (
             <>
               <span className={job.status === "failed" ? "text-bad" : ""}>{job.status}</span>
               {job.exit_code != null && <span className="font-mono">exit {job.exit_code}</span>}
+              {Boolean(job.notify_agent) && <span className="text-accent">agent</span>}
               {job.updated_at && <span>{relAgeFrom(job.updated_at)}</span>}
             </>
           )}
