@@ -15,6 +15,7 @@ import { TaskStatusChip } from "../ui/StatusChip";
 import { Button } from "../ui/Button";
 import { cn } from "../../lib/cn";
 import { useResolveApproval } from "../../hooks/useSessionActions";
+import { RichText } from "./RichText";
 
 function timeLabel(at: string): string {
   if (!at) return "";
@@ -180,7 +181,13 @@ function MessageBubble({
               ),
         )}
       >
-        <p className="whitespace-pre-wrap break-words">{text}</p>
+        {/* Agent output gets rich formatting (code/links/source refs); the user's
+            own message is echoed verbatim as plain text. */}
+        {mine ? (
+          <p className="whitespace-pre-wrap break-words">{text}</p>
+        ) : (
+          <RichText text={text} />
+        )}
       </div>
 
       {/* Timestamp (+ subtle token badge) — only on last in a group */}
