@@ -339,174 +339,292 @@ export function SessionDetailScreen() {
 
   return (
     <div className="mx-auto flex h-full max-w-[480px] flex-col bg-base">
-      {/* ── Fixed header (hide-on-scroll down) ── */}
-      <div
-        ref={headerRef}
-        className={`transition-transform duration-300 will-change-transform ${tab === "chat" && headerHidden ? "-translate-y-full" : ""}`}
-      >
-        <CompactTopBar
-          title={proj ?? session?.id ?? id ?? "Session"}
-          subtitle={
-            session ? (
-              <span className="font-mono text-[11px] text-ink-muted">
-                {session.backend} · {modelLabel(session.model, session.defaultModel)}
-              </span>
-            ) : loading ? (
-              <span className="text-[11px] text-ink-muted">loading…</span>
-            ) : undefined
-          }
-          left={
-            <button
-              onClick={() => navigate("/sessions")}
-              className="-ml-1 flex size-9 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
-              aria-label="Back to sessions"
-            >
-              <ChevronLeft className="size-5" />
-            </button>
-          }
-          right={
-          session ? (
-            <div className="flex items-center gap-1.5">
-              <SessionStatusChip state={session.opState} closed={closed} />
-              <div className="relative">
-                <button
-                  onClick={() => setMenuOpen((v) => !v)}
-                  className="flex size-8 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
-                  aria-label="Session actions"
-                  aria-expanded={menuOpen}
-                >
-                  <MoreVertical className="size-5" />
-                </button>
-                {menuOpen && (
-                  <>
-                    <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-                    <div className="card-elev absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-xl py-1 text-[13px] shadow-xl">
-                      {/* View switcher — Chat / Files / Info live here (rarely
-                          visited, so they don't need permanent tab real estate). */}
-                      {TABS.map(({ key, label, Icon }) => (
-                        <button
-                          key={key}
-                          onClick={() => act(() => setTab(key))}
-                          className={cn(
-                            "flex w-full items-center gap-2.5 px-3.5 py-2.5 hover:bg-surface-2",
-                            tab === key ? "text-accent" : "text-ink-soft",
-                          )}
-                        >
-                          <Icon className="size-4" /> {label}
-                          {tab === key && <span className="ml-auto text-[11px]">●</span>}
-                        </button>
-                      ))}
-                      <div className="my-1 border-t border-hairline" />
-                      {running && (
-                        <button
-                          onClick={() => act(() => id && stop.mutate(id))}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-bad hover:bg-surface-2"
-                        >
-                          <Square className="size-4" /> Stop task
-                        </button>
-                      )}
-                      {!closed && !running && (
-                        <button
-                          onClick={() => act(() => setCompactConfirm(true))}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
-                        >
-                          <Minimize2 className="size-4" /> Compact context
-                        </button>
-                      )}
-                      {!closed && (
-                        <button
-                          onClick={() => act(() => setModelPickerOpen(true))}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
-                        >
-                          <Sliders className="size-4" /> Change model
-                        </button>
-                      )}
-                      {!closed && (
-                        <button
-                          onClick={() => act(() => setGitPanelOpen(true))}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
-                        >
-                          <GitBranch className="size-4" /> Git
-                        </button>
-                      )}
-                      <div className="my-1 border-t border-hairline" />
-                      {!closed ? (
-                        <button
-                          onClick={() => act(() => id && close.mutate(id))}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
-                        >
-                          <Archive className="size-4" /> Close session
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => act(() => id && restore.mutate(id))}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
-                        >
-                          <RotateCcw className="size-4" /> Restore session
-                        </button>
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          ) : null
-          }
-        />
-      </div>
-
-      {/* ── Contextual sub-header — only when off Chat (Files/Info are opened
-            from the menu). Gives a title + one-tap return to the conversation. ── */}
+      {/* ── On non-chat tabs, header is outside scroll ── */}
       {tab !== "chat" && (
-        <button
-          onClick={() => setTab("chat")}
-          className="flex items-center gap-2 border-b border-hairline bg-base/80 px-4 py-2.5 text-[12px] font-medium text-ink-soft backdrop-blur-sm hover:bg-surface-2"
-        >
-          <ChevronLeft className="size-4" />
-          <span>{TABS.find((t) => t.key === tab)?.label}</span>
-          <span className="ml-auto text-[11px] text-ink-muted">Back to chat</span>
-        </button>
+        <>
+          <CompactTopBar
+            title={proj ?? session?.id ?? id ?? "Session"}
+            subtitle={
+              session ? (
+                <span className="font-mono text-[11px] text-ink-muted">
+                  {session.backend} · {modelLabel(session.model, session.defaultModel)}
+                </span>
+              ) : loading ? (
+                <span className="text-[11px] text-ink-muted">loading…</span>
+              ) : undefined
+            }
+            left={
+              <button
+                onClick={() => navigate("/sessions")}
+                className="-ml-1 flex size-9 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
+                aria-label="Back to sessions"
+              >
+                <ChevronLeft className="size-5" />
+              </button>
+            }
+            right={
+              session ? (
+                <div className="flex items-center gap-1.5">
+                  <SessionStatusChip state={session.opState} closed={closed} />
+                  <div className="relative">
+                    <button
+                      onClick={() => setMenuOpen((v) => !v)}
+                      className="flex size-8 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
+                      aria-label="Session actions"
+                      aria-expanded={menuOpen}
+                    >
+                      <MoreVertical className="size-5" />
+                    </button>
+                    {menuOpen && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+                        <div className="card-elev absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-xl py-1 text-[13px] shadow-xl">
+                          {TABS.map(({ key, label, Icon }) => (
+                            <button
+                              key={key}
+                              onClick={() => act(() => setTab(key))}
+                              className={cn(
+                                "flex w-full items-center gap-2.5 px-3.5 py-2.5 hover:bg-surface-2",
+                                tab === key ? "text-accent" : "text-ink-soft",
+                              )}
+                            >
+                              <Icon className="size-4" /> {label}
+                              {tab === key && <span className="ml-auto text-[11px]">●</span>}
+                            </button>
+                          ))}
+                          <div className="my-1 border-t border-hairline" />
+                          {running && (
+                            <button
+                              onClick={() => act(() => id && stop.mutate(id))}
+                              className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-bad hover:bg-surface-2"
+                            >
+                              <Square className="size-4" /> Stop task
+                            </button>
+                          )}
+                          {!closed && !running && (
+                            <button
+                              onClick={() => act(() => setCompactConfirm(true))}
+                              className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                            >
+                              <Minimize2 className="size-4" /> Compact context
+                            </button>
+                          )}
+                          {!closed && (
+                            <button
+                              onClick={() => act(() => setModelPickerOpen(true))}
+                              className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                            >
+                              <Sliders className="size-4" /> Change model
+                            </button>
+                          )}
+                          {!closed && (
+                            <button
+                              onClick={() => act(() => setGitPanelOpen(true))}
+                              className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                            >
+                              <GitBranch className="size-4" /> Git
+                            </button>
+                          )}
+                          <div className="my-1 border-t border-hairline" />
+                          {!closed ? (
+                            <button
+                              onClick={() => act(() => id && close.mutate(id))}
+                              className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
+                            >
+                              <Archive className="size-4" /> Close session
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => act(() => id && restore.mutate(id))}
+                              className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
+                            >
+                              <RotateCcw className="size-4" /> Restore session
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ) : null
+            }
+          />
+          <button
+            onClick={() => setTab("chat")}
+            className="flex items-center gap-2 border-b border-hairline bg-base/80 px-4 py-2.5 text-[12px] font-medium text-ink-soft backdrop-blur-sm hover:bg-surface-2"
+          >
+            <ChevronLeft className="size-4" />
+            <span>{TABS.find((t) => t.key === tab)?.label}</span>
+            <span className="ml-auto text-[11px] text-ink-muted">Back to chat</span>
+          </button>
+        </>
       )}
 
-      {compactBanner && (
-        <div className="border-b border-hairline bg-surface-1 px-4 py-2 text-[12px] text-ink-soft">
-          {compactBanner}
-        </div>
-      )}
-
-      {messagesStale && (
-        <div className="border-b border-hairline bg-warn-dim/40 px-4 py-2 text-[12px] text-warn">
-          Reconnecting… showing the last loaded messages.
-        </div>
-      )}
-
-      {/* ── Tab content ── */}
+      {/* ── Chat tab: header + timeline + composer all inside one scroll container ── */}
       {tab === "chat" && (
         <div
           ref={timelineRef}
           className="flex-1 overflow-y-auto overscroll-contain"
           onScroll={handleHeaderScroll}
-          style={headerHidden ? { marginTop: -(headerRef.current?.offsetHeight ?? 0) } : undefined}
         >
-          {loading && timeline.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-3 py-20 text-ink-muted">
-              <Loader2 className="size-6 animate-spin" />
-              <p className="text-sm">Loading conversation…</p>
+          {/* Sticky header inside scroll — hides on scroll down */}
+          <div
+            ref={headerRef}
+            className={`sticky top-0 z-20 transition-transform duration-300 will-change-transform ${headerHidden ? "-translate-y-full" : ""}`}
+          >
+            <CompactTopBar
+              title={proj ?? session?.id ?? id ?? "Session"}
+              subtitle={
+                session ? (
+                  <span className="font-mono text-[11px] text-ink-muted">
+                    {session.backend} · {modelLabel(session.model, session.defaultModel)}
+                  </span>
+                ) : loading ? (
+                  <span className="text-[11px] text-ink-muted">loading…</span>
+                ) : undefined
+              }
+              left={
+                <button
+                  onClick={() => navigate("/sessions")}
+                  className="-ml-1 flex size-9 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
+                  aria-label="Back to sessions"
+                >
+                  <ChevronLeft className="size-5" />
+                </button>
+              }
+              right={
+                session ? (
+                  <div className="flex items-center gap-1.5">
+                    <SessionStatusChip state={session.opState} closed={closed} />
+                    <div className="relative">
+                      <button
+                        onClick={() => setMenuOpen((v) => !v)}
+                        className="flex size-8 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
+                        aria-label="Session actions"
+                        aria-expanded={menuOpen}
+                      >
+                        <MoreVertical className="size-5" />
+                      </button>
+                      {menuOpen && (
+                        <>
+                          <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+                          <div className="card-elev absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-xl py-1 text-[13px] shadow-xl">
+                            {TABS.map(({ key, label, Icon }) => (
+                              <button
+                                key={key}
+                                onClick={() => act(() => setTab(key))}
+                                className={cn(
+                                  "flex w-full items-center gap-2.5 px-3.5 py-2.5 hover:bg-surface-2",
+                                  tab === key ? "text-accent" : "text-ink-soft",
+                                )}
+                              >
+                                <Icon className="size-4" /> {label}
+                                {tab === key && <span className="ml-auto text-[11px]">●</span>}
+                              </button>
+                            ))}
+                            <div className="my-1 border-t border-hairline" />
+                            {running && (
+                              <button
+                                onClick={() => act(() => id && stop.mutate(id))}
+                                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-bad hover:bg-surface-2"
+                              >
+                                <Square className="size-4" /> Stop task
+                              </button>
+                            )}
+                            {!closed && !running && (
+                              <button
+                                onClick={() => act(() => setCompactConfirm(true))}
+                                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                              >
+                                <Minimize2 className="size-4" /> Compact context
+                              </button>
+                            )}
+                            {!closed && (
+                              <button
+                                onClick={() => act(() => setModelPickerOpen(true))}
+                                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                              >
+                                <Sliders className="size-4" /> Change model
+                              </button>
+                            )}
+                            {!closed && (
+                              <button
+                                onClick={() => act(() => setGitPanelOpen(true))}
+                                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                              >
+                                <GitBranch className="size-4" /> Git
+                              </button>
+                            )}
+                            <div className="my-1 border-t border-hairline" />
+                            {!closed ? (
+                              <button
+                                onClick={() => act(() => id && close.mutate(id))}
+                                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
+                              >
+                                <Archive className="size-4" /> Close session
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => act(() => id && restore.mutate(id))}
+                                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
+                              >
+                                <RotateCcw className="size-4" /> Restore session
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : null
+              }
+            />
+          </div>
+
+          {compactBanner && (
+            <div className="border-b border-hairline bg-surface-1 px-4 py-2 text-[12px] text-ink-soft">
+              {compactBanner}
             </div>
-          ) : timeline.length > 0 ? (
-            <>
-              <SessionTimeline items={timeline} />
-              <div ref={bottomRef} className="h-px" />
-            </>
+          )}
+
+          {messagesStale && (
+            <div className="border-b border-hairline bg-warn-dim/40 px-4 py-2 text-[12px] text-warn">
+              Reconnecting… showing the last loaded messages.
+            </div>
+          )}
+
+          <div className="pb-[76px]">
+            {loading && timeline.length === 0 ? (
+              <div className="flex flex-col items-center justify-center gap-3 py-20 text-ink-muted">
+                <Loader2 className="size-6 animate-spin" />
+                <p className="text-sm">Loading conversation…</p>
+              </div>
+            ) : timeline.length > 0 ? (
+              <>
+                <SessionTimeline items={timeline} />
+                <div ref={bottomRef} className="h-px" />
+              </>
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-3 px-6 py-20 text-center">
+                <div className="flex size-12 items-center justify-center rounded-2xl bg-surface-1 ring-1 ring-hairline">
+                  <Bot className="size-6 text-ink-muted" />
+                </div>
+                <div>
+                  <p className="text-[14px] font-medium text-ink-soft">Session ready</p>
+                  <p className="mt-1 text-sm text-ink-muted">Send an instruction to start.</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Composer (or closed state) — sticky at the bottom of the scroll area */}
+          {id && !closed ? (
+            <div className="sticky bottom-0 z-10">
+              <Composer sessionId={id} running={running} />
+            </div>
           ) : (
-            <div className="flex flex-col items-center justify-center gap-3 px-6 py-20 text-center">
-              <div className="flex size-12 items-center justify-center rounded-2xl bg-surface-1 ring-1 ring-hairline">
-                <Bot className="size-6 text-ink-muted" />
-              </div>
-              <div>
-                <p className="text-[14px] font-medium text-ink-soft">Session ready</p>
-                <p className="mt-1 text-sm text-ink-muted">Send an instruction to start.</p>
-              </div>
+            <div className="sticky bottom-0 border-t border-hairline bg-surface-1/70 px-4 py-3 text-center text-[12px] text-ink-muted">
+              Session closed · open the menu to restore
             </div>
           )}
         </div>
@@ -521,17 +639,6 @@ export function SessionDetailScreen() {
       {tab === "info" && id && (
         <div className="flex-1 overflow-y-auto overscroll-contain">
           <SessionInfoTab sessionId={id} />
-        </div>
-      )}
-
-      {/* ── Composer (chat tab only, open sessions only) ── */}
-      {tab === "chat" && id && !closed && (
-        <Composer sessionId={id} running={running} />
-      )}
-
-      {tab === "chat" && closed && (
-        <div className="border-t border-hairline bg-surface-1/70 px-4 py-3 text-center text-[12px] text-ink-muted">
-          Session closed · open the menu to restore
         </div>
       )}
 
