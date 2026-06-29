@@ -24,6 +24,7 @@ import type {
   RawModelOption,
   RawUploadResult,
   RawJob,
+  RawTurn,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -68,13 +69,21 @@ async function post<T>(
   });
   const data = await res.json().catch(() => ({}) as Record<string, unknown>);
   if (!res.ok) {
-    const reason =
-      (data as { reason?: string; detail?: { reason?: string } | string }).reason ??
-      (typeof (data as { detail?: unknown }).detail === "object"
-        ? ((data as { detail?: { reason?: string } }).detail?.reason ?? "")
-        : (data as { detail?: string }).detail) ??
+    // FastAPI nests the command envelope under `detail`. Our envelope carries a
+    // stable machine `reason` and, when a reject has human context (e.g. a bad
+    // repo_path → "Path does not exist."), a `detail` string. Prefer that human
+    // string; fall back to the machine reason, then the HTTP status line.
+    const inner = (data as { detail?: unknown }).detail;
+    const envelope =
+      inner && typeof inner === "object"
+        ? (inner as { reason?: string; detail?: string })
+        : (data as { reason?: string; detail?: string });
+    const message =
+      envelope.detail ||
+      envelope.reason ||
+      (typeof inner === "string" ? inner : "") ||
       `${res.status} ${res.statusText}`;
-    throw new ApiError(res.status, String(reason));
+    throw new ApiError(res.status, String(message));
   }
   return data as T;
 }
@@ -170,6 +179,20 @@ export const api = {
       token,
     );
     return data.messages ?? [];
+  },
+
+  /**
+   * LLM turn observability for a session (Feature #37). One row per agent turn
+   * from the llm_turns projection, newest-first. `metrics` carries the token
+   * accounting that also powers the context-usage display (Feature #35).
+   * Returns [] when telemetry is unavailable (no TelemetryStore / empty DB).
+   */
+  async turns(token: string, sessionId: string, limit = 50): Promise<RawTurn[]> {
+    const data = await get<{ turns: RawTurn[] }>(
+      `/api/turns?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`,
+      token,
+    );
+    return data.turns ?? [];
   },
 
   /** Live event tail (poll). Pass the returned offset back as `since`. */

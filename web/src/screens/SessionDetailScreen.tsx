@@ -22,10 +22,11 @@ import {
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
 import { SessionTimeline } from "../components/timeline/SessionTimeline";
+import { SessionTurns } from "../components/timeline/SessionTurns";
 import { Composer } from "../components/timeline/Composer";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
-import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact } from "../hooks/useLiveData";
+import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns } from "../hooks/useLiveData";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
 import {
   useStopSession,
@@ -174,6 +175,7 @@ function SessionInfoTab({ sessionId }: { sessionId: string }) {
   const session = sessions?.find((s) => s.id === sessionId);
   const [dirs, setDirs] = useState<string[] | null>(null);
   const inspect = useInspectSession();
+  const { data: turns, isLoading: turnsLoading } = useSessionTurns(sessionId);
 
   useEffect(() => {
     inspect.mutate(
@@ -210,6 +212,8 @@ function SessionInfoTab({ sessionId }: { sessionId: string }) {
           </div>
         ))}
       </div>
+
+      <SessionTurns turns={turns ?? []} loading={turnsLoading} />
 
       {dirs !== null && dirs.length > 0 && (
         <div>

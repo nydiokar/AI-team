@@ -33,7 +33,7 @@ class _FakeBackend:
 
 class _StubOrchestrator:
     def __init__(self):
-        self.session_service = SessionService(SessionStore())
+        self.session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
         self.submitted = []          # (description, session_id, cwd, source)
         self.cancelled = []          # task_ids
         self.compacted = []          # session_ids
@@ -97,6 +97,31 @@ def test_create_session_unknown_backend_is_400(client, tmp_path):
                     json={"backend": "nope", "repo_path": str(tmp_path)})
     assert r.status_code == 400
     assert r.json()["detail"]["reason"] == "unknown_backend"
+
+
+def test_create_session_invalid_repo_path_is_400_with_detail(monkeypatch):
+    """Feature #38: a bad LOCAL repo_path is rejected at create time with a 400,
+    the stable reason, and the human detail surfaced through the envelope — so the
+    web client can show *why* instead of opening a doomed session."""
+    from src.services.session_service import CommandResult
+
+    def reject(_p):
+        return CommandResult(False, reason="invalid_repo_path",
+                             detail="Path does not exist.")
+
+    orch = _StubOrchestrator()
+    orch.session_service = SessionService(SessionStore(), repo_path_validator=reject)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    client = TestClient(control_api.build_control_api(orch))
+
+    r = client.post("/api/sessions", headers=_auth(),
+                    json={"backend": "claude", "repo_path": "/no/such/dir"})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["reason"] == "invalid_repo_path"
+    assert detail["detail"] == "Path does not exist."
+    # Nothing was created.
+    assert client.get("/api/sessions", headers=_auth()).json()["sessions"] == []
 
 
 # --- instructions -----------------------------------------------------------

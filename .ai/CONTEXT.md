@@ -49,10 +49,10 @@
 | 32 | **Session model header hide-on-scroll** — ✅ sticky header inside scroll container, translates up on scroll-down past 40px, reveals on scroll-up (no negative margin hack) | `CONTEXT.md` | Frontend ✅ |
 | 33 | **Compact context confirmation** — ✅ bottom-sheet confirm dialog before compact mutation fires | `CONTEXT.md` | Frontend ✅ |
 | 34 | **Backend usage limits view** — surface current backends (Codex, Claude) account info + usage limits (daily, weekly, reset time). Either in System page or a dedicated page | `CONTEXT.md` | Backend + Frontend |
-| 35 | **Context % in Session** — show context usage percentage in Session view if easily reachable from the API | `CONTEXT.md` | Frontend |
+| 35 | **Context % in Session** — ✅ (as a COUNT, not %) Session Info tab shows per-turn context tokens (`peak`→`exit`→raw) via `useSessionTurns`. No per-model window size exists backend-side, so a true % is deferred (needs a model-window table) | `CONTEXT.md` | Frontend ✅ |
 | 36 | **Watched jobs notify user + agent in-session** — watched jobs currently stop the session flow and nothing continues it. Jobs should notify both the user AND the agent within the same session so the flow can continue | `CONTEXT.md` | Backend |
-| 37 | **LLM turn observability in WebUI** — LLM turn observability is already exposed via API. Surface it in the WebUI | `CONTEXT.md` | Frontend |
-| 38 | **Fail early on bad session directory** — failure state (non-existing directory) should be caught before the session is created, not after the session UI is opened and only surfaced when the first message is sent | `CONTEXT.md` | Backend |
+| 37 | **LLM turn observability in WebUI** — ✅ Session Info tab now lists `/api/turns` rows (status, model, duration, token accounting) via `SessionTurns` + `useSessionTurns` | `CONTEXT.md` | Frontend ✅ |
+| 38 | **Fail early on bad session directory** — ✅ `SessionService.create_session` validates LOCAL `repo_path` up front (injectable `repo_path_validator`, real default = `PathResolver`); rejects with `invalid_repo_path` + human `detail`; `POST /api/sessions` → 400; web NewSessionSheet surfaces the message. Remote (mesh) paths skipped (can't stat off-host) | `CONTEXT.md` | Backend ✅ |
 | 39 | **Job notification routing** — jobs are currently delivering to Telegram instead of the WebUI. Determine whether the MCP is configured to send to Telegram specifically, or to the server (which should dispatch to the correct surface) | `CONTEXT.md` | Backend + Infra |
 
 ### Deliberately deferred (from `docs/DEFERRED.md`)

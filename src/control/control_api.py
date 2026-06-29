@@ -39,6 +39,7 @@ from src.core import observability
 _REASON_STATUS = {
     "unknown_backend": 400,
     "unknown_model": 400,
+    "invalid_repo_path": 400,
     "session_not_found": 404,
     "not_closed": 409,
     # Move H — approvals
@@ -120,11 +121,15 @@ def _session_payload(session) -> Optional[Dict[str, Any]]:
 
 def _command_envelope(result) -> Dict[str, Any]:
     """Uniform JSON for a CommandResult: {ok, reason, session}."""
-    return {
+    env = {
         "ok": result.ok,
         "reason": result.reason,
         "session": _session_payload(result.session),
     }
+    detail = getattr(result, "detail", "")
+    if detail:
+        env["detail"] = detail
+    return env
 
 logger = logging.getLogger(__name__)
 

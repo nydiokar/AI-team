@@ -34,14 +34,21 @@ class CommandResult:
     ok: bool
     reason: str = ""                    # "" on success; stable code on reject
     session: Optional[Session] = None
+    detail: str = ""                    # optional human-facing context (e.g. why a
+                                        # repo_path was rejected); transports may show it
 
 
 class SessionService:
     """Transport-neutral session lifecycle. Owns *session lifecycle only*."""
 
-    def __init__(self, session_store: SessionStore):
+    def __init__(self, session_store: SessionStore,
+                 repo_path_validator: Optional[Callable[[str], Optional["CommandResult"]]] = None):
         # Reuse the orchestrator's store — never construct a second one.
         self.store = session_store
+        # Injectable so tests can supply a permissive validator and the real path
+        # policy (PathResolver against the configured allowed_root) isn't reached
+        # implicitly. Defaults to the real local-repo validator (Feature #38).
+        self._repo_path_validator = repo_path_validator or self._validate_local_repo_path
 
     def create_session(self, *, backend: str, repo_path: str,
                         chat_id: Optional[int] = None,
@@ -59,6 +66,18 @@ class SessionService:
         backend = (backend or DEFAULT_BACKEND).strip().lower()
         if not is_valid_backend(backend):
             return CommandResult(False, reason="unknown_backend")
+        # Fail early on a bad working directory (Move #38). For LOCAL sessions the
+        # gateway host can stat the path, so validate it up front — a nonexistent /
+        # not-a-dir / outside-allowed-root repo is rejected at create time instead
+        # of silently surfacing only when the first instruction tries to cd into it.
+        # Remote (mesh) sessions are skipped: their path lives on the owning node and
+        # cannot be stat'd here. Telegram already passes a pre-resolved path, which
+        # simply re-validates as ok — so this is transparent to the existing wizard.
+        is_local = (not node_id) or node_id == "__local__"
+        if is_local:
+            invalid = self._repo_path_validator(repo_path)
+            if invalid is not None:
+                return invalid
         s = self.store.create(backend=backend, repo_path=repo_path,
                               telegram_chat_id=chat_id, owner_user_id=owner_user_id)
         s.origin = origin or SessionOrigin()
@@ -70,6 +89,30 @@ class SessionService:
         if bind_chat and chat_id is not None:
             self.store.bind(chat_id, s.session_id)
         return CommandResult(True, session=s)
+
+    def _validate_local_repo_path(self, repo_path: str) -> Optional[CommandResult]:
+        """Reject a bad LOCAL repo_path up front. Returns a rejecting CommandResult
+        (reason="invalid_repo_path", detail=<why>) or None when the path is fine.
+
+        Uses the same PathResolver the Telegram wizard uses, so the rules (must
+        exist, be a directory, live inside the allowed root) are identical across
+        surfaces. If a resolver cannot be constructed (no workspace configured), we
+        do NOT block — validation is best-effort and must not regress create().
+        """
+        try:
+            from src.services.path_resolver import PathResolver
+            resolver = PathResolver.from_config()
+        except Exception as e:
+            logger.warning("event=repo_path_validation_skipped err=%s", e)
+            return None
+        resolution = resolver.resolve_session_path(repo_path)
+        if resolution.ok:
+            return None
+        return CommandResult(
+            False,
+            reason="invalid_repo_path",
+            detail=resolution.error or "Invalid working directory.",
+        )
 
     def bind_active(self, chat_id: int, session_id: str) -> CommandResult:
         s = self.store.get(session_id)

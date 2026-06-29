@@ -71,7 +71,7 @@ class _DummyOrchestrator:
         # SessionStore. The store honors the test-isolated _SESSIONS_DIR/_BINDINGS_FILE
         # monkeypatched by the isolated_session_store fixture.
         from src.services.session_service import SessionService
-        self.session_service = SessionService(SessionStore())
+        self.session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
 
     async def submit_instruction(self, description, task_type=None, target_files=None, session_id=None, cwd=None, source="runtime"):
         task_id = f"task_{len(self.created_tasks) + 1}"

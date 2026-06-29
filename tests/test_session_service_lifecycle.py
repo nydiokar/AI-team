@@ -15,7 +15,11 @@ from src.core.interfaces import SessionStatus
 
 @pytest.fixture
 def svc():
-    return SessionService(SessionStore())
+    # Permissive repo-path validator: these lifecycle tests use placeholder paths
+    # (e.g. "/tmp") that the real local-path policy (Feature #38) would reject for
+    # being outside the configured allowed_root. Path validation is covered in
+    # test_session_service.py; here we only exercise lifecycle transitions.
+    return SessionService(SessionStore(), repo_path_validator=lambda _p: None)
 
 
 class _FakeBackend:
