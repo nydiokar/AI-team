@@ -280,8 +280,12 @@ def _seed_artifact(tmp_path, task_id, **fields):
 
 
 def test_artifacts_list_and_detail(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(control_api, "_results_dir", lambda: tmp_path)
-    _seed_artifact(tmp_path, "task_a4", files_modified=["x.py", "y.py"])
+    """Canonical source is the DB (mesh_tasks). The endpoint reads enriched task
+    rows, not the files."""
+    from src.control.db import get_db
+    db = get_db()
+    db.enqueue_task("task_a4", None, None, "claude", "run_oneoff", {})
+    db.enrich_task("task_a4", files_modified=["x.py", "y.py"])
 
     r = client.get("/api/artifacts", headers=_auth())
     assert r.status_code == 200
@@ -294,6 +298,19 @@ def test_artifacts_list_and_detail(client, monkeypatch, tmp_path):
     assert body["artifact"]["task_id"] == "task_a4"
     assert [f["path"] for f in body["files"]] == ["x.py", "y.py"]
     assert all(f["change"] == "modified" for f in body["files"])
+
+
+def test_artifacts_file_fallback_when_not_in_db(client, monkeypatch, tmp_path):
+    """When the DB has no such task, the endpoint falls back to results/*.json so
+    legacy artifacts still resolve during the migration window."""
+    monkeypatch.setattr(control_api, "_results_dir", lambda: tmp_path)
+    _seed_artifact(tmp_path, "task_legacy", files_modified=["z.py"])
+
+    rd = client.get("/api/artifacts/task_legacy", headers=_auth())
+    assert rd.status_code == 200
+    body = rd.json()
+    assert body["artifact"]["task_id"] == "task_legacy"
+    assert [f["path"] for f in body["files"]] == ["z.py"]
 
 
 def test_artifact_missing_is_404(client, monkeypatch, tmp_path):

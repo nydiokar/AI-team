@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 16
+_CURRENT_VERSION = 17
 
 
 # ---------------------------------------------------------------------------
@@ -1012,6 +1012,139 @@ class MeshDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def enrich_task(
+        self,
+        task_id: str,
+        *,
+        prompt: Optional[str] = None,
+        reply_text: Optional[str] = None,
+        parsed_output: Any = None,
+        file_changes: Any = None,
+        files_modified: Any = None,
+        usage: Any = None,
+        error_class: Optional[str] = None,
+        return_code: Optional[int] = None,
+    ) -> None:
+        """Populate the artifact-complete columns on a task row.
+
+        This is the DB side of the file-free conversation/artifact store: the
+        orchestrator calls this at turn completion (and the backfill calls it for
+        historical tasks) so ``mesh_tasks`` holds everything ``results/task_*.json``
+        used to hold — full untruncated ``reply_text``, ``parsed_output``,
+        per-file ``file_changes``, token ``usage`` — without the 264 MB of raw
+        NDJSON. COALESCE keeps existing values when a field isn't supplied so this
+        is safe to call repeatedly / partially (idempotent backfill).
+        """
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    UPDATE mesh_tasks SET
+                        prompt              = COALESCE(?, prompt),
+                        reply_text          = COALESCE(?, reply_text),
+                        parsed_output_json  = COALESCE(?, parsed_output_json),
+                        file_changes_json   = COALESCE(?, file_changes_json),
+                        files_modified_json = COALESCE(?, files_modified_json),
+                        usage_json          = COALESCE(?, usage_json),
+                        error_class         = COALESCE(?, error_class),
+                        return_code         = COALESCE(?, return_code),
+                        updated_at          = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        prompt,
+                        reply_text,
+                        json.dumps(parsed_output) if parsed_output is not None else None,
+                        json.dumps(file_changes) if file_changes is not None else None,
+                        json.dumps(files_modified) if files_modified is not None else None,
+                        json.dumps(usage) if usage is not None else None,
+                        error_class,
+                        return_code,
+                        _now(),
+                        task_id,
+                    ),
+                )
+        except Exception as e:
+            logger.warning("event=db_enrich_task_failed task_id=%s err=%s", task_id, e)
+
+    def enrich_tasks_batch(self, rows: List[Dict[str, Any]]) -> int:
+        """Enrich many task rows in ONE transaction (fast backfill path).
+
+        Each dict: {task_id, prompt?, reply_text?, parsed_output?, file_changes?,
+        files_modified?, usage?, error_class?, return_code?}. Same COALESCE
+        semantics as enrich_task. Returns the count attempted. Wrapping all
+        UPDATEs in a single BEGIN IMMEDIATE avoids 900+ fsync/commit cycles —
+        the difference between seconds and minutes on a server with WAL.
+        """
+        if not rows:
+            return 0
+        now = _now()
+        try:
+            with self._write() as conn:
+                for r in rows:
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks SET
+                            prompt              = COALESCE(?, prompt),
+                            reply_text          = COALESCE(?, reply_text),
+                            parsed_output_json  = COALESCE(?, parsed_output_json),
+                            file_changes_json   = COALESCE(?, file_changes_json),
+                            files_modified_json = COALESCE(?, files_modified_json),
+                            usage_json          = COALESCE(?, usage_json),
+                            error_class         = COALESCE(?, error_class),
+                            return_code         = COALESCE(?, return_code),
+                            updated_at          = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            r.get("prompt"),
+                            r.get("reply_text"),
+                            json.dumps(r["parsed_output"]) if r.get("parsed_output") is not None else None,
+                            json.dumps(r["file_changes"]) if r.get("file_changes") is not None else None,
+                            json.dumps(r["files_modified"]) if r.get("files_modified") is not None else None,
+                            json.dumps(r["usage"]) if r.get("usage") is not None else None,
+                            r.get("error_class"),
+                            r.get("return_code"),
+                            now,
+                            r["task_id"],
+                        ),
+                    )
+        except Exception as e:
+            logger.warning("event=db_enrich_tasks_batch_failed err=%s", e)
+        return len(rows)
+
+    def existing_task_ids(self) -> set:
+        """All task ids present in mesh_tasks (one query — backfill membership test)."""
+        try:
+            rows = self._conn().execute("SELECT id FROM mesh_tasks").fetchall()
+            return {r[0] for r in rows}
+        except Exception:
+            return set()
+
+    def get_session_turns(self, session_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+        """Return the session's tasks as conversation turns, oldest→newest.
+
+        The conversation is a projection of the task ledger: each task row yields
+        one user turn (``prompt``) and one assistant turn (``reply_text``). This is
+        the file-free replacement for ``transcript.get_transcript`` — no artifact
+        files, no NDJSON parsing. Rows lacking ``reply_text`` (not yet backfilled)
+        are returned with ``reply_text=None`` so the caller can fall back.
+        """
+        rows = self._conn().execute(
+            """
+            SELECT id AS task_id, session_id, prompt, reply_text,
+                   parsed_output_json, file_changes_json, files_modified_json,
+                   usage_json, error_class, return_code, status, result,
+                   created_at, completed_at
+            FROM mesh_tasks
+            WHERE session_id = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (session_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def list_tasks(
         self,
         status: Optional[str] = None,
@@ -1545,6 +1678,19 @@ def _get_migrations() -> List[tuple]:
         (14, _LLM_TELEMETRY_SCHEMA_SQL),  # main lineage: durable LLM telemetry
         (15, ""),  # marker retained for main telemetry history compatibility
         (16, ""),  # merged-lineage marker; _ensure_merged_schema repairs both paths
+        (17, """
+            ALTER TABLE mesh_tasks ADD COLUMN prompt TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN reply_text TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN parsed_output_json TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN file_changes_json TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN files_modified_json TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN usage_json TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN error_class TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN return_code INTEGER
+        """),  # artifact-complete task rows: full reply + structured fields so
+               # the DB is self-sufficient and results/task_*.json can be dropped.
+               # reply_text holds the FULL untruncated assistant reply (the chat
+               # source); the legacy `result` JSON keeps output[:2000] for back-compat.
     ]
 
 

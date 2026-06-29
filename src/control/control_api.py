@@ -449,20 +449,27 @@ def build_control_api(orchestrator) -> FastAPI:
 
     @app.get("/api/artifacts", dependencies=[Depends(_require_auth)])
     def api_artifacts(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
-        """Newest-first artifact summaries (results/*.json). Per-file detail is on
-        ``/api/artifacts/{task_id}``."""
+        """Newest-first artifact summaries. Canonical source is mesh_tasks (DB);
+        falls back to results/*.json only when the DB is unavailable."""
         from src.control import artifacts as _artifacts
-        rows = _artifacts.list_artifacts(_results_dir(), limit=limit)
+        from src.control.db import get_db
+        rows = _artifacts.list_artifacts_db(get_db(), limit=limit)
+        if rows is None:
+            rows = _artifacts.list_artifacts(_results_dir(), limit=limit)
         return JSONResponse({"artifacts": rows})
 
     @app.get("/api/artifacts/{task_id}", dependencies=[Depends(_require_auth)])
     def api_artifact(task_id: str) -> JSONResponse:
         """One artifact's full header + normalized changed files (RemoteFile rows).
 
-        404 (``not_found``) on a missing id OR a path-traversal escape — the
-        confined read collapses both to None (no signal that distinguishes them)."""
+        Canonical source is mesh_tasks (DB); falls back to the results/*.json file
+        only when the DB has no such task. 404 (``not_found``) on a missing id OR a
+        path-traversal escape — the confined file read collapses both to None."""
         from src.control import artifacts as _artifacts
-        artifact = _artifacts.get_artifact(_results_dir(), task_id)
+        from src.control.db import get_db
+        artifact = _artifacts.get_artifact_db(get_db(), task_id)
+        if artifact is None:
+            artifact = _artifacts.get_artifact(_results_dir(), task_id)
         if artifact is None:
             raise HTTPException(status_code=404, detail="not_found")
         return JSONResponse({

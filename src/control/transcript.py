@@ -197,7 +197,89 @@ def _load_artifact_index(results_dir: Path, session_id: str) -> Dict[str, Dict[s
     return index
 
 
-# ── Primary source: session task_history ──────────────────────────────────────
+# ── Primary source: mesh.db task ledger ───────────────────────────────────────
+
+
+def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]]:
+    """Project the session's task ledger into conversation turns.
+
+    Returns a turn list when the DB can serve the conversation, or ``None`` to
+    signal the caller to fall back to the file-stitching path (DB unavailable, or
+    no task row for this session carries a backfilled ``reply_text`` yet).
+
+    A row is "usable" when ``reply_text`` is populated — that's the marker that the
+    artifact-complete enrichment (or backfill) has run for it. If NOT ONE row in
+    the session has reply_text, we hand off to the file path so old un-backfilled
+    sessions don't render blank.
+    """
+    try:
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return None
+        rows = db.get_session_turns(session_id, limit=limit)
+    except Exception as e:
+        logger.debug("transcript_db_read_failed session_id=%s err=%s", session_id, e)
+        return None
+
+    if not rows:
+        return None
+    if not any((r.get("reply_text") or "").strip() for r in rows):
+        return None  # nothing enriched yet — let the file path handle it
+
+    turns: List[Dict[str, Any]] = []
+    for r in rows:
+        success = (r.get("status") or "") not in ("failed", "failed_node_offline")
+        instruction = (r.get("prompt") or "").strip()
+        result = (r.get("reply_text") or "").strip()
+        # Back-compat: a row enriched only via the legacy `result` JSON.
+        if not result and r.get("result"):
+            try:
+                result = (json.loads(r["result"]) or {}).get("output") or ""
+            except Exception:
+                result = ""
+        result = _clean_result(result, success, None)
+        if not instruction and not result:
+            continue
+        # A failed task with no captured prompt is a ghost dispatch (e.g. a
+        # dispatch-timeout that never ran) — task_history never recorded it, so the
+        # chat never showed it. Skip it here too rather than render a blank user
+        # turn with just a failure string. A FAILED turn that DOES have a prompt is
+        # a real turn (user asked, it failed) and is kept.
+        if not instruction and not success:
+            continue
+
+        files = []
+        fc = r.get("files_modified_json")
+        if fc:
+            try:
+                files = json.loads(fc) or []
+            except Exception:
+                files = []
+        usage = None
+        if r.get("usage_json"):
+            try:
+                usage = json.loads(r["usage_json"])
+            except Exception:
+                usage = None
+
+        turns.append({
+            "task_id": r.get("task_id") or "",
+            "timestamp": r.get("completed_at") or r.get("created_at") or "",
+            "success": success,
+            "instruction": instruction,
+            "result": result,
+            "file_count": len(files) if isinstance(files, (list, tuple)) else 0,
+            "usage": usage,
+        })
+
+    turns.sort(key=lambda t: t.get("timestamp") or "")
+    if limit and len(turns) > limit:
+        turns = turns[-limit:]
+    return turns
+
+
+# ── Fallback source: session task_history (files) ─────────────────────────────
 
 
 def _turn_from_history(
@@ -258,6 +340,16 @@ def get_transcript(
     session_path = _confined(sessions_dir, session_id, ".json")
     if session_path is None:
         return None  # traversal attempt
+
+    # Primary source: the task ledger in mesh.db. The conversation is a projection
+    # of mesh_tasks — each task row carries the full prompt + untruncated reply_text
+    # (written by orchestrator._mesh_complete_task / backfilled). No file I/O, no
+    # NDJSON parsing. Falls through to the file-stitching path only when the DB has
+    # no usable rows for this session (old sessions not yet backfilled, or DB off).
+    db_turns = _turns_from_db(session_id, limit)
+    if db_turns is not None:
+        return db_turns
+
     if not session_path.is_file():
         return []
 
