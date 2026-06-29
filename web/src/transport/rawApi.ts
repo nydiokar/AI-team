@@ -249,3 +249,52 @@ export interface RawApproval {
   resolved_at: string | null;
   expires_at: string | null;
 }
+
+// GET /api/turns?session_id=<id> → { turns: RawTurn[] } (LLM turn observability,
+// Feature #37). One row per agent turn from the llm_turns projection
+// (TelemetryStore.list_turns → _decode_turn). `metrics` is the decoded
+// metrics_json — token accounting + per-turn aggregates produced by
+// src/core/telemetry_projection.py. All metric fields are optional/nullable
+// because coverage varies by backend; the UI degrades to "—" on absence.
+export interface RawTurnMetrics {
+  // Token accounting (from the merged usage block).
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  cache_creation_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  context_tokens?: number | null;
+  // Context-window accounting (Feature #35 — context usage). These are token
+  // COUNTS, not a percentage: the backend has no per-model window size to divide
+  // by, so the UI shows the count. A true % needs a model-window table later.
+  peak_context_tokens?: number | null;
+  turn_entry_context_tokens?: number | null;
+  turn_exit_context_tokens?: number | null;
+  intra_turn_context_growth?: number | null;
+  // Per-turn aggregates.
+  tool_call_count?: number | null;
+  subagent_count?: number | null;
+  invocations_per_turn?: number | null;
+  retry_count?: number | null;
+  wall_time_ms?: number | null;
+  metric_quality?: string | null; // request | aggregate_only | unavailable
+  // Other keys exist; index signature keeps the type open without `any`.
+  [key: string]: number | string | null | undefined;
+}
+
+export interface RawTurn {
+  turn_id: string;
+  session_id: string | null;
+  task_id: string;
+  backend: string | null;
+  requested_model: string | null;
+  observed_models: string[];
+  started_at: string | null;
+  ended_at: string | null;
+  final_status: string; // running | completed | failed | ...
+  timeout_status: string;
+  final_exit_code: number | null;
+  metrics: RawTurnMetrics;
+  coverage: Record<string, unknown>;
+  data_quality: unknown[];
+}

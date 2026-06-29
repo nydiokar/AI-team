@@ -21,7 +21,7 @@ class _StubOrchestrator:
     """Minimal orchestrator: only what the read handlers touch (session_service)."""
 
     def __init__(self) -> None:
-        self.session_service = SessionService(SessionStore())
+        self.session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
 
 
 @pytest.fixture
