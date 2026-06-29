@@ -692,50 +692,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                     await asyncio.sleep(30)
                     continue
 
-                # Job-completion notifications are sent from the task server's
-                # /done handler (report_job_done) — the authoritative point that
-                # works for jobs with no session_id. This poller previously also
-                # sent here but skipped session-less jobs, silently dropping
-                # their notifications. It is disabled to avoid duplicate sends.
+                # The task server owns terminal job state; the gateway owns
+                # routing those terminal jobs to session-visible notifications.
                 terminal = db.get_terminal_jobs_since(self._last_job_poll)
                 if terminal:
                     self._last_job_poll = datetime.now().isoformat()
 
-                for job in []:  # disabled: server-side /done handler owns notifications
-                    if not job.get("notify"):
-                        continue
-                    session_id = job.get("session_id")
-                    if not session_id or not self.telegram_interface:
-                        continue
-
-                    session = self.session_store.get(session_id)
-                    if not session:
-                        continue
-                    chat_id = getattr(session, "telegram_chat_id", None)
-                    if not chat_id:
-                        continue
-
-                    label = job.get("label", job.get("id", "unknown"))
-                    status = job.get("status", "done")
-                    exit_code = job.get("exit_code")
-                    tail = job.get("tail", "")
-
-                    status_icon = "✅" if status == "done" else ("❌" if status == "failed" else "⚠️")
-                    lines = [
-                        f"{status_icon} Job **{label}** {status}",
-                    ]
-                    if exit_code is not None:
-                        lines.append(f"Exit code: `{exit_code}`")
-                    if tail:
-                        lines.append(f"\n```\n{tail[-1500:]}\n```")
-
-                    summary = "\n".join(lines)
-                    await self.telegram_interface.notify_completion(
-                        job.get("id", ""),
-                        summary,
-                        success=(status == "done"),
-                        chat_id=chat_id,
-                    )
+                for job in terminal:
+                    await self._process_terminal_job(job)
             except Exception as e:
                 logger.debug("event=job_poller_error err=%s", e)
 
@@ -743,6 +707,164 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await asyncio.wait_for(asyncio.sleep(30), timeout=30)
             except asyncio.TimeoutError:
                 pass
+
+    def _job_notification_payload(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        job_id = str(job.get("id") or "")
+        label = str(job.get("label") or job_id or "unknown")
+        status = str(job.get("status") or "done")
+        exit_code = job.get("exit_code")
+        tail = str(job.get("tail") or "")
+        success = status == "done"
+
+        prompt = f"Watched job finished: {label}"
+        lines = [f"Watched job `{label}` {status}."]
+        if exit_code is not None:
+            lines.append(f"Exit code: `{exit_code}`")
+        if tail:
+            lines.append(f"\nLast log lines:\n```\n{tail[-1500:]}\n```")
+
+        return {
+            "job_id": job_id,
+            "label": label,
+            "status": status,
+            "success": success,
+            "prompt": prompt,
+            "reply": "\n".join(lines),
+        }
+
+    def _record_job_session_turn(self, job: Dict[str, Any], session: Any, payload: Dict[str, Any]) -> None:
+        job_id = str(payload["job_id"])
+        reply = str(payload["reply"])
+        prompt = str(payload["prompt"])
+        success = bool(payload["success"])
+        now = datetime.now().isoformat()
+
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None:
+                db.enqueue_task(
+                    task_id=job_id,
+                    session_id=session.session_id,
+                    machine_id=getattr(session, "machine_id", None),
+                    backend=getattr(session, "backend", None) or "unknown",
+                    action="watched_job",
+                    payload={
+                        "task": {"id": job_id, "title": prompt, "prompt": prompt},
+                        "job": {
+                            "id": job_id,
+                            "label": payload["label"],
+                            "status": payload["status"],
+                        },
+                    },
+                )
+                result_dict = {
+                    "success": success,
+                    "output": reply,
+                    "errors": [] if success else [reply],
+                    "files_modified": [],
+                    "execution_time": 0.0,
+                    "timestamp": now,
+                    "return_code": job.get("exit_code"),
+                }
+                if success:
+                    db.complete_task(job_id, result_dict, None)
+                else:
+                    db.fail_task(job_id, reply, result=result_dict)
+                db.enrich_task(
+                    job_id,
+                    prompt=prompt,
+                    reply_text=reply,
+                    parsed_output={"type": "watched_job", "job": job},
+                    files_modified=[],
+                    return_code=job.get("exit_code"),
+                )
+                db.append_event(
+                    session_id=session.session_id,
+                    task_id=job_id,
+                    success=success,
+                    execution_time=0.0,
+                    error="" if success else reply,
+                )
+        except Exception as e:
+            logger.warning("event=job_session_turn_db_failed job_id=%s err=%s", job_id, e)
+
+        try:
+            history = list(getattr(session, "task_history", None) or [])
+            exists = any(
+                item.get("task_id") == job_id
+                for item in history
+                if isinstance(item, dict)
+            )
+            if not exists:
+                history.append({
+                    "task_id": job_id,
+                    "timestamp": now,
+                    "success": success,
+                    "execution_time": 0.0,
+                    "user_message": prompt,
+                    "result_summary": reply,
+                    "files_modified": [],
+                })
+                session.task_history = history[-20:]
+            session.last_task_id = job_id
+            session.last_result_summary = reply[-400:] if len(reply) > 400 else reply
+            session.last_summary = session.last_result_summary
+            session.last_files_modified = []
+            self.session_store.save(session)
+        except Exception as e:
+            logger.warning("event=job_session_turn_save_failed job_id=%s err=%s", job_id, e)
+
+    async def _process_terminal_job(self, job: Dict[str, Any]) -> None:
+        if not job.get("notify") and not job.get("notify_agent"):
+            return
+
+        payload = self._job_notification_payload(job)
+        job_id = str(payload["job_id"])
+        session_id = str(job.get("session_id") or "")
+        session = self.session_store.get(session_id) if session_id else None
+        if session is None:
+            logger.info("event=job_notify_skipped job_id=%s reason=no_session", job_id)
+            return
+
+        self._record_job_session_turn(job, session, payload)
+
+        if job.get("notify"):
+            result = TaskResult(
+                task_id=job_id,
+                success=bool(payload["success"]),
+                output=str(payload["reply"]),
+                errors=[] if payload["success"] else [str(payload["reply"])],
+                files_modified=[],
+                execution_time=0.0,
+                timestamp=datetime.now().isoformat(),
+                return_code=job.get("exit_code") or 0,
+            )
+            try:
+                await self.notifier.notify_task_outcome(
+                    job_id,
+                    result,
+                    session=session,
+                    chat_id=getattr(session, "telegram_chat_id", None),
+                )
+            except Exception as e:
+                logger.warning("event=job_notify_failed job_id=%s err=%s", job_id, e)
+
+        if job.get("notify_agent"):
+            description = (
+                f"The watched job `{payload['label']}` finished with status "
+                f"`{payload['status']}`.\n\n{payload['reply']}"
+            )
+            try:
+                await self.submit_instruction(
+                    description,
+                    session_id=session.session_id,
+                    cwd=getattr(session, "repo_path", None),
+                    source="watched_job",
+                    extra_metadata={"job_id": job_id, "source": "watched_job"},
+                )
+            except Exception as e:
+                logger.warning("event=job_notify_agent_failed job_id=%s err=%s", job_id, e)
 
     @staticmethod
     def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:
