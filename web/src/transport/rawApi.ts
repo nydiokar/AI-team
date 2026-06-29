@@ -228,6 +228,8 @@ export interface RawJob {
   last_checked_at: string | null;
   last_probe_error: string | null;
   exit_code: number | null;
+  notify: number | null;
+  notify_agent: number | null;
   created_at: string;
   updated_at: string;
 }

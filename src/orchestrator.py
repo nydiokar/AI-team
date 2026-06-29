@@ -720,6 +720,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         lines = [f"Watched job `{label}` {status}."]
         if exit_code is not None:
             lines.append(f"Exit code: `{exit_code}`")
+        if job.get("notify_agent"):
+            lines.append("Agent continuation requested.")
         if tail:
             lines.append(f"\nLast log lines:\n```\n{tail[-1500:]}\n```")
 
