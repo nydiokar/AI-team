@@ -55,19 +55,33 @@ def _confined(base_dir: Path, name: str, suffix: str) -> Optional[Path]:
 
 
 def _instruction_from_artifact(art: Dict[str, Any]) -> str:
-    """The user-side text of a turn. ``task.title`` is the instruction Telegram set
-    (often prefixed 'Task: '); fall back to a few known fields."""
+    """The user-side text of a turn — the FULL instruction.
+
+    ``task.prompt`` holds the complete user message (orchestrator stores it
+    verbatim); ``task.title`` is only a truncated display label
+    (``f"Task: {description[:50]}..."``) so it must NOT be the primary source —
+    using it clipped every historical turn to ~50 chars. Prefer prompt, fall
+    back to the truncated title (and a couple of legacy fields) only when there
+    is no full prompt."""
     task = art.get("task") or {}
-    title = (task.get("title") or "").strip()
-    if title.lower().startswith("task:"):
-        title = title[5:].strip()
-    if title:
-        return title
+
+    prompt = (task.get("prompt") or "").strip() if isinstance(task.get("prompt"), str) else ""
+    if prompt:
+        return prompt
+
+    # Fallbacks (older artifacts without task.prompt): top-level legacy fields…
     for k in ("instruction", "objective", "prompt"):
         v = (art.get(k) or "").strip() if isinstance(art.get(k), str) else ""
         if v:
             return v
-    return ""
+
+    # …then the truncated title as a last resort (better a clipped label than blank).
+    title = (task.get("title") or "").strip()
+    if title.lower().startswith("task:"):
+        title = title[5:].strip()
+    # Drop the synthetic trailing ellipsis the title cap appends, so the summary
+    # full-text overlay still prefix-matches cleanly.
+    return title
 
 
 def _result_text_from_artifact(art: Dict[str, Any]) -> str:

@@ -2359,6 +2359,10 @@ created: {task.created}
                 "type": getattr(task.type, "value", str(task.type)),
                 "priority": getattr(task.priority, "value", str(task.priority)),
                 "title": task.title,
+                # FULL user instruction — `title` is only a truncated display label
+                # (`Task: {description[:50]}...`); persisting `prompt` is what lets
+                # the transcript show the complete message instead of a 50-char clip.
+                "prompt": task.prompt or "",
                 "target_files": list(task.target_files or []),
                 "source": str((task.metadata or {}).get("source") or "runtime"),
                 "cwd": str((task.metadata or {}).get("cwd") or ""),
