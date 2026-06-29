@@ -179,6 +179,11 @@ class SystemConfig:
     inactivity_timeout_sec: int = 600  # kill backend process after N seconds of no stdout (10 min default)
     task_heartbeat_interval_sec: int = 300  # send "still working" every 5 min for long tasks
     guarded_write: bool = False
+    # When True, _write_artifacts moves the heavy raw_stdout NDJSON (87% of
+    # artifact bytes) to a gzipped sidecar (results/raw/<id>.ndjson.gz) and drops
+    # it from the JSON. Safe to enable once the DB backfill parity check passes;
+    # the conversation + structured fields then live in mesh_tasks, not the files.
+    slim_artifacts: bool = False
     # Rate limiting and backpressure settings
     max_queue_size: int = 50
     telegram_rate_limit_requests: int = 5

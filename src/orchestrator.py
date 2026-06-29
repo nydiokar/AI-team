@@ -2407,6 +2407,25 @@ created: {task.created}
         except Exception:
             pass
 
+        # raw_stdout is 87% of artifact bytes (264 MB across the corpus) and pure
+        # debug NDJSON — nothing product-facing reads it back once the reply +
+        # usage are extracted into mesh_tasks. When `slim_artifacts` is on, move it
+        # to a gzipped sidecar (~10x smaller) and drop it from the JSON, so the DB
+        # is the self-sufficient source and the on-disk files shrink to metadata.
+        slim = bool(getattr(config.system, "slim_artifacts", False))
+        if slim and artifact.get("raw_stdout"):
+            try:
+                import gzip
+                raw_dir = results_dir / "raw"
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                with gzip.open(raw_dir / f"{task_id}.ndjson.gz", "wt", encoding="utf-8") as gz:
+                    gz.write(artifact.get("raw_stdout") or "")
+            except Exception as e:
+                logger.warning(f"event=raw_archive_failed task_id={task_id} error={e}")
+            else:
+                artifact["raw_stdout"] = ""
+                artifact["raw_stdout_archived"] = f"raw/{task_id}.ndjson.gz"
+
         flat_artifact_path = results_dir / f"{task_id}.json"
         flat_artifact_path.write_text(
             json.dumps(artifact, ensure_ascii=False, indent=2),
@@ -3392,7 +3411,18 @@ Generated from user description: {description}
                 logger.debug("event=mesh_enqueue_failed task_id=%s err=%s", task.id, e)
 
     def _mesh_complete_task(self, task: Task, result: "TaskResult", artifact_path: Optional[str]) -> None:
-        """Shadow-write the task result into mesh_tasks."""
+        """Shadow-write the task result into mesh_tasks — the canonical, file-free store.
+
+        Two writes:
+          1. The legacy ``result`` JSON (``output`` still capped at 2000 for the
+             small-payload list/preview consumers and back-compat).
+          2. ``enrich_task`` with the FULL untruncated reply + structured fields
+             (parsed_output, file_changes, usage, prompt) so the DB holds
+             everything ``results/task_*.json`` did. This is what lets the chat
+             transcript and Files/Info tabs read from the DB and lets the fat
+             artifact files be dropped. Only ``raw_stdout`` (debug NDJSON) stays
+             on disk, gzipped.
+        """
         try:
             from src.control.db import get_db
             db = get_db()
@@ -3400,7 +3430,7 @@ Generated from user description: {description}
                 return
             result_dict = {
                 "success": result.success,
-                "output": result.output[:2000] if result.output else "",  # keep payload small
+                "output": result.output[:2000] if result.output else "",  # small preview only
                 "errors": result.errors or [],
                 "files_modified": result.files_modified or [],
                 "execution_time": result.execution_time,
@@ -3411,7 +3441,44 @@ Generated from user description: {description}
                 db.complete_task(task.id, result_dict, artifact_path)
             else:
                 error_str = "; ".join(result.errors) if result.errors else "unknown error"
-                db.fail_task(task.id, error_str)
+                db.fail_task(task.id, error_str, result=result_dict, artifact_path=artifact_path)
+
+            # Full artifact-complete enrichment — the file-free conversation store.
+            if result.success:
+                reply_text = self._session_reply_text(result).strip()
+            else:
+                reply_text = (self._short_failure_reason(result) or "(failed)").strip()
+            usage = None
+            try:
+                from src.services.result_text import extract_usage_from_ndjson
+                usage = extract_usage_from_ndjson(getattr(result, "raw_stdout", "") or "")
+            except Exception:
+                usage = None
+            # Prompt: task.prompt is the source for runtime tasks, but for some
+            # dispatch paths it's empty while session.last_user_message holds the
+            # full instruction (same precedence the file transcript used). Fall
+            # back so the user turn is never blank.
+            prompt_text = (task.prompt or "").strip()
+            if not prompt_text:
+                try:
+                    sid = (task.metadata or {}).get("session_id", "").strip()
+                    if sid:
+                        _s = self.session_store.get(sid)
+                        if _s:
+                            prompt_text = (_s.last_user_message or "").strip()
+                except Exception:
+                    pass
+            db.enrich_task(
+                task.id,
+                prompt=prompt_text or None,
+                reply_text=reply_text,
+                parsed_output=getattr(result, "parsed_output", None),
+                file_changes=getattr(result, "file_changes", None) or None,
+                files_modified=result.files_modified or [],
+                usage=usage,
+                error_class=getattr(result, "error_class", "") or None,
+                return_code=getattr(result, "return_code", None),
+            )
         except Exception as e:
             logger.debug("event=mesh_complete_failed task_id=%s err=%s", task.id, e)
 

@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-06-29 (tasks #30–#39 added)
+**Last Updated:** 2026-06-30 (conversation+artifacts made DB-canonical — migration 17, see Architecture + state layout)
 
 ## Remaining work across all open specs (swept from unarchived docs)
 
@@ -187,11 +187,20 @@ State layout:
 state/sessions/<id>.json              session records (legacy-authoritative, still dual-written)
 state/telegram/active_bindings.json   chat_id → session_id
 state/summaries/<id>.md               per-session summary
-state/mesh.db                         SQLite — now read-first by session_store
-results/<task_id>.json                full task artifact
+state/mesh.db                         SQLite — read-first by session_store; CANONICAL for conversation + artifacts (migration 17)
+results/<task_id>.json                task artifact — now FALLBACK/debug only (DB-canonical since 2026-06-30); droppable
+results/raw/<task_id>.ndjson.gz       gzipped raw_stdout debug stream (when system.slim_artifacts=on)
 logs/session_events/<id>.log          per-session NDJSON
 logs/events.ndjson                    system-wide event log
 ```
+
+**Conversation/artifacts are DB-canonical (2026-06-30).** `mesh_tasks` carries the full
+untruncated reply + prompt + parsed_output + file_changes + usage (migration 17). Chat
+(`/api/sessions/{id}/messages`) and Files/Info tabs (`/api/artifacts*`) read the DB first,
+files only as fallback for un-enriched old sessions. The conversation is a **projection of
+the task ledger** (no separate turns table). Live write is DB-first, untruncated, all backends.
+Migrate + drop the fat files via `docs/RUNBOOK_db_self_sufficient.md`. Full audit + rationale:
+`docs/CONVERSATION_DATA_FLOW.md` §0. Memory: `db-self-sufficient-conversation`.
 
 **Config flags that matter:** `MESH_ENABLED` (default `false` — gateway behaves
 exactly as pre-mesh), `MESH_SHADOW_WRITE` (default `true`), `WORKER_TOKEN`,
@@ -281,8 +290,13 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 
 ## Architecture rules (do not violate)
 
-- DB is the canonical **read** source; JSON dual-write stays as the ultimate
-  fallback and is **never deleted**.
+- DB is the canonical **read** source. `state/sessions/<id>.json` dual-write stays
+  as the ultimate session fallback and is **never deleted**. NOTE (2026-06-30):
+  `results/task_*.json` artifacts are NO LONGER a source — `mesh_tasks` holds the
+  full conversation + artifact data (migration 17). The fat artifact files are a
+  fallback/debug archive and ARE droppable (see `docs/RUNBOOK_db_self_sufficient.md`);
+  the `raw_stdout` debug stream is kept gzipped under `results/raw/` when
+  `system.slim_artifacts` is on.
 - The server/gateway host keeps its **own embedded worker capacity** (configurable
   pool, default ≥1 — **not** capped at 1) that executes tasks when no remote node
   is available. Prefer remote nodes when online; the server runs work locally when
@@ -291,8 +305,10 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 - `MESH_ENABLED=false` ⇒ gateway is byte-for-byte the old behavior.
 - Session affinity is a hard correctness requirement: a session pinned to a
   machine must execute on that machine. `backend_session_id` is machine-local.
-- No uncontrolled autonomous behavior. Ollama is optional/helper-only. Artifacts
-  are mandatory for audit.
+- No uncontrolled autonomous behavior. Ollama is optional/helper-only. Per-turn
+  audit data (full reply, files changed, usage) is **mandatory** — it now lives
+  canonically in `mesh_tasks` (was the `results/*.json` files; those are now an
+  optional debug archive, not the audit source).
 
 ---
 
@@ -310,7 +326,10 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | `src/worker/agent.py` | worker daemon (runs as its own process on worker nodes) |
 | `src/telegram/interface.py` | Telegram command surface |
 | `config/settings.py` | all config incl. `MeshConfig` |
-| `docs/CONTROL_CONTRACT.md` | **M1** — event + inbound-command + backend + read-model contract for a 2nd surface |
+| `docs/CONTROL_CONTRACT.md` | **M1** — event + inbound-command + backend + read-model contract for a 2nd surface (§6 = conversation/artifact DB read model) |
+| `docs/CONVERSATION_DATA_FLOW.md` | **conversation+artifact data flow audit** (§0 = DB-canonical resolution, migration 17) |
+| `docs/RUNBOOK_db_self_sufficient.md` | e2e runbook to backfill `mesh_tasks` + drop the fat `results/*.json` files |
+| `scripts/backfill_conversation_turns.py` | one-time backfill (`--verify` for parity) — enriches `mesh_tasks` from existing artifacts |
 | `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` / `docs/archive/m1/M1_CHECKLIST.md` | M1 rationale + the executed build checklist |
 | `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` | Web UI ladder (§14) — **all rungs M1→UI-6 done** |
 | `docs/DEFERRED.md` | Web UI track — deliberately-not-built future boxes (Web Push, streaming, diff hunks, terminal, approvals automation) |

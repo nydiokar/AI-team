@@ -1,8 +1,40 @@
 # Conversation Data Flow — Current State & Migration Path
 
-> Written 2026-06-29 after a full audit of the live system.  
-> Purpose: canonical reference so anyone opening this repo understands exactly  
+> Written 2026-06-29 after a full audit of the live system.
+> **Updated 2026-06-30: the DB is now the self-sufficient source. See §0.**
+> Purpose: canonical reference so anyone opening this repo understands exactly
 > where every piece of data comes from, why it is messy, and what to do next.
+
+---
+
+## 0. RESOLVED (2026-06-30) — mesh.db is now self-sufficient
+
+The conversation + artifact data is now canonical in **`mesh_tasks`**, not the files.
+The chat is a projection of the task ledger (session-first, task-first — the convo is
+a read-model over tasks, not a separate entity).
+
+**What changed:**
+- `mesh_tasks` gained artifact-complete columns (migration 17): `prompt`, `reply_text`
+  (FULL untruncated assistant reply), `parsed_output_json`, `file_changes_json`,
+  `files_modified_json`, `usage_json`, `error_class`, `return_code`.
+- `orchestrator._mesh_complete_task` writes them DB-first at completion via
+  `db.enrich_task(...)`. The old `result.output[:2000]` cap is gone for the reply.
+- `transcript.get_transcript` now reads the DB first (`_turns_from_db`), projecting
+  `mesh_tasks` → turns. Falls back to the file-stitching path only for sessions with
+  no enriched rows (old/un-backfilled). No file I/O on the hot path.
+- `scripts/backfill_conversation_turns.py` backfilled all historical turns from the
+  artifact files. **Parity verified: 786 tasks enriched, 509 turns checked, 0 mismatches.**
+- `raw_stdout` (the 264 MB / 87% of artifact bytes — pure debug NDJSON, nothing
+  product-facing reads it back) is NOT copied into the DB. With `system.slim_artifacts=true`
+  it's gzipped to `results/raw/<id>.ndjson.gz` (~10×) and dropped from the JSON.
+
+**Remaining (safe, optional):** flip `slim_artifacts` on, then archive/delete the fat
+`results/task_*.json` after a grace window. The app already survives without them for
+all enriched sessions.
+
+The §7/§8 standalone-`conversation_turns`-table plan below was **superseded** — we made
+the task ledger itself complete instead of adding a parallel turns table (one writer,
+one row per turn, no dual-store drift), per the session-first design.
 
 ---
 

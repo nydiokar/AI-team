@@ -148,6 +148,87 @@ def to_remote_files(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+# ── DB-backed variants (canonical; files become a fallback) ───────────────────
+#
+# mesh_tasks now carries everything these endpoints expose (migration 17:
+# files_modified_json, file_changes_json, error_class, return_code; plus the
+# always-present success/timestamp/parent_task_id). These read the DB so the
+# Files/diff tab keeps working after results/*.json are dropped. They return None
+# / [] when the DB is unavailable so the caller can fall back to the file readers.
+
+
+def _row_to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    files = _loads_list(row.get("files_modified_json"))
+    file_changes = _loads_list(row.get("file_changes_json"))
+    status = (row.get("status") or "")
+    return {
+        "task_id": row.get("id") or row.get("task_id"),
+        "artifact_path": row.get("artifact_path") or "",
+        "success": status not in ("failed", "failed_node_offline"),
+        "timestamp": row.get("completed_at") or row.get("created_at") or "",
+        "file_count": len(file_changes) if file_changes else len(files),
+        "files_modified": list(files),
+        "has_changes": bool(file_changes) or bool(files),
+        "session_id": row.get("session_id"),
+        "parent_task_id": row.get("parent_task_id"),
+    }
+
+
+def _loads_list(raw: Any) -> List[Any]:
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
+def list_artifacts_db(db: Any, limit: int = 50) -> Optional[List[Dict[str, Any]]]:
+    """Newest-first artifact summaries from mesh_tasks, or None if DB unusable."""
+    if db is None:
+        return None
+    try:
+        rows = db.list_tasks(limit=limit)  # already ORDER BY created_at DESC
+    except Exception:
+        return None
+    return [_row_to_summary(r) for r in rows]
+
+
+def get_artifact_db(db: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    """Full per-file artifact detail for one task from mesh_tasks, or None."""
+    if db is None:
+        return None
+    try:
+        row = db.get_task(task_id)
+    except Exception:
+        return None
+    if not row:
+        return None
+    status = (row.get("status") or "")
+    exec_time = None
+    if row.get("result"):
+        try:
+            exec_time = (json.loads(row["result"]) or {}).get("execution_time")
+        except Exception:
+            exec_time = None
+    return {
+        "task_id": row.get("id") or task_id,
+        "success": status not in ("failed", "failed_node_offline"),
+        "timestamp": row.get("completed_at") or row.get("created_at") or "",
+        "execution_time": exec_time,
+        "errors": [row["error"]] if row.get("error") else [],
+        "files_modified": _loads_list(row.get("files_modified_json")),
+        "file_changes": _loads_list(row.get("file_changes_json")) or None,
+        "session_id": row.get("session_id"),
+        "parent_task_id": row.get("parent_task_id"),
+        "return_code": row.get("return_code"),
+        "error_class": row.get("error_class"),
+    }
+
+
 def _normalize_change(change_type: Optional[str], git_status: Optional[str]) -> str:
     """Map an artifact change_type / git porcelain status to added|modified|deleted."""
     ct = (change_type or "").lower()
