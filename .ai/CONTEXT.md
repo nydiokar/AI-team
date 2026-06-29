@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-06-30 (conversation+artifacts made DB-canonical — migration 17, see Architecture + state layout)
+**Last Updated:** 2026-06-30 (watched-job routing fixed; conversation+artifacts DB-canonical — migration 17)
 
 ## Remaining work across all open specs (swept from unarchived docs)
 
@@ -50,10 +50,10 @@
 | 33 | **Compact context confirmation** — ✅ bottom-sheet confirm dialog before compact mutation fires | `CONTEXT.md` | Frontend ✅ |
 | 34 | **Backend usage limits view** — surface current backends (Codex, Claude) account info + usage limits (daily, weekly, reset time). Either in System page or a dedicated page | `CONTEXT.md` | Backend + Frontend |
 | 35 | **Context % in Session** — ✅ (as a COUNT, not %) Session Info tab shows per-turn context tokens (`peak`→`exit`→raw) via `useSessionTurns`. No per-model window size exists backend-side, so a true % is deferred (needs a model-window table) | `CONTEXT.md` | Frontend ✅ |
-| 36 | **Watched jobs notify user + agent in-session** — watched jobs currently stop the session flow and nothing continues it. Jobs should notify both the user AND the agent within the same session so the flow can continue | `CONTEXT.md` | Backend |
+| 36 | **Watched jobs notify user + agent in-session** — ✅ terminal watched jobs are projected into the owning session via canonical `mesh_tasks` rows + session history fallback; `notify_agent=1` submits a `watched_job` follow-up instruction with `job_id` metadata so the agent can continue | `CONTEXT.md` | Backend ✅ |
 | 37 | **LLM turn observability in WebUI** — ✅ Session Info tab now lists `/api/turns` rows (status, model, duration, token accounting) via `SessionTurns` + `useSessionTurns` | `CONTEXT.md` | Frontend ✅ |
 | 38 | **Fail early on bad session directory** — ✅ `SessionService.create_session` validates LOCAL `repo_path` up front (injectable `repo_path_validator`, real default = `PathResolver`); rejects with `invalid_repo_path` + human `detail`; `POST /api/sessions` → 400; web NewSessionSheet surfaces the message. Remote (mesh) paths skipped (can't stat off-host) | `CONTEXT.md` | Backend ✅ |
-| 39 | **Job notification routing** — jobs are currently delivering to Telegram instead of the WebUI. Determine whether the MCP is configured to send to Telegram specifically, or to the server (which should dispatch to the correct surface) | `CONTEXT.md` | Backend + Infra |
+| 39 | **Job notification routing** — ✅ direct Telegram Bot API send removed from `/jobs/{id}/done`; task server now only records terminal job state, while gateway `_job_completion_poller` routes through session/WebUI projection + `NotificationService` | `CONTEXT.md` | Backend + Infra ✅ |
 | 40 | Dont' forget to review and further turn this load_compact_context into something useful | 
 
 ### Deliberately deferred (from `docs/DEFERRED.md`)

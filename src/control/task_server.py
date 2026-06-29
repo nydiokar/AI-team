@@ -37,45 +37,6 @@ from src.core.telemetry import TelemetryEvent
 logger = logging.getLogger(__name__)
 
 
-def _send_job_telegram_notification(job: Dict[str, Any], exit_code: int, tail: str) -> None:
-    """Send a job-completion notification straight to the Telegram Bot API.
-
-    This runs from the authoritative /done handler so delivery does not depend
-    on the gateway's job poller (which skips jobs that have no session_id). It
-    posts directly over HTTPS using the bot token + chat id from config, so it
-    works regardless of the embedded/standalone process split. Best-effort:
-    any failure is logged but never breaks job completion.
-    """
-    if not job.get("notify"):
-        return
-    try:
-        from config import config as _cfg
-        bot_token = getattr(_cfg.telegram, "bot_token", "") or ""
-        targets: List[int] = []
-        chat_id = getattr(_cfg.telegram, "notification_chat_id", None)
-        if chat_id:
-            targets.append(int(chat_id))
-        if not targets:
-            targets = [int(u) for u in (getattr(_cfg.telegram, "allowed_users", []) or [])]
-    except Exception as e:
-        logger.warning("event=job_notify_config_failed job_id=%s err=%s", job.get("id"), e)
-        return
-
-    if not bot_token or not targets:
-        logger.info(
-            "event=job_notify_skipped job_id=%s reason=no_token_or_target", job.get("id")
-        )
-        return
-
-    label = job.get("label", job.get("id", "unknown"))
-    status = "done" if exit_code == 0 else "failed"
-    icon = "✅" if exit_code == 0 else "❌"
-    lines = [f"{icon} Job *{label}* {status}", f"Exit code: `{exit_code}`"]
-    if tail:
-        lines.append(f"\n```\n{tail[-1500:]}\n```")
-    text = "\n".join(lines)
-
-
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
