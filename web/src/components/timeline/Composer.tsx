@@ -96,10 +96,17 @@ export function Composer({
 
   const rejected = submit.isError;
 
+  const sendOnEnter = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      send();
+    }
+  };
+
   return (
     <div
       className="border-t border-hairline bg-surface-1/95 px-3 py-2.5 backdrop-blur-xl"
-      style={{ paddingBottom: `max(0.625rem, env(safe-area-inset-bottom))` }}
+      style={{ paddingBottom: "max(0.625rem, env(safe-area-inset-bottom))" }}
     >
       {uploadBanner && (
         <p className="mb-1.5 px-1 text-[11px] text-ink-soft">{uploadBanner}</p>
@@ -143,15 +150,10 @@ export function Composer({
           value={text}
           aria-label="Instruction text"
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
+          onKeyDown={sendOnEnter}
           placeholder={running ? "Task running…" : "Send an instruction…"}
           rows={1}
-          className="min-h-[44px] max-h-[160px] flex-1 resize-none rounded-2xl bg-surface-2 px-4 py-3 text-[15px] text-ink outline-none ring-1 ring-inset ring-transparent transition-shadow placeholder:text-ink-muted focus:ring-accent/50"
+          className="min-h-[44px] max-h-[160px] flex-1 resize-none overflow-y-auto rounded-2xl bg-surface-2 px-4 py-3 text-[15px] text-ink outline-none ring-1 ring-inset ring-transparent transition-shadow placeholder:text-ink-muted focus:ring-accent/50"
         />
         <Button
           size="icon"
