@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sys
 import urllib.error
@@ -57,33 +58,34 @@ _bootstrap()
 # ---------------------------------------------------------------------------
 # Tool catalogue
 # ---------------------------------------------------------------------------
-
 _TOOLS = [
     {
         "name": "watch_job",
         "description": (
             "Register a long-running shell command as a watched job. "
             "The worker spawns it detached, captures ALL stdout and stderr to a log file, "
-            "and sends a Telegram notification when it finishes — including the label, "
-            "exit code, and the last 20 lines of output. "
+            "records it in System > Jobs, and posts the terminal result into the owning "
+            "session when it finishes. "
             "\n\n"
             "Use this whenever you are about to run a command that will take more than "
             "~30 seconds: training runs, builds, ETL jobs, data processing, deployments. "
             "The task turn ends immediately after registration; the job runs independently "
-            "and does NOT hold the session busy or consume a task slot. "
+            "and does NOT hold the session busy or consume a task slot. By default, the "
+            "agent is notified in-session when the job finishes so it can continue. "
             "\n\n"
-            "Do NOT use for short commands — only for things the user should be notified about."
+            "Commands run on the worker OS shell. On Windows workers, use cmd/PowerShell "
+            "syntax, not POSIX shell syntax. Do NOT use for short commands."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to run (executed with shell=True on the worker node).",
+                    "description": "Shell command to run (executed with shell=True on the worker node). Use worker-native syntax.",
                 },
                 "label": {
                     "type": "string",
-                    "description": "Human-readable label shown in the Telegram notification, e.g. 'Training run epoch 100' or 'Nightly ETL'.",
+                    "description": "Human-readable label shown in System > Jobs and the terminal session result, e.g. 'Training run epoch 100' or 'Nightly ETL'.",
                 },
                 "cwd": {
                     "type": "string",
@@ -91,7 +93,12 @@ _TOOLS = [
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Gateway session ID for routing the notification. Leave blank — it is set automatically from the environment.",
+                    "description": "Gateway session ID for routing the notification. Leave blank; it is set automatically from the environment.",
+                },
+                "notify_agent": {
+                    "type": "boolean",
+                    "description": "Whether to submit a follow-up instruction to the same session when the job finishes. Defaults to true.",
+                    "default": True,
                 },
             },
             "required": ["command", "label"],
@@ -127,12 +134,66 @@ def _post_job(payload: Dict[str, Any]) -> Dict[str, Any]:
 # Tool implementation
 # ---------------------------------------------------------------------------
 
+_WINDOWS_SLEEP_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])sleep\s+([0-9]+(?:\.[0-9]+)?)(?![A-Za-z0-9_./-])"
+)
+_MAX_COMMAND_CHARS = 8000
+_MAX_LABEL_CHARS = 160
+_MAX_PATH_CHARS = 1000
+_MAX_SESSION_ID_CHARS = 128
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _bounded_text(value: Any, name: str, max_chars: int, *, required: bool = True) -> Optional[str]:
+    if value is None:
+        if required:
+            raise ValueError(f"{name} is required")
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    text = value.strip()
+    if required and not text:
+        raise ValueError(f"{name} cannot be empty")
+    if len(text) > max_chars:
+        raise ValueError(f"{name} is too long (max {max_chars} characters)")
+    return text or None
+
+
+def _normalize_worker_command(command: str) -> str:
+    if os.name != "nt":
+        return command
+
+    def _replace_sleep(match: re.Match[str]) -> str:
+        seconds = match.group(1)
+        return f'powershell -NoProfile -Command "Start-Sleep -Seconds {seconds}"'
+
+    return _WINDOWS_SLEEP_RE.sub(_replace_sleep, command)
+
+
 def _watch_job(args: Dict[str, Any]) -> str:
     node = os.environ.get("NODE_ID") or os.environ.get("WORKER_NODE_ID") or socket.gethostname()
-    session = args.get("session_id") or os.environ.get("SESSION_ID") or None
-    cwd = args.get("cwd") or os.getcwd()
-    command = args["command"]
-    label = args["label"]
+    session = (
+        _bounded_text(args.get("session_id"), "session_id", _MAX_SESSION_ID_CHARS, required=False)
+        or os.environ.get("SESSION_ID")
+        or None
+    )
+    if session is not None:
+        session = _bounded_text(session, "session_id", _MAX_SESSION_ID_CHARS)
+    cwd = _bounded_text(args.get("cwd"), "cwd", _MAX_PATH_CHARS, required=False) or os.getcwd()
+    command = _normalize_worker_command(
+        _bounded_text(args.get("command"), "command", _MAX_COMMAND_CHARS) or ""
+    )
+    label = _bounded_text(args.get("label"), "label", _MAX_LABEL_CHARS) or ""
+    notify_agent = _coerce_bool(args.get("notify_agent"), True)
 
     result = _post_job({
         "node_id": node,
@@ -141,6 +202,7 @@ def _watch_job(args: Dict[str, Any]) -> str:
         "cwd": cwd,
         "session_id": session,
         "notify": True,
+        "notify_agent": notify_agent,
     })
 
     job_id = result.get("job_id", "?")
@@ -150,9 +212,12 @@ def _watch_job(args: Dict[str, Any]) -> str:
         f"Command: {command}\n"
         f"CWD:     {cwd}\n"
         f"Node:    {node}\n"
+        f"Session: {session or '(none)'}\n"
+        f"Agent follow-up: {'yes' if notify_agent else 'no'}\n"
         f"\n"
         f"The worker will spawn it now and capture its output.\n"
-        f"You (and the user) will be notified via Telegram when it finishes."
+        f"You can watch it in System > Jobs. When it finishes, the result is posted "
+        f"to the session chat; agent follow-up runs when enabled and a session is available."
     )
 
 # ---------------------------------------------------------------------------
