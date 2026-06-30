@@ -266,6 +266,7 @@ export interface RawTurnMetrics {
   cache_creation_tokens?: number | null;
   reasoning_tokens?: number | null;
   context_tokens?: number | null;
+  uncached_input_tokens?: number | null;
   // Context-window accounting (Feature #35 — context usage). These are token
   // COUNTS, not a percentage: the backend has no per-model window size to divide
   // by, so the UI shows the count. A true % needs a model-window table later.
@@ -273,6 +274,21 @@ export interface RawTurnMetrics {
   turn_entry_context_tokens?: number | null;
   turn_exit_context_tokens?: number | null;
   intra_turn_context_growth?: number | null;
+  context_window_tokens?: number | null;
+  context_used_ratio?: number | null;
+  context_remaining_tokens?: number | null;
+  total_token_work?: number | null;
+  aggregate_input_tokens?: number | null;
+  aggregate_output_tokens?: number | null;
+  aggregate_cache_read_tokens?: number | null;
+  aggregate_reasoning_tokens?: number | null;
+  session_cumulative_input_tokens?: number | null;
+  session_cumulative_output_tokens?: number | null;
+  session_cumulative_cache_read_tokens?: number | null;
+  session_cumulative_reasoning_tokens?: number | null;
+  session_cumulative_total_tokens?: number | null;
+  rate_limit_primary_used_percent?: number | null;
+  rate_limit_secondary_used_percent?: number | null;
   // Per-turn aggregates.
   tool_call_count?: number | null;
   subagent_count?: number | null;

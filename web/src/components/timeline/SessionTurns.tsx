@@ -1,40 +1,29 @@
-/**
- * LLM turn observability (Feature #37) + context-usage display (Feature #35).
- *
- * Surfaces the telemetry the backend already exposes at GET /api/turns — one row
- * per agent turn from the llm_turns projection — inside the Session "Info" tab.
- * Each turn shows its status, model, timing and headline context-token count;
- * expanding it reveals the full token accounting the projection computes.
- *
- * On #35: the backend reports context-token COUNTS, not a percentage — there is
- * no per-model context-window size to divide by — so we show the count
- * ("ctx 48.2k"), not a fabricated "%". A true percentage needs a model-window
- * table added backend-side later; until then a count is the honest signal.
- */
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Activity } from "lucide-react";
 import type { RawTurn, RawTurnMetrics } from "../../transport/rawApi";
 import { relAgeFrom } from "../../lib/time";
 import { cn } from "../../lib/cn";
 
-/** Compact a token count: 48217 → "48.2k", 980 → "980", null → "—". */
 export function compactTokens(n: number | null | undefined): string {
-  if (n == null) return "—";
+  if (n == null) return "-";
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-/** Turn wall time from started/ended ISO stamps → "1.4s" / "2m 03s" / "—". */
+function compactPercent(n: number | null | undefined): string {
+  if (n == null) return "-";
+  return `${(n * 100).toFixed(n < 0.1 ? 1 : 0)}%`;
+}
+
 export function turnDuration(turn: RawTurn): string {
-  // Prefer the projection's measured wall time; fall back to the stamps.
   const ms =
     typeof turn.metrics.wall_time_ms === "number"
       ? turn.metrics.wall_time_ms
       : turn.started_at && turn.ended_at
         ? new Date(turn.ended_at).getTime() - new Date(turn.started_at).getTime()
         : null;
-  if (ms == null || Number.isNaN(ms) || ms < 0) return "—";
+  if (ms == null || Number.isNaN(ms) || ms < 0) return "-";
   if (ms < 1000) return `${ms}ms`;
   const sec = ms / 1000;
   if (sec < 60) return `${sec.toFixed(1)}s`;
@@ -43,11 +32,6 @@ export function turnDuration(turn: RawTurn): string {
   return `${m}m ${String(s).padStart(2, "0")}s`;
 }
 
-// Turn `final_status` vocabulary, from src/core/telemetry_projection.py: the turn
-// starts "running" and is set from the turn-completed event's status attr —
-// observed as "success" / "failed", with "unknown" as the fallback. (NOT
-// "completed" — that string never appears; an earlier guess that left successful
-// turns rendering in default grey.)
 const STATUS_STYLES: Record<string, string> = {
   success: "text-emerald-400",
   running: "text-accent",
@@ -59,15 +43,22 @@ function statusClass(status: string): string {
   return STATUS_STYLES[status] ?? "text-ink-soft";
 }
 
-/** The "context usage" headline for #35 — the largest context-token signal we
- * have for the turn, preferring the peak, then the turn-exit, then the raw count. */
 export function contextTokens(m: RawTurnMetrics): number | null {
   return (
-    m.peak_context_tokens ??
     m.turn_exit_context_tokens ??
+    m.peak_context_tokens ??
     m.context_tokens ??
     null
   );
+}
+
+function contextLabel(m: RawTurnMetrics): string {
+  const ctx = contextTokens(m);
+  if (ctx == null) return "ctx -";
+  if (m.context_window_tokens != null) {
+    return `ctx ${compactTokens(ctx)}/${compactTokens(m.context_window_tokens)}`;
+  }
+  return `ctx ${compactTokens(ctx)}`;
 }
 
 function MetricRow({ label, value }: { label: string; value: string }) {
@@ -79,11 +70,55 @@ function MetricRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function latestSessionMetrics(turns: RawTurn[]): RawTurnMetrics | null {
+  let latest: RawTurn | null = null;
+  for (const turn of turns) {
+    const m = turn.metrics;
+    if (
+      m.session_cumulative_total_tokens != null ||
+      m.session_cumulative_input_tokens != null ||
+      m.rate_limit_primary_used_percent != null
+    ) {
+      if (
+        latest == null ||
+        String(turn.ended_at ?? turn.started_at ?? "") >
+          String(latest.ended_at ?? latest.started_at ?? "")
+      ) {
+        latest = turn;
+      }
+    }
+  }
+  return latest?.metrics ?? null;
+}
+
+function SessionUsageSummary({ turns }: { turns: RawTurn[] }) {
+  const m = latestSessionMetrics(turns);
+  if (!m) return null;
+  return (
+    <div className="card-elev mb-3 overflow-hidden rounded-xl divide-y divide-hairline">
+      <MetricRow
+        label="Session cumulative"
+        value={compactTokens(
+          m.session_cumulative_total_tokens ?? m.session_cumulative_input_tokens,
+        )}
+      />
+      <MetricRow label="Cumulative input" value={compactTokens(m.session_cumulative_input_tokens)} />
+      <MetricRow label="Cumulative cache read" value={compactTokens(m.session_cumulative_cache_read_tokens)} />
+      {m.rate_limit_primary_used_percent != null && (
+        <MetricRow label="Primary limit" value={`${m.rate_limit_primary_used_percent}%`} />
+      )}
+      {m.rate_limit_secondary_used_percent != null && (
+        <MetricRow label="Secondary limit" value={`${m.rate_limit_secondary_used_percent}%`} />
+      )}
+    </div>
+  );
+}
+
 function TurnCard({ turn }: { turn: RawTurn }) {
   const [open, setOpen] = useState(false);
   const m = turn.metrics;
-  const model = turn.observed_models?.[0] ?? turn.requested_model ?? turn.backend ?? "—";
-  const ctx = contextTokens(m);
+  const model = turn.observed_models?.[0] ?? turn.requested_model ?? turn.backend ?? "-";
+  const turnWork = m.total_token_work ?? m.input_tokens ?? null;
 
   return (
     <div className="overflow-hidden">
@@ -103,8 +138,7 @@ function TurnCard({ turn }: { turn: RawTurn }) {
         </span>
         <span className="truncate font-mono text-[11px] text-ink-soft">{model}</span>
         <span className="ml-auto shrink-0 font-mono text-[11px] text-ink-muted">
-          {/* Context-token count (#35) — a count, deliberately not a % */}
-          ctx {compactTokens(ctx)}
+          {contextLabel(m)}
         </span>
       </button>
 
@@ -114,12 +148,25 @@ function TurnCard({ turn }: { turn: RawTurn }) {
           {turn.ended_at && (
             <MetricRow label="Ended" value={relAgeFrom(turn.ended_at)} />
           )}
-          <MetricRow label="Context tokens" value={compactTokens(ctx)} />
-          <MetricRow label="Input" value={compactTokens(m.input_tokens)} />
+          <MetricRow label="Context used" value={contextLabel(m)} />
+          {m.context_used_ratio != null && (
+            <MetricRow label="Context filled" value={compactPercent(m.context_used_ratio)} />
+          )}
+          {m.context_remaining_tokens != null && (
+            <MetricRow label="Context free" value={compactTokens(m.context_remaining_tokens)} />
+          )}
+          <MetricRow label="Turn token work" value={compactTokens(turnWork)} />
+          <MetricRow label="Turn input" value={compactTokens(m.input_tokens)} />
+          {m.uncached_input_tokens != null && (
+            <MetricRow label="Uncached input" value={compactTokens(m.uncached_input_tokens)} />
+          )}
           <MetricRow label="Output" value={compactTokens(m.output_tokens)} />
           <MetricRow label="Cache read" value={compactTokens(m.cache_read_tokens)} />
           {m.reasoning_tokens != null && (
             <MetricRow label="Reasoning" value={compactTokens(m.reasoning_tokens)} />
+          )}
+          {m.aggregate_input_tokens != null && m.metric_quality !== "request" && (
+            <MetricRow label="Provider aggregate" value={compactTokens(m.aggregate_input_tokens)} />
           )}
           {m.tool_call_count != null && (
             <MetricRow label="Tool calls" value={String(m.tool_call_count)} />
@@ -147,9 +194,6 @@ export function SessionTurns({
   turns: RawTurn[];
   loading: boolean;
 }) {
-  // Telemetry is best-effort: an empty list is a normal state (a session that
-  // hasn't run a turn, or a backend that doesn't emit turn telemetry). Say so
-  // plainly rather than rendering an empty card.
   if (!loading && turns.length === 0) {
     return (
       <div>
@@ -171,6 +215,7 @@ export function SessionTurns({
           <span className="ml-1 text-ink-soft">({turns.length})</span>
         )}
       </p>
+      <SessionUsageSummary turns={turns} />
       <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
         {turns.map((t) => (
           <TurnCard key={t.turn_id} turn={t} />

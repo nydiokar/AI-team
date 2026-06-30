@@ -427,6 +427,79 @@ def test_aggregate_usage_is_reported_as_unattributed_work():
     assert metrics["tool_loop_rounds"] is None
 
 
+def test_request_usage_takes_precedence_over_codex_session_cumulative_usage():
+    start = utc_now()
+    events = [
+        _event("turn.started", at=start),
+        _event(
+            "model.request.usage",
+            at=start + timedelta(seconds=1),
+            invocation_id="inv_codex",
+            attributes={
+                "input_tokens": 1000,
+                "output_tokens": 20,
+                "cache_read_tokens": 800,
+                "reasoning_tokens": 5,
+                "input_token_semantics": "includes_cache",
+                "usage_granularity": "invocation_total",
+                "usage_source": "turn.completed.usage",
+                "usage_coverage": "aggregate_only",
+                "work_category": "primary",
+            },
+        ),
+        _event(
+            "model.request.usage",
+            at=start + timedelta(seconds=2),
+            invocation_id="inv_codex",
+            model_request_id="mr_codex_1",
+            attributes={
+                "sequence": 1,
+                "input_tokens": 100,
+                "output_tokens": 3,
+                "cache_read_tokens": 80,
+                "reasoning_tokens": 1,
+                "context_window_tokens": 500,
+                "input_token_semantics": "includes_cache",
+                "usage_granularity": "request",
+                "usage_source": "codex.rollout.token_count.last_token_usage",
+                "usage_coverage": "complete",
+                "work_category": "primary",
+            },
+        ),
+        _event(
+            "model.session_usage",
+            at=start + timedelta(seconds=2),
+            invocation_id="inv_codex",
+            attributes={
+                "input_tokens": 1000,
+                "output_tokens": 20,
+                "cache_read_tokens": 800,
+                "reasoning_tokens": 5,
+                "total_tokens": 1020,
+                "context_window_tokens": 500,
+                "rate_limit_primary_used_percent": 12.0,
+            },
+        ),
+        _event(
+            "turn.completed",
+            at=start + timedelta(seconds=3),
+            invocation_id="inv_codex",
+            attributes={"status": "success", "timeout_status": "none", "exit_code": 0},
+        ),
+    ]
+
+    metrics = project_turn(events)["turn"]["metrics"]
+
+    assert metrics["input_tokens"] == 100
+    assert metrics["total_token_work"] == 104
+    assert metrics["aggregate_input_tokens"] == 1000
+    assert metrics["session_cumulative_input_tokens"] == 1000
+    assert metrics["context_window_tokens"] == 500
+    assert metrics["context_used_ratio"] == 0.2
+    assert metrics["uncached_input_tokens"] == 20
+    assert metrics["rate_limit_primary_used_percent"] == 12.0
+
+
 def test_duplicate_invocation_exposes_raw_and_deduplicated_work():
     start = utc_now()
     events = [

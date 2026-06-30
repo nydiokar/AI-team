@@ -131,6 +131,7 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
     tool_ids: Dict[str, set[str]] = {}
     tool_events: List[Dict[str, Any]] = []
     subagent_ids: Dict[str, set[str]] = {}
+    session_usage_events: List[Dict[str, Any]] = []
     turn_flags: List[str] = []
     timeout_kinds: List[str] = []
 
@@ -333,6 +334,7 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
                     "cache_creation_tokens": None,
                     "reasoning_tokens": None,
                     "context_tokens": None,
+                    "context_window_tokens": None,
                     "input_token_semantics": attrs.get("input_token_semantics")
                     or "unknown",
                     "usage_granularity": granularity,
@@ -356,6 +358,7 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
                     "cache_creation_tokens",
                     "reasoning_tokens",
                     "context_tokens",
+                    "context_window_tokens",
                 ):
                     request[field] = _non_negative_int(attrs.get(field), flags, field)
                 request["input_token_semantics"] = attrs.get(
@@ -377,6 +380,15 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
             elif name == "model.request.failed":
                 request["ended_at"] = event_time
                 request["status"] = "failed"
+
+        if name == "model.session_usage" and invocation_id:
+            session_usage_events.append(
+                {
+                    "event_time": event_time,
+                    "invocation_id": invocation_id,
+                    "attributes": attrs,
+                }
+            )
 
         if name == "process.timeout_detected":
             timeout_kinds.append(str(attrs.get("timeout_kind") or "backend_timeout"))
@@ -406,7 +418,8 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
         for row in model_requests.values()
         if row["usage_granularity"] == "request" and not row["is_duplicate"]
     ]
-    usage_rows = [row for row in model_requests.values() if not row["is_duplicate"]]
+    all_usage_rows = [row for row in model_requests.values() if not row["is_duplicate"]]
+    usage_rows = request_rows if request_rows else all_usage_rows
     for invocation_id, invocation in invocations.items():
         _duration_ms(
             invocation.get("started_at"),
@@ -436,6 +449,8 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
         subagent_ids=subagent_ids,
         timeout_kinds=timeout_kinds,
         coverage=turn["coverage"],
+        all_usage_rows=all_usage_rows,
+        session_usage_events=session_usage_events,
         event_count=len(ordered),
         flags=turn_flags,
     )
@@ -471,6 +486,7 @@ def _usage_totals(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "cache_creation_tokens",
         "reasoning_tokens",
         "context_tokens",
+        "context_window_tokens",
     )
     return {
         field: sum(row[field] or 0 for row in rows)
@@ -491,10 +507,16 @@ def _turn_metrics(
     subagent_ids: Dict[str, set[str]],
     timeout_kinds: List[str],
     coverage: Dict[str, Dict[str, Any]],
+    all_usage_rows: List[Dict[str, Any]],
+    session_usage_events: List[Dict[str, Any]],
     event_count: int,
     flags: List[str],
 ) -> Dict[str, Any]:
     usage = _usage_totals(usage_rows)
+    aggregate_rows = [
+        row for row in all_usage_rows if row["usage_granularity"] != "request"
+    ]
+    aggregate_usage = _usage_totals(aggregate_rows)
     request_work: List[int] = []
     all_work_known = bool(usage_rows)
     for row in usage_rows:
@@ -536,6 +558,11 @@ def _turn_metrics(
     request_contexts = [
         row["context_tokens"] for row in request_rows if row["context_tokens"] is not None
     ]
+    request_windows = [
+        row["context_window_tokens"]
+        for row in request_rows
+        if row.get("context_window_tokens") is not None
+    ]
     ordered_requests = sorted(
         request_rows, key=lambda row: (row["started_at"] or "", row["sequence"])
     )
@@ -544,7 +571,10 @@ def _turn_metrics(
     final_requests = [
         row for row in ordered_requests if row["invocation_id"] == final_invocation
     ]
+    if not final_requests:
+        final_requests = ordered_requests
     exit_context = final_requests[-1]["context_tokens"] if final_requests else None
+    context_window = request_windows[-1] if request_windows else usage.get("context_window_tokens")
 
     cache_ratio = None
     context_total = usage.get("context_tokens")
@@ -672,14 +702,13 @@ def _turn_metrics(
             + (row["output_tokens"] or 0)
             + (row["reasoning_tokens"] or 0)
         )
-        for row in usage_rows
-        if row["usage_granularity"] != "request"
-        and any(
+        for row in aggregate_rows
+        if any(
             row[field] is not None
             for field in ("context_tokens", "output_tokens", "reasoning_tokens")
         )
     )
-    if not any(row["usage_granularity"] != "request" for row in usage_rows):
+    if not aggregate_rows:
         unattributed_token_count = 0 if usage_rows else None
 
     token_work_by_category: Dict[str, int] = {}
@@ -697,6 +726,52 @@ def _turn_metrics(
         )
     if not category_complete and not token_work_by_category:
         token_work_by_category = {}
+
+    uncached_input_tokens = None
+    if usage.get("input_tokens") is not None:
+        uncached_input_tokens = max(
+            0,
+            usage["input_tokens"]
+            - (usage.get("cache_read_tokens") or 0)
+            - (usage.get("cache_creation_tokens") or 0),
+        )
+
+    latest_session_usage: Dict[str, Any] = {}
+    if session_usage_events:
+        latest_session_usage = max(
+            session_usage_events,
+            key=lambda row: (row.get("event_time") or "", row.get("invocation_id") or ""),
+        ).get("attributes") or {}
+
+    def _session_int(key: str) -> Optional[int]:
+        return _non_negative_int(latest_session_usage.get(key), flags, key)
+
+    session_cumulative_input = _session_int("input_tokens")
+    session_cumulative_cache = _session_int("cache_read_tokens")
+    session_cumulative_output = _session_int("output_tokens")
+    session_cumulative_reasoning = _session_int("reasoning_tokens")
+    session_cumulative_total = _session_int("total_tokens")
+    if session_cumulative_total is None and session_cumulative_input is not None:
+        session_cumulative_total = (
+            session_cumulative_input
+            + (session_cumulative_output or 0)
+            + (session_cumulative_reasoning or 0)
+        )
+    if latest_session_usage.get("context_window_tokens") is not None:
+        context_window = (
+            _non_negative_int(
+                latest_session_usage.get("context_window_tokens"),
+                flags,
+                "context_window_tokens",
+            )
+            or context_window
+        )
+
+    context_used_ratio = (
+        round(exit_context / context_window, 6)
+        if exit_context is not None and context_window
+        else None
+    )
 
     supported_coverage = [
         details
@@ -716,7 +791,44 @@ def _turn_metrics(
 
     return {
         **usage,
+        "uncached_input_tokens": uncached_input_tokens,
+        "aggregate_input_tokens": aggregate_usage.get("input_tokens"),
+        "aggregate_output_tokens": aggregate_usage.get("output_tokens"),
+        "aggregate_cache_read_tokens": aggregate_usage.get("cache_read_tokens"),
+        "aggregate_reasoning_tokens": aggregate_usage.get("reasoning_tokens"),
+        "session_cumulative_input_tokens": session_cumulative_input,
+        "session_cumulative_output_tokens": session_cumulative_output,
+        "session_cumulative_cache_read_tokens": session_cumulative_cache,
+        "session_cumulative_reasoning_tokens": session_cumulative_reasoning,
+        "session_cumulative_total_tokens": session_cumulative_total,
+        "rate_limit_primary_used_percent": latest_session_usage.get(
+            "rate_limit_primary_used_percent"
+        ),
+        "rate_limit_primary_window_minutes": latest_session_usage.get(
+            "rate_limit_primary_window_minutes"
+        ),
+        "rate_limit_primary_resets_at": latest_session_usage.get(
+            "rate_limit_primary_resets_at"
+        ),
+        "rate_limit_secondary_used_percent": latest_session_usage.get(
+            "rate_limit_secondary_used_percent"
+        ),
+        "rate_limit_secondary_window_minutes": latest_session_usage.get(
+            "rate_limit_secondary_window_minutes"
+        ),
+        "rate_limit_secondary_resets_at": latest_session_usage.get(
+            "rate_limit_secondary_resets_at"
+        ),
+        "rate_limit_plan_type": latest_session_usage.get("rate_limit_plan_type"),
+        "rate_limit_reached_type": latest_session_usage.get("rate_limit_reached_type"),
         "peak_context_tokens": max(request_contexts) if request_contexts else None,
+        "context_window_tokens": context_window,
+        "context_used_ratio": context_used_ratio,
+        "context_remaining_tokens": (
+            max(0, context_window - exit_context)
+            if context_window is not None and exit_context is not None
+            else None
+        ),
         "total_token_work": total_token_work,
         "raw_total_token_work": total_token_work,
         "deduplicated_total_token_work": deduplicated_total_token_work,
