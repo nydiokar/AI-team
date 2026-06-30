@@ -13,7 +13,7 @@ import textwrap
 import threading
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -698,5 +698,23 @@ class TestDriverStatePersistenceIntegration:
         assert row is not None
         assert row["driver_status"] == "lost"
 
+class TestSDKUsageSerialization:
+    def test_plain_usage_dict_accepts_dataclass_usage(self):
+        from src.backends.claude_driver import _plain_usage_dict
 
+        @dataclass
+        class Usage:
+            input_tokens: int
+            cache_creation_input_tokens: int
+            cache_read_input_tokens: int
+            output_tokens: int
+
+        usage = Usage(1, 2, 3, 4)
+
+        assert _plain_usage_dict(usage) == {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "output_tokens": 4,
+        }
 
