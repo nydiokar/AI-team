@@ -39,7 +39,7 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -80,6 +80,24 @@ class CacheStats:
             self.cache_creation > _CACHE_UNHEALTHY_CREATION_THRESHOLD
             and self.hit_ratio < _CACHE_UNHEALTHY_HIT_RATIO_THRESHOLD
         )
+
+
+def _plain_usage_dict(usage: Any) -> Optional[Dict[str, Any]]:
+    """Return SDK usage as a plain dict, across SDK versions."""
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage
+    if hasattr(usage, "model_dump"):
+        data = usage.model_dump()
+        return data if isinstance(data, dict) else None
+    if is_dataclass(usage):
+        data = asdict(usage)
+        return data if isinstance(data, dict) else None
+    if hasattr(usage, "__dict__"):
+        data = vars(usage)
+        return data if isinstance(data, dict) else None
+    return None
 
 
 def parse_cache_stats_from_ndjson(raw_stdout: str) -> Optional[CacheStats]:
@@ -280,8 +298,8 @@ class _SDKSession:
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         parts.append(block.text)
-                usage = getattr(msg, "usage", None)
-                if isinstance(usage, dict):
+                usage = _plain_usage_dict(getattr(msg, "usage", None))
+                if usage is not None:
                     ndjson_lines.append(json.dumps({"type": "assistant", "message": {"usage": usage}}))
                 sid = getattr(msg, "session_id", None) or ""
                 if sid:
@@ -292,8 +310,8 @@ class _SDKSession:
                 if sid:
                     backend_session_id = sid
                     self.backend_session_id = sid
-                usage = getattr(msg, "usage", None)
-                if isinstance(usage, dict):
+                usage = _plain_usage_dict(getattr(msg, "usage", None))
+                if usage is not None:
                     ndjson_lines.append(json.dumps({"type": "result", "usage": usage}))
 
         return "".join(parts).strip(), backend_session_id, "\n".join(ndjson_lines)

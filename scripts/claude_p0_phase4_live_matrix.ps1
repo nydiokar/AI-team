@@ -7,9 +7,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$ProjectRoot = Get-Location
+$PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) { $PythonExe = "python" }
+
 if (-not $OutDir) {
   $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-  $OutDir = Join-Path (Get-Location) ".claude-p0-live-$stamp"
+  $OutDir = Join-Path $ProjectRoot ".claude-p0-live-$stamp"
 }
 if (-not $Repo) {
   $Repo = Join-Path $OutDir "safe-repo"
@@ -60,12 +64,31 @@ function Invoke-SdkMatrix {
   @"
 import asyncio
 import json
+import os
+from dataclasses import asdict, is_dataclass
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, TextBlock
 
 TURNS = ["say exactly: turn one", "say exactly: turn two", "say exactly: turn three"]
 
+def serialise(value):
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): serialise(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [serialise(v) for v in value]
+    if hasattr(value, "model_dump"):
+        return serialise(value.model_dump())
+    if is_dataclass(value):
+        return serialise(asdict(value))
+    if hasattr(value, "__dict__"):
+        return serialise(vars(value))
+    return str(value)
+
 async def main() -> None:
-    client = ClaudeSDKClient(options=ClaudeAgentOptions(permission_mode="bypassPermissions"))
+    client = ClaudeSDKClient(options=ClaudeAgentOptions(permission_mode="bypassPermissions", cwd=os.environ.get("CLAUDE_P0_REPO") or None))
     await client.connect()
     try:
         for index, prompt in enumerate(TURNS, start=1):
@@ -74,7 +97,7 @@ async def main() -> None:
                 row = {"turn": index, "message_type": type(msg).__name__}
                 usage = getattr(msg, "usage", None)
                 if usage:
-                    row["usage"] = usage
+                    row["usage"] = serialise(usage)
                 sid = getattr(msg, "session_id", "")
                 if sid:
                     row["session_id"] = sid
@@ -87,11 +110,13 @@ async def main() -> None:
 asyncio.run(main())
 "@ | Set-Content -Path $sdkScript -Encoding UTF8
   Write-Step "sdk turn matrix"
-  python $sdkScript 1> (Join-Path $OutDir "sdk.ndjson") 2> (Join-Path $OutDir "sdk.stderr.txt")
+  $env:CLAUDE_P0_REPO = $Repo
+  & $PythonExe $sdkScript 1> (Join-Path $OutDir "sdk.ndjson") 2> (Join-Path $OutDir "sdk.stderr.txt")
 }
 
 Write-Step "output: $OutDir"
 Write-Step "repo: $Repo"
+Write-Step "python: $PythonExe"
 Write-Step "matrix: print_with_partial, print_without_partial, sdk"
 Assert-LiveAllowed
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
