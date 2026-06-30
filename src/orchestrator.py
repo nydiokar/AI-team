@@ -3395,6 +3395,7 @@ Generated from user description: {description}
                         # rather than an empty field (T2).
                         raw_stdout=worker_output,
                     )
+                    setattr(result, "usage", r.get("usage"))
                     setattr(result, "backend_name", row.get("backend", "claude"))
                     setattr(
                         result,
@@ -3434,6 +3435,7 @@ Generated from user description: {description}
                         execution_time=0.0,
                         timestamp=datetime.now().isoformat(),
                     )
+                    setattr(result, "usage", r.get("usage") if r else None)
                     setattr(result, "backend_name", row.get("backend", "claude"))
                     return result
 
@@ -3759,10 +3761,11 @@ Generated from user description: {description}
                 reply_text = self._session_reply_text(result).strip()
             else:
                 reply_text = (self._short_failure_reason(result) or "(failed)").strip()
-            usage = None
+            usage = getattr(result, "usage", None)
             try:
-                from src.services.result_text import extract_usage_from_ndjson
-                usage = extract_usage_from_ndjson(getattr(result, "raw_stdout", "") or "")
+                if usage is None:
+                    from src.services.result_text import extract_usage_from_ndjson
+                    usage = extract_usage_from_ndjson(getattr(result, "raw_stdout", "") or "")
             except Exception:
                 usage = None
             # Prompt: task.prompt is the source for runtime tasks, but for some

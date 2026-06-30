@@ -88,7 +88,7 @@ def _register_opencode(script: Path) -> None:
     existing["mcp"]["jobs"] = {
         "type": "local",
         "command": [sys.executable, str(script)],
-        "enabled": True,
+        "enable": True,
     }
     cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     print(f"  [opencode]     {cfg_path}")
