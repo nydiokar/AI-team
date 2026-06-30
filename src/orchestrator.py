@@ -115,6 +115,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._context_loader = None
         # Job completion polling (T3)
         self._last_job_poll = datetime.now().isoformat()
+        self._last_remote_job_poll = datetime.now().isoformat()
+        self._remote_job_poll_started_epoch = time.time()
+        self._processed_terminal_jobs: set[str] = set()
         # Cancellation and runtime tracking
         self._task_cancel_events: Dict[str, asyncio.Event] = {}
         self._running_exec_tasks: Dict[str, asyncio.Task] = {}
@@ -700,6 +703,13 @@ class TaskOrchestrator(ITaskOrchestrator):
 
                 for job in terminal:
                     await self._process_terminal_job(job)
+
+                remote_terminal = self._remote_terminal_jobs_since(self._last_remote_job_poll)
+                if remote_terminal:
+                    self._last_remote_job_poll = datetime.now().isoformat()
+
+                for job in remote_terminal:
+                    await self._process_terminal_job(job)
             except Exception as e:
                 logger.debug("event=job_poller_error err=%s", e)
 
@@ -707,6 +717,81 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await asyncio.wait_for(asyncio.sleep(30), timeout=30)
             except asyncio.TimeoutError:
                 pass
+
+    def _remote_jobs_client(self):
+        """Return a task-server client for CONTROLLER_URL, if this gateway has one."""
+        controller_url = os.environ.get("CONTROLLER_URL", "").strip().rstrip("/")
+        token = config.mesh.worker_token
+        if not controller_url or not token:
+            return None
+        try:
+            from src.control.task_server_client import TaskServerClient
+            return TaskServerClient(controller_url, token, timeout=5)
+        except Exception as e:
+            logger.debug("event=remote_jobs_client_unavailable err=%s", e)
+            return None
+
+    def list_watched_jobs(self, limit: int = 20) -> Dict[str, List[Dict[str, Any]]]:
+        """Return watched jobs visible to this gateway.
+
+        The local Web UI can run on a machine whose MCP/worker points at a
+        remote task server via CONTROLLER_URL. In that topology, local SQLite is
+        empty but the real watched jobs live on the controller. Merge both views
+        by job id so System > Jobs reflects the actual registration target.
+        """
+        running: List[Dict[str, Any]] = []
+        recent: List[Dict[str, Any]] = []
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None:
+                running.extend(db.list_jobs(status="running", limit=limit))
+                recent.extend(db.list_jobs(limit=limit))
+        except Exception as e:
+            logger.debug("event=local_jobs_list_failed err=%s", e)
+
+        client = self._remote_jobs_client()
+        if client is not None:
+            running.extend(client.list_jobs(status="running", limit=limit))
+            recent.extend(client.list_jobs(limit=limit))
+
+        return {
+            "running": self._dedupe_jobs(running, limit),
+            "recent": self._dedupe_jobs(recent, limit),
+        }
+
+    def _dedupe_jobs(self, jobs: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+        seen: set[str] = set()
+        out: List[Dict[str, Any]] = []
+        for job in jobs:
+            job_id = str(job.get("id") or "")
+            if not job_id or job_id in seen:
+                continue
+            seen.add(job_id)
+            out.append(job)
+            if len(out) >= limit:
+                break
+        return out
+
+    def _remote_terminal_jobs_since(self, since: str) -> List[Dict[str, Any]]:
+        client = self._remote_jobs_client()
+        if client is None:
+            return []
+        started_after = float(getattr(self, "_remote_job_poll_started_epoch", 0.0) or 0.0)
+        terminal: List[Dict[str, Any]] = []
+        for job in client.list_jobs(limit=50):
+            job_id = str(job.get("id") or "")
+            if not job_id or job_id in self._processed_terminal_jobs:
+                continue
+            if str(job.get("status") or "") not in {"done", "failed", "lost"}:
+                continue
+            started_epoch = job.get("started_epoch")
+            if isinstance(started_epoch, (int, float)) and started_epoch < started_after:
+                continue
+            if started_epoch is None and str(job.get("updated_at") or "") <= since:
+                continue
+            terminal.append(job)
+        return terminal
 
     def _job_notification_payload(self, job: Dict[str, Any]) -> Dict[str, Any]:
         job_id = str(job.get("id") or "")
@@ -773,6 +858,18 @@ class TaskOrchestrator(ITaskOrchestrator):
                     db.complete_task(job_id, result_dict, None)
                 else:
                     db.fail_task(job_id, reply, result=result_dict)
+                try:
+                    with db._write() as conn:
+                        conn.execute(
+                            """
+                            UPDATE mesh_tasks
+                            SET created_at = ?, completed_at = ?, updated_at = ?
+                            WHERE id = ? AND action = 'watched_job'
+                            """,
+                            (now, now, now, job_id),
+                        )
+                except Exception as e:
+                    logger.debug("event=job_session_turn_time_update_failed job_id=%s err=%s", job_id, e)
                 db.enrich_task(
                     job_id,
                     prompt=prompt,
@@ -818,6 +915,15 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.warning("event=job_session_turn_save_failed job_id=%s err=%s", job_id, e)
 
     async def _process_terminal_job(self, job: Dict[str, Any]) -> None:
+        job_id_key = str(job.get("id") or "")
+        processed = getattr(self, "_processed_terminal_jobs", None)
+        if processed is None:
+            processed = set()
+            self._processed_terminal_jobs = processed
+        if job_id_key in processed:
+            return
+        processed.add(job_id_key)
+
         if not job.get("notify") and not job.get("notify_agent"):
             return
 

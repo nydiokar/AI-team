@@ -321,5 +321,25 @@ def test_jobs_returns_running_and_recent(client, monkeypatch):
     assert "running" in body and "recent" in body
 
 
+def test_jobs_prefers_orchestrator_merged_view(monkeypatch, orch):
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+
+    def _list_watched_jobs(limit=20):
+        return {
+            "running": [{"id": "remote-running", "status": "running"}],
+            "recent": [{"id": "remote-done", "status": "done"}],
+        }
+
+    orch.list_watched_jobs = _list_watched_jobs
+    client = TestClient(control_api.build_control_api(orch))
+
+    r = client.get("/api/jobs", headers=_auth())
+    assert r.status_code == 200
+    assert r.json() == {
+        "running": [{"id": "remote-running", "status": "running"}],
+        "recent": [{"id": "remote-done", "status": "done"}],
+    }
+
+
 def test_jobs_requires_auth(client):
     assert client.get("/api/jobs").status_code in (401, 403)
