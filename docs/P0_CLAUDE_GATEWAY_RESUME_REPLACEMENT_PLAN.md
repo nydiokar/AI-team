@@ -1,5 +1,78 @@
 # P0: Replace Broken Claude Gateway Resume Engine
 
+## Closure Status - 2026-07-01
+
+Status: implementation complete for the SDK default path and the remote usage
+propagation audit gap. Deployed canary verification still must be run after this
+usage patch is installed on the controller/worker pair.
+
+Code state:
+
+```text
+Claude gateway session path selects ClaudeSDKClientDriver through build_driver("auto").
+ClaudePrintResumeDriver remains available as fallback only.
+Worker ExecutionResult payloads now include compact structured usage parsed from raw_stdout.
+Task server accepts payload.usage and persists it to mesh_tasks.usage_json.
+Remote orchestrator completion carries structured result.usage and prefers it over raw_stdout parsing.
+Cache-unhealthy detection remains the implemented guardrail.
+Rollover/handoff remains a deferred safety enhancement, not a P0 blocker.
+```
+
+Owner-supplied deployed SDK evidence for session
+`14c0db02-0486-4e6b-97f6-d483ecc5b9ba`:
+
+```text
+Claude JSONL entrypoint: sdk-py
+Claude JSONL sessionId: 14c0db02-0486-4e6b-97f6-d483ecc5b9ba
+model: claude-sonnet-4-6
+version: 2.1.191
+final provided turn timestamp: 2026-06-30T22:49:59.604Z
+usage: input_tokens=3, cache_creation_input_tokens=27,
+       cache_read_input_tokens=14338, output_tokens=8
+```
+
+That evidence satisfies the critical SDK-path proof for the provided deployed
+turn: the backend entrypoint was `sdk-py`, the logical session id was stable, and
+cache reads dominated cache creation. It also shows why `ccusage` totals are not
+the source of truth for this P0.
+
+Targeted non-live tests added for the usage propagation fix:
+
+```text
+tests/test_usage_propagation.py
+  - worker ExecutionResult usage extraction from Claude raw_stdout
+  - task_server payload.usage persistence into mesh_tasks.usage_json
+  - orchestrator _mesh_complete_task prefers structured result.usage when raw_stdout has no NDJSON
+```
+
+Targeted verification run locally:
+
+```text
+.venv/bin/pytest -q tests/test_usage_propagation.py
+.venv/bin/pytest -q tests/test_claim_reaper.py::test_submit_result_idempotency_endpoint_function \
+  tests/test_claim_reaper.py::test_submit_result_reconciles_failed_telemetry_turn \
+  tests/test_mesh_dispatch_timeout.py::test_claimed_remote_task_is_not_failed_by_pickup_timeout \
+  tests/test_result_text_ndjson.py \
+  tests/test_claude_driver.py
+```
+
+Post-deploy canary still required:
+
+```text
+1. Install this patch on the controller and the worker that runs Claude.
+2. Send only tiny prompts, for example:
+   - say exactly: canary one
+   - say exactly: canary two
+3. Verify Claude JSONL on the worker host:
+   - entrypoint == sdk-py
+   - same sessionId/backend_session_id across turns
+   - cache_read_input_tokens stays high relative to cache_creation_input_tokens
+4. Verify controller DB:
+   - mesh_tasks.usage_json is populated for the remote Claude turns
+5. Restart the worker and verify live SDK sessions become explicit lost/session_lost state,
+   not silent unsafe print/resume continuation.
+```
+
 ## Objective
 
 Fix the Claude gateway execution path so multi-turn Claude Code sessions remain usable from the gateway without detonating quota after a few turns.

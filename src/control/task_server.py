@@ -141,6 +141,7 @@ class ExecutionResultPayload(BaseModel):
     cache_health: str = "unknown"
     cache_unhealthy_count: int = 0
     previous_backend_session_ids: List[str] = Field(default_factory=list)
+    usage: Optional[Dict[str, Any]] = None
     telemetry_invocation_id: str = ""
     error_detail: str = ""  # full traceback when the worker caught an exception (D2)
     inspect: Optional[Dict[str, Any]] = None  # repo inspection op result (action=='inspect')
@@ -520,6 +521,7 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         "cache_health": payload.cache_health,
         "cache_unhealthy_count": payload.cache_unhealthy_count,
         "previous_backend_session_ids": payload.previous_backend_session_ids,
+        "usage": payload.usage,
         "telemetry_invocation_id": payload.telemetry_invocation_id,
         "error_detail": payload.error_detail,
         "inspect": payload.inspect,
@@ -562,6 +564,8 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
             )
         except Exception:
             pass
+    if payload.usage is not None:
+        db.enrich_task(task_id, usage=payload.usage)
     try:
         TelemetryStore(db).reconcile(turn_id=task_id, since_hours=0)
     except Exception:

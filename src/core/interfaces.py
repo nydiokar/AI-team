@@ -54,6 +54,7 @@ class TaskResult:
     raw_stderr: str = ""
     parsed_output: Any = None
     return_code: int = 0
+    usage: Optional[Dict[str, Any]] = None
     # Retry metadata (filled by orchestrator)
     retries: int = 0
     error_class: str = ""

@@ -59,6 +59,14 @@ def _bound_output(text: str) -> str:
     return text[:limit] + marker
 
 
+def _usage_from_execution_result(raw: Any) -> Optional[Dict[str, Any]]:
+    try:
+        from src.services.result_text import extract_usage_from_ndjson
+        return extract_usage_from_ndjson(getattr(raw, "raw_stdout", "") or "")
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Job watcher helpers (T3)
 # ---------------------------------------------------------------------------
@@ -630,6 +638,7 @@ async def _execute_task(
 
         elapsed = time.monotonic() - start
         if isinstance(raw, _ER):
+            usage = _usage_from_execution_result(raw)
             _emit(
                 "invocation.completed",
                 {
@@ -657,6 +666,7 @@ async def _execute_task(
                 "cache_health": getattr(session, "cache_health", "unknown") if action in ("create_session", "resume_session") else "unknown",
                 "cache_unhealthy_count": int(getattr(session, "cache_unhealthy_count", 0) or 0) if action in ("create_session", "resume_session") else 0,
                 "previous_backend_session_ids": list(getattr(session, "previous_backend_session_ids", []) or []) if action in ("create_session", "resume_session") else [],
+                "usage": usage,
                 "telemetry_invocation_id": context.invocation_id if context else "",
             }
         # Fallback for legacy return types
