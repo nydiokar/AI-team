@@ -336,6 +336,30 @@ class TaskOrchestrator(ITaskOrchestrator):
         backend = (backend_name or "claude").strip().lower() or "claude"
         return f"{backend}_{phase}"
 
+    def _mark_local_claude_driver_sessions_lost_after_restart(self, host: str) -> int:
+        """A gateway restart orphaned live SDK clients owned by this process."""
+        marked = 0
+        for session in self.session_store.list_all():
+            if session.backend != "claude":
+                continue
+            if session.driver_type != "sdk" or session.driver_status != "live":
+                continue
+            if session.machine_id not in ("", host):
+                continue
+            if session.status not in (SessionStatus.IDLE, SessionStatus.AWAITING_INPUT):
+                continue
+            session.driver_status = "lost"
+            self.session_store.save(session)
+            marked += 1
+        if marked:
+            logger.warning("event=local_driver_sessions_marked_lost host=%s count=%d", host, marked)
+        backend = self._backends.get("claude")
+        marker = getattr(backend, "mark_sessions_lost", None)
+        if callable(marker):
+            with contextlib.suppress(Exception):
+                marker()
+        return marked
+
     async def _recover_stale_busy_sessions(self) -> None:
         """Recover BUSY sessions after a gateway restart.
 
@@ -349,6 +373,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         host = socket.gethostname()
         active_task_ids = set(self.active_tasks.keys())
+        self._mark_local_claude_driver_sessions_lost_after_restart(host)
 
         db = None
         try:
@@ -2054,8 +2079,19 @@ class TaskOrchestrator(ITaskOrchestrator):
                             # recreated a session (e.g. after server restart) but the
                             # first message failed, we still want the new ID persisted so
                             # the next turn can resume rather than starting fresh again.
-                            if session and raw.backend_session_id:
-                                session.backend_session_id = raw.backend_session_id
+                            if session and (
+                                raw.backend_session_id
+                                or session.cache_health != "unknown"
+                                or session.driver_status
+                            ):
+                                # _observe_cache_health mutates cache_health /
+                                # cache_unhealthy_count in place on this session
+                                # object during the backend call; persist them
+                                # (alongside any new backend_session_id) so the
+                                # cache_unhealthy_count>=2 guard survives across
+                                # turns rather than resetting each time.
+                                if raw.backend_session_id:
+                                    session.backend_session_id = raw.backend_session_id
                                 self.session_store.save(session)
                             result = TaskResult(
                                 task_id=task.id,
@@ -3205,8 +3241,13 @@ Generated from user description: {description}
         if exec_task in done:
             raw = exec_task.result()
             if isinstance(raw, _ER):
-                if session and raw.backend_session_id:
-                    session.backend_session_id = raw.backend_session_id
+                if session and (
+                    raw.backend_session_id
+                    or session.cache_health != "unknown"
+                    or session.driver_status
+                ):
+                    if raw.backend_session_id:
+                        session.backend_session_id = raw.backend_session_id
                     self.session_store.save(session)
                 result = TaskResult(
                     task_id=task.id,
@@ -3320,9 +3361,24 @@ Generated from user description: {description}
                     # Propagate the worker's backend_session_id so the next
                     # turn can resume the remote-side backend session.
                     new_bsid = r.get("backend_session_id", "")
-                    if session and new_bsid:
-                        session.backend_session_id = new_bsid
-                        self.session_store.save(session)
+                    if session:
+                        changed = False
+                        if new_bsid:
+                            session.backend_session_id = new_bsid
+                            changed = True
+                        for attr in ("driver_type", "driver_status", "cache_health"):
+                            value = r.get(attr)
+                            if value is not None:
+                                setattr(session, attr, value)
+                                changed = True
+                        if "cache_unhealthy_count" in r:
+                            session.cache_unhealthy_count = int(r.get("cache_unhealthy_count") or 0)
+                            changed = True
+                        if "previous_backend_session_ids" in r:
+                            session.previous_backend_session_ids = r.get("previous_backend_session_ids") or []
+                            changed = True
+                        if changed:
+                            self.session_store.save(session)
                     worker_output = r.get("output", "")
                     result = TaskResult(
                         task_id=task.id,
@@ -3348,6 +3404,26 @@ Generated from user description: {description}
                     return result
 
                 if status in ("failed", "failed_node_offline"):
+                    result_raw = row.get("result")
+                    try:
+                        r = json.loads(result_raw) if isinstance(result_raw, str) else (result_raw or {})
+                    except Exception:
+                        r = {}
+                    if session and r:
+                        changed = False
+                        for attr in ("driver_type", "driver_status", "cache_health"):
+                            value = r.get(attr)
+                            if value is not None:
+                                setattr(session, attr, value)
+                                changed = True
+                        if "cache_unhealthy_count" in r:
+                            session.cache_unhealthy_count = int(r.get("cache_unhealthy_count") or 0)
+                            changed = True
+                        if "previous_backend_session_ids" in r:
+                            session.previous_backend_session_ids = r.get("previous_backend_session_ids") or []
+                            changed = True
+                        if changed:
+                            self.session_store.save(session)
                     error_msg = row.get("error") or f"Task {status}"
                     result = TaskResult(
                         task_id=task.id,
@@ -3609,6 +3685,11 @@ Generated from user description: {description}
                     "telegram_thread_id": session.telegram_thread_id,
                     "owner_user_id": session.owner_user_id,
                     "last_user_message": session.last_user_message,
+                    "driver_type": session.driver_type,
+                    "driver_status": session.driver_status,
+                    "cache_health": session.cache_health,
+                    "cache_unhealthy_count": session.cache_unhealthy_count,
+                    "previous_backend_session_ids": session.previous_backend_session_ids or [],
                 }
             db.enqueue_task(
                 task_id=task.id,

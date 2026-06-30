@@ -237,36 +237,174 @@ def _extract_text_blocks(blocks: Any) -> str:
 
 
 class ClaudeCodeBackend(CodingBackend):
+    """CodingBackend implementation for the Claude Code CLI.
 
-    def __init__(self):
+    Delegates to a ClaudeDriver (SDK continuous driver by default, print/resume
+    as fallback). The driver choice is made once at construction time and applies
+    to all sessions managed by this backend instance.
+
+    The existing _run/_build_cmd methods are kept for run_oneoff and for the
+    test suite that asserts on _build_cmd output. New multi-turn session calls
+    go through the driver boundary.
+    """
+
+    def __init__(self, driver_type: str = "auto"):
+        from src.backends.claude_driver import build_driver, ClaudePrintResumeDriver
+        self._driver = build_driver(driver_type)
+        # Fallback driver for one-off calls and tests that directly use _build_cmd
+        self._fallback = ClaudePrintResumeDriver()
+        # Legacy process tracking for terminate_active_processes compatibility
         self._exe = shutil.which("claude") or "claude"
         self._session_procs: dict[str, subprocess.Popen] = {}
         self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
 
     def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        session_id = session.backend_session_id or str(uuid.uuid4())
-        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_id=session_id, session_key=session.session_id, model=_resolve_model(session), telemetry_context=telemetry_context)
+        from src.core.test_guard import assert_live_calls_allowed
+        assert_live_calls_allowed("claude")
+        proc_env = self._build_proc_env(session.backend_session_id or str(uuid.uuid4()), telemetry_context)
+        before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
+
+        result = self._driver.start_session(
+            session,
+            session.last_user_message,
+            model=_resolve_model(session),
+            telemetry_context=telemetry_context,
+            proc_env=proc_env,
+        )
+        self._observe_driver_state(session, result)
+        result = self._observe_cache_health(session, result)
+        if session.repo_path:
+            after_snapshot = _snapshot_worktree(session.repo_path)
+            result.file_changes = _compute_turn_changes(session.repo_path, before_snapshot, after_snapshot)
+            result.files_modified = [item["path"] for item in result.file_changes]
+        return result
 
     def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_id=None, session_key=session.session_id, model=_resolve_model(session), telemetry_context=telemetry_context)
+        # Guards are checked BEFORE the live-call gate so they work in test mode too.
+
+        # Guard: if session was lost after worker restart, don't silently resume
+        # via print/resume into stale context.
+        if session.driver_status == "lost" and self._driver.driver_type() != "print_resume":
+            return ExecutionResult(
+                success=False,
+                output="",
+                errors=[
+                    "Claude session was lost after a worker restart and cannot be resumed "
+                    "by the continuous driver. Start a new session or explicitly request "
+                    "fallback resume."
+                ],
+                error_class="session_lost",
+            )
+
+        # Guard: if cache is unhealthy twice, block silent print/resume continuation
+        if (
+            session.cache_health == "unhealthy"
+            and session.cache_unhealthy_count >= 2
+            and self._driver.driver_type() == "print_resume"
+        ):
+            return ExecutionResult(
+                success=False,
+                output="",
+                errors=[
+                    f"Claude session cache is unhealthy ({session.cache_unhealthy_count} times). "
+                    "Context is being fully recreated every turn, burning subscription quota. "
+                    "Start a new session to reset cache health."
+                ],
+                error_class="cache_unhealthy",
+            )
+
+        from src.core.test_guard import assert_live_calls_allowed
+        assert_live_calls_allowed("claude")
+        proc_env = self._build_proc_env(session.backend_session_id, telemetry_context)
+        before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
+
+        result = self._driver.send_turn(
+            session,
+            message,
+            model=_resolve_model(session),
+            telemetry_context=telemetry_context,
+            proc_env=proc_env,
+        )
+        self._observe_driver_state(session, result)
+        result = self._observe_cache_health(session, result)
+        if session.repo_path:
+            after_snapshot = _snapshot_worktree(session.repo_path)
+            result.file_changes = _compute_turn_changes(session.repo_path, before_snapshot, after_snapshot)
+            result.files_modified = [item["path"] for item in result.file_changes]
+        return result
 
     def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         return self._run(cwd, message, resume_id=None, session_id=None, session_key=None, model=None, telemetry_context=telemetry_context)
 
     def cancel(self, session: Session) -> None:
+        self._driver.cancel(session)
+        # Also cancel any legacy procs (compat)
         with self._proc_lock:
             proc = self._session_procs.get(session.session_id)
         if proc is not None:
             terminate_many_popen([proc])
 
     def close(self, session: Session) -> None:
-        pass
+        self._driver.close(session)
+
+    def mark_sessions_lost(self) -> None:
+        """Called on worker restart — all live SDK sessions are orphaned."""
+        from src.backends.claude_driver import ClaudeSDKClientDriver
+        if isinstance(self._driver, ClaudeSDKClientDriver):
+            # Clear the session map; driver_status is updated by the orchestrator
+            for sid in list(self._driver._sessions.keys()):
+                self._driver.mark_lost(sid)
 
     def terminate_active_processes(self) -> None:
+        # For SDK driver, close all live sessions
+        from src.backends.claude_driver import ClaudeSDKClientDriver, ClaudePrintResumeDriver
+        if isinstance(self._driver, ClaudeSDKClientDriver):
+            for sdk_sess in list(self._driver._sessions.values()):
+                sdk_sess.close()
+        elif isinstance(self._driver, ClaudePrintResumeDriver):
+            self._driver.terminate_active_processes()
+        # Legacy procs
         with self._proc_lock:
             procs = list(self._session_procs.values()) + list(self._oneoff_procs)
         terminate_many_popen(procs)
+
+    @staticmethod
+    def _build_proc_env(session_id: Optional[str], telemetry_context: Optional[TelemetryContext]) -> dict:
+        proc_env = ensure_node_on_path()
+        if session_id:
+            proc_env["SESSION_ID"] = session_id
+        proc_env.update(telemetry_subprocess_env(telemetry_context))
+        return proc_env
+
+    @staticmethod
+    def _observe_driver_state(session: Session, result: ExecutionResult) -> None:
+        """Persist the selected driver mode on the Session object after a turn."""
+        if session.driver_type == "sdk":
+            session.driver_status = "live" if result.success else (session.driver_status or "")
+        elif session.driver_type == "print_resume":
+            session.driver_status = "closed"
+
+    @staticmethod
+    def _observe_cache_health(session: Session, result: ExecutionResult) -> ExecutionResult:
+        """Parse cache stats from result and mutate session health fields in-place."""
+        from src.backends.claude_driver import parse_cache_stats_from_ndjson, CacheStats
+        stats = parse_cache_stats_from_ndjson(result.raw_stdout)
+        if stats is None:
+            return result
+        if stats.is_unhealthy:
+            session.cache_health = "unhealthy"
+            session.cache_unhealthy_count += 1
+            logger.warning(
+                "Cache unhealthy for session %s: creation=%d hit_ratio=%.2f (count=%d)",
+                session.session_id,
+                stats.cache_creation,
+                stats.hit_ratio,
+                session.cache_unhealthy_count,
+            )
+        else:
+            session.cache_health = "healthy"
+        return result
 
     def _run(
         self,
@@ -452,7 +590,8 @@ class ClaudeCodeBackend(CodingBackend):
                 "--verbose",
                 "--output-format",
                 "stream-json",
-                "--include-partial-messages",
+                # --include-partial-messages omitted: duplicated usage rows per
+                # assistant message and inflated telemetry (P0 finding).
                 "--dangerously-skip-permissions",
                 "-p",
             ]
@@ -462,7 +601,6 @@ class ClaudeCodeBackend(CodingBackend):
                 "--verbose",
                 "--output-format",
                 "stream-json",
-                "--include-partial-messages",
                 "--dangerously-skip-permissions",
                 "-p",
             ]

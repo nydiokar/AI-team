@@ -121,6 +121,12 @@ class NodeRegistry:
                     "event=orphaned_claims_released node_id=%s old_incarnation=%s new_incarnation=%s count=%d task_ids=%s",
                     info.node_id, old_incarnation, new_incarnation, len(released), released,
                 )
+            lost_count = self._db_mark_driver_sessions_lost(info.node_id)
+            if lost_count:
+                logger.warning(
+                    "event=driver_sessions_marked_lost node_id=%s old_incarnation=%s new_incarnation=%s count=%d",
+                    info.node_id, old_incarnation, new_incarnation, lost_count,
+                )
         logger.info("event=node_registered node_id=%s ip=%s", info.node_id, info.tailscale_ip)
 
     def deregister(self, node_id: str) -> None:
@@ -322,6 +328,16 @@ class NodeRegistry:
                 db.mark_node_offline(node_id)
         except Exception as e:
             logger.debug("event=db_mark_offline_err node_id=%s err=%s", node_id, e)
+
+    def _db_mark_driver_sessions_lost(self, node_id: str) -> int:
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None:
+                return db.mark_driver_sessions_lost_for_node(node_id)
+        except Exception:
+            logger.debug("event=node_registry_mark_driver_sessions_lost_failed node_id=%s", node_id, exc_info=True)
+        return 0
 
     def _db_release_node_claims(self, node_id: str) -> list:
         try:

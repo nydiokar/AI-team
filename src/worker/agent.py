@@ -416,7 +416,7 @@ def _make_session_from_payload(payload: Dict[str, Any]) -> Any:
         model=session_dict.get("model") or None,
     )
     # Copy optional fields if present
-    for attr in ("telegram_chat_id", "telegram_thread_id", "owner_user_id", "last_user_message"):
+    for attr in ("telegram_chat_id", "telegram_thread_id", "owner_user_id", "last_user_message", "driver_type", "driver_status", "cache_health", "cache_unhealthy_count", "previous_backend_session_ids"):
         if attr in session_dict:
             setattr(session, attr, session_dict[attr])
     return session
@@ -652,6 +652,11 @@ async def _execute_task(
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "return_code": getattr(raw, "return_code", 0),
                 "backend_session_id": raw.backend_session_id or "",
+                "driver_type": getattr(session, "driver_type", "") if action in ("create_session", "resume_session") else "",
+                "driver_status": getattr(session, "driver_status", "") if action in ("create_session", "resume_session") else "",
+                "cache_health": getattr(session, "cache_health", "unknown") if action in ("create_session", "resume_session") else "unknown",
+                "cache_unhealthy_count": int(getattr(session, "cache_unhealthy_count", 0) or 0) if action in ("create_session", "resume_session") else 0,
+                "previous_backend_session_ids": list(getattr(session, "previous_backend_session_ids", []) or []) if action in ("create_session", "resume_session") else [],
                 "telemetry_invocation_id": context.invocation_id if context else "",
             }
         # Fallback for legacy return types
