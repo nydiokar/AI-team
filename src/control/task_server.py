@@ -136,6 +136,11 @@ class ExecutionResultPayload(BaseModel):
     return_code: int = 0
     artifact_path: Optional[str] = None
     backend_session_id: str = ""  # worker echoes back the native session ID for affinity continuity
+    driver_type: str = ""
+    driver_status: str = ""
+    cache_health: str = "unknown"
+    cache_unhealthy_count: int = 0
+    previous_backend_session_ids: List[str] = Field(default_factory=list)
     telemetry_invocation_id: str = ""
     error_detail: str = ""  # full traceback when the worker caught an exception (D2)
     inspect: Optional[Dict[str, Any]] = None  # repo inspection op result (action=='inspect')
@@ -510,6 +515,11 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         "timestamp": payload.timestamp,
         "return_code": payload.return_code,
         "backend_session_id": payload.backend_session_id,
+        "driver_type": payload.driver_type,
+        "driver_status": payload.driver_status,
+        "cache_health": payload.cache_health,
+        "cache_unhealthy_count": payload.cache_unhealthy_count,
+        "previous_backend_session_ids": payload.previous_backend_session_ids,
         "telemetry_invocation_id": payload.telemetry_invocation_id,
         "error_detail": payload.error_detail,
         "inspect": payload.inspect,

@@ -204,6 +204,11 @@ class SessionStore:
                 "channel": (s.origin or SessionOrigin()).channel,
                 "kind": (s.origin or SessionOrigin()).kind,
             },
+            "driver_type": s.driver_type,
+            "driver_status": s.driver_status,
+            "cache_health": s.cache_health,
+            "cache_unhealthy_count": s.cache_unhealthy_count,
+            "previous_backend_session_ids": s.previous_backend_session_ids or [],
         }
 
     @staticmethod
@@ -253,4 +258,9 @@ class SessionStore:
             owner_user_id=d.get("owner_user_id"),
             task_history=_parse_list(d.get("task_history", [])),
             origin=_parse_origin(d.get("origin")),
+            driver_type=d.get("driver_type", "") or "",
+            driver_status=d.get("driver_status", "") or "",
+            cache_health=d.get("cache_health", "unknown") or "unknown",
+            cache_unhealthy_count=int(d.get("cache_unhealthy_count", 0) or 0),
+            previous_backend_session_ids=_parse_list(d.get("previous_backend_session_ids", [])),
         )

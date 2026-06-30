@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 17
+_CURRENT_VERSION = 18
 
 
 # ---------------------------------------------------------------------------
@@ -512,14 +512,18 @@ class MeshDB:
                         last_task_id, last_artifact_path, last_summary,
                         last_user_message, last_result_summary, last_files_modified,
                         telegram_chat_id, telegram_thread_id, owner_user_id, task_history,
-                        origin
+                        origin,
+                        driver_type, driver_status, cache_health, cache_unhealthy_count,
+                        previous_backend_session_ids
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
                         :created_at, :updated_at, :machine_id, :backend_session_id, :model,
                         :last_task_id, :last_artifact_path, :last_summary,
                         :last_user_message, :last_result_summary, :last_files_modified,
                         :telegram_chat_id, :telegram_thread_id, :owner_user_id, :task_history,
-                        :origin
+                        :origin,
+                        :driver_type, :driver_status, :cache_health, :cache_unhealthy_count,
+                        :previous_backend_session_ids
                     )
                     ON CONFLICT(session_id) DO UPDATE SET
                         backend             = excluded.backend,
@@ -539,7 +543,12 @@ class MeshDB:
                         telegram_thread_id  = excluded.telegram_thread_id,
                         owner_user_id       = excluded.owner_user_id,
                         task_history        = excluded.task_history,
-                        origin              = excluded.origin
+                        origin              = excluded.origin,
+                        driver_type                  = excluded.driver_type,
+                        driver_status                = excluded.driver_status,
+                        cache_health                 = excluded.cache_health,
+                        cache_unhealthy_count        = excluded.cache_unhealthy_count,
+                        previous_backend_session_ids = excluded.previous_backend_session_ids
                     """,
                     {
                         "session_id":          session.session_id,
@@ -562,10 +571,36 @@ class MeshDB:
                         "owner_user_id":       session.owner_user_id,
                         "task_history":        json.dumps(session.task_history or []),
                         "origin":              _origin_json(getattr(session, "origin", None)),
+                        "driver_type":           getattr(session, "driver_type", "") or "",
+                        "driver_status":         getattr(session, "driver_status", "") or "",
+                        "cache_health":          getattr(session, "cache_health", "unknown") or "unknown",
+                        "cache_unhealthy_count": int(getattr(session, "cache_unhealthy_count", 0) or 0),
+                        "previous_backend_session_ids": json.dumps(getattr(session, "previous_backend_session_ids", None) or []),
                     },
                 )
         except Exception as e:
             logger.warning("event=db_upsert_session_failed session_id=%s err=%s", session.session_id, e)
+
+    def mark_driver_sessions_lost_for_node(self, node_id: str, *, backend: str = "claude") -> int:
+        """Mark idle live SDK-backed sessions on a restarted worker as lost."""
+        try:
+            with self._write() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE sessions
+                    SET driver_status = 'lost', updated_at = ?
+                    WHERE machine_id = ?
+                      AND backend = ?
+                      AND driver_type = 'sdk'
+                      AND driver_status = 'live'
+                      AND status IN ('idle', 'awaiting_input')
+                    """,
+                    (_now(), node_id, backend),
+                )
+                return int(cur.rowcount or 0)
+        except Exception as e:
+            logger.warning("event=db_mark_driver_sessions_lost_failed node_id=%s err=%s", node_id, e)
+            return 0
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         row = self._conn().execute(
@@ -1691,6 +1726,15 @@ def _get_migrations() -> List[tuple]:
                # the DB is self-sufficient and results/task_*.json can be dropped.
                # reply_text holds the FULL untruncated assistant reply (the chat
                # source); the legacy `result` JSON keeps output[:2000] for back-compat.
+        (18, """
+            ALTER TABLE sessions ADD COLUMN driver_type TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN driver_status TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN cache_health TEXT NOT NULL DEFAULT 'unknown';
+            ALTER TABLE sessions ADD COLUMN cache_unhealthy_count INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE sessions ADD COLUMN previous_backend_session_ids TEXT NOT NULL DEFAULT '[]'
+        """),  # P0 replacement-engine driver state: persisted so the
+               # cache_unhealthy_count>=2 guard and driver_status=lost guard
+               # survive across turns and gateway restarts.
     ]
 
 
