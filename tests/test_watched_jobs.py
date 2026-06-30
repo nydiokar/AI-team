@@ -382,10 +382,87 @@ async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeyp
     assert turns[-1]["instruction"] == "Watched job finished: npm test"
     assert "all tests passed" in turns[-1]["result"]
 
+    from src.control.db import get_db
+    row = get_db().get_task("job_test123")
+    saved = store.get(session.session_id)
+    assert row["completed_at"] == saved.task_history[-1]["timestamp"]
+
 
 def test_pid_alive_with_nonexistent_pid():
     from src.worker.agent import _pid_alive
     assert _pid_alive(999999999) is False
+
+
+def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
+    import src.control.db as db_mod
+    from src.orchestrator import TaskOrchestrator
+
+    class _FakeDB:
+        def list_jobs(self, status=None, limit=20):
+            if status == "running":
+                return [{"id": "local-running", "status": "running"}]
+            return [{"id": "local-done", "status": "done"}]
+
+    class _FakeClient:
+        def list_jobs(self, node_id=None, status=None, session_id=None, limit=20):
+            if status == "running":
+                return [{"id": "remote-running", "status": "running"}]
+            return [
+                {"id": "remote-done", "status": "done"},
+                {"id": "local-done", "status": "done"},
+            ]
+
+    monkeypatch.setattr(db_mod, "get_db", lambda: _FakeDB())
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch._remote_jobs_client = lambda: _FakeClient()
+
+    jobs = orch.list_watched_jobs(limit=20)
+
+    assert jobs["running"] == [
+        {"id": "local-running", "status": "running"},
+        {"id": "remote-running", "status": "running"},
+    ]
+    assert jobs["recent"] == [
+        {"id": "local-done", "status": "done"},
+        {"id": "remote-done", "status": "done"},
+    ]
+
+
+def test_orchestrator_filters_remote_terminal_jobs_once():
+    from src.orchestrator import TaskOrchestrator
+
+    class _FakeClient:
+        def list_jobs(self, node_id=None, status=None, session_id=None, limit=20):
+            return [
+                {
+                    "id": "job_new",
+                    "status": "done",
+                    "updated_at": "2026-06-30T09:00:00",
+                    "started_epoch": 200.0,
+                },
+                {
+                    "id": "job_old",
+                    "status": "done",
+                    "updated_at": "2026-06-30T09:00:00",
+                    "started_epoch": 100.0,
+                },
+                {
+                    "id": "job_running",
+                    "status": "running",
+                    "updated_at": "2026-06-30T12:00:00",
+                    "started_epoch": 300.0,
+                },
+            ]
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch._processed_terminal_jobs = {"job_seen"}
+    orch._remote_job_poll_started_epoch = 150.0
+    orch._remote_jobs_client = lambda: _FakeClient()
+
+    jobs = orch._remote_terminal_jobs_since("2026-06-30T12:00:00")
+
+    assert [job["id"] for job in jobs] == ["job_new"]
 
 
 def test_process_identity_for_current_process():

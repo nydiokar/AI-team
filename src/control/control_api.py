@@ -995,6 +995,10 @@ def build_control_api(orchestrator) -> FastAPI:
 
     @app.get("/api/jobs", dependencies=[Depends(_require_auth)])
     def api_jobs(limit: int = Query(20, ge=1, le=50)) -> JSONResponse:
+        list_watched_jobs = getattr(orchestrator, "list_watched_jobs", None)
+        if callable(list_watched_jobs):
+            return JSONResponse(list_watched_jobs(limit=limit))
+
         db = _db()
         if db is None:
             return JSONResponse({"running": [], "recent": []})
