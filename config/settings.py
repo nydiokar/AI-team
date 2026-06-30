@@ -6,9 +6,68 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 
+# Environment variables owned by this process config. When AI_TEAM_ENV_FILE is
+# explicit, that file is authoritative for these keys: commented/deleted keys
+# clear stale supervisor environment values instead of silently reusing them.
+_MANAGED_ENV_KEYS = {
+    "CLAUDE_ALLOWED_ROOT",
+    "CLAUDE_BASE_CWD",
+    "CLAUDE_DEFAULT_MODEL",
+    "CLAUDE_MAX_TURNS",
+    "CLAUDE_SKIP_PERMISSIONS",
+    "CLAUDE_TIMEOUT_SEC",
+    "CODEX_DEFAULT_MODEL",
+    "CONTROL_API_ENABLED",
+    "CONTROL_API_HOST",
+    "DASHBOARD_PORT",
+    "DASHBOARD_TOKEN",
+    "GATEWAY_HEARTBEAT_INTERVAL_SEC",
+    "GATEWAY_INACTIVITY_TIMEOUT_SEC",
+    "GATEWAY_TASK_TIMEOUT_SEC",
+    "GATEWAY_TELEGRAM_ALLOWED_USERS",
+    "GATEWAY_TELEGRAM_BOT_TOKEN",
+    "GATEWAY_TELEGRAM_CHAT_ID",
+    "GATEWAY_UPLOAD_MAX_MB",
+    "GUARDED_WRITE",
+    "MAX_CONCURRENT_TASKS",
+    "MAX_QUEUE_SIZE",
+    "MESH_CLAIM_LEASE_SEC",
+    "MESH_CLAIM_MAX_RUNTIME_SEC",
+    "MESH_DB_PATH",
+    "MESH_EMBEDDED_SERVER",
+    "MESH_ENABLED",
+    "MESH_HEALTH_FAILURE_THRESHOLD",
+    "MESH_HEALTH_WINDOW_SIZE",
+    "MESH_ONEOFF_QUEUE_TIMEOUT_SEC",
+    "MESH_ROUTING_FRESHNESS_WAIT_SEC",
+    "MESH_ROUTING_LIVE_STATE_MAX_AGE_SEC",
+    "MESH_SESSION_RECONCILE_INTERVAL_SEC",
+    "MESH_SHADOW_WRITE",
+    "MESH_TAILSCALE_IP",
+    "MESH_TASK_SERVER_PORT",
+    "OPENCODE_DEFAULT_AGENT",
+    "OPENCODE_DEFAULT_MODEL",
+    "OPENCODE_MODE",
+    "OPENCODE_SERVER_ENABLED",
+    "OPENCODE_TIMEOUT_SEC",
+    "TELEGRAM_MESSAGE_BUFFER_SEC",
+    "TELEGRAM_RATE_LIMIT_REQUESTS",
+    "TELEGRAM_RATE_LIMIT_WINDOW_SEC",
+    "TELEMETRY_DETAILED_EVENTS",
+    "TELEMETRY_ENABLED",
+    "TELEMETRY_EVENT_RETENTION_DAYS",
+    "TELEMETRY_OTLP_ENDPOINT",
+    "TELEMETRY_SPOOL_MAX_BYTES",
+    "TELEMETRY_SUMMARY_RETENTION_DAYS",
+    "TELEMETRY_TASK_SERVER_URL",
+    "TELEMETRY_UPLOAD_BATCH_SIZE",
+    "TELEMETRY_UPLOAD_INTERVAL_MS",
+    "TELEMETRY_UPLOAD_MAX_BYTES",
+    "WORKER_TOKEN",
+}
 # Load environment variables from .env file
 try:
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values, load_dotenv
     # Prefer explicit PM2 env file, then this project root, then CWD.
     configured_env = os.getenv("AI_TEAM_ENV_FILE")
     env_candidates = (
@@ -18,7 +77,11 @@ try:
     )
     for env_path in env_candidates:
         if env_path.exists():
-            load_dotenv(env_path, override=False)
+            if configured_env:
+                configured_values = dotenv_values(env_path)
+                for env_key in _MANAGED_ENV_KEYS - set(configured_values):
+                    os.environ.pop(env_key, None)
+            load_dotenv(env_path, override=bool(configured_env))
             print(f"Loaded environment from: {env_path}")
             break
     else:
@@ -116,6 +179,11 @@ class SystemConfig:
     inactivity_timeout_sec: int = 600  # kill backend process after N seconds of no stdout (10 min default)
     task_heartbeat_interval_sec: int = 300  # send "still working" every 5 min for long tasks
     guarded_write: bool = False
+    # When True, _write_artifacts moves the heavy raw_stdout NDJSON (87% of
+    # artifact bytes) to a gzipped sidecar (results/raw/<id>.ndjson.gz) and drops
+    # it from the JSON. Safe to enable once the DB backfill parity check passes;
+    # the conversation + structured fields then live in mesh_tasks, not the files.
+    slim_artifacts: bool = False
     # Rate limiting and backpressure settings
     max_queue_size: int = 50
     telegram_rate_limit_requests: int = 5

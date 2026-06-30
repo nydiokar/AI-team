@@ -107,13 +107,25 @@ export function useSessionTimeline(
       });
     }
 
-    // 3 — pending approvals (durable, round-trip via the card buttons).
+    // 3 — pending approvals (durable, round-trip via the card buttons). Splice
+    //     each into its chronological slot WITHOUT re-sorting the message stream:
+    //     insert before the first message whose `at` is later than the approval.
     for (const appr of approvals) {
       if (appr.sessionId !== sessionId) continue;
-      items.push({ kind: "approval", at: appr.createdAt, approval: appr });
+      const card: TimelineItem = { kind: "approval", at: appr.createdAt, approval: appr };
+      const idx = items.findIndex((it) => it.at && appr.createdAt && it.at > appr.createdAt);
+      if (idx === -1) items.push(card);
+      else items.splice(idx, 0, card);
     }
 
-    items.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    // NOTE: we deliberately do NOT sort the message stream by `at`. The turns
+    // arrive from the backend already oldest→newest, and each turn's user +
+    // assistant bubble share ONE coarse artifact timestamp — so sorting by `at`
+    // would (a) be a no-op at best and (b) actively scramble order whenever a
+    // newly-sent message's wall-clock `createdAt` disagrees with the artifact's
+    // server timestamp (clock skew / tz), flipping the answer above the question
+    // and collapsing turns. Insertion order IS the chronology. Below we only
+    // *splice in* approvals at their chronological spot, preserving message order.
 
     // 4 — ONE live running indicator, only if the session is actually running
     //     now (honest state from the live snapshot — never a buffered event).

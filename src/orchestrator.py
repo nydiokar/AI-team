@@ -115,6 +115,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._context_loader = None
         # Job completion polling (T3)
         self._last_job_poll = datetime.now().isoformat()
+        self._last_remote_job_poll = datetime.now().isoformat()
+        self._remote_job_poll_started_epoch = time.time()
+        self._processed_terminal_jobs: set[str] = set()
         # Cancellation and runtime tracking
         self._task_cancel_events: Dict[str, asyncio.Event] = {}
         self._running_exec_tasks: Dict[str, asyncio.Task] = {}
@@ -333,6 +336,30 @@ class TaskOrchestrator(ITaskOrchestrator):
         backend = (backend_name or "claude").strip().lower() or "claude"
         return f"{backend}_{phase}"
 
+    def _mark_local_claude_driver_sessions_lost_after_restart(self, host: str) -> int:
+        """A gateway restart orphaned live SDK clients owned by this process."""
+        marked = 0
+        for session in self.session_store.list_all():
+            if session.backend != "claude":
+                continue
+            if session.driver_type != "sdk" or session.driver_status != "live":
+                continue
+            if session.machine_id not in ("", host):
+                continue
+            if session.status not in (SessionStatus.IDLE, SessionStatus.AWAITING_INPUT):
+                continue
+            session.driver_status = "lost"
+            self.session_store.save(session)
+            marked += 1
+        if marked:
+            logger.warning("event=local_driver_sessions_marked_lost host=%s count=%d", host, marked)
+        backend = self._backends.get("claude")
+        marker = getattr(backend, "mark_sessions_lost", None)
+        if callable(marker):
+            with contextlib.suppress(Exception):
+                marker()
+        return marked
+
     async def _recover_stale_busy_sessions(self) -> None:
         """Recover BUSY sessions after a gateway restart.
 
@@ -346,6 +373,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         host = socket.gethostname()
         active_task_ids = set(self.active_tasks.keys())
+        self._mark_local_claude_driver_sessions_lost_after_restart(host)
 
         db = None
         try:
@@ -443,7 +471,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             exec_time = 0.0
 
         session.status = SessionStatus.AWAITING_INPUT
-        session.last_result_summary = (result_dict.get("output", "") or "")[-400:] or "Task completed (recovered)"
+        full_out = (result_dict.get("output", "") or "").strip() or "Task completed (recovered)"
+        session.last_result_summary = full_out[-400:] if len(full_out) > 400 else full_out
         session.last_files_modified = result_dict.get("files_modified") or []
         # Propagate the backend_session_id the worker established, exactly as the
         # live dispatch path does (_dispatch_to_node). Without this the recovered
@@ -461,7 +490,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             "success": True,
             "execution_time": round(exec_time, 2),
             "user_message": session.last_user_message,
-            "result_summary": session.last_result_summary,
+            "result_summary": full_out,
             "files_modified": session.last_files_modified[:20],
         })
         session.task_history = session.task_history[-20:]
@@ -691,50 +720,21 @@ class TaskOrchestrator(ITaskOrchestrator):
                     await asyncio.sleep(30)
                     continue
 
-                # Job-completion notifications are sent from the task server's
-                # /done handler (report_job_done) — the authoritative point that
-                # works for jobs with no session_id. This poller previously also
-                # sent here but skipped session-less jobs, silently dropping
-                # their notifications. It is disabled to avoid duplicate sends.
+                # The task server owns terminal job state; the gateway owns
+                # routing those terminal jobs to session-visible notifications.
                 terminal = db.get_terminal_jobs_since(self._last_job_poll)
                 if terminal:
                     self._last_job_poll = datetime.now().isoformat()
 
-                for job in []:  # disabled: server-side /done handler owns notifications
-                    if not job.get("notify"):
-                        continue
-                    session_id = job.get("session_id")
-                    if not session_id or not self.telegram_interface:
-                        continue
+                for job in terminal:
+                    await self._process_terminal_job(job)
 
-                    session = self.session_store.get(session_id)
-                    if not session:
-                        continue
-                    chat_id = getattr(session, "telegram_chat_id", None)
-                    if not chat_id:
-                        continue
+                remote_terminal = self._remote_terminal_jobs_since(self._last_remote_job_poll)
+                if remote_terminal:
+                    self._last_remote_job_poll = datetime.now().isoformat()
 
-                    label = job.get("label", job.get("id", "unknown"))
-                    status = job.get("status", "done")
-                    exit_code = job.get("exit_code")
-                    tail = job.get("tail", "")
-
-                    status_icon = "✅" if status == "done" else ("❌" if status == "failed" else "⚠️")
-                    lines = [
-                        f"{status_icon} Job **{label}** {status}",
-                    ]
-                    if exit_code is not None:
-                        lines.append(f"Exit code: `{exit_code}`")
-                    if tail:
-                        lines.append(f"\n```\n{tail[-1500:]}\n```")
-
-                    summary = "\n".join(lines)
-                    await self.telegram_interface.notify_completion(
-                        job.get("id", ""),
-                        summary,
-                        success=(status == "done"),
-                        chat_id=chat_id,
-                    )
+                for job in remote_terminal:
+                    await self._process_terminal_job(job)
             except Exception as e:
                 logger.debug("event=job_poller_error err=%s", e)
 
@@ -742,6 +742,262 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await asyncio.wait_for(asyncio.sleep(30), timeout=30)
             except asyncio.TimeoutError:
                 pass
+
+    def _remote_jobs_client(self):
+        """Return a task-server client for CONTROLLER_URL, if this gateway has one."""
+        controller_url = os.environ.get("CONTROLLER_URL", "").strip().rstrip("/")
+        token = config.mesh.worker_token
+        if not controller_url or not token:
+            return None
+        try:
+            from src.control.task_server_client import TaskServerClient
+            return TaskServerClient(controller_url, token, timeout=5)
+        except Exception as e:
+            logger.debug("event=remote_jobs_client_unavailable err=%s", e)
+            return None
+
+    def list_watched_jobs(self, limit: int = 20) -> Dict[str, List[Dict[str, Any]]]:
+        """Return watched jobs visible to this gateway.
+
+        The local Web UI can run on a machine whose MCP/worker points at a
+        remote task server via CONTROLLER_URL. In that topology, local SQLite is
+        empty but the real watched jobs live on the controller. Merge both views
+        by job id so System > Jobs reflects the actual registration target.
+        """
+        running: List[Dict[str, Any]] = []
+        recent: List[Dict[str, Any]] = []
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None:
+                running.extend(db.list_jobs(status="running", limit=limit))
+                recent.extend(db.list_jobs(limit=limit))
+        except Exception as e:
+            logger.debug("event=local_jobs_list_failed err=%s", e)
+
+        client = self._remote_jobs_client()
+        if client is not None:
+            running.extend(client.list_jobs(status="running", limit=limit))
+            recent.extend(client.list_jobs(limit=limit))
+
+        return {
+            "running": self._dedupe_jobs(running, limit),
+            "recent": self._dedupe_jobs(recent, limit),
+        }
+
+    def _dedupe_jobs(self, jobs: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+        seen: set[str] = set()
+        out: List[Dict[str, Any]] = []
+        for job in jobs:
+            job_id = str(job.get("id") or "")
+            if not job_id or job_id in seen:
+                continue
+            seen.add(job_id)
+            out.append(job)
+            if len(out) >= limit:
+                break
+        return out
+
+    def _remote_terminal_jobs_since(self, since: str) -> List[Dict[str, Any]]:
+        client = self._remote_jobs_client()
+        if client is None:
+            return []
+        started_after = float(getattr(self, "_remote_job_poll_started_epoch", 0.0) or 0.0)
+        terminal: List[Dict[str, Any]] = []
+        for job in client.list_jobs(limit=50):
+            job_id = str(job.get("id") or "")
+            if not job_id or job_id in self._processed_terminal_jobs:
+                continue
+            if str(job.get("status") or "") not in {"done", "failed", "lost"}:
+                continue
+            started_epoch = job.get("started_epoch")
+            if isinstance(started_epoch, (int, float)) and started_epoch < started_after:
+                continue
+            if started_epoch is None and str(job.get("updated_at") or "") <= since:
+                continue
+            terminal.append(job)
+        return terminal
+
+    def _job_notification_payload(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        job_id = str(job.get("id") or "")
+        label = str(job.get("label") or job_id or "unknown")
+        status = str(job.get("status") or "done")
+        exit_code = job.get("exit_code")
+        tail = str(job.get("tail") or "")
+        success = status == "done"
+
+        prompt = f"Watched job finished: {label}"
+        lines = [f"Watched job `{label}` {status}."]
+        if exit_code is not None:
+            lines.append(f"Exit code: `{exit_code}`")
+        if job.get("notify_agent"):
+            lines.append("Agent continuation requested.")
+        if tail:
+            lines.append(f"\nLast log lines:\n```\n{tail[-1500:]}\n```")
+
+        return {
+            "job_id": job_id,
+            "label": label,
+            "status": status,
+            "success": success,
+            "prompt": prompt,
+            "reply": "\n".join(lines),
+        }
+
+    def _record_job_session_turn(self, job: Dict[str, Any], session: Any, payload: Dict[str, Any]) -> None:
+        job_id = str(payload["job_id"])
+        reply = str(payload["reply"])
+        prompt = str(payload["prompt"])
+        success = bool(payload["success"])
+        now = datetime.now().isoformat()
+
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None:
+                db.enqueue_task(
+                    task_id=job_id,
+                    session_id=session.session_id,
+                    machine_id=getattr(session, "machine_id", None),
+                    backend=getattr(session, "backend", None) or "unknown",
+                    action="watched_job",
+                    payload={
+                        "task": {"id": job_id, "title": prompt, "prompt": prompt},
+                        "job": {
+                            "id": job_id,
+                            "label": payload["label"],
+                            "status": payload["status"],
+                        },
+                    },
+                )
+                result_dict = {
+                    "success": success,
+                    "output": reply,
+                    "errors": [] if success else [reply],
+                    "files_modified": [],
+                    "execution_time": 0.0,
+                    "timestamp": now,
+                    "return_code": job.get("exit_code"),
+                }
+                if success:
+                    db.complete_task(job_id, result_dict, None)
+                else:
+                    db.fail_task(job_id, reply, result=result_dict)
+                try:
+                    with db._write() as conn:
+                        conn.execute(
+                            """
+                            UPDATE mesh_tasks
+                            SET created_at = ?, completed_at = ?, updated_at = ?
+                            WHERE id = ? AND action = 'watched_job'
+                            """,
+                            (now, now, now, job_id),
+                        )
+                except Exception as e:
+                    logger.debug("event=job_session_turn_time_update_failed job_id=%s err=%s", job_id, e)
+                db.enrich_task(
+                    job_id,
+                    prompt=prompt,
+                    reply_text=reply,
+                    parsed_output={"type": "watched_job", "job": job},
+                    files_modified=[],
+                    return_code=job.get("exit_code"),
+                )
+                db.append_event(
+                    session_id=session.session_id,
+                    task_id=job_id,
+                    success=success,
+                    execution_time=0.0,
+                    error="" if success else reply,
+                )
+        except Exception as e:
+            logger.warning("event=job_session_turn_db_failed job_id=%s err=%s", job_id, e)
+
+        try:
+            history = list(getattr(session, "task_history", None) or [])
+            exists = any(
+                item.get("task_id") == job_id
+                for item in history
+                if isinstance(item, dict)
+            )
+            if not exists:
+                history.append({
+                    "task_id": job_id,
+                    "timestamp": now,
+                    "success": success,
+                    "execution_time": 0.0,
+                    "user_message": prompt,
+                    "result_summary": reply,
+                    "files_modified": [],
+                })
+                session.task_history = history[-20:]
+            session.last_task_id = job_id
+            session.last_result_summary = reply[-400:] if len(reply) > 400 else reply
+            session.last_summary = session.last_result_summary
+            session.last_files_modified = []
+            self.session_store.save(session)
+        except Exception as e:
+            logger.warning("event=job_session_turn_save_failed job_id=%s err=%s", job_id, e)
+
+    async def _process_terminal_job(self, job: Dict[str, Any]) -> None:
+        job_id_key = str(job.get("id") or "")
+        processed = getattr(self, "_processed_terminal_jobs", None)
+        if processed is None:
+            processed = set()
+            self._processed_terminal_jobs = processed
+        if job_id_key in processed:
+            return
+        processed.add(job_id_key)
+
+        if not job.get("notify") and not job.get("notify_agent"):
+            return
+
+        payload = self._job_notification_payload(job)
+        job_id = str(payload["job_id"])
+        session_id = str(job.get("session_id") or "")
+        session = self.session_store.get(session_id) if session_id else None
+        if session is None:
+            logger.info("event=job_notify_skipped job_id=%s reason=no_session", job_id)
+            return
+
+        self._record_job_session_turn(job, session, payload)
+
+        if job.get("notify"):
+            result = TaskResult(
+                task_id=job_id,
+                success=bool(payload["success"]),
+                output=str(payload["reply"]),
+                errors=[] if payload["success"] else [str(payload["reply"])],
+                files_modified=[],
+                execution_time=0.0,
+                timestamp=datetime.now().isoformat(),
+                return_code=job.get("exit_code") or 0,
+            )
+            try:
+                await self.notifier.notify_task_outcome(
+                    job_id,
+                    result,
+                    session=session,
+                    chat_id=getattr(session, "telegram_chat_id", None),
+                )
+            except Exception as e:
+                logger.warning("event=job_notify_failed job_id=%s err=%s", job_id, e)
+
+        if job.get("notify_agent"):
+            description = (
+                f"The watched job `{payload['label']}` finished with status "
+                f"`{payload['status']}`.\n\n{payload['reply']}"
+            )
+            try:
+                await self.submit_instruction(
+                    description,
+                    session_id=session.session_id,
+                    cwd=getattr(session, "repo_path", None),
+                    source="watched_job",
+                    extra_metadata={"job_id": job_id, "source": "watched_job"},
+                )
+            except Exception as e:
+                logger.warning("event=job_notify_agent_failed job_id=%s err=%s", job_id, e)
 
     @staticmethod
     def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:
@@ -1558,12 +1814,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                         if session:
                             session.last_task_id = task.id
                             if not result.success:
-                                session.last_result_summary = self._short_failure_reason(result) or "(failed)"
+                                full_out = self._short_failure_reason(result) or "(failed)"
                             else:
-                                # Take the last ~400 chars (the conclusion) rather than
-                                # the first 200 (always mid-explanation for session turns).
-                                out = self._session_reply_text(result).strip()
-                                session.last_result_summary = out[-400:] if len(out) > 400 else out
+                                full_out = self._session_reply_text(result).strip()
+                            # last_result_summary is a short preview used by Telegram
+                            # and the session list — keep it brief (last 400 chars).
+                            session.last_result_summary = full_out[-400:] if len(full_out) > 400 else full_out
                             session.last_summary = session.last_result_summary
                             session.last_files_modified = result.files_modified or []
                             artifact_path = str(Path(config.system.results_dir) / f"{task.id}.json")
@@ -1574,7 +1830,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 "success": result.success,
                                 "execution_time": round(result.execution_time or 0.0, 2),
                                 "user_message": session.last_user_message,
-                                "result_summary": session.last_result_summary,
+                                "result_summary": full_out,
                                 "files_modified": session.last_files_modified[:20],
                             })
                             session.task_history = session.task_history[-20:]
@@ -1823,8 +2079,19 @@ class TaskOrchestrator(ITaskOrchestrator):
                             # recreated a session (e.g. after server restart) but the
                             # first message failed, we still want the new ID persisted so
                             # the next turn can resume rather than starting fresh again.
-                            if session and raw.backend_session_id:
-                                session.backend_session_id = raw.backend_session_id
+                            if session and (
+                                raw.backend_session_id
+                                or session.cache_health != "unknown"
+                                or session.driver_status
+                            ):
+                                # _observe_cache_health mutates cache_health /
+                                # cache_unhealthy_count in place on this session
+                                # object during the backend call; persist them
+                                # (alongside any new backend_session_id) so the
+                                # cache_unhealthy_count>=2 guard survives across
+                                # turns rather than resetting each time.
+                                if raw.backend_session_id:
+                                    session.backend_session_id = raw.backend_session_id
                                 self.session_store.save(session)
                             result = TaskResult(
                                 task_id=task.id,
@@ -2359,6 +2626,10 @@ created: {task.created}
                 "type": getattr(task.type, "value", str(task.type)),
                 "priority": getattr(task.priority, "value", str(task.priority)),
                 "title": task.title,
+                # FULL user instruction — `title` is only a truncated display label
+                # (`Task: {description[:50]}...`); persisting `prompt` is what lets
+                # the transcript show the complete message instead of a 50-char clip.
+                "prompt": task.prompt or "",
                 "target_files": list(task.target_files or []),
                 "source": str((task.metadata or {}).get("source") or "runtime"),
                 "cwd": str((task.metadata or {}).get("cwd") or ""),
@@ -2401,6 +2672,25 @@ created: {task.created}
                         pass
         except Exception:
             pass
+
+        # raw_stdout is 87% of artifact bytes (264 MB across the corpus) and pure
+        # debug NDJSON — nothing product-facing reads it back once the reply +
+        # usage are extracted into mesh_tasks. When `slim_artifacts` is on, move it
+        # to a gzipped sidecar (~10x smaller) and drop it from the JSON, so the DB
+        # is the self-sufficient source and the on-disk files shrink to metadata.
+        slim = bool(getattr(config.system, "slim_artifacts", False))
+        if slim and artifact.get("raw_stdout"):
+            try:
+                import gzip
+                raw_dir = results_dir / "raw"
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                with gzip.open(raw_dir / f"{task_id}.ndjson.gz", "wt", encoding="utf-8") as gz:
+                    gz.write(artifact.get("raw_stdout") or "")
+            except Exception as e:
+                logger.warning(f"event=raw_archive_failed task_id={task_id} error={e}")
+            else:
+                artifact["raw_stdout"] = ""
+                artifact["raw_stdout_archived"] = f"raw/{task_id}.ndjson.gz"
 
         flat_artifact_path = results_dir / f"{task_id}.json"
         flat_artifact_path.write_text(
@@ -2951,8 +3241,13 @@ Generated from user description: {description}
         if exec_task in done:
             raw = exec_task.result()
             if isinstance(raw, _ER):
-                if session and raw.backend_session_id:
-                    session.backend_session_id = raw.backend_session_id
+                if session and (
+                    raw.backend_session_id
+                    or session.cache_health != "unknown"
+                    or session.driver_status
+                ):
+                    if raw.backend_session_id:
+                        session.backend_session_id = raw.backend_session_id
                     self.session_store.save(session)
                 result = TaskResult(
                     task_id=task.id,
@@ -3066,9 +3361,24 @@ Generated from user description: {description}
                     # Propagate the worker's backend_session_id so the next
                     # turn can resume the remote-side backend session.
                     new_bsid = r.get("backend_session_id", "")
-                    if session and new_bsid:
-                        session.backend_session_id = new_bsid
-                        self.session_store.save(session)
+                    if session:
+                        changed = False
+                        if new_bsid:
+                            session.backend_session_id = new_bsid
+                            changed = True
+                        for attr in ("driver_type", "driver_status", "cache_health"):
+                            value = r.get(attr)
+                            if value is not None:
+                                setattr(session, attr, value)
+                                changed = True
+                        if "cache_unhealthy_count" in r:
+                            session.cache_unhealthy_count = int(r.get("cache_unhealthy_count") or 0)
+                            changed = True
+                        if "previous_backend_session_ids" in r:
+                            session.previous_backend_session_ids = r.get("previous_backend_session_ids") or []
+                            changed = True
+                        if changed:
+                            self.session_store.save(session)
                     worker_output = r.get("output", "")
                     result = TaskResult(
                         task_id=task.id,
@@ -3094,6 +3404,26 @@ Generated from user description: {description}
                     return result
 
                 if status in ("failed", "failed_node_offline"):
+                    result_raw = row.get("result")
+                    try:
+                        r = json.loads(result_raw) if isinstance(result_raw, str) else (result_raw or {})
+                    except Exception:
+                        r = {}
+                    if session and r:
+                        changed = False
+                        for attr in ("driver_type", "driver_status", "cache_health"):
+                            value = r.get(attr)
+                            if value is not None:
+                                setattr(session, attr, value)
+                                changed = True
+                        if "cache_unhealthy_count" in r:
+                            session.cache_unhealthy_count = int(r.get("cache_unhealthy_count") or 0)
+                            changed = True
+                        if "previous_backend_session_ids" in r:
+                            session.previous_backend_session_ids = r.get("previous_backend_session_ids") or []
+                            changed = True
+                        if changed:
+                            self.session_store.save(session)
                     error_msg = row.get("error") or f"Task {status}"
                     result = TaskResult(
                         task_id=task.id,
@@ -3355,6 +3685,11 @@ Generated from user description: {description}
                     "telegram_thread_id": session.telegram_thread_id,
                     "owner_user_id": session.owner_user_id,
                     "last_user_message": session.last_user_message,
+                    "driver_type": session.driver_type,
+                    "driver_status": session.driver_status,
+                    "cache_health": session.cache_health,
+                    "cache_unhealthy_count": session.cache_unhealthy_count,
+                    "previous_backend_session_ids": session.previous_backend_session_ids or [],
                 }
             db.enqueue_task(
                 task_id=task.id,
@@ -3387,7 +3722,18 @@ Generated from user description: {description}
                 logger.debug("event=mesh_enqueue_failed task_id=%s err=%s", task.id, e)
 
     def _mesh_complete_task(self, task: Task, result: "TaskResult", artifact_path: Optional[str]) -> None:
-        """Shadow-write the task result into mesh_tasks."""
+        """Shadow-write the task result into mesh_tasks — the canonical, file-free store.
+
+        Two writes:
+          1. The legacy ``result`` JSON (``output`` still capped at 2000 for the
+             small-payload list/preview consumers and back-compat).
+          2. ``enrich_task`` with the FULL untruncated reply + structured fields
+             (parsed_output, file_changes, usage, prompt) so the DB holds
+             everything ``results/task_*.json`` did. This is what lets the chat
+             transcript and Files/Info tabs read from the DB and lets the fat
+             artifact files be dropped. Only ``raw_stdout`` (debug NDJSON) stays
+             on disk, gzipped.
+        """
         try:
             from src.control.db import get_db
             db = get_db()
@@ -3395,7 +3741,7 @@ Generated from user description: {description}
                 return
             result_dict = {
                 "success": result.success,
-                "output": result.output[:2000] if result.output else "",  # keep payload small
+                "output": result.output[:2000] if result.output else "",  # small preview only
                 "errors": result.errors or [],
                 "files_modified": result.files_modified or [],
                 "execution_time": result.execution_time,
@@ -3406,7 +3752,44 @@ Generated from user description: {description}
                 db.complete_task(task.id, result_dict, artifact_path)
             else:
                 error_str = "; ".join(result.errors) if result.errors else "unknown error"
-                db.fail_task(task.id, error_str)
+                db.fail_task(task.id, error_str, result=result_dict, artifact_path=artifact_path)
+
+            # Full artifact-complete enrichment — the file-free conversation store.
+            if result.success:
+                reply_text = self._session_reply_text(result).strip()
+            else:
+                reply_text = (self._short_failure_reason(result) or "(failed)").strip()
+            usage = None
+            try:
+                from src.services.result_text import extract_usage_from_ndjson
+                usage = extract_usage_from_ndjson(getattr(result, "raw_stdout", "") or "")
+            except Exception:
+                usage = None
+            # Prompt: task.prompt is the source for runtime tasks, but for some
+            # dispatch paths it's empty while session.last_user_message holds the
+            # full instruction (same precedence the file transcript used). Fall
+            # back so the user turn is never blank.
+            prompt_text = (task.prompt or "").strip()
+            if not prompt_text:
+                try:
+                    sid = (task.metadata or {}).get("session_id", "").strip()
+                    if sid:
+                        _s = self.session_store.get(sid)
+                        if _s:
+                            prompt_text = (_s.last_user_message or "").strip()
+                except Exception:
+                    pass
+            db.enrich_task(
+                task.id,
+                prompt=prompt_text or None,
+                reply_text=reply_text,
+                parsed_output=getattr(result, "parsed_output", None),
+                file_changes=getattr(result, "file_changes", None) or None,
+                files_modified=result.files_modified or [],
+                usage=usage,
+                error_class=getattr(result, "error_class", "") or None,
+                return_code=getattr(result, "return_code", None),
+            )
         except Exception as e:
             logger.debug("event=mesh_complete_failed task_id=%s err=%s", task.id, e)
 

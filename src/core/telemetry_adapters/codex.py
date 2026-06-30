@@ -82,6 +82,95 @@ class CodexTelemetryAdapter:
             ]
         return []
 
+    def consume_token_count(
+        self,
+        payload: Dict[str, Any],
+        *,
+        event_time: Optional[datetime] = None,
+    ) -> List[TelemetryEvent]:
+        """Map Codex rollout token_count events without retaining transcript data."""
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return []
+        last_usage = info.get("last_token_usage")
+        total_usage = info.get("total_token_usage")
+        context_window = info.get("model_context_window")
+        events: List[TelemetryEvent] = []
+        if isinstance(last_usage, dict):
+            request_attrs: Dict[str, Any] = {
+                "sequence": self._sequence + 1,
+                "input_tokens": last_usage.get("input_tokens"),
+                "output_tokens": last_usage.get("output_tokens"),
+                "cache_read_tokens": last_usage.get("cached_input_tokens"),
+                "reasoning_tokens": last_usage.get("reasoning_output_tokens"),
+                "context_window_tokens": context_window,
+                "input_token_semantics": "includes_cache",
+                "usage_granularity": "request",
+                "usage_source": "codex.rollout.token_count.last_token_usage",
+                "usage_coverage": "complete",
+                "counter_semantics": "per_request",
+                "work_category": (
+                    "retry" if self.context.spawn_reason == "retry" else "primary"
+                ),
+            }
+            request_attrs = {
+                key: value for key, value in request_attrs.items() if value is not None
+            }
+            events.append(
+                self._event(
+                    "model.request.usage",
+                    event_time=event_time,
+                    model_request_id=f"{self.context.invocation_id}:request:{self._sequence + 1}",
+                    attributes=request_attrs,
+                )
+            )
+        if isinstance(total_usage, dict):
+            session_attrs: Dict[str, Any] = {
+                "input_tokens": total_usage.get("input_tokens"),
+                "output_tokens": total_usage.get("output_tokens"),
+                "cache_read_tokens": total_usage.get("cached_input_tokens"),
+                "reasoning_tokens": total_usage.get("reasoning_output_tokens"),
+                "total_tokens": total_usage.get("total_tokens"),
+                "context_window_tokens": context_window,
+                "usage_source": "codex.rollout.token_count.total_token_usage",
+                "counter_semantics": "session_cumulative_total",
+            }
+            rate_limits = payload.get("rate_limits")
+            if isinstance(rate_limits, dict):
+                primary = rate_limits.get("primary")
+                secondary = rate_limits.get("secondary")
+                if isinstance(primary, dict):
+                    session_attrs.update(
+                        {
+                            "rate_limit_primary_used_percent": primary.get("used_percent"),
+                            "rate_limit_primary_window_minutes": primary.get("window_minutes"),
+                            "rate_limit_primary_resets_at": primary.get("resets_at"),
+                        }
+                    )
+                if isinstance(secondary, dict):
+                    session_attrs.update(
+                        {
+                            "rate_limit_secondary_used_percent": secondary.get("used_percent"),
+                            "rate_limit_secondary_window_minutes": secondary.get("window_minutes"),
+                            "rate_limit_secondary_resets_at": secondary.get("resets_at"),
+                        }
+                    )
+                session_attrs["rate_limit_plan_type"] = rate_limits.get("plan_type")
+                session_attrs["rate_limit_reached_type"] = rate_limits.get(
+                    "rate_limit_reached_type"
+                )
+            session_attrs = {
+                key: value for key, value in session_attrs.items() if value is not None
+            }
+            events.append(
+                self._event(
+                    "model.session_usage",
+                    event_time=event_time,
+                    attributes=session_attrs,
+                )
+            )
+        return events
+
     def coverage_events(self, *, event_time: Optional[datetime] = None) -> List[TelemetryEvent]:
         return [
             self._event(
@@ -218,6 +307,7 @@ class CodexTelemetryAdapter:
         event_time: Optional[datetime],
         attributes: Dict[str, Any],
         tool_call_id: Optional[str] = None,
+        model_request_id: Optional[str] = None,
     ) -> TelemetryEvent:
         self._sequence += 1
         return build_event(
@@ -229,6 +319,7 @@ class CodexTelemetryAdapter:
             source="backend",
             source_sequence=self._sequence,
             invocation_id=self.context.invocation_id,
+            model_request_id=model_request_id,
             tool_call_id=tool_call_id,
             backend=self.context.backend or "codex",
             model=self.context.model,

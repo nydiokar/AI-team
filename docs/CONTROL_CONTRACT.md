@@ -231,6 +231,23 @@ Authoritative state is the per-session JSON in `state/sessions/`; the **mesh DB*
 | `db.list_tasks(...)` | task rows |
 | `db.list_nodes(...)` | worker node rows |
 | `db.get_task(task_id)` · `db.get_task_by_session(session_id, task_id)` | one task row |
+| `db.get_session_turns(session_id, limit)` | conversation turns (chat) — projection of `mesh_tasks` |
+
+**Conversation + artifacts are DB-canonical (2026-06-30).** `mesh_tasks` carries
+the artifact-complete columns (`prompt`, `reply_text` full untruncated, `parsed_output_json`,
+`file_changes_json`, `files_modified_json`, `usage_json`, `error_class`, `return_code` — migration 17).
+The conversation is a **projection of the task ledger**, not a separate store:
+
+| endpoint | source | fallback |
+|---|---|---|
+| `GET /api/sessions/{id}/messages` | `transcript.get_transcript` → `db.get_session_turns` (`mesh_tasks`) | `state/sessions/<id>.json` + `results/*.json` (un-enriched sessions only) |
+| `GET /api/artifacts` · `/api/artifacts/{id}` | `artifacts.list_artifacts_db` / `get_artifact_db` (`mesh_tasks`) | `results/*.json` (task not in DB only) |
+
+The live write (`orchestrator._mesh_complete_task`) is DB-first and untruncated for all
+backends (claude/codex/opencode). `results/task_*.json` is now a fallback/debug artifact,
+not the source — droppable per `docs/RUNBOOK_db_self_sufficient.md`. The `raw_stdout` debug
+NDJSON (87% of artifact bytes) is gzipped to `results/raw/<id>.ndjson.gz` when
+`system.slim_artifacts` is on. Full picture: `docs/CONVERSATION_DATA_FLOW.md` §0.
 
 A Web UI dashboard renders `events.ndjson` for live deltas (§1) and these reads for state.
 

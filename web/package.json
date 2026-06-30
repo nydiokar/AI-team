@@ -1,7 +1,7 @@
 {
   "name": "ai-team-webui",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Mobile-first Web UI for the AI-team coding gateway (UI-0 / UI-1).",
   "scripts": {

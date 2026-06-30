@@ -33,7 +33,7 @@ class _FakeBackend:
 
 class _StubOrchestrator:
     def __init__(self):
-        self.session_service = SessionService(SessionStore())
+        self.session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
         self.submitted = []          # (description, session_id, cwd, source)
         self.cancelled = []          # task_ids
         self.compacted = []          # session_ids
@@ -99,6 +99,31 @@ def test_create_session_unknown_backend_is_400(client, tmp_path):
     assert r.json()["detail"]["reason"] == "unknown_backend"
 
 
+def test_create_session_invalid_repo_path_is_400_with_detail(monkeypatch):
+    """Feature #38: a bad LOCAL repo_path is rejected at create time with a 400,
+    the stable reason, and the human detail surfaced through the envelope — so the
+    web client can show *why* instead of opening a doomed session."""
+    from src.services.session_service import CommandResult
+
+    def reject(_p):
+        return CommandResult(False, reason="invalid_repo_path",
+                             detail="Path does not exist.")
+
+    orch = _StubOrchestrator()
+    orch.session_service = SessionService(SessionStore(), repo_path_validator=reject)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    client = TestClient(control_api.build_control_api(orch))
+
+    r = client.post("/api/sessions", headers=_auth(),
+                    json={"backend": "claude", "repo_path": "/no/such/dir"})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["reason"] == "invalid_repo_path"
+    assert detail["detail"] == "Path does not exist."
+    # Nothing was created.
+    assert client.get("/api/sessions", headers=_auth()).json()["sessions"] == []
+
+
 # --- instructions -----------------------------------------------------------
 
 def test_instruction_one_off(client, orch):
@@ -141,6 +166,56 @@ def test_idempotency_key_dedupes_instruction(client, orch):
     r2 = client.post("/api/instructions", headers=h, json={"description": "once"})
     assert r1.json() == r2.json()
     assert len(orch.submitted) == 1  # second call did not re-act
+
+
+def test_idempotency_key_is_concurrency_safe(monkeypatch, orch):
+    """CONC-1: two genuinely concurrent requests sharing an Idempotency-Key must
+    collapse to a single side effect. We drive the ASGI app directly with
+    asyncio.gather so both requests are in-flight on one event loop at once (the
+    TestClient serializes requests through a single portal and cannot reproduce
+    this). Without the per-key guard the second request misses the cache mid-flight
+    and submits a duplicate; with it, the second blocks on the asyncio.Lock and then
+    serves the first's cached response.
+
+    Regression guard: an event-loop deadlock would also surface here (the test
+    would time out) if the async path ever held a blocking threading.Lock across
+    its ``await``."""
+    import asyncio
+    import httpx
+
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    app = control_api.build_control_api(orch)
+
+    # Force interleave: the first submit yields control mid-flight so the second
+    # request runs before the first stores its idempotent response.
+    barrier = asyncio.Event()
+    orig = orch.submit_instruction
+    first = {"seen": False}
+
+    async def slow_submit(*a, **k):
+        if not first["seen"]:
+            first["seen"] = True
+            # Let the gather's second coroutine reach the guard before we finish.
+            await asyncio.sleep(0.05)
+        return await orig(*a, **k)
+
+    orch.submit_instruction = slow_submit
+
+    async def _run():
+        h = {**_auth(), "Idempotency-Key": "race"}
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+            r1, r2 = await asyncio.gather(
+                ac.post("/api/instructions", headers=h, json={"description": "once"}),
+                ac.post("/api/instructions", headers=h, json={"description": "once"}),
+            )
+            return r1.json(), r2.json()
+
+    j1, j2 = asyncio.run(asyncio.wait_for(_run(), timeout=5))
+
+    # Exactly one real submission despite two concurrent identical requests.
+    assert len(orch.submitted) == 1
+    assert j1 == j2
 
 
 # --- stop / compact ---------------------------------------------------------
@@ -244,6 +319,26 @@ def test_jobs_returns_running_and_recent(client, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert "running" in body and "recent" in body
+
+
+def test_jobs_prefers_orchestrator_merged_view(monkeypatch, orch):
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+
+    def _list_watched_jobs(limit=20):
+        return {
+            "running": [{"id": "remote-running", "status": "running"}],
+            "recent": [{"id": "remote-done", "status": "done"}],
+        }
+
+    orch.list_watched_jobs = _list_watched_jobs
+    client = TestClient(control_api.build_control_api(orch))
+
+    r = client.get("/api/jobs", headers=_auth())
+    assert r.status_code == 200
+    assert r.json() == {
+        "running": [{"id": "remote-running", "status": "running"}],
+        "recent": [{"id": "remote-done", "status": "done"}],
+    }
 
 
 def test_jobs_requires_auth(client):

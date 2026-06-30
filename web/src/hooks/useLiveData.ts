@@ -126,6 +126,25 @@ export function useSessionMessages(sessionId: string | undefined) {
 }
 
 /**
+ * LLM turn observability for a session (Feature #37) — one row per agent turn
+ * from the llm_turns telemetry projection, newest-first. Drives the Session
+ * "info" tab's turn list and the context-usage display (Feature #35). Polls so a
+ * turn that completes while you watch updates its metrics; keeps previous data to
+ * avoid a spinner flash on each cycle. Returns [] when telemetry is unavailable.
+ */
+export function useSessionTurns(sessionId: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["session-turns", sessionId],
+    queryFn: async () => api.turns(token, sessionId!),
+    enabled: Boolean(token) && Boolean(sessionId),
+    refetchInterval: POLL_MS,
+    refetchOnReconnect: true,
+    placeholderData: (prev) => prev,
+  });
+}
+
+/**
  * One artifact's changed files (UI-4) — fetched on demand when a card expands.
  * Artifacts are immutable once written, so this does NOT poll.
  */

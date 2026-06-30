@@ -268,9 +268,201 @@ def test_job_endpoint_functions(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_report_job_done_does_not_call_telegram_api(tmp_path, monkeypatch):
+    """The task server records terminal jobs; the gateway routes notifications."""
+    from config import config as cfg
+    cfg.mesh.db_path = str(tmp_path / "mesh_api.db")
+    cfg.mesh.worker_token = "test-token-api"
+    cfg.telegram.bot_token = "test-bot-token"
+    cfg.telegram.allowed_users = [123]
+    cfg.telegram.notification_chat_id = None
+    import src.control.db as db_mod
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old is not None:
+        old.close()
+
+    def _urlopen_should_not_run(*args, **kwargs):
+        raise AssertionError("task server must not call Telegram directly")
+
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen_should_not_run)
+
+    try:
+        from src.control.task_server import JobDonePayload, RegisterJobPayload, register_job, report_job_done
+
+        data = register_job(RegisterJobPayload(
+            node_id="test-node",
+            label="api-test",
+            command="echo ok",
+            notify=True,
+        ))
+        resp = report_job_done(data["job_id"], JobDonePayload(
+            node_id="test-node",
+            exit_code=0,
+            tail="api test passed",
+        ))
+        assert resp["status"] == "accepted"
+    finally:
+        db_mod._db_instance = None
+        if old is not None:
+            old.close()
+        db_mod._db_instance = old
+
+
+@pytest.mark.asyncio
+async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeypatch):
+    import src.services.session_store as session_store_module
+    from src.control import transcript
+    from src.orchestrator import TaskOrchestrator
+    from src.services.session_store import SessionStore
+
+    state_dir = tmp_path / "state"
+    sessions_dir = state_dir / "sessions"
+    monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", sessions_dir, raising=False)
+    monkeypatch.setattr(
+        session_store_module,
+        "_BINDINGS_FILE",
+        state_dir / "telegram" / "active_bindings.json",
+        raising=False,
+    )
+
+    store = SessionStore()
+    session = store.create("codex", str(tmp_path), telegram_chat_id=100, owner_user_id=1)
+
+    class _Notifier:
+        def __init__(self):
+            self.calls = []
+
+        async def notify_task_outcome(self, task_id, result, *, session=None, chat_id=None, prefix=""):
+            self.calls.append({
+                "task_id": task_id,
+                "output": result.output,
+                "chat_id": chat_id,
+                "session_id": session.session_id if session else None,
+            })
+
+    notifier = _Notifier()
+    submitted = []
+
+    async def _submit_instruction(description, **kwargs):
+        submitted.append({"description": description, **kwargs})
+        return "task_followup"
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch.session_store = store
+    orch.notifier = notifier
+    orch.submit_instruction = _submit_instruction
+
+    await orch._process_terminal_job({
+        "id": "job_test123",
+        "session_id": session.session_id,
+        "node_id": "worker-a",
+        "label": "npm test",
+        "status": "done",
+        "exit_code": 0,
+        "tail": "all tests passed",
+        "notify": 1,
+        "notify_agent": 1,
+    })
+
+    assert notifier.calls == [{
+        "task_id": "job_test123",
+        "output": "Watched job `npm test` done.\nExit code: `0`\nAgent continuation requested.\n\nLast log lines:\n```\nall tests passed\n```",
+        "chat_id": 100,
+        "session_id": session.session_id,
+    }]
+    assert submitted[0]["session_id"] == session.session_id
+    assert submitted[0]["source"] == "watched_job"
+    assert submitted[0]["extra_metadata"] == {"job_id": "job_test123", "source": "watched_job"}
+    assert "all tests passed" in submitted[0]["description"]
+
+    turns = transcript.get_transcript(tmp_path / "results", sessions_dir, session.session_id)
+    assert turns is not None
+    assert turns[-1]["task_id"] == "job_test123"
+    assert turns[-1]["instruction"] == "Watched job finished: npm test"
+    assert "all tests passed" in turns[-1]["result"]
+
+    from src.control.db import get_db
+    row = get_db().get_task("job_test123")
+    saved = store.get(session.session_id)
+    assert row["completed_at"] == saved.task_history[-1]["timestamp"]
+
+
 def test_pid_alive_with_nonexistent_pid():
     from src.worker.agent import _pid_alive
     assert _pid_alive(999999999) is False
+
+
+def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
+    import src.control.db as db_mod
+    from src.orchestrator import TaskOrchestrator
+
+    class _FakeDB:
+        def list_jobs(self, status=None, limit=20):
+            if status == "running":
+                return [{"id": "local-running", "status": "running"}]
+            return [{"id": "local-done", "status": "done"}]
+
+    class _FakeClient:
+        def list_jobs(self, node_id=None, status=None, session_id=None, limit=20):
+            if status == "running":
+                return [{"id": "remote-running", "status": "running"}]
+            return [
+                {"id": "remote-done", "status": "done"},
+                {"id": "local-done", "status": "done"},
+            ]
+
+    monkeypatch.setattr(db_mod, "get_db", lambda: _FakeDB())
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch._remote_jobs_client = lambda: _FakeClient()
+
+    jobs = orch.list_watched_jobs(limit=20)
+
+    assert jobs["running"] == [
+        {"id": "local-running", "status": "running"},
+        {"id": "remote-running", "status": "running"},
+    ]
+    assert jobs["recent"] == [
+        {"id": "local-done", "status": "done"},
+        {"id": "remote-done", "status": "done"},
+    ]
+
+
+def test_orchestrator_filters_remote_terminal_jobs_once():
+    from src.orchestrator import TaskOrchestrator
+
+    class _FakeClient:
+        def list_jobs(self, node_id=None, status=None, session_id=None, limit=20):
+            return [
+                {
+                    "id": "job_new",
+                    "status": "done",
+                    "updated_at": "2026-06-30T09:00:00",
+                    "started_epoch": 200.0,
+                },
+                {
+                    "id": "job_old",
+                    "status": "done",
+                    "updated_at": "2026-06-30T09:00:00",
+                    "started_epoch": 100.0,
+                },
+                {
+                    "id": "job_running",
+                    "status": "running",
+                    "updated_at": "2026-06-30T12:00:00",
+                    "started_epoch": 300.0,
+                },
+            ]
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch._processed_terminal_jobs = {"job_seen"}
+    orch._remote_job_poll_started_epoch = 150.0
+    orch._remote_jobs_client = lambda: _FakeClient()
+
+    jobs = orch._remote_terminal_jobs_since("2026-06-30T12:00:00")
+
+    assert [job["id"] for job in jobs] == ["job_new"]
 
 
 def test_process_identity_for_current_process():
