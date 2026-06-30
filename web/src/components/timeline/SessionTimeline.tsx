@@ -15,6 +15,7 @@ import { TaskStatusChip } from "../ui/StatusChip";
 import { Button } from "../ui/Button";
 import { cn } from "../../lib/cn";
 import { useResolveApproval } from "../../hooks/useSessionActions";
+import { RichText } from "./RichText";
 
 function timeLabel(at: string): string {
   if (!at) return "";
@@ -180,7 +181,13 @@ function MessageBubble({
               ),
         )}
       >
-        <p className="whitespace-pre-wrap break-words">{text}</p>
+        {/* Agent output gets rich formatting (code/links/source refs); the user's
+            own message is echoed verbatim as plain text. */}
+        {mine ? (
+          <p className="whitespace-pre-wrap break-words">{text}</p>
+        ) : (
+          <RichText text={text} />
+        )}
       </div>
 
       {/* Timestamp (+ subtle token badge) — only on last in a group */}
@@ -194,26 +201,53 @@ function MessageBubble({
   );
 }
 
+/** Stable identity for a timeline item, so React keeps DOM nodes pinned to the
+ *  same message across 4s polls (index keys made bubbles shuffle/collapse). */
+function keyFor(item: TimelineItem, i: number): string {
+  switch (item.kind) {
+    case "message":
+      return `m:${item.message.id}`;
+    case "approval":
+      return `ap:${item.approval.id}`;
+    case "task_state":
+      return `ts:${item.taskId}`;
+    case "notice":
+      return `n:${item.notice.id}`;
+    case "artifact":
+      return `af:${item.artifact.id}`;
+    default:
+      return `i:${i}:${item.at}`;
+  }
+}
+
 export function SessionTimeline({ items }: { items: TimelineItem[] }) {
   return (
     <div role="feed" aria-label="Session timeline" className="pb-4 pt-2">
       {items.map((item, i) => {
-        // For message items, determine grouping context
+        const key = keyFor(item, i);
+        // For message items, determine grouping context. We group ONLY within
+        // the same turn (same role AND same task), so two adjacent turns never
+        // merge into one bubble group and each turn keeps its own timestamp.
+        // The message id is `${task_id}-u` / `${task_id}-a`; the turn is the
+        // part before the trailing role suffix.
         if (item.kind === "message") {
+          const turnOf = (m: TimelineItem) =>
+            m.kind === "message" ? m.message.id.replace(/-[ua]$/, "") : null;
           const prev = i > 0 ? items[i - 1] : null;
           const next = i < items.length - 1 ? items[i + 1] : null;
-          const prevSameRole =
-            prev?.kind === "message" && prev.message.role === item.message.role;
-          const nextSameRole =
-            next?.kind === "message" && next.message.role === item.message.role;
+          const turn = turnOf(item);
+          const sameGroup = (other: TimelineItem | null) =>
+            other?.kind === "message" &&
+            other.message.role === item.message.role &&
+            turnOf(other) === turn;
           return (
             <MessageBubble
-              key={i}
+              key={key}
               role={item.message.role}
               text={item.message.text}
               at={item.at}
-              isFirst={!prevSameRole}
-              isLast={!nextSameRole}
+              isFirst={!sameGroup(prev)}
+              isLast={!sameGroup(next)}
               usage={item.usage}
             />
           );
@@ -222,7 +256,7 @@ export function SessionTimeline({ items }: { items: TimelineItem[] }) {
         if (item.kind === "task_state") {
           return (
             <div
-              key={i}
+              key={key}
               className="mx-4 my-3 flex items-center gap-2.5 rounded-xl border border-hairline bg-surface-1/60 px-3.5 py-2.5"
             >
               {item.state === "running" ? (
@@ -242,7 +276,7 @@ export function SessionTimeline({ items }: { items: TimelineItem[] }) {
           const Icon = NOTICE_ICON[item.notice.severity];
           return (
             <div
-              key={i}
+              key={key}
               className="mx-4 my-1 flex items-center gap-2 px-1 py-0.5"
             >
               <Icon
@@ -262,13 +296,13 @@ export function SessionTimeline({ items }: { items: TimelineItem[] }) {
         }
 
         if (item.kind === "approval") {
-          return <ApprovalCard key={i} approval={item.approval} at={item.at} />;
+          return <ApprovalCard key={key} approval={item.approval} at={item.at} />;
         }
 
         if (item.kind === "artifact") {
           return (
             <div
-              key={i}
+              key={key}
               className="mx-4 my-2 flex items-center gap-2.5 rounded-xl border border-hairline bg-surface-1/60 px-3.5 py-2.5"
             >
               <FileCode2 className="size-3.5 shrink-0 text-accent opacity-70" />
@@ -282,7 +316,7 @@ export function SessionTimeline({ items }: { items: TimelineItem[] }) {
         if (item.kind === "error") {
           return (
             <div
-              key={i}
+              key={key}
               className="mx-4 my-2 flex items-center gap-2 rounded-xl border border-bad/30 bg-bad/5 px-3.5 py-2.5 text-[13px] text-bad"
             >
               <AlertCircle className="size-4 shrink-0" />

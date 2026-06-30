@@ -37,67 +37,6 @@ from src.core.telemetry import TelemetryEvent
 logger = logging.getLogger(__name__)
 
 
-def _send_job_telegram_notification(job: Dict[str, Any], exit_code: int, tail: str) -> None:
-    """Send a job-completion notification straight to the Telegram Bot API.
-
-    This runs from the authoritative /done handler so delivery does not depend
-    on the gateway's job poller (which skips jobs that have no session_id). It
-    posts directly over HTTPS using the bot token + chat id from config, so it
-    works regardless of the embedded/standalone process split. Best-effort:
-    any failure is logged but never breaks job completion.
-    """
-    if not job.get("notify"):
-        return
-    try:
-        from config import config as _cfg
-        bot_token = getattr(_cfg.telegram, "bot_token", "") or ""
-        targets: List[int] = []
-        chat_id = getattr(_cfg.telegram, "notification_chat_id", None)
-        if chat_id:
-            targets.append(int(chat_id))
-        if not targets:
-            targets = [int(u) for u in (getattr(_cfg.telegram, "allowed_users", []) or [])]
-    except Exception as e:
-        logger.warning("event=job_notify_config_failed job_id=%s err=%s", job.get("id"), e)
-        return
-
-    if not bot_token or not targets:
-        logger.info(
-            "event=job_notify_skipped job_id=%s reason=no_token_or_target", job.get("id")
-        )
-        return
-
-    label = job.get("label", job.get("id", "unknown"))
-    status = "done" if exit_code == 0 else "failed"
-    icon = "✅" if exit_code == 0 else "❌"
-    lines = [f"{icon} Job *{label}* {status}", f"Exit code: `{exit_code}`"]
-    if tail:
-        lines.append(f"\n```\n{tail[-1500:]}\n```")
-    text = "\n".join(lines)
-
-    import urllib.request
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    for target in targets:
-        try:
-            data = json.dumps(
-                {"chat_id": target, "text": text, "parse_mode": "Markdown"}
-            ).encode()
-            req = urllib.request.Request(
-                url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
-            logger.info(
-                "event=job_notify_sent job_id=%s chat_id=%s", job.get("id"), target
-            )
-        except Exception as e:
-            logger.warning(
-                "event=job_notify_failed job_id=%s chat_id=%s err=%s",
-                job.get("id"),
-                target,
-                e,
-            )
-
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -197,6 +136,11 @@ class ExecutionResultPayload(BaseModel):
     return_code: int = 0
     artifact_path: Optional[str] = None
     backend_session_id: str = ""  # worker echoes back the native session ID for affinity continuity
+    driver_type: str = ""
+    driver_status: str = ""
+    cache_health: str = "unknown"
+    cache_unhealthy_count: int = 0
+    previous_backend_session_ids: List[str] = Field(default_factory=list)
     telemetry_invocation_id: str = ""
     error_detail: str = ""  # full traceback when the worker caught an exception (D2)
     inspect: Optional[Dict[str, Any]] = None  # repo inspection op result (action=='inspect')
@@ -571,6 +515,11 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         "timestamp": payload.timestamp,
         "return_code": payload.return_code,
         "backend_session_id": payload.backend_session_id,
+        "driver_type": payload.driver_type,
+        "driver_status": payload.driver_status,
+        "cache_health": payload.cache_health,
+        "cache_unhealthy_count": payload.cache_unhealthy_count,
+        "previous_backend_session_ids": payload.previous_backend_session_ids,
         "telemetry_invocation_id": payload.telemetry_invocation_id,
         "error_detail": payload.error_detail,
         "inspect": payload.inspect,
@@ -838,11 +787,6 @@ def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
         if payload.tail:
             err = f"{err}: {payload.tail[:500]}"
         db.fail_job(job_id, err)
-
-    # Notify directly from the authoritative completion point. The gateway's
-    # job poller skips jobs without a session_id, which silently dropped these
-    # notifications; sending here guarantees end-to-end delivery.
-    _send_job_telegram_notification(job, payload.exit_code, payload.tail)
 
     return {"status": "accepted", "job_id": job_id}
 

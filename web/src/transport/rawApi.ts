@@ -135,9 +135,10 @@ export interface RawArtifactSummary {
 }
 
 // GET /api/sessions/{id}/messages → { messages: RawTranscriptTurn[] }.
-// src.control.transcript.get_transcript() — one turn per task artifact, oldest→
-// newest. `result` is "" when there genuinely was no output, or an honest
-// "(no output — …)" / "(task failed …)" note on a failed turn (never fabricated).
+// src.control.transcript.get_transcript() — one turn per session task_history
+// entry (FULL user_message → result_summary), oldest→newest. `result` is "" when
+// there genuinely was no output, or an honest "(no output — …)" / "(task failed
+// …)" note on a failed turn (never fabricated).
 export interface RawTokenUsage {
   input_tokens?: number;
   cached_input_tokens?: number;
@@ -227,6 +228,8 @@ export interface RawJob {
   last_checked_at: string | null;
   last_probe_error: string | null;
   exit_code: number | null;
+  notify: number | null;
+  notify_agent: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -247,4 +250,69 @@ export interface RawApproval {
   created_at: string;
   resolved_at: string | null;
   expires_at: string | null;
+}
+
+// GET /api/turns?session_id=<id> → { turns: RawTurn[] } (LLM turn observability,
+// Feature #37). One row per agent turn from the llm_turns projection
+// (TelemetryStore.list_turns → _decode_turn). `metrics` is the decoded
+// metrics_json — token accounting + per-turn aggregates produced by
+// src/core/telemetry_projection.py. All metric fields are optional/nullable
+// because coverage varies by backend; the UI degrades to "—" on absence.
+export interface RawTurnMetrics {
+  // Token accounting (from the merged usage block).
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  cache_creation_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  context_tokens?: number | null;
+  uncached_input_tokens?: number | null;
+  // Context-window accounting (Feature #35 — context usage). These are token
+  // COUNTS, not a percentage: the backend has no per-model window size to divide
+  // by, so the UI shows the count. A true % needs a model-window table later.
+  peak_context_tokens?: number | null;
+  turn_entry_context_tokens?: number | null;
+  turn_exit_context_tokens?: number | null;
+  intra_turn_context_growth?: number | null;
+  context_window_tokens?: number | null;
+  context_used_ratio?: number | null;
+  context_remaining_tokens?: number | null;
+  total_token_work?: number | null;
+  aggregate_input_tokens?: number | null;
+  aggregate_output_tokens?: number | null;
+  aggregate_cache_read_tokens?: number | null;
+  aggregate_reasoning_tokens?: number | null;
+  session_cumulative_input_tokens?: number | null;
+  session_cumulative_output_tokens?: number | null;
+  session_cumulative_cache_read_tokens?: number | null;
+  session_cumulative_reasoning_tokens?: number | null;
+  session_cumulative_total_tokens?: number | null;
+  rate_limit_primary_used_percent?: number | null;
+  rate_limit_secondary_used_percent?: number | null;
+  // Per-turn aggregates.
+  tool_call_count?: number | null;
+  subagent_count?: number | null;
+  invocations_per_turn?: number | null;
+  retry_count?: number | null;
+  wall_time_ms?: number | null;
+  metric_quality?: string | null; // request | aggregate_only | unavailable
+  // Other keys exist; index signature keeps the type open without `any`.
+  [key: string]: number | string | null | undefined;
+}
+
+export interface RawTurn {
+  turn_id: string;
+  session_id: string | null;
+  task_id: string;
+  backend: string | null;
+  requested_model: string | null;
+  observed_models: string[];
+  started_at: string | null;
+  ended_at: string | null;
+  final_status: string; // running | completed | failed | ...
+  timeout_status: string;
+  final_exit_code: number | null;
+  metrics: RawTurnMetrics;
+  coverage: Record<string, unknown>;
+  data_quality: unknown[];
 }

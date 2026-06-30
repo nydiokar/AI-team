@@ -13,7 +13,11 @@ from src.services.session_service import SessionService, CommandResult
 
 @pytest.fixture
 def service():
-    return SessionService(SessionStore())
+    # Permissive repo-path validator: these tests exercise lifecycle, not the
+    # local-directory path policy (which is covered separately below). tmp_path
+    # lives outside the configured allowed_root, so the real validator would
+    # reject it — inject a no-op so create() proceeds.
+    return SessionService(SessionStore(), repo_path_validator=lambda _p: None)
 
 
 def test_create_session_ok_persisted_and_bound(service, tmp_path):
@@ -75,6 +79,59 @@ def test_create_session_unknown_backend_rejected_nothing_saved(service, tmp_path
     assert res.reason == "unknown_backend"
     assert res.session is None
     assert len(service.store.list_all()) == before  # nothing persisted
+
+
+# --- Feature #38: fail early on a bad local working directory ----------------
+
+def test_create_session_invalid_repo_path_rejected_nothing_saved(tmp_path):
+    """A LOCAL session with a nonexistent repo_path is rejected at create time
+    (reason=invalid_repo_path, human detail), and nothing is persisted — instead
+    of the failure only surfacing when the first instruction tries to cd into it."""
+    from src.services.path_resolver import PathResolver
+
+    # Real validator scoped to tmp_path as the allowed root, so an existing
+    # subdir passes and a missing one is rejected by the same policy Telegram uses.
+    resolver = PathResolver(base_cwd=str(tmp_path), allowed_root=str(tmp_path))
+
+    def validate(p):
+        resolution = resolver.resolve_session_path(p)
+        if resolution.ok:
+            return None
+        return CommandResult(False, reason="invalid_repo_path",
+                             detail=resolution.error or "Invalid working directory.")
+
+    svc = SessionService(SessionStore(), repo_path_validator=validate)
+    before = len(svc.store.list_all())
+
+    missing = tmp_path / "does_not_exist"
+    res = svc.create_session(backend="claude", repo_path=str(missing))
+    assert not res.ok
+    assert res.reason == "invalid_repo_path"
+    assert res.detail  # carries the human "Path does not exist." string
+    assert res.session is None
+    assert len(svc.store.list_all()) == before  # nothing persisted
+
+    # An existing directory inside the root passes the same validator.
+    ok = svc.create_session(backend="claude", repo_path=str(tmp_path))
+    assert ok.ok and ok.session is not None
+
+
+def test_create_session_remote_node_skips_local_path_validation(tmp_path):
+    """A remote (mesh) session's path lives on the owning node and cannot be
+    stat'd here, so local path validation is skipped — the validator is never
+    consulted for a non-__local__ node_id."""
+    consulted = []
+
+    def validate(p):
+        consulted.append(p)
+        return CommandResult(False, reason="invalid_repo_path", detail="should not run")
+
+    svc = SessionService(SessionStore(), repo_path_validator=validate)
+    res = svc.create_session(
+        backend="claude", repo_path="/anything/on/the/worker", node_id="LP-1",
+    )
+    assert res.ok and res.session is not None
+    assert consulted == []  # validator never called for a remote node
 
 
 def test_bind_active_unknown_session(service):

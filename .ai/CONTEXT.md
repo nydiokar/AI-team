@@ -1,13 +1,83 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-06-25
+**Last Updated:** 2026-06-30 (watched-job routing fixed; conversation+artifacts DB-canonical — migration 17)
+
+## Remaining work across all open specs (swept from unarchived docs)
+
+### Open checklist items
+
+| # | Task | Source | Depends on | Scope |
+|---|---|---|---|---|
+| 1 | **U1.5** — Merge `feat/webui-ui0` into `main` (2 commits pending). Dev proxy already points at `:9003`; README already references the gateway port. | `docs/U1_CHECKLIST.md` | Branch merge | Process |
+
+### Mesh / State-Separation — remaining work (paused track)
+
+| # | Task | Source | Depends on | Scope |
+|---|---|---|---|---|
+| 7 | **Phase 4** — Graceful degradation: 1 embedded fallback worker + JSON-only mode when task server / mesh workers are unreachable; health-check loop to rejoin mesh. See `STATE_SEPARATION_PLAN.md` §Phase 4 and `.ai/NEXT_TASKS.md` §Phase 4. | `STATE_SEPARATION_PLAN.md` §4 | None (additive) | Backend |
+
+### Accepted warts (known, not fixed)
+
+| # | Item | Source | Scope |
+|---|---|---|---|
+| 3 | **DX-1** — ✅ fixed: unmatched `GET /api/...` now returns a real 404 JSON (SPA catch-all in `control_api._web_spa` rejects `api/` paths before falling to the index). Regression test in `test_control_api_webui.py` | `docs/U3_5_CHECKLIST.md` | DX ✅ |
+| 4 | **CONC-1** — ✅ fixed: idempotency cache is now concurrency-safe. Per-key lock serializes the whole get→execute→put (sync `_idem_guard` + async `_idem_guard_async`); held locks are never evicted. Concurrency test in `test_control_api_write.py` | `docs/U3_5_CHECKLIST.md` | Race condition ✅ |
+
+### LLM Turn Observability — remaining validation (M1/M2)
+
+| # | Task | Source | Depends on | Scope |
+|---|---|---|---|---|
+| 5 | Capture sanitized fixtures from deployed Codex (plain answer, MCP, retry, subagent) | `docs/LLM_TURN_OBSERVABILITY_SPEC.md` §handoff | Deployed Codex | Testing |
+| 6 | Add cumulative-counter/reset fixtures if backend emits cumulative usage | §handoff #2 | #5 | Testing |
+| 7 | Real local + mesh Codex smoke tests; inspect dashboard + privacy scan | §handoff #3 | #5, #6 | Validation |
+| 8 | SQLite ingestion/query/concurrency benchmarks (§16.5) | §handoff #4 | #7 | Perf ✅ done — 16k evt/s ingestion, ~85ms query; projection rebuild below aspirational target (noted for M3) |
+| 9 | After #5–#8 pass, mark M1/M2 shipped, begin M3 | §handoff #5 | #5–#8 | Process |
+
+### LLM Turn Observability — future milestones (not started)
+
+| # | Task | Source | Depends on | Scope |
+|---|---|---|---|---|
+| 10 | **M3** — Claude adapter (stream-json parser, hook integration, coverage UI) | §9.5 | #9 | Backend |
+| 11 | **M4** — OpenCode CLI/server| §9.6–9.7 | #10 | Backend |
+
+### Web UI Feature Requests / UX Issues
+
+| # | Task | Notes | Scope |
+|---|---|---|---|
+| 30 | **Typing field expands upward** — ✅ `<input>` → `<textarea>`, auto-resize via `useLayoutEffect`, capped at 160px, Enter sends / Shift+Enter newline | `CONTEXT.md` | Frontend ✅ |
+| 31 | **Rich formatter for agent output** — ✅ `lib/richText.ts` tokenizes assistant text into inline `code`, URLs, and source refs (`path:line`, also inside backticks/parens); `timeline/RichText.tsx` renders three visually-distinct styles (code chip / underlined URL link / accent monospace source ref). Wired into assistant bubbles in `SessionTimeline`. 11 vitest cases in `richText.test.ts` | `CONTEXT.md` | Frontend ✅ |
+| 32 | **Session model header hide-on-scroll** — ✅ sticky header inside scroll container, translates up on scroll-down past 40px, reveals on scroll-up (no negative margin hack) | `CONTEXT.md` | Frontend ✅ |
+| 33 | **Compact context confirmation** — ✅ bottom-sheet confirm dialog before compact mutation fires | `CONTEXT.md` | Frontend ✅ |
+| 34 | **Backend usage limits view** — surface current backends (Codex, Claude) account info + usage limits (daily, weekly, reset time). Either in System page or a dedicated page | `CONTEXT.md` | Backend + Frontend |
+| 35 | **Context % in Session** — ✅ (as a COUNT, not %) Session Info tab shows per-turn context tokens (`peak`→`exit`→raw) via `useSessionTurns`. No per-model window size exists backend-side, so a true % is deferred (needs a model-window table) | `CONTEXT.md` | Frontend ✅ |
+| 36 | **Watched jobs notify user + agent in-session** — ✅ terminal watched jobs are projected into the owning session via canonical `mesh_tasks` rows + session history fallback; `notify_agent=1` submits a `watched_job` follow-up instruction with `job_id` metadata so the agent can continue. WebUI visibility: System → Jobs shows an `agent` chip when `notify_agent` is set; Session → Chat result includes `Agent continuation requested.` MCP fixed too: `scripts/mcp_jobs.py` now defaults `notify_agent=true`, stops promising Telegram, and normalizes Windows `sleep N` to PowerShell `Start-Sleep`. | `CONTEXT.md` | Backend + Frontend ✅ |
+| 37 | **LLM turn observability in WebUI** — ✅ Session Info tab now lists `/api/turns` rows (status, model, duration, token accounting) via `SessionTurns` + `useSessionTurns` | `CONTEXT.md` | Frontend ✅ |
+| 38 | **Fail early on bad session directory** — ✅ `SessionService.create_session` validates LOCAL `repo_path` up front (injectable `repo_path_validator`, real default = `PathResolver`); rejects with `invalid_repo_path` + human `detail`; `POST /api/sessions` → 400; web NewSessionSheet surfaces the message. Remote (mesh) paths skipped (can't stat off-host) | `CONTEXT.md` | Backend ✅ |
+| 39 | **Job notification routing** — ✅ direct Telegram Bot API send removed from `/jobs/{id}/done`; task server now only records terminal job state, while gateway `_job_completion_poller` routes through session/WebUI projection + `NotificationService` | `CONTEXT.md` | Backend + Infra ✅ |
+| 40 | Dont' forget to review and further turn this load_compact_context into something useful | 
+
+**Current local jobs topology note (2026-06-30):** Horse/this PC may run the Web UI gateway locally on `127.0.0.1:9003` while MCP/worker jobs register against the remote controller from `CONTROLLER_URL` (currently the older Telegram-serving server). In that split, the local gateway has no local `:9002` task server and its SQLite jobs table can be empty even when jobs exist remotely. The local gateway now merges remote controller jobs into `/api/jobs` and polls remote terminal jobs so matching local sessions get the watched-job turn/agent continuation. Live smoke passed with `job_217c415b56dc`: visible in System -> Jobs and projected into session `b696d1040c4b`; watched-job DB turn timestamps are forced to the local session-history timestamp so the WebUI chat shows local time.
+
+### Deliberately deferred (from `docs/DEFERRED.md`)
+
+| # | Task | Notes | Scope |
+|---|---|---|---|
+| 21 | **Web Push notifications** — VAPID keypair, subscribe endpoint, event emitter. PWA is push-ready. | `docs/DEFERRED.md` | Backend + Frontend |
+| 22 | **Token streaming** (`message.delta`) — dropped for v1; timeline shows per-turn summary | ⛔ DROP `docs/FRONTEND_BACKEND_GAP.md` | Frontend |
+| 23 | **Diff hunks / file-content preview** — no backend source | `docs/DEFERRED.md` | Backend + Frontend |
+| 24 | **Terminal / raw stdout-stderr line stream** — out (security) | `docs/DEFERRED.md` | Backend + Frontend |
+| 25 | **Approvals automation** — durable gate exists but inert; auto-emit deferred | `docs/DEFERRED.md` | Backend |
+
+---
+
+**Last Updated:** 2026-06-29
 **Branch:** `feat/webui-ui0` (Web UI track — **ladder complete, ready to merge**) — mesh/State-Sep track lives on `main`
 
 > This file is the **fast-orientation** doc: what the project is, how it's wired
 > *right now*, the active plan, and the immediate next step. It is intentionally
-> short. Per-phase build history lives in `docs/PROGRESS_LOG.md`. The detailed
+> short. Per-phase build history lives in `docs/archive/progress/PROGRESS_LOG.md`. The detailed
 > task breakdown for the **paused mesh** plan lives in `.ai/NEXT_TASKS.md`. The
-> active plan (Web UI) is the ladder in `docs/COCKPIT_REFACTOR_SPEC.md` §14 — see
+> active plan (Web UI) is the ladder in `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` §14 — see
 > the "Web UI track" section below.
 
 > ⚠️ **TEST COST GUARD — READ BEFORE RUNNING ANYTHING.** This project's tests can
@@ -48,10 +118,10 @@ surface over the same gateway**, consuming the M1 control contract. The gateway
 serves it in-process: `python main.py` serves `web/dist` at `/` + `/api/*` on one
 tailnet-bound port — the "one process, many interfaces" goal.
 
-**Plan of record / ladder (single source of truth):** `docs/COCKPIT_REFACTOR_SPEC.md`
+**Plan of record / ladder (single source of truth):** `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md`
 §14. Build order was `M1 → UI-0 → UI-1 → F → I → UI-2 → G′ → H → UI-3 → UI-4 →
 UI-5 → UI-6`. The control-surface unification that embedded the web API into the
-gateway is `docs/CONTROL_SURFACE_UNIFICATION.md` (U1..U6, all done).
+gateway is `docs/archive/control-surface-unification/CONTROL_SURFACE_UNIFICATION.md` (U1..U6, all done).
 
 **Status as of 2026-06-25 — THE LADDER IS COMPLETE (all committed on `feat/webui-ui0`):**
 
@@ -120,11 +190,20 @@ State layout:
 state/sessions/<id>.json              session records (legacy-authoritative, still dual-written)
 state/telegram/active_bindings.json   chat_id → session_id
 state/summaries/<id>.md               per-session summary
-state/mesh.db                         SQLite — now read-first by session_store
-results/<task_id>.json                full task artifact
+state/mesh.db                         SQLite — read-first by session_store; CANONICAL for conversation + artifacts (migration 17)
+results/<task_id>.json                task artifact — now FALLBACK/debug only (DB-canonical since 2026-06-30); droppable
+results/raw/<task_id>.ndjson.gz       gzipped raw_stdout debug stream (when system.slim_artifacts=on)
 logs/session_events/<id>.log          per-session NDJSON
 logs/events.ndjson                    system-wide event log
 ```
+
+**Conversation/artifacts are DB-canonical (2026-06-30).** `mesh_tasks` carries the full
+untruncated reply + prompt + parsed_output + file_changes + usage (migration 17). Chat
+(`/api/sessions/{id}/messages`) and Files/Info tabs (`/api/artifacts*`) read the DB first,
+files only as fallback for un-enriched old sessions. The conversation is a **projection of
+the task ledger** (no separate turns table). Live write is DB-first, untruncated, all backends.
+Migrate + drop the fat files via `docs/RUNBOOK_db_self_sufficient.md`. Full audit + rationale:
+`docs/CONVERSATION_DATA_FLOW.md` §0. Memory: `db-self-sufficient-conversation`.
 
 **Config flags that matter:** `MESH_ENABLED` (default `false` — gateway behaves
 exactly as pre-mesh), `MESH_SHADOW_WRITE` (default `true`), `WORKER_TOKEN`,
@@ -149,7 +228,7 @@ worker's real result to Telegram (no fabricated "Task failed"). State Separation
 Phases 0–3 are effectively complete.
 
 The only remaining work **on this (paused) mesh track** is **Phase 4 — graceful
-degradation / fallback** (see the mesh plan + `.ai/NEXT_TASKS.md`). It is not
+degradation / fallback** (see the mesh plan + `.ai/NEXT_TASKS.md`). (Mesh plan doc archived at `docs/archive/STATE_SEPARATION_PLAN.md`.) It is not
 scheduled against the current Web UI work.
 
 **Cockpit M1 (2026-06-21, `feat/session-service-m1`):** a separate, completed
@@ -158,11 +237,11 @@ transport-neutral `SessionService` (lifecycle create/bind off the Telegram
 class), a single backend `registry.py`, a descriptive `SessionOrigin` tag on
 `Session` (persisted via DB migration 12), and `docs/CONTROL_CONTRACT.md`.
 Telegram behavior is byte-identical (gate matches the pre-M1 baseline). Scope
-discipline lived in `docs/M1_CHECKLIST.md`. M2+ (SessionView DTO, WS/HTTP
+discipline lived in `docs/archive/m1/M1_CHECKLIST.md`. M2+ (SessionView DTO, WS/HTTP
 transport, workflow events) remain deferred.
 
 History of every completed phase (8, 9, Step B/C, D1–D6) + the 2026-06-11
-restart-resilience milestone: `docs/PROGRESS_LOG.md`.
+restart-resilience milestone: `docs/archive/progress/PROGRESS_LOG.md`.
 
 ---
 
@@ -171,7 +250,7 @@ restart-resilience milestone: `docs/PROGRESS_LOG.md`.
 > Reference only — the **active plan is the Web UI track** (top of file). This is
 > the parked mesh plan, kept for the runtime picture.
 
-**Plan of record (for the mesh track):** `docs/STATE_SEPARATION_PLAN.md`. This
+**Plan of record (for the mesh track):** `docs/archive/STATE_SEPARATION_PLAN.md`. This
 **supersedes** the old
 standalone "VPS migration Phase 4" — VPS migration is now simply the end-state of
 this plan's Phases 2–3 (server on the VPS, workers on local machines).
@@ -214,8 +293,13 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 
 ## Architecture rules (do not violate)
 
-- DB is the canonical **read** source; JSON dual-write stays as the ultimate
-  fallback and is **never deleted**.
+- DB is the canonical **read** source. `state/sessions/<id>.json` dual-write stays
+  as the ultimate session fallback and is **never deleted**. NOTE (2026-06-30):
+  `results/task_*.json` artifacts are NO LONGER a source — `mesh_tasks` holds the
+  full conversation + artifact data (migration 17). The fat artifact files are a
+  fallback/debug archive and ARE droppable (see `docs/RUNBOOK_db_self_sufficient.md`);
+  the `raw_stdout` debug stream is kept gzipped under `results/raw/` when
+  `system.slim_artifacts` is on.
 - The server/gateway host keeps its **own embedded worker capacity** (configurable
   pool, default ≥1 — **not** capped at 1) that executes tasks when no remote node
   is available. Prefer remote nodes when online; the server runs work locally when
@@ -224,8 +308,10 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 - `MESH_ENABLED=false` ⇒ gateway is byte-for-byte the old behavior.
 - Session affinity is a hard correctness requirement: a session pinned to a
   machine must execute on that machine. `backend_session_id` is machine-local.
-- No uncontrolled autonomous behavior. Ollama is optional/helper-only. Artifacts
-  are mandatory for audit.
+- No uncontrolled autonomous behavior. Ollama is optional/helper-only. Per-turn
+  audit data (full reply, files changed, usage) is **mandatory** — it now lives
+  canonically in `mesh_tasks` (was the `results/*.json` files; those are now an
+  optional debug archive, not the audit source).
 
 ---
 
@@ -243,14 +329,17 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | `src/worker/agent.py` | worker daemon (runs as its own process on worker nodes) |
 | `src/telegram/interface.py` | Telegram command surface |
 | `config/settings.py` | all config incl. `MeshConfig` |
-| `docs/CONTROL_CONTRACT.md` | **M1** — event + inbound-command + backend + read-model contract for a 2nd surface |
-| `docs/COCKPIT_REFACTOR_SPEC.md` / `docs/M1_CHECKLIST.md` | M1 rationale + the executed build checklist |
-| `docs/COCKPIT_REFACTOR_SPEC.md` | Web UI ladder (§14) — **all rungs M1→UI-6 done** |
+| `docs/CONTROL_CONTRACT.md` | **M1** — event + inbound-command + backend + read-model contract for a 2nd surface (§6 = conversation/artifact DB read model) |
+| `docs/CONVERSATION_DATA_FLOW.md` | **conversation+artifact data flow audit** (§0 = DB-canonical resolution, migration 17) |
+| `docs/RUNBOOK_db_self_sufficient.md` | e2e runbook to backfill `mesh_tasks` + drop the fat `results/*.json` files |
+| `scripts/backfill_conversation_turns.py` | one-time backfill (`--verify` for parity) — enriches `mesh_tasks` from existing artifacts |
+| `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` / `docs/archive/m1/M1_CHECKLIST.md` | M1 rationale + the executed build checklist |
+| `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` | Web UI ladder (§14) — **all rungs M1→UI-6 done** |
 | `docs/DEFERRED.md` | Web UI track — deliberately-not-built future boxes (Web Push, streaming, diff hunks, terminal, approvals automation) |
-| `docs/STATE_SEPARATION_PLAN.md` | mesh plan (PAUSED background, not active) |
-| `docs/AGENT_MESH_SPEC.md` | mesh design spec |
+| `docs/archive/STATE_SEPARATION_PLAN.md` | mesh plan (PAUSED background, not active) |
+| `docs/archive/AGENT_MESH_SPEC.md` | mesh design spec |
 | `docs/PHASE_4_RUNBOOK.md` | VPS cutover runbook (= State Sep end-state) |
-| `docs/PROGRESS_LOG.md` | completed-work history |
+| `docs/archive/progress/PROGRESS_LOG.md` | completed-work history |
 | `ecosystem.config.js` | PM2 supervisor config |
 
 ---
@@ -262,3 +351,13 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 - Codex end-to-end validation.
 - OpenCode server cross-machine sessions (needs shared DB mount).
 - Postgres migration — trigger: >5 nodes or observed SQLite write contention.
+- **M-Mesh** — distributed event bus (Redis/NATS), shared state store, leader election.
+  "DO NOT build until the app is operable." (`docs/archive/control-surface-unification/CONTROL_SURFACE_UNIFICATION.md` §12)
+- **ACP / A2A bridges** — deferred from cockpit spec; no consuming surface.
+  (`docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md` §9)
+- **Supervisor agents & workflow engine** — deferred; needs workflow-automation design.
+  (`COCKPIT_REFACTOR_SPEC.md` §9)
+- **Transport / role / prompt / tool registries** — deferred; no present pain beyond
+  `BackendRegistry`. (`COCKPIT_REFACTOR_SPEC.md` §9)
+- **Native mobile** — deferred; Web UI is the mobile surface for v1.
+  (`COCKPIT_REFACTOR_SPEC.md` §9)

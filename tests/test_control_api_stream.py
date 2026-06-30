@@ -22,7 +22,7 @@ TOKEN = "test-stream-token"
 
 class _StubOrchestrator:
     def __init__(self):
-        self.session_service = SessionService(SessionStore())
+        self.session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
 
 
 @pytest.fixture

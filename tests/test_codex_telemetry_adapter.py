@@ -156,3 +156,50 @@ def test_invalid_json_emits_sanitized_parse_error():
     assert len(events) == 1
     assert events[0].event_name == "telemetry.parse_error"
     assert "PROMPT_SECRET" not in events[0].model_dump_json()
+
+
+def test_token_count_maps_request_context_and_session_cumulative_usage():
+    events = _adapter().consume_token_count(
+        {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": 1200,
+                    "cached_input_tokens": 900,
+                    "output_tokens": 30,
+                    "reasoning_output_tokens": 5,
+                    "total_tokens": 1230,
+                },
+                "last_token_usage": {
+                    "input_tokens": 140,
+                    "cached_input_tokens": 100,
+                    "output_tokens": 8,
+                    "reasoning_output_tokens": 2,
+                    "total_tokens": 148,
+                },
+                "model_context_window": 1000,
+            },
+            "rate_limits": {
+                "primary": {"used_percent": 34.0, "window_minutes": 300, "resets_at": 123},
+                "secondary": {"used_percent": 42.0, "window_minutes": 10080, "resets_at": 456},
+                "plan_type": "plus",
+            },
+        }
+    )
+
+    request = next(event for event in events if event.event_name == "model.request.usage")
+    assert request.attributes["input_tokens"] == 140
+    assert request.attributes["cache_read_tokens"] == 100
+    assert request.attributes["context_window_tokens"] == 1000
+    assert request.attributes["usage_granularity"] == "request"
+
+    cumulative = next(event for event in events if event.event_name == "model.session_usage")
+    assert cumulative.attributes["input_tokens"] == 1200
+    assert cumulative.attributes["cache_read_tokens"] == 900
+    assert cumulative.attributes["rate_limit_primary_used_percent"] == 34.0
+
+    metrics = project_turn(events)["turn"]["metrics"]
+    assert metrics["input_tokens"] == 140
+    assert metrics["session_cumulative_input_tokens"] == 1200
+    assert metrics["turn_exit_context_tokens"] == 140
+    assert metrics["context_window_tokens"] == 1000

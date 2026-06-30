@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -397,7 +398,20 @@ class CodexBackend(CodingBackend):
                     raw_stderr=stderr,
                 )
 
-            return self._parse(stdout, stderr, returncode, elapsed)
+            result = self._parse(stdout, stderr, returncode, elapsed)
+            if adapter is not None and result.backend_session_id:
+                try:
+                    _emit(
+                        self._rollout_token_events(
+                            adapter,
+                            result.backend_session_id,
+                            started_at=start,
+                            ended_at=time.time(),
+                        )
+                    )
+                except Exception:
+                    logger.warning("event=codex_rollout_telemetry_failed", exc_info=True)
+            return result
 
         except Exception as e:
             return ExecutionResult(
@@ -537,12 +551,36 @@ class CodexBackend(CodingBackend):
         if not output:
             output = stdout.strip()
 
+        # Collect error-type events from stdout JSON stream.
+        error_events: List[str] = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if event.get("type") in ("error", "session.error", "turn.error"):
+                msg = (
+                    event.get("message")
+                    or event.get("error", {}).get("message")
+                    or str(event)
+                )
+                if msg:
+                    error_events.append(msg)
+
         errors: List[str] = []
         if not success:
             if stderr:
                 errors.append(stderr.strip())
+            for msg in error_events:
+                if msg not in errors:
+                    errors.append(msg)
             if not errors:
-                errors.append(f"codex exited with code {returncode}")
+                # Last resort: surface raw stdout so the real error isn't hidden.
+                raw = stdout.strip()
+                errors.append(raw if raw else f"codex exited with code {returncode}")
 
         return ExecutionResult(
             success=success,
@@ -555,3 +593,61 @@ class CodexBackend(CodingBackend):
             parsed_output=parsed_output,
             return_code=returncode,
         )
+
+    def _parse_codex_timestamp(self, value: object) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _find_rollout_file(self, thread_id: str) -> Optional[Path]:
+        if not thread_id:
+            return None
+        root = Path.home() / ".codex" / "sessions"
+        if not root.exists():
+            return None
+        try:
+            matches = sorted(
+                root.rglob(f"*{thread_id}.jsonl"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception:
+            return None
+        return matches[0] if matches else None
+
+    def _rollout_token_events(
+        self,
+        adapter: CodexTelemetryAdapter,
+        thread_id: str,
+        *,
+        started_at: float,
+        ended_at: float,
+    ) -> List[object]:
+        path = self._find_rollout_file(thread_id)
+        if path is None:
+            return []
+        start_dt = datetime.fromtimestamp(started_at - 2.0, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(ended_at + 2.0, tz=timezone.utc)
+        events: List[object] = []
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("type") != "event_msg":
+                continue
+            payload = row.get("payload")
+            if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                continue
+            event_time = self._parse_codex_timestamp(row.get("timestamp"))
+            if event_time is not None and not (start_dt <= event_time <= end_dt):
+                continue
+            events.extend(adapter.consume_token_count(payload, event_time=event_time))
+        return events

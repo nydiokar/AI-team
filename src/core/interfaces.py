@@ -189,6 +189,13 @@ class Session:
     task_history: List[Dict[str, Any]] = None  # [{task_id, timestamp, success, execution_time}]
     origin: Optional[SessionOrigin] = None      # where the session came from; defaults telegram/user
 
+    # Driver state (P0 replacement engine)
+    driver_type: str = ""               # "sdk" | "print_resume" | "" (unknown/legacy)
+    driver_status: str = ""             # "live" | "lost" | "closed" | ""
+    cache_health: str = "unknown"       # "unknown" | "healthy" | "unhealthy"
+    cache_unhealthy_count: int = 0
+    previous_backend_session_ids: List[str] = None  # history when rolling over
+
     def __post_init__(self):
         if self.last_files_modified is None:
             self.last_files_modified = []
@@ -196,6 +203,8 @@ class Session:
             self.task_history = []
         if self.origin is None:
             self.origin = SessionOrigin()
+        if self.previous_backend_session_ids is None:
+            self.previous_backend_session_ids = []
 
 
 @dataclass

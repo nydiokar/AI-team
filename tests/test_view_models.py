@@ -112,7 +112,7 @@ def test_to_dict_has_no_session_object_leak():
 
 @pytest.fixture
 def service():
-    return SessionService(SessionStore())
+    return SessionService(SessionStore(), repo_path_validator=lambda _p: None)
 
 
 def test_list_views_returns_session_views(service, tmp_path):

@@ -211,7 +211,7 @@ export function SystemScreen() {
   const { lines, connection } = useActivityLog();
   const { canInstall, isIos, install } = useInstallPrompt();
   const [selectedTarget, setSelectedTarget] = useState<Target | null>(null);
-  const [jobsExpanded, setJobsExpanded] = useState(false);
+  const [jobsExpanded, setJobsExpanded] = useState(true);
   const [jobs, setJobs] = useState({ total: 0, running: 0 });
 
   const all = targets ?? [];

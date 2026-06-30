@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useLayoutEffect } from "react";
 import { ArrowUp, Square, Paperclip } from "lucide-react";
 import { Button } from "../ui/Button";
 import { newIdempotencyKey } from "../../transport/apiClient";
@@ -19,6 +19,14 @@ export function Composer({
   const [text, setText] = useState("");
   const [uploadBanner, setUploadBanner] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + "px";
+  }, [text]);
 
   const submit = useSubmitInstruction();
   const stop = useStopSession();
@@ -88,10 +96,17 @@ export function Composer({
 
   const rejected = submit.isError;
 
+  const sendOnEnter = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      send();
+    }
+  };
+
   return (
     <div
       className="border-t border-hairline bg-surface-1/95 px-3 py-2.5 backdrop-blur-xl"
-      style={{ paddingBottom: `max(0.625rem, env(safe-area-inset-bottom))` }}
+      style={{ paddingBottom: "max(0.625rem, env(safe-area-inset-bottom))" }}
     >
       {uploadBanner && (
         <p className="mb-1.5 px-1 text-[11px] text-ink-soft">{uploadBanner}</p>
@@ -130,18 +145,15 @@ export function Composer({
             </button>
           </>
         )}
-        <input
+        <textarea
+          ref={textareaRef}
           value={text}
           aria-label="Instruction text"
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
+          onKeyDown={sendOnEnter}
           placeholder={running ? "Task running…" : "Send an instruction…"}
-          className="h-11 flex-1 rounded-full bg-surface-2 px-4 text-[15px] text-ink outline-none ring-1 ring-inset ring-transparent transition-shadow placeholder:text-ink-muted focus:ring-accent/50"
+          rows={1}
+          className="min-h-[44px] max-h-[160px] flex-1 resize-none overflow-y-auto rounded-2xl bg-surface-2 px-4 py-3 text-[15px] text-ink outline-none ring-1 ring-inset ring-transparent transition-shadow placeholder:text-ink-muted focus:ring-accent/50"
         />
         <Button
           size="icon"
