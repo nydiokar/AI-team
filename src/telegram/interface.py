@@ -1409,6 +1409,24 @@ class TelegramInterface:
                 f" · Ollama {_mark(comps.get('llama_available'), optional=True)}"
             )
 
+            mesh_status = status.get("mesh", {}) or {}
+            if mesh_status.get("enabled"):
+                online_nodes = mesh_status.get("online_nodes")
+                total_nodes = mesh_status.get("total_nodes")
+                node_text = "nodes unknown"
+                if online_nodes is not None and total_nodes is not None:
+                    node_text = f"{online_nodes}/{total_nodes} nodes online"
+                fallback_text = (
+                    f"local fallback {mesh_status.get('local_worker_capacity', 0)} workers"
+                    if mesh_status.get("fallback_capacity")
+                    else "no local fallback capacity"
+                )
+                lines.append(
+                    "Mesh mode: "
+                    f"{mesh_status.get('task_server_mode', 'unknown')} · "
+                    f"{node_text} · {fallback_text}"
+                )
+
             # --- Mesh line, only when enabled ---
             if show_node:
                 nodes = self._mesh_online_nodes()

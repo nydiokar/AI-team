@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-06-30 (watched-job routing fixed; conversation+artifacts DB-canonical — migration 17)
+**Last Updated:** 2026-07-01 (P4 fallback/degradation cleanup complete/superseded: status visibility, DB-reconcile spool, mesh health transition events)
 
 ## Remaining work across all open specs (swept from unarchived docs)
 
@@ -14,7 +14,7 @@
 
 | # | Task | Source | Depends on | Scope |
 |---|---|---|---|---|
-| 7 | **Phase 4** — Graceful degradation: 1 embedded fallback worker + JSON-only mode when task server / mesh workers are unreachable; health-check loop to rejoin mesh. See `STATE_SEPARATION_PLAN.md` §Phase 4 and `.ai/NEXT_TASKS.md` §Phase 4. | `STATE_SEPARATION_PLAN.md` §4 | None (additive) | Backend |
+| 7 | **P4 degradation cleanup** — ✅ complete/superseded: DB-first session reads + JSON fallback, optional embedded task server (`MESH_EMBEDDED_SERVER`), configurable local worker capacity, sliding-window mesh health, no local fallback for pinned remote sessions, `/status` mesh mode, `results/reconcile/` replay for DB completion failures, and `mesh_degraded` / `mesh_restored` transition events are in code. | `.ai/NEXT_TASKS.md` | None | Backend ✅ |
 
 ### Accepted warts (known, not fixed)
 
@@ -170,7 +170,7 @@ the task server embedded on its own event loop.
   ├── src/telegram/interface.py     command surface (/status, /nodes, pickers…)
   ├── src/orchestrator.py           task queue, in-process workers, routing, recovery
   ├── src/core/session_service.py   transport-neutral session lifecycle (create/bind) — M1 inbound seam
-  ├── src/core/session_store.py     DB-first reads, dual-write to JSON + DB
+  ├── src/services/session_store.py DB-first reads, dual-write to JSON + DB
   ├── src/control/db.py             SQLite mesh DB (WAL, busy_timeout=5000, migrations)
   ├── src/control/embedded_server.py task server, embedded (mesh on)
   ├── src/control/{task_server,node_registry}.py  HTTP API + node registry
@@ -192,6 +192,7 @@ state/telegram/active_bindings.json   chat_id → session_id
 state/summaries/<id>.md               per-session summary
 state/mesh.db                         SQLite — read-first by session_store; CANONICAL for conversation + artifacts (migration 17)
 results/<task_id>.json                task artifact — now FALLBACK/debug only (DB-canonical since 2026-06-30); droppable
+results/reconcile/<task_id>.json      DB-reconcile spool for completed turns if `mesh_tasks` write fails; replayed on startup / next DB-available completion
 results/raw/<task_id>.ndjson.gz       gzipped raw_stdout debug stream (when system.slim_artifacts=on)
 logs/session_events/<id>.log          per-session NDJSON
 logs/events.ndjson                    system-wide event log
@@ -227,9 +228,15 @@ the worker keeps running, the gateway reattaches on startup and delivers the
 worker's real result to Telegram (no fabricated "Task failed"). State Separation
 Phases 0–3 are effectively complete.
 
-The only remaining work **on this (paused) mesh track** is **Phase 4 — graceful
-degradation / fallback** (see the mesh plan + `.ai/NEXT_TASKS.md`). (Mesh plan doc archived at `docs/archive/STATE_SEPARATION_PLAN.md`.) It is not
-scheduled against the current Web UI work.
+The remaining old **Phase 4** item is now closed as complete/superseded. The
+2026-07-01 audit found the archived one-worker fallback plan partially
+implemented and partially obsolete: DB-first session reads + JSON fallback,
+optional embedded task server, configurable local worker capacity, sliding-window
+task-server health, `/status` mesh mode, DB completion replay from
+`results/reconcile/`, and `mesh_degraded` / `mesh_restored` transition events now
+exist; pinned remote sessions still correctly fail rather than silently running
+locally. See `.ai/NEXT_TASKS.md`. (Mesh plan doc archived at
+`docs/archive/STATE_SEPARATION_PLAN.md`.)
 
 **Cockpit M1 (2026-06-21, `feat/session-service-m1`):** a separate, completed
 track preparing the gateway for a second surface (Web UI). It added a
@@ -259,7 +266,7 @@ Progress against that plan (verified against code on 2026-06-10):
 
 | Phase | Goal | Status |
 |-------|------|--------|
-| 4 | Graceful degradation: 1 embedded fallback worker + JSON when mesh down | **Not started — the only remaining work on the (paused) mesh track** |
+| 4 | Graceful degradation / fallback | **Complete/superseded — audit, status visibility, DB-reconcile spool, and mesh health transition events done 2026-07-01** |
 
 ---
 
@@ -274,10 +281,9 @@ Genuinely additive future work (Web Push, streaming, diff hunks, terminal,
 approvals automation) is parked in `docs/DEFERRED.md` — none blocks shipping.
 
 **Mesh track (paused, branch `main`):** the two-machine cutover is **done and
-live** — gateway+server on the Pi5, worker on `Horse`, restart-resilient. The only
-remaining mesh plan work is Phase 4 (graceful degradation / fallback). Full,
-dispatch-ready task definitions with acceptance checks are in `.ai/NEXT_TASKS.md`
-(§Phase 4).
+live** — gateway+server on the Pi5, worker on `Horse`, restart-resilient. P4 is
+now closed as complete/superseded: do not rebuild the old one-worker fallback
+plan; preserve session affinity and configurable local worker capacity.
 
 Current run mode: gateway + embedded task server in one process on the Pi5
 (`MESH_EMBEDDED_SERVER=true`), worker daemon as a separate process on `Horse`.
@@ -322,7 +328,7 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | `src/orchestrator.py` | runtime, task queue, workers, routing, recovery, mesh hooks |
 | `src/core/session_service.py` | transport-neutral session lifecycle (create/bind) — M1 inbound seam |
 | `src/backends/registry.py` | single declaration site for the backend set — M1 (add a backend = one edit here) |
-| `src/core/session_store.py` | DB-first session reads + JSON/DB dual-write |
+| `src/services/session_store.py` | DB-first session reads + JSON/DB dual-write |
 | `src/control/db.py` | SQLite mesh DB — canonical DB layer |
 | `src/control/task_server.py` | FastAPI task server (currently embedded) |
 | `src/control/node_registry.py` | node registry + heartbeat expiry |

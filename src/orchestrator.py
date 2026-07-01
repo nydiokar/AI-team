@@ -123,6 +123,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._running_exec_tasks: Dict[str, asyncio.Task] = {}
         self._shutdown_interrupted_tasks: set[str] = set()
         self._stale_busy_reconcile_task: Optional[asyncio.Task] = None
+        self._mesh_reconcile_in_progress: bool = False
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -1082,6 +1083,7 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         # Check component availability now that all components are up
         await self._check_component_status()
+        self.reconcile_spooled_mesh_completions(limit=100)
         asyncio.create_task(self._warm_llama_helpers())
         
         # Start Telegram interface if available
@@ -3079,6 +3081,42 @@ Generated from user description: {description}
         except asyncio.CancelledError:
             pass
 
+    def _mesh_status(self) -> Dict[str, Any]:
+        """Return operator-facing mesh mode without probing live services."""
+        online_nodes: Optional[int] = None
+        total_nodes: Optional[int] = None
+        db_available: bool = False
+        if config.mesh.enabled:
+            try:
+                from src.control.db import get_db
+                db = get_db()
+                db_available = db is not None
+                if db is not None:
+                    online_nodes = len(db.list_nodes(status="online"))
+                    total_nodes = len(db.list_nodes())
+            except Exception:
+                db_available = False
+
+        if not config.mesh.enabled:
+            task_server_mode = "off"
+        elif config.mesh.embedded_server:
+            task_server_mode = "embedded-running" if self._embedded_task_server is not None else "embedded-configured"
+        else:
+            task_server_mode = "standalone"
+
+        return {
+            "enabled": bool(config.mesh.enabled),
+            "task_server_mode": task_server_mode,
+            "embedded_server": bool(config.mesh.embedded_server),
+            "local_worker_capacity": len(self.worker_tasks),
+            "configured_worker_capacity": int(config.system.max_concurrent_tasks),
+            "fallback_capacity": len(self.worker_tasks) > 0,
+            "db_available": db_available,
+            "online_nodes": online_nodes,
+            "total_nodes": total_nodes,
+            "session_affinity_required": True,
+        }
+
     def get_status(self) -> Dict[str, Any]:
         """Get comprehensive orchestrator status"""
         resolver = PathResolver.from_config()
@@ -3096,6 +3134,7 @@ Generated from user description: {description}
                 "configured": bool(self.telegram_interface),
                 "running": bool(self.telegram_interface and self.telegram_interface.is_running),
             },
+            "mesh": self._mesh_status(),
             "scope": {
                 "base_cwd": getattr(config.claude, "base_cwd", None),
                 "allowed_root": getattr(config.claude, "allowed_root", None),
@@ -3724,6 +3763,220 @@ Generated from user description: {description}
             else:
                 logger.debug("event=mesh_enqueue_failed task_id=%s err=%s", task.id, e)
 
+    def _mesh_reconcile_dir(self) -> Path:
+        return Path(config.system.results_dir) / "reconcile"
+
+    def _spool_mesh_completion_reconcile(
+        self,
+        task: Task,
+        result: "TaskResult",
+        artifact_path: Optional[str],
+        reason: str,
+    ) -> None:
+        """Persist a completed task for later DB reconciliation."""
+        try:
+            spool_dir = self._mesh_reconcile_dir()
+            spool_dir.mkdir(parents=True, exist_ok=True)
+            payload: Dict[str, Any] = {
+                "schema_version": 1,
+                "task": {
+                    "id": task.id,
+                    "type": getattr(task.type, "value", str(task.type)),
+                    "priority": getattr(task.priority, "value", str(task.priority)),
+                    "status": getattr(task.status, "value", str(task.status)),
+                    "created": task.created,
+                    "title": task.title,
+                    "target_files": list(task.target_files or []),
+                    "prompt": task.prompt or "",
+                    "success_criteria": list(task.success_criteria or []),
+                    "context": task.context or "",
+                    "metadata": task.metadata or {},
+                },
+                "result": {
+                    "task_id": result.task_id,
+                    "success": result.success,
+                    "output": result.output or "",
+                    "errors": list(result.errors or []),
+                    "files_modified": list(result.files_modified or []),
+                    "execution_time": result.execution_time,
+                    "timestamp": result.timestamp,
+                    "file_changes": list(getattr(result, "file_changes", None) or []),
+                    "raw_stdout": getattr(result, "raw_stdout", "") or "",
+                    "raw_stderr": getattr(result, "raw_stderr", "") or "",
+                    "parsed_output": getattr(result, "parsed_output", None),
+                    "return_code": getattr(result, "return_code", 0),
+                    "usage": getattr(result, "usage", None),
+                    "retries": getattr(result, "retries", 0),
+                    "error_class": getattr(result, "error_class", "") or "",
+                    "backend_name": getattr(result, "backend_name", ""),
+                },
+                "artifact_path": artifact_path or "",
+                "reason": reason,
+                "created_at": datetime.now().isoformat(),
+                "reconciled": False,
+            }
+            (spool_dir / f"{task.id}.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.warning(
+                "event=mesh_completion_reconcile_spooled task_id=%s reason=%s",
+                task.id,
+                reason,
+            )
+        except Exception as e:
+            logger.error(
+                "event=mesh_completion_reconcile_spool_failed task_id=%s err=%s",
+                task.id,
+                e,
+            )
+
+    def _task_from_reconcile_payload(self, payload: Dict[str, Any]) -> Task:
+        data = payload.get("task") or {}
+        try:
+            task_type = TaskType(data.get("type") or TaskType.FIX.value)
+        except Exception:
+            task_type = TaskType.FIX
+        try:
+            priority = TaskPriority(data.get("priority") or TaskPriority.MEDIUM.value)
+        except Exception:
+            priority = TaskPriority.MEDIUM
+        try:
+            status = TaskStatus(data.get("status") or TaskStatus.COMPLETED.value)
+        except Exception:
+            status = TaskStatus.COMPLETED
+        return Task(
+            id=str(data.get("id") or ""),
+            type=task_type,
+            priority=priority,
+            status=status,
+            created=str(data.get("created") or datetime.now().isoformat()),
+            title=str(data.get("title") or data.get("id") or "reconciled task"),
+            target_files=list(data.get("target_files") or []),
+            prompt=str(data.get("prompt") or ""),
+            success_criteria=list(data.get("success_criteria") or []),
+            context=str(data.get("context") or ""),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+    def _result_from_reconcile_payload(self, payload: Dict[str, Any]) -> TaskResult:
+        data = payload.get("result") or {}
+        result = TaskResult(
+            task_id=str(data.get("task_id") or (payload.get("task") or {}).get("id") or ""),
+            success=bool(data.get("success")),
+            output=str(data.get("output") or ""),
+            errors=list(data.get("errors") or []),
+            files_modified=list(data.get("files_modified") or []),
+            execution_time=float(data.get("execution_time") or 0.0),
+            timestamp=str(data.get("timestamp") or datetime.now().isoformat()),
+            file_changes=list(data.get("file_changes") or []),
+            raw_stdout=str(data.get("raw_stdout") or ""),
+            raw_stderr=str(data.get("raw_stderr") or ""),
+            parsed_output=data.get("parsed_output"),
+            return_code=int(data.get("return_code") or 0),
+            usage=data.get("usage"),
+            retries=int(data.get("retries") or 0),
+            error_class=str(data.get("error_class") or ""),
+        )
+        backend_name = str(data.get("backend_name") or "")
+        if backend_name:
+            setattr(result, "backend_name", backend_name)
+        return result
+
+    def _ensure_reconcile_task_row(self, db: Any, task: Task, result: TaskResult) -> None:
+        if db.get_task(task.id):
+            return
+        metadata: Dict[str, Any] = task.metadata or {}
+        session_id = str(metadata.get("session_id") or "").strip() or None
+        backend_name = str(getattr(result, "backend_name", "") or metadata.get("backend") or "claude")
+        action = "resume_session" if session_id else "run_oneoff"
+        machine_id: Optional[str] = None
+        if session_id:
+            try:
+                session = self.session_store.get(session_id)
+                if session:
+                    machine_id = session.machine_id or None
+            except Exception:
+                machine_id = None
+        db.enqueue_task(
+            task_id=task.id,
+            session_id=session_id,
+            machine_id=machine_id,
+            backend=backend_name,
+            action=action,
+            payload={
+                "prompt": task.prompt,
+                "task_id": task.id,
+                "action": action,
+                "metadata": metadata,
+            },
+        )
+
+    def reconcile_spooled_mesh_completions(self, limit: int = 100) -> Dict[str, int]:
+        """Replay completed task DB mirrors that were spooled during DB outage."""
+        if self._mesh_reconcile_in_progress:
+            return {"checked": 0, "reconciled": 0, "failed": 0}
+        try:
+            from src.control.db import get_db
+            db = get_db()
+        except Exception:
+            return {"checked": 0, "reconciled": 0, "failed": 0}
+        if db is None:
+            return {"checked": 0, "reconciled": 0, "failed": 0}
+
+        spool_dir = self._mesh_reconcile_dir()
+        if not spool_dir.exists():
+            return {"checked": 0, "reconciled": 0, "failed": 0}
+
+        checked: int = 0
+        reconciled: int = 0
+        failed: int = 0
+        self._mesh_reconcile_in_progress = True
+        try:
+            for path in sorted(spool_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
+                if checked >= limit:
+                    break
+                checked += 1
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    if payload.get("reconciled"):
+                        continue
+                    task = self._task_from_reconcile_payload(payload)
+                    result = self._result_from_reconcile_payload(payload)
+                    if not task.id or not result.task_id:
+                        raise ValueError("missing task_id")
+                    self._ensure_reconcile_task_row(db, task, result)
+                    self._mesh_complete_task(task, result, payload.get("artifact_path") or None)
+                    row = db.get_task(task.id)
+                    if row and row.get("status") in {"completed", "failed", "failed_node_offline"}:
+                        payload["reconciled"] = True
+                        payload["reconciled_at"] = datetime.now().isoformat()
+                        path.write_text(
+                            json.dumps(payload, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        reconciled += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    failed += 1
+                    logger.warning(
+                        "event=mesh_completion_reconcile_failed path=%s err=%s",
+                        path,
+                        e,
+                    )
+        finally:
+            self._mesh_reconcile_in_progress = False
+
+        if checked:
+            logger.info(
+                "event=mesh_completion_reconcile checked=%s reconciled=%s failed=%s",
+                checked,
+                reconciled,
+                failed,
+            )
+        return {"checked": checked, "reconciled": reconciled, "failed": failed}
+
     def _mesh_complete_task(self, task: Task, result: "TaskResult", artifact_path: Optional[str]) -> None:
         """Shadow-write the task result into mesh_tasks — the canonical, file-free store.
 
@@ -3741,7 +3994,11 @@ Generated from user description: {description}
             from src.control.db import get_db
             db = get_db()
             if db is None:
+                self._spool_mesh_completion_reconcile(task, result, artifact_path, "db unavailable")
                 return
+            replay = getattr(self, "reconcile_spooled_mesh_completions", None)
+            if callable(replay) and not getattr(self, "_mesh_reconcile_in_progress", False):
+                replay(limit=25)
             result_dict = {
                 "success": result.success,
                 "output": result.output[:2000] if result.output else "",  # small preview only
@@ -3796,6 +4053,7 @@ Generated from user description: {description}
             )
         except Exception as e:
             logger.debug("event=mesh_complete_failed task_id=%s err=%s", task.id, e)
+            self._spool_mesh_completion_reconcile(task, result, artifact_path, str(e))
 
 
 class _ContextLoader:

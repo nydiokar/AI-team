@@ -52,6 +52,29 @@ def test_single_success_clears_degradation():
     assert h.is_degraded() is False
 
 
+def test_transition_events_emit_once(monkeypatch):
+    events = []
+
+    def fake_emit_event(name, **fields):
+        events.append((name, fields))
+
+    monkeypatch.setattr("src.core.observability.emit_event", fake_emit_event)
+
+    h = MeshHealth(window_size=6, failure_threshold=3)
+    h.record_check(False)
+    h.record_check(False)
+    assert events == []
+
+    h.record_check(False)
+    h.record_check(False)
+    assert [name for name, _fields in events] == ["mesh_degraded"]
+
+    h.record_check(True)
+    h.record_check(True)
+    assert [name for name, _fields in events] == ["mesh_degraded", "mesh_restored"]
+    assert events[-1][1]["consecutive_failures"] == 0
+
+
 def test_mixed_pattern_does_not_degrade():
     """Alternating success/failure never reaches consecutive threshold."""
     h = MeshHealth(window_size=6, failure_threshold=3)
