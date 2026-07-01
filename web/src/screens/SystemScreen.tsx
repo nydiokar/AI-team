@@ -360,7 +360,7 @@ export function SystemScreen() {
           }
         />
       )}
-      <JobsPanel expanded={jobsExpanded} onSummary={setJobs} />
+      <JobsPanel expanded={jobsExpanded} onSummary={setJobs} owned="unowned" />
 
       <SectionHeader label="Mesh" />
       <MeshHealthPanel data={meshHealth} isLoading={meshHealthLoading} error={meshHealthError} />

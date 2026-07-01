@@ -25,9 +25,10 @@ import { SessionStatusChip } from "../components/ui/StatusChip";
 import { SessionTimeline } from "../components/timeline/SessionTimeline";
 import { SessionTurns } from "../components/timeline/SessionTurns";
 import { Composer } from "../components/timeline/Composer";
+import { JobRow } from "../components/system/JobsPanel";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
-import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionActivity } from "../hooks/useLiveData";
+import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionActivity, useJobs } from "../hooks/useLiveData";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
 import {
   useStopSession,
@@ -44,6 +45,7 @@ import {
   type ActivityTone,
 } from "../lib/sessionActivityPresentation";
 import type { Artifact, RemoteFile, SessionActivityItem } from "../domain/models";
+import type { RawJob } from "../transport/rawApi";
 
 type SessionTab = "chat" | "files" | "info";
 
@@ -288,6 +290,43 @@ function SessionStateSequence({
   );
 }
 
+function SessionJobsSection({ sessionId }: { sessionId: string }) {
+  const { data, isLoading } = useJobs(20, sessionId);
+  const running: RawJob[] = data?.running ?? [];
+  const recent: RawJob[] = (data?.recent ?? []).filter(
+    (j) => j.status === "done" || j.status === "failed" || j.status === "lost",
+  );
+  const total = running.length + recent.length;
+
+  return (
+    <div>
+      <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">
+        <Activity className="size-3" />
+        Jobs
+      </p>
+      <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
+        {isLoading ? (
+          <div className="flex items-center gap-2 px-4 py-3 text-[12px] text-ink-muted">
+            <Loader2 className="size-3.5 animate-spin" />
+            Loading jobs...
+          </div>
+        ) : total === 0 ? (
+          <p className="px-4 py-3 text-[12px] text-ink-muted">No watched jobs for this session.</p>
+        ) : (
+          <>
+            {running.map((job) => (
+              <JobRow key={job.id} job={job} running />
+            ))}
+            {recent.map((job) => (
+              <JobRow key={job.id} job={job} />
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SessionInfoTab({
   sessionId,
   onOpenFiles,
@@ -340,6 +379,8 @@ function SessionInfoTab({
       <SessionTurns turns={turns ?? []} loading={turnsLoading} />
 
       <SessionStateSequence sessionId={sessionId} onOpenFiles={onOpenFiles} />
+
+      <SessionJobsSection sessionId={sessionId} />
 
       {dirs !== null && dirs.length > 0 && (
         <div>

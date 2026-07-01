@@ -16,6 +16,10 @@ import {
 import { useJobs } from "../../hooks/useLiveData";
 import type { RawJob } from "../../transport/rawApi";
 import { relAgeFrom } from "../../lib/time";
+import {
+  filterJobsByOwnership,
+  type JobOwnershipFilter,
+} from "../../lib/jobOwnership";
 
 type JobsSummary = { total: number; running: number };
 
@@ -29,7 +33,7 @@ const STATUS_VISUAL: Record<
   lost: { Icon: AlertTriangle, tint: "text-warn" },
 };
 
-function JobRow({ job, running }: { job: RawJob; running?: boolean }) {
+export function JobRow({ job, running }: { job: RawJob; running?: boolean }) {
   const v = STATUS_VISUAL[running ? "running" : job.status] ?? STATUS_VISUAL.lost;
   const { Icon, tint, spin } = v;
   return (
@@ -68,15 +72,20 @@ function JobRow({ job, running }: { job: RawJob; running?: boolean }) {
 export function JobsPanel({
   expanded,
   onSummary,
+  owned = "all",
 }: {
   expanded: boolean;
   onSummary?: (s: JobsSummary) => void;
+  owned?: JobOwnershipFilter;
 }) {
   const { data, isLoading } = useJobs();
 
-  const running = data?.running ?? [];
-  const recent = (data?.recent ?? []).filter(
-    (j) => j.status === "done" || j.status === "failed" || j.status === "lost",
+  const running = filterJobsByOwnership(data?.running ?? [], owned);
+  const recent = filterJobsByOwnership(
+    (data?.recent ?? []).filter(
+      (j) => j.status === "done" || j.status === "failed" || j.status === "lost",
+    ),
+    owned,
   );
   const total = running.length + recent.length;
   const runningCount = running.length;

@@ -1,6 +1,6 @@
 /**
  * Server-state hooks (TanStack Query) for the LIVE read API. Sessions + System
- * bind to these (UI-1 acceptance gate). Tasks/timeline use fixtures in UI-1.
+ * bind to these.
  *
  * Polling (3s, matching the dashboard) is the transport — there is no WS/SSE
  * until Move F (gap-doc §7). Raw payloads are translated through the adapters
@@ -44,9 +44,8 @@ export function useTargets() {
 }
 
 /**
- * Live tasks — available but NOT required for the UI-1 gate (Tasks screen renders
- * from fixtures per scope). Exposed so the Tasks screen can opt into live data
- * where the flat /api/tasks rows suffice; richer sectioning waits for Move G′.
+ * Live tasks. Kept for command invalidation and legacy consumers; primary
+ * session progress now comes from the durable session timeline.
  */
 export function useTasks(limit = 50) {
   const token = useAuthStore((s) => s.token);
@@ -59,8 +58,8 @@ export function useTasks(limit = 50) {
 }
 
 /**
- * Sectioned tasks (Move G′) — the Tasks inbox bound to the backend's supervised
- * lifecycle buckets (attention/running/queued/recent), not client-side bucketing.
+ * Sectioned task buckets bound to the backend's supervised lifecycle
+ * (attention/running/queued/recent), not client-side bucketing.
  * The backend overlays each task's owning-session status, so `waiting_for_input`
  * lands in `attention` here where the flat status alone couldn't reach it.
  */
