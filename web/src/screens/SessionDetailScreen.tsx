@@ -21,13 +21,13 @@ import {
   MessagesSquare,
 } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
-import { SessionStatusChip, TaskStatusChip } from "../components/ui/StatusChip";
+import { SessionStatusChip } from "../components/ui/StatusChip";
 import { SessionTimeline } from "../components/timeline/SessionTimeline";
 import { SessionTurns } from "../components/timeline/SessionTurns";
 import { Composer } from "../components/timeline/Composer";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
-import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns } from "../hooks/useLiveData";
+import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionActivity } from "../hooks/useLiveData";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
 import {
   useStopSession,
@@ -36,12 +36,14 @@ import {
   useCompactSession,
   useInspectSession,
 } from "../hooks/useSessionActions";
-import { useActivityLog } from "../hooks/useActivityLog";
 import { cn } from "../lib/cn";
 import { clockLabel } from "../lib/time";
-import type { Artifact, RemoteFile } from "../domain/models";
-import type { TaskState } from "../domain/status";
-import type { LogLine } from "../transport/eventLog";
+import {
+  activityKindLabel,
+  activityStatusView,
+  type ActivityTone,
+} from "../lib/sessionActivityPresentation";
+import type { Artifact, RemoteFile, SessionActivityItem } from "../domain/models";
 
 type SessionTab = "chat" | "files" | "info";
 
@@ -175,84 +177,124 @@ function SessionFilesTab({ sessionId }: { sessionId: string }) {
 
 // ── Session Info tab ──────────────────────────────────────────────────────────
 
-const STATE_KIND_LABEL: Record<string, string> = {
-  task: "Task",
-  run: "Run",
-  approval: "Approval",
-  artifact_written: "Artifact",
-  approval_requested: "Approval",
+const ACTIVITY_TONE_CLASS: Record<ActivityTone, string> = {
+  running: "bg-running text-running",
+  ok: "bg-ok text-ok",
+  warn: "bg-warn text-warn",
+  bad: "bg-bad text-bad",
+  idle: "bg-ink-muted text-ink-muted",
 };
-const TASK_STATES: ReadonlySet<string> = new Set([
-  "queued",
-  "dispatching",
-  "running",
-  "waiting_for_input",
-  "waiting_for_approval",
-  "succeeded",
-  "failed",
-  "cancelled",
-  "connection_unknown",
-]);
 
-function SessionStateRow({ line }: { line: LogLine }) {
-  const label = STATE_KIND_LABEL[line.kind] ?? line.kind.replace(/[_.]+/g, " ");
-  const isTask = line.kind === "task";
-  const rawState = isTask ? line.text.replace(/^task\s+/, "").replace(/\s+/g, "_") : "";
-  const state = TASK_STATES.has(rawState) ? (rawState as TaskState) : null;
+function ActivityStatusPill({ item }: { item: SessionActivityItem }) {
+  const view = activityStatusView(item);
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-surface-3/70 py-1 pl-2 pr-2.5 text-[11px] font-medium text-ink-soft">
+      <span className={cn("size-1.5 rounded-full", ACTIVITY_TONE_CLASS[view.tone])} />
+      {view.label}
+    </span>
+  );
+}
+
+function SessionStateRow({
+  item,
+  onOpenFiles,
+}: {
+  item: SessionActivityItem;
+  onOpenFiles?: () => void;
+}) {
+  const label = activityKindLabel(item.kind);
+  const identifier = item.taskId ?? item.jobId ?? item.turnId ?? item.nodeId;
+  const detail = item.detail || item.source;
+  const canOpenFiles = item.kind === "artifact" || item.kind === "file_change";
   return (
     <div className="flex items-center gap-2.5 px-4 py-2.5">
       <span
         className={cn(
           "size-1.5 shrink-0 rounded-full",
-          line.severity === "error"
-            ? "bg-bad"
-            : line.severity === "warning"
-              ? "bg-warn"
-              : line.severity === "success"
-                ? "bg-ok"
-                : "bg-accent",
+          item.confidence === "low" || item.staleness === "stale"
+            ? "bg-warn"
+            : item.durability === "durable"
+              ? "bg-ok"
+              : "bg-accent",
         )}
       />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="shrink-0 text-[11px] font-medium text-ink-muted">{label}</span>
-          <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-soft">{line.text}</span>
+          <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-soft">{item.summary}</span>
         </div>
-        {line.taskId && (
-          <div className="mt-0.5 truncate font-mono text-[10.5px] text-ink-muted">{line.taskId}</div>
+        {(identifier || detail) && (
+          <div className="mt-0.5 truncate font-mono text-[10.5px] text-ink-muted">
+            {[identifier, detail].filter(Boolean).join(" / ")}
+          </div>
         )}
       </div>
-      {state ? (
-        <TaskStatusChip state={state} />
-      ) : (
-        <span className="shrink-0 text-[10.5px] tabular-nums text-ink-muted">{clockLabel(line.at)}</span>
+      <ActivityStatusPill item={item} />
+      {canOpenFiles && onOpenFiles && (
+        <button
+          type="button"
+          onClick={onOpenFiles}
+          className="flex size-7 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-surface-2 hover:text-ink"
+          aria-label="Open files"
+        >
+          <FolderGit2 className="size-3.5" />
+        </button>
       )}
+      <span className="shrink-0 text-[10.5px] tabular-nums text-ink-muted">{clockLabel(item.timestamp)}</span>
     </div>
   );
 }
 
-function SessionStateSequence({ sessionId }: { sessionId: string }) {
-  const { lines } = useActivityLog({ sessionId, includeSessionActivity: true });
-  const scoped = lines.slice(0, 12).reverse();
+function SessionStateSequence({
+  sessionId,
+  onOpenFiles,
+}: {
+  sessionId: string;
+  onOpenFiles?: () => void;
+}) {
+  const { data, isLoading, isError } = useSessionActivity(sessionId, 30);
+  const scoped = (data?.items ?? []).slice(0, 12);
 
   return (
     <div>
       <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">
         <Activity className="size-3" />
-        State
+        Durable state
       </p>
       <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
-        {scoped.length === 0 ? (
-          <div className="px-4 py-3 text-[12px] text-ink-muted">No live state events yet.</div>
+        {isLoading ? (
+          <div className="flex items-center gap-2 px-4 py-3 text-[12px] text-ink-muted">
+            <Loader2 className="size-3.5 animate-spin" />
+            Loading durable timeline...
+          </div>
+        ) : isError ? (
+          <div className="px-4 py-3 text-[12px] text-warn">
+            Durable timeline unavailable. State is not inferred from live events.
+          </div>
+        ) : scoped.length === 0 ? (
+          <div className="px-4 py-3 text-[12px] text-ink-muted">No durable state yet.</div>
         ) : (
-          scoped.map((line) => <SessionStateRow key={line.id} line={line} />)
+          scoped.map((item) => (
+            <SessionStateRow key={item.id} item={item} onOpenFiles={onOpenFiles} />
+          ))
         )}
       </div>
+      {data && data.coverage.telemetry === "partial" && (
+        <p className="mt-2 text-[11px] text-warn">
+          Telemetry coverage is partial; uncertain work is shown explicitly.
+        </p>
+      )}
     </div>
   );
 }
 
-function SessionInfoTab({ sessionId }: { sessionId: string }) {
+function SessionInfoTab({
+  sessionId,
+  onOpenFiles,
+}: {
+  sessionId: string;
+  onOpenFiles?: () => void;
+}) {
   const { data: sessions } = useSessions();
   const session = sessions?.find((s) => s.id === sessionId);
   const [dirs, setDirs] = useState<string[] | null>(null);
@@ -297,7 +339,7 @@ function SessionInfoTab({ sessionId }: { sessionId: string }) {
 
       <SessionTurns turns={turns ?? []} loading={turnsLoading} />
 
-      <SessionStateSequence sessionId={sessionId} />
+      <SessionStateSequence sessionId={sessionId} onOpenFiles={onOpenFiles} />
 
       {dirs !== null && dirs.length > 0 && (
         <div>
@@ -727,7 +769,7 @@ export function SessionDetailScreen() {
 
       {tab === "info" && id && (
         <div className="flex-1 overflow-y-auto overscroll-contain">
-          <SessionInfoTab sessionId={id} />
+          <SessionInfoTab sessionId={id} onOpenFiles={() => setTab("files")} />
         </div>
       )}
 
