@@ -321,6 +321,140 @@ def test_session_timeline_is_bounded_stably_ordered_and_missing_telemetry_ok(cli
     assert all(item["source"] != "sse" for item in r1.json()["items"])
 
 
+# --- session timeline honesty ------------------------------------------------
+
+def test_session_timeline_surfaces_restart_stale_detached_recovered_and_lost(client, orch, tmp_path):
+    import json
+    from datetime import timedelta
+
+    from src.control.db import get_db
+    from src.control.telemetry_store import TelemetryStore
+    from src.core.telemetry import build_event, utc_now
+
+    res = orch.session_service.create_session(
+        backend="codex", repo_path=str(tmp_path), chat_id=44,
+    )
+    assert res.ok
+    sid = res.session.session_id
+    db = get_db()
+    now = utc_now()
+    old = (now - timedelta(hours=2)).isoformat()
+
+    for node_id, incarnation in [
+        ("worker-stale", "inc-a"),
+        ("worker-restarted", "inc-a"),
+        ("worker-detached", "inc-a"),
+    ]:
+        db.upsert_node(
+            node_id=node_id,
+            tailscale_ip="100.64.0.10",
+            api_port=9001,
+            backends=["codex"],
+            max_concurrent=2,
+            incarnation_id=incarnation,
+        )
+
+    db.enqueue_task("task_worker_unknown", sid, "worker-stale", "codex", "resume_session", {})
+    assert db.claim_task("task_worker_unknown", "worker-stale")
+    db.heartbeat_node(
+        "worker-stale",
+        live_state=json.dumps({"v": 1, "active_tasks": ["task_worker_unknown"]}),
+    )
+    with db._write() as conn:
+        conn.execute(
+            """
+            UPDATE nodes
+            SET last_heartbeat = ?, live_state_updated_at = ?, updated_at = ?
+            WHERE node_id = ?
+            """,
+            (old, old, old, "worker-stale"),
+        )
+
+    db.enqueue_task("task_stale_claim", sid, "worker-restarted", "codex", "resume_session", {})
+    assert db.claim_task("task_stale_claim", "worker-restarted")
+    db.upsert_node(
+        node_id="worker-restarted",
+        tailscale_ip="100.64.0.10",
+        api_port=9001,
+        backends=["codex"],
+        max_concurrent=2,
+        incarnation_id="inc-b",
+    )
+
+    db.enqueue_task("task_detached", sid, "worker-detached", "codex", "resume_session", {})
+    assert db.claim_task("task_detached", "worker-detached")
+    db.heartbeat_node(
+        "worker-detached",
+        live_state=json.dumps({"v": 1, "active_tasks": ["some_other_task"]}),
+    )
+
+    db.enqueue_task("task_recovered", sid, None, "codex", "resume_session", {})
+    db.complete_task("task_recovered", {"success": True, "output": "recovered"})
+    start = now - timedelta(minutes=1)
+    common = {
+        "turn_id": "task_recovered",
+        "session_id": sid,
+        "node_id": "worker-stale",
+        "emitter_process_instance_id": "worker_proc",
+        "source": "worker",
+        "backend": "codex",
+    }
+    TelemetryStore(db).insert_events(
+        [
+            build_event("turn.started", event_time=start, observed_time=start, **common),
+            build_event(
+                "turn.completed",
+                event_time=now,
+                observed_time=now,
+                attributes={"status": "success", "timeout_status": "none", "exit_code": 0},
+                **common,
+            ),
+        ]
+    )
+    with db._write() as conn:
+        conn.execute(
+            """
+            UPDATE llm_turns
+            SET data_quality_json = ?
+            WHERE turn_id = ?
+            """,
+            (json.dumps([{"reason_code": "reconciled_after_restart"}]), "task_recovered"),
+        )
+
+    db.register_job(
+        job_id="job_lost_session",
+        node_id="worker-stale",
+        label="background test",
+        session_id=sid,
+    )
+    db.fail_job("job_lost_session", "pid identity changed", status="lost")
+
+    r = client.get(f"/api/sessions/{sid}/timeline?limit=50", headers=_auth())
+
+    assert r.status_code == 200
+    items = r.json()["items"]
+    task_states = {
+        item["task_id"]: item
+        for item in items
+        if item["kind"] == "task_state"
+    }
+    assert task_states["task_worker_unknown"]["status"] == "worker_unknown"
+    assert task_states["task_worker_unknown"]["staleness"] == "unknown"
+    assert task_states["task_stale_claim"]["status"] == "stale_claim"
+    assert task_states["task_stale_claim"]["staleness"] == "stale"
+    assert task_states["task_detached"]["status"] == "detached"
+    assert task_states["task_detached"]["staleness"] == "stale"
+    assert task_states["task_recovered"]["status"] == "recovered"
+    assert task_states["task_recovered"]["staleness"] == "fresh"
+    assert any(
+        item["kind"] == "job_state"
+        and item["job_id"] == "job_lost_session"
+        and item["status"] == "lost"
+        for item in items
+    )
+    assert all(item["status"] != "running" for item in task_states.values())
+
+
 # --- Move G′: sectioned /api/tasks + session-status overlay ------------------
 
 def test_tasks_sectioned_returns_five_buckets(client):

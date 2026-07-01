@@ -206,7 +206,12 @@ function SessionStateRow({
 }) {
   const label = activityKindLabel(item.kind);
   const identifier = item.taskId ?? item.jobId ?? item.turnId ?? item.nodeId;
-  const detail = item.detail || item.source;
+  const detail =
+    typeof item.detail.reason === "string"
+      ? item.detail.reason
+      : typeof item.detail.label === "string"
+        ? item.detail.label
+        : item.source;
   const canOpenFiles = item.kind === "artifact" || item.kind === "file_change";
   return (
     <div className="flex items-center gap-2.5 px-4 py-2.5">

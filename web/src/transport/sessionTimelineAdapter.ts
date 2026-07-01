@@ -26,7 +26,7 @@ export function toSessionActivityItem(
     confidence: raw.confidence,
     staleness: raw.staleness,
     summary: raw.summary,
-    detail: raw.detail,
+    detail: raw.detail ?? {},
     rawRefs: raw.raw_refs ?? {},
   };
 }

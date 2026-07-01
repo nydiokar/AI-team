@@ -395,7 +395,7 @@ export interface RawSessionTimelineItem {
   confidence: string;
   staleness: string;
   summary: string;
-  detail: string | null;
+  detail: Record<string, unknown>;
   raw_refs: Record<string, string | number | boolean | null>;
 }
 
