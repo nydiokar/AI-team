@@ -34,8 +34,9 @@ describe("eventLog — GatewayEvent → LogLine", () => {
     expect(
       toLogLine(stamp({ type: "task.state_changed", taskId: "t9", state: "failed" })).severity,
     ).toBe("error");
-    const ok = toLogLine(stamp({ type: "task.state_changed", taskId: "t9", state: "running" }));
+    const ok = toLogLine(stamp({ type: "task.state_changed", sessionId: "s9", taskId: "t9", state: "running" }));
     expect(ok.severity).toBe("info");
+    expect(ok.sessionId).toBe("s9");
     expect(ok.taskId).toBe("t9");
     expect(ok.text).toBe("task running");
   });

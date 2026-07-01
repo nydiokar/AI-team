@@ -56,7 +56,7 @@ export type GatewayEvent =
   // ── tasks ─ ✅ task.created (rename); 🟡 state_changed (collapses scattered
   //    backend transitions task_received/timeout/cancelled/retry into one).
   | { type: "task.created"; task: Task }
-  | { type: "task.state_changed"; taskId: string; state: TaskState }
+  | { type: "task.state_changed"; taskId: string; state: TaskState; sessionId?: string | null }
   // ⛔ task.progress + tool.* OMITTED — see header.
   // ── approvals ─ 🟡 PARTIAL: emitted (already dotted!) but inert (Move H).
   | { type: "approval.required"; approval: ApprovalRequest }
