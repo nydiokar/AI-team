@@ -279,6 +279,8 @@ def metrics() -> Dict[str, Any]:
     tailing logs, and to be consumed by a task-distributing agent.
     """
     db = get_db()
+    if db:
+        db.record_mesh_health_sample(source="metrics")
     s = db.stats() if db else {}
     mesh_load = s.get("mesh_load") or {}
     completed = s.get("tasks_completed", 0)
@@ -322,6 +324,9 @@ def metrics() -> Dict[str, Any]:
             "busy": s.get("sessions_busy", 0),
             "stale_busy": mesh_load.get("stale_busy_sessions", 0),
         },
+        "history": {
+            "recent": db.list_mesh_health_samples(limit=24) if db else [],
+        },
         "schema_version": s.get("schema_version", 0),
     }
 
@@ -355,6 +360,12 @@ def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
     if not ok:
         # Unknown node — prompt re-register instead of silently failing
         raise HTTPException(status_code=404, detail="Node not found; send /nodes/register first")
+    try:
+        db = get_db()
+        if db:
+            db.record_mesh_health_sample(source="heartbeat")
+    except Exception:
+        pass
     return {"status": "ok"}
 
 

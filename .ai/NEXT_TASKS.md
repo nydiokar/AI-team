@@ -24,6 +24,7 @@ history.
 | T3 watched jobs | DONE | `jobs` table, `/jobs` API, worker watcher, MCP registration, tests exist. |
 | T3.1 watched job process identity | DONE | Worker probes PID + process start/command, records `last_checked_at`, and marks mismatches `lost`. |
 | T4 worker-restart claim reclaim | DONE | Release endpoint, stale-claim reaper, startup sweep, late-result guard, tests exist. |
+| M5 mesh health history | DONE | `mesh_health_samples` ledger records slot/load/stale-state samples from heartbeat + metrics; `/metrics.history.recent` exposes recent trend rows. |
 | Cockpit M1 (session core) | DONE (branch) | `feat/session-service-m1`: backend `registry.py`, `SessionService` (create/bind), `SessionOrigin` (DB migration 12), `docs/CONTROL_CONTRACT.md`. Telegram byte-identical. Separate track from State Separation. See `docs/M1_CHECKLIST.md` + PROGRESS_LOG 2026-06-21. M2+ deferred. |
 
 ---
@@ -91,7 +92,7 @@ Implemented 2026-07-01:
 Verification:
 - `pytest tests/test_mesh_health.py`
 
-### M5 — Mesh Health History / Trend Ledger
+### M5 — Mesh Health History / Trend Ledger — DONE
 
 **Why:** the self-awareness branch exposes current mesh state (`/status`,
 `/nodes`, `/node`, `/metrics`) and emits reconciliation events, but operators
@@ -99,20 +100,18 @@ still have to reconstruct trends from logs. Stale-busy count, live-state
 freshness, slot utilization, and node availability are important enough to keep
 as queryable history once the live mesh sees real incidents.
 
-**Task:** add a lightweight historical ledger for mesh health snapshots and/or
-reconciliation events. Keep it separate from `mesh_tasks`; this is operational
-telemetry, not task lifecycle state.
+Implemented 2026-07-01:
+- Migration 19 adds `mesh_health_samples`, separate from `mesh_tasks`.
+- Samples capture sessions busy, pending/claimed tasks, online/total nodes,
+  slots used/total/available, active tasks, stale-busy sessions, live-state
+  freshness counts, and stale live-state node IDs.
+- Samples are recorded from worker heartbeat and `/metrics`, with retention
+  pruning by age and max rows.
+- `/metrics` now returns `history.recent` so an operator can compare recent
+  stale-busy/live-state/slot trends without reading logs.
 
-**Possible shape:**
-- table such as `mesh_health_samples` or append-only event rows keyed by
-  timestamp/node/session
-- periodic sample of aggregate slot load, stale-live-state nodes, stale-busy
-  count, online/offline node count
-- compact Telegram or CLI view for recent anomalies
-- retention policy so the SQLite DB does not grow without bound
-
-**Acceptance:** an operator can answer "did stale-busy/live-state freshness get
-worse over the last hour/day?" without manually reading logs.
+Verification:
+- `pytest tests/test_mesh_health_samples.py tests/test_heartbeat_live_state.py tests/test_mesh_health.py tests/test_task_server_client.py`
 
 ---
 
