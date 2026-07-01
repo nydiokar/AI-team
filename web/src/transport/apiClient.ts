@@ -26,6 +26,7 @@ import type {
   RawJob,
   RawTurn,
   RawMeshHealthResponse,
+  RawSessionTimelineResponse,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -194,6 +195,21 @@ export const api = {
       token,
     );
     return data.turns ?? [];
+  },
+
+  /** Durable session-owned execution timeline, distinct from live events. */
+  async sessionTimeline(
+    token: string,
+    sessionId: string,
+    limit = 50,
+    cursor?: string | null,
+  ): Promise<RawSessionTimelineResponse> {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (cursor) qs.set("cursor", cursor);
+    return get<RawSessionTimelineResponse>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/timeline?${qs.toString()}`,
+      token,
+    );
   },
 
   /** Live event tail (poll). Pass the returned offset back as `since`. */

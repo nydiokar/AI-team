@@ -13,6 +13,7 @@ import { toTargets } from "../transport/nodeAdapter";
 import { toTasks, toTaskSections } from "../transport/taskAdapter";
 import { toApprovals } from "../transport/approvalAdapter";
 import { toArtifacts, toArtifactDetail } from "../transport/artifactAdapter";
+import { toSessionActivityTimeline } from "../transport/sessionTimelineAdapter";
 import { useAuthStore } from "../stores/authStore";
 
 const POLL_MS = 3000;
@@ -148,6 +149,31 @@ export function useSessionTurns(sessionId: string | undefined) {
  * One artifact's changed files (UI-4) — fetched on demand when a card expands.
  * Artifacts are immutable once written, so this does NOT poll.
  */
+/**
+ * Durable session execution timeline. This is the session-owned read model for
+ * task/job/turn/approval facts and must not be mixed with rolling live events as
+ * state authority.
+ */
+export function useSessionActivity(
+  sessionId: string | undefined,
+  limit = 50,
+  cursor?: string | null,
+) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["session-activity", sessionId, limit, cursor ?? null],
+    queryFn: async () =>
+      toSessionActivityTimeline(
+        await api.sessionTimeline(token, sessionId!, limit, cursor),
+      ),
+    enabled: Boolean(token) && Boolean(sessionId),
+    refetchInterval: POLL_MS,
+    refetchOnReconnect: true,
+    placeholderData: (prev) => prev,
+  });
+}
+
+/** Fetch one immutable artifact detail on demand. */
 export function useArtifact(taskId: string | null) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
