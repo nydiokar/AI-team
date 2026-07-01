@@ -1278,12 +1278,18 @@ class MeshDB:
         return dict(row) if row else None
 
     def list_approvals(
-        self, status: Optional[str] = None, limit: int = 50
+        self,
+        status: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 50,
     ) -> List[Dict[str, Any]]:
         clauses, params = [], []
         if status:
             clauses.append("status = ?")
             params.append(status)
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         rows = self._conn().execute(

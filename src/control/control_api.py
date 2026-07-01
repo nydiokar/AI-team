@@ -575,6 +575,39 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=404, detail="not_found")
         return JSONResponse({"messages": turns})
 
+    @app.get("/api/sessions/{session_id}/timeline", dependencies=[Depends(_require_auth)])
+    def api_session_timeline(
+        session_id: str,
+        limit: int = Query(50, ge=1, le=200),
+        cursor: Optional[str] = Query(default=None),
+    ) -> JSONResponse:
+        """Durable, bounded session activity timeline.
+
+        Service boundary checklist:
+        - concurrency: read-only bounded DB queries; no scarce resource held
+          beyond the request.
+        - memory: per-source reads are capped, endpoint limit is 1..200.
+        - request size: path id plus bounded query params only.
+        - timeout/degraded: no filesystem scans or SSE log parsing; DB/telemetry
+          failures degrade through coverage fields, not fabricated states.
+        - malformed input: bad cursors normalize to the first page.
+        - backing resources: unavailable DB returns empty durable response with
+          unavailable coverage.
+        """
+        db = _db()
+        session = orchestrator.session_service.store.get(session_id)
+        session_row = _session_payload(session) if session is not None else None
+        from src.control.session_timeline import build_session_timeline
+        response = build_session_timeline(
+            db=db,
+            telemetry_store=_telemetry_store(),
+            session_id=session_id,
+            session_row=session_row,
+            limit=limit,
+            cursor=cursor,
+        )
+        return JSONResponse(response.model_dump(mode="json"))
+
     @app.get("/api/events", dependencies=[Depends(_require_auth)])
     def api_events(
         since: int = Query(0, ge=0),
