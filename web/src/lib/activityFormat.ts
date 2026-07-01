@@ -77,6 +77,10 @@ export function enrichLine(
   };
 }
 
+export function isSystemActivity(line: EnrichedLine): boolean {
+  return line.session == null;
+}
+
 /** File/artifact events live in the Files tab; everything else is conversational. */
 function tabSuffix(kind: string): string {
   return /artifact|file/i.test(kind) ? "?tab=files" : "";
