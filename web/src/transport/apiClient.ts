@@ -387,8 +387,14 @@ export const api = {
   },
 
   /** GET /api/jobs — watched jobs: running + recent. */
-  async jobs(token: string, limit = 20): Promise<{ running: RawJob[]; recent: RawJob[] }> {
-    return get(`/api/jobs?limit=${limit}`, token);
+  async jobs(
+    token: string,
+    limit = 20,
+    sessionId?: string,
+  ): Promise<{ running: RawJob[]; recent: RawJob[] }> {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (sessionId) qs.set("session_id", sessionId);
+    return get(`/api/jobs?${qs.toString()}`, token);
   },
 
   async meshHealth(token: string, limit = 24): Promise<RawMeshHealthResponse> {

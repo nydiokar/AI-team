@@ -471,6 +471,36 @@ def test_artifacts_requires_auth(client):
     assert client.get("/api/artifacts").status_code in (401, 403)
 
 
+def test_jobs_endpoint_filters_by_session_id(client):
+    from src.control.db import get_db
+
+    db = get_db()
+    db.register_job(
+        job_id="job_owned",
+        node_id="worker-a",
+        label="owned",
+        session_id="sess_jobs_filter",
+    )
+    db.register_job(
+        job_id="job_unowned",
+        node_id="worker-a",
+        label="unowned",
+        session_id=None,
+    )
+
+    filtered = client.get(
+        "/api/jobs?session_id=sess_jobs_filter",
+        headers=_auth(),
+    ).json()
+    unfiltered = client.get("/api/jobs", headers=_auth()).json()
+
+    filtered_ids = {job["id"] for job in filtered["running"] + filtered["recent"]}
+    unfiltered_ids = {job["id"] for job in unfiltered["running"] + unfiltered["recent"]}
+    assert "job_owned" in filtered_ids
+    assert "job_unowned" not in filtered_ids
+    assert {"job_owned", "job_unowned"}.issubset(unfiltered_ids)
+
+
 # --- nodes: DB fallback annotates liveness when the registry is empty -------
 
 def test_nodes_fallback_annotates_live_when_registry_empty(client):

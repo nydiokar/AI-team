@@ -767,13 +767,19 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.debug("event=remote_jobs_client_unavailable err=%s", e)
             return None
 
-    def list_watched_jobs(self, limit: int = 20) -> Dict[str, List[Dict[str, Any]]]:
+    def list_watched_jobs(
+        self,
+        limit: int = 20,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
         """Return watched jobs visible to this gateway.
 
         The local Web UI can run on a machine whose MCP/worker points at a
         remote task server via CONTROLLER_URL. In that topology, local SQLite is
         empty but the real watched jobs live on the controller. Merge both views
         by job id so System > Jobs reflects the actual registration target.
+        When session_id is supplied, return only jobs owned by that session so
+        Session/Project surfaces do not have to filter a global operator list.
         """
         running: List[Dict[str, Any]] = []
         recent: List[Dict[str, Any]] = []
@@ -781,15 +787,15 @@ class TaskOrchestrator(ITaskOrchestrator):
             from src.control.db import get_db
             db = get_db()
             if db is not None:
-                running.extend(db.list_jobs(status="running", limit=limit))
-                recent.extend(db.list_jobs(limit=limit))
+                running.extend(db.list_jobs(status="running", session_id=session_id, limit=limit))
+                recent.extend(db.list_jobs(session_id=session_id, limit=limit))
         except Exception as e:
             logger.debug("event=local_jobs_list_failed err=%s", e)
 
         client = self._remote_jobs_client()
         if client is not None:
-            running.extend(client.list_jobs(status="running", limit=limit))
-            recent.extend(client.list_jobs(limit=limit))
+            running.extend(client.list_jobs(status="running", session_id=session_id, limit=limit))
+            recent.extend(client.list_jobs(session_id=session_id, limit=limit))
 
         return {
             "running": self._dedupe_jobs(running, limit),

@@ -398,7 +398,7 @@ def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
     from src.orchestrator import TaskOrchestrator
 
     class _FakeDB:
-        def list_jobs(self, status=None, limit=20):
+        def list_jobs(self, status=None, session_id=None, limit=20):
             if status == "running":
                 return [{"id": "local-running", "status": "running"}]
             return [{"id": "local-done", "status": "done"}]
@@ -427,6 +427,48 @@ def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
         {"id": "local-done", "status": "done"},
         {"id": "remote-done", "status": "done"},
     ]
+
+
+def test_orchestrator_filters_local_and_remote_jobs_by_session(monkeypatch):
+    import src.control.db as db_mod
+    from src.orchestrator import TaskOrchestrator
+
+    calls = []
+
+    class _FakeDB:
+        def list_jobs(self, status=None, session_id=None, limit=20):
+            calls.append(("local", status, session_id, limit))
+            if session_id != "sess_jobs":
+                return []
+            if status == "running":
+                return [{"id": "local-owned-running", "status": "running", "session_id": session_id}]
+            return [{"id": "local-owned-done", "status": "done", "session_id": session_id}]
+
+    class _FakeClient:
+        def list_jobs(self, node_id=None, status=None, session_id=None, limit=20):
+            calls.append(("remote", status, session_id, limit))
+            if session_id != "sess_jobs":
+                return []
+            if status == "running":
+                return [{"id": "remote-owned-running", "status": "running", "session_id": session_id}]
+            return [{"id": "remote-owned-done", "status": "done", "session_id": session_id}]
+
+    monkeypatch.setattr(db_mod, "get_db", lambda: _FakeDB())
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch._remote_jobs_client = lambda: _FakeClient()
+
+    jobs = orch.list_watched_jobs(limit=10, session_id="sess_jobs")
+
+    assert [job["id"] for job in jobs["running"]] == [
+        "local-owned-running",
+        "remote-owned-running",
+    ]
+    assert [job["id"] for job in jobs["recent"]] == [
+        "local-owned-done",
+        "remote-owned-done",
+    ]
+    assert all(call[2] == "sess_jobs" for call in calls)
 
 
 def test_orchestrator_filters_remote_terminal_jobs_once():

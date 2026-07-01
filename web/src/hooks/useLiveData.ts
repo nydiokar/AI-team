@@ -190,11 +190,11 @@ export function useModels(backend: string | undefined) {
 /**
  * Watched jobs — running + recently finished. Polls at the same rate as tasks.
  */
-export function useJobs(limit = 20) {
+export function useJobs(limit = 20, sessionId?: string) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["jobs", limit],
-    queryFn: () => api.jobs(token, limit),
+    queryKey: ["jobs", limit, sessionId ?? null],
+    queryFn: () => api.jobs(token, limit, sessionId),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
   });

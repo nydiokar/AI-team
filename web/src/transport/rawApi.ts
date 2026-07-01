@@ -222,6 +222,8 @@ export interface RawUploadResult {
 // db.list_jobs() rows from mesh_jobs table.
 export interface RawJob {
   id: string;
+  session_id: string | null;
+  node_id: string;
   label: string | null;
   status: string; // running|done|failed|lost
   pid: number | null;
