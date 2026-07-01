@@ -22,7 +22,7 @@ function item(status: string | null, overrides: Partial<SessionActivityItem> = {
     confidence: "high",
     staleness: "fresh",
     summary: "summary",
-    detail: null,
+    detail: {},
     rawRefs: {},
     ...overrides,
   };

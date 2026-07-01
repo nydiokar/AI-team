@@ -178,7 +178,7 @@ export interface SessionActivityItem {
   confidence: "high" | "medium" | "low" | string;
   staleness: "fresh" | "stale" | "unknown" | string;
   summary: string;
-  detail: string | null;
+  detail: Record<string, unknown>;
   rawRefs: Record<string, string | number | boolean | null>;
 }
 

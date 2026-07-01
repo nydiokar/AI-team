@@ -129,6 +129,7 @@ def build_session_timeline(
             node_row=nodes_by_id.get(node_id),
             telemetry_turn=turns_by_task.get(task_id),
             approval_pending=task_id in pending_approval_task_ids,
+            recovery_evidence=_has_recovery_evidence(turns_by_task.get(task_id)),
         )
         items.append(
             SessionTimelineItem(
@@ -146,7 +147,7 @@ def build_session_timeline(
                 backend=_text(task.get("backend")) or None,
                 status=derived.state,
                 confidence=derived.confidence,
-                staleness=derived.reason if derived.state in {"stale_claim", "worker_unknown", "detached"} else None,
+                staleness=_staleness_for_state(derived.state),
                 summary=f"Task {derived.state.replace('_', ' ')}",
                 detail={
                     "reason": derived.reason,
@@ -320,6 +321,30 @@ def _timestamp(*values: object) -> str:
 
 def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _staleness_for_state(state: str) -> str:
+    if state in {"stale_claim", "detached"}:
+        return "stale"
+    if state == "worker_unknown":
+        return "unknown"
+    return "fresh"
+
+
+def _has_recovery_evidence(turn: dict[str, object] | None) -> bool:
+    if not turn:
+        return False
+    data_quality = turn.get("data_quality")
+    if isinstance(data_quality, list):
+        for item in data_quality:
+            if isinstance(item, dict) and item.get("reason_code") == "reconciled_after_restart":
+                return True
+    coverage = turn.get("coverage")
+    if isinstance(coverage, dict):
+        for item in coverage.values():
+            if isinstance(item, dict) and item.get("reason_code") == "reconciled_after_restart":
+                return True
+    return False
 
 
 def _loads_list(raw: object) -> list[Any]:
