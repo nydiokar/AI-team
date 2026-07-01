@@ -1,12 +1,16 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-01 (session state surfacing started; cancelled sessions stay open/resumable; Tasks removed from primary nav)
+**Last Updated:** 2026-07-01 (session/job/task durable timeline roadmap #36-#39 implemented and targeted-test verified)
 
 ## Remaining work across all open specs (swept from unarchived docs)
 
 ### Open checklist items
 
-UNDESIRED AND "HAD TO BE FIXED" ISSUE WHERE IF THE SERVER GETS RESTARTED THE TASKS ON THE MESH BECOME "FAILED". This is incorrect each task and worker have unique and honest state that is being reported to the server and the database should fix the problem of server not being "aware" where when it's alive it should ask the worker that the task was "Running" as last state "hey, what happened here" and the worker knows the state OR IT SHOULD!
+The stale restart state issue has a durable read-model fix path as of 2026-07-01:
+`src/core/task_state_truth.py` derives honest task/job state from DB rows,
+worker live_state, node incarnation, telemetry, and stale evidence; `/api/sessions/{id}/timeline`
+exposes the bounded durable sequence; Session Detail renders stale/unknown/detached/recovered
+explicitly instead of silently showing running/failed. Covered by targeted backend and web tests.
 
 ### LLM Turn Observability — remaining validation (M1/M2)
 
@@ -33,10 +37,10 @@ UNDESIRED AND "HAD TO BE FIXED" ISSUE WHERE IF THE SERVER GETS RESTARTED THE TAS
 | 33 | **Backend Account + Usage Visibility** — Add a clear place to view current backend/account state (Codex, Claude) with active account identity, current usage, daily/weekly limits/quotas/reset times. Show explicitly when limits are unknown. Either in System tab or a dedicated Usage/Limits page. Do not invent quota data. | `CONTEXT.md` | Backend + Frontend |
 | 34 | **Fix Stop Task Behavior** — ✅ Stop Task no longer makes the Web UI treat the session as closed: `cancelled` is a run outcome, not lifecycle. `SessionView.is_active` keeps cancelled sessions active/resumable, frontend lifecycle maps only `closed` to closed, and Close Session remains the separate explicit action. Covered by `test_view_models.py`, `test_control_api_write.py`, and web adapter tests. | `CONTEXT.md` | Backend + Frontend ✅ |
 | 35 | **Add Per-Project "Current Focus" Panel** — Panel showing current roadmap/direction/active focus per project. Reads CONTEXT.md as source of truth. Detects recent session/job activity. Shows last updated, source file, whether auto or manually edited. Operational: current direction, state, next action. Use local/cheap model for summarization if needed. | `CONTEXT.md` | Backend + Frontend | DEFFER UNTIL WORKFLOW IS SETTLED
-| 36 | **Remove Tasks Page / Replace With Jobs** — 🔶 Primary nav cleanup done: Tasks is no longer a bottom-nav tab and `/tasks` redirects to System for legacy links. Remaining: jobs still need richer session/project-local cards and expanded result/history views before the standalone `TasksScreen` module can be deleted. | `CONTEXT.md` | Frontend partial |
-| 37 | **Move Job Event Sequences Out of System** — 🔶 Session-state surfacing started. Routine task lifecycle events are typed as `task.state_changed` with `sessionId` when available; System activity filters session/task-correlated rows by default; Session Info now shows a rolling live State sequence from SSE. Remaining: make this durable from DB/event history, add expandable full sequence, and route job cards into the session/project surfaces. | `CONTEXT.md` | Frontend partial |
-| 38 | **Make the System Tab Earn Its Place** — 🔶 System is less noisy: routine session/task lifecycle is filtered out, leaving Jobs, Mesh health, Nodes, infra notices, and settings. Remaining: backend/account usage, runtime/process health, stuck/orphaned mismatch checks, and credential/version warnings. | `CONTEXT.md` | Backend + Frontend partial |
-| 39 | **Make worker/session state reporting honest** — 🔶 Improved at the UI/read-model boundary: cancelled sessions remain open, task state events carry session identity when present, and session detail exposes observed SSE state instead of relying only on a stale status pill. Remaining: deeper server-worker audit for request-accepted vs worker-running, durable uncertain state, and restart/state-mismatch recovery UI. | `CONTEXT.md` | Backend + Frontend partial |
+| 36 | **Remove Tasks Page / Replace With Jobs** — ✅ Done for current architecture. `/tasks` redirects, `web/src/screens/TasksScreen.tsx` was removed, session-owned jobs render in Session Detail, and System shows only unowned operator jobs. Project-local job cards remain dependent on a future project identity in job rows; do not fabricate project ownership. | `CONTEXT.md` | Frontend ✅ |
+| 37 | **Move Job Event Sequences Out of System** — ✅ Done. Session/job/task history is owned by durable `/api/sessions/{id}/timeline` and rendered in Session Detail; live SSE remains operational-only; System activity filters session-owned progress out by default. | `CONTEXT.md` | Backend + Frontend ✅ |
+| 38 | **Make the System Tab Earn Its Place** — ✅ Done for the available sources. System is infrastructure-focused: unowned jobs, mesh health/reconcile status, nodes, and infra live activity. Account/quota visibility remains separately tracked in #30/#33 because no reliable quota source exists yet, and the UI must show unknown rather than invented limits. | `CONTEXT.md` | Frontend ✅ / Backend source-limited |
+| 39 | **Make worker/session state reporting honest** — ✅ Done for the read model and Web rendering. The backend distinguishes accepted/queued/claimed/worker_running/backend_running/waiting/cancel/cancelled/completed/failed/detached/stale_claim/worker_unknown/recovered; restart/stale/incarnation/detached/recovered/lost-job cases are targeted-test covered through the timeline API and frontend presentation. | `CONTEXT.md` | Backend + Frontend ✅ |
 
 **Current local jobs topology note (2026-06-30):** Horse/this PC may run the Web UI gateway locally on `127.0.0.1:9003` while MCP/worker jobs register against the remote controller from `CONTROLLER_URL` (currently the older Telegram-serving server). In that split, the local gateway has no local `:9002` task server and its SQLite jobs table can be empty even when jobs exist remotely. The local gateway now merges remote controller jobs into `/api/jobs` and polls remote terminal jobs so matching local sessions get the watched-job turn/agent continuation. Live smoke passed with `job_217c415b56dc`: visible in System -> Jobs and projected into session `b696d1040c4b`; watched-job DB turn timestamps are forced to the local session-history timestamp so the WebUI chat shows local time.
 
