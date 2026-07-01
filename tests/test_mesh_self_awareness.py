@@ -115,6 +115,8 @@ def test_metrics_includes_mesh_load(monkeypatch, tmp_path):
     assert body["nodes"]["slots_total"] == 4
     assert body["nodes"]["active_tasks"] == 1
     assert body["sessions"]["stale_busy"] == 0
+    assert body["history"]["recent"] == []
+    assert db.list_mesh_health_samples(limit=10) == []
 
 
 def _registry_node(node_id: str, *, used=None, total=2) -> NodeInfo:

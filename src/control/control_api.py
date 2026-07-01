@@ -1006,6 +1006,37 @@ def build_control_api(orchestrator) -> FastAPI:
         recent = db.list_jobs(limit=limit)
         return JSONResponse({"running": running, "recent": recent})
 
+    @app.get("/api/mesh/health", dependencies=[Depends(_require_auth)])
+    def api_mesh_health(limit: int = Query(24, ge=1, le=200)) -> JSONResponse:
+        """Read-only mesh health trend and reconcile backlog for the Web UI."""
+        db = _db()
+        current: Dict[str, Any] = {}
+        recent: List[Dict[str, Any]] = []
+        if db is not None:
+            try:
+                current = db.stats()
+                recent = db.list_mesh_health_samples(limit=limit)
+            except Exception as e:
+                logger.warning("control_api_mesh_health_failed err=%s", e)
+        reconcile_status = getattr(orchestrator, "mesh_reconcile_status", None)
+        reconcile = (
+            reconcile_status()
+            if callable(reconcile_status)
+            else {
+                "total": 0,
+                "pending": 0,
+                "reconciled": 0,
+                "invalid": 0,
+                "oldest_pending_at": None,
+                "latest_reconciled_at": None,
+            }
+        )
+        return JSONResponse({
+            "current": current,
+            "history": {"recent": recent},
+            "reconcile": reconcile,
+        })
+
     @app.post("/api/git/status", dependencies=[Depends(_require_auth)])
     def api_git_status() -> JSONResponse:
         from src.services.git_automation import GitAutomationService

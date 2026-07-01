@@ -47,6 +47,9 @@ from typing import Any, Dict, Generator, List, Optional
 
 logger = logging.getLogger(__name__)
 
+_mesh_health_sample_lock = threading.Lock()
+_mesh_health_last_sample: Dict[str, float] = {}
+
 # ---------------------------------------------------------------------------
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
@@ -1726,6 +1729,21 @@ class MeshDB:
         except Exception as e:
             logger.warning("event=db_record_mesh_health_sample_failed err=%s", e)
         return self._decode_mesh_health_sample(row)
+
+    def maybe_record_mesh_health_sample(
+        self,
+        source: str = "manual",
+        *,
+        min_interval_seconds: float = 30.0,
+    ) -> Optional[Dict[str, Any]]:
+        """Append a sample at most once per source interval."""
+        now = time.monotonic()
+        with _mesh_health_sample_lock:
+            last = _mesh_health_last_sample.get(source)
+            if last is not None and now - last < max(1.0, min_interval_seconds):
+                return None
+            _mesh_health_last_sample[source] = now
+        return self.record_mesh_health_sample(source=source)
 
     def list_mesh_health_samples(
         self,

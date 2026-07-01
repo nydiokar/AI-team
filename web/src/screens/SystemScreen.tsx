@@ -16,10 +16,11 @@ import { HealthChip } from "../components/ui/StatusChip";
 import { Button } from "../components/ui/Button";
 import { NodeDetailSheet } from "../components/system/NodeDetailSheet";
 import { JobsPanel } from "../components/system/JobsPanel";
-import { useSessions, useTargets } from "../hooks/useLiveData";
+import { useMeshHealth, useSessions, useTargets } from "../hooks/useLiveData";
 import { useActivityLog } from "../hooks/useActivityLog";
 import type { Target } from "../domain/models";
 import type { LogSeverity } from "../transport/eventLog";
+import type { RawMeshHealthResponse } from "../transport/rawApi";
 import { relAge, clockLabel } from "../lib/time";
 import {
   enrichLine,
@@ -205,9 +206,124 @@ function OfflineNodes({ nodes, onPick }: { nodes: Target[]; onPick: (t: Target) 
   );
 }
 
+function sampleAge(sampledAt: string | undefined): string {
+  if (!sampledAt) return "no samples";
+  const t = new Date(sampledAt).getTime();
+  if (!Number.isFinite(t)) return "sample time unknown";
+  return relAge(Math.max(0, Math.round((Date.now() - t) / 1000)));
+}
+
+function MeshStat({
+  label,
+  value,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  tone?: "default" | "warn" | "bad";
+}) {
+  const text = tone === "bad" ? "text-bad" : tone === "warn" ? "text-warn" : "text-ink";
+  return (
+    <div className="min-w-0 px-1 py-1">
+      <div className={`truncate text-[15px] font-semibold tabular-nums ${text}`}>{value}</div>
+      <div className="mt-0.5 truncate text-[11px] text-ink-muted">{label}</div>
+    </div>
+  );
+}
+
+function MeshHealthPanel({
+  data,
+  isLoading,
+  error,
+}: {
+  data: RawMeshHealthResponse | undefined;
+  isLoading: boolean;
+  error: unknown;
+}) {
+  const latest = data?.history.recent[0];
+  const current = data?.current;
+  const load = current?.mesh_load;
+  const slotsUsed = load?.slots_used ?? latest?.slots_used ?? 0;
+  const slotsTotal = load?.slots_total ?? latest?.slots_total ?? 0;
+  const nodesOnline = current?.nodes_online ?? latest?.nodes_online ?? 0;
+  const nodesTotal = current?.nodes_total ?? latest?.nodes_total ?? 0;
+  const pending = current?.tasks_pending ?? latest?.tasks_pending ?? 0;
+  const claimed = current?.tasks_claimed ?? latest?.tasks_claimed ?? 0;
+  const staleBusy = load?.stale_busy_sessions ?? latest?.stale_busy_sessions ?? 0;
+  const staleNodes = load?.stale_live_state_nodes ?? latest?.stale_live_state_nodes ?? [];
+  const reconcilePending = data?.reconcile.pending ?? 0;
+  const reconcileInvalid = data?.reconcile.invalid ?? 0;
+
+  if (isLoading && !data) {
+    return (
+      <div className="card-elev mx-4 animate-pulse rounded-xl px-4 py-3.5">
+        <div className="h-4 w-28 rounded bg-surface-2" />
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="h-14 rounded-lg bg-surface-2" />
+          <div className="h-14 rounded-lg bg-surface-2" />
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="card-elev mx-4 rounded-xl px-4 py-3.5">
+        <div className="flex items-center gap-2 text-[13px] text-warn">
+          <Activity className="size-3.5" />
+          {error ? "Couldn't load mesh health." : "No mesh health data."}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card-elev mx-4 rounded-xl px-4 py-3.5">
+      <div className="flex items-center gap-2 text-[12px] text-ink-muted">
+        <Activity className="size-3.5" />
+        <span className="min-w-0 flex-1 truncate">latest sample {sampleAge(latest?.sampled_at)}</span>
+        {reconcilePending > 0 || reconcileInvalid > 0 ? (
+          <span className="rounded-full bg-warm-dim/70 px-2 py-0.5 text-[11px] font-medium text-warn">
+            reconcile attention
+          </span>
+        ) : (
+          <span className="rounded-full bg-ok/12 px-2 py-0.5 text-[11px] font-medium text-ok">
+            mirror clean
+          </span>
+        )}
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <MeshStat label="slots used" value={`${slotsUsed}/${slotsTotal}`} />
+        <MeshStat
+          label="nodes online"
+          value={`${nodesOnline}/${nodesTotal}`}
+          tone={nodesOnline === 0 && nodesTotal > 0 ? "bad" : "default"}
+        />
+        <MeshStat label="pending / claimed" value={`${pending}/${claimed}`} tone={pending > 0 ? "warn" : "default"} />
+        <MeshStat label="stale busy" value={String(staleBusy)} tone={staleBusy > 0 ? "bad" : "default"} />
+      </div>
+
+      {(staleNodes.length > 0 || reconcilePending > 0 || reconcileInvalid > 0) && (
+        <div className="mt-3 space-y-1.5 text-[12px] text-ink-soft">
+          {staleNodes.length > 0 && (
+            <div className="truncate text-bad">stale live state: {staleNodes.join(", ")}</div>
+          )}
+          {(reconcilePending > 0 || reconcileInvalid > 0) && (
+            <div className="truncate text-warn">
+              reconcile pending {reconcilePending}, invalid {reconcileInvalid}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SystemScreen() {
   const { data: targets, isLoading, error } = useTargets();
   const { data: sessions } = useSessions();
+  const { data: meshHealth, isLoading: meshHealthLoading, error: meshHealthError } = useMeshHealth();
   const { lines, connection } = useActivityLog();
   const { canInstall, isIos, install } = useInstallPrompt();
   const [selectedTarget, setSelectedTarget] = useState<Target | null>(null);
@@ -245,6 +361,9 @@ export function SystemScreen() {
         />
       )}
       <JobsPanel expanded={jobsExpanded} onSummary={setJobs} />
+
+      <SectionHeader label="Mesh" />
+      <MeshHealthPanel data={meshHealth} isLoading={meshHealthLoading} error={meshHealthError} />
 
       {/* ── Nodes — live first; dormant ones fold away ── */}
       <SectionHeader

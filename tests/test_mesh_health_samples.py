@@ -62,3 +62,19 @@ def test_mesh_health_sample_retention_prunes_old_rows(tmp_path: Path) -> None:
 
     samples = db.list_mesh_health_samples(limit=10)
     assert [sample["source"] for sample in samples] == ["new"]
+
+
+def test_maybe_record_mesh_health_sample_throttles_by_source(tmp_path: Path) -> None:
+    db = MeshDB(str(tmp_path / "mesh.db"))
+
+    first = db.maybe_record_mesh_health_sample(source="test-heartbeat", min_interval_seconds=60)
+    second = db.maybe_record_mesh_health_sample(source="test-heartbeat", min_interval_seconds=60)
+    other = db.maybe_record_mesh_health_sample(source="test-manual", min_interval_seconds=60)
+
+    assert first is not None
+    assert second is None
+    assert other is not None
+    assert [sample["source"] for sample in db.list_mesh_health_samples(limit=10)] == [
+        "test-manual",
+        "test-heartbeat",
+    ]

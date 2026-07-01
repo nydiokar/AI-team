@@ -25,6 +25,7 @@ import type {
   RawUploadResult,
   RawJob,
   RawTurn,
+  RawMeshHealthResponse,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -388,5 +389,9 @@ export const api = {
   /** GET /api/jobs — watched jobs: running + recent. */
   async jobs(token: string, limit = 20): Promise<{ running: RawJob[]; recent: RawJob[] }> {
     return get(`/api/jobs?limit=${limit}`, token);
+  },
+
+  async meshHealth(token: string, limit = 24): Promise<RawMeshHealthResponse> {
+    return get(`/api/mesh/health?limit=${limit}`, token);
   },
 };

@@ -279,8 +279,6 @@ def metrics() -> Dict[str, Any]:
     tailing logs, and to be consumed by a task-distributing agent.
     """
     db = get_db()
-    if db:
-        db.record_mesh_health_sample(source="metrics")
     s = db.stats() if db else {}
     mesh_load = s.get("mesh_load") or {}
     completed = s.get("tasks_completed", 0)
@@ -363,7 +361,7 @@ def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
     try:
         db = get_db()
         if db:
-            db.record_mesh_health_sample(source="heartbeat")
+            db.maybe_record_mesh_health_sample(source="heartbeat", min_interval_seconds=30.0)
     except Exception:
         pass
     return {"status": "ok"}

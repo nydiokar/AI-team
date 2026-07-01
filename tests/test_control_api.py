@@ -101,6 +101,22 @@ def test_tasks_limit_validation(client):
     assert client.get("/api/tasks?limit=99999", headers=_auth()).status_code == 422
 
 
+def test_mesh_health_endpoint_exposes_history_and_reconcile(client, monkeypatch, tmp_path):
+    from src.control.db import MeshDB
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.record_mesh_health_sample(source="test")
+    monkeypatch.setattr(control_api, "_db", lambda: db)
+
+    r = client.get("/api/mesh/health", headers=_auth())
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["history"]["recent"][0]["source"] == "test"
+    assert body["current"]["schema_version"] >= 19
+    assert body["reconcile"]["pending"] == 0
+
+
 def test_turn_graph_diagnostics_and_timeline_endpoints(client):
     from datetime import timedelta
     from src.control.db import get_db
