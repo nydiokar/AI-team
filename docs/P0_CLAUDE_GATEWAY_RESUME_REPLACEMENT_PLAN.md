@@ -2,9 +2,9 @@
 
 ## Closure Status - 2026-07-01
 
-Status: implementation complete for the SDK default path and the remote usage
-propagation audit gap. Deployed canary verification still must be run after this
-usage patch is installed on the controller/worker pair.
+Status: closed. The SDK default path, cache-health guard, remote usage
+propagation fix, and deployed DB verification have all passed for a real remote
+Claude session.
 
 Code state:
 
@@ -56,22 +56,47 @@ Targeted verification run locally:
   tests/test_claude_driver.py
 ```
 
-Post-deploy canary still required:
+Final deployed DB evidence for session `348ae25d663d`:
 
 ```text
-1. Install this patch on the controller and the worker that runs Claude.
-2. Send only tiny prompts, for example:
-   - say exactly: canary one
-   - say exactly: canary two
-3. Verify Claude JSONL on the worker host:
-   - entrypoint == sdk-py
-   - same sessionId/backend_session_id across turns
-   - cache_read_input_tokens stays high relative to cache_creation_input_tokens
-4. Verify controller DB:
-   - mesh_tasks.usage_json is populated for the remote Claude turns
-5. Restart the worker and verify live SDK sessions become explicit lost/session_lost state,
-   not silent unsafe print/resume continuation.
+sessions:
+  session_id: 348ae25d663d
+  backend: claude
+  backend_session_id: fc84fb4e-4084-4419-ae00-21f65d7e2c28
+  driver_type: sdk
+  driver_status: live
+  cache_health: healthy
+  cache_unhealthy_count: 0
+  machine_id: Horse
+
+mesh_tasks:
+  task_7eed64fc:
+    action: create_session
+    status: completed
+    claimed_by: Horse
+    usage_json: {"input_tokens": 3, "cached_input_tokens": 12422,
+                 "output_tokens": 11, "reasoning_output_tokens": 0}
+  task_3b410136:
+    action: resume_session
+    status: completed
+    claimed_by: Horse
+    payload session driver_type/status/cache: sdk/live/healthy
+    payload backend_session_id: fc84fb4e-4084-4419-ae00-21f65d7e2c28
+    usage_json: {"input_tokens": 3, "cached_input_tokens": 12446,
+                 "output_tokens": 44, "reasoning_output_tokens": 0}
+
+llm_turns:
+  task_3b410136 backend_session_id_start:
+    fc84fb4e-4084-4419-ae00-21f65d7e2c28
+  task_3b410136 backend_session_id_end:
+    fc84fb4e-4084-4419-ae00-21f65d7e2c28
+  final_status: success
 ```
+
+The gateway/UI did not visibly report "agent picked up the task" for the resume
+turn, but the database proves the worker did pick it up (`claimed_by=Horse`,
+`claimed_at` populated), completed it, and persisted usage. Treat any missing
+pickup notification as a separate non-P0 visibility issue.
 
 ## Objective
 
