@@ -15,6 +15,8 @@ export interface ActivityFilter {
   sessionId?: string;
   /** Only show lines at or above attention (warning|error). */
   attentionOnly?: boolean;
+  /** Include session/task-correlated rows. System omits these by default. */
+  includeSessionActivity?: boolean;
 }
 
 const ATTENTION: ReadonlySet<LogSeverity> = new Set<LogSeverity>(["warning", "error"]);
@@ -26,15 +28,18 @@ export interface ActivityLog {
 
 export function useActivityLog(filter: ActivityFilter = {}): ActivityLog {
   const { events, connection } = useEventStreamContext();
-  const { sessionId, attentionOnly } = filter;
+  const { sessionId, attentionOnly, includeSessionActivity } = filter;
 
   const lines = useMemo(() => {
     let out = toLogLines(events);
     if (sessionId) out = out.filter((l) => l.sessionId === sessionId);
+    if (!sessionId && !includeSessionActivity) {
+      out = out.filter((l) => !l.sessionId && !l.taskId);
+    }
     if (attentionOnly) out = out.filter((l) => ATTENTION.has(l.severity));
     // The stream is appended oldest→newest; the log reads newest-first.
     return out.reverse();
-  }, [events, sessionId, attentionOnly]);
+  }, [events, sessionId, attentionOnly, includeSessionActivity]);
 
   return { lines, connection };
 }
