@@ -54,7 +54,7 @@ Baseline: branch `feat/control-surface-unify` off `main@5f246b7`.
     `DASHBOARD_PORT`; gateway start/stop is clean; Telegram behavior unchanged.
   - **Revert =** remove the two methods, the init line, and the two call sites.
 
-- [ ] **U1.5 — Point `web/` dev proxy at the gateway, not the dashboard**
+- [x] **U1.5 — Point `web/` dev proxy at the gateway, not the dashboard**
   `web/vite.config.ts`: `/api` proxy target stays `DASHBOARD_PORT` (9003) — now served
   by the gateway. Update `web/README.md` run steps: "start the gateway
   (`python main.py`); `npm run dev` proxies `/api` to the gateway." (web/ lives on

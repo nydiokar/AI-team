@@ -13,7 +13,7 @@ import subprocess
 import re
 import socket
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional
 from datetime import datetime
 import uuid
 import random
@@ -1573,7 +1573,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         under small token/char caps.
         """
         if self._context_loader is None:
-            self._context_loader = _ContextLoader(self._artifact_index_path, Path(config.system.results_dir))
+            from src.control.db import get_db
+            self._context_loader = _ContextLoader(self._artifact_index_path, Path(config.system.results_dir), get_db)
         return self._context_loader.load(task_id)
     
     async def _handle_new_task_file(self, file_path: str):
@@ -3800,52 +3801,160 @@ Generated from user description: {description}
 class _ContextLoader:
     """Lightweight loader that produces compact, prompt-ready context.
 
-    Reads `results/index.json` to resolve the latest artifact path for a task
-    id, with a fallback to `results/{task_id}.json` when missing. Returns a
-    small dictionary containing a short summary, constraints, and files list.
+    Reads the canonical `mesh_tasks` row first, then falls back to
+    `results/index.json` / `results/{task_id}.json` for old artifacts. Returns a
+    small dictionary containing bounded prompt context, summary, constraints,
+    usage, and files.
     """
 
-    def __init__(self, index_path: Path, results_dir: Path) -> None:
+    SUMMARY_LIMIT = 2000
+    PROMPT_LIMIT = 1000
+    ERROR_LIMIT = 5
+
+    def __init__(
+        self,
+        index_path: Path,
+        results_dir: Path,
+        db_factory: Optional[Callable[[], Any]] = None,
+    ) -> None:
         self._index_path = index_path
         self._results_dir = results_dir
+        self._db_factory = db_factory
 
     def load(self, task_id: str) -> Dict[str, Any]:
-        import json
-        default: Dict[str, Any] = {"summary": "", "constraints": {}, "files_modified": []}
+        default: Dict[str, Any] = {
+            "task_id": task_id,
+            "source": "none",
+            "prompt": "",
+            "summary": "",
+            "constraints": {},
+            "files_modified": [],
+            "usage": {},
+            "errors": [],
+        }
         try:
-            artifact_path: Optional[Path] = None
-            if self._index_path.exists():
-                try:
-                    idx = json.loads(self._index_path.read_text(encoding="utf-8"))
-                    p = idx.get(str(task_id))
-                    if p:
-                        ap = Path(p)
-                        if ap.exists():
-                            artifact_path = ap
-                except Exception:
-                    artifact_path = None
-            if artifact_path is None:
-                cand = self._results_dir / f"{task_id}.json"
-                if cand.exists():
-                    artifact_path = cand
-
-            if artifact_path is None or not artifact_path.exists():
-                return default
-
-            data = json.loads(artifact_path.read_text(encoding="utf-8"))
-            # Extract up to ~2000 chars for prompt friendliness
-            summary_text: str = ""
-            po = data.get("parsed_output")
-            if isinstance(po, dict):
-                content = po.get("content")
-                if isinstance(content, str):
-                    summary_text = content[:2000]
-            files_modified: List[str] = list(data.get("files_modified") or [])
-            constraints: Dict[str, Any] = {"prior_success": bool(data.get("success"))}
-            return {
-                "summary": summary_text,
-                "constraints": constraints,
-                "files_modified": files_modified,
-            }
+            row = self._load_db_row(task_id)
+            if row is not None:
+                return self._from_db_row(task_id, row)
+            data = self._load_artifact(task_id)
+            if data is not None:
+                return self._from_artifact(task_id, data)
         except Exception:
-            return default
+            pass
+        return default
+
+    def _load_db_row(self, task_id: str) -> Optional[Dict[str, Any]]:
+        if self._db_factory is None:
+            return None
+        try:
+            db = self._db_factory()
+            if db is None:
+                return None
+            row = db.get_task(task_id)
+            return row if isinstance(row, dict) else None
+        except Exception:
+            return None
+
+    def _load_artifact(self, task_id: str) -> Optional[Dict[str, Any]]:
+        artifact_path: Optional[Path] = None
+        if self._index_path.exists():
+            try:
+                idx = json.loads(self._index_path.read_text(encoding="utf-8"))
+                p = idx.get(str(task_id))
+                if p:
+                    ap = Path(p)
+                    if ap.exists():
+                        artifact_path = ap
+            except Exception:
+                artifact_path = None
+        if artifact_path is None:
+            cand = self._results_dir / f"{task_id}.json"
+            if cand.exists():
+                artifact_path = cand
+        if artifact_path is None or not artifact_path.exists():
+            return None
+        data = json.loads(artifact_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+
+    def _from_db_row(self, task_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
+        result = self._json_obj(row.get("result"))
+        parsed_output = self._json_obj(row.get("parsed_output_json"))
+        files_modified = self._json_list(row.get("files_modified_json")) or self._json_list(
+            result.get("files_modified")
+        )
+        usage = self._json_obj(row.get("usage_json"))
+        prompt = self._text(row.get("prompt")) or self._text(self._json_obj(row.get("payload")).get("prompt"))
+        summary = (
+            self._text(row.get("reply_text"))
+            or self._summary_from_parsed(parsed_output)
+            or self._text(result.get("output"))
+        )
+        errors = self._json_list(result.get("errors"))
+        status = self._text(row.get("status"))
+        prior_success = result.get("success")
+        if prior_success is None:
+            prior_success = status == "completed"
+        return {
+            "task_id": task_id,
+            "source": "db",
+            "prompt": prompt[:self.PROMPT_LIMIT],
+            "summary": summary[:self.SUMMARY_LIMIT],
+            "constraints": {
+                "prior_success": bool(prior_success),
+                "status": status,
+                "error_class": self._text(row.get("error_class")),
+                "return_code": row.get("return_code"),
+            },
+            "files_modified": files_modified,
+            "usage": usage,
+            "errors": [self._text(e)[:300] for e in errors[:self.ERROR_LIMIT]],
+        }
+
+    def _from_artifact(self, task_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        parsed_output = data.get("parsed_output") if isinstance(data.get("parsed_output"), dict) else {}
+        summary = self._summary_from_parsed(parsed_output) or self._text(data.get("output"))
+        errors = self._json_list(data.get("errors"))
+        return {
+            "task_id": task_id,
+            "source": "artifact",
+            "prompt": self._text(data.get("prompt"))[:self.PROMPT_LIMIT],
+            "summary": summary[:self.SUMMARY_LIMIT],
+            "constraints": {
+                "prior_success": bool(data.get("success")),
+                "status": self._text(data.get("status")),
+                "error_class": self._text(data.get("error_class")),
+                "return_code": data.get("return_code"),
+            },
+            "files_modified": self._json_list(data.get("files_modified")),
+            "usage": data.get("usage") if isinstance(data.get("usage"), dict) else {},
+            "errors": [self._text(e)[:300] for e in errors[:self.ERROR_LIMIT]],
+        }
+
+    def _summary_from_parsed(self, parsed_output: Dict[str, Any]) -> str:
+        content = parsed_output.get("content")
+        return content if isinstance(content, str) else ""
+
+    def _json_obj(self, value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                loaded = json.loads(value)
+                return loaded if isinstance(loaded, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    def _json_list(self, value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                loaded = json.loads(value)
+                return loaded if isinstance(loaded, list) else []
+            except Exception:
+                return []
+        return []
+
+    def _text(self, value: Any) -> str:
+        return value if isinstance(value, str) else ""

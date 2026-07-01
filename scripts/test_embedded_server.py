@@ -6,8 +6,7 @@ loop, that the in-process NodeRegistry singleton is shared between the HTTP
 handlers and direct get_registry() access (the whole point of D1), and that the
 server stops cleanly.
 
-Uses the real config WORKER_TOKEN (config loads .env with override=True, so we
-read the effective token rather than fighting it).
+Uses an isolated temp DB and token so it never touches state/mesh.db.
 
 Run: python scripts/test_embedded_server.py
 """
@@ -18,6 +17,10 @@ import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts._test_env import cleanup_test_environment, configure_test_environment
+
+TEST_DB = configure_test_environment("embedded_server", worker_token="embed-test-token")
 
 from config import config
 from src.control.embedded_server import EmbeddedTaskServer
@@ -120,4 +123,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    try:
+        sys.exit(asyncio.run(main()))
+    finally:
+        cleanup_test_environment(TEST_DB)
