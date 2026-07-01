@@ -67,6 +67,33 @@ def _usage_from_execution_result(raw: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _tail_text(text: str, *, max_chars: int = 4000) -> str:
+    if not text:
+        return ""
+    text = str(text).strip()
+    if len(text) <= max_chars:
+        return text
+    return "..." + text[-max_chars:]
+
+
+def _backend_error_detail(raw: Any) -> str:
+    """Build a bounded diagnostic block for normal backend failure results."""
+    parts: List[str] = []
+    return_code = getattr(raw, "return_code", None)
+    if return_code not in (None, 0):
+        parts.append(f"exit_code={return_code}")
+    error_class = getattr(raw, "error_class", "") or ""
+    if error_class:
+        parts.append(f"error_class={error_class}")
+    stderr_tail = _tail_text(getattr(raw, "raw_stderr", "") or "")
+    if stderr_tail:
+        parts.append("stderr_tail:\n" + stderr_tail)
+    stdout_tail = _tail_text(getattr(raw, "raw_stdout", "") or "")
+    if stdout_tail:
+        parts.append("stdout_tail:\n" + stdout_tail)
+    return "\n\n".join(parts)[:4000]
+
+
 # ---------------------------------------------------------------------------
 # Job watcher helpers (T3)
 # ---------------------------------------------------------------------------
@@ -639,6 +666,24 @@ async def _execute_task(
         elapsed = time.monotonic() - start
         if isinstance(raw, _ER):
             usage = _usage_from_execution_result(raw)
+            error_detail = "" if raw.success else _backend_error_detail(raw)
+            errors = list(raw.errors or [])
+            if not raw.success and (
+                not errors
+                or all(str(e).strip().lower() in {"task failed", "failed"} for e in errors)
+            ):
+                summary_bits = []
+                if getattr(raw, "return_code", 0):
+                    summary_bits.append(f"exit code {getattr(raw, 'return_code', 0)}")
+                if error_detail:
+                    first_detail_line = error_detail.splitlines()[0].strip()
+                    if first_detail_line and first_detail_line not in summary_bits:
+                        summary_bits.append(first_detail_line)
+                errors = [
+                    "Backend task failed"
+                    + (f" ({'; '.join(summary_bits)})" if summary_bits else "")
+                    + "; see error_detail for stdout/stderr tail"
+                ]
             _emit(
                 "invocation.completed",
                 {
@@ -655,11 +700,12 @@ async def _execute_task(
             return {
                 "success": raw.success,
                 "output": _bound_output(raw.output or ""),
-                "errors": list(raw.errors or []),
+                "errors": errors,
                 "files_modified": list(raw.files_modified or []),
                 "execution_time": elapsed,
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "return_code": getattr(raw, "return_code", 0),
+                "error_detail": error_detail,
                 "backend_session_id": raw.backend_session_id or "",
                 "driver_type": getattr(session, "driver_type", "") if action in ("create_session", "resume_session") else "",
                 "driver_status": getattr(session, "driver_status", "") if action in ("create_session", "resume_session") else "",

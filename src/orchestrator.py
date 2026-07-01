@@ -656,6 +656,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._recover_completed_session(session, row)
                 return
             if status in ("failed", "failed_node_offline"):
+                result_raw = row.get("result") if row else None
+                try:
+                    result_dict = json.loads(result_raw) if isinstance(result_raw, str) else (result_raw or {})
+                except Exception:
+                    result_dict = {}
                 error_msg = (row.get("error") if row else "") or f"Task {status}"
                 session.status = SessionStatus.ERROR
                 session.last_result_summary = error_msg[-400:]
@@ -663,12 +668,17 @@ class TaskOrchestrator(ITaskOrchestrator):
                 result = TaskResult(
                     task_id=task_id,
                     success=False,
-                    output="",
-                    errors=[error_msg],
-                    files_modified=[],
-                    execution_time=0.0,
-                    timestamp=datetime.now().isoformat(),
+                    output=result_dict.get("output", "") if result_dict else "",
+                    errors=result_dict.get("errors") or [error_msg],
+                    files_modified=result_dict.get("files_modified") or [],
+                    execution_time=result_dict.get("execution_time", 0.0),
+                    timestamp=result_dict.get("timestamp", datetime.now().isoformat()) if result_dict else datetime.now().isoformat(),
+                    return_code=result_dict.get("return_code", 1) if result_dict else 1,
+                    raw_stdout=result_dict.get("output", "") if result_dict else "",
+                    raw_stderr=(result_dict.get("error_detail", "") if result_dict else ""),
                 )
+                setattr(result, "error_detail", result_dict.get("error_detail", "") if result_dict else "")
+                setattr(result, "usage", result_dict.get("usage") if result_dict else None)
                 setattr(result, "backend_name", session.backend or "claude")
                 self._write_session_summary(session, result)
                 self._append_session_event(session.session_id, task_id, result)
@@ -2521,12 +2531,21 @@ class TaskOrchestrator(ITaskOrchestrator):
             result.success, result.execution_time,
             "" if result.success else f" error={first_error}",
         )
+        error_detail = getattr(result, "error_detail", "") or getattr(result, "raw_stderr", "") or ""
+        if not result.success and error_detail:
+            logger.info(
+                "mesh_result_detail task_id=%s node=%s detail=%s",
+                task.id,
+                node_label,
+                error_detail[:4000],
+            )
         self._emit_event("mesh_result", task, {
             "success": result.success,
             "target_node": node.node_id if node is not None else session.machine_id,
             "duration_s": round(result.execution_time, 3),
             "error_class": result.error_class,
             "error": first_error,
+            "error_detail": error_detail[:4000],
         })
 
         return result
@@ -3466,17 +3485,27 @@ Generated from user description: {description}
                         if changed:
                             self.session_store.save(session)
                     error_msg = row.get("error") or f"Task {status}"
+                    error_detail = (r.get("error_detail") if r else "") or ""
                     result = TaskResult(
                         task_id=task.id,
                         success=False,
-                        output="",
-                        errors=[error_msg],
-                        files_modified=[],
-                        execution_time=0.0,
-                        timestamp=datetime.now().isoformat(),
+                        output=r.get("output", "") if r else "",
+                        errors=r.get("errors") or [error_msg],
+                        files_modified=r.get("files_modified") or [],
+                        execution_time=r.get("execution_time", 0.0),
+                        timestamp=r.get("timestamp", datetime.now().isoformat()) if r else datetime.now().isoformat(),
+                        return_code=r.get("return_code", 1) if r else 1,
+                        raw_stdout=r.get("output", "") if r else "",
+                        raw_stderr=error_detail,
                     )
+                    setattr(result, "error_detail", error_detail)
                     setattr(result, "usage", r.get("usage") if r else None)
                     setattr(result, "backend_name", row.get("backend", "claude"))
+                    setattr(
+                        result,
+                        "telemetry_invocation_id",
+                        r.get("telemetry_invocation_id") if r else None,
+                    )
                     return result
 
                 if status != "claimed" and time.time() >= pickup_deadline:
