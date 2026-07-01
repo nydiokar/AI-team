@@ -188,6 +188,34 @@ async def test_start_registers_bot_commands(monkeypatch, isolated_session_store)
 
 
 @pytest.mark.asyncio
+async def test_status_shows_mesh_mode_when_mesh_enabled(monkeypatch, isolated_session_store):
+    orchestrator = _DummyOrchestrator()
+    base_status = orchestrator.get_status()
+    base_status["running"] = True
+    base_status["telegram"]["running"] = True
+    base_status["mesh"] = {
+        "enabled": True,
+        "task_server_mode": "embedded-running",
+        "local_worker_capacity": 3,
+        "fallback_capacity": True,
+        "online_nodes": 0,
+        "total_nodes": 0,
+    }
+    monkeypatch.setattr(orchestrator, "get_status", lambda: base_status)
+
+    bot = TelegramInterface("", orchestrator, allowed_users=[1])
+    monkeypatch.setattr(bot, "_mesh_node_column_enabled", lambda: False)
+
+    update = _DummyUpdate()
+    await bot._handle_status_command(update, _DummyContext())
+
+    reply = update.message.replies[-1]
+    assert "Mesh mode: embedded-running" in reply
+    assert "0/0 nodes online" in reply
+    assert "local fallback 3 workers" in reply
+
+
+@pytest.mark.asyncio
 async def test_session_new_creates_session_and_guides_next_step(monkeypatch, isolated_session_store):
     workspace = _make_workspace()
     try:

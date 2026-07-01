@@ -56,6 +56,7 @@ class MeshHealth:
 
     def record_check(self, healthy: bool) -> None:
         """Feed a health check outcome into the sliding window."""
+        was_degraded = self._degraded
         self._results.append(healthy)
         if healthy:
             self._consecutive_failures = 0
@@ -64,6 +65,21 @@ class MeshHealth:
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._failure_threshold:
                 self._degraded = True
+        if self._degraded != was_degraded:
+            self._emit_transition()
+
+    def _emit_transition(self) -> None:
+        event_name = "mesh_degraded" if self._degraded else "mesh_restored"
+        try:
+            from src.core.observability import emit_event
+            emit_event(
+                event_name,
+                consecutive_failures=self._consecutive_failures,
+                failure_threshold=self._failure_threshold,
+                recent_checks=list(self._results),
+            )
+        except Exception:
+            pass
 
     def is_degraded(self) -> bool:
         """``True`` iff the mesh is currently considered degraded."""

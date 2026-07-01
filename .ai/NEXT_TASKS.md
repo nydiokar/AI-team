@@ -4,7 +4,7 @@
 Use `.ai/CONTEXT.md` for orientation and `docs/PROGRESS_LOG.md` for detailed
 history.
 
-**Last updated:** 2026-06-21
+**Last updated:** 2026-07-01
 **Plan of record:** `docs/STATE_SEPARATION_PLAN.md`
 
 > **Test cost guard:** normal test command is `pytest`. Tests must not invoke
@@ -18,7 +18,7 @@ history.
 | Item | Status | Notes |
 |---|---|---|
 | State Separation P0-P3 | DONE | Mesh is live across `kanebra` + `Horse`; gateway restart resilience shipped. |
-| P4 fallback/degradation | CHECK CURRENT CODE | Older plan said not started; verify before adding new work. |
+| P4 fallback/degradation | DONE / SUPERSEDED | 2026-07-01 audit closed the old Phase 4 plan: status visibility, DB-reconcile spool, and mesh health transition events are implemented; obsolete one-worker fallback language is retired. |
 | T1 auto-deploy | DONE | Pull-based PM2 deploy agent exists; operator activation may still be manual. |
 | T2 long Telegram output | DONE | Worker no longer silently truncates; Telegram splitter handles delivery. |
 | T3 watched jobs | DONE | `jobs` table, `/jobs` API, worker watcher, MCP registration, tests exist. |
@@ -30,27 +30,66 @@ history.
 
 ## Active / Next
 
-### P4 — Graceful Degradation / Fallback Audit
+### P4 — Graceful Degradation / Fallback Cleanup — DONE
 
-**Why:** old notes claimed P4 was not started, but the code has moved since then.
-Before building anything, audit the current implementation and decide whether P4
-is complete, partially complete, or obsolete.
+**Audit result (2026-07-01):** the old Phase 4 plan is partially implemented and
+partially superseded. Do not build the archived "exactly 1 fallback worker" plan.
 
-**Check:**
-- Does the gateway/server host execute locally when no remote node is available?
-- Is fallback capacity configurable, and is it not hard-capped at one worker?
-- Does `/status` clearly show mesh health and fallback mode?
-- If DB/task-server access is degraded, are task/session writes reconciled
-  cleanly once the mesh recovers?
-- Is `_dispatch_or_run_local` still dead code, wired intentionally, or removable?
+Already true in code:
+- Gateway/server host keeps configurable local worker capacity via
+  `config.system.max_concurrent_tasks`; it is not hard-capped at one worker.
+- `src/services/session_store.py` reads sessions from DB first and falls back to
+  JSON files.
+- `MESH_EMBEDDED_SERVER` can run the task server in-process for single-process /
+  fallback deployments.
+- `TaskServerClient` and `MeshHealth` model task-server unavailability as
+  degraded health instead of crashing.
+- Pinned remote sessions intentionally have **no local fallback** because
+  `backend_session_id` is machine-local and session affinity is a hard
+  correctness rule.
+- `_dispatch_or_run_local` is historical/compatibility routing code; the hot
+  session path uses `_process_task_remote` for pinned remote sessions and local
+  worker execution otherwise. Do not remove it without a dedicated call-graph
+  pass and tests.
+- `/status` now reports mesh mode, online/total nodes when known, and local
+  fallback worker capacity.
+- Completed tasks whose `mesh_tasks` completion/enrichment write fails are now
+  spooled under `results/reconcile/<task_id>.json` and replayed on gateway
+  startup or the next DB-available completion.
+- Mesh health emits one `mesh_degraded` event when the sliding-window detector
+  crosses the failure threshold and one `mesh_restored` event when a later
+  successful probe clears degradation.
+
+No remaining P4 tasks. The next cleanup target is M5 below.
 
 **Where to look:** `src/orchestrator.py`, `config/settings.py`,
-`src/control/task_server_client.py`, `src/telegram/interface.py`,
-`src/core/session_store.py`, and `docs/STATE_SEPARATION_PLAN.md`.
+`src/control/task_server_client.py`, `src/control/mesh_health.py`,
+`src/control/task_server.py`, `src/control/node_registry.py`,
+`src/services/session_store.py`, and `src/telegram/interface.py`.
 
-**Acceptance:** update `.ai/CONTEXT.md` and this file with the result of the
-audit. If gaps remain, split them into small P4.x tasks here. If no gaps remain,
-move P4 to the completed ledger and put details in `docs/PROGRESS_LOG.md`.
+### P4.1 — Reconcile Fallback-Completed Work After DB/Task-Server Outage — DONE
+
+Implemented 2026-07-01:
+- `_mesh_complete_task` writes a durable reconcile spool entry when the DB is
+  unavailable or completion/enrichment raises.
+- `reconcile_spooled_mesh_completions()` replays bounded spool files, creates the
+  missing `mesh_tasks` row when needed, finalizes/enriches it, and marks the
+  spool file reconciled.
+- Replay runs on gateway startup and opportunistically on the next DB-available
+  completion.
+
+Verification:
+- `pytest tests/test_mesh_reconcile_spool.py tests/test_usage_propagation.py::test_mesh_complete_task_prefers_structured_usage_when_stdout_has_no_ndjson`
+
+### P4.2 — Mesh-Restored Operator Notification — DONE
+
+Implemented 2026-07-01:
+- `MeshHealth.record_check()` emits transition-only `mesh_degraded` and
+  `mesh_restored` observability events.
+- Repeated failures/successes do not spam events; only state transitions emit.
+
+Verification:
+- `pytest tests/test_mesh_health.py`
 
 ### M5 — Mesh Health History / Trend Ledger
 
