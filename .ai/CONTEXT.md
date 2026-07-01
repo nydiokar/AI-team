@@ -8,7 +8,7 @@
 
 | # | Task | Source | Depends on | Scope |
 |---|---|---|---|---|
-| 1 | **U1.5** — Merge `feat/webui-ui0` into `main` (2 commits pending). Dev proxy already points at `:9003`; README already references the gateway port. | `docs/U1_CHECKLIST.md` | Branch merge | Process |
+| 1 | **U1.5** — ✅ closed on `main`: Web UI is present, Vite proxies `/api` + `/health` to gateway `:9003`, and `web/README.md` now tells devs to start `python main.py` instead of the removed dashboard. | `docs/U1_CHECKLIST.md` | Branch merge | Process ✅ |
 
 ### Mesh / State-Separation — remaining work (paused track)
 
@@ -54,7 +54,7 @@
 | 37 | **LLM turn observability in WebUI** — ✅ Session Info tab now lists `/api/turns` rows (status, model, duration, token accounting) via `SessionTurns` + `useSessionTurns` | `CONTEXT.md` | Frontend ✅ |
 | 38 | **Fail early on bad session directory** — ✅ `SessionService.create_session` validates LOCAL `repo_path` up front (injectable `repo_path_validator`, real default = `PathResolver`); rejects with `invalid_repo_path` + human `detail`; `POST /api/sessions` → 400; web NewSessionSheet surfaces the message. Remote (mesh) paths skipped (can't stat off-host) | `CONTEXT.md` | Backend ✅ |
 | 39 | **Job notification routing** — ✅ direct Telegram Bot API send removed from `/jobs/{id}/done`; task server now only records terminal job state, while gateway `_job_completion_poller` routes through session/WebUI projection + `NotificationService` | `CONTEXT.md` | Backend + Infra ✅ |
-| 40 | Dont' forget to review and further turn this load_compact_context into something useful | 
+| 40 | **load_compact_context useful context** — ✅ DB-canonical first via `mesh_tasks`, artifact fallback retained, returns bounded prompt/summary/files/usage/errors/constraints; covered in `tests/test_context_loader.py` | `CONTEXT.md` | Backend ✅ |
 
 **Current local jobs topology note (2026-06-30):** Horse/this PC may run the Web UI gateway locally on `127.0.0.1:9003` while MCP/worker jobs register against the remote controller from `CONTROLLER_URL` (currently the older Telegram-serving server). In that split, the local gateway has no local `:9002` task server and its SQLite jobs table can be empty even when jobs exist remotely. The local gateway now merges remote controller jobs into `/api/jobs` and polls remote terminal jobs so matching local sessions get the watched-job turn/agent continuation. Live smoke passed with `job_217c415b56dc`: visible in System -> Jobs and projected into session `b696d1040c4b`; watched-job DB turn timestamps are forced to the local session-history timestamp so the WebUI chat shows local time.
 

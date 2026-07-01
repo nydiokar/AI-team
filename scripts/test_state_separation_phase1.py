@@ -10,32 +10,17 @@ Run: python scripts/test_state_separation_phase1.py
 Uses an isolated test DB — never touches state/mesh.db.
 """
 import json
-import os
 import sys
-import uuid
 from pathlib import Path
 from datetime import datetime
 
-# Temporarily rename .env so load_dotenv(override=True) doesn't clobber our
-# test env vars (MESH_DB_PATH, etc.).  Restored in the cleanup block.
 _proj_root = Path(__file__).resolve().parent.parent
-_dotenv = _proj_root / ".env"
-_dotenv_bak = _proj_root / ".env.phase1test.bak"
-if _dotenv.exists():
-    _dotenv.rename(_dotenv_bak)
-
-# Isolated test DB
-TEST_DB = _proj_root / "state" / "test_phase1.db"
-for ext in ("", "-wal", "-shm"):
-    p = Path(str(TEST_DB) + ext)
-    if p.exists():
-        p.unlink()
-
-os.environ["MESH_DB_PATH"] = str(TEST_DB)
-os.environ["MESH_SHADOW_WRITE"] = "true"
-os.environ["MESH_ENABLED"] = "false"
 
 sys.path.insert(0, str(_proj_root))
+
+from scripts._test_env import cleanup_test_environment, configure_test_environment
+
+TEST_DB = configure_test_environment("phase1")
 
 from src.control.db import get_db, MeshDB
 from src.services.session_store import SessionStore
@@ -260,13 +245,6 @@ print()
 # 6. Cleanup
 # ------------------------------------------------------------------
 db.close()
-for ext in ("", "-wal", "-shm"):
-    p = Path(str(TEST_DB) + ext)
-    if p.exists():
-        try:
-            p.unlink()
-        except OSError:
-            pass
 
 # Clean up test JSON files
 for sid in ("test_db_first", "db_only_sess", "recover_test_busy"):
@@ -274,9 +252,7 @@ for sid in ("test_db_first", "db_only_sess", "recover_test_busy"):
     if p.exists():
         p.unlink()
 
-# Restore .env
-if _dotenv_bak.exists():
-    _dotenv_bak.rename(_dotenv)
+cleanup_test_environment(TEST_DB)
 
 print()
 if FAILURES:

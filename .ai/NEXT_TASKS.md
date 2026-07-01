@@ -52,17 +52,6 @@ is complete, partially complete, or obsolete.
 audit. If gaps remain, split them into small P4.x tasks here. If no gaps remain,
 move P4 to the completed ledger and put details in `docs/PROGRESS_LOG.md`.
 
-### D1 — Script/Test DB Safety
-
-**Why:** pytest isolates DB state, but standalone scripts and ad-hoc commands can
-still touch prod `state/mesh.db`. This previously leaked junk sessions.
-
-**Task:** give standalone dev/test scripts an explicit temp DB path or
-`MESH_DB_PATH` override by default, especially `scripts/test_*.py`.
-
-**Acceptance:** running any script named like a test cannot write to prod
-`state/mesh.db` unless explicitly opted in.
-
 ### M5 — Mesh Health History / Trend Ledger
 
 **Why:** the self-awareness branch exposes current mesh state (`/status`,
@@ -89,6 +78,22 @@ worse over the last hour/day?" without manually reading logs.
 ---
 
 ## Completed Ledger
+
+### D1 — Script/Test DB Safety — DONE
+
+Implemented:
+- `scripts/_test_env.py` creates a throwaway env file and temp `MESH_DB_PATH`
+  before project config is imported.
+- `scripts/test_embedded_server.py`, `scripts/test_mesh_local.py`,
+  `scripts/test_routing_integration.py`, and
+  `scripts/test_state_separation_phase1.py` use the helper by default.
+- Removed the old `.env` rename workaround from the Phase 1 script.
+
+Verification:
+- `python scripts/test_mesh_local.py`
+- `python scripts/test_embedded_server.py`
+- `python scripts/test_routing_integration.py`
+- `python scripts/test_state_separation_phase1.py`
 
 ### T4 — Reclaim In-Flight Tasks Dropped By Worker Restart — DONE
 

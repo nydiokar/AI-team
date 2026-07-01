@@ -5,23 +5,14 @@ claim -> result -> verify DB state. No live worker or gateway required.
 
 Run: python scripts/test_mesh_local.py
 """
-import os
 import sys
 from pathlib import Path
 
-# Use an isolated test DB so this never touches state/mesh.db
-TEST_DB = Path(__file__).resolve().parent.parent / "state" / "test_mesh_local.db"
-for ext in ("", "-wal", "-shm"):
-    p = Path(str(TEST_DB) + ext)
-    if p.exists():
-        p.unlink()
-
-os.environ["WORKER_TOKEN"] = "test-token-12345"
-os.environ["MESH_DB_PATH"] = str(TEST_DB)
-os.environ["MESH_SHADOW_WRITE"] = "true"
-os.environ["MESH_ENABLED"] = "false"
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts._test_env import cleanup_test_environment, configure_test_environment
+
+TEST_DB = configure_test_environment("mesh_local", worker_token="test-token-12345")
 
 from fastapi.testclient import TestClient
 from src.control.task_server import app
@@ -137,18 +128,14 @@ nodes_after = r.json()
 check("deregistered node removed from list", not any(n["node_id"] == "test-node" for n in nodes_after), str(nodes_after))
 
 print()
+exit_code = 0
 if FAILURES:
     print(f"=== {len(FAILURES)} CHECK(S) FAILED: {FAILURES} ===")
-    sys.exit(1)
+    exit_code = 1
 else:
     print("=== All checks passed ===")
 
 # Cleanup (best-effort — Windows may hold the file lock briefly after close)
 db.close()
-for ext in ("", "-wal", "-shm"):
-    p = Path(str(TEST_DB) + ext)
-    if p.exists():
-        try:
-            p.unlink()
-        except OSError:
-            pass
+cleanup_test_environment(TEST_DB)
+sys.exit(exit_code)

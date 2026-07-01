@@ -13,7 +13,6 @@ Run: python scripts/test_routing_integration.py
 """
 import asyncio
 import json
-import os
 import socket
 import sys
 import time
@@ -21,18 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-TEST_DB = Path(__file__).resolve().parent.parent / "state" / "test_routing.db"
-for ext in ("", "-wal", "-shm"):
-    p = Path(str(TEST_DB) + ext)
-    if p.exists():
-        p.unlink()
-
-os.environ["WORKER_TOKEN"] = "rtest-token-99"
-os.environ["MESH_DB_PATH"] = str(TEST_DB)
-os.environ["MESH_SHADOW_WRITE"] = "true"
-os.environ["MESH_ENABLED"] = "true"
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts._test_env import cleanup_test_environment, configure_test_environment
+
+TEST_DB = configure_test_environment("routing", worker_token="rtest-token-99", mesh_enabled=True)
 
 from src.control.db import MeshDB
 from src.core.interfaces import (
@@ -214,6 +206,7 @@ async def test_dispatch_to_node():
     class MinimalOrch:
         session_store = StubStore()
         def _resolve_task_backend(self, t): return "claude"
+        def _nudge_worker_for_dispatch(self, node, target_node_id, db): pass
 
     orch = MinimalOrch()
     from src.orchestrator import TaskOrchestrator
@@ -253,6 +246,7 @@ async def test_claimed_task_outlives_pickup_timeout():
         session_store = StubStore()
         _task_cancel_events = {}
         def _resolve_task_backend(self, t): return "claude"
+        def _nudge_worker_for_dispatch(self, node, target_node_id, db): pass
 
     async def complete_on_sleep(delay):
         sleep_calls["count"] += 1
@@ -307,6 +301,7 @@ async def test_db_unavailable():
     class MinimalOrch:
         session_store = StubStore()
         def _resolve_task_backend(self, t): return "claude"
+        def _nudge_worker_for_dispatch(self, node, target_node_id, db): pass
 
     orch = MinimalOrch()
     from src.orchestrator import TaskOrchestrator
@@ -368,6 +363,7 @@ async def test_db_node_fallback():
         def _classify_error(self, r): return "none" if r.success else "fatal"
         def _emit_event(self, *a, **kw): pass
         def _resolve_task_backend(self, t): return "claude"
+        def _nudge_worker_for_dispatch(self, node, target_node_id, db): pass
 
     orch = MinimalOrch()
     from src.orchestrator import TaskOrchestrator
@@ -444,6 +440,7 @@ async def test_missing_row_fast_fail():
     class MinimalOrch:
         session_store = StubStore()
         def _resolve_task_backend(self, t): return "claude"
+        def _nudge_worker_for_dispatch(self, node, target_node_id, db): pass
 
     orch = MinimalOrch()
     from src.orchestrator import TaskOrchestrator
@@ -475,13 +472,7 @@ else:
     print("=== All routing integration checks passed ===")
 
 db.close()
-for ext in ("", "-wal", "-shm"):
-    p = Path(str(TEST_DB) + ext)
-    if p.exists():
-        try:
-            p.unlink()
-        except OSError:
-            pass
+cleanup_test_environment(TEST_DB)
 
 if FAILURES:
     sys.exit(1)
