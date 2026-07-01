@@ -6,6 +6,8 @@
 
 ### Open checklist items
 
+UNDESIRED AND "HAD TO BE FIXED" ISSUE WHERE IF THE SERVER GETS RESTARTED THE TASKS ON THE MESH BECOME "FAILED". This is incorrect each task and worker have unique and honest state that is being reported to the server and the database should fix the problem of server not being "aware" where when it's alive it should ask the worker that the task was "Running" as last state "hey, what happened here" and the worker knows the state OR IT SHOULD!
+
 | # | Task | Source | Depends on | Scope |
 |---|---|---|---|---|
 | 1 | **U1.5** — ✅ closed on `main`: Web UI is present, Vite proxies `/api` + `/health` to gateway `:9003`, and `web/README.md` now tells devs to start `python main.py` instead of the removed dashboard. | `docs/U1_CHECKLIST.md` | Branch merge | Process ✅ |
@@ -38,7 +40,7 @@
 | # | Task | Source | Depends on | Scope |
 |---|---|---|---|---|
 | 10 | **M3** — Claude adapter (stream-json parser, hook integration, coverage UI) | §9.5 | #9 | Backend |
-| 11 | **M4** — OpenCode CLI/server| §9.6–9.7 | #10 | Backend |
+| 11 | **M4** — OpenCode CLI/server| §9.6–9.7 | #10 | Backend | DEFFER FOR NOW
 
 ### Web UI Feature Requests / UX Issues
 
@@ -56,6 +58,12 @@
 | 39 | **Job notification routing** — ✅ direct Telegram Bot API send removed from `/jobs/{id}/done`; task server now only records terminal job state, while gateway `_job_completion_poller` routes through session/WebUI projection + `NotificationService` | `CONTEXT.md` | Backend + Infra ✅ |
 | 40 | **load_compact_context useful context** — backend helper exists: DB-canonical first via `mesh_tasks`, artifact fallback retained, returns bounded prompt/summary/files/usage/errors/constraints; covered in `tests/test_context_loader.py`. **Not wired into a production workflow yet**; use it deliberately when the workflow-automation/compact-resume wiring is designed. | `CONTEXT.md` | Backend helper / future workflow |
 | 41 | **Wire compact context into workflows** — tech-debt/opportunity: decide where `load_compact_context(task_id)` belongs in actual agent/workflow prompts, then consume it through that path with tests. Do not mark it as user-visible until a workflow actually calls it. | `CONTEXT.md` | Backend + Workflow |
+| 42 | **Backend Account + Usage Visibility** — Add a clear place to view current backend/account state (Codex, Claude) with active account identity, current usage, daily/weekly limits/quotas/reset times. Show explicitly when limits are unknown. Either in System tab or a dedicated Usage/Limits page. Do not invent quota data. | `CONTEXT.md` | Backend + Frontend |
+| 43 | **Fix Stop Task Behavior** — Stop Task should abort only the active task/job, not close the whole session. Session stays open, resumable, chat/history visible. Closing session must be a separate explicit action (Close Session). | `CONTEXT.md` | Frontend |
+| 44 | **Add Per-Project "Current Focus" Panel** — Panel showing current roadmap/direction/active focus per project. Reads CONTEXT.md as source of truth. Detects recent session/job activity. Shows last updated, source file, whether auto or manually edited. Operational: current direction, state, next action. Use local/cheap model for summarization if needed. | `CONTEXT.md` | Backend + Frontend | DEFFER UNTIL WORKFLOW IS SETTLED
+| 45 | **Remove Tasks Page / Replace With Jobs** — Remove standalone Tasks page as primary navigation. Expose Jobs inside relevant session, project view, as clickable job bubbles/cards. Compact state: title, status, backend, started time, result state. Expanded: full state history, result/output, artifacts, logs, errors. | `CONTEXT.md` | Frontend |
+| 46 | **Move Job Event Sequences Out of System** — Remove from System tab: task dispatched, queued, started, running, artifact sequence, generic job progress. Belong in session details/chat timeline. Session shows real state sequence (queued → dispatched → backend accepted → executing → streaming). Visible state box clickable, expandable to full SSE state sequence. | `CONTEXT.md` | Frontend |
+| 47 | **Make the System Tab Earn Its Place** — After removing job noise, System tab becomes operational cockpit: worker/node status, backend availability/usage/quota, connected machines, active agent runtimes, queue health, SSE/event stream health, stuck/orphaned jobs, sessions with state mismatch, agent process health, recent crashes/errors, storage/runtime warnings, credential/account status, version/build info. Rule: session activity → session, project direction → project, backend/account limits → Usage/System, infrastructure health → System. | `CONTEXT.md` | Backend + Frontend |
 
 **Current local jobs topology note (2026-06-30):** Horse/this PC may run the Web UI gateway locally on `127.0.0.1:9003` while MCP/worker jobs register against the remote controller from `CONTROLLER_URL` (currently the older Telegram-serving server). In that split, the local gateway has no local `:9002` task server and its SQLite jobs table can be empty even when jobs exist remotely. The local gateway now merges remote controller jobs into `/api/jobs` and polls remote terminal jobs so matching local sessions get the watched-job turn/agent continuation. Live smoke passed with `job_217c415b56dc`: visible in System -> Jobs and projected into session `b696d1040c4b`; watched-job DB turn timestamps are forced to the local session-history timestamp so the WebUI chat shows local time.
 
