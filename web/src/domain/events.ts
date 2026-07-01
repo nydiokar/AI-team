@@ -23,10 +23,9 @@ import type {
 } from "./models";
 import type { TaskState, ConnectionState } from "./status";
 
-// A "SystemNotice" is the cheap presence signal that REPLACES tool.* + progress
-// (gap-doc §6 note): turn-level operational/"job" events the backend already
-// emits — task_received → mesh_dispatch (which node) → validated/summarized/
-// retry → artifacts_written. Rendered as SystemNotice cards in the timeline.
+// A "SystemNotice" is the operational channel for infrastructure/health events
+// that have no session home. Routine turn lifecycle stays in typed task/run
+// events so System does not become a session progress feed.
 export interface SystemNotice {
   id: string;
   sessionId: string | null;

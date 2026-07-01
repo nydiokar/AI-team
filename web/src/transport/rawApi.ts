@@ -26,7 +26,7 @@ export interface RawSessionView {
   last_summary: string;
   last_files_modified: string[];
   needs_input: boolean; //  status == awaiting_input
-  is_active: boolean; //    status not in {closed,error,cancelled}
+  is_active: boolean; //    status not in {closed,error}; cancelled remains resumable
   origin_channel: string;
   origin_kind: string;
   updated_at: string;
