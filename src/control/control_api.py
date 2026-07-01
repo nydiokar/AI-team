@@ -1027,16 +1027,19 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse(result)
 
     @app.get("/api/jobs", dependencies=[Depends(_require_auth)])
-    def api_jobs(limit: int = Query(20, ge=1, le=50)) -> JSONResponse:
+    def api_jobs(
+        limit: int = Query(20, ge=1, le=50),
+        session_id: Optional[str] = Query(default=None),
+    ) -> JSONResponse:
         list_watched_jobs = getattr(orchestrator, "list_watched_jobs", None)
         if callable(list_watched_jobs):
-            return JSONResponse(list_watched_jobs(limit=limit))
+            return JSONResponse(list_watched_jobs(limit=limit, session_id=session_id))
 
         db = _db()
         if db is None:
             return JSONResponse({"running": [], "recent": []})
-        running = db.list_jobs(status="running", limit=limit)
-        recent = db.list_jobs(limit=limit)
+        running = db.list_jobs(status="running", session_id=session_id, limit=limit)
+        recent = db.list_jobs(session_id=session_id, limit=limit)
         return JSONResponse({"running": running, "recent": recent})
 
     @app.get("/api/mesh/health", dependencies=[Depends(_require_auth)])
