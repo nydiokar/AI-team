@@ -13,6 +13,8 @@
  * backends are blocking/one-shot, so it never fires until a deliberate streaming
  * build. UI-1 renders whole-message only.
  */
+// GatewayEvent is the live operational event contract. Durable session history
+// is modeled separately by SessionActivityTimeline.
 import type {
   Session,
   Message,

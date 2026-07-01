@@ -375,3 +375,33 @@ export interface RawTurn {
   coverage: Record<string, unknown>;
   data_quality: unknown[];
 }
+
+// GET /api/sessions/{id}/timeline -> durable session-owned execution timeline.
+// This is distinct from the live /api/events SSE/poll stream: rows here are
+// backend-derived durable read-model facts with explicit confidence/staleness.
+export interface RawSessionTimelineItem {
+  id: string;
+  kind: string;
+  source: string;
+  durability: string;
+  timestamp: string;
+  session_id: string | null;
+  task_id: string | null;
+  turn_id: string | null;
+  job_id: string | null;
+  node_id: string | null;
+  backend: string | null;
+  status: string | null;
+  confidence: string;
+  staleness: string;
+  summary: string;
+  detail: string | null;
+  raw_refs: Record<string, string | number | boolean | null>;
+}
+
+export interface RawSessionTimelineResponse {
+  items: RawSessionTimelineItem[];
+  next_cursor: string | null;
+  generated_at: string;
+  coverage: Record<string, string>;
+}
