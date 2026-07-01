@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-01 (P4 complete; M5 mesh health history ledger added via `mesh_health_samples` + `/metrics.history.recent`)
+**Last Updated:** 2026-07-01 (P4 complete; M5 mesh health history ledger added via `mesh_health_samples`, `/metrics.history.recent`, and `/api/mesh/health`)
 
 ## Remaining work across all open specs (swept from unarchived docs)
 
@@ -54,7 +54,8 @@
 | 37 | **LLM turn observability in WebUI** — ✅ Session Info tab now lists `/api/turns` rows (status, model, duration, token accounting) via `SessionTurns` + `useSessionTurns` | `CONTEXT.md` | Frontend ✅ |
 | 38 | **Fail early on bad session directory** — ✅ `SessionService.create_session` validates LOCAL `repo_path` up front (injectable `repo_path_validator`, real default = `PathResolver`); rejects with `invalid_repo_path` + human `detail`; `POST /api/sessions` → 400; web NewSessionSheet surfaces the message. Remote (mesh) paths skipped (can't stat off-host) | `CONTEXT.md` | Backend ✅ |
 | 39 | **Job notification routing** — ✅ direct Telegram Bot API send removed from `/jobs/{id}/done`; task server now only records terminal job state, while gateway `_job_completion_poller` routes through session/WebUI projection + `NotificationService` | `CONTEXT.md` | Backend + Infra ✅ |
-| 40 | **load_compact_context useful context** — ✅ DB-canonical first via `mesh_tasks`, artifact fallback retained, returns bounded prompt/summary/files/usage/errors/constraints; covered in `tests/test_context_loader.py` | `CONTEXT.md` | Backend ✅ |
+| 40 | **load_compact_context useful context** — backend helper exists: DB-canonical first via `mesh_tasks`, artifact fallback retained, returns bounded prompt/summary/files/usage/errors/constraints; covered in `tests/test_context_loader.py`. **Not wired into a production workflow yet**; use it deliberately when the workflow-automation/compact-resume wiring is designed. | `CONTEXT.md` | Backend helper / future workflow |
+| 41 | **Wire compact context into workflows** — tech-debt/opportunity: decide where `load_compact_context(task_id)` belongs in actual agent/workflow prompts, then consume it through that path with tests. Do not mark it as user-visible until a workflow actually calls it. | `CONTEXT.md` | Backend + Workflow |
 
 **Current local jobs topology note (2026-06-30):** Horse/this PC may run the Web UI gateway locally on `127.0.0.1:9003` while MCP/worker jobs register against the remote controller from `CONTROLLER_URL` (currently the older Telegram-serving server). In that split, the local gateway has no local `:9002` task server and its SQLite jobs table can be empty even when jobs exist remotely. The local gateway now merges remote controller jobs into `/api/jobs` and polls remote terminal jobs so matching local sessions get the watched-job turn/agent continuation. Live smoke passed with `job_217c415b56dc`: visible in System -> Jobs and projected into session `b696d1040c4b`; watched-job DB turn timestamps are forced to the local session-history timestamp so the WebUI chat shows local time.
 
@@ -330,7 +331,7 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | `src/backends/registry.py` | single declaration site for the backend set — M1 (add a backend = one edit here) |
 | `src/services/session_store.py` | DB-first session reads + JSON/DB dual-write |
 | `src/control/db.py` | SQLite mesh DB — canonical DB layer |
-| `src/control/task_server.py` | FastAPI task server (currently embedded); `/metrics.history.recent` exposes M5 mesh health samples |
+| `src/control/task_server.py` | FastAPI task server (currently embedded); `/metrics.history.recent` exposes M5 mesh health samples without mutating on read |
 | `src/control/node_registry.py` | node registry + heartbeat expiry |
 | `src/worker/agent.py` | worker daemon (runs as its own process on worker nodes) |
 | `src/telegram/interface.py` | Telegram command surface |

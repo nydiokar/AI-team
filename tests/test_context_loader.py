@@ -6,9 +6,10 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from config import config
-from src.control.db import get_db
+from src.control.db import MeshDB
 from src.core.interfaces import TaskResult
 from src.orchestrator import TaskOrchestrator
 
@@ -18,8 +19,7 @@ def test_compact_context_prefers_db_task_ledger(tmp_path: Path) -> None:
     config.system.results_dir = str(tmp_path)
     try:
         task_id = "test_ctx_db"
-        db = get_db()
-        assert db is not None
+        db = MeshDB(str(tmp_path / "mesh.db"))
         db.enqueue_task(
             task_id=task_id,
             session_id=None,
@@ -48,7 +48,8 @@ def test_compact_context_prefers_db_task_ledger(tmp_path: Path) -> None:
             return_code=0,
         )
 
-        ctx = TaskOrchestrator().load_compact_context(task_id)
+        with patch("src.control.db.get_db", return_value=db):
+            ctx = TaskOrchestrator().load_compact_context(task_id)
 
         assert ctx["source"] == "db"
         assert ctx["task_id"] == task_id

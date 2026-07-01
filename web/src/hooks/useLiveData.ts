@@ -199,3 +199,13 @@ export function useJobs(limit = 20) {
     refetchInterval: POLL_MS,
   });
 }
+
+export function useMeshHealth(limit = 24) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["mesh-health", limit],
+    queryFn: () => api.meshHealth(token, limit),
+    enabled: Boolean(token),
+    refetchInterval: POLL_MS,
+  });
+}

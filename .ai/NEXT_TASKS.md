@@ -24,7 +24,7 @@ history.
 | T3 watched jobs | DONE | `jobs` table, `/jobs` API, worker watcher, MCP registration, tests exist. |
 | T3.1 watched job process identity | DONE | Worker probes PID + process start/command, records `last_checked_at`, and marks mismatches `lost`. |
 | T4 worker-restart claim reclaim | DONE | Release endpoint, stale-claim reaper, startup sweep, late-result guard, tests exist. |
-| M5 mesh health history | DONE | `mesh_health_samples` ledger records slot/load/stale-state samples from heartbeat + metrics; `/metrics.history.recent` exposes recent trend rows. |
+| M5 mesh health history | DONE | `mesh_health_samples` ledger records throttled slot/load/stale-state samples from heartbeat; `/metrics.history.recent` and `/api/mesh/health` expose recent trend rows. |
 | Cockpit M1 (session core) | DONE (branch) | `feat/session-service-m1`: backend `registry.py`, `SessionService` (create/bind), `SessionOrigin` (DB migration 12), `docs/CONTROL_CONTRACT.md`. Telegram byte-identical. Separate track from State Separation. See `docs/M1_CHECKLIST.md` + PROGRESS_LOG 2026-06-21. M2+ deferred. |
 
 ---
@@ -105,9 +105,9 @@ Implemented 2026-07-01:
 - Samples capture sessions busy, pending/claimed tasks, online/total nodes,
   slots used/total/available, active tasks, stale-busy sessions, live-state
   freshness counts, and stale live-state node IDs.
-- Samples are recorded from worker heartbeat and `/metrics`, with retention
-  pruning by age and max rows.
-- `/metrics` now returns `history.recent` so an operator can compare recent
+- Samples are recorded from worker heartbeat with per-source throttling and
+  retention pruning by age and max rows; `/metrics` stays read-only.
+- `/metrics` and `/api/mesh/health` now return recent history so an operator can compare recent
   stale-busy/live-state/slot trends without reading logs.
 
 Verification:

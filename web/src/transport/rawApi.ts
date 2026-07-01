@@ -234,6 +234,63 @@ export interface RawJob {
   updated_at: string;
 }
 
+// GET /api/mesh/health -> current mesh snapshot, recent samples, reconcile spool.
+export interface RawMeshHealthSample {
+  id?: number;
+  sampled_at: string;
+  source: string;
+  sessions_busy: number;
+  tasks_pending: number;
+  tasks_claimed: number;
+  nodes_online: number;
+  nodes_total: number;
+  slots_used: number;
+  slots_total: number;
+  slots_available: number;
+  active_tasks: number;
+  stale_busy_sessions: number;
+  nodes_with_live_state: number;
+  nodes_without_live_state: number;
+  stale_live_state_nodes: string[];
+}
+
+export interface RawMeshHealthCurrent {
+  sessions_total?: number;
+  sessions_busy?: number;
+  tasks_pending?: number;
+  tasks_claimed?: number;
+  tasks_completed?: number;
+  tasks_failed?: number;
+  nodes_online?: number;
+  nodes_total?: number;
+  schema_version?: number;
+  mesh_load?: {
+    slots_used?: number;
+    slots_total?: number;
+    slots_available?: number;
+    active_tasks?: number;
+    stale_busy_sessions?: number;
+    nodes_with_live_state?: number;
+    nodes_without_live_state?: number;
+    stale_live_state_nodes?: string[];
+  };
+}
+
+export interface RawMeshReconcileStatus {
+  total: number;
+  pending: number;
+  reconciled: number;
+  invalid: number;
+  oldest_pending_at: string | null;
+  latest_reconciled_at: string | null;
+}
+
+export interface RawMeshHealthResponse {
+  current: RawMeshHealthCurrent;
+  history: { recent: RawMeshHealthSample[] };
+  reconcile: RawMeshReconcileStatus;
+}
+
 // GET /api/approvals → { approvals: RawApproval[] } (Move H).
 // Row from the `approvals` table (control_api). `reversible` is stored 0|1.
 export interface RawApproval {

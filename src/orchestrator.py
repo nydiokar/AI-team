@@ -3977,6 +3977,54 @@ Generated from user description: {description}
             )
         return {"checked": checked, "reconciled": reconciled, "failed": failed}
 
+    def mesh_reconcile_status(self, limit: int = 1000) -> Dict[str, Any]:
+        """Summarize pending DB-completion reconcile spool files for operators."""
+        spool_dir = self._mesh_reconcile_dir()
+        if not spool_dir.exists():
+            return {
+                "total": 0,
+                "pending": 0,
+                "reconciled": 0,
+                "invalid": 0,
+                "oldest_pending_at": None,
+                "latest_reconciled_at": None,
+            }
+
+        total: int = 0
+        pending: int = 0
+        reconciled: int = 0
+        invalid: int = 0
+        oldest_pending_at: Optional[str] = None
+        latest_reconciled_at: Optional[str] = None
+        for path in sorted(spool_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
+            if total >= max(1, limit):
+                break
+            total += 1
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                invalid += 1
+                continue
+            if payload.get("reconciled"):
+                reconciled += 1
+                reconciled_at = str(payload.get("reconciled_at") or "")
+                if reconciled_at and (latest_reconciled_at is None or reconciled_at > latest_reconciled_at):
+                    latest_reconciled_at = reconciled_at
+            else:
+                pending += 1
+                created_at = str(payload.get("created_at") or "")
+                if created_at and (oldest_pending_at is None or created_at < oldest_pending_at):
+                    oldest_pending_at = created_at
+
+        return {
+            "total": total,
+            "pending": pending,
+            "reconciled": reconciled,
+            "invalid": invalid,
+            "oldest_pending_at": oldest_pending_at,
+            "latest_reconciled_at": latest_reconciled_at,
+        }
+
     def _mesh_complete_task(self, task: Task, result: "TaskResult", artifact_path: Optional[str]) -> None:
         """Shadow-write the task result into mesh_tasks — the canonical, file-free store.
 

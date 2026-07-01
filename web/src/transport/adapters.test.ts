@@ -153,6 +153,13 @@ describe("eventAdapter — snake→dotted translation (gap-doc §6)", () => {
     expect(ev?.type).toBe("system.notice");
   });
 
+  it("treats mesh health transitions as visible operator states", () => {
+    const degraded = adaptEvent({ event: "mesh_degraded", timestamp: "t" });
+    const restored = adaptEvent({ event: "mesh_restored", timestamp: "t" });
+    expect(degraded).toMatchObject({ type: "system.notice", notice: { severity: "warning" } });
+    expect(restored).toMatchObject({ type: "system.notice", notice: { severity: "success" } });
+  });
+
   it("drops the heartbeat from a batch but keeps the rest", () => {
     const out = adaptEvents(rawEvents);
     expect(out.some((e) => e.type === "system.notice")).toBe(true);

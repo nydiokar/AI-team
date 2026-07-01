@@ -52,6 +52,8 @@ const OPERATIONAL_SEVERITY: Record<string, SystemNotice["severity"]> = {
   summarized: "info",
   security_violation: "error",
   task_claimed: "info",
+  mesh_degraded: "warning",
+  mesh_restored: "success",
 };
 
 // Events deliberately SWALLOWED (too noisy / pure infra) → return null.
