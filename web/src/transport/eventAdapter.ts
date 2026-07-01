@@ -76,6 +76,16 @@ function toNotice(ev: RawEvent): GatewayEvent {
   return { type: "system.notice", notice };
 }
 
+function toTaskState(ev: RawEvent, state: TaskState): GatewayEvent | null {
+  if (!ev.task_id) return null;
+  return {
+    type: "task.state_changed",
+    taskId: String(ev.task_id),
+    state,
+    ...(ev.session_id ? { sessionId: String(ev.session_id) } : {}),
+  };
+}
+
 /**
  * Translate a single backend event. Returns null when the event is
  * intentionally dropped (heartbeat) or carries no usable correlation.
@@ -91,7 +101,7 @@ export function adaptEvent(ev: RawEvent): GatewayEvent | null {
       // object); emit a state transition + a notice. A full task.created is
       // synthesised by the store from /api/tasks, not here.
       if (ev.task_id) {
-        return { type: "task.state_changed", taskId: String(ev.task_id), state: "queued" };
+        return toTaskState(ev, "queued");
       }
       return toNotice(ev);
     case "artifacts_written":
@@ -113,11 +123,7 @@ export function adaptEvent(ev: RawEvent): GatewayEvent | null {
         : null;
     case "mesh_result":
       if (ev.task_id) {
-        return {
-          type: "task.state_changed",
-          taskId: String(ev.task_id),
-          state: ev.success === false ? "failed" : "succeeded",
-        };
+        return toTaskState(ev, ev.success === false ? "failed" : "succeeded");
       }
       return toNotice(ev);
     case "summarized":
@@ -132,7 +138,7 @@ export function adaptEvent(ev: RawEvent): GatewayEvent | null {
       if (runId) return { type: "run.cancelled", runId };
     }
     if (ev.task_id) {
-      return { type: "task.state_changed", taskId: String(ev.task_id), state: transition };
+      return toTaskState(ev, transition);
     }
     return toNotice(ev);
   }

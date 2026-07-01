@@ -144,8 +144,13 @@ describe("eventAdapter — snake→dotted translation (gap-doc §6)", () => {
   });
 
   it("collapses task_received into a task.state_changed", () => {
-    const ev = adaptEvent({ event: "task_received", timestamp: "t", task_id: "task_a1" });
-    expect(ev).toEqual({ type: "task.state_changed", taskId: "task_a1", state: "running" });
+    const ev = adaptEvent({ event: "task_received", timestamp: "t", session_id: "sess_1", task_id: "task_a1" });
+    expect(ev).toEqual({
+      type: "task.state_changed",
+      sessionId: "sess_1",
+      taskId: "task_a1",
+      state: "running",
+    });
   });
 
   it("keeps task lifecycle out of system.notice", () => {

@@ -50,6 +50,7 @@ export function toLogLine(stamped: StampedEvent): LogLine {
         severity: event.state === "failed" ? "error" : "info",
         kind: "task",
         text: `task ${event.state.replace(/_/g, " ")}`,
+        sessionId: event.sessionId ?? null,
         taskId: event.taskId,
       };
     case "run.cancelled":
