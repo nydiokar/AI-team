@@ -482,3 +482,44 @@ def test_ordinary_aggregate_turn_has_process_and_unknown_request_granularity(tmp
     assert len(diagnostics["invocations"]) == 1
     assert len(diagnostics["processes"]) == 1
     assert diagnostics["processes"][0]["status"] == "exited"
+
+
+def test_partial_raw_event_coverage_is_preserved_on_turn_projection(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    store = TelemetryStore(db)
+    start = utc_now()
+    common = {
+        "turn_id": "turn_partial_coverage",
+        "session_id": "session_partial_coverage",
+        "node_id": "worker-a",
+        "emitter_process_instance_id": "worker_proc",
+        "source": "worker",
+        "backend": "codex",
+    }
+
+    store.insert_events(
+        [
+            build_event("turn.started", event_time=start, observed_time=start, **common),
+            build_event(
+                "telemetry.coverage",
+                event_time=start,
+                observed_time=start,
+                attributes={
+                    "area": "tools",
+                    "coverage": "partial",
+                    "reason_code": "fixture_missing_tool_detail",
+                    "adapter_version": "test",
+                },
+                **common,
+            ),
+        ]
+    )
+
+    turn = store.get_turn("turn_partial_coverage")
+    events = store.list_events("turn_partial_coverage")
+
+    assert turn["final_status"] == "running"
+    assert turn["coverage"]["tools"]["coverage"] == "partial"
+    assert turn["coverage"]["tools"]["reason_code"] == "fixture_missing_tool_detail"
+    assert turn["metrics"]["tool_call_count"] is None
+    assert len(events) == 2

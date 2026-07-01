@@ -180,4 +180,25 @@ describe("eventAdapter — snake→dotted translation (gap-doc §6)", () => {
       expect(e.type).not.toBe("task.progress");
     }
   });
+
+  it("keeps SSE activity live-only, without durable timeline authority fields", () => {
+    const ev = adaptEvent({
+      event: "tool.call.started",
+      timestamp: "2026-07-01T00:00:00Z",
+      session_id: "sess_live",
+      task_id: "task_live",
+    });
+
+    expect(ev).toMatchObject({
+      type: "system.notice",
+      notice: {
+        sessionId: "sess_live",
+        taskId: "task_live",
+        kind: "tool.call.started",
+      },
+    });
+    expect("durability" in (ev as Record<string, unknown>)).toBe(false);
+    expect("confidence" in (ev as Record<string, unknown>)).toBe(false);
+    expect("source" in (ev as Record<string, unknown>)).toBe(false);
+  });
 });
