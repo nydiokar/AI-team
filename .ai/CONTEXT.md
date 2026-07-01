@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-01 (P4 fallback/degradation cleanup complete/superseded: status visibility, DB-reconcile spool, mesh health transition events)
+**Last Updated:** 2026-07-01 (P4 complete; M5 mesh health history ledger added via `mesh_health_samples` + `/metrics.history.recent`)
 
 ## Remaining work across all open specs (swept from unarchived docs)
 
@@ -190,7 +190,7 @@ State layout:
 state/sessions/<id>.json              session records (legacy-authoritative, still dual-written)
 state/telegram/active_bindings.json   chat_id → session_id
 state/summaries/<id>.md               per-session summary
-state/mesh.db                         SQLite — read-first by session_store; CANONICAL for conversation + artifacts (migration 17)
+state/mesh.db                         SQLite — read-first by session_store; CANONICAL for conversation + artifacts (migration 17); M5 `mesh_health_samples` trend ledger (migration 19)
 results/<task_id>.json                task artifact — now FALLBACK/debug only (DB-canonical since 2026-06-30); droppable
 results/reconcile/<task_id>.json      DB-reconcile spool for completed turns if `mesh_tasks` write fails; replayed on startup / next DB-available completion
 results/raw/<task_id>.ndjson.gz       gzipped raw_stdout debug stream (when system.slim_artifacts=on)
@@ -330,7 +330,7 @@ Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
 | `src/backends/registry.py` | single declaration site for the backend set — M1 (add a backend = one edit here) |
 | `src/services/session_store.py` | DB-first session reads + JSON/DB dual-write |
 | `src/control/db.py` | SQLite mesh DB — canonical DB layer |
-| `src/control/task_server.py` | FastAPI task server (currently embedded) |
+| `src/control/task_server.py` | FastAPI task server (currently embedded); `/metrics.history.recent` exposes M5 mesh health samples |
 | `src/control/node_registry.py` | node registry + heartbeat expiry |
 | `src/worker/agent.py` | worker daemon (runs as its own process on worker nodes) |
 | `src/telegram/interface.py` | Telegram command surface |

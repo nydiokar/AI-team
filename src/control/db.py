@@ -41,7 +41,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 18
+_CURRENT_VERSION = 19
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +165,28 @@ CREATE TABLE IF NOT EXISTS nodes (
 -- A job is a long-lived external process monitored by the worker's
 -- _job_watcher_loop.  It does NOT hold a task semaphore slot, does NOT
 -- keep a session BUSY, and does NOT enter the stale-busy reattach loop.
+-- Operational mesh health history. Aggregate telemetry, not task lifecycle.
+CREATE TABLE IF NOT EXISTS mesh_health_samples (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    sampled_at                  TEXT NOT NULL,
+    source                      TEXT NOT NULL,
+    sessions_busy               INTEGER NOT NULL DEFAULT 0,
+    tasks_pending               INTEGER NOT NULL DEFAULT 0,
+    tasks_claimed               INTEGER NOT NULL DEFAULT 0,
+    nodes_online                INTEGER NOT NULL DEFAULT 0,
+    nodes_total                 INTEGER NOT NULL DEFAULT 0,
+    slots_used                  INTEGER NOT NULL DEFAULT 0,
+    slots_total                 INTEGER NOT NULL DEFAULT 0,
+    slots_available             INTEGER NOT NULL DEFAULT 0,
+    active_tasks                INTEGER NOT NULL DEFAULT 0,
+    stale_busy_sessions         INTEGER NOT NULL DEFAULT 0,
+    nodes_with_live_state       INTEGER NOT NULL DEFAULT 0,
+    nodes_without_live_state    INTEGER NOT NULL DEFAULT 0,
+    stale_live_state_nodes_json TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_mesh_health_samples_sampled_at
+    ON mesh_health_samples(sampled_at);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id              TEXT PRIMARY KEY,
     session_id      TEXT,
@@ -1644,6 +1666,125 @@ class MeshDB:
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # Mesh health samples (M5)
+    # ------------------------------------------------------------------
+
+    def record_mesh_health_sample(self, source: str = "manual") -> Dict[str, Any]:
+        """Append one aggregate mesh health sample and enforce retention."""
+        snapshot = self.stats()
+        mesh_load = snapshot.get("mesh_load") or {}
+        sampled_at: str = _now()
+        row: Dict[str, Any] = {
+            "sampled_at": sampled_at,
+            "source": source,
+            "sessions_busy": int(snapshot.get("sessions_busy") or 0),
+            "tasks_pending": int(snapshot.get("tasks_pending") or 0),
+            "tasks_claimed": int(snapshot.get("tasks_claimed") or 0),
+            "nodes_online": int(snapshot.get("nodes_online") or 0),
+            "nodes_total": int(snapshot.get("nodes_total") or 0),
+            "slots_used": int(mesh_load.get("slots_used") or 0),
+            "slots_total": int(mesh_load.get("slots_total") or 0),
+            "slots_available": int(mesh_load.get("slots_available") or 0),
+            "active_tasks": int(mesh_load.get("active_tasks") or 0),
+            "stale_busy_sessions": int(mesh_load.get("stale_busy_sessions") or 0),
+            "nodes_with_live_state": int(mesh_load.get("nodes_with_live_state") or 0),
+            "nodes_without_live_state": int(mesh_load.get("nodes_without_live_state") or 0),
+            "stale_live_state_nodes_json": json.dumps(mesh_load.get("stale_live_state_nodes") or []),
+        }
+        try:
+            with self._write() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO mesh_health_samples (
+                        sampled_at, source, sessions_busy, tasks_pending,
+                        tasks_claimed, nodes_online, nodes_total, slots_used,
+                        slots_total, slots_available, active_tasks,
+                        stale_busy_sessions, nodes_with_live_state,
+                        nodes_without_live_state, stale_live_state_nodes_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["sampled_at"],
+                        row["source"],
+                        row["sessions_busy"],
+                        row["tasks_pending"],
+                        row["tasks_claimed"],
+                        row["nodes_online"],
+                        row["nodes_total"],
+                        row["slots_used"],
+                        row["slots_total"],
+                        row["slots_available"],
+                        row["active_tasks"],
+                        row["stale_busy_sessions"],
+                        row["nodes_with_live_state"],
+                        row["nodes_without_live_state"],
+                        row["stale_live_state_nodes_json"],
+                    ),
+                )
+                row["id"] = int(cur.lastrowid)
+            self.prune_mesh_health_samples()
+        except Exception as e:
+            logger.warning("event=db_record_mesh_health_sample_failed err=%s", e)
+        return self._decode_mesh_health_sample(row)
+
+    def list_mesh_health_samples(
+        self,
+        *,
+        since: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 1000))
+        params: List[Any] = []
+        where = ""
+        if since:
+            where = "WHERE sampled_at >= ?"
+            params.append(since)
+        params.append(bounded_limit)
+        rows = self._conn().execute(
+            f"""
+            SELECT * FROM mesh_health_samples
+            {where}
+            ORDER BY sampled_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [self._decode_mesh_health_sample(dict(r)) for r in rows]
+
+    def prune_mesh_health_samples(
+        self,
+        *,
+        retention_hours: int = 48,
+        max_rows: int = 10000,
+    ) -> None:
+        cutoff = (datetime.utcnow() - timedelta(hours=max(1, retention_hours))).isoformat()
+        try:
+            with self._write() as conn:
+                conn.execute("DELETE FROM mesh_health_samples WHERE sampled_at < ?", (cutoff,))
+                conn.execute(
+                    """
+                    DELETE FROM mesh_health_samples
+                    WHERE id NOT IN (
+                        SELECT id FROM mesh_health_samples
+                        ORDER BY sampled_at DESC
+                        LIMIT ?
+                    )
+                    """,
+                    (max(1, max_rows),),
+                )
+        except Exception as e:
+            logger.debug("event=db_prune_mesh_health_samples_failed err=%s", e)
+
+    def _decode_mesh_health_sample(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        raw_nodes = row.pop("stale_live_state_nodes_json", "[]")
+        try:
+            stale_nodes = json.loads(raw_nodes) if isinstance(raw_nodes, str) else raw_nodes
+        except Exception:
+            stale_nodes = []
+        row["stale_live_state_nodes"] = stale_nodes if isinstance(stale_nodes, list) else []
+        return row
+
+    # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
 
@@ -1735,6 +1876,28 @@ def _get_migrations() -> List[tuple]:
         """),  # P0 replacement-engine driver state: persisted so the
                # cache_unhealthy_count>=2 guard and driver_status=lost guard
                # survive across turns and gateway restarts.
+        (19, """
+            CREATE TABLE IF NOT EXISTS mesh_health_samples (
+                id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+                sampled_at                  TEXT NOT NULL,
+                source                      TEXT NOT NULL,
+                sessions_busy               INTEGER NOT NULL DEFAULT 0,
+                tasks_pending               INTEGER NOT NULL DEFAULT 0,
+                tasks_claimed               INTEGER NOT NULL DEFAULT 0,
+                nodes_online                INTEGER NOT NULL DEFAULT 0,
+                nodes_total                 INTEGER NOT NULL DEFAULT 0,
+                slots_used                  INTEGER NOT NULL DEFAULT 0,
+                slots_total                 INTEGER NOT NULL DEFAULT 0,
+                slots_available             INTEGER NOT NULL DEFAULT 0,
+                active_tasks                INTEGER NOT NULL DEFAULT 0,
+                stale_busy_sessions         INTEGER NOT NULL DEFAULT 0,
+                nodes_with_live_state       INTEGER NOT NULL DEFAULT 0,
+                nodes_without_live_state    INTEGER NOT NULL DEFAULT 0,
+                stale_live_state_nodes_json TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE INDEX IF NOT EXISTS idx_mesh_health_samples_sampled_at
+                ON mesh_health_samples(sampled_at)
+        """),  # M5 operational mesh health trend ledger.
     ]
 
 
