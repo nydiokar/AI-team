@@ -445,4 +445,33 @@ export const api = {
   async pushUnsubscribe(token: string, endpoint: string): Promise<{ ok: boolean }> {
     return post(`/api/push/unsubscribe`, token, { endpoint });
   },
+
+  // ── backend account + usage (#30/#33) ────────────────────────────────────
+
+  /** GET /api/backends/usage — honest per-backend account/usage facts. */
+  async backendsUsage(token: string): Promise<BackendUsageResponse> {
+    return get<BackendUsageResponse>(`/api/backends/usage`, token);
+  },
 };
+
+export interface BackendUsageRow {
+  backend: string;
+  configured_model: string | null;
+  observed_models: string[];
+  recent_usage: Record<string, number> | null;
+  recent_turn_count: number;
+  account_identity: string | null;
+  account_identity_reason: string | null;
+  daily_limit: number | null;
+  weekly_limit: number | null;
+  limit_reset_at: string | null;
+  limit_reason: string | null;
+  usage_coverage: string;
+}
+
+export interface BackendUsageResponse {
+  telemetry_available: boolean;
+  backends: BackendUsageRow[];
+  limits_source: string | null;
+  limits_reason: string | null;
+}

@@ -991,6 +991,25 @@ def build_control_api(orchestrator) -> FastAPI:
         db.disable_push_subscription(body.endpoint)
         return JSONResponse({"ok": True})
 
+    # --- backend account + usage visibility (#30/#33) ---
+
+    @app.get("/api/backends/usage", dependencies=[Depends(_require_auth)])
+    def api_backends_usage() -> JSONResponse:
+        """Honest per-backend account/usage view. Emits ONLY provable facts
+        (configured/observed model, recent token usage from telemetry) and returns
+        null + a reason for limits/reset/identity, which no backend proves. Never
+        fabricates quota data."""
+        from src.services.backend_usage import build_backend_usage
+        from src.backends.registry import valid_backend_names
+        from config import config as _cfg
+
+        view = build_backend_usage(
+            _cfg,
+            valid_backends=list(valid_backend_names()),
+            telemetry_store=_telemetry_store(),
+        )
+        return JSONResponse(view)
+
     # --- projects / models / upload (Telegram parity) ---
 
     @app.get("/api/projects", dependencies=[Depends(_require_auth)])

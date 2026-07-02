@@ -246,7 +246,35 @@ handlers); 62 vitest pass.
 3. `.env.example` could not be documented from this environment (harness blocks
    reading/writing env files); add the three VAPID vars there manually.
 
-### T2 / T3 — NOT started this pass
+### T2 — Backend Account + Usage Visibility — SHIPPED (2026-07-03)
 
-T2 (Backend Account + Usage Visibility) and T3 (gateway-routed mesh smoke) remain
-open per the ranking; T1 was the highest-impact rung and is self-contained.
+Delivered as an **honesty-first** read model. Files:
+- **Service:** `src/services/backend_usage.py::build_backend_usage` — aggregates
+  ONLY provable facts: configured/default model (config), observed models +
+  recent token usage summed from `TelemetryStore.list_turns(backend=...)`
+  (bounded, O(#backends) queries). Limits/reset/identity are ALWAYS `null` +
+  a machine reason (`no_backend_limit_source` / `no_backend_identity_source`)
+  because no backend emits them. Usage absent ⇒ `null`, never a fabricated 0.
+  Coverage states: `observed` / `no_data` / `usage_fields_absent` /
+  `telemetry_unavailable`. Survives `list_turns` failure.
+- **API:** `GET /api/backends/usage` (auth-gated) over registry + config +
+  telemetry only.
+- **Frontend:** `BackendUsagePanel` in System (hidden on error/empty),
+  `apiClient.backendsUsage` + typed `BackendUsageResponse`. Renders model +
+  observed token count + an explicit "Limits & quota: unknown" line; a footnote
+  states token counts are observed usage, not a quota.
+
+**Honesty audit (self-review):** no code path derives a limit from usage; every
+unknown is null + reason; the UI never promises provider-specific quota. The
+telemetry read is bounded (≤200 turns × #backends). Verified.
+
+**Verification:** `tests/test_backend_usage.py` (8: no-telemetry facts, always-null
+limits/identity, usage summation, null-not-zero, usage-fields-absent, list_turns
+failure survived, API auth + shape). 77 backend tests green together; `tsc -b`
+clean; 62 vitest pass.
+
+### T3 — gateway-routed mesh smoke — NOT started
+
+Remains open per the ranking (validation-debt, lowest user impact). Needs a live
+gateway-routed mesh Codex run with non-null `gateway_node_id`; deferred to a
+session with the mesh available.
