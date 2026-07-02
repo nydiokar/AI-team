@@ -1,5 +1,5 @@
 /**
- * App — routes the four root tabs + the session detail route. Gated on a token
+ * App — routes the root tabs + the session detail route. Gated on a token
  * (TokenGate) before any /api/* call. Session detail is full-screen (no bottom
  * nav) per the back-stack model (spec §6.3).
  */
@@ -8,7 +8,6 @@ import { MobileAppShell } from "./components/shell/MobileAppShell";
 import { TokenGate } from "./components/shell/TokenGate";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { SystemScreen } from "./screens/SystemScreen";
-import { TasksScreen } from "./screens/TasksScreen";
 import { SessionDetailScreen } from "./screens/SessionDetailScreen";
 import { useAuthStore } from "./stores/authStore";
 import { EventStreamProvider } from "./hooks/eventStreamContext";
@@ -37,7 +36,7 @@ export function App() {
             <MobileAppShell>
               <Routes>
                 <Route path="/sessions" element={<SessionsScreen />} />
-                <Route path="/tasks" element={<TasksScreen />} />
+                <Route path="/tasks" element={<Navigate to="/system" replace />} />
                 <Route path="/system" element={<SystemScreen />} />
                 <Route path="*" element={<Navigate to="/sessions" replace />} />
               </Routes>

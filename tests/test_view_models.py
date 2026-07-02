@@ -31,9 +31,10 @@ def _make_session(status: SessionStatus, **kw) -> Session:
 
 _ACTIVE_STATUSES = {
     SessionStatus.IDLE, SessionStatus.BUSY, SessionStatus.AWAITING_INPUT,
+    SessionStatus.CANCELLED,
 }
 _INACTIVE_STATUSES = {
-    SessionStatus.CLOSED, SessionStatus.ERROR, SessionStatus.CANCELLED,
+    SessionStatus.CLOSED, SessionStatus.ERROR,
 }
 
 

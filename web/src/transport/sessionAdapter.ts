@@ -8,14 +8,12 @@ import type { SessionLifecycle, SessionOpState } from "../domain/status";
 import type { RawSessionView } from "./rawApi";
 
 /**
- * lifecycle: open vs closed only (archived ⛔ dropped). `is_active` already
- * folds error/cancelled/closed into "not active" backend-side, but lifecycle is
- * specifically about closed — error/cancelled are still "open but failed".
+ * lifecycle: open vs closed only (archived ⛔ dropped). `cancelled` is a turn
+ * outcome, not a session lifecycle: a stopped task must leave the session
+ * resumable, while `closed` remains the only explicit close state.
  */
 export function deriveLifecycle(raw: RawSessionView): SessionLifecycle {
-  return raw.status === "closed" || raw.status === "cancelled"
-    ? "closed"
-    : "open";
+  return raw.status === "closed" ? "closed" : "open";
 }
 
 /** Backend SessionStatus → operational state (gap-doc §3 table). */
@@ -31,9 +29,9 @@ export function deriveOpState(raw: RawSessionView): SessionOpState {
     case "closed":
     case "cancelled":
     default:
-      // closed/cancelled have no live op-state; report idle (lifecycle carries
-      // the "closed" truth). waiting_for_approval is never derivable today — it
-      // arrives with Move H, set by the approval adapter, not from status.
+      // closed/cancelled have no live op-state; report idle. Only `closed`
+      // carries lifecycle truth. waiting_for_approval is never derivable today
+      // — it arrives with Move H, set by the approval adapter, not from status.
       return "idle";
   }
 }

@@ -197,6 +197,7 @@ class TaskServerClient:
         node_id: Optional[str] = None,
         status: Optional[str] = None,
         session_id: Optional[str] = None,
+        ownership: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {"limit": limit}
@@ -206,6 +207,8 @@ class TaskServerClient:
             params["status"] = status
         if session_id:
             params["session_id"] = session_id
+        elif ownership:
+            params["ownership"] = ownership
         return self._get("/jobs", params) or []
 
     # ------------------------------------------------------------------

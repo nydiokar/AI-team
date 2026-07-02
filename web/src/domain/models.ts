@@ -150,6 +150,45 @@ export interface RemoteFile {
   change: "added" | "modified" | "deleted";
 }
 
+export type SessionActivityKind =
+  | "task_state"
+  | "worker_state"
+  | "turn_event"
+  | "artifact"
+  | "file_change"
+  | "job_state"
+  | "approval"
+  | "recovery"
+  | "system_notice"
+  | string;
+
+export interface SessionActivityItem {
+  id: string;
+  kind: SessionActivityKind;
+  source: string;
+  durability: "durable" | "diagnostic" | string;
+  timestamp: string;
+  sessionId: string | null;
+  taskId: string | null;
+  turnId: string | null;
+  jobId: string | null;
+  nodeId: string | null;
+  backend: string | null;
+  status: string | null;
+  confidence: "high" | "medium" | "low" | string;
+  staleness: "fresh" | "stale" | "unknown" | string;
+  summary: string;
+  detail: Record<string, unknown>;
+  rawRefs: Record<string, string | number | boolean | null>;
+}
+
+export interface SessionActivityTimeline {
+  items: SessionActivityItem[];
+  nextCursor: string | null;
+  generatedAt: string;
+  coverage: Record<string, string>;
+}
+
 /**
  * ⛔ DROPPED — NOT modeled here, by design (gap-doc §2 "Tool execution"):
  *   - ToolExecution  → a backend turn is atomic/black-box; the agent's own UI

@@ -25,6 +25,7 @@ import { relAge, clockLabel } from "../lib/time";
 import {
   enrichLine,
   indexSessions,
+  isSystemActivity,
   repoName,
   type EnrichedLine,
 } from "../lib/activityFormat";
@@ -336,12 +337,15 @@ export function SystemScreen() {
 
   const enriched = useMemo(() => {
     const idx = indexSessions(sessions ?? []);
-    return lines.slice(0, MAX_ROWS).map((line) => enrichLine(line, idx));
+    return lines
+      .map((line) => enrichLine(line, idx))
+      .filter(isSystemActivity)
+      .slice(0, MAX_ROWS);
   }, [lines, sessions]);
 
   return (
     <div className="pb-8">
-      <CompactTopBar title="System" subtitle="Nodes and live activity" />
+      <CompactTopBar title="System" subtitle="Infrastructure health" />
 
       {/* ── Jobs — one collapsible header; hidden entirely when there's none ── */}
       {(jobs.total > 0 || jobsExpanded) && (
@@ -360,7 +364,7 @@ export function SystemScreen() {
           }
         />
       )}
-      <JobsPanel expanded={jobsExpanded} onSummary={setJobs} />
+      <JobsPanel expanded={jobsExpanded} onSummary={setJobs} owned="unowned" />
 
       <SectionHeader label="Mesh" />
       <MeshHealthPanel data={meshHealth} isLoading={meshHealthLoading} error={meshHealthError} />
@@ -406,7 +410,7 @@ export function SystemScreen() {
 
       {/* ── Live activity — one row per piece of WORK, newest-touched first ── */}
       <SectionHeader
-        label="Activity"
+        label="Infra activity"
         count={enriched.length > 0 ? enriched.length : undefined}
         action={
           connection === "reconnecting" ? (
@@ -427,7 +431,7 @@ export function SystemScreen() {
           <p className="px-4 py-6 text-center text-sm text-ink-muted">
             {connection === "reconnecting"
               ? "Reconnecting — showing last known activity…"
-              : "No activity yet."}
+              : "No infrastructure activity yet."}
           </p>
         ) : (
           enriched.map((e, i) => (

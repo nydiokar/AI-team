@@ -26,6 +26,7 @@ import type {
   RawJob,
   RawTurn,
   RawMeshHealthResponse,
+  RawSessionTimelineResponse,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -194,6 +195,21 @@ export const api = {
       token,
     );
     return data.turns ?? [];
+  },
+
+  /** Durable session-owned execution timeline, distinct from live events. */
+  async sessionTimeline(
+    token: string,
+    sessionId: string,
+    limit = 50,
+    cursor?: string | null,
+  ): Promise<RawSessionTimelineResponse> {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (cursor) qs.set("cursor", cursor);
+    return get<RawSessionTimelineResponse>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/timeline?${qs.toString()}`,
+      token,
+    );
   },
 
   /** Live event tail (poll). Pass the returned offset back as `since`. */
@@ -387,8 +403,16 @@ export const api = {
   },
 
   /** GET /api/jobs — watched jobs: running + recent. */
-  async jobs(token: string, limit = 20): Promise<{ running: RawJob[]; recent: RawJob[] }> {
-    return get(`/api/jobs?limit=${limit}`, token);
+  async jobs(
+    token: string,
+    limit = 20,
+    sessionId?: string,
+    ownership?: "all" | "unowned",
+  ): Promise<{ running: RawJob[]; recent: RawJob[] }> {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (sessionId) qs.set("session_id", sessionId);
+    else if (ownership) qs.set("ownership", ownership);
+    return get(`/api/jobs?${qs.toString()}`, token);
   },
 
   async meshHealth(token: string, limit = 24): Promise<RawMeshHealthResponse> {

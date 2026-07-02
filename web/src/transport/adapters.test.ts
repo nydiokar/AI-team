@@ -31,7 +31,7 @@ describe("sessionAdapter — lifecycle/op split (gap-doc §3)", () => {
   it("maps each backend status correctly", () => {
     expect(deriveOpState({ status: "awaiting_input" } as never)).toBe("waiting_for_input");
     expect(deriveOpState({ status: "error" } as never)).toBe("failed_attention");
-    expect(deriveLifecycle({ status: "cancelled" } as never)).toBe("closed");
+    expect(deriveLifecycle({ status: "cancelled" } as never)).toBe("open");
   });
 });
 
@@ -144,13 +144,48 @@ describe("eventAdapter — snake→dotted translation (gap-doc §6)", () => {
   });
 
   it("collapses task_received into a task.state_changed", () => {
-    const ev = adaptEvent({ event: "task_received", timestamp: "t", task_id: "task_a1" });
-    expect(ev).toEqual({ type: "task.state_changed", taskId: "task_a1", state: "running" });
+    const ev = adaptEvent({ event: "task_received", timestamp: "t", session_id: "sess_1", task_id: "task_a1" });
+    expect(ev).toEqual({
+      type: "task.state_changed",
+      sessionId: "sess_1",
+      taskId: "task_a1",
+      state: "running",
+    });
   });
 
-  it("routes operational job events to system.notice", () => {
+  it("keeps task lifecycle out of system.notice", () => {
     const ev = adaptEvent({ event: "mesh_dispatch", timestamp: "t", task_id: "task_a1", node_id: "main-pc" });
-    expect(ev?.type).toBe("system.notice");
+    expect(ev).toEqual({ type: "task.state_changed", taskId: "task_a1", state: "dispatching" });
+  });
+
+  it("preserves correlation on typed cancellation and approval events", () => {
+    expect(
+      adaptEvent({
+        event: "run_cancelled",
+        timestamp: "t",
+        session_id: "sess_1",
+        task_id: "task_a1",
+      }),
+    ).toEqual({
+      type: "run.cancelled",
+      runId: "task_a1",
+      sessionId: "sess_1",
+      taskId: "task_a1",
+    });
+    expect(
+      adaptEvent({
+        event: "approval_granted",
+        timestamp: "t",
+        session_id: "sess_1",
+        task_id: "task_a1",
+      }),
+    ).toEqual({
+      type: "approval.resolved",
+      approvalId: "task_a1",
+      decision: "granted",
+      sessionId: "sess_1",
+      taskId: "task_a1",
+    });
   });
 
   it("treats mesh health transitions as visible operator states", () => {
@@ -164,8 +199,8 @@ describe("eventAdapter — snake→dotted translation (gap-doc §6)", () => {
     const out = adaptEvents(rawEvents);
     expect(out.some((e) => e.type === "system.notice")).toBe(true);
     expect(out.some((e) => e.type === "task.state_changed")).toBe(true);
-    // 8 raw events, 1 heartbeat swallowed → 7 out
-    expect(out).toHaveLength(7);
+    // 8 raw events, 1 heartbeat and 1 redundant summarized event swallowed → 6 out
+    expect(out).toHaveLength(6);
   });
 
   it("emits NO tool.* or task.progress types", () => {
@@ -174,5 +209,26 @@ describe("eventAdapter — snake→dotted translation (gap-doc §6)", () => {
       expect(e.type.startsWith("tool.")).toBe(false);
       expect(e.type).not.toBe("task.progress");
     }
+  });
+
+  it("keeps SSE activity live-only, without durable timeline authority fields", () => {
+    const ev = adaptEvent({
+      event: "tool.call.started",
+      timestamp: "2026-07-01T00:00:00Z",
+      session_id: "sess_live",
+      task_id: "task_live",
+    });
+
+    expect(ev).toMatchObject({
+      type: "system.notice",
+      notice: {
+        sessionId: "sess_live",
+        taskId: "task_live",
+        kind: "tool.call.started",
+      },
+    });
+    expect("durability" in (ev as Record<string, unknown>)).toBe(false);
+    expect("confidence" in (ev as Record<string, unknown>)).toBe(false);
+    expect("source" in (ev as Record<string, unknown>)).toBe(false);
   });
 });

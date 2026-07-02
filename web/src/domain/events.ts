@@ -13,6 +13,8 @@
  * backends are blocking/one-shot, so it never fires until a deliberate streaming
  * build. UI-1 renders whole-message only.
  */
+// GatewayEvent is the live operational event contract. Durable session history
+// is modeled separately by SessionActivityTimeline.
 import type {
   Session,
   Message,
@@ -23,10 +25,9 @@ import type {
 } from "./models";
 import type { TaskState, ConnectionState } from "./status";
 
-// A "SystemNotice" is the cheap presence signal that REPLACES tool.* + progress
-// (gap-doc §6 note): turn-level operational/"job" events the backend already
-// emits — task_received → mesh_dispatch (which node) → validated/summarized/
-// retry → artifacts_written. Rendered as SystemNotice cards in the timeline.
+// A "SystemNotice" is the operational channel for infrastructure/health events
+// that have no session home. Routine turn lifecycle stays in typed task/run
+// events so System does not become a session progress feed.
 export interface SystemNotice {
   id: string;
   sessionId: string | null;
@@ -57,17 +58,17 @@ export type GatewayEvent =
   // ── tasks ─ ✅ task.created (rename); 🟡 state_changed (collapses scattered
   //    backend transitions task_received/timeout/cancelled/retry into one).
   | { type: "task.created"; task: Task }
-  | { type: "task.state_changed"; taskId: string; state: TaskState }
+  | { type: "task.state_changed"; taskId: string; state: TaskState; sessionId?: string | null }
   // ⛔ task.progress + tool.* OMITTED — see header.
   // ── approvals ─ 🟡 PARTIAL: emitted (already dotted!) but inert (Move H).
   | { type: "approval.required"; approval: ApprovalRequest }
-  | { type: "approval.resolved"; approvalId: string; decision: string }
+  | { type: "approval.resolved"; approvalId: string; decision: string; sessionId?: string | null; taskId?: string | null }
   // ── artifacts / files ─ ✅ artifact.created (rename artifacts_written);
   //    🟡 file.changed (from TaskResult.files_modified, not an event today).
   | { type: "artifact.created"; artifact: Artifact }
   | { type: "file.changed"; file: RemoteFile }
   // ── run control ─ ✅ run.cancelled (rename `cancelled`).
-  | { type: "run.cancelled"; runId: string }
+  | { type: "run.cancelled"; runId: string; sessionId?: string | null; taskId?: string | null }
   // ── connection ─ 🟡 PARTIAL: derived from node heartbeat / transport.
   | { type: "connection.state_changed"; state: ConnectionState }
   // ── operational presence ─ the SystemNotice channel (gap-doc §6 note).

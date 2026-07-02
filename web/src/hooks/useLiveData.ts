@@ -1,6 +1,6 @@
 /**
  * Server-state hooks (TanStack Query) for the LIVE read API. Sessions + System
- * bind to these (UI-1 acceptance gate). Tasks/timeline use fixtures in UI-1.
+ * bind to these.
  *
  * Polling (3s, matching the dashboard) is the transport — there is no WS/SSE
  * until Move F (gap-doc §7). Raw payloads are translated through the adapters
@@ -13,6 +13,7 @@ import { toTargets } from "../transport/nodeAdapter";
 import { toTasks, toTaskSections } from "../transport/taskAdapter";
 import { toApprovals } from "../transport/approvalAdapter";
 import { toArtifacts, toArtifactDetail } from "../transport/artifactAdapter";
+import { toSessionActivityTimeline } from "../transport/sessionTimelineAdapter";
 import { useAuthStore } from "../stores/authStore";
 
 const POLL_MS = 3000;
@@ -43,9 +44,8 @@ export function useTargets() {
 }
 
 /**
- * Live tasks — available but NOT required for the UI-1 gate (Tasks screen renders
- * from fixtures per scope). Exposed so the Tasks screen can opt into live data
- * where the flat /api/tasks rows suffice; richer sectioning waits for Move G′.
+ * Live tasks. Kept for command invalidation and legacy consumers; primary
+ * session progress now comes from the durable session timeline.
  */
 export function useTasks(limit = 50) {
   const token = useAuthStore((s) => s.token);
@@ -58,8 +58,8 @@ export function useTasks(limit = 50) {
 }
 
 /**
- * Sectioned tasks (Move G′) — the Tasks inbox bound to the backend's supervised
- * lifecycle buckets (attention/running/queued/recent), not client-side bucketing.
+ * Sectioned task buckets bound to the backend's supervised lifecycle
+ * (attention/running/queued/recent), not client-side bucketing.
  * The backend overlays each task's owning-session status, so `waiting_for_input`
  * lands in `attention` here where the flat status alone couldn't reach it.
  */
@@ -148,6 +148,31 @@ export function useSessionTurns(sessionId: string | undefined) {
  * One artifact's changed files (UI-4) — fetched on demand when a card expands.
  * Artifacts are immutable once written, so this does NOT poll.
  */
+/**
+ * Durable session execution timeline. This is the session-owned read model for
+ * task/job/turn/approval facts and must not be mixed with rolling live events as
+ * state authority.
+ */
+export function useSessionActivity(
+  sessionId: string | undefined,
+  limit = 50,
+  cursor?: string | null,
+) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["session-activity", sessionId, limit, cursor ?? null],
+    queryFn: async () =>
+      toSessionActivityTimeline(
+        await api.sessionTimeline(token, sessionId!, limit, cursor),
+      ),
+    enabled: Boolean(token) && Boolean(sessionId),
+    refetchInterval: POLL_MS,
+    refetchOnReconnect: true,
+    placeholderData: (prev) => prev,
+  });
+}
+
+/** Fetch one immutable artifact detail on demand. */
 export function useArtifact(taskId: string | null) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
@@ -190,11 +215,15 @@ export function useModels(backend: string | undefined) {
 /**
  * Watched jobs — running + recently finished. Polls at the same rate as tasks.
  */
-export function useJobs(limit = 20) {
+export function useJobs(
+  limit = 20,
+  sessionId?: string,
+  ownership?: "all" | "unowned",
+) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["jobs", limit],
-    queryFn: () => api.jobs(token, limit),
+    queryKey: ["jobs", limit, sessionId ?? null, ownership ?? "all"],
+    queryFn: () => api.jobs(token, limit, sessionId, ownership),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
   });
