@@ -1329,6 +1329,19 @@ class WorkerAgent:
             t.cancel()
         await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, return_exceptions=True)
 
+        # Terminate any backend subprocesses still alive (e.g. a hung
+        # claude.exe that outlived its task). Without this, a worker restart
+        # orphans these children and they accumulate as zombies, competing for
+        # auth/token slots and memory.
+        for name, backend in (self._backends or {}).items():
+            terminate = getattr(backend, "terminate_active_processes", None)
+            if callable(terminate):
+                try:
+                    await asyncio.to_thread(terminate)
+                    logger.info("event=backend_procs_terminated backend=%s", name)
+                except Exception as e:
+                    logger.warning("event=backend_terminate_failed backend=%s err=%s", name, e)
+
         self._deregister()
 
     def _on_sigterm(self) -> None:
