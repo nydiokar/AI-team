@@ -64,8 +64,21 @@ def set_log_context(**fields: str) -> "contextvars.Token":
     ``backend``. ``task_id`` remains the compatibility alias for ``turn_id``.
     """
     current = dict(_log_context.get())
-    current.update({k: v for k, v in fields.items() if v})
-    if current.get("turn_id") and not current.get("task_id"):
+    incoming = {k: v for k, v in fields.items() if v}
+    current.update(incoming)
+    # ``task_id`` and ``turn_id`` are aliases in this correlation envelope; the
+    # real turn-vs-task distinction is carried explicitly in telemetry payloads
+    # / TelemetryContext, never here. When a new unit of work sets one alias
+    # without the other, refresh its partner from the *incoming* value. This is
+    # the load-bearing bit: an explicitly-updated ``task_id`` must overwrite a
+    # ``turn_id`` left behind by a previous turn/session, otherwise the stale
+    # ``turn_id`` leaks forward through this process-global context and results
+    # get emitted against the previous turn (the "one turn behind" bug).
+    if "turn_id" in incoming and "task_id" not in incoming:
+        current["task_id"] = incoming["turn_id"]
+    elif "task_id" in incoming and "turn_id" not in incoming:
+        current["turn_id"] = incoming["task_id"]
+    elif current.get("turn_id") and not current.get("task_id"):
         current["task_id"] = current["turn_id"]
     elif current.get("task_id") and not current.get("turn_id"):
         current["turn_id"] = current["task_id"]
