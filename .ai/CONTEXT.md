@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-01 (session/job/task durable timeline roadmap #36-#39 implemented and targeted-test verified)
+**Last Updated:** 2026-07-02 (LLM turn observability local + controlled worker/controller mesh smoke recorded; full M1/M2 ship still blocked on gateway-routed mesh acceptance)
 
 ## Remaining work across all open specs (swept from unarchived docs)
 
@@ -21,6 +21,15 @@ explicitly instead of silently showing running/failed. Covered by targeted backe
 | 7 | Real local + mesh Codex smoke tests; inspect dashboard + privacy scan | §handoff #3 | #5, #6 | Validation |
 | 8 | SQLite ingestion/query/concurrency benchmarks (§16.5) | §handoff #4 | #7 | Perf ✅ done — 16k evt/s ingestion, ~85ms query; projection rebuild below aspirational target (noted for M3) |
 | 9 | After #5–#8 pass, mark M1/M2 shipped, begin M3 | §handoff #5 | #5–#8 | Process |
+
+2026-07-02 validation pass on branch `validate/llm-turn-observability-m1m2`:
+- Local Codex smoke passed through Web/control API: `POST /api/sessions`, `POST /api/instructions`; session `49c5c6d1157f`, turn `task_99bc7bec`, reply `LOCAL_CODEX_SMOKE_OK`.
+- Local graph/diagnostics/timeline API inspection passed: `/api/turns/task_99bc7bec/graph` returned 5 nodes/4 edges; diagnostics reported `success`, 1 invocation, 1 process, request-level plus session-cumulative Codex usage; `/api/sessions/49c5c6d1157f/timeline` returned durable timeline items.
+- Controlled worker/controller mesh Codex smoke passed on temporary local ports `9012`/`9011`: task `task_mesh_smoke_20260702`, claimed by `smoke-mesh-20260702`, reply `MESH_CODEX_SMOKE_OK`; graph/diagnostics/events APIs reported worker/backend/reconciler telemetry with `execution_node_id=smoke-mesh-20260702`.
+- Privacy scan passed for sentinels `PROMPT_SECRET_LLMOBS_LOCAL_20260702`, `PROMPT_SECRET_LLMOBS_MESH_20260702`, and `PROMPT_SECRET_LLMOBS_GWMESH_20260702` across all `llm_%` tables, `logs/telemetry_spool` (0 files), and relevant turn graph/diagnostics/events/timeline API JSON.
+- Temporary smoke processes were cleaned up; ports `9011`-`9014` had no listening owner afterward, and the temporary node `smoke-mesh-20260702` was marked offline via `MeshDB.mark_node_offline`. The only `codex` process remaining was pre-existing before these smokes.
+- #8 benchmark was not rerun; no ingestion/query/projection performance code changed.
+- Do **not** mark #9 shipped yet: the gateway-routed temporary mesh attempt did not reach a usable embedded task server on alternate port `9014`, so the completed mesh smoke lacks gateway-source events (`gateway_node_id` is null). Before scheduling #10 M3 Claude adapter, run/pass a gateway-routed mesh Codex smoke through the production controller/gateway path or a stable equivalent.
 
 ### LLM Turn Observability — future milestones (not started)
 
@@ -104,23 +113,6 @@ surface over the same gateway**, consuming the M1 control contract. The gateway
 serves it in-process: `python main.py` serves `web/dist` at `/` + `/api/*` on one
 tailnet-bound port — the "one process, many interfaces" goal.
 
-**Plan of record / ladder (single source of truth):** `docs/archive/cockpit-refactor-spec/COCKPIT_REFACTOR_SPEC.md`
-§14. Build order was `M1 → UI-0 → UI-1 → F → I → UI-2 → G′ → H → UI-3 → UI-4 →
-UI-5 → UI-6`. The control-surface unification that embedded the web API into the
-gateway is `docs/archive/control-surface-unification/CONTROL_SURFACE_UNIFICATION.md` (U1..U6, all done).
-
-**Status as of 2026-06-25 — THE LADDER IS COMPLETE (all committed on `feat/webui-ui0`):**
-
-| Rung | What | Status |
-|------|------|--------|
-| F / I | write + SSE control API; canonical event adapter | ✅ done (U1–U5, embedded `src/control/control_api.py`) |
-| UI-0/UI-1 | TS domain + adapters + fixtures; live Sessions/System | ✅ done |
-| **UI-2** | live write surface, SSE transport, real session timeline | ✅ done (`5590cb5`) — send/stop, idempotency, SSE all live-verified |
-| **G′** | task lifecycle object + sectioned `/api/tasks` | ✅ done (`baba1d1`) |
-| **H + UI-3** | durable approval gate + approval card | ✅ done (`3dc00c7`) — **see priority note** |
-| **UI-4** | **Files & artifacts** | ✅ done — artifact listing API + live FilesScreen (`docs/UI4_CHECKLIST.md`) |
-| UI-5 | logs / health / terminal | ✅ done — live activity feed on System screen off the SSE stream (`docs/UI5_CHECKLIST.md`) |
-| **UI-6** | hardening, a11y, PWA, push | ✅ done (`9c452e8`, gate-verified live `8a0ee76`) — installable PWA, offline shell, a11y pass, install affordance (`docs/UI6_CHECKLIST.md`) |
 
 **Every rung M1 → UI-6 is shipped, committed, and gate-verified.** Branch
 `feat/webui-ui0` is ready to merge to `main`. Gate re-confirmed 2026-06-25:
@@ -198,13 +190,7 @@ exactly as pre-mesh), `MESH_SHADOW_WRITE` (default `true`), `WORKER_TOKEN`,
 
 ---
 
-## Background: mesh / State-Separation track (PAUSED — not the current work)
-
-> This is NOT where we are now. The current work is the **Web UI track** on
-> `feat/webui-ui0` (see that section above — building UI-4 next). The mesh content
-> below is **paused background context**: it last advanced 2026-06-11, lives on
-> `main`, and is parked at Phase 4. Kept here only so an agent has the runtime
-> picture; do not treat it as the active plan.
+## Background: mesh 
 
 **The mesh is LIVE across two real machines (as of 2026-06-11).** Gateway +
 embedded task server run on the **Pi5 (`kanebra`)**; the worker daemon runs on a
@@ -213,75 +199,6 @@ that was the whole point — a task now **survives a gateway restart end-to-end*
 the worker keeps running, the gateway reattaches on startup and delivers the
 worker's real result to Telegram (no fabricated "Task failed"). State Separation
 Phases 0–3 are effectively complete.
-
-The remaining old **Phase 4** item is now closed as complete/superseded. The
-2026-07-01 audit found the archived one-worker fallback plan partially
-implemented and partially obsolete: DB-first session reads + JSON fallback,
-optional embedded task server, configurable local worker capacity, sliding-window
-task-server health, `/status` mesh mode, DB completion replay from
-`results/reconcile/`, and `mesh_degraded` / `mesh_restored` transition events now
-exist; pinned remote sessions still correctly fail rather than silently running
-locally. See `.ai/NEXT_TASKS.md`. (Mesh plan doc archived at
-`docs/archive/STATE_SEPARATION_PLAN.md`.)
-
-**Cockpit M1 (2026-06-21, `feat/session-service-m1`):** a separate, completed
-track preparing the gateway for a second surface (Web UI). It added a
-transport-neutral `SessionService` (lifecycle create/bind off the Telegram
-class), a single backend `registry.py`, a descriptive `SessionOrigin` tag on
-`Session` (persisted via DB migration 12), and `docs/CONTROL_CONTRACT.md`.
-Telegram behavior is byte-identical (gate matches the pre-M1 baseline). Scope
-discipline lived in `docs/archive/m1/M1_CHECKLIST.md`. M2+ (SessionView DTO, WS/HTTP
-transport, workflow events) remain deferred.
-
-History of every completed phase (8, 9, Step B/C, D1–D6) + the 2026-06-11
-restart-resilience milestone: `docs/archive/progress/PROGRESS_LOG.md`.
-
----
-
-## Mesh plan reference — State Separation (PAUSED background, not active)
-
-> Reference only — the **active plan is the Web UI track** (top of file). This is
-> the parked mesh plan, kept for the runtime picture.
-
-**Plan of record (for the mesh track):** `docs/archive/STATE_SEPARATION_PLAN.md`. This
-**supersedes** the old
-standalone "VPS migration Phase 4" — VPS migration is now simply the end-state of
-this plan's Phases 2–3 (server on the VPS, workers on local machines).
-
-Progress against that plan (verified against code on 2026-06-10):
-
-| Phase | Goal | Status |
-|-------|------|--------|
-| 4 | Graceful degradation / fallback | **Complete/superseded — audit, status visibility, DB-reconcile spool, and mesh health transition events done 2026-07-01** |
-
----
-
-## ➡️ Immediate next step
-
-**ACTIVE track (Web UI, branch `feat/webui-ui0`): LADDER COMPLETE — merge to
-`main`.** Every rung M1 → UI-6 is shipped, committed, and gate-verified (see the
-Web UI status table above). UI-6 (installable PWA + offline shell + a11y +
-install affordance) landed in `9c452e8` and was gate-verified live in `8a0ee76`.
-The remaining work on this branch is **merge it to `main`** and close it out.
-Genuinely additive future work (Web Push, streaming, diff hunks, terminal,
-approvals automation) is parked in `docs/DEFERRED.md` — none blocks shipping.
-
-**Mesh track (paused, branch `main`):** the two-machine cutover is **done and
-live** — gateway+server on the Pi5, worker on `Horse`, restart-resilient. P4 is
-now closed as complete/superseded: do not rebuild the old one-worker fallback
-plan; preserve session affinity and configurable local worker capacity.
-
-Current run mode: gateway + embedded task server in one process on the Pi5
-(`MESH_EMBEDDED_SERVER=true`), worker daemon as a separate process on `Horse`.
-
-**Deploy note (important):** the gateway runs on the **Pi5**. Code changed on a
-worker machine must be pushed, then `git pull` + gateway restart **on the Pi5**;
-confirm with `git log -1` on the Pi5. A fix that's on `origin/main` but not yet
-pulled+restarted on the Pi5 will look like it "didn't work."
-
-Per-task detail and acceptance checks: `.ai/NEXT_TASKS.md`.
-
----
 
 ## Architecture rules (do not violate)
 
