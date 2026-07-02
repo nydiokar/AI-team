@@ -1030,16 +1030,35 @@ def build_control_api(orchestrator) -> FastAPI:
     def api_jobs(
         limit: int = Query(20, ge=1, le=50),
         session_id: Optional[str] = Query(default=None),
+        ownership: Optional[str] = Query(default=None, pattern="^(all|unowned)$"),
     ) -> JSONResponse:
+        ownership_filter = None if ownership in (None, "all") else ownership
+        if session_id and ownership_filter == "unowned":
+            raise HTTPException(status_code=400, detail="session_id_conflicts_with_unowned")
         list_watched_jobs = getattr(orchestrator, "list_watched_jobs", None)
         if callable(list_watched_jobs):
-            return JSONResponse(list_watched_jobs(limit=limit, session_id=session_id))
+            return JSONResponse(
+                list_watched_jobs(
+                    limit=limit,
+                    session_id=session_id,
+                    ownership=ownership_filter,
+                )
+            )
 
         db = _db()
         if db is None:
             return JSONResponse({"running": [], "recent": []})
-        running = db.list_jobs(status="running", session_id=session_id, limit=limit)
-        recent = db.list_jobs(session_id=session_id, limit=limit)
+        running = db.list_jobs(
+            status="running",
+            session_id=session_id,
+            ownership=ownership_filter,
+            limit=limit,
+        )
+        recent = db.list_jobs(
+            session_id=session_id,
+            ownership=ownership_filter,
+            limit=limit,
+        )
         return JSONResponse({"running": running, "recent": recent})
 
     @app.get("/api/mesh/health", dependencies=[Depends(_require_auth)])

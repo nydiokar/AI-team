@@ -78,7 +78,11 @@ export function JobsPanel({
   onSummary?: (s: JobsSummary) => void;
   owned?: JobOwnershipFilter;
 }) {
-  const { data, isLoading } = useJobs();
+  const { data, isLoading } = useJobs(
+    20,
+    undefined,
+    owned === "unowned" ? "unowned" : undefined,
+  );
 
   const running = filterJobsByOwnership(data?.running ?? [], owned);
   const recent = filterJobsByOwnership(

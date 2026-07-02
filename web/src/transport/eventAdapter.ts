@@ -119,6 +119,8 @@ export function adaptEvent(ev: RawEvent): GatewayEvent | null {
             type: "approval.resolved",
             approvalId: String(ev.task_id ?? ev.session_id),
             decision: "granted",
+            sessionId: ev.session_id ? String(ev.session_id) : null,
+            taskId: ev.task_id ? String(ev.task_id) : null,
           }
         : null;
     case "mesh_result":
@@ -135,7 +137,14 @@ export function adaptEvent(ev: RawEvent): GatewayEvent | null {
   if (transition) {
     if (name === "cancelled" || name === "run_cancelled") {
       const runId = String(ev.task_id ?? ev.session_id ?? "");
-      if (runId) return { type: "run.cancelled", runId };
+      if (runId) {
+        return {
+          type: "run.cancelled",
+          runId,
+          sessionId: ev.session_id ? String(ev.session_id) : null,
+          taskId: ev.task_id ? String(ev.task_id) : null,
+        };
+      }
     }
     if (ev.task_id) {
       return toTaskState(ev, transition);

@@ -809,12 +809,24 @@ def list_jobs(
     node_id: Optional[str] = None,
     status: Optional[str] = None,
     session_id: Optional[str] = None,
+    ownership: Optional[str] = None,
     limit: int = 20,
 ) -> List[Dict[str, Any]]:
+    if ownership not in (None, "all", "unowned"):
+        raise HTTPException(status_code=400, detail="invalid_ownership")
+    ownership_filter = None if ownership in (None, "all") else ownership
+    if session_id and ownership_filter == "unowned":
+        raise HTTPException(status_code=400, detail="session_id_conflicts_with_unowned")
     db = get_db()
     if db is None:
         return []
-    return db.list_jobs(node_id=node_id, status=status, session_id=session_id, limit=limit)
+    return db.list_jobs(
+        node_id=node_id,
+        status=status,
+        session_id=session_id,
+        ownership=ownership_filter,
+        limit=limit,
+    )
 
 
 @app.get("/jobs/{job_id}", dependencies=[Depends(_require_auth)])

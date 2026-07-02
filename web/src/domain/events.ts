@@ -62,13 +62,13 @@ export type GatewayEvent =
   // ⛔ task.progress + tool.* OMITTED — see header.
   // ── approvals ─ 🟡 PARTIAL: emitted (already dotted!) but inert (Move H).
   | { type: "approval.required"; approval: ApprovalRequest }
-  | { type: "approval.resolved"; approvalId: string; decision: string }
+  | { type: "approval.resolved"; approvalId: string; decision: string; sessionId?: string | null; taskId?: string | null }
   // ── artifacts / files ─ ✅ artifact.created (rename artifacts_written);
   //    🟡 file.changed (from TaskResult.files_modified, not an event today).
   | { type: "artifact.created"; artifact: Artifact }
   | { type: "file.changed"; file: RemoteFile }
   // ── run control ─ ✅ run.cancelled (rename `cancelled`).
-  | { type: "run.cancelled"; runId: string }
+  | { type: "run.cancelled"; runId: string; sessionId?: string | null; taskId?: string | null }
   // ── connection ─ 🟡 PARTIAL: derived from node heartbeat / transport.
   | { type: "connection.state_changed"; state: ConnectionState }
   // ── operational presence ─ the SystemNotice channel (gap-doc §6 note).

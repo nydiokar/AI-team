@@ -58,6 +58,26 @@ describe("eventLog — GatewayEvent → LogLine", () => {
     ).toBe("warning");
   });
 
+  it("preserves session and task correlation for filtered typed events", () => {
+    const cancelled = toLogLine(
+      stamp({ type: "run.cancelled", runId: "r1", sessionId: "s1", taskId: "t1" }),
+    );
+    const approval = toLogLine(
+      stamp({
+        type: "approval.resolved",
+        approvalId: "a1",
+        decision: "rejected",
+        sessionId: "s1",
+        taskId: "t1",
+      }),
+    );
+
+    expect(cancelled.sessionId).toBe("s1");
+    expect(cancelled.taskId).toBe("t1");
+    expect(approval.sessionId).toBe("s1");
+    expect(approval.taskId).toBe("t1");
+  });
+
   it("never produces a blank row for other typed variants (no throw)", () => {
     const line = toLogLine(
       stamp({ type: "connection.state_changed", state: "reconnecting" }),

@@ -158,6 +158,36 @@ describe("eventAdapter — snake→dotted translation (gap-doc §6)", () => {
     expect(ev).toEqual({ type: "task.state_changed", taskId: "task_a1", state: "dispatching" });
   });
 
+  it("preserves correlation on typed cancellation and approval events", () => {
+    expect(
+      adaptEvent({
+        event: "run_cancelled",
+        timestamp: "t",
+        session_id: "sess_1",
+        task_id: "task_a1",
+      }),
+    ).toEqual({
+      type: "run.cancelled",
+      runId: "task_a1",
+      sessionId: "sess_1",
+      taskId: "task_a1",
+    });
+    expect(
+      adaptEvent({
+        event: "approval_granted",
+        timestamp: "t",
+        session_id: "sess_1",
+        task_id: "task_a1",
+      }),
+    ).toEqual({
+      type: "approval.resolved",
+      approvalId: "task_a1",
+      decision: "granted",
+      sessionId: "sess_1",
+      taskId: "task_a1",
+    });
+  });
+
   it("treats mesh health transitions as visible operator states", () => {
     const degraded = adaptEvent({ event: "mesh_degraded", timestamp: "t" });
     const restored = adaptEvent({ event: "mesh_restored", timestamp: "t" });
