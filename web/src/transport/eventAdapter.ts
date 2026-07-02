@@ -11,9 +11,9 @@
  *   1. RENAME      — direct 1:1 to a dotted type (task_created → task.created).
  *   2. COLLAPSE    — several backend names fold into one typed transition
  *                    (task_received/timeout/cancelled/retry → task.state_changed).
- *   3. OPERATIONAL — "job" events with no UI home become system.notice cards;
- *                    this is the cheap presence signal that REPLACES the dropped
- *                    tool-events / task.progress (gap-doc §6 note).
+ *   3. OPERATIONAL — infrastructure/health events with no session home become
+ *                    system.notice cards. Routine task lifecycle stays typed so
+ *                    System does not become a task-progress feed.
  *
  * ⛔ The backend emits NO tool.* and NO task.progress, so there is nothing to map
  *    to them — the canonical union doesn't even contain them.
@@ -32,6 +32,7 @@ function noticeId(ev: RawEvent): string {
 const TASK_STATE_TRANSITIONS: Record<string, TaskState> = {
   task_received: "running",
   task_claimed: "dispatching",
+  mesh_dispatch: "dispatching",
   validated: "running",
   timeout: "failed",
   task_timeout: "failed",
@@ -40,18 +41,14 @@ const TASK_STATE_TRANSITIONS: Record<string, TaskState> = {
   run_cancelled: "cancelled",
 };
 
-// ── bucket 3: operational "job" events → SystemNotice severity. Anything in
-//    here is a presence signal, rendered as a timeline card (gap-doc §6 note).
+// ── bucket 3: infrastructure/health events → SystemNotice severity. Session or
+//    task lifecycle events should stay in typed task/run channels.
 const OPERATIONAL_SEVERITY: Record<string, SystemNotice["severity"]> = {
-  mesh_dispatch: "info",
-  mesh_result: "info",
   mesh_routing_failed: "error",
   worker_pool_scaled: "info",
   throttled: "warning",
   dropped_low_priority: "warning",
-  summarized: "info",
   security_violation: "error",
-  task_claimed: "info",
   mesh_degraded: "warning",
   mesh_restored: "success",
 };
@@ -79,6 +76,16 @@ function toNotice(ev: RawEvent): GatewayEvent {
   return { type: "system.notice", notice };
 }
 
+function toTaskState(ev: RawEvent, state: TaskState): GatewayEvent | null {
+  if (!ev.task_id) return null;
+  return {
+    type: "task.state_changed",
+    taskId: String(ev.task_id),
+    state,
+    ...(ev.session_id ? { sessionId: String(ev.session_id) } : {}),
+  };
+}
+
 /**
  * Translate a single backend event. Returns null when the event is
  * intentionally dropped (heartbeat) or carries no usable correlation.
@@ -94,7 +101,7 @@ export function adaptEvent(ev: RawEvent): GatewayEvent | null {
       // object); emit a state transition + a notice. A full task.created is
       // synthesised by the store from /api/tasks, not here.
       if (ev.task_id) {
-        return { type: "task.state_changed", taskId: String(ev.task_id), state: "queued" };
+        return toTaskState(ev, "queued");
       }
       return toNotice(ev);
     case "artifacts_written":
@@ -112,8 +119,17 @@ export function adaptEvent(ev: RawEvent): GatewayEvent | null {
             type: "approval.resolved",
             approvalId: String(ev.task_id ?? ev.session_id),
             decision: "granted",
+            sessionId: ev.session_id ? String(ev.session_id) : null,
+            taskId: ev.task_id ? String(ev.task_id) : null,
           }
         : null;
+    case "mesh_result":
+      if (ev.task_id) {
+        return toTaskState(ev, ev.success === false ? "failed" : "succeeded");
+      }
+      return toNotice(ev);
+    case "summarized":
+      return ev.task_id || ev.session_id ? null : toNotice(ev);
   }
 
   // bucket 2 — collapse scattered transitions into one typed change ----------
@@ -121,10 +137,17 @@ export function adaptEvent(ev: RawEvent): GatewayEvent | null {
   if (transition) {
     if (name === "cancelled" || name === "run_cancelled") {
       const runId = String(ev.task_id ?? ev.session_id ?? "");
-      if (runId) return { type: "run.cancelled", runId };
+      if (runId) {
+        return {
+          type: "run.cancelled",
+          runId,
+          sessionId: ev.session_id ? String(ev.session_id) : null,
+          taskId: ev.task_id ? String(ev.task_id) : null,
+        };
+      }
     }
     if (ev.task_id) {
-      return { type: "task.state_changed", taskId: String(ev.task_id), state: transition };
+      return toTaskState(ev, transition);
     }
     return toNotice(ev);
   }

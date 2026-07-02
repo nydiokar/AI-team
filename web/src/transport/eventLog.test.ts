@@ -34,8 +34,9 @@ describe("eventLog — GatewayEvent → LogLine", () => {
     expect(
       toLogLine(stamp({ type: "task.state_changed", taskId: "t9", state: "failed" })).severity,
     ).toBe("error");
-    const ok = toLogLine(stamp({ type: "task.state_changed", taskId: "t9", state: "running" }));
+    const ok = toLogLine(stamp({ type: "task.state_changed", sessionId: "s9", taskId: "t9", state: "running" }));
     expect(ok.severity).toBe("info");
+    expect(ok.sessionId).toBe("s9");
     expect(ok.taskId).toBe("t9");
     expect(ok.text).toBe("task running");
   });
@@ -55,6 +56,26 @@ describe("eventLog — GatewayEvent → LogLine", () => {
     expect(
       toLogLine(stamp({ type: "target.disconnected", targetId: "horse" })).severity,
     ).toBe("warning");
+  });
+
+  it("preserves session and task correlation for filtered typed events", () => {
+    const cancelled = toLogLine(
+      stamp({ type: "run.cancelled", runId: "r1", sessionId: "s1", taskId: "t1" }),
+    );
+    const approval = toLogLine(
+      stamp({
+        type: "approval.resolved",
+        approvalId: "a1",
+        decision: "rejected",
+        sessionId: "s1",
+        taskId: "t1",
+      }),
+    );
+
+    expect(cancelled.sessionId).toBe("s1");
+    expect(cancelled.taskId).toBe("t1");
+    expect(approval.sessionId).toBe("s1");
+    expect(approval.taskId).toBe("t1");
   });
 
   it("never produces a blank row for other typed variants (no throw)", () => {

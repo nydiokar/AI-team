@@ -575,6 +575,39 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=404, detail="not_found")
         return JSONResponse({"messages": turns})
 
+    @app.get("/api/sessions/{session_id}/timeline", dependencies=[Depends(_require_auth)])
+    def api_session_timeline(
+        session_id: str,
+        limit: int = Query(50, ge=1, le=200),
+        cursor: Optional[str] = Query(default=None),
+    ) -> JSONResponse:
+        """Durable, bounded session activity timeline.
+
+        Service boundary checklist:
+        - concurrency: read-only bounded DB queries; no scarce resource held
+          beyond the request.
+        - memory: per-source reads are capped, endpoint limit is 1..200.
+        - request size: path id plus bounded query params only.
+        - timeout/degraded: no filesystem scans or SSE log parsing; DB/telemetry
+          failures degrade through coverage fields, not fabricated states.
+        - malformed input: bad cursors normalize to the first page.
+        - backing resources: unavailable DB returns empty durable response with
+          unavailable coverage.
+        """
+        db = _db()
+        session = orchestrator.session_service.store.get(session_id)
+        session_row = _session_payload(session) if session is not None else None
+        from src.control.session_timeline import build_session_timeline
+        response = build_session_timeline(
+            db=db,
+            telemetry_store=_telemetry_store(),
+            session_id=session_id,
+            session_row=session_row,
+            limit=limit,
+            cursor=cursor,
+        )
+        return JSONResponse(response.model_dump(mode="json"))
+
     @app.get("/api/events", dependencies=[Depends(_require_auth)])
     def api_events(
         since: int = Query(0, ge=0),
@@ -994,16 +1027,38 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse(result)
 
     @app.get("/api/jobs", dependencies=[Depends(_require_auth)])
-    def api_jobs(limit: int = Query(20, ge=1, le=50)) -> JSONResponse:
+    def api_jobs(
+        limit: int = Query(20, ge=1, le=50),
+        session_id: Optional[str] = Query(default=None),
+        ownership: Optional[str] = Query(default=None, pattern="^(all|unowned)$"),
+    ) -> JSONResponse:
+        ownership_filter = None if ownership in (None, "all") else ownership
+        if session_id and ownership_filter == "unowned":
+            raise HTTPException(status_code=400, detail="session_id_conflicts_with_unowned")
         list_watched_jobs = getattr(orchestrator, "list_watched_jobs", None)
         if callable(list_watched_jobs):
-            return JSONResponse(list_watched_jobs(limit=limit))
+            return JSONResponse(
+                list_watched_jobs(
+                    limit=limit,
+                    session_id=session_id,
+                    ownership=ownership_filter,
+                )
+            )
 
         db = _db()
         if db is None:
             return JSONResponse({"running": [], "recent": []})
-        running = db.list_jobs(status="running", limit=limit)
-        recent = db.list_jobs(limit=limit)
+        running = db.list_jobs(
+            status="running",
+            session_id=session_id,
+            ownership=ownership_filter,
+            limit=limit,
+        )
+        recent = db.list_jobs(
+            session_id=session_id,
+            ownership=ownership_filter,
+            limit=limit,
+        )
         return JSONResponse({"running": running, "recent": recent})
 
     @app.get("/api/mesh/health", dependencies=[Depends(_require_auth)])

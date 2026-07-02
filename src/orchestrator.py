@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import re
 import socket
+import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional
 from datetime import datetime
@@ -118,6 +119,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._last_remote_job_poll = datetime.now().isoformat()
         self._remote_job_poll_started_epoch = time.time()
         self._processed_terminal_jobs: set[str] = set()
+        self._watched_jobs_cache_lock = threading.Lock()
+        self._watched_jobs_remote_cache: Dict[
+            tuple[Optional[str], Optional[str], int],
+            tuple[float, Dict[str, List[Dict[str, Any]]]],
+        ] = {}
+        self._watched_jobs_remote_cache_ttl_sec = 2.0
         # Cancellation and runtime tracking
         self._task_cancel_events: Dict[str, asyncio.Event] = {}
         self._running_exec_tasks: Dict[str, asyncio.Task] = {}
@@ -762,18 +769,25 @@ class TaskOrchestrator(ITaskOrchestrator):
             return None
         try:
             from src.control.task_server_client import TaskServerClient
-            return TaskServerClient(controller_url, token, timeout=5)
+            return TaskServerClient(controller_url, token, timeout=2)
         except Exception as e:
             logger.debug("event=remote_jobs_client_unavailable err=%s", e)
             return None
 
-    def list_watched_jobs(self, limit: int = 20) -> Dict[str, List[Dict[str, Any]]]:
+    def list_watched_jobs(
+        self,
+        limit: int = 20,
+        session_id: Optional[str] = None,
+        ownership: Optional[str] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
         """Return watched jobs visible to this gateway.
 
         The local Web UI can run on a machine whose MCP/worker points at a
         remote task server via CONTROLLER_URL. In that topology, local SQLite is
         empty but the real watched jobs live on the controller. Merge both views
         by job id so System > Jobs reflects the actual registration target.
+        When session_id is supplied, return only jobs owned by that session so
+        Session/Project surfaces do not have to filter a global operator list.
         """
         running: List[Dict[str, Any]] = []
         recent: List[Dict[str, Any]] = []
@@ -781,20 +795,87 @@ class TaskOrchestrator(ITaskOrchestrator):
             from src.control.db import get_db
             db = get_db()
             if db is not None:
-                running.extend(db.list_jobs(status="running", limit=limit))
-                recent.extend(db.list_jobs(limit=limit))
+                running.extend(
+                    db.list_jobs(
+                        status="running",
+                        session_id=session_id,
+                        ownership=ownership,
+                        limit=limit,
+                    )
+                )
+                recent.extend(
+                    db.list_jobs(
+                        session_id=session_id,
+                        ownership=ownership,
+                        limit=limit,
+                    )
+                )
         except Exception as e:
             logger.debug("event=local_jobs_list_failed err=%s", e)
 
-        client = self._remote_jobs_client()
-        if client is not None:
-            running.extend(client.list_jobs(status="running", limit=limit))
-            recent.extend(client.list_jobs(limit=limit))
+        remote = self._cached_remote_watched_jobs(
+            limit=limit,
+            session_id=session_id,
+            ownership=ownership,
+        )
+        running.extend(remote["running"])
+        recent.extend(remote["recent"])
 
         return {
             "running": self._dedupe_jobs(running, limit),
             "recent": self._dedupe_jobs(recent, limit),
         }
+
+    def _cached_remote_watched_jobs(
+        self,
+        *,
+        limit: int,
+        session_id: Optional[str],
+        ownership: Optional[str],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        if not hasattr(self, "_watched_jobs_cache_lock"):
+            self._watched_jobs_cache_lock = threading.Lock()
+        if not hasattr(self, "_watched_jobs_remote_cache"):
+            self._watched_jobs_remote_cache = {}
+        if not hasattr(self, "_watched_jobs_remote_cache_ttl_sec"):
+            self._watched_jobs_remote_cache_ttl_sec = 2.0
+
+        cache_key = (session_id, ownership, limit)
+        now = time.monotonic()
+        cached = self._watched_jobs_remote_cache.get(cache_key)
+        if cached and now - cached[0] <= self._watched_jobs_remote_cache_ttl_sec:
+            return cached[1]
+
+        if not self._watched_jobs_cache_lock.acquire(blocking=False):
+            return cached[1] if cached else {"running": [], "recent": []}
+
+        try:
+            cached = self._watched_jobs_remote_cache.get(cache_key)
+            now = time.monotonic()
+            if cached and now - cached[0] <= self._watched_jobs_remote_cache_ttl_sec:
+                return cached[1]
+
+            client = self._remote_jobs_client()
+            if client is None:
+                return {"running": [], "recent": []}
+
+            result = {
+                "running": client.list_jobs(
+                    status="running",
+                    session_id=session_id,
+                    ownership=ownership,
+                    limit=limit,
+                ),
+                "recent": client.list_jobs(
+                    session_id=session_id,
+                    ownership=ownership,
+                    limit=limit,
+                ),
+            }
+            self._watched_jobs_remote_cache[cache_key] = (now, result)
+            return result
+        finally:
+            self._watched_jobs_cache_lock.release()
 
     def _dedupe_jobs(self, jobs: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
         seen: set[str] = set()

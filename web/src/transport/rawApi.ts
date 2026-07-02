@@ -26,7 +26,7 @@ export interface RawSessionView {
   last_summary: string;
   last_files_modified: string[];
   needs_input: boolean; //  status == awaiting_input
-  is_active: boolean; //    status not in {closed,error,cancelled}
+  is_active: boolean; //    status not in {closed,error}; cancelled remains resumable
   origin_channel: string;
   origin_kind: string;
   updated_at: string;
@@ -222,6 +222,8 @@ export interface RawUploadResult {
 // db.list_jobs() rows from mesh_jobs table.
 export interface RawJob {
   id: string;
+  session_id: string | null;
+  node_id: string;
   label: string | null;
   status: string; // running|done|failed|lost
   pid: number | null;
@@ -372,4 +374,34 @@ export interface RawTurn {
   metrics: RawTurnMetrics;
   coverage: Record<string, unknown>;
   data_quality: unknown[];
+}
+
+// GET /api/sessions/{id}/timeline -> durable session-owned execution timeline.
+// This is distinct from the live /api/events SSE/poll stream: rows here are
+// backend-derived durable read-model facts with explicit confidence/staleness.
+export interface RawSessionTimelineItem {
+  id: string;
+  kind: string;
+  source: string;
+  durability: string;
+  timestamp: string;
+  session_id: string | null;
+  task_id: string | null;
+  turn_id: string | null;
+  job_id: string | null;
+  node_id: string | null;
+  backend: string | null;
+  status: string | null;
+  confidence: string;
+  staleness: string;
+  summary: string;
+  detail: Record<string, unknown>;
+  raw_refs: Record<string, string | number | boolean | null>;
+}
+
+export interface RawSessionTimelineResponse {
+  items: RawSessionTimelineItem[];
+  next_cursor: string | null;
+  generated_at: string;
+  coverage: Record<string, string>;
 }
