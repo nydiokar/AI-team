@@ -194,6 +194,12 @@ class SystemConfig:
     telegram_rate_limit_requests: int = 5
     telegram_rate_limit_window_sec: int = 60
     telegram_message_buffer_sec: float = 3.0
+    # Cap on how many chars of agent reply text to forward to Telegram.
+    # 0 = no limit (send everything). When the reply exceeds the cap the
+    # first ~30% and last ~70% are kept, with a truncation notice inserted
+    # between them so both the opening context and Claude's conclusion are visible.
+    # Env: TG_REPLY_MAX_CHARS (e.g. 2000)
+    telegram_reply_max_chars: int = 0
     
 @dataclass
 class MeshConfig:
@@ -426,6 +432,12 @@ class Config:
             tg_buffer = os.getenv("TELEGRAM_MESSAGE_BUFFER_SEC")
             if tg_buffer is not None:
                 self.system.telegram_message_buffer_sec = max(0.0, float(tg_buffer))
+        except Exception:
+            pass
+        try:
+            tg_reply_max = os.getenv("TG_REPLY_MAX_CHARS")
+            if tg_reply_max is not None:
+                self.system.telegram_reply_max_chars = max(0, int(tg_reply_max))
         except Exception:
             pass
         try:

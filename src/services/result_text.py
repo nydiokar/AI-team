@@ -353,6 +353,44 @@ def short_failure_reason(result) -> str:
     return "Claude failed"
 
 
+def trim_reply_for_chat(text: str, max_chars: int) -> str:
+    """Trim a long agent reply to ``max_chars`` characters for chat delivery.
+
+    Strategy: keep the first ~30% (opening context) and the last ~70%
+    (Claude's conclusion / summary), with a truncation notice between them.
+    Both slices are aligned to the nearest paragraph boundary so the output
+    doesn't begin or end mid-sentence.
+
+    When ``max_chars`` is 0 or the text is already short enough, returns
+    ``text`` unchanged.
+    """
+    if not max_chars or len(text) <= max_chars:
+        return text
+
+    head_budget = max(200, int(max_chars * 0.30))
+    tail_budget = max_chars - head_budget
+
+    # Snap head to the nearest paragraph end (double newline) or newline.
+    head_raw = text[:head_budget]
+    for sep in ("\n\n", "\n"):
+        idx = head_raw.rfind(sep)
+        if idx > head_budget // 2:  # at least halfway in — not degenerate
+            head_raw = head_raw[:idx]
+            break
+
+    # Snap tail to start at the nearest paragraph/line start.
+    tail_raw = text[-tail_budget:]
+    for sep in ("\n\n", "\n"):
+        idx = tail_raw.find(sep)
+        if idx != -1 and idx < tail_budget // 4:  # within the first quarter
+            tail_raw = tail_raw[idx + len(sep):]
+            break
+
+    omitted = len(text) - len(head_raw) - len(tail_raw)
+    notice = f"\n\n[… {omitted:,} chars omitted — full reply in the web UI …]\n\n"
+    return head_raw.rstrip() + notice + tail_raw.lstrip()
+
+
 def format_file_change_lines(result, limit: int = 20) -> List[str]:
     """Format a list of changed files for display."""
     changes = list(getattr(result, "file_changes", None) or [])

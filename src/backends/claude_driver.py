@@ -297,11 +297,21 @@ class _SDKSession:
     async def _do_query(self, message: str) -> Tuple[str, str, str]:
         """Run one turn and return (output, backend_session_id, raw_ndjson).
 
-        The raw_ndjson is synthesised from the SDK's typed message objects
-        (which expose `usage` and `session_id` fields directly) into the same
-        NDJSON shape that parse_cache_stats_from_ndjson expects. The SDK does
-        NOT expose the underlying stream-json line, so we reconstruct only the
-        fields the cache-health detector reads.
+        Output priority (highest → lowest):
+          1. ``ResultMessage.result`` — the terminal result event's clean final
+             answer.  This is the text Claude addressed to the user at the end
+             of the agentic loop.  It is always present on successful turns and
+             is the right thing to show in chat.
+          2. Last ``AssistantMessage`` text blocks — fallback for unusual turns
+             where the SDK emits no ResultMessage (e.g. error paths).  Only the
+             LAST assistant message is kept; earlier ones are intermediate
+             narration ("I'll now read file X…") that is not useful in chat.
+
+        The raw_ndjson is synthesised from the SDK's typed message objects into
+        the same NDJSON shape that ``parse_cache_stats_from_ndjson`` and the
+        ``_extract_from_ndjson`` result-text helpers expect.  The terminal
+        ``result`` line carries both usage and the result text so that raw_stdout
+        fallback paths also get the clean answer.
         """
         if self._client is None:
             raise RuntimeError("SDK client not initialised")
@@ -311,7 +321,12 @@ class _SDKSession:
         # so the default thread is correct. Do not pass the gateway key.
         await self._client.query(message)
 
-        parts: List[str] = []
+        # Authoritative answer from the terminal ResultMessage.
+        result_text: str = ""
+        # Last assistant turn text — fallback only.  We intentionally overwrite
+        # on each AssistantMessage so only the last one is retained; earlier
+        # messages are agentic intermediate steps, not the final answer.
+        last_assistant_text: str = ""
         backend_session_id = self.backend_session_id
         ndjson_lines: List[str] = []
 
@@ -319,9 +334,12 @@ class _SDKSession:
 
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        parts.append(block.text)
+                # Overwrite (not append) so only the last assistant turn survives.
+                blocks_text = "".join(
+                    block.text for block in msg.content if isinstance(block, TextBlock)
+                ).strip()
+                if blocks_text:
+                    last_assistant_text = blocks_text
                 usage = _plain_usage_dict(getattr(msg, "usage", None))
                 if usage is not None:
                     ndjson_lines.append(json.dumps({"type": "assistant", "message": {"usage": usage}}))
@@ -334,11 +352,22 @@ class _SDKSession:
                 if sid:
                     backend_session_id = sid
                     self.backend_session_id = sid
+                r = getattr(msg, "result", None)
+                if r and isinstance(r, str):
+                    result_text = r.strip()
                 usage = _plain_usage_dict(getattr(msg, "usage", None))
                 if usage is not None:
-                    ndjson_lines.append(json.dumps({"type": "result", "usage": usage}))
+                    # Include the result text so raw_stdout fallback paths
+                    # (parse_cache_stats, _extract_from_ndjson) see the same
+                    # clean answer without re-parsing the assistant stream.
+                    result_line: Dict[str, Any] = {"type": "result", "usage": usage}
+                    if result_text:
+                        result_line["result"] = result_text
+                    ndjson_lines.append(json.dumps(result_line))
 
-        return "".join(parts).strip(), backend_session_id, "\n".join(ndjson_lines)
+        # Prefer the authoritative terminal result; fall back to last assistant text.
+        output = result_text or last_assistant_text
+        return output, backend_session_id, "\n".join(ndjson_lines)
 
     def send(self, message: str) -> Tuple[str, str, str]:
         # sdk_turn_timeout_sec is the total deadline for one turn (send → full response).

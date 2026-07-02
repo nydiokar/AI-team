@@ -19,7 +19,7 @@ Design rules (same as the rest of the codebase):
 import logging
 from typing import Any, Optional
 
-from src.services.result_text import session_reply_text, short_failure_reason, format_file_change_lines
+from src.services.result_text import session_reply_text, short_failure_reason, format_file_change_lines, trim_reply_for_chat
 
 logger = logging.getLogger(__name__)
 
@@ -146,16 +146,34 @@ class NotificationService:
 
     @staticmethod
     def _build_outcome_text(result: Any, *, success: bool, prefix: str = "") -> str:
-        """Produce user-facing text from a TaskResult-like object."""
+        """Produce user-facing text from a TaskResult-like object.
+
+        Assembly order matters:
+          1. Extract and trim the reply body (the only thing that gets long).
+          2. Append the file-change summary — always in full; it's small and
+             high-signal. Including it inside the trim would silently cut it when
+             the reply is large.
+          3. Prepend the prefix last so it is never consumed by the cap.
+        """
         if success:
-            content = session_reply_text(result)
+            reply = session_reply_text(result)
+
+            # Trim the reply body only — read the cap from config so it's
+            # tunable without a deploy (TG_REPLY_MAX_CHARS env var; 0 = off).
+            try:
+                from config import config as _cfg
+                max_chars = getattr(_cfg.system, "telegram_reply_max_chars", 0)
+            except Exception:
+                max_chars = 0
+            reply = trim_reply_for_chat(reply, max_chars)
+
+            # File summary always appended after the trim so it is never eaten.
             files = getattr(result, "files_modified", None) or []
             if files:
                 lines = format_file_change_lines(result, limit=20)
-                content = content + "\n\n**Changed files:**\n" + "\n".join(lines)
-            if prefix:
-                content = prefix + content
-            return content
+                reply = reply + "\n\n**Changed files:**\n" + "\n".join(lines)
+
+            return (prefix + reply) if prefix else reply
 
         reason = short_failure_reason(result)
         return f"Task failed: {reason}" if reason else "Task failed"
