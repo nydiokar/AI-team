@@ -259,6 +259,22 @@ class TelemetryConfig:
     otlp_endpoint: str = ""
 
 
+@dataclass
+class PushConfig:
+    """Web Push (#21) config. Push is *disabled* unless both VAPID keys and a
+    contact subject are present; absence never crashes the gateway."""
+    vapid_public_key: str = ""       # VAPID_PUBLIC_KEY (base64url, exposed to browser)
+    vapid_private_key: str = ""      # VAPID_PRIVATE_KEY (base64url, secret)
+    vapid_subject: str = ""          # VAPID_SUBJECT (mailto: or https: contact URI)
+    fanout_concurrency: int = 8      # max concurrent sends per outcome
+    send_timeout_sec: float = 5.0    # per-send network timeout
+    max_subscribe_bytes: int = 4096  # reject subscribe bodies larger than this
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.vapid_public_key and self.vapid_private_key and self.vapid_subject)
+
+
 class Config:
     """Main configuration class"""
 
@@ -299,6 +315,11 @@ class Config:
         self.opencode = OpenCodeConfig()
         self.mesh = MeshConfig()
         self.telemetry = TelemetryConfig()
+        self.push = PushConfig(
+            vapid_public_key=os.getenv("VAPID_PUBLIC_KEY", ""),
+            vapid_private_key=os.getenv("VAPID_PRIVATE_KEY", ""),
+            vapid_subject=os.getenv("VAPID_SUBJECT", ""),
+        )
         # Apply env overrides for selected runtime-tunable settings
         self._apply_env_overrides()
         

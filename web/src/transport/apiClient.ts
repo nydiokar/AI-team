@@ -418,4 +418,60 @@ export const api = {
   async meshHealth(token: string, limit = 24): Promise<RawMeshHealthResponse> {
     return get(`/api/mesh/health?limit=${limit}`, token);
   },
+
+  // ── web push (#21) ───────────────────────────────────────────────────────
+
+  /** GET /api/push/status — is push available + the public VAPID key to subscribe. */
+  async pushStatus(
+    token: string,
+  ): Promise<{ available: boolean; reason: string | null; vapid_public_key: string }> {
+    return get(`/api/push/status`, token);
+  },
+
+  /** POST /api/push/subscribe — register a browser PushSubscription (idempotent). */
+  async pushSubscribe(
+    token: string,
+    subscription: PushSubscriptionJSON,
+    label?: string,
+  ): Promise<{ ok: boolean }> {
+    return post(`/api/push/subscribe`, token, {
+      endpoint: subscription.endpoint,
+      keys: subscription.keys,
+      label: label ?? null,
+    });
+  },
+
+  /** POST /api/push/unsubscribe — disable a subscription by endpoint. */
+  async pushUnsubscribe(token: string, endpoint: string): Promise<{ ok: boolean }> {
+    return post(`/api/push/unsubscribe`, token, { endpoint });
+  },
+
+  // ── backend account + usage (#30/#33) ────────────────────────────────────
+
+  /** GET /api/backends/usage — honest per-backend account/usage facts. */
+  async backendsUsage(token: string): Promise<BackendUsageResponse> {
+    return get<BackendUsageResponse>(`/api/backends/usage`, token);
+  },
 };
+
+export interface BackendUsageRow {
+  backend: string;
+  configured_model: string | null;
+  observed_models: string[];
+  recent_usage: Record<string, number> | null;
+  recent_turn_count: number;
+  account_identity: string | null;
+  account_identity_reason: string | null;
+  daily_limit: number | null;
+  weekly_limit: number | null;
+  limit_reset_at: string | null;
+  limit_reason: string | null;
+  usage_coverage: string;
+}
+
+export interface BackendUsageResponse {
+  telemetry_available: boolean;
+  backends: BackendUsageRow[];
+  limits_source: string | null;
+  limits_reason: string | null;
+}

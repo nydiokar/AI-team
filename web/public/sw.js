@@ -1,4 +1,4 @@
-const CACHE = "ai-team-shell-v2";
+const CACHE = "ai-team-shell-v3";
 const SHELL = ["/", "/index.html"];
 
 self.addEventListener("install", (e) => {
@@ -44,5 +44,40 @@ self.addEventListener("fetch", (e) => {
     fetch(e.request).catch(() =>
       caches.match("/index.html").then((shell) => shell || Response.error())
     )
+  );
+});
+
+// --- Web Push (#21) ---
+// Payload shape (sanitized by the backend PushService): { title, body, url, task_id, session_id }
+self.addEventListener("push", (e) => {
+  let data = {};
+  try {
+    data = e.data ? e.data.json() : {};
+  } catch {
+    data = { title: "AI-Team", body: e.data ? e.data.text() : "" };
+  }
+  const title = data.title || "AI-Team";
+  const options = {
+    body: data.body || "",
+    tag: data.session_id || data.task_id || "ai-team",
+    data: { url: data.url || "/" },
+  };
+  e.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const target = (e.notification.data && e.notification.data.url) || "/";
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      // Focus an existing tab if one is already open, else open a new one.
+      for (const client of clients) {
+        if ("focus" in client) {
+          client.navigate && client.navigate(target);
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(target);
+    })
   );
 });

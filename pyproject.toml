@@ -42,6 +42,11 @@ llama = [
 telegram = [
   "python-telegram-bot>=20.0",
 ]
+push = [
+  # Web Push (#21). Optional: absent package or VAPID config => push disabled,
+  # gateway keeps running and Telegram delivery is unaffected.
+  "pywebpush>=1.14.0",
+]
 
 [tool.setuptools]
 packages = [
