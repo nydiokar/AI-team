@@ -17,6 +17,7 @@ import { Button } from "../components/ui/Button";
 import { NodeDetailSheet } from "../components/system/NodeDetailSheet";
 import { JobsPanel } from "../components/system/JobsPanel";
 import { PushSetting } from "../components/system/PushSetting";
+import { BackendUsagePanel } from "../components/system/BackendUsagePanel";
 import { useMeshHealth, useSessions, useTargets } from "../hooks/useLiveData";
 import { useActivityLog } from "../hooks/useActivityLog";
 import type { Target } from "../domain/models";
@@ -444,6 +445,8 @@ export function SystemScreen() {
           ))
         )}
       </div>
+
+      <BackendUsagePanel />
 
       {/* ── Settings — quiet footnote, not a faux feature card ── */}
       <SectionHeader label="Settings" />
