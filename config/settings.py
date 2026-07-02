@@ -13,6 +13,7 @@ _MANAGED_ENV_KEYS = {
     "CLAUDE_ALLOWED_ROOT",
     "CLAUDE_BASE_CWD",
     "CLAUDE_DEFAULT_MODEL",
+    "CLAUDE_DRIVER_TYPE",
     "CLAUDE_MAX_TURNS",
     "CLAUDE_SKIP_PERMISSIONS",
     "CLAUDE_TIMEOUT_SEC",
@@ -104,6 +105,8 @@ class ClaudeConfig:
     allowed_root: Optional[str] = None
     # Default model (alias like "sonnet"/"opus", or full name). None = CLI default.
     default_model: Optional[str] = None
+    # Driver preference: "sdk" (default, raises if unavailable) | "auto" (SDK w/ CLI fallback) | "print_resume" (legacy CLI only)
+    driver_type: str = "sdk"
 
 @dataclass
 class CodexConfig:
@@ -270,6 +273,12 @@ class Config:
             to = os.getenv("CLAUDE_TIMEOUT_SEC")
             if to is not None:
                 self.claude.timeout = max(1, int(to))
+        except Exception:
+            pass
+        try:
+            dt = os.getenv("CLAUDE_DRIVER_TYPE")
+            if dt is not None and dt in ("sdk", "auto", "print_resume"):
+                self.claude.driver_type = dt
         except Exception:
             pass
         self.llama = LlamaConfig()
