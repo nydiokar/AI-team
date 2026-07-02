@@ -54,7 +54,7 @@ _mesh_health_last_sample: Dict[str, float] = {}
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 19
+_CURRENT_VERSION = 20
 
 
 # ---------------------------------------------------------------------------
@@ -1812,6 +1812,80 @@ class MeshDB:
         return row
 
     # ------------------------------------------------------------------
+    # Web Push subscriptions (#21)
+    # ------------------------------------------------------------------
+
+    def upsert_push_subscription(
+        self,
+        endpoint: str,
+        p256dh_key: str,
+        auth_key: str,
+        label: Optional[str] = None,
+    ) -> None:
+        """Insert or refresh a browser push subscription (idempotent by endpoint).
+
+        Re-subscribing from the same browser re-enables and refreshes keys/label.
+        """
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO push_subscriptions
+                        (endpoint, p256dh_key, auth_key, enabled, label,
+                         last_error, created_at, updated_at)
+                    VALUES (?, ?, ?, 1, ?, NULL, ?, ?)
+                    ON CONFLICT(endpoint) DO UPDATE SET
+                        p256dh_key = excluded.p256dh_key,
+                        auth_key   = excluded.auth_key,
+                        enabled    = 1,
+                        label      = excluded.label,
+                        last_error = NULL,
+                        updated_at = excluded.updated_at
+                    """,
+                    (endpoint, p256dh_key, auth_key, label, now, now),
+                )
+        except Exception as e:
+            logger.warning("event=db_upsert_push_subscription_failed err=%s", e)
+
+    def list_push_subscriptions(self, enabled_only: bool = True) -> List[Dict[str, Any]]:
+        try:
+            if enabled_only:
+                rows = self._conn().execute(
+                    "SELECT * FROM push_subscriptions WHERE enabled = 1 ORDER BY created_at"
+                ).fetchall()
+            else:
+                rows = self._conn().execute(
+                    "SELECT * FROM push_subscriptions ORDER BY created_at"
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.debug("event=db_list_push_subscriptions_failed err=%s", e)
+            return []
+
+    def disable_push_subscription(self, endpoint: str) -> None:
+        """Disable a subscription (unsubscribe or after a permanent send error)."""
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    "UPDATE push_subscriptions SET enabled = 0, updated_at = ? WHERE endpoint = ?",
+                    (_now(), endpoint),
+                )
+        except Exception as e:
+            logger.warning("event=db_disable_push_subscription_failed err=%s", e)
+
+    def mark_push_error(self, endpoint: str, error: str) -> None:
+        """Record the last transient send error without disabling the subscription."""
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    "UPDATE push_subscriptions SET last_error = ?, updated_at = ? WHERE endpoint = ?",
+                    (str(error)[:500], _now(), endpoint),
+                )
+        except Exception as e:
+            logger.debug("event=db_mark_push_error_failed err=%s", e)
+
+    # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
 
@@ -1925,6 +1999,19 @@ def _get_migrations() -> List[tuple]:
             CREATE INDEX IF NOT EXISTS idx_mesh_health_samples_sampled_at
                 ON mesh_health_samples(sampled_at)
         """),  # M5 operational mesh health trend ledger.
+        (20, """
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                endpoint    TEXT PRIMARY KEY,
+                p256dh_key  TEXT NOT NULL,
+                auth_key    TEXT NOT NULL,
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                label       TEXT,
+                last_error  TEXT,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            )
+        """),  # #21 Web Push: durable browser push subscriptions. endpoint is the
+               # natural key (unique per browser/device); re-subscribe is an upsert.
     ]
 
 

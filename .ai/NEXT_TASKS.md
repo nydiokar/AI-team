@@ -36,15 +36,26 @@ history.
 Chosen from the existing open/deferred task set in `.ai/CONTEXT.md`; no new
 tasks are introduced.
 
-1. **#21 Web Push notifications** — promote from deferred to next build. The
-   Web UI is already PWA/service-worker ready, and the operator need is now
-   concrete: Telegram-like info pings when agent work completes or fails. Keep
-   this as notification fanout only; do not connect it to approval gates.
-2. **#30/#33 Backend Account + Usage Visibility** — build immediately after
-   push, or in parallel only if it stays source-limited. The System page already
-   deliberately shows infrastructure state; account/quota visibility is the
-   missing operator surface. Show unknown explicitly and do not invent quota
-   data.
+1. **#21 Web Push notifications** — ✅ SHIPPED 2026-07-03 on branch
+   `feat/operator-signal` (dispatch: `.ai/dispatch/AGENT_8_OPERATOR_SIGNAL.md`,
+   adversarial review: `...REVIEW.md`). DB migration 20 (`push_subscriptions`),
+   `PushConfig`+VAPID, `src/services/push_service.py` (bounded, non-blocking
+   fan-out; 410→disable), unconditional wiring in `notification_service`,
+   `/api/push/{subscribe,unsubscribe,status}` (4 KB cap), SW push/notificationclick
+   handlers (cache v3), `usePushNotifications`+`PushSetting`. Notification
+   fan-out only — NOT connected to approval gates. `pywebpush` is an optional
+   extra; absent VAPID ⇒ push disabled, gateway unaffected. Tests:
+   `tests/test_push_notifications.py` (15). Operator TODO: set VAPID_* env +
+   `pip install -e ".[push]"` + add VAPID vars to `.env.example` (env files were
+   not editable from the build environment).
+2. **#30/#33 Backend Account + Usage Visibility** — ✅ SHIPPED 2026-07-03 on
+   `feat/operator-signal`. `src/services/backend_usage.py` + `GET
+   /api/backends/usage` (registry+config+telemetry only), `BackendUsagePanel` in
+   System. Honesty-first: configured/observed model + recent token usage from
+   telemetry are surfaced; daily/weekly limits, reset time, and account identity
+   are ALWAYS null + a reason (no backend emits them); usage-absent is null, not
+   fabricated 0. Tests: `tests/test_backend_usage.py` (8). No provider quota was
+   invented.
 3. **#5-#9 LLM Turn Observability remaining validation** — finish M1/M2 release
    validation after the operator surfaces above are moving. #8 is already done;
    2026-07-02 local Codex smoke and controlled worker/controller mesh Codex

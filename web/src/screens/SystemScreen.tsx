@@ -16,6 +16,8 @@ import { HealthChip } from "../components/ui/StatusChip";
 import { Button } from "../components/ui/Button";
 import { NodeDetailSheet } from "../components/system/NodeDetailSheet";
 import { JobsPanel } from "../components/system/JobsPanel";
+import { PushSetting } from "../components/system/PushSetting";
+import { BackendUsagePanel } from "../components/system/BackendUsagePanel";
 import { useMeshHealth, useSessions, useTargets } from "../hooks/useLiveData";
 import { useActivityLog } from "../hooks/useActivityLog";
 import type { Target } from "../domain/models";
@@ -444,6 +446,8 @@ export function SystemScreen() {
         )}
       </div>
 
+      <BackendUsagePanel />
+
       {/* ── Settings — quiet footnote, not a faux feature card ── */}
       <SectionHeader label="Settings" />
       <div className="space-y-2.5 px-4">
@@ -467,8 +471,9 @@ export function SystemScreen() {
             </p>
           </div>
         )}
+        <PushSetting />
         <p className="px-1 text-[11px] leading-relaxed text-ink-muted">
-          Notifications, approval policy, and security settings arrive in a later phase.
+          Approval policy and security settings arrive in a later phase.
         </p>
       </div>
 

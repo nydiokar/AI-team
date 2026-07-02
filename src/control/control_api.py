@@ -93,6 +93,21 @@ class ApprovalResolveBody(BaseModel):
     resolved_by: str = ""
 
 
+class PushKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+
+class PushSubscribeBody(BaseModel):
+    endpoint: str
+    keys: PushKeys
+    label: Optional[str] = None
+
+
+class PushUnsubscribeBody(BaseModel):
+    endpoint: str
+
+
 class InspectBody(BaseModel):
     op: str
     path: Optional[str] = None
@@ -908,6 +923,92 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400),
                                 detail={"ok": False, "reason": result.reason})
         return JSONResponse({"ok": True, "reason": "", "approval": svc.get(approval_id)})
+
+    # --- web push (#21) ---
+
+    @app.get("/api/push/status", dependencies=[Depends(_require_auth)])
+    def api_push_status() -> JSONResponse:
+        """Report whether push is available (VAPID configured + transport present)
+        and expose the public VAPID key the browser needs to subscribe."""
+        from src.services.push_service import push_available
+        from config import config as _cfg
+
+        available, reason = push_available(_cfg, _db())
+        pub = getattr(getattr(_cfg, "push", None), "vapid_public_key", "") or ""
+        return JSONResponse({
+            "available": available,
+            "reason": reason,
+            "vapid_public_key": pub if available else "",
+        })
+
+    @app.post("/api/push/subscribe", dependencies=[Depends(_require_auth)])
+    async def api_push_subscribe(request: Request) -> JSONResponse:
+        """Register/refresh a browser push subscription (idempotent by endpoint).
+
+        Enforces a hard body-size cap BEFORE parsing — FastAPI does not bound
+        request bodies by default and subscribe payloads are tiny.
+        """
+        from config import config as _cfg
+
+        max_bytes = int(getattr(getattr(_cfg, "push", None), "max_subscribe_bytes", 4096))
+        # Reject BEFORE buffering the body: request.body() reads the whole payload
+        # into memory, so an oversized Content-Length must be caught up front. The
+        # post-read length check below is the fallback for chunked/absent CL.
+        cl = request.headers.get("content-length")
+        if cl is not None:
+            try:
+                if int(cl) > max_bytes:
+                    raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
+            except ValueError:
+                raise HTTPException(status_code=400, detail={"ok": False, "reason": "bad_content_length"})
+        raw = await request.body()
+        if len(raw) > max_bytes:
+            raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
+        try:
+            body = PushSubscribeBody.model_validate_json(raw)
+        except Exception:
+            raise HTTPException(status_code=422, detail={"ok": False, "reason": "invalid_subscription"})
+
+        if not body.endpoint or not body.keys.p256dh or not body.keys.auth:
+            raise HTTPException(status_code=422, detail={"ok": False, "reason": "invalid_subscription"})
+
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        db.upsert_push_subscription(
+            endpoint=body.endpoint,
+            p256dh_key=body.keys.p256dh,
+            auth_key=body.keys.auth,
+            label=(body.label or "")[:120] or None,
+        )
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/push/unsubscribe", dependencies=[Depends(_require_auth)])
+    def api_push_unsubscribe(body: PushUnsubscribeBody) -> JSONResponse:
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        db.disable_push_subscription(body.endpoint)
+        return JSONResponse({"ok": True})
+
+    # --- backend account + usage visibility (#30/#33) ---
+
+    @app.get("/api/backends/usage", dependencies=[Depends(_require_auth)])
+    def api_backends_usage() -> JSONResponse:
+        """Honest per-backend account/usage view. Emits ONLY provable facts
+        (configured/observed model, recent token usage from telemetry) and returns
+        null + a reason for limits/reset/identity, which no backend proves. Never
+        fabricates quota data."""
+        from src.services.backend_usage import build_backend_usage
+        from src.backends.registry import valid_backend_names
+        from config import config as _cfg
+
+        view = build_backend_usage(
+            _cfg,
+            valid_backends=list(valid_backend_names()),
+            telemetry_store=_telemetry_store(),
+        )
+        return JSONResponse(view)
 
     # --- projects / models / upload (Telegram parity) ---
 
