@@ -251,6 +251,17 @@ class ClaudeCodeBackend(CodingBackend):
     def __init__(self, driver_type: str = "auto"):
         from src.backends.claude_driver import build_driver, ClaudePrintResumeDriver
         self._driver = build_driver(driver_type)
+        active = self._driver.driver_type()
+        if active == "print_resume":
+            logger.warning(
+                "event=backend_degraded driver=print_resume "
+                "— ClaudeCodeBackend is running on the LEGACY CLI driver. "
+                "Long sessions burn tokens on context reconstruction, are not "
+                "persistent, and are subject to inactivity timeouts. "
+                "Verify claude_agent_sdk is installed in the venv."
+            )
+        else:
+            logger.info("event=backend_init driver=%s", active)
         # Fallback driver for one-off calls and tests that directly use _build_cmd
         self._fallback = ClaudePrintResumeDriver()
         # Legacy process tracking for terminate_active_processes compatibility
@@ -425,9 +436,9 @@ class ClaudeCodeBackend(CodingBackend):
 
         try:
             from config import config as _cfg
-            inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 600)))
+            inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 36000)))
         except Exception:
-            inactivity_sec = 600
+            inactivity_sec = 36000
 
         # Propagate session ID so the MCP watch_job tool can route notifications
         # back to the right Telegram chat without the agent having to pass it explicitly.

@@ -107,9 +107,9 @@ class CodexBackend(CodingBackend):
 
         try:
             from config import config as _cfg
-            inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 600)))
+            inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 36000)))
         except Exception:
-            inactivity_sec = 600
+            inactivity_sec = 36000
 
         proc_env = ensure_node_on_path()
         if session_key:
