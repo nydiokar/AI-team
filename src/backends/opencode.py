@@ -309,11 +309,11 @@ class OpenCodeBackend(CodingBackend):
 
         try:
             from config import config as _cfg
-            inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 600)))
+            inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 36000)))
             oc_cfg = getattr(_cfg, "opencode", None)
             collect_diff = bool(getattr(oc_cfg, "collect_diff", True)) if oc_cfg else True
         except Exception:
-            inactivity_sec = 600
+            inactivity_sec = 36000
             collect_diff = True
 
         logger.info(

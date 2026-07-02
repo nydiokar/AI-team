@@ -97,7 +97,7 @@ class ClaudeConfig:
     output_format: str = "json"
     headless_mode: bool = True
     skip_permissions: bool = False
-    timeout: int = 300  # 5 minutes
+    timeout: int = 36000  # 10 hours
     max_turns: int = 0
     # Working directory controls
     base_cwd: Optional[str] = None
@@ -177,8 +177,8 @@ class SystemConfig:
     log_level: str = "INFO"
     max_concurrent_tasks: int = 3
     task_timeout: int = 0  # wall-clock kill (0 = disabled; backend inactivity timeout is the primary mechanism)
-    inactivity_timeout_sec: int = 600  # PrintResume driver: kill process after N seconds of no stdout (10 min default)
-    sdk_turn_timeout_sec: int = 7200   # SDK driver: total-turn deadline in seconds (2 hours; 0 = no limit)
+    inactivity_timeout_sec: int = 36000  # PrintResume driver: kill process after N seconds of no stdout (10 hours)
+    sdk_turn_timeout_sec: int = 36000   # SDK driver: total-turn deadline in seconds (10 hours; 0 = no limit)
     task_heartbeat_interval_sec: int = 300  # send "still working" every 5 min for long tasks
     guarded_write: bool = False
     # When True, _write_artifacts moves the heavy raw_stdout NDJSON (87% of
@@ -208,9 +208,9 @@ class MeshConfig:
     task_server_port: int = 9002            # MESH_TASK_SERVER_PORT
     worker_token: str = ""                  # WORKER_TOKEN — shared mesh auth secret
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
-    oneoff_queue_timeout_sec: int = 600     # MESH_ONEOFF_QUEUE_TIMEOUT_SEC
+    oneoff_queue_timeout_sec: int = 36000   # MESH_ONEOFF_QUEUE_TIMEOUT_SEC (10 hours)
     claim_lease_sec: int = 300              # MESH_CLAIM_LEASE_SEC — stale-claim reaper threshold (T4)
-    claim_max_runtime_sec: int = 1800       # MESH_CLAIM_MAX_RUNTIME_SEC — hard cap for active claimed tasks
+    claim_max_runtime_sec: int = 36000      # MESH_CLAIM_MAX_RUNTIME_SEC — hard cap for active claimed tasks (10 hours)
     session_reconcile_interval_sec: int = 60  # MESH_SESSION_RECONCILE_INTERVAL_SEC — 0 disables M3 loop
     routing_freshness_wait_sec: float = 2.0  # MESH_ROUTING_FRESHNESS_WAIT_SEC — pre-route nudge wait; 0 disables
     routing_live_state_max_age_sec: int = 90  # MESH_ROUTING_LIVE_STATE_MAX_AGE_SEC — stale state is ignored for slot routing

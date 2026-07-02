@@ -342,12 +342,12 @@ class _SDKSession:
 
     def send(self, message: str) -> Tuple[str, str, str]:
         # sdk_turn_timeout_sec is the total deadline for one turn (send → full response).
-        # 0 means no limit. Default 7200 (2 h) — distinct from inactivity_timeout_sec
+        # 0 means no limit. Default 36000 (10 h) — distinct from inactivity_timeout_sec
         # which is a per-stdout-line timeout used only by the PrintResume driver.
-        timeout: Optional[float] = 7200.0
+        timeout: Optional[float] = 36000.0
         try:
             from config import config as _cfg
-            raw = getattr(_cfg.system, "sdk_turn_timeout_sec", 7200)
+            raw = getattr(_cfg.system, "sdk_turn_timeout_sec", 36000)
             timeout = None if int(raw) == 0 else float(max(60, int(raw)))
         except Exception:
             pass
@@ -570,10 +570,10 @@ class ClaudePrintResumeDriver(ClaudeDriver):
     ) -> ExecutionResult:
         start = time.time()
         try:
-            inactivity_sec = 600
+            inactivity_sec = 36000
             try:
                 from config import config as _cfg
-                inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 600)))
+                inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 36000)))
             except Exception:
                 pass
 
@@ -858,11 +858,21 @@ def _sdk_available() -> bool:
 def build_driver(driver_type: str = "auto") -> ClaudeDriver:
     """Return the appropriate driver.
 
-    "auto"        -- SDK if available, else print_resume
+    "auto"        -- SDK if available, else print_resume (with WARNING log on fallback)
     "sdk"         -- ClaudeSDKClientDriver (raises if package missing)
     "print_resume"-- ClaudePrintResumeDriver (always available)
     """
     if driver_type == "sdk" or (driver_type == "auto" and _sdk_available()):
+        logger.info("event=driver_selected driver=sdk")
         return ClaudeSDKClientDriver()
+    if driver_type == "auto":
+        logger.warning(
+            "event=driver_fallback driver=print_resume reason=sdk_unavailable "
+            "— SDK package (claude_agent_sdk) not importable; falling back to LEGACY "
+            "CLI/print-resume driver. Sessions will be stateless and subject to "
+            "inactivity timeouts. This is a degraded mode — fix SDK availability ASAP."
+        )
+    else:
+        logger.info("event=driver_selected driver=print_resume")
     return ClaudePrintResumeDriver()
 
