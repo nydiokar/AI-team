@@ -858,21 +858,32 @@ def _sdk_available() -> bool:
 def build_driver(driver_type: str = "auto") -> ClaudeDriver:
     """Return the appropriate driver.
 
-    "auto"        -- SDK if available, else print_resume (with WARNING log on fallback)
-    "sdk"         -- ClaudeSDKClientDriver (raises if package missing)
-    "print_resume"-- ClaudePrintResumeDriver (always available)
+    "sdk"         -- ClaudeSDKClientDriver; raises RuntimeError if SDK not importable
+                     (no silent fallback — use "auto" if you want graceful degradation)
+    "auto"        -- SDK if available, else print_resume (WARNING logged on fallback)
+    "print_resume"-- ClaudePrintResumeDriver (legacy CLI, always available)
     """
-    if driver_type == "sdk" or (driver_type == "auto" and _sdk_available()):
+    if driver_type == "sdk":
+        if not _sdk_available():
+            raise RuntimeError(
+                "CLAUDE_DRIVER_TYPE=sdk but claude_agent_sdk is not importable. "
+                "Install it in the venv: pip install claude-agent-sdk  "
+                "To allow silent fallback set CLAUDE_DRIVER_TYPE=auto instead."
+            )
         logger.info("event=driver_selected driver=sdk")
         return ClaudeSDKClientDriver()
     if driver_type == "auto":
+        if _sdk_available():
+            logger.info("event=driver_selected driver=sdk (auto)")
+            return ClaudeSDKClientDriver()
         logger.warning(
             "event=driver_fallback driver=print_resume reason=sdk_unavailable "
             "— SDK package (claude_agent_sdk) not importable; falling back to LEGACY "
             "CLI/print-resume driver. Sessions will be stateless and subject to "
             "inactivity timeouts. This is a degraded mode — fix SDK availability ASAP."
         )
-    else:
-        logger.info("event=driver_selected driver=print_resume")
+        return ClaudePrintResumeDriver()
+    # driver_type == "print_resume" (explicit legacy request)
+    logger.info("event=driver_selected driver=print_resume (explicit)")
     return ClaudePrintResumeDriver()
 

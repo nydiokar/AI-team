@@ -249,6 +249,13 @@ class ClaudeCodeBackend(CodingBackend):
     """
 
     def __init__(self, driver_type: str = "auto"):
+        # "auto" means defer to config; explicit values bypass config
+        if driver_type == "auto":
+            try:
+                from config import config as _cfg
+                driver_type = getattr(_cfg.claude, "driver_type", "sdk")
+            except Exception:
+                driver_type = "sdk"
         from src.backends.claude_driver import build_driver, ClaudePrintResumeDriver
         self._driver = build_driver(driver_type)
         active = self._driver.driver_type()
@@ -258,7 +265,7 @@ class ClaudeCodeBackend(CodingBackend):
                 "— ClaudeCodeBackend is running on the LEGACY CLI driver. "
                 "Long sessions burn tokens on context reconstruction, are not "
                 "persistent, and are subject to inactivity timeouts. "
-                "Verify claude_agent_sdk is installed in the venv."
+                "Verify claude_agent_sdk is installed in the venv or set CLAUDE_DRIVER_TYPE=sdk."
             )
         else:
             logger.info("event=backend_init driver=%s", active)
@@ -270,9 +277,24 @@ class ClaudeCodeBackend(CodingBackend):
         self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
 
+    def _log_driver_turn(self, action: str, session_id: str) -> None:
+        """Log which driver is handling this turn — WARNING when legacy CLI is active."""
+        active = self._driver.driver_type()
+        if active == "print_resume":
+            logger.warning(
+                "event=legacy_driver_active action=%s session_id=%s driver=print_resume "
+                "— using LEGACY CLI driver, not SDK. Sessions are stateless; long turns "
+                "reconstruct full context from disk (token-heavy). "
+                "Check that claude_agent_sdk is installed and CLAUDE_DRIVER_TYPE=sdk.",
+                action, session_id,
+            )
+        else:
+            logger.info("event=driver_turn action=%s session_id=%s driver=%s", action, session_id, active)
+
     def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
+        self._log_driver_turn("create_session", session.session_id or "")
         proc_env = self._build_proc_env(session.backend_session_id or str(uuid.uuid4()), telemetry_context)
         before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
 
@@ -293,6 +315,7 @@ class ClaudeCodeBackend(CodingBackend):
 
     def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         # Guards are checked BEFORE the live-call gate so they work in test mode too.
+        self._log_driver_turn("resume_session", session.session_id or "")
 
         # Guard: if session was lost after worker restart, don't silently resume
         # via print/resume into stale context.
