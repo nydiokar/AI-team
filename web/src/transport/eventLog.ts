@@ -54,13 +54,22 @@ export function toLogLine(stamped: StampedEvent): LogLine {
         taskId: event.taskId,
       };
     case "run.cancelled":
-      return { ...base, severity: "warning", kind: "run", text: "run cancelled", taskId: event.runId };
+      return {
+        ...base,
+        severity: "warning",
+        kind: "run",
+        text: "run cancelled",
+        sessionId: event.sessionId ?? null,
+        taskId: event.taskId ?? event.runId,
+      };
     case "approval.resolved":
       return {
         ...base,
         severity: event.decision === "granted" || event.decision === "approved" ? "success" : "warning",
         kind: "approval",
         text: `approval ${event.decision}`,
+        sessionId: event.sessionId ?? null,
+        taskId: event.taskId ?? null,
       };
     case "target.connected":
       return { ...base, severity: "success", kind: "target", text: `target ${event.targetId} connected` };

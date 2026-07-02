@@ -6,6 +6,7 @@ processes (echo, sleep) are used for watched jobs.
 
 import json
 import os
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -132,6 +133,27 @@ def test_list_jobs_filters(tmp_path):
     assert len(db.list_jobs(status="done")) == 1
 
 
+def test_list_jobs_filters_unowned_before_limit(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    for i in range(3):
+        db.register_job(
+            job_id=f"job_owned_{i}",
+            node_id="node-a",
+            label=f"owned {i}",
+            session_id="sess_1",
+        )
+    db.register_job(
+        job_id="job_unowned",
+        node_id="node-a",
+        label="unowned",
+        session_id=None,
+    )
+
+    jobs = db.list_jobs(ownership="unowned", limit=1)
+
+    assert [job["id"] for job in jobs] == ["job_unowned"]
+
+
 def test_get_terminal_jobs_since(tmp_path):
     from src.control.db import _now
     db = MeshDB(str(tmp_path / "mesh.db"))
@@ -235,6 +257,10 @@ def test_job_endpoint_functions(tmp_path):
 
         # GET /jobs lists it
         assert any(j["id"] == jid for j in list_jobs(node_id="test-node"))
+        with pytest.raises(HTTPException):
+            list_jobs(session_id="sess_api", ownership="unowned")
+        with pytest.raises(HTTPException):
+            list_jobs(ownership="invalid")
 
         lost_data = register_job(RegisterJobPayload(
             node_id="test-node",
@@ -398,13 +424,13 @@ def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
     from src.orchestrator import TaskOrchestrator
 
     class _FakeDB:
-        def list_jobs(self, status=None, session_id=None, limit=20):
+        def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
             if status == "running":
                 return [{"id": "local-running", "status": "running"}]
             return [{"id": "local-done", "status": "done"}]
 
     class _FakeClient:
-        def list_jobs(self, node_id=None, status=None, session_id=None, limit=20):
+        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20):
             if status == "running":
                 return [{"id": "remote-running", "status": "running"}]
             return [
@@ -436,8 +462,8 @@ def test_orchestrator_filters_local_and_remote_jobs_by_session(monkeypatch):
     calls = []
 
     class _FakeDB:
-        def list_jobs(self, status=None, session_id=None, limit=20):
-            calls.append(("local", status, session_id, limit))
+        def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
+            calls.append(("local", status, session_id, ownership, limit))
             if session_id != "sess_jobs":
                 return []
             if status == "running":
@@ -445,8 +471,8 @@ def test_orchestrator_filters_local_and_remote_jobs_by_session(monkeypatch):
             return [{"id": "local-owned-done", "status": "done", "session_id": session_id}]
 
     class _FakeClient:
-        def list_jobs(self, node_id=None, status=None, session_id=None, limit=20):
-            calls.append(("remote", status, session_id, limit))
+        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20):
+            calls.append(("remote", status, session_id, ownership, limit))
             if session_id != "sess_jobs":
                 return []
             if status == "running":
@@ -469,6 +495,71 @@ def test_orchestrator_filters_local_and_remote_jobs_by_session(monkeypatch):
         "remote-owned-done",
     ]
     assert all(call[2] == "sess_jobs" for call in calls)
+
+
+def test_orchestrator_filters_local_and_remote_jobs_by_unowned(monkeypatch):
+    import src.control.db as db_mod
+    from src.orchestrator import TaskOrchestrator
+
+    calls = []
+
+    class _FakeDB:
+        def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
+            calls.append(("local", status, session_id, ownership, limit))
+            if ownership != "unowned":
+                return []
+            if status == "running":
+                return [{"id": "local-unowned-running", "status": "running", "session_id": None}]
+            return [{"id": "local-unowned-done", "status": "done", "session_id": None}]
+
+    class _FakeClient:
+        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20):
+            calls.append(("remote", status, session_id, ownership, limit))
+            if ownership != "unowned":
+                return []
+            if status == "running":
+                return [{"id": "remote-unowned-running", "status": "running", "session_id": None}]
+            return [{"id": "remote-unowned-done", "status": "done", "session_id": None}]
+
+    monkeypatch.setattr(db_mod, "get_db", lambda: _FakeDB())
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch._remote_jobs_client = lambda: _FakeClient()
+
+    jobs = orch.list_watched_jobs(limit=10, ownership="unowned")
+
+    assert [job["id"] for job in jobs["running"]] == [
+        "local-unowned-running",
+        "remote-unowned-running",
+    ]
+    assert [job["id"] for job in jobs["recent"]] == [
+        "local-unowned-done",
+        "remote-unowned-done",
+    ]
+    assert all(call[3] == "unowned" for call in calls)
+
+
+def test_orchestrator_returns_cached_remote_jobs_when_fetch_in_progress():
+    from src.orchestrator import TaskOrchestrator
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch._watched_jobs_cache_lock = threading.Lock()
+    orch._watched_jobs_remote_cache = {
+        (None, None, 20): (
+            time.monotonic() - 100.0,
+            {"running": [{"id": "stale-running"}], "recent": [{"id": "stale-done"}]},
+        )
+    }
+    orch._watched_jobs_remote_cache_ttl_sec = 2.0
+    assert orch._watched_jobs_cache_lock.acquire(blocking=False)
+    try:
+        assert orch._cached_remote_watched_jobs(
+            limit=20,
+            session_id=None,
+            ownership=None,
+        ) == {"running": [{"id": "stale-running"}], "recent": [{"id": "stale-done"}]}
+    finally:
+        orch._watched_jobs_cache_lock.release()
 
 
 def test_orchestrator_filters_remote_terminal_jobs_once():

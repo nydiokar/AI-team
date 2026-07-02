@@ -407,9 +407,11 @@ export const api = {
     token: string,
     limit = 20,
     sessionId?: string,
+    ownership?: "all" | "unowned",
   ): Promise<{ running: RawJob[]; recent: RawJob[] }> {
     const qs = new URLSearchParams({ limit: String(limit) });
     if (sessionId) qs.set("session_id", sessionId);
+    else if (ownership) qs.set("ownership", ownership);
     return get(`/api/jobs?${qs.toString()}`, token);
   },
 

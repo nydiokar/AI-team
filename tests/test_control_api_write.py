@@ -313,7 +313,7 @@ def test_jobs_returns_running_and_recent(client, monkeypatch):
     import src.control.control_api as capi
 
     class _FakeDB:
-        def list_jobs(self, status=None, limit=20):
+        def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
             return [{"id": "j1", "status": status or "done"}]
 
     monkeypatch.setattr(capi, "_db", lambda: _FakeDB())
@@ -326,7 +326,7 @@ def test_jobs_returns_running_and_recent(client, monkeypatch):
 def test_jobs_prefers_orchestrator_merged_view(monkeypatch, orch):
     monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
 
-    def _list_watched_jobs(limit=20):
+    def _list_watched_jobs(limit=20, session_id=None, ownership=None):
         return {
             "running": [{"id": "remote-running", "status": "running"}],
             "recent": [{"id": "remote-done", "status": "done"}],
@@ -341,6 +341,31 @@ def test_jobs_prefers_orchestrator_merged_view(monkeypatch, orch):
         "running": [{"id": "remote-running", "status": "running"}],
         "recent": [{"id": "remote-done", "status": "done"}],
     }
+
+
+def test_jobs_supports_unowned_filter(client, monkeypatch):
+    import src.control.control_api as capi
+
+    calls = []
+
+    class _FakeDB:
+        def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
+            calls.append((status, session_id, ownership, limit))
+            if ownership == "unowned":
+                return [{"id": "unowned", "status": status or "done", "session_id": None}]
+            return [{"id": "owned", "status": status or "done", "session_id": "sess_1"}]
+
+    monkeypatch.setattr(capi, "_db", lambda: _FakeDB())
+    r = client.get("/api/jobs?ownership=unowned", headers=_auth())
+
+    assert r.status_code == 200
+    assert r.json()["running"][0]["id"] == "unowned"
+    assert calls[0][2] == "unowned"
+
+
+def test_jobs_rejects_conflicting_session_and_unowned(client):
+    r = client.get("/api/jobs?session_id=sess_1&ownership=unowned", headers=_auth())
+    assert r.status_code == 400
 
 
 def test_jobs_requires_auth(client):

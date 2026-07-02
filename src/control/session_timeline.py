@@ -8,6 +8,7 @@ not read SSE logs and does not scan the filesystem.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -17,6 +18,8 @@ from src.core.task_state_truth import (
     derive_job_execution_state,
     derive_task_execution_state,
 )
+
+logger = logging.getLogger(__name__)
 
 TimelineKind = Literal[
     "task_state",
@@ -69,7 +72,7 @@ def build_session_timeline(
 ) -> SessionTimelineResponse:
     bounded_limit: int = max(1, min(int(limit), 200))
     offset: int = _cursor_offset(cursor)
-    source_limit: int = max(50, min(500, offset + bounded_limit + 50))
+    source_limit: int = 500
     generated_at: str = datetime.now(tz=timezone.utc).isoformat()
 
     tasks: list[dict[str, object]] = []
@@ -86,22 +89,31 @@ def build_session_timeline(
     }
 
     if db is not None:
-        tasks = _safe_list(lambda: db.list_tasks(session_id=session_id, limit=source_limit))
-        nodes = _safe_list(lambda: db.list_nodes())
-        jobs = _safe_list(lambda: db.list_jobs(session_id=session_id, limit=source_limit))
-        approvals = _safe_list(
+        tasks, coverage["tasks"] = _load_list(
+            "tasks",
+            lambda: db.list_tasks(session_id=session_id, limit=source_limit),
+        )
+        nodes, node_coverage = _load_list("nodes", lambda: db.list_nodes())
+        if node_coverage != "complete" and coverage["tasks"] == "complete":
+            coverage["tasks"] = "partial"
+        jobs, coverage["jobs"] = _load_list(
+            "jobs",
+            lambda: db.list_jobs(session_id=session_id, limit=source_limit),
+        )
+        approvals, coverage["approvals"] = _load_list(
+            "approvals",
             lambda: db.list_approvals(session_id=session_id, limit=source_limit)
         )
-        coverage["tasks"] = "complete"
-        coverage["jobs"] = "complete"
-        coverage["artifacts"] = "complete"
-        coverage["approvals"] = "complete"
+        coverage["artifacts"] = coverage["tasks"]
 
     if telemetry_store is not None:
-        turns = _safe_list(
+        turns, telemetry_status = _load_list(
+            "telemetry",
             lambda: telemetry_store.list_turns(session_id=session_id, limit=source_limit)
         )
-        coverage["telemetry"] = _telemetry_coverage(turns)
+        coverage["telemetry"] = (
+            _telemetry_coverage(turns) if telemetry_status == "complete" else telemetry_status
+        )
 
     nodes_by_id: dict[str, dict[str, object]] = {
         str(node.get("node_id")): node
@@ -252,7 +264,7 @@ def build_session_timeline(
             )
         )
 
-    items.sort(key=_sort_key)
+    items.sort(key=lambda item: item.timestamp, reverse=True)
     page: list[SessionTimelineItem] = items[offset : offset + bounded_limit]
     next_offset: int = offset + bounded_limit
     return SessionTimelineResponse(
@@ -272,12 +284,20 @@ def _cursor_offset(cursor: str | None) -> int:
         return 0
 
 
-def _safe_list(loader: Any) -> list[dict[str, object]]:
+def _load_list(source: str, loader: Any) -> tuple[list[dict[str, object]], str]:
     try:
         loaded = loader()
-    except Exception:
-        return []
-    return [dict(row) for row in loaded] if isinstance(loaded, list) else []
+    except Exception as exc:
+        logger.warning("session_timeline_source_failed source=%s err=%s", source, exc)
+        return [], "unavailable"
+    if not isinstance(loaded, list):
+        logger.warning(
+            "session_timeline_source_unexpected source=%s type=%s",
+            source,
+            type(loaded).__name__,
+        )
+        return [], "unavailable"
+    return [dict(row) for row in loaded], "complete"
 
 
 def _telemetry_coverage(turns: list[dict[str, object]]) -> str:
@@ -294,21 +314,6 @@ def _telemetry_coverage(turns: list[dict[str, object]]) -> str:
                 if isinstance(details, dict) and details.get("coverage") not in ("complete", None):
                     return "partial"
     return "complete"
-
-
-def _sort_key(item: SessionTimelineItem) -> tuple[str, int, str]:
-    order = {
-        "task_state": 0,
-        "approval": 1,
-        "turn_event": 2,
-        "artifact": 3,
-        "file_change": 4,
-        "job_state": 5,
-        "worker_state": 6,
-        "recovery": 7,
-        "system_notice": 8,
-    }
-    return (item.timestamp, order.get(item.kind, 99), item.id)
 
 
 def _timestamp(*values: object) -> str:
