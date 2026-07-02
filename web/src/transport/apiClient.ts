@@ -418,4 +418,31 @@ export const api = {
   async meshHealth(token: string, limit = 24): Promise<RawMeshHealthResponse> {
     return get(`/api/mesh/health?limit=${limit}`, token);
   },
+
+  // ── web push (#21) ───────────────────────────────────────────────────────
+
+  /** GET /api/push/status — is push available + the public VAPID key to subscribe. */
+  async pushStatus(
+    token: string,
+  ): Promise<{ available: boolean; reason: string | null; vapid_public_key: string }> {
+    return get(`/api/push/status`, token);
+  },
+
+  /** POST /api/push/subscribe — register a browser PushSubscription (idempotent). */
+  async pushSubscribe(
+    token: string,
+    subscription: PushSubscriptionJSON,
+    label?: string,
+  ): Promise<{ ok: boolean }> {
+    return post(`/api/push/subscribe`, token, {
+      endpoint: subscription.endpoint,
+      keys: subscription.keys,
+      label: label ?? null,
+    });
+  },
+
+  /** POST /api/push/unsubscribe — disable a subscription by endpoint. */
+  async pushUnsubscribe(token: string, endpoint: string): Promise<{ ok: boolean }> {
+    return post(`/api/push/unsubscribe`, token, { endpoint });
+  },
 };

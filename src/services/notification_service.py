@@ -61,12 +61,20 @@ class NotificationService:
         success = bool(getattr(result, "success", False))
         text = self._build_outcome_text(result, success=success, prefix=prefix)
 
+        session_id = getattr(session, "session_id", None) if session else None
+
         emit_event(
             "task_notification",
             task_id=task_id,
-            session_id=getattr(session, "session_id", None) if session else None,
+            session_id=session_id,
             status="success" if success else "failed",
         )
+
+        # Web Push fan-out — a SECOND channel, independent of Telegram. It runs on
+        # this unconditional path (NOT under the chat_id/telegram guard below) so
+        # Web-only sessions, which have no chat_id, still get notified. Fire-and-
+        # forget so a slow/absent push service never blocks task completion.
+        self._maybe_push_outcome(task_id, session_id, success=success)
 
         tg = self._telegram
         if chat_id and tg:
@@ -76,6 +84,61 @@ class NotificationService:
                 )
             except Exception as e:
                 logger.warning("notify_task_outcome failed task=%s err=%s", task_id, e)
+
+    # ------------------------------------------------------------------
+    # Web Push (#21) — best-effort second channel
+    # ------------------------------------------------------------------
+
+    def _maybe_push_outcome(
+        self,
+        task_id: str,
+        session_id: Optional[str],
+        *,
+        success: bool,
+    ) -> None:
+        """Schedule a best-effort Web Push for a terminal outcome.
+
+        Never raises, never blocks: the actual fan-out runs as a detached task
+        bounded by concurrency + per-send timeout inside PushService.
+        """
+        import asyncio
+
+        try:
+            from config import config as _cfg
+            from src.control.db import get_db
+            from src.services.push_service import PushService, build_task_payload
+
+            db = get_db()
+            svc = PushService(_cfg, db)
+            ok, _reason = svc.available()
+            if not ok:
+                return
+
+            title = "Task complete" if success else "Task failed"
+            body = f"Session {session_id}" if session_id else f"Task {task_id}"
+            url = f"/sessions/{session_id}" if session_id else "/"
+            payload = build_task_payload(
+                title=title,
+                body=body,
+                task_id=task_id,
+                session_id=session_id,
+                url=url,
+            )
+
+            async def _run() -> None:
+                try:
+                    await svc.fanout(payload)
+                except Exception as e:  # defensive: fanout already swallows
+                    logger.debug("push fanout task=%s err=%s", task_id, e)
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_run())
+            except RuntimeError:
+                # No running loop (e.g. sync test context) — skip; push is best-effort.
+                logger.debug("no running loop for push fanout task=%s", task_id)
+        except Exception as e:
+            logger.debug("maybe_push_outcome failed task=%s err=%s", task_id, e)
 
     # ------------------------------------------------------------------
     # Heartbeat (progress update for long-running work)
