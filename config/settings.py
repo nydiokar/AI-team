@@ -23,6 +23,7 @@ _MANAGED_ENV_KEYS = {
     "DASHBOARD_TOKEN",
     "GATEWAY_HEARTBEAT_INTERVAL_SEC",
     "GATEWAY_INACTIVITY_TIMEOUT_SEC",
+    "GATEWAY_SDK_TURN_TIMEOUT_SEC",
     "GATEWAY_TASK_TIMEOUT_SEC",
     "GATEWAY_TELEGRAM_ALLOWED_USERS",
     "GATEWAY_TELEGRAM_BOT_TOKEN",
@@ -176,7 +177,8 @@ class SystemConfig:
     log_level: str = "INFO"
     max_concurrent_tasks: int = 3
     task_timeout: int = 0  # wall-clock kill (0 = disabled; backend inactivity timeout is the primary mechanism)
-    inactivity_timeout_sec: int = 600  # kill backend process after N seconds of no stdout (10 min default)
+    inactivity_timeout_sec: int = 600  # PrintResume driver: kill process after N seconds of no stdout (10 min default)
+    sdk_turn_timeout_sec: int = 7200   # SDK driver: total-turn deadline in seconds (2 hours; 0 = no limit)
     task_heartbeat_interval_sec: int = 300  # send "still working" every 5 min for long tasks
     guarded_write: bool = False
     # When True, _write_artifacts moves the heavy raw_stdout NDJSON (87% of
@@ -439,6 +441,12 @@ class Config:
             gia = os.getenv("GATEWAY_INACTIVITY_TIMEOUT_SEC")
             if gia is not None:
                 self.system.inactivity_timeout_sec = max(60, int(gia))
+        except Exception:
+            pass
+        try:
+            gst = os.getenv("GATEWAY_SDK_TURN_TIMEOUT_SEC")
+            if gst is not None:
+                self.system.sdk_turn_timeout_sec = max(0, int(gst))
         except Exception:
             pass
         # OpenCode env overrides

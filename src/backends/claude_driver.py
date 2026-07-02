@@ -188,6 +188,12 @@ class _SDKSession:
       - send_turn() submits work to the background thread.
     """
 
+    # The SDK's own control-protocol handshake (query.initialize) has a 60s
+    # floor. Wait comfortably past that or a legitimately-in-progress connect()
+    # reads as a false failure -- the subprocess keeps running on the worker
+    # while the gateway reports "failed to connect", orphaning the live task.
+    _CONNECT_TIMEOUT_SEC = 90
+
     def __init__(self, session_key: str, cwd: str, model: Optional[str], proc_env: Dict[str, str]):
         self.session_key = session_key
         self.cwd = cwd
@@ -206,9 +212,13 @@ class _SDKSession:
         """Boot the background event loop and SDK client."""
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name=f"claude-sdk-{self.session_key[:8]}")
         self._thread.start()
-        if not self._ready.wait(timeout=30):
+        if not self._ready.wait(timeout=self._CONNECT_TIMEOUT_SEC):
             self._closed = True
-            raise TimeoutError("SDK session failed to connect within 30s")
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(lambda: None)
+            raise TimeoutError(
+                f"SDK session failed to connect within {self._CONNECT_TIMEOUT_SEC}s"
+            )
         if self._error:
             raise self._error
 
@@ -247,8 +257,18 @@ class _SDKSession:
         self._client = ClaudeSDKClient(options=options)
         try:
             await self._client.connect()
+        except Exception as e:
+            # Surface the REAL connect failure (missing CLI, auth, initialize
+            # error) instead of masking it behind start()'s generic timeout.
+            self._error = e
             self._ready.set()
-
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+            return
+        self._ready.set()
+        try:
             # Keep the event loop alive; work arrives via run_coroutine_threadsafe
             # We run a simple await loop so the loop stays spinning until close.
             while not self._closed:
@@ -259,15 +279,19 @@ class _SDKSession:
             except Exception:
                 pass
 
-    def submit(self, coro, timeout: float = 600) -> Any:
-        """Run coro on the SDK event loop from any thread and return result."""
+    def submit(self, coro, timeout: Optional[float] = None) -> Any:
+        """Run coro on the SDK event loop from any thread and return result.
+
+        timeout=None means wait indefinitely (correct for long-running tasks).
+        timeout=N kills the wait after N seconds and raises TimeoutError.
+        """
         if not self._loop or self._closed:
             raise RuntimeError("SDK session loop is not running")
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             return fut.result(timeout=timeout)
         except Exception:
-            fut.cancel()  # don't leave the coroutine running on the loop thread
+            fut.cancel()  # don't leave the coroutine dangling on the loop thread
             raise
 
     async def _do_query(self, message: str) -> Tuple[str, str, str]:
@@ -317,10 +341,14 @@ class _SDKSession:
         return "".join(parts).strip(), backend_session_id, "\n".join(ndjson_lines)
 
     def send(self, message: str) -> Tuple[str, str, str]:
-        timeout = 600.0
+        # sdk_turn_timeout_sec is the total deadline for one turn (send → full response).
+        # 0 means no limit. Default 7200 (2 h) — distinct from inactivity_timeout_sec
+        # which is a per-stdout-line timeout used only by the PrintResume driver.
+        timeout: Optional[float] = 7200.0
         try:
             from config import config as _cfg
-            timeout = float(max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 600))))
+            raw = getattr(_cfg.system, "sdk_turn_timeout_sec", 7200)
+            timeout = None if int(raw) == 0 else float(max(60, int(raw)))
         except Exception:
             pass
         with self._lock:
@@ -386,11 +414,19 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 raw_stderr="",
             )
         except Exception as e:
+            import concurrent.futures as _cf
             elapsed = time.time() - start
+            err_str = str(e)
+            if not err_str:
+                # TimeoutError / concurrent.futures.TimeoutError str() is blank in Python 3.11+
+                if isinstance(e, (TimeoutError, _cf.TimeoutError)):
+                    err_str = f"SDK turn timed out after {elapsed:.0f}s — claude produced no response"
+                else:
+                    err_str = f"{type(e).__name__} after {elapsed:.0f}s"
             return ExecutionResult(
                 success=False,
                 output="",
-                errors=[str(e)],
+                errors=[err_str],
                 execution_time=elapsed,
             )
 

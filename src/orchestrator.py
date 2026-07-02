@@ -2519,11 +2519,15 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         # Annotate failure errors with the node name so users see *which* machine failed.
         node_label = node.node_id if node is not None else session.machine_id
-        if not result.success and result.errors and node_label:
-            result.errors = [
-                f"[{node_label}] {e}" if not str(e).startswith(f"[{node_label}]") else e
-                for e in result.errors
-            ]
+        if not result.success and node_label:
+            if not result.errors:
+                result.errors = [f"[{node_label}] Task failed with no error details"]
+            else:
+                result.errors = [
+                    (f"[{node_label}] {e}" if e.strip() else f"[{node_label}] Task failed (no error message)")
+                    if not str(e).startswith(f"[{node_label}]") else e
+                    for e in result.errors
+                ]
 
         first_error = result.errors[0] if result.errors else ""
         logger.info(
