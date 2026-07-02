@@ -179,7 +179,7 @@ class SystemConfig:
     logs_dir: str = "logs"
     log_level: str = "INFO"
     max_concurrent_tasks: int = 3
-    task_timeout: int = 0  # wall-clock kill (0 = disabled; backend inactivity timeout is the primary mechanism)
+    task_timeout: int = 0  # explicit wall-clock kill (0 = use driver fallback of 4x inactivity_timeout_sec; drivers always enforce a hard cap now)
     inactivity_timeout_sec: int = 36000  # PrintResume driver: kill process after N seconds of no stdout (10 hours)
     sdk_turn_timeout_sec: int = 36000   # SDK driver: total-turn deadline in seconds (10 hours; 0 = no limit)
     task_heartbeat_interval_sec: int = 300  # send "still working" every 5 min for long tasks

@@ -4,7 +4,7 @@
 Use `.ai/CONTEXT.md` for orientation and `docs/PROGRESS_LOG.md` for detailed
 history.
 
-**Last updated:** 2026-07-01
+**Last updated:** 2026-07-02
 **Plan of record:** `docs/STATE_SEPARATION_PLAN.md`
 
 > **Test cost guard:** normal test command is `pytest`. Tests must not invoke
@@ -30,6 +30,154 @@ history.
 ---
 
 ## Active / Next
+
+### Next Focus Selection — selected 2026-07-02
+
+Chosen from the existing open/deferred task set in `.ai/CONTEXT.md`; no new
+tasks are introduced.
+
+1. **#21 Web Push notifications** — promote from deferred to next build. The
+   Web UI is already PWA/service-worker ready, and the operator need is now
+   concrete: Telegram-like info pings when agent work completes or fails. Keep
+   this as notification fanout only; do not connect it to approval gates.
+2. **#30/#33 Backend Account + Usage Visibility** — build immediately after
+   push, or in parallel only if it stays source-limited. The System page already
+   deliberately shows infrastructure state; account/quota visibility is the
+   missing operator surface. Show unknown explicitly and do not invent quota
+   data.
+3. **#5-#9 LLM Turn Observability remaining validation** — finish M1/M2 release
+   validation after the operator surfaces above are moving. #8 is already done;
+   2026-07-02 local Codex smoke and controlled worker/controller mesh Codex
+   smoke passed with graph/diagnostics/events/privacy scans recorded below, but
+   #9 is **not shipped** yet because a gateway-routed mesh smoke still needs to
+   pass with gateway-source telemetry before M3 Claude adapter scheduling.
+
+Recently completed and should remain called out as done: **#34 Stop Task
+Behavior**, **#36 Remove Tasks Page / Replace With Jobs**, **#37 Move Job Event
+Sequences Out of System**, **#38 Make the System Tab Earn Its Place**, and
+**#39 Make worker/session state reporting honest**.
+
+#### Execution handoff: #21 Web Push notifications
+
+Goal: deliver best-effort browser push notifications for task/session terminal
+outcomes, using the existing Web UI PWA and notification spine.
+
+Implementation path:
+- Read `docs/DEFERRED.md`, `docs/CONTROL_CONTRACT.md` notification section,
+  `src/services/notification_service.py`, `src/control/control_api.py`,
+  `web/public/sw.js`, `web/src/main.tsx`, `web/src/screens/SystemScreen.tsx`,
+  and existing control API tests before editing.
+- Add durable push subscription storage in the existing SQLite DB layer. Store
+  endpoint, keys, created/updated timestamps, last error, enabled flag, and
+  optional coarse user/browser label. Add migration and DB unit tests.
+- Add authenticated control API endpoints: subscribe, unsubscribe/disable, and
+  current subscription/status. Validate payload shape, cap request size, reject
+  malformed subscriptions with structured errors, and keep endpoint idempotent.
+- Add VAPID config through existing settings/env patterns. Startup must show
+  push unavailable when keys are absent; it must not crash the gateway unless an
+  explicitly required mode is later added.
+- Add a small push delivery helper used by `NotificationService.notify_task_outcome`.
+  Fan out only sanitized `task_notification` success/failure facts with title,
+  short body, task/session IDs, and a URL to the relevant session when known.
+  Never include prompts, assistant output, file contents, command lines, or raw
+  errors.
+- Add service-worker `push` and `notificationclick` handlers. Open/focus the
+  relevant Web UI URL. Keep the current offline shell and API network-only
+  behavior intact.
+- Add a quiet System settings control for permission/subscription state. Request
+  browser notification permission only from a user click; no auto-prompt on load.
+- Verification: targeted backend tests for DB/API/service-boundary cases,
+  frontend tests for API adapter/UI state where practical, `cd web && npx tsc -b`,
+  focused vitest, and manual browser smoke on localhost/tailnet with a test push
+  path or injected fake sender.
+
+Service boundary checklist for #21:
+- Concurrency: cap fanout concurrency and per-notification send time; failed
+  subscriptions must not block task completion.
+- Memory at scale: batch subscription reads and bound payload size; N=100
+  subscribers must stay small and predictable.
+- Request size: subscribe endpoint must enforce bounded JSON input.
+- Timeout: push sends must use short network timeouts.
+- Malformed input: reject invalid endpoint/key payloads before DB writes.
+- Backing resources: if DB or VAPID config is unavailable, report push disabled
+  and keep task execution/Telegram notification working.
+
+#### Execution handoff: #30/#33 Backend Account + Usage Visibility
+
+Goal: give the operator a reliable System/Usage view of backend account and
+quota state without fabricating provider data.
+
+Implementation path:
+- Read existing backend registry and usage parsing paths:
+  `src/backends/registry.py`, `src/backends/codex.py`,
+  `src/backends/claude_driver.py`, telemetry projection/store files,
+  `web/src/components/timeline/SessionTurns.tsx`, `web/src/screens/SystemScreen.tsx`,
+  and raw API/adapters.
+- Inventory what each backend can currently prove locally: active backend name,
+  configured/selected model, known account identity if available, last observed
+  usage/rate-limit fields from telemetry, and explicit unknown coverage reasons.
+- Add a read-only backend usage/status endpoint under the existing control API.
+  It must aggregate known facts from registry/config/telemetry only. Unknown
+  daily/weekly limits, reset times, or identities must be returned as `null`
+  plus coverage/reason fields.
+- Render a compact System section or dedicated Usage/Limits screen consistent
+  with the current infrastructure-focused System page. Avoid noisy cards and
+  avoid provider-specific promises the backend cannot prove.
+- Tests: API shape with missing data, known Codex telemetry rate-limit fields,
+  Claude usage-limit error extraction where already parsed, frontend adapter/UI
+  rendering of known vs unknown values.
+
+#### Execution handoff: #5-#9 LLM Turn Observability validation
+
+Goal: close the M1/M2 release-candidate validation without redesigning telemetry.
+
+Implementation path:
+- Use `docs/LLM_TURN_OBSERVABILITY_SPEC.md` handoff as the contract. Do not
+  start M3 Claude adapter work until #5-#8 are closed and #9 is recorded.
+- Capture sanitized deployed Codex fixtures for plain answer, MCP, retry/failure,
+  and subagent if supported. If a fact is unsupported, add coverage fixtures
+  showing unsupported/unknown rather than inferred values.
+- Add cumulative-counter/reset fixtures only if the deployed backend emits such
+  usage. Preserve aggregate-only semantics when only final totals exist.
+- Run one controlled local Codex smoke and one controlled mesh Codex smoke.
+  Inspect graph, diagnostics, and timeline views; scan DB/spool/API outputs for
+  privacy sentinels.
+- #8 benchmark is already done in `.ai/CONTEXT.md`; keep the recorded result and
+  only rerun if code touched ingestion/query/projection performance.
+- After validation passes, update `.ai/CONTEXT.md` and this file to mark M1/M2
+  shipped; only then schedule #10 M3 Claude adapter.
+
+2026-07-02 validation results on branch `validate/llm-turn-observability-m1m2`:
+- Branch switched with `git switch -c validate/llm-turn-observability-m1m2`.
+- Local Web/control API was started with `pm2 start ai-team-gateway`; `/health`
+  returned `{"status":"ok"}` on `http://127.0.0.1:9003/health`.
+- Local Codex smoke used `POST /api/sessions` and `POST /api/instructions`:
+  session `49c5c6d1157f`, turn `task_99bc7bec`, reply `LOCAL_CODEX_SMOKE_OK`.
+- Local dashboard/API inspection: `/api/turns/task_99bc7bec/graph` returned
+  5 nodes/4 edges; diagnostics returned `success`, 1 invocation, 1 process,
+  request-level plus session-cumulative Codex usage; `/api/sessions/49c5c6d1157f/timeline`
+  returned durable timeline items.
+- Controlled worker/controller mesh smoke used temporary ports `9012`/`9011`:
+  task `task_mesh_smoke_20260702`, claimed by `smoke-mesh-20260702`, reply
+  `MESH_CODEX_SMOKE_OK`. Graph/diagnostics/events APIs returned worker/backend/
+  reconciler telemetry and `execution_node_id=smoke-mesh-20260702`.
+- Privacy scan command shape: query all `llm_%` SQLite tables, `logs/telemetry_spool`,
+  and relevant graph/diagnostics/events/timeline API JSON for
+  `PROMPT_SECRET_LLMOBS_LOCAL_20260702`, `PROMPT_SECRET_LLMOBS_MESH_20260702`,
+  and `PROMPT_SECRET_LLMOBS_GWMESH_20260702`; result was no sentinel hits and
+  `logs/telemetry_spool` had 0 files.
+- Cleanup check: `Get-NetTCPConnection -LocalPort 9011,9012,9013,9014` had no
+  listening owner after smoke cleanup, and `smoke-mesh-20260702` was marked
+  offline via `MeshDB.mark_node_offline`. The only `codex` process still listed
+  was the pre-existing process from before validation.
+- #8 benchmark was not rerun because no ingestion/query/projection performance
+  code changed.
+- Remaining blocker: do not mark #9 shipped yet. The completed mesh smoke did
+  not include gateway-source events (`gateway_node_id` was null) because it
+  bypassed the gateway submit path. A temporary gateway-routed mesh attempt on
+  port `9014` failed before submission; rerun a gateway-routed mesh Codex smoke
+  through the production controller/gateway path or a stable equivalent, then
+  mark M1/M2 shipped and schedule #10.
 
 ### P4 — Graceful Degradation / Fallback Cleanup — DONE
 

@@ -600,11 +600,25 @@ class ClaudePrintResumeDriver(ClaudeDriver):
         start = time.time()
         try:
             inactivity_sec = 36000
+            # Absolute wall-clock cap, independent of the rolling inactivity
+            # timer. The inactivity timeout resets on every line of stdout, so a
+            # backend that dribbles output (or emits its banner then stalls) can
+            # otherwise run forever, stacking up zombie claude.exe processes.
+            # 0 disables the hard cap (falls back to inactivity-only, legacy
+            # behaviour). Default to a generous multiple of the inactivity
+            # window so normal long tasks are unaffected.
+            hard_cap_sec = 0
             try:
                 from config import config as _cfg
                 inactivity_sec = max(60, int(getattr(_cfg.system, "inactivity_timeout_sec", 36000)))
+                hard_cap_sec = int(getattr(_cfg.system, "task_timeout", 0) or 0)
             except Exception:
                 pass
+            if hard_cap_sec <= 0:
+                # Safety net even when task_timeout is disabled: never let a
+                # single invocation exceed 4x the inactivity window.
+                hard_cap_sec = inactivity_sec * 4
+            deadline = start + hard_cap_sec
 
             cmd = self._build_cmd(resume_id, session_id, model)
             proc: Optional[subprocess.Popen] = None
@@ -643,17 +657,35 @@ class ClaudePrintResumeDriver(ClaudeDriver):
                 stdout_done = False
                 stderr_done = False
                 killed = False
+                kill_reason = "inactivity"
 
                 while not (stdout_done and stderr_done):
                     if not stdout_done:
+                        # Wait no longer than whichever budget expires first:
+                        # the rolling inactivity window or the absolute deadline.
+                        remaining_hard = deadline - time.time()
+                        wait_for = inactivity_sec if remaining_hard <= 0 else min(inactivity_sec, remaining_hard)
+                        if wait_for <= 0:
+                            wait_for = 0.1
                         try:
-                            item = stdout_q.get(timeout=inactivity_sec)
+                            item = stdout_q.get(timeout=wait_for)
                             if item is _SENTINEL:
                                 stdout_done = True
                             else:
                                 stdout_lines.append(item)
                         except queue.Empty:
-                            logger.warning("claude inactivity timeout after %.0fs -- terminating pid=%s", inactivity_sec, proc.pid)
+                            if time.time() >= deadline:
+                                kill_reason = "hard_cap"
+                                logger.warning(
+                                    "claude hard-cap timeout after %.0fs (task_timeout) -- terminating pid=%s",
+                                    hard_cap_sec, proc.pid,
+                                )
+                            else:
+                                kill_reason = "inactivity"
+                                logger.warning(
+                                    "claude inactivity timeout after %.0fs -- terminating pid=%s",
+                                    inactivity_sec, proc.pid,
+                                )
                             killed = True
                             terminate_many_popen([proc])
                             stdout_done = True
@@ -702,14 +734,22 @@ class ClaudePrintResumeDriver(ClaudeDriver):
                 elapsed = time.time() - start
 
                 if killed:
-                    inactivity_min = int(inactivity_sec // 60)
+                    if kill_reason == "hard_cap":
+                        cap_min = int(hard_cap_sec // 60)
+                        err_msg = (
+                            f"Claude process killed after {cap_min}m wall-clock (hard cap). "
+                            f"Adjust GATEWAY_TASK_TIMEOUT_SEC (currently {hard_cap_sec}) to tune this."
+                        )
+                    else:
+                        inactivity_min = int(inactivity_sec // 60)
+                        err_msg = (
+                            f"Claude process killed after {inactivity_min}m of inactivity. "
+                            f"Adjust GATEWAY_INACTIVITY_TIMEOUT_SEC (currently {inactivity_sec}) to tune this."
+                        )
                     return ExecutionResult(
                         success=False,
                         output="",
-                        errors=[
-                            f"Claude process killed after {inactivity_min}m of inactivity. "
-                            f"Adjust GATEWAY_INACTIVITY_TIMEOUT_SEC (currently {inactivity_sec}) to tune this."
-                        ],
+                        errors=[err_msg],
                         execution_time=elapsed,
                         raw_stdout=stdout,
                         raw_stderr=stderr,
