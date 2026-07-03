@@ -128,6 +128,43 @@ function TokenBadge({ usage }: { usage: TokenUsage }) {
   );
 }
 
+/** Char threshold past which an agent reply is collapsed to a preview. Long
+ *  replies (including salvaged context-overflow progress) never flood the thread;
+ *  the full text is one tap away. */
+const REPLY_COLLAPSE_CHARS = 1200;
+
+/**
+ * Agent reply text that collapses when long. Shows a preview + "Show full reply"
+ * toggle. Short replies render as-is with no chrome. This is the in-chat
+ * summary→full affordance: the whole message is always present client-side
+ * (nothing is dropped), just visually collapsed until expanded.
+ */
+function ExpandableRichText({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > REPLY_COLLAPSE_CHARS;
+  if (!long) return <RichText text={text} />;
+
+  // Snap the preview to a paragraph/line boundary so it doesn't cut mid-sentence.
+  const slice = text.slice(0, REPLY_COLLAPSE_CHARS);
+  const cut = Math.max(slice.lastIndexOf("\n\n"), slice.lastIndexOf("\n"));
+  const preview = cut > REPLY_COLLAPSE_CHARS / 2 ? slice.slice(0, cut) : slice;
+
+  return (
+    <div>
+      <RichText text={open ? text : preview.trimEnd()} />
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="mt-2 text-[12px] font-medium text-accent hover:underline"
+      >
+        {open
+          ? "Show less"
+          : `Show full reply (${(text.length / 1000).toFixed(1)}k chars)`}
+      </button>
+    </div>
+  );
+}
+
 /**
  * Grouped message bubble. When consecutive messages share a role we tighten
  * vertical spacing and suppress the role label on all but the first. The
@@ -182,11 +219,13 @@ function MessageBubble({
         )}
       >
         {/* Agent output gets rich formatting (code/links/source refs); the user's
-            own message is echoed verbatim as plain text. */}
+            own message is echoed verbatim as plain text. Long agent replies are
+            collapsed to a preview with an inline "Show full reply" toggle so a
+            large turn never floods the thread — the full text stays one tap away. */}
         {mine ? (
           <p className="whitespace-pre-wrap break-words">{text}</p>
         ) : (
-          <RichText text={text} />
+          <ExpandableRichText text={text} />
         )}
       </div>
 
