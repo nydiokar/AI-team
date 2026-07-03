@@ -49,6 +49,46 @@ class InspectError(Exception):
     """Raised when an inspection cannot be completed (offline node, timeout, DB down)."""
 
 
+def nudge_node_direct(node_id: str, db: Any) -> bool:
+    """POST /nudge to a worker node directly over Tailscale. Returns True on success.
+
+    Canonical implementation — shared by :class:`NodeInspector` and the
+    orchestrator so the HTTP nudge logic lives in exactly one place.  Callers
+    that need an awaitable wrapper use :func:`_nudge_worker`; sync callers
+    (e.g. ``asyncio.to_thread`` contexts in the orchestrator) call this directly.
+    """
+    import urllib.request
+
+    try:
+        row = db.get_node(node_id)
+        if not row:
+            return False
+        tailscale_ip = row.get("tailscale_ip") or ""
+        api_port = row.get("api_port") or 0
+        if not tailscale_ip or not api_port:
+            logger.debug("event=nudge_skipped node_id=%s reason=no_address", node_id)
+            return False
+        url = f"http://{tailscale_ip}:{api_port}/nudge"
+        req = urllib.request.Request(url, method="POST", data=b"")
+        with urllib.request.urlopen(req, timeout=2):
+            pass
+        logger.debug("event=nudge_sent node_id=%s", node_id)
+        return True
+    except Exception as e:
+        logger.debug("event=nudge_failed node_id=%s err=%s", node_id, e)
+        return False
+
+
+async def _nudge_worker(node_id: str, db: Any) -> None:
+    """Fire-and-forget async wrapper: wake the worker after an inspect enqueue.
+
+    Eliminates the worker's adaptive backoff (up to 30 s on an idle node).
+    Failures are swallowed — the poll loop handles the case where the nudge
+    doesn't arrive.
+    """
+    await asyncio.to_thread(nudge_node_direct, node_id, db)
+
+
 def session_node(session: Any) -> Optional[str]:
     """Return the node_id a session is pinned to, or None if it runs locally.
 
@@ -155,6 +195,11 @@ class NodeInspector:
             "inspect",
             payload,
         )
+
+        # Nudge the worker so it polls immediately instead of waiting out its
+        # backoff window (up to 30s on an idle node). Best-effort: failures are
+        # logged at DEBUG and we fall through to the normal poll loop.
+        asyncio.ensure_future(_nudge_worker(node_id, db))
 
         deadline = time.time() + _INSPECT_TIMEOUT_SEC
         first = True
