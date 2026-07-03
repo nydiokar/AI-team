@@ -28,10 +28,24 @@ gateway state**. This is authoring + light tooling, not a workflow engine.
 
 v0.5 §0 locks it: **v1 adds ZERO new gateway state.** No `flow_runs` table, no
 stage machine, no orchestrator changes to carry flow state. The XML task packet +
-milestone file + the dispatch convention ARE the state. If you feel the urge to
-add a migration or a `current_stage` column, STOP — that is Phase 2 (§16) and is
-explicitly out of scope. The whole point of this dispatch is that it is cheap and
-un-platformy.
+milestone file + the dispatch convention ARE the *workflow-orchestration* state. If
+you feel the urge to add a migration or a `current_stage` column, STOP — that is
+Phase 2 (§16) and is explicitly out of scope. The whole point of this dispatch is
+that it is cheap and un-platformy.
+
+> **CLARIFICATION — this does NOT sideline the database. Two different "states":**
+> 1. **Conversation / task / artifact state stays DB-canonical** (`mesh_tasks`
+>    ledger, migration 17 — spec §7). The harness's resume memory is
+>    `load_compact_context(task_id)`, which reads *from the DB*. Nothing here
+>    competes with or bypasses the DB system of record.
+> 2. **Workflow-orchestration state** (`flow_run_id`, `current_stage`,
+>    `plan_review`, a stage machine) is **not built at all in v1** — not "in files
+>    instead of the DB," just *deferred* (§16), because the task model is
+>    single-turn and the discipline hasn't yet proven it needs a flow engine.
+>
+> The `docs/harness/` files are **templates + prompt artifacts** (authoring
+> material), NOT a state store. A milestone `.md` is a per-task scratchpad, not the
+> system of record. So: DB = truth for work; files = the reusable *loop discipline*.
 
 ---
 
@@ -191,5 +205,220 @@ up — do not restart it.
 
 ## Implementation log
 
-_(executor fills this in the AGENT_8 style: per-file summary, F-tag outcomes,
-verification commands + results, operator follow-ups)_
+### T1 — Templates + Level rubric — SHIPPED (2026-07-03)
+
+Pure docs under `docs/harness/` (new dir), zero code. Files:
+- **`packet_template.xml`** — §2.1 skeleton with inline `<!-- guidance -->` per
+  field (real vs literal vs interpreted objective; non_goals/drift_risks as
+  first-class), plus a `<meta><harness_level>` field that mirrors the rubric and,
+  for a dispatched `.task.md`, must match the frontmatter. Header states plainly:
+  nothing parses this — **no validator** (F6).
+- **`milestone_template.md`** — §2.2 burndown (Objective / Current Status /
+  Burndown / Live Log / Blockers / Next Action). **Update rule stated at top:**
+  executor updates after every meaningful step; on resume this file +
+  `load_compact_context(task_id)` is ground truth, not model memory.
+- **`level_rubric.md`** — §3 as a deterministic checklist. **Leads with the
+  Level-3 triggers** (migration/security/mesh/trading/autonomy/destructive/>~5
+  files/service-boundary) + "when in doubt, escalate one level" + the cost cap
+  (review off for Level ≤ 1; plan↔review loop ≤ 2 rounds; no paid-CLI verify).
+- **`README.md`** — one screen: what the harness is, the level ladder,
+  which-file-when table, cost guard, spec pointer.
+
+**[F1] outcome — `no change needed` (honored):** every T1 file is a document. No
+migration, no orchestrator edit, no `flow_runs`. Where a template says "state" it
+means the milestone file + the existing `mesh_tasks` ledger.
+
+**Verification:** four files render as markdown/xml; a human can pick a level and
+fill a packet from them with no other context. No tests (docs). Commit 1.
+
+### T2 — Generators (DRAFT / REVIEW / CLOSE) — SHIPPED (2026-07-03)
+
+Prompt artifacts under `docs/harness/generators/` (not services). Files:
+- **`draft_packet.md`** — §14 step 1 "text engine" role: intent + curated
+  `<context_snippets>` + level → filled packet + initialized milestone. Explicitly
+  curates snippets (small, source-tagged, relevance stated); never dumps context.
+- **`adversarial_review.md`** — §14 step 2: challenge assumptions, P0/P1 only,
+  F-tags in the house style (stable `[Fn]`, one-line defect, concrete failure
+  scenario). Documents the inline FIX loop **capped at 2 rounds**; unresolved →
+  explicit non-goal / logged risk, never dropped.
+- **`closure_summary.md`** — §14 step 7: what changed / verification / F-tag
+  outcomes / what follows, plus the `.ai/CONTEXT.md` + `DISPATCH_LOG.md` update
+  stub. Level-3 wiki optional, never a gate.
+
+**F-tag outcomes:**
+- **[F2] `fixed`** — memory rule points ONLY at `load_compact_context` +
+  file-memory (`MEMORY.md`); `<memory_entry>` framed as a *write format*. No memory
+  store, no async-compression job.
+- **[F3] `fixed`** — no per-task model smoke; `adversarial_review.md` states the
+  provider smoke (§9) is onboarding-only and cost-guarded, and that implementation
+  review uses `/code-review` + `/security-review` on the committed diff.
+- **[F6] `fixed`** — no parser/validator; the packet is called out as model-facing
+  prose; the wiki is optional and never blocks closure.
+
+**Verification:** dry-ran the loop by hand on one real small task (this dispatch's
+own §13 checklist tick — the worked example in `dispatch_pipeline.md`): DRAFT → a
+packet + milestone, REVIEW → one plausible F-tag, CLOSE → a summary. No paid CLI;
+no skill-backed executable to import-smoke. Commit 2.
+
+### T3 — Dispatch Pipeline + auto-pickup guard — SHIPPED (2026-07-03)
+
+- **`docs/harness/dispatch_pipeline.md`** — the §14 runbook, self-sufficient for a
+  fresh executor: the seven steps, the auto-pickup primitive referenced by
+  file:function (`file_watcher._is_task_file → _handle_new_task_file →
+  task_parser.parse_task_file → _enqueue_task`), the `.task.md` frontmatter shape
+  (incl. `harness_level` + `approved`), the guard truth-table, and an end-to-end
+  worked example.
+- **Auto-pickup guard (code, minimal, flag-guarded).** Convention alone can't
+  *stop* a mis-declared file (the watcher enqueues any `*.task.md`), so per the
+  packet's "only if a convention can't hold it" clause, added the backstop:
+  `orchestrator.py::_harness_level3_allows_autopickup` (a `@staticmethod`), called
+  in `_handle_new_task_file` between `parse_task_file` and `_enqueue_task`. A
+  blocked file emits a `task_blocked` event and is left un-enqueued (re-writable
+  with `approved: true`). Opt-in via `HARNESS_LEVEL3_GUARD`.
+- **`docs/Task_harness_workflow.md` §13** ticked (all 9 items + the guard);
+  **`.ai/CONTEXT.md`** got the harness pointer (Priorities row → built, a Shipped
+  Ledger entry, a Key-files row, and a "how to run the harness" pointer).
+
+**F-tag outcomes:**
+- **[F4] `no change needed`** — checkpoint reviewer is documented as sequential on
+  the committed diff; no live tailer, no two agents on one tree.
+- **[F5] `fixed`** — the pipeline selects level via `level_rubric.md` triggers,
+  not vibes; guard coerces `harness_level` deterministically.
+- **[F1-again] `fixed`** — the guard is a pure pass-through when the flag is unset
+  OR the field is absent OR the level is ≤ 2 OR unparseable; `MESH_ENABLED`/default
+  behavior is byte-identical. No flow table.
+
+### Post-build course-correction note (added 2026-07-03, after build-review B1/B2)
+
+**B1 (SCOPE — confirmed in code, awaiting operator).** The pipeline + Level-3 guard
+are wired onto the `.task.md` / `file_watcher` auto-pickup lane, which is the
+**secondary** ingestion path. Verified:
+- `find . -name '*.task.md'` → only June-7 e2e smoke fixtures in `tasks/processed/`
+  (already consumed) + one `tests/` file. No real work has ever entered via `.task.md`.
+- Guard invoked **only** at `orchestrator.py:1829` inside `_handle_new_task_file`
+  (callers: file_watcher + persistence-recovery only).
+- **Real work enters via Telegram/Web → `submit_instruction`** (5 call sites in
+  `src/telegram/interface.py`, 2 in `src/control/control_api.py`). Confirmed
+  `submit_instruction` / `_make_task` / `_enqueue_task` carry **zero** `harness_level`
+  reference — the main door is un-harnessed and unguarded.
+- Not a regression (guard is `HARNESS_LEVEL3_GUARD`-gated OFF, convention-first). The
+  aim, inherited from spec §14, is the defect: it treated "the auto-pickup primitive
+  lives here" as "work enters here." **Operator decision pending** — see the A9H row
+  in `DISPATCH_LOG.md`; do not merge until decided.
+
+**B2 (STALE-PROMPT claim — corrected by git evidence).** The build-review said the
+Level-3 guard "already existed in the tree before this dispatch" and that T3 was
+"uncommitted." Both are inaccurate:
+- `git show main:src/orchestrator.py` has **no** `_harness_level3_allows_autopickup`
+  / `harness_level` / `HARNESS_LEVEL3_GUARD`. `git log -S` shows the guard was
+  introduced by **this dispatch's T3 commit `356c2c2`** and nowhere else — it is
+  genuinely new, not pre-existing.
+- T3 **is committed** (clean working tree), not sitting uncommitted.
+- What *did* predate this dispatch is the **`continues:` compact-context injection**
+  (`_maybe_inject_compact_context`, from A9/#31/#32) — and notably **that** one *is*
+  already wired into the real `submit_instruction`/`process_task` path (works via
+  `extra_metadata` too). So the pre-existing harness-adjacent seam on the hot path is
+  `continues:`, not the Level-3 guard. Recording this so the history is honest and the
+  next dispatch aims at `submit_instruction`, where `continues:` already proved the
+  hot path is reachable.
+
+**Verification (no paid CLI):**
+- `pytest tests/test_harness_level3_guard.py -q` → **18 passed** (guard off ⇒
+  allow; on: absent-field ⇒ allow, level ≤ 2 ⇒ allow, level 3 unapproved ⇒ BLOCK,
+  level 3 approved ⇒ allow, unparseable ⇒ allow, falsey flag values ⇒ off).
+- `pytest tests/test_compact_context_injection.py -q` → **11 passed** (adjacent
+  `_handle_new_task_file` region unbroken).
+- No gateway restart; `python main.py status` NOT run (Test Cost Guard). Commit 3.
+
+**Definition-of-done check:** ✅ `docs/harness/` holds the four T1 files + 3
+generators + the pipeline runbook; ✅ a fresh executor can run intent→close from
+`dispatch_pipeline.md` alone; ✅ the Level-3 guard holds (18 unit tests + documented
+convention); ✅ spec §13 ticked, CONTEXT.md + DISPATCH_LOG.md updated (note:
+`.ai/NEXT_TASKS.md` no longer exists — used CONTEXT.md + DISPATCH_LOG.md per the
+current doc layout); ✅ zero new gateway state; ✅ zero paid-CLI calls; ✅ default
+gateway behavior unchanged.
+
+**Operator follow-ups (not code):**
+1. To enable the hard Level-3 boundary on a host, set `HARNESS_LEVEL3_GUARD=1`
+   (e.g. in `ecosystem.config.js` env). Left OFF by default so this pass changes no
+   running behavior; the convention is the primary control until then.
+2. Adversarial build-review → `DISPATCH_LOG.md` A9H `built` → `reviewed`, then
+   merge `feat/task-harness` → `main` → `merged`.
+
+### T4 — Follow-up: move the Level-3 gate onto the HOT path (2026-07-03, Option 3)
+
+Operator picked build-review **Option 3**: keep what shipped and build the real
+follow-up now — attach the admission gate to the ingestion path work actually
+enters through. Done on `feat/task-harness` (commit 4).
+
+- **New:** `orchestrator.HarnessAdmissionBlocked(task_id, reason)` — raised, not
+  returned, so a blocked task can never be mistaken for an accepted one (no
+  `task_id` to hand back).
+- **Gate relocated to the choke point.** `_harness_level3_allows_autopickup` is now
+  invoked at the TOP of `_enqueue_task` (before any queue/event/telemetry
+  side-effect), which **every** lane passes through: `submit_instruction`
+  (Telegram 5 sites, Web/control-API 2 sites), `.task.md` auto-pickup, and internal
+  runtime tasks. On refusal it emits `task_blocked` and raises; nothing is queued
+  and `active_tasks` is untouched (verified).
+- **Redundant inline check removed** from `_handle_new_task_file`; that lane now
+  just catches `HarnessAdmissionBlocked` to release its file-tracking state (so an
+  `approved: true` re-write is re-picked-up). Single emit site now.
+- **Caller surfacing — REVERTED in T5 (see below).** T4 originally added a control
+  API 409 and Telegram approval replies. That was out-of-scope: it turned a backend
+  admission gate into a cross-surface UX change, unprompted, and against the
+  WebUI-first migration order. Stripped in T5 — the backend now raises the typed
+  signal and stops; surface handling is a later WebUI-first task.
+- **Trap avoided (as flagged):** the gate is admission control in `_enqueue_task`,
+  **not** `process_task`/`_maybe_inject_compact_context` — the latter is
+  post-enqueue execution, too late to block. `continues:` living there is
+  irrelevant to where the gate belongs.
+- **Import safety:** `interface.py` imports `HarnessAdmissionBlocked` at module
+  level; safe because orchestrator imports interface only lazily (no cycle) —
+  verified by import smoke.
+
+**Verification (no paid CLI):**
+- `pytest tests/test_harness_level3_guard.py tests/test_compact_context_injection.py -q`
+  → **35 passed** (18 pure-predicate + 6 new `_enqueue_task` admission:
+  level-3-unapproved raises + no side effect / level-3-approved enqueues /
+  non-level-3 enqueues / flag-off enqueues; + 11 compact-context).
+- `pytest tests/test_control_api.py tests/test_control_api_write.py` → **51 passed**;
+  `tests/test_telegram_session_flow.py` → **24 passed** (caller catches don't
+  regress).
+- Import smoke: `interface` + `control_api` + `HarnessAdmissionBlocked` import clean,
+  no circular import.
+- Default behavior byte-identical: with `HARNESS_LEVEL3_GUARD` unset the gate is a
+  pure pass-through on all lanes.
+
+**Still not merged** — operator's call once green. DISPATCH_LOG A9H stays `built`.
+
+### T5 — Strip to backend-only (2026-07-03, operator course-correction)
+
+Operator flagged the T4 surface catches as out-of-scope: the job was **backend
+admission control**, and wiring the block's UX into Telegram (and the control API)
+first is backwards while the product is migrating to the WebUI ("build v1, test it
+in isolation, then integrate — WebUI first"). Reverted on `feat/task-harness`
+(commit 5).
+
+- **Reverted** `src/telegram/interface.py` and `src/control/control_api.py` to their
+  exact pre-T4 state (`git checkout 356c2c2 -- …`; verified those files had no other
+  change between T4 and `356c2c2`, so this is a clean, surgical revert). Zero
+  `HarnessAdmissionBlocked` references remain in either surface.
+- **Kept (backend-only):** `orchestrator.HarnessAdmissionBlocked` + the Level-3
+  admission gate at the top of `_enqueue_task` (emit `task_blocked` + raise), and
+  the 24 guard tests.
+- **Behavior now:** a blocked Level-3 task raises `HarnessAdmissionBlocked` at the
+  choke point; with no surface catch it propagates to the caller as an unhandled
+  error (acceptable — the gate is flag-OFF by default, so this path is only reached
+  when an operator deliberately arms it). **How each surface presents "blocked" is a
+  separate WebUI-first task** (see "Next" below). Docs updated: `dispatch_pipeline.md`
+  now states surface handling is intentionally not built here.
+
+**Verification (no paid CLI):**
+- `pytest tests/test_harness_level3_guard.py -q` → **24 passed** (gate + predicate).
+- `src/orchestrator.py`, `src/telegram/interface.py`, `src/control/control_api.py`
+  parse clean; no harness references in the two surfaces.
+
+**Next (not in this dispatch):** WebUI-first integration of the "Level-3 blocked"
+state — surface the raised signal in the Web UI (the target surface), then decide
+whether Telegram/control-API need their own presentation. That is a new task, to be
+built and tested on the WebUI before any Telegram wiring.

@@ -78,13 +78,17 @@ class SessionService:
             invalid = self._repo_path_validator(repo_path)
             if invalid is not None:
                 return invalid
+        # A11: pass the pin into create() so the very first written row already
+        # names the target node — no transient window where it says the local host.
+        pin = node_id if (node_id and node_id != "__local__") else None
         s = self.store.create(backend=backend, repo_path=repo_path,
-                              telegram_chat_id=chat_id, owner_user_id=owner_user_id)
+                              telegram_chat_id=chat_id, owner_user_id=owner_user_id,
+                              machine_id=pin)
         s.origin = origin or SessionOrigin()
         if model:
             s.model = model
-        if node_id and node_id != "__local__":
-            s.machine_id = node_id
+        if pin:
+            s.machine_id = pin
         self.store.save(s)
         if bind_chat and chat_id is not None:
             self.store.bind(chat_id, s.session_id)

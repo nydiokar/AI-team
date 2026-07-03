@@ -40,6 +40,24 @@ from src.validation.engine import ValidationEngine
 
 logger = logging.getLogger(__name__)
 
+
+class HarnessAdmissionBlocked(Exception):
+    """Raised by `_enqueue_task` when the task-harness Level-3 admission gate
+    refuses a task at the queue choke point (flag on + `harness_level: 3` +
+    not `approved: true`).
+
+    Raised — not returned — so no caller can mistake a blocked task for an
+    accepted one (there is no `task_id` to hand back). Callers that face an
+    operator (Telegram, control API) catch this and surface a clear
+    "needs operator approval" result instead of a generic error.
+    """
+
+    def __init__(self, task_id: str, reason: str = "harness_level3_needs_approval"):
+        self.task_id = task_id
+        self.reason = reason
+        super().__init__(f"task {task_id} blocked at admission: {reason}")
+
+
 class TaskOrchestrator(ITaskOrchestrator):
     """Main gateway coordinator.
 
@@ -1554,7 +1572,29 @@ class TaskOrchestrator(ITaskOrchestrator):
         return task
 
     async def _enqueue_task(self, task: Task) -> str:
-        """Queue a task object directly without writing a task file."""
+        """Queue a task object directly without writing a task file.
+
+        This is the choke point every ingestion lane passes through
+        (`submit_instruction` from Telegram/Web, the `.task.md` auto-pickup path,
+        and internal runtime tasks). The task-harness Level-3 admission gate runs
+        HERE — before any queue/telemetry side-effect — so an un-approved Level-3
+        task is refused at admission on every lane, not just `.task.md`. The gate
+        is flag-gated OFF by default (`HARNESS_LEVEL3_GUARD`), so default behavior
+        is byte-identical: absent flag / absent field / level ≤ 2 ⇒ pass-through.
+        """
+        # [Harness] Admission control (spec docs/Task_harness_workflow.md §14).
+        if not self._harness_level3_allows_autopickup(task):
+            logger.warning(
+                f"event=task_blocked reason=harness_level3_needs_approval "
+                f"task_id={task.id} source={(task.metadata or {}).get('source', 'runtime')}"
+            )
+            self._emit_event(
+                "task_blocked",
+                task,
+                {"task_id": task.id, "reason": "harness_level3_needs_approval"},
+            )
+            raise HarnessAdmissionBlocked(task.id)
+
         logger.info(f"event=task_created task_id={task.id} source={(task.metadata or {}).get('source', 'runtime')}")
         self._emit_event("task_created", task, {"source": (task.metadata or {}).get("source", "runtime")})
         self._emit_event("parsed", task)
@@ -1819,8 +1859,23 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception:
                 pass
             logger.info(f"event=parsed task_id={task.id} type={task.type.value} priority={task.priority.value}")
-            await self._enqueue_task(task)
-            
+
+            # Admission (incl. the Level-3 harness gate) now lives in
+            # `_enqueue_task` — the choke point shared by every ingestion lane. A
+            # blocked Level-3 `.task.md` raises HarnessAdmissionBlocked there; here
+            # we just release this lane's file-tracking state so an `approved: true`
+            # re-write can be picked up later. The file is left un-enqueued.
+            try:
+                await self._enqueue_task(task)
+            except HarnessAdmissionBlocked:
+                try:
+                    self._pending_files.discard(path_key)
+                    self._inflight_paths.discard(path_key)
+                    self._save_state()
+                except Exception:
+                    pass
+                return
+
         except Exception as e:
             logger.error(f"Error processing task file {file_path}: {e}")
             # Best-effort release of lock on exception
@@ -1831,7 +1886,47 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._save_state()
             except Exception:
                 pass
-    
+
+    @staticmethod
+    def _harness_level3_allows_autopickup(task: "Task") -> bool:
+        """Task-harness Level-3 admission predicate (spec §14).
+
+        The single decision function behind the admission gate in `_enqueue_task`
+        (every ingestion lane) and the `.task.md` file lane. Pure over
+        `task.metadata`, so it is trivially testable.
+
+        Returns True (allow) in every case EXCEPT: the guard flag is enabled AND
+        the task declares `harness_level: 3` AND it is not `approved: true`.
+        Level ≤ 2 and any task without a `harness_level` field are always allowed
+        — behavior is byte-identical to before when the field is absent or the
+        flag is unset.
+
+        The guard is opt-in via `HARNESS_LEVEL3_GUARD` (truthy: 1/true/yes/on).
+        The convention (a documented rule the dispatch prompt obeys) is the primary
+        control; this is the enforcement backstop for when a drafter ignores it.
+        """
+        flag = os.environ.get("HARNESS_LEVEL3_GUARD", "").strip().lower()
+        if flag not in ("1", "true", "yes", "on"):
+            return True  # guard off ⇒ legacy behavior
+
+        meta = getattr(task, "metadata", None) or {}
+        raw_level = meta.get("harness_level", None)
+        if raw_level is None:
+            return True  # field absent ⇒ unchanged
+
+        # Coerce level defensively (YAML may give int or str); only "3" gates.
+        try:
+            level = int(str(raw_level).strip())
+        except (TypeError, ValueError):
+            return True  # unparseable level ⇒ don't invent a block
+        if level != 3:
+            return True  # Level ≤ 2 auto-enqueues
+
+        approved = meta.get("approved", False)
+        if isinstance(approved, str):
+            approved = approved.strip().lower() in ("1", "true", "yes", "on")
+        return bool(approved)
+
     async def _task_worker(self, worker_name: str):
         """Worker coroutine that processes tasks from the queue.
 
@@ -2143,13 +2238,63 @@ class TaskOrchestrator(ITaskOrchestrator):
             # (`session.machine_id` set) with MESH_ENABLED=true take this path.
             # Everything else falls through to the untouched local retry loop
             # below — zero behavior change for ordinary local sessions.
-            route_remote = bool(
-                config.mesh.enabled
-                and session
-                and session.machine_id
-                and session.machine_id != socket.gethostname()
+            _host = socket.gethostname()
+            _pinned_elsewhere = bool(
+                session and session.machine_id and session.machine_id != _host
             )
-            if route_remote:
+            route_remote = bool(config.mesh.enabled and _pinned_elsewhere)
+
+            # Affinity guard (A11): a session pinned to a *different* node must NOT
+            # execute in this host's local worker pool. Before A11, if `route_remote`
+            # came out False for any reason (mesh flag not seen at this call site,
+            # etc.) while the session named another node, the task silently ran
+            # locally on the wrong machine — corrupting backend_session_id continuity
+            # and producing a null/duplicate gateway_node_id (the #9 smoke failure).
+            # Make that case loud instead of silent: log the exact sub-conditions and
+            # refuse local execution.
+            if _pinned_elsewhere and not route_remote:
+                logger.error(
+                    "event=affinity_unrouted task_id=%s session_id=%s machine_id=%s host=%s "
+                    "mesh_enabled=%s — refusing local execution of a remote-pinned session",
+                    task.id, getattr(session, "session_id", None),
+                    getattr(session, "machine_id", None), _host, config.mesh.enabled,
+                )
+                self._emit_event(
+                    "affinity_unrouted",
+                    task,
+                    {
+                        "session_id": getattr(session, "session_id", None),
+                        "machine_id": getattr(session, "machine_id", None),
+                        "host": _host,
+                        "mesh_enabled": bool(config.mesh.enabled),
+                    },
+                )
+                if config.mesh.enabled:
+                    # Mesh is on and the node is named — honor the pin via the remote
+                    # path (which fails loudly if the node is offline; no local fallback).
+                    route_remote = True
+                else:
+                    # Mesh disabled but the session is pinned elsewhere: we cannot
+                    # honor affinity and must not run on the wrong host. Fail honestly.
+                    last_result = TaskResult(
+                        task_id=task.id,
+                        success=False,
+                        output="",
+                        errors=[
+                            f"Session pinned to node {session.machine_id!r} but mesh is "
+                            f"disabled on {_host!r}; cannot execute without violating "
+                            f"session affinity."
+                        ],
+                        files_modified=[],
+                        execution_time=time.time() - start_time,
+                        timestamp=datetime.now().isoformat(),
+                    )
+                    setattr(last_result, "backend_name", getattr(session, "backend", None))
+                    last_result.error_class = self._classify_error(last_result)
+                    last_result.retries = 0
+                    route_remote = True  # skip the local loop below
+
+            if route_remote and last_result is None:
                 last_result = await self._process_task_remote(task, session, start_time, timeout_s)
 
             while not route_remote:

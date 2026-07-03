@@ -356,17 +356,23 @@ Tested only after the core works. The harness must run without all of them.
 Because v1 is prompt-and-artifact discipline, "build" mostly means **authoring the
 generators and conventions**, not gateway code.
 
-Build only this first:
+Build only this first (v1 shipped on `feat/task-harness`, A9H — `docs/harness/`):
 ```text
-1. Level-selector rubric (§3 triggers) as a short reusable checklist
-2. Objective-Lock + XML Task-Packet generator (a prompt/skill that emits §2.1)
-3. Plan-Review generator (adversarial pass → F-tagged findings, §14)
-4. Burn-down / milestone-file template + revision loop (§2.2)
-5. Executor handoff via the dispatch convention (.ai/dispatch, optional .task.md)
-6. Checkpoint Implementation-Review generator (§5, uses /code-review, F-tags)
-7. Closure-summary generator
-8. The milestone-file update requirement, enforced by the dispatch prompt
-9. The Dispatch Pipeline meta-process wired end-to-end (§14)
+[x] 1. Level-selector rubric (§3 triggers)          → docs/harness/level_rubric.md
+[x] 2. Objective-Lock + XML Task-Packet generator   → docs/harness/packet_template.xml
+                                                       + generators/draft_packet.md
+[x] 3. Plan-Review generator (F-tagged findings)    → generators/adversarial_review.md
+[x] 4. Burn-down / milestone template + fix loop     → docs/harness/milestone_template.md
+[x] 5. Executor handoff via dispatch convention      → docs/harness/dispatch_pipeline.md
+[x] 6. Checkpoint Implementation-Review generator    → generators/adversarial_review.md (§5)
+[x] 7. Closure-summary generator                     → generators/closure_summary.md
+[x] 8. Milestone-update requirement (dispatch prompt)→ milestone_template.md update-rule
+                                                       + dispatch_pipeline.md step 5
+[x] 9. Dispatch Pipeline meta-process end-to-end     → docs/harness/dispatch_pipeline.md
+       (the `continues:` resume-memory field itself shipped earlier via A9/#31/#32;
+        the pipeline now documents how to use it — §7/§14)
++  Auto-pickup safety: Level-3 guard (convention + flag-guarded backstop)
+   → orchestrator.py::_harness_level3_allows_autopickup, tests/test_harness_level3_guard.py
 ```
 
 Do **not** build yet:
