@@ -361,7 +361,33 @@ pytest -q \
 
 ## Implementation log
 
-### T1 — Close #9: gateway-routed mesh smoke — BLOCKED (2026-07-03, run from Horse) — NOT PASSED
+### T1 — Close #9: gateway-routed mesh smoke — DONE (2026-07-03, run from kanebra)
+
+**Closed per the handoff below (run from kanebra, control API is loopback-only).**
+`POST /api/sessions` (`backend=codex`, `node_id=Horse`, `repo_path` from the mesh
+`nodes` table) → `POST /api/instructions` with sentinel `PROMPT_SECRET_LLMOBS_GWMESH_20260703B`
+→ polled `GET /api/tasks` to terminal → verified **[F2]**:
+
+```
+sqlite3 state/mesh.db "SELECT turn_id, gateway_node_id, execution_node_id, final_status
+FROM llm_turns WHERE turn_id='task_35655be9'"
+→ gateway_node_id=kanebra, execution_node_id=Horse, final_status=success
+```
+
+Non-null and distinct — gate passes. `llm_invocations.node_id` = `[kanebra, Horse]`,
+confirming the worker-side invocation ran on Horse. Privacy scan **[F3]**: sentinel
+appeared 4 times in `.dump`, only in benign reply/summary fields — zero leaks. No
+`affinity_unrouted` in gateway logs for this task_id. Session closed **[F4]** (200 ok).
+
+**Note for future runs:** the original relay instructions assumed both the mesh task
+server (9002) and the dashboard/control API (9003) bind the Tailscale IP. Only 9002
+does — 9003 is `127.0.0.1`-only. Run T1-style checks from kanebra itself, or set
+`CONTROL_API_HOST` to expose 9003 on the tailnet first.
+
+**#9 is CLOSED. M1/M2 are SHIPPED.**
+
+<details>
+<summary>Original blocked attempt (2026-07-03, run from Horse) — superseded above</summary>
 
 **Attempted from:** the Horse worker box (this machine). **Result:** cannot execute the
 gateway-routed submit here. Prerequisites confirmed live, gate confirmed still open, but the
@@ -427,7 +453,9 @@ env vars (`AI_TEAM_TURN_ID`, etc.) are absent for SDK-path sessions. This is a
 separate pre-existing gap unrelated to the gateway_node_id blocker; noted in the
 review and NOT in scope for this dispatch.
 
-### T2 — M3 Claude telemetry adapter — SHIPPED (2026-07-03)
+</details>
+
+### T2 — M3 Claude telemetry adapter — SHIPPED (2026-07-03), VERIFIED LIVE (2026-07-03)
 
 **Branch:** `feat/m3-claude-telemetry` off `main`
 
@@ -450,8 +478,10 @@ review and NOT in scope for this dispatch.
   - Added `new_telemetry_id` to import.
   - Added `_maybe_emit_telemetry(result, telemetry_context, telemetry_sink)` method
     to `ClaudeCodeBackend` — post-processes `result.raw_stdout` through the adapter
-    and calls `telemetry_sink.send_batch(events)`. Wrapped in `try/except` — never
-    raises (spec §8.2). No-op when context, sink, or raw_stdout absent.
+    and calls `telemetry_sink.emit_many(events)` (matches the real `TelemetrySink`
+    protocol — earlier draft text said `send_batch`, which is not a real method;
+    corrected here and in the tests, see Follow-up below). Wrapped in `try/except` —
+    never raises (spec §8.2). No-op when context, sink, or raw_stdout absent.
   - Wired at end of `create_session()`, `resume_session()`, and `run_oneoff()` — covers
     BOTH driver paths (SDK + PrintResume) since both return `raw_stdout` in their
     `ExecutionResult`.
@@ -479,6 +509,58 @@ does not pass `telemetry_context` to `self.proc_env` — subprocess telemetry en
 are absent for SDK sessions. This is a pre-existing gap (not introduced here). The
 post-process approach is unaffected: it reads `result.raw_stdout` after the fact
 regardless of whether env vars were set on the subprocess.
+
+### Post-ship correction (2026-07-03) — "18 passed" was not true as committed
+
+Re-verification found the implementation log's original claims did not match the
+committed state:
+- `tests/fixtures/telemetry/claude/*.ndjson` (the three fixture files this dispatch
+  claims to have added) **did not exist on disk**. 4 fixture-dependent tests failed
+  with `FileNotFoundError`.
+- All "wire smoke" tests asserted `sink.send_batch(...)`, a method that does not
+  exist on the real `TelemetrySink` protocol (`emit`/`emit_many`/`flush` only). The
+  actual implementation correctly calls `emit_many` — only the test assertions were
+  wrong, so they were vacuously passing against a `MagicMock` attribute that was
+  never really exercised.
+
+**Root cause of the missing fixtures:** `tests/fixtures/telemetry/` is gitignored
+(`.gitignore:418`). The Codex fixtures under the same directory are tracked only
+because they were force-added (`git add -f`) before that ignore rule existed; the
+Claude fixtures never were, so a plain `git add` silently dropped them at commit
+time even though the implementation log recorded them as committed.
+
+**Fixed:** recreated the three sanitized fixture files, force-added
+(`git add -f`) to bypass the gitignore rule; replaced `send_batch` with
+`emit_many` throughout `tests/test_claude_telemetry_adapter.py` (7 occurrences).
+`pytest tests/test_claude_telemetry_adapter.py` → **18 passed** (verified for real
+this time). Full gate re-run: 52 passed.
+
+**Live verification (canonical path):** the unit tests above only prove the adapter
+against fixtures — they never exercise the real `ai-team-worker` process, the real
+`ClaudeSDKClientDriver`, or a real `DatabaseTelemetrySink` writing to `state/mesh.db`.
+Ran two live turns through the actual production path (`POST /api/sessions` →
+`POST /api/instructions` on the real gateway → claimed by the real `ai-team-worker`
+pm2 process → `ClaudeSDKClientDriver` → `ClaudeCodeBackend._maybe_emit_telemetry`):
+`task_bfe8c90b` and `task_f89edffb`, both `backend=claude`, both produced
+`model.request.usage` + 4 `telemetry.coverage` events in `llm_events`, matching
+fixture-test expectations (`cache_creation_tokens`, `context_tokens = input_tokens`,
+etc. all populated correctly). A third real user turn (`task_e4e1281a`) confirmed
+`cache_creation_tokens` is captured correctly in production
+(`metrics_json.cache_creation_tokens = 16572`).
+
+**T2 status: SHIPPED and VERIFIED LIVE.** M3 is complete on the canonical
+worker-agent/SDK-driver execution path, which is what runs on every mesh node
+(kanebra, Horse, and future nodes) — not the legacy `orchestrator.py` in-process
+retry loop, which mesh routing has superseded for task execution.
+
+**Known follow-up (non-blocking, UI-only):** the session dashboard's turn detail
+card does not currently surface `cache_creation_tokens` or `context_used_ratio`
+even where the data is present. `context_used_ratio`/`context_window_tokens` are
+genuinely `null` at the data layer — Claude's stream-json output never reports the
+model's total context window size, so no fullness percentage can be computed
+(this is a Claude CLI limitation, not an adapter bug). `cache_creation_tokens` IS
+captured correctly and just needs to be wired into the UI card. Not in scope for
+this dispatch.
 
 **Coverage state:** `stream_only` (no hooks). M3 definition of done: Claude turns now
 appear in graph/diagnostics/timeline with real token usage + tool call counts. M4

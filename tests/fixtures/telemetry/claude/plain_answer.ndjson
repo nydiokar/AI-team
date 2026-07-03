@@ -1,0 +1,3 @@
+{"type": "system", "subtype": "init", "session_id": "<SANITIZED>"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "<SANITIZED>"}]}}
+{"type": "result", "subtype": "success", "is_error": false, "stop_reason": "end_turn", "usage": {"input_tokens": 5000, "output_tokens": 150, "cache_read_input_tokens": 4200, "cache_creation_input_tokens": 0}, "result": "<SANITIZED>"}

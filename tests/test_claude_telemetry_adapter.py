@@ -257,7 +257,7 @@ def test_privacy_result_text_not_stored():
 # ---------------------------------------------------------------------------
 
 def test_wire_smoke_sends_events_to_sink():
-    """_maybe_emit_telemetry processes raw_stdout and calls sink.send_batch."""
+    """_maybe_emit_telemetry processes raw_stdout and calls sink.emit_many."""
     from src.backends.claude_code import ClaudeCodeBackend
     from src.core.interfaces import ExecutionResult
 
@@ -276,8 +276,8 @@ def test_wire_smoke_sends_events_to_sink():
     backend = ClaudeCodeBackend.__new__(ClaudeCodeBackend)  # skip __init__
     backend._maybe_emit_telemetry(result, ctx, sink)
 
-    sink.send_batch.assert_called_once()
-    events = sink.send_batch.call_args[0][0]
+    sink.emit_many.assert_called_once()
+    events = sink.emit_many.call_args[0][0]
     usage_events = [e for e in events if e.event_name == "model.request.usage"]
     assert len(usage_events) == 1
     assert usage_events[0].attributes["input_tokens"] == 500
@@ -292,7 +292,7 @@ def test_wire_smoke_no_op_when_context_is_none():
     sink = MagicMock()
     backend = ClaudeCodeBackend.__new__(ClaudeCodeBackend)
     backend._maybe_emit_telemetry(result, None, sink)
-    sink.send_batch.assert_not_called()
+    sink.emit_many.assert_not_called()
 
 
 def test_wire_smoke_no_op_when_raw_stdout_empty():
@@ -304,11 +304,11 @@ def test_wire_smoke_no_op_when_raw_stdout_empty():
     sink = MagicMock()
     backend = ClaudeCodeBackend.__new__(ClaudeCodeBackend)
     backend._maybe_emit_telemetry(result, _ctx(), sink)
-    sink.send_batch.assert_not_called()
+    sink.emit_many.assert_not_called()
 
 
 def test_wire_smoke_sink_exception_does_not_propagate():
-    """Even if sink.send_batch raises, _maybe_emit_telemetry must not raise."""
+    """Even if sink.emit_many raises, _maybe_emit_telemetry must not raise."""
     from src.backends.claude_code import ClaudeCodeBackend
     from src.core.interfaces import ExecutionResult
 
@@ -317,7 +317,7 @@ def test_wire_smoke_sink_exception_does_not_propagate():
         raw_stdout='{"type":"result","usage":{"input_tokens":1,"output_tokens":1},"result":"x"}',
     )
     sink = MagicMock()
-    sink.send_batch.side_effect = RuntimeError("sink exploded")
+    sink.emit_many.side_effect = RuntimeError("sink exploded")
     backend = ClaudeCodeBackend.__new__(ClaudeCodeBackend)
     # Must not raise — telemetry errors are swallowed (spec §8.2)
     backend._maybe_emit_telemetry(result, _ctx(), sink)
