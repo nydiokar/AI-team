@@ -1784,7 +1784,7 @@ class MeshDB:
         retention_hours: int = 48,
         max_rows: int = 10000,
     ) -> None:
-        cutoff = (datetime.utcnow() - timedelta(hours=max(1, retention_hours))).isoformat()
+        cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=max(1, retention_hours))).isoformat()
         try:
             with self._write() as conn:
                 conn.execute("DELETE FROM mesh_health_samples WHERE sampled_at < ?", (cutoff,))
@@ -2020,7 +2020,11 @@ def _get_migrations() -> List[tuple]:
 # ---------------------------------------------------------------------------
 
 def _now() -> str:
-    return datetime.utcnow().isoformat()
+    # Always produce a timezone-aware UTC string so the browser can correctly
+    # convert to local time. datetime.utcnow() produced naive strings that JS
+    # treated as local time, causing a 3-hour clock skew vs telemetry timestamps
+    # (which are always UTC-aware).
+    return datetime.now(tz=timezone.utc).isoformat()
 
 
 def _origin_json(origin: Any) -> str:

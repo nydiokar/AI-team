@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import {
   CircleDot,
   ShieldQuestion,
@@ -154,9 +154,6 @@ async function copyToClipboard(text: string): Promise<void> {
   document.body.removeChild(ta);
 }
 
-const LONG_PRESS_MS = 450;
-const MOVE_CANCEL_PX = 10;
-
 /** Char threshold past which an agent reply is collapsed to a preview. Long
  *  replies (including salvaged context-overflow progress) never flood the thread;
  *  the full text is one tap away. */
@@ -199,9 +196,10 @@ function ExpandableRichText({ text }: { text: string }) {
  * vertical spacing and suppress the role label on all but the first. The
  * timestamp only shows on the last bubble in a group (cleaner, less noise).
  *
- * Long-press (or right-click) selects the WHOLE bubble — Telegram-style —
- * and surfaces a Copy action, rather than relying on native text selection
- * (which only grabs a fragment and fights the touch scroller).
+ * Text is fully selectable — native OS selection + copy works with zero
+ * interference. The copy-all action lives in the meta row (below the bubble,
+ * same line as the timestamp) so it never overlaps the text content.
+ * On desktop it fades in on hover; on touch it is always softly visible.
  */
 function MessageBubble({
   id,
@@ -221,54 +219,21 @@ function MessageBubble({
   usage?: TokenUsage | null;
 }) {
   const mine = role === "user";
-  const [menuOpen, setMenuOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pressStart = useRef<{ x: number; y: number } | null>(null);
 
-  const clearPressTimer = () => {
-    if (pressTimer.current) {
-      clearTimeout(pressTimer.current);
-      pressTimer.current = null;
-    }
-  };
-
-  const onPointerDown = (e: React.PointerEvent) => {
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-    pressStart.current = { x: e.clientX, y: e.clientY };
-    clearPressTimer();
-    pressTimer.current = setTimeout(() => {
-      setMenuOpen(true);
-      navigator.vibrate?.(12);
-    }, LONG_PRESS_MS);
-  };
-
-  const onPointerMove = (e: React.PointerEvent) => {
-    if (!pressStart.current) return;
-    const dx = e.clientX - pressStart.current.x;
-    const dy = e.clientY - pressStart.current.y;
-    if (Math.hypot(dx, dy) > MOVE_CANCEL_PX) clearPressTimer();
-  };
-
-  const onContextMenu = (e: React.MouseEvent) => {
-    e.preventDefault();
-    setMenuOpen(true);
-  };
-
-  const handleCopy = () => {
+  const handleCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
     copyToClipboard(text);
     setCopied(true);
-    setTimeout(() => {
-      setMenuOpen(false);
-      setCopied(false);
-    }, 900);
+    setTimeout(() => setCopied(false), 1500);
   };
 
   return (
+    // `group` scoped here so hover-reveal targets only this bubble's meta row.
     <div
       id={id}
       className={cn(
-        "flex flex-col px-4 scroll-mt-16",
+        "group flex flex-col px-4 scroll-mt-16",
         mine ? "items-end" : "items-start",
         isFirst ? "mt-3" : "mt-0.5",
       )}
@@ -285,21 +250,11 @@ function MessageBubble({
         </span>
       )}
 
-      {/* Bubble. Assistant = a calm tonal surface with generous padding (not a
-          heavy outlined slab); user = a flat, bright lilac fill — no gradient,
-          no glow, just a confident block of color that reads as yours.
-          Long-press/right-click selects the whole thing and offers Copy. */}
+      {/* Bubble — no absolute children, so text selection is completely
+          unobstructed from the first character to the last. */}
       <div
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={clearPressTimer}
-        onPointerCancel={clearPressTimer}
-        onPointerLeave={clearPressTimer}
-        onContextMenu={onContextMenu}
         className={cn(
-          "relative max-w-[90%] select-none px-4 py-3 text-[15px] leading-relaxed transition-transform",
-          menuOpen && "scale-[0.97]",
-          // Shape: rounded on all corners except the "tail" corner (only first bubble)
+          "max-w-[90%] px-4 py-3 text-[15px] leading-relaxed select-text",
           mine
             ? cn(
                 "bg-user-bubble text-user-text border-r-[3px] border-r-user-border",
@@ -309,54 +264,65 @@ function MessageBubble({
                 "bg-surface-2 text-ink border-l-[3px] border-l-accent/50",
                 isFirst ? "rounded-2xl rounded-tl-md" : "rounded-2xl",
               ),
-          menuOpen && (mine ? "ring-2 ring-user-border" : "ring-2 ring-accent"),
         )}
       >
-        {/* Agent output gets rich formatting (code/links/source refs); the user's
-            own message is echoed verbatim as plain text. Long agent replies are
-            collapsed to a preview with an inline "Show full reply" toggle so a
-            large turn never floods the thread — the full text stays one tap away. */}
+        {/* Agent output gets rich formatting; user message echoed verbatim.
+            Long agent replies collapse to a preview with an inline toggle. */}
         {mine ? (
           <p className="whitespace-pre-wrap break-words">{text}</p>
         ) : (
           <ExpandableRichText text={text} />
         )}
-
-        {menuOpen && (
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-            <div
-              className={cn(
-                "absolute -top-11 z-50 flex items-center gap-1 rounded-full border border-hairline bg-surface-3 p-1 shadow-xl",
-                mine ? "right-0" : "left-0",
-              )}
-            >
-              <button
-                type="button"
-                onClick={handleCopy}
-                className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium text-ink hover:bg-surface-2"
-              >
-                {copied ? (
-                  <>
-                    <Check className="size-3.5 text-ok" /> Copied
-                  </>
-                ) : (
-                  <>
-                    <Copy className="size-3.5" /> Copy
-                  </>
-                )}
-              </button>
-            </div>
-          </>
-        )}
       </div>
 
-      {/* Timestamp (+ subtle token badge) — only on last in a group */}
-      {isLast && (at || usage) && (
-        <span className="mt-1 flex items-center gap-1.5 text-[10px] text-ink-muted">
-          {at && timeLabel(at)}
-          {usage && <TokenBadge usage={usage} />}
-        </span>
+      {/* Meta row — timestamp, token badge, and copy-all button live here,
+          completely below the bubble so they never block text selection.
+          The entire row is shown on the last bubble of a group only; the
+          copy button is always part of this row (not the bubble itself). */}
+      {isLast && (
+        <div
+          className={cn(
+            "mt-1 flex items-center gap-1.5",
+            mine ? "flex-row-reverse" : "flex-row",
+          )}
+        >
+          {/* Copy-all: fades in on hover (pointer devices); softly visible on touch */}
+          <button
+            type="button"
+            onClick={handleCopy}
+            aria-label={copied ? "Copied!" : "Copy full message"}
+            title={copied ? "Copied!" : "Copy full message"}
+            className={cn(
+              "flex items-center gap-1 rounded-full px-1.5 py-0.5",
+              "text-[10px] transition-all duration-150",
+              "border border-transparent",
+              // Hover devices: invisible until the bubble group is hovered
+              "opacity-0 group-hover:opacity-100 group-hover:border-hairline group-hover:bg-surface-2",
+              // Touch-only devices: always softly visible
+              "[@media(hover:none)]:opacity-40 [@media(hover:none)]:group-active:opacity-100",
+              copied && "!opacity-100 border-hairline bg-surface-2 text-ok",
+              !copied && "text-ink-muted hover:text-ink-soft",
+            )}
+          >
+            {copied ? (
+              <>
+                <Check className="size-3" />
+                <span>Copied</span>
+              </>
+            ) : (
+              <>
+                <Copy className="size-3" />
+                <span>Copy all</span>
+              </>
+            )}
+          </button>
+
+          {/* Timestamp + token badge */}
+          <span className="flex items-center gap-1.5 text-[10px] text-ink-muted">
+            {at && timeLabel(at)}
+            {usage && <TokenBadge usage={usage} />}
+          </span>
+        </div>
       )}
     </div>
   );
@@ -381,7 +347,15 @@ function keyFor(item: TimelineItem, i: number): string {
   }
 }
 
-export function SessionTimeline({ items }: { items: TimelineItem[] }) {
+export function SessionTimeline({
+  items,
+  liveActivity,
+}: {
+  items: TimelineItem[];
+  /** Real-time agent activity label from the SDK stream (e.g. "Using Bash").
+   *  When provided, replaces the static "Working…" on the running pill. */
+  liveActivity?: string | null;
+}) {
   return (
     <div role="feed" aria-label="Session timeline" className="pb-4 pt-2">
       {items.map((item, i) => {
@@ -427,7 +401,9 @@ export function SessionTimeline({ items }: { items: TimelineItem[] }) {
                 <CircleDot className="size-3.5 shrink-0 text-accent opacity-70" />
               )}
               <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-soft">
-                {item.objective}
+                {item.state === "running" && liveActivity
+                  ? liveActivity
+                  : item.objective}
               </span>
               <TaskStatusChip state={item.state} />
             </div>

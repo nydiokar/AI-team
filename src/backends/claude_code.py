@@ -315,7 +315,7 @@ class ClaudeCodeBackend(CodingBackend):
             # (e.g. stream was truncated by an inactivity kill before type=result).
             events.extend(adapter.flush_pending_usage())
             if events:
-                telemetry_sink.send_batch(events)
+                telemetry_sink.emit_many(events)
         except Exception:
             logger.debug(
                 "event=claude_telemetry_post_process_failed "

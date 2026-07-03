@@ -165,6 +165,23 @@ def _build_salvaged_reply(error_class: str, salvaged: str) -> str:
     return f"{banner}\n\n---\n\n{body}"
 
 
+def _make_activity_cb(session_id: Optional[str], task_id: Optional[str]):
+    """Return a thread-safe callback that emits task_activity events to the
+    observability spine. Called from inside the SDK async loop (background
+    thread) — intentionally avoids contextvars and passes IDs explicitly."""
+    if not session_id and not task_id:
+        return None
+
+    def cb(label: str) -> None:
+        try:
+            from src.core.observability import emit_event
+            emit_event("task_activity", session_id=session_id, task_id=task_id, label=label)
+        except Exception:
+            pass
+
+    return cb
+
+
 @dataclass
 class TurnOutcome:
     """Structured result of one SDK turn — carries the error signal so an
@@ -374,7 +391,7 @@ class _SDKSession:
             fut.cancel()  # don't leave the coroutine dangling on the loop thread
             raise
 
-    async def _do_query(self, message: str) -> "TurnOutcome":
+    async def _do_query(self, message: str, progress_cb=None) -> "TurnOutcome":
         """Run one turn and return a :class:`TurnOutcome`.
 
         Output priority (highest → lowest):
@@ -420,7 +437,7 @@ class _SDKSession:
         subtype = ""
         error_text = ""
 
-        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock, ThinkingBlock
 
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
@@ -430,6 +447,16 @@ class _SDKSession:
                 ).strip()
                 if blocks_text:
                     last_assistant_text = blocks_text
+                # Emit real-time activity signals for each content block type so
+                # the chat UI can show what the agent is doing instead of "Working…"
+                if progress_cb is not None:
+                    for block in msg.content:
+                        if isinstance(block, ToolUseBlock):
+                            progress_cb(f"Using {block.name}")
+                        elif isinstance(block, ThinkingBlock):
+                            progress_cb("Thinking…")
+                        elif isinstance(block, TextBlock) and block.text:
+                            progress_cb("Writing response…")
                 usage = _plain_usage_dict(getattr(msg, "usage", None))
                 if usage is not None:
                     ndjson_lines.append(json.dumps({"type": "assistant", "message": {"usage": usage}}))
@@ -497,7 +524,7 @@ class _SDKSession:
             is_error=False,
         )
 
-    def send(self, message: str) -> "TurnOutcome":
+    def send(self, message: str, progress_cb=None) -> "TurnOutcome":
         # sdk_turn_timeout_sec is the total deadline for one turn (send → full response).
         # 0 means no limit. Default 36000 (10 h) — distinct from inactivity_timeout_sec
         # which is a per-stdout-line timeout used only by the PrintResume driver.
@@ -509,7 +536,7 @@ class _SDKSession:
         except Exception:
             pass
         with self._lock:
-            return self.submit(self._do_query(message), timeout=timeout)
+            return self.submit(self._do_query(message, progress_cb=progress_cb), timeout=timeout)
 
     def close(self) -> None:
         self._closed = True
@@ -548,17 +575,23 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             return self._sessions.pop(session_key, None)
 
     def start_session(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._run_turn(session, message, model=model, proc_env=proc_env or {})
+        return self._run_turn(session, message, model=model, proc_env=proc_env or {}, telemetry_context=telemetry_context)
 
     def send_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._run_turn(session, message, model=model, proc_env=proc_env or {})
+        return self._run_turn(session, message, model=model, proc_env=proc_env or {}, telemetry_context=telemetry_context)
 
-    def _run_turn(self, session: Session, message: str, *, model: Optional[str], proc_env: Dict[str, str]) -> ExecutionResult:
+    def _run_turn(self, session: Session, message: str, *, model: Optional[str], proc_env: Dict[str, str], telemetry_context=None) -> ExecutionResult:
         start = time.time()
         try:
             sdk_sess = self._get_or_create(session, model, proc_env)
             session.driver_type = "sdk"
-            outcome = sdk_sess.send(message)
+            # Build a lightweight progress callback so the SDK message loop can
+            # emit task_activity events in real time. IDs are passed explicitly
+            # (not via contextvars) because the SDK loop runs in its own thread.
+            sess_id = getattr(telemetry_context, "session_id", None) or (session.session_id if session else None)
+            t_id = getattr(telemetry_context, "turn_id", None)
+            progress_cb = _make_activity_cb(sess_id, t_id)
+            outcome = sdk_sess.send(message, progress_cb=progress_cb)
             elapsed = time.time() - start
             session.driver_status = "live"
 
