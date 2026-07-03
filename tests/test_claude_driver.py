@@ -29,12 +29,18 @@ from src.backends.claude_driver import (
     _parse_print_resume,
     build_driver,
     parse_cache_stats_from_ndjson,
+    TurnOutcome,
+    classify_error_text,
 )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _ok(output: str, sid: str = "sid", raw: str = "") -> TurnOutcome:
+    """A successful TurnOutcome (replaces the old (output, sid, raw) tuple)."""
+    return TurnOutcome(output=output, backend_session_id=sid, raw_ndjson=raw)
 
 def _make_session(*, repo_path: str = "", backend_session_id: str = "") -> Session:
     return Session(
@@ -345,7 +351,7 @@ class TestSDKClientDriver:
         session = _make_session(repo_path="")
 
         def fake_send(self_inner, message):
-            return ("turn one reply", "sid-001", "")
+            return _ok("turn one reply", "sid-001")
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
@@ -362,7 +368,7 @@ class TestSDKClientDriver:
 
         def fake_send(self_inner, message):
             call_count["n"] += 1
-            return (f"reply-{call_count['n']}", "sid-stable", "")
+            return _ok(f"reply-{call_count['n']}", "sid-stable")
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
@@ -384,7 +390,7 @@ class TestSDKClientDriver:
         s2 = _make_session()
 
         def fake_send(self_inner, message):
-            return ("ok", "sid", "")
+            return _ok("ok")
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
@@ -400,7 +406,7 @@ class TestSDKClientDriver:
         session = _make_session()
 
         def fake_send(self_inner, message):
-            return ("ok", "sid", "")
+            return _ok("ok")
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
@@ -415,7 +421,7 @@ class TestSDKClientDriver:
         session = _make_session()
 
         def fake_send(self_inner, message):
-            return ("ok", "sid", "")
+            return _ok("ok")
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
@@ -443,7 +449,7 @@ class TestSDKClientDriver:
         session = _make_session()
 
         def fake_send(self_inner, message):
-            return ("ok", "sid", "")
+            return _ok("ok")
 
         with patch.object(_SDKSession, "send", fake_send):
             with patch.object(_SDKSession, "start", lambda self_inner: None):
@@ -456,6 +462,82 @@ class TestSDKClientDriver:
     def test_driver_type_string(self):
         drv = ClaudeSDKClientDriver()
         assert drv.driver_type() == "sdk"
+
+
+# ---------------------------------------------------------------------------
+# Error result handling — the "Prompt is too long" bug
+# ---------------------------------------------------------------------------
+
+class TestClassifyErrorText:
+    def test_prompt_too_long_is_context_overflow(self):
+        assert classify_error_text("Prompt is too long") == "context_overflow"
+
+    def test_context_window_variants(self):
+        assert classify_error_text("exceeds the context window") == "context_overflow"
+        assert classify_error_text("blocking_limit hit") == "context_overflow"
+
+    def test_other_errors_are_backend_error(self):
+        assert classify_error_text("some random failure") == "backend_error"
+        assert classify_error_text("") == "backend_error"
+
+
+class TestErrorResultTurn:
+    """An is_error ResultMessage must become a FAILURE that still delivers the
+    salvaged work — never a success reply of the bare error string."""
+
+    def test_context_overflow_fails_and_salvages(self):
+        drv = ClaudeSDKClientDriver()
+        session = _make_session()
+
+        def fake_send(self_inner, message):
+            return TurnOutcome(
+                output="",  # driver sets output=salvaged for error turns
+                backend_session_id="sid-x",
+                raw_ndjson='{"type":"result","is_error":true,"result":"Prompt is too long"}',
+                is_error=True,
+                error_class="context_overflow",
+                error_text="Prompt is too long",
+                salvaged_output="I edited config.py and ran the tests; 3 passed.",
+            )
+
+        with patch.object(_SDKSession, "send", fake_send):
+            with patch.object(_SDKSession, "start", lambda self_inner: None):
+                result = drv.start_session(session, "do work")
+
+        # Honest failure with the right class
+        assert not result.success
+        assert result.error_class == "context_overflow"
+        # The raw error travels in errors[], never as the (only) reply
+        assert any("too long" in e.lower() for e in result.errors)
+        # The reply DELIVERS the salvaged progress + an actionable banner
+        assert "I edited config.py" in result.output
+        assert "/compact" in result.output or "new session" in result.output
+        # raw_stdout stays diagnosable (carries is_error)
+        assert '"is_error":true' in result.raw_stdout or '"is_error": true' in result.raw_stdout
+
+    def test_error_without_salvage_still_actionable(self):
+        drv = ClaudeSDKClientDriver()
+        session = _make_session()
+
+        def fake_send(self_inner, message):
+            return TurnOutcome(
+                output="",
+                backend_session_id="sid-y",
+                raw_ndjson="",
+                is_error=True,
+                error_class="context_overflow",
+                error_text="Prompt is too long",
+                salvaged_output="",
+            )
+
+        with patch.object(_SDKSession, "send", fake_send):
+            with patch.object(_SDKSession, "start", lambda self_inner: None):
+                result = drv.start_session(session, "do work")
+
+        assert not result.success
+        # Even with nothing to salvage, the user gets the actionable banner,
+        # not a bare "Prompt is too long".
+        assert "Context window full" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +570,7 @@ class TestClaudeCodeBackendDriverIntegration:
         session.last_user_message = "initial prompt"
 
         def fake_send(self_inner, message):
-            return ("first response", "sess-aaa", "")
+            return _ok("first response", "sess-aaa")
 
         monkeypatch.setattr(_SDKSession, "send", fake_send)
         monkeypatch.setattr(_SDKSession, "start", lambda self_inner: None)
