@@ -1819,6 +1819,33 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception:
                 pass
             logger.info(f"event=parsed task_id={task.id} type={task.type.value} priority={task.priority.value}")
+
+            # Task-harness Level-3 auto-pickup guard (spec docs/Task_harness_workflow.md
+            # §14). Flag-guarded and OFF by default: when the field is absent OR the
+            # flag is unset, behavior is byte-identical to before. When enabled, a
+            # `.task.md` declaring `harness_level: 3` is NOT auto-enqueued unless it
+            # also carries `approved: true` — destructive/infra/security/agent-behavior
+            # work must clear the operator-approval stage before dispatch.
+            if not self._harness_level3_allows_autopickup(task):
+                logger.warning(
+                    f"event=task_blocked reason=harness_level3_needs_approval "
+                    f"task_id={task.id} file={file_path}"
+                )
+                self._emit_event(
+                    "task_blocked",
+                    None,
+                    {"file": file_path, "task_id": task.id, "reason": "harness_level3_needs_approval"},
+                )
+                # Drop from pending; release inflight so an `approved: true` re-write
+                # can be picked up later. The file is intentionally left un-enqueued.
+                try:
+                    self._pending_files.discard(path_key)
+                    self._inflight_paths.discard(path_key)
+                    self._save_state()
+                except Exception:
+                    pass
+                return
+
             await self._enqueue_task(task)
             
         except Exception as e:
@@ -1831,7 +1858,43 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._save_state()
             except Exception:
                 pass
-    
+
+    @staticmethod
+    def _harness_level3_allows_autopickup(task: "Task") -> bool:
+        """Task-harness safety boundary for auto-pickup (spec §14).
+
+        Returns True (allow auto-enqueue) in every case EXCEPT: the guard flag is
+        enabled AND the task declares `harness_level: 3` AND it is not
+        `approved: true`. Level ≤ 2 and any task without a `harness_level` field
+        are always allowed — behavior is byte-identical to before when the field
+        is absent or the flag is unset.
+
+        The guard is opt-in via `HARNESS_LEVEL3_GUARD` (truthy: 1/true/yes/on).
+        The convention (a documented rule the dispatch prompt obeys) is the primary
+        control; this is the enforcement backstop for when a drafter ignores it.
+        """
+        flag = os.environ.get("HARNESS_LEVEL3_GUARD", "").strip().lower()
+        if flag not in ("1", "true", "yes", "on"):
+            return True  # guard off ⇒ legacy behavior
+
+        meta = getattr(task, "metadata", None) or {}
+        raw_level = meta.get("harness_level", None)
+        if raw_level is None:
+            return True  # field absent ⇒ unchanged
+
+        # Coerce level defensively (YAML may give int or str); only "3" gates.
+        try:
+            level = int(str(raw_level).strip())
+        except (TypeError, ValueError):
+            return True  # unparseable level ⇒ don't invent a block
+        if level != 3:
+            return True  # Level ≤ 2 auto-enqueues
+
+        approved = meta.get("approved", False)
+        if isinstance(approved, str):
+            approved = approved.strip().lower() in ("1", "true", "yes", "on")
+        return bool(approved)
+
     async def _task_worker(self, worker_name: str):
         """Worker coroutine that processes tasks from the queue.
 

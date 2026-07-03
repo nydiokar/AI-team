@@ -47,7 +47,11 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
-| 1 | **Build Task Harness Workflow Kernel (v1)** | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). Dispatched, not started — hand off to a build agent. | dispatched (A9H) — spec `docs/Task_harness_workflow.md` |
+| — | ~~Build Task Harness Workflow Kernel (v1)~~ | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). | **built** (A9H) on `feat/task-harness` — see Shipped Ledger + `docs/harness/` |
+
+**To run a task through the harness:** start at
+[`docs/harness/dispatch_pipeline.md`](../docs/harness/dispatch_pipeline.md)
+(pick the level with `docs/harness/level_rubric.md`).
 
 Everything else in the recent dispatch set is **shipped and on `main`**: M1/M2 + M3
 observability, Operator Signal (Web Push + Backend Usage), Compact-Context, the
@@ -81,6 +85,16 @@ files. This is the "don't rebuild it, it's done" list.
 
 **Operator Signal (merged from `feat/operator-signal`, PR #5):**
 - **#21** Web Push (migration 20, `push_service.py`, SW handlers; notification fan-out only, NOT approval-gated). **VAPID env configured 2026-07-03 — push is live.** · **#30/#33** Backend Account + Usage Visibility (`backend_usage.py`, `/api/backends/usage`; honesty-first — unknown limits return `null` + reason, never fabricated).
+
+**Task Harness Workflow Kernel v1 (built on `feat/task-harness`, A9H):**
+- Prompt-and-artifact task-quality loop under `docs/harness/` — templates (packet
+  XML, milestone, level rubric, README), DRAFT/REVIEW/CLOSE generators, and the
+  `dispatch_pipeline.md` runbook. **Zero new gateway state** (spec §0). Level-3
+  auto-pickup guard = convention + flag-guarded backstop
+  (`orchestrator.py::_harness_level3_allows_autopickup`, OFF unless
+  `HARNESS_LEVEL3_GUARD` set; byte-identical legacy behavior when the field/flag is
+  absent). 18 tests (`tests/test_harness_level3_guard.py`). Spec:
+  `docs/Task_harness_workflow.md` §13 ticked.
 
 **Compact-Context (merged from `feat/compact-context`, PR #6):**
 - **#31/#32** `load_compact_context` wired via opt-in `continues: <task_id>` frontmatter → `process_task` prepends bounded, fence-hardened `<prior_context>` block. No new gateway state. Docs: `docs/Task_harness_workflow.md` §7/§14.
@@ -172,7 +186,8 @@ logs/events.ndjson                    system-wide event log
 | `docs/CONVERSATION_DATA_FLOW.md` | conversation+artifact data-flow audit (§0 = DB-canonical, migration 17) |
 | `docs/RUNBOOK_db_self_sufficient.md` | backfill `mesh_tasks` + drop fat `results/*.json` |
 | `docs/LLM_TURN_OBSERVABILITY_SPEC.md` | turn-observability spec (M1–M4) |
-| `docs/Task_harness_workflow.md` | task-quality loop spec (v0.5) — A9H build target |
+| `docs/Task_harness_workflow.md` | task-quality loop spec (v0.5) — A9H |
+| `docs/harness/` | task-harness v1: templates, generators, `dispatch_pipeline.md` runbook |
 | `docs/RUNBOOKS/PHASE_4_RUNBOOK.md` | VPS cutover runbook (= State Sep end-state) |
 | `docs/archive/progress/_archive_PROGRESS_LOG.md` | completed-work history |
 | `ecosystem.config.js` | PM2 supervisor config |
