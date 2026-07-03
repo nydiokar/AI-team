@@ -18,11 +18,12 @@ import {
   FilePen,
   FileMinus2,
   ChevronDown,
+  ChevronUp,
   MessagesSquare,
 } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
-import { SessionTimeline } from "../components/timeline/SessionTimeline";
+import { SessionTimeline, userAnchorId } from "../components/timeline/SessionTimeline";
 import { SessionTurns } from "../components/timeline/SessionTurns";
 import { Composer } from "../components/timeline/Composer";
 import { JobRow } from "../components/system/JobsPanel";
@@ -457,6 +458,7 @@ export function SessionDetailScreen() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const [headerHidden, setHeaderHidden] = useState(false);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const lastScrollYRef = useRef(0);
 
   const handleHeaderScroll = useCallback(() => {
@@ -469,11 +471,53 @@ export function SessionDetailScreen() {
       setHeaderHidden(false);
     }
     lastScrollYRef.current = scrollY;
+
+    // Jump-to-bottom button: shown once the user has scrolled meaningfully
+    // away from the live edge of the conversation.
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowJumpToBottom(distanceFromBottom > 240);
   }, []);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     bottomRef.current?.scrollIntoView({ behavior, block: "end" });
   }, []);
+
+  // Ordered ids of every user message in the current timeline, so the
+  // prev/next controls can walk between them regardless of what else is
+  // interleaved (approvals, notices, agent replies).
+  const userMessageIds = timeline
+    .filter((it): it is Extract<typeof it, { kind: "message" }> => it.kind === "message" && it.message.role === "user")
+    .map((it) => it.message.id);
+
+  const jumpToUserMessage = useCallback(
+    (direction: "prev" | "next") => {
+      const container = timelineRef.current;
+      if (!container || userMessageIds.length === 0) return;
+      const anchors = userMessageIds
+        .map((mid) => container.querySelector<HTMLElement>(`#${userAnchorId(mid)}`))
+        .filter((el): el is HTMLElement => !!el);
+      if (anchors.length === 0) return;
+
+      const containerRect = container.getBoundingClientRect();
+      const positions = anchors.map(
+        (el) => el.getBoundingClientRect().top - containerRect.top + container.scrollTop,
+      );
+      const current = container.scrollTop;
+      const EPS = 4;
+
+      let target: number | undefined;
+      if (direction === "next") {
+        target = positions.find((p) => p > current + EPS);
+      } else {
+        const past = positions.filter((p) => p < current - EPS);
+        target = past.at(-1);
+      }
+      if (target != null) {
+        container.scrollTo({ top: target, behavior: "smooth" });
+      }
+    },
+    [userMessageIds],
+  );
 
   const prevLengthRef = useRef(0);
   useEffect(() => {
@@ -639,9 +683,10 @@ export function SessionDetailScreen() {
       {/* ── Chat tab: header + timeline in scroll, composer pinned outside ── */}
       {tab === "chat" && (
         <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="relative flex-1 overflow-hidden">
         <div
           ref={timelineRef}
-          className="flex-1 overflow-y-auto overscroll-contain"
+          className="h-full overflow-y-auto overscroll-contain"
           onScroll={handleHeaderScroll}
         >
           {/* Sticky header inside scroll — hides on scroll down */}
@@ -794,6 +839,47 @@ export function SessionDetailScreen() {
             )}
           </div>
 
+        </div>
+
+        {/* Floating jump controls — jump between your own messages, and back to
+            the live edge of the conversation. Positioned above the composer,
+            inset from the trailing edge like the WhatsApp/Slack pattern. */}
+        <div className="pointer-events-none absolute bottom-3 right-3 z-10 flex flex-col items-end gap-2">
+          {userMessageIds.length > 1 && (
+            <div className="pointer-events-auto flex overflow-hidden rounded-full border border-hairline bg-surface-2/95 shadow-lg backdrop-blur-sm">
+              <button
+                type="button"
+                onClick={() => jumpToUserMessage("prev")}
+                className="flex size-9 items-center justify-center text-ink-soft hover:bg-surface-3 hover:text-ink"
+                aria-label="Jump to previous message"
+                title="Jump to previous message"
+              >
+                <ChevronUp className="size-4" />
+              </button>
+              <div className="w-px bg-hairline" />
+              <button
+                type="button"
+                onClick={() => jumpToUserMessage("next")}
+                className="flex size-9 items-center justify-center text-ink-soft hover:bg-surface-3 hover:text-ink"
+                aria-label="Jump to next message"
+                title="Jump to next message"
+              >
+                <ChevronDown className="size-4" />
+              </button>
+            </div>
+          )}
+          {showJumpToBottom && (
+            <button
+              type="button"
+              onClick={() => scrollToBottom()}
+              className="pointer-events-auto flex size-10 items-center justify-center rounded-full border border-hairline bg-surface-2/95 text-ink-soft shadow-lg backdrop-blur-sm transition-transform hover:scale-105 hover:bg-surface-3 hover:text-ink active:scale-95"
+              aria-label="Scroll to latest message"
+              title="Scroll to latest message"
+            >
+              <ChevronDown className="size-5" />
+            </button>
+          )}
+        </div>
         </div>
 
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}
