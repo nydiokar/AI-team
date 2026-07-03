@@ -393,6 +393,27 @@ class ClaudeCodeBackend(CodingBackend):
         elif isinstance(self._driver, ClaudePrintResumeDriver):
             self._driver.terminate_active_processes()
 
+    # ------------------------------------------------------------------
+    # Backward-compatibility delegators
+    # These keep existing tests and callers working without modification.
+    # The canonical implementations live in claude_driver.py.
+    # ------------------------------------------------------------------
+
+    def _build_cmd(self, resume_id: Optional[str], session_id: Optional[str], model: Optional[str] = None) -> List[str]:
+        """Thin delegator — single source of truth is ClaudePrintResumeDriver._build_cmd."""
+        return self._fallback._build_cmd(resume_id, session_id, model)
+
+    @staticmethod
+    def _parse(
+        stdout: str,
+        stderr: str,
+        returncode: int,
+        elapsed: float,
+        known_session_id: str = "",
+    ) -> ExecutionResult:
+        """Thin delegator — single source of truth is _parse_print_resume in claude_driver."""
+        return _parse_print_resume(stdout, stderr, returncode, elapsed, known_session_id)
+
     @staticmethod
     def _build_proc_env(session_id: Optional[str], telemetry_context: Optional[TelemetryContext]) -> dict:
         proc_env = ensure_node_on_path()

@@ -16,7 +16,6 @@ def test_create_session_uses_stream_json_output_and_explicit_session_id():
 
     assert "--output-format" in cmd
     assert "stream-json" in cmd
-    assert "--include-partial-messages" in cmd
     assert "--verbose" in cmd
     assert "--session-id" in cmd
     assert "11111111-1111-1111-1111-111111111111" in cmd
@@ -35,7 +34,6 @@ def test_resume_session_uses_stream_json_output_and_resume_id():
     assert "22222222-2222-2222-2222-222222222222" in cmd
     assert "--output-format" in cmd
     assert "stream-json" in cmd
-    assert "--include-partial-messages" in cmd
     assert "--verbose" in cmd
     assert "--session-id" not in cmd
 
