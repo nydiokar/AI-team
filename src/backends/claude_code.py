@@ -27,7 +27,7 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 from src.core.process_utils import ensure_node_on_path, terminate_many_popen
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
-from src.core.telemetry import TelemetryContext, telemetry_subprocess_env
+from src.core.telemetry import TelemetryContext, new_telemetry_id, telemetry_subprocess_env
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +277,54 @@ class ClaudeCodeBackend(CodingBackend):
         self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
 
+    def _maybe_emit_telemetry(
+        self,
+        result: ExecutionResult,
+        telemetry_context: Optional[TelemetryContext],
+        telemetry_sink: Any,
+    ) -> None:
+        """Post-process raw_stdout and upload telemetry events (M3 Claude adapter).
+
+        Uses ClaudeStreamJsonAdapter to parse the NDJSON lines collected in
+        result.raw_stdout and sends the resulting events through telemetry_sink.
+        Called at the boundary of each public execution method so it covers both
+        the SDK driver path (ClaudeSDKClientDriver) and the legacy CLI path
+        (ClaudePrintResumeDriver / run_oneoff).
+
+        Contract:
+        - Never raises into the caller (spec §8.2).
+        - No-op when telemetry_context, telemetry_sink, or raw_stdout are absent.
+        - Emits exactly ONE model.request.usage event per invocation (double-count
+          guard is inside ClaudeStreamJsonAdapter).
+        """
+        if telemetry_context is None or telemetry_sink is None:
+            return
+        raw_stdout = getattr(result, "raw_stdout", None) or ""
+        if not raw_stdout:
+            return
+        try:
+            from src.core.telemetry_adapters.claude_stream_json import ClaudeStreamJsonAdapter
+            adapter = ClaudeStreamJsonAdapter(
+                telemetry_context,
+                emitter_process_instance_id=new_telemetry_id("proc"),
+            )
+            events = adapter.coverage_events()
+            for line in raw_stdout.splitlines():
+                events.extend(adapter.consume_line(line))
+            # Flush any pending assistant usage not superseded by a result event
+            # (e.g. stream was truncated by an inactivity kill before type=result).
+            events.extend(adapter.flush_pending_usage())
+            if events:
+                telemetry_sink.send_batch(events)
+        except Exception:
+            logger.debug(
+                "event=claude_telemetry_post_process_failed "
+                "turn_id=%s invocation_id=%s",
+                getattr(telemetry_context, "turn_id", "?"),
+                getattr(telemetry_context, "invocation_id", "?"),
+                exc_info=True,
+            )
+
     def _log_driver_turn(self, action: str, session_id: str) -> None:
         """Log which driver is handling this turn — WARNING when legacy CLI is active."""
         active = self._driver.driver_type()
@@ -311,6 +359,7 @@ class ClaudeCodeBackend(CodingBackend):
             after_snapshot = _snapshot_worktree(session.repo_path)
             result.file_changes = _compute_turn_changes(session.repo_path, before_snapshot, after_snapshot)
             result.files_modified = [item["path"] for item in result.file_changes]
+        self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
         return result
 
     def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
@@ -366,10 +415,13 @@ class ClaudeCodeBackend(CodingBackend):
             after_snapshot = _snapshot_worktree(session.repo_path)
             result.file_changes = _compute_turn_changes(session.repo_path, before_snapshot, after_snapshot)
             result.files_modified = [item["path"] for item in result.file_changes]
+        self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
         return result
 
     def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(cwd, message, resume_id=None, session_id=None, session_key=None, model=None, telemetry_context=telemetry_context)
+        result = self._run(cwd, message, resume_id=None, session_id=None, session_key=None, model=None, telemetry_context=telemetry_context)
+        self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
+        return result
 
     def cancel(self, session: Session) -> None:
         self._driver.cancel(session)

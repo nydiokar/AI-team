@@ -414,3 +414,5 @@ $RECYCLE.BIN/
 # Stray Windows paths from dev machines
 C:\\*
 *.tsbuildinfo
+
+tests/fixtures/telemetry/
