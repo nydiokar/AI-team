@@ -4285,7 +4285,16 @@ Generated from user description: {description}
             if result.success:
                 reply_text = self._session_reply_text(result).strip()
             else:
-                reply_text = (self._short_failure_reason(result) or "(failed)").strip()
+                # A failed turn may still carry a deliverable reply — e.g. a
+                # context-overflow turn that salvaged the agent's real progress
+                # (driver builds banner + bounded work into result.output). Prefer
+                # that so the user gets the work, not just a terse reason. Fall
+                # back to the short failure reason when output is empty.
+                salvaged = (getattr(result, "output", "") or "").strip()
+                if salvaged:
+                    reply_text = salvaged
+                else:
+                    reply_text = (self._short_failure_reason(result) or "(failed)").strip()
             usage = getattr(result, "usage", None)
             try:
                 if usage is None:

@@ -37,6 +37,24 @@ from src.core.telemetry import TelemetryEvent
 logger = logging.getLogger(__name__)
 
 
+# Backend error phrases that can leak into `output` when a pre-fix worker treats
+# an is_error result as a successful reply. A NORMAL reply that merely *mentions*
+# these words won't match: we only test a short output that IS essentially the
+# phrase (bounded length), never long prose. Kept deliberately conservative to
+# avoid downgrading a genuine answer that discusses context windows.
+def _looks_like_backend_error(output: Optional[str]) -> str:
+    """Return an error_class if `output` looks like a bare backend error string,
+    else "". Only fires on short outputs that are essentially just the phrase."""
+    text = (output or "").strip()
+    if not text or len(text) > 200:
+        return ""
+    from src.backends.claude_driver import classify_error_text, _CONTEXT_OVERFLOW_MARKERS
+    low = text.lower()
+    if any(m in low for m in _CONTEXT_OVERFLOW_MARKERS):
+        return "context_overflow"
+    return ""
+
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -516,8 +534,27 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
             status_code=403,
             detail=f"Task {task_id!r} was claimed by {claimed_by!r}, not {payload.node_id!r}",
         )
+    # Trust boundary (defense in depth): a worker running pre-fix driver code can
+    # report success=True while `output` is actually a backend error string (the
+    # "Prompt is too long" bug — an is_error ResultMessage stored as a reply).
+    # Independently re-validate here so the gateway never persists such a turn as
+    # completed even before the worker is redeployed.
+    effective_success = payload.success
+    downgraded_error_class = ""
+    if payload.success and not payload.errors:
+        err_class = _looks_like_backend_error(payload.output)
+        if err_class:
+            effective_success = False
+            downgraded_error_class = err_class
+            logger.warning(
+                "event=submit_result_downgraded task_id=%s node=%s error_class=%s "
+                "— worker reported success but output is a backend error string "
+                "(likely pre-fix driver); recording as failure",
+                task_id, payload.node_id, err_class,
+            )
+
     result_dict = {
-        "success": payload.success,
+        "success": effective_success,
         "output": payload.output,
         "errors": payload.errors,
         "files_modified": payload.files_modified,
@@ -532,11 +569,11 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
         "previous_backend_session_ids": payload.previous_backend_session_ids,
         "usage": payload.usage,
         "telemetry_invocation_id": payload.telemetry_invocation_id,
-        "error_detail": payload.error_detail,
+        "error_detail": payload.error_detail or downgraded_error_class,
         "inspect": payload.inspect,
     }
     session_id = task.get("session_id")
-    if payload.success:
+    if effective_success:
         db.complete_task(task_id, result_dict, payload.artifact_path)
         # Append event for the session if present
         if session_id:
@@ -547,7 +584,12 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
                 execution_time=payload.execution_time,
             )
     else:
-        error_str = "; ".join(payload.errors) if payload.errors else "worker reported failure"
+        if payload.errors:
+            error_str = "; ".join(payload.errors)
+        elif downgraded_error_class:
+            error_str = f"backend error result ({downgraded_error_class})"
+        else:
+            error_str = "worker reported failure"
         db.fail_task(task_id, error_str, result=result_dict, artifact_path=payload.artifact_path)
         if session_id:
             db.append_event(
