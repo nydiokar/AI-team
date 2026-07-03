@@ -36,6 +36,33 @@ export interface RawSessionView {
 // db.list_nodes() rows + dashboard._annotate_node_liveness() derived fields.
 // NOTE: trust `live` + `heartbeat_age_sec` (derived per-request), NOT `status`
 // (a stale column another process owns) — gap-doc §2.
+
+/** One active task as reported in a worker's live_state heartbeat payload. */
+export interface RawLiveStateTask {
+  task_id: string;
+  backend: string;
+  /** Mesh action: run_oneoff | run_session | create_session | resume_session | compact_session | cancel */
+  action: string;
+  /** Execution phase (optional — worker schema v2+). */
+  phase?: string;
+  /** ISO timestamp when the task started on this worker; null when not captured. */
+  started_at: string | null;
+}
+
+/** Worker live_state snapshot — sent every ~30 s via heartbeat. */
+export interface RawLiveState {
+  slots_used?: number;
+  slots_total?: number;
+  /** Task IDs currently executing (summary list). */
+  active_tasks?: string[];
+  /** Rich per-task metadata (superset of active_tasks). */
+  active_task_details?: RawLiveStateTask[];
+  canary?: boolean;
+  incarnation_id?: string;
+  /** Schema version for forward-compat. */
+  v?: number;
+}
+
 export interface RawNode {
   node_id: string;
   tailscale_ip: string;
@@ -51,6 +78,9 @@ export interface RawNode {
   // ── derived by dashboard._annotate_node_liveness ──
   live: boolean;
   heartbeat_age_sec: number | null;
+  // ── live_state: worker heartbeat snapshot (already present in API response) ──
+  live_state?: RawLiveState | null;
+  live_state_updated_at?: string | null;
 }
 
 // GET /api/tasks → { tasks: RawTask[] }

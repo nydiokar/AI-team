@@ -23,6 +23,19 @@ export function relAgeFrom(ts: string | null): string {
   return relAge((Date.now() - d.getTime()) / 1000);
 }
 
+/** "8m" / "2h 14m" / "45s" — elapsed since a start timestamp (no "ago"). */
+export function elapsed(startedAt: string | null): string {
+  if (!startedAt) return "";
+  const d = new Date(startedAt);
+  if (Number.isNaN(d.getTime())) return "";
+  const sec = Math.max(0, (Date.now() - d.getTime()) / 1000);
+  if (sec < 60) return `${Math.round(sec)}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  const h = Math.floor(sec / 3600);
+  const m = Math.round((sec % 3600) / 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
 /** "12:13 AM" — used to collapse runs of same-minute log rows. */
 export function clockLabel(at: string): string {
   const d = new Date(at);

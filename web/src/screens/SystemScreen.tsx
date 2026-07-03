@@ -23,7 +23,7 @@ import { useActivityLog } from "../hooks/useActivityLog";
 import type { Target } from "../domain/models";
 import type { LogSeverity } from "../transport/eventLog";
 import type { RawMeshHealthResponse } from "../transport/rawApi";
-import { relAge, clockLabel } from "../lib/time";
+import { relAge, clockLabel, elapsed } from "../lib/time";
 import {
   enrichLine,
   indexSessions,
@@ -144,7 +144,20 @@ function ActivityRow({ e, showTime }: { e: EnrichedLine; showTime: boolean }) {
   return <div className="flex items-start gap-2.5 px-4 py-2.5 text-[13px]">{inner}</div>;
 }
 
+/** Simplified mesh action → readable label for the task list. */
+function actionLabel(action: string): string {
+  if (action === "run_oneoff") return "oneoff";
+  if (action === "run_session" || action === "create_session" || action === "resume_session") return "session";
+  if (action === "compact_session") return "compact";
+  if (action === "cancel") return "cancel";
+  return action.replace(/_/g, " ");
+}
+
 function TargetCard({ target, onClick }: { target: Target; onClick: () => void }) {
+  const hasSlots = target.slotsUsed !== null && target.slotsTotal !== null;
+  const shownTasks = target.activeTasks.slice(0, 3);
+  const hiddenCount = target.activeTasks.length - shownTasks.length;
+
   return (
     <button
       className="card-elev w-full rounded-xl px-4 py-3.5 text-left transition-transform active:scale-[0.99]"
@@ -167,8 +180,40 @@ function TargetCard({ target, onClick }: { target: Target; onClick: () => void }
             <span className="font-mono text-accent/90">{target.backends.join(" · ")}</span>
           </span>
         )}
-        <span className="ml-auto text-ink-muted">max {target.maxConcurrent}</span>
+        <span className="ml-auto text-ink-muted">
+          {hasSlots ? `${target.slotsUsed}/${target.slotsTotal} slots` : `max ${target.maxConcurrent}`}
+        </span>
       </div>
+      {shownTasks.length > 0 && (
+        <div className="mt-2.5 space-y-1.5 border-t border-hairline/50 pt-2.5">
+          {shownTasks.map((t) => {
+            const dur = elapsed(t.startedAt);
+            const durSec = t.startedAt
+              ? (Date.now() - new Date(t.startedAt).getTime()) / 1000
+              : 0;
+            const isLong = durSec > 3600;
+            return (
+              <div key={t.taskId} className="flex items-center gap-2 text-[11px]">
+                <span className="size-1.5 shrink-0 rounded-full bg-accent pulse-dot" />
+                <span className="min-w-0 flex-1 truncate font-mono text-ink-soft">
+                  {actionLabel(t.action)} · {t.backend}
+                </span>
+                {dur && (
+                  <span
+                    className={`shrink-0 tabular-nums ${isLong ? "font-medium text-warn" : "text-ink-muted"}`}
+                  >
+                    {dur}
+                    {isLong ? " ⚠" : ""}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+          {hiddenCount > 0 && (
+            <div className="text-[11px] text-ink-muted/60">+{hiddenCount} more</div>
+          )}
+        </div>
+      )}
     </button>
   );
 }
@@ -250,18 +295,26 @@ function MeshHealthPanel({
   const slotsTotal = load?.slots_total ?? latest?.slots_total ?? 0;
   const nodesOnline = current?.nodes_online ?? latest?.nodes_online ?? 0;
   const nodesTotal = current?.nodes_total ?? latest?.nodes_total ?? 0;
+  const sessionsBusy = current?.sessions_busy ?? 0;
+  const sessionsTotal = current?.sessions_total ?? 0;
   const pending = current?.tasks_pending ?? latest?.tasks_pending ?? 0;
   const claimed = current?.tasks_claimed ?? latest?.tasks_claimed ?? 0;
+  const completed = current?.tasks_completed ?? 0;
+  const failed = current?.tasks_failed ?? 0;
   const staleBusy = load?.stale_busy_sessions ?? latest?.stale_busy_sessions ?? 0;
   const staleNodes = load?.stale_live_state_nodes ?? latest?.stale_live_state_nodes ?? [];
+  const nodesNoLiveState = load?.nodes_without_live_state ?? latest?.nodes_without_live_state ?? 0;
   const reconcilePending = data?.reconcile.pending ?? 0;
   const reconcileInvalid = data?.reconcile.invalid ?? 0;
+  const oldestPendingAt = data?.reconcile.oldest_pending_at ?? null;
 
   if (isLoading && !data) {
     return (
       <div className="card-elev mx-4 animate-pulse rounded-xl px-4 py-3.5">
         <div className="h-4 w-28 rounded bg-surface-2" />
         <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="h-14 rounded-lg bg-surface-2" />
+          <div className="h-14 rounded-lg bg-surface-2" />
           <div className="h-14 rounded-lg bg-surface-2" />
           <div className="h-14 rounded-lg bg-surface-2" />
         </div>
@@ -297,24 +350,41 @@ function MeshHealthPanel({
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2">
+        <MeshStat
+          label="sessions active"
+          value={sessionsTotal > 0 ? `${sessionsBusy}/${sessionsTotal}` : String(sessionsBusy)}
+          tone={sessionsBusy > 0 ? "default" : "default"}
+        />
         <MeshStat label="slots used" value={`${slotsUsed}/${slotsTotal}`} />
         <MeshStat
           label="nodes online"
           value={`${nodesOnline}/${nodesTotal}`}
           tone={nodesOnline === 0 && nodesTotal > 0 ? "bad" : "default"}
         />
+        <MeshStat
+          label="completed / failed"
+          value={`${completed}/${failed}`}
+          tone={failed > 0 ? "bad" : "default"}
+        />
         <MeshStat label="pending / claimed" value={`${pending}/${claimed}`} tone={pending > 0 ? "warn" : "default"} />
         <MeshStat label="stale busy" value={String(staleBusy)} tone={staleBusy > 0 ? "bad" : "default"} />
       </div>
 
-      {(staleNodes.length > 0 || reconcilePending > 0 || reconcileInvalid > 0) && (
-        <div className="mt-3 space-y-1.5 text-[12px] text-ink-soft">
+      {(staleNodes.length > 0 || nodesNoLiveState > 0 || reconcilePending > 0 || reconcileInvalid > 0) && (
+        <div className="mt-3 space-y-1.5 border-t border-hairline/60 pt-3 text-[12px] text-ink-soft">
+          {nodesNoLiveState > 0 && (
+            <div className="text-warn">
+              ⚠ {nodesNoLiveState} node{nodesNoLiveState > 1 ? "s" : ""} heartbeating but scheduler-invisible (no live state)
+            </div>
+          )}
           {staleNodes.length > 0 && (
             <div className="truncate text-bad">stale live state: {staleNodes.join(", ")}</div>
           )}
           {(reconcilePending > 0 || reconcileInvalid > 0) && (
-            <div className="truncate text-warn">
-              reconcile pending {reconcilePending}, invalid {reconcileInvalid}
+            <div className="text-warn">
+              reconcile: {reconcilePending} pending
+              {oldestPendingAt ? ` (oldest ${sampleAge(oldestPendingAt)})` : ""}
+              {reconcileInvalid > 0 ? `, ${reconcileInvalid} invalid` : ""}
             </div>
           )}
         </div>
