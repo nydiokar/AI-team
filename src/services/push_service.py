@@ -10,9 +10,11 @@ follows the same rules:
   completion — callers fire it via ``asyncio.create_task`` (see
   ``NotificationService.notify_task_outcome``).
 
-Privacy: only sanitized facts are ever sent — title, short body, task/session IDs,
-and a session URL. Never prompts, assistant output, file contents, command lines,
-or raw errors.
+Privacy: payloads are end-to-end encrypted per RFC 8291 with the browser's
+subscription keys before leaving this process — the push relay (e.g. FCM) only
+ever sees ciphertext. The body carries a short, single-line preview of the
+actual reply/failure reason (like a chat notification), plus task/session IDs
+and a session URL — never raw prompts, file contents, or command lines.
 
 Transport: RFC 8291 encryption + VAPID signing is delegated to ``pywebpush``,
 imported lazily so a missing package (or missing VAPID config) simply means push

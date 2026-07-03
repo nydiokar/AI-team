@@ -2,6 +2,7 @@
 Configuration settings for the AI Task Orchestrator
 """
 import os
+import sys
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
@@ -84,12 +85,12 @@ try:
                 for env_key in _MANAGED_ENV_KEYS - set(configured_values):
                     os.environ.pop(env_key, None)
             load_dotenv(env_path, override=bool(configured_env))
-            print(f"Loaded environment from: {env_path}")
+            print(f"Loaded environment from: {env_path}", file=sys.stderr)
             break
     else:
-        print("Warning: .env file not found in project or current directory")
+        print("Warning: .env file not found in project or current directory", file=sys.stderr)
 except ImportError:
-    print("Warning: python-dotenv not available, using system environment only")
+    print("Warning: python-dotenv not available, using system environment only", file=sys.stderr)
 
 @dataclass
 class ClaudeConfig:

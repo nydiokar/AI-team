@@ -17,6 +17,7 @@ Design rules (same as the rest of the codebase):
 - all formatting lives here or in ``result_text``, not in the orchestrator
 """
 import logging
+import re
 from typing import Any, Optional
 
 from src.services.result_text import session_reply_text, short_failure_reason, format_file_change_lines, trim_reply_for_chat
@@ -74,7 +75,7 @@ class NotificationService:
         # this unconditional path (NOT under the chat_id/telegram guard below) so
         # Web-only sessions, which have no chat_id, still get notified. Fire-and-
         # forget so a slow/absent push service never blocks task completion.
-        self._maybe_push_outcome(task_id, session_id, success=success)
+        self._maybe_push_outcome(task_id, session_id, result, session, success=success)
 
         tg = self._telegram
         if chat_id and tg:
@@ -93,6 +94,8 @@ class NotificationService:
         self,
         task_id: str,
         session_id: Optional[str],
+        result: Any,
+        session: Optional[Any],
         *,
         success: bool,
     ) -> None:
@@ -114,8 +117,22 @@ class NotificationService:
             if not ok:
                 return
 
-            title = "Task complete" if success else "Task failed"
-            body = f"Session {session_id}" if session_id else f"Task {task_id}"
+            repo_path = getattr(session, "repo_path", None) if session else None
+            project = self._project_name(repo_path)
+            emoji = "✅" if success else "❌"
+            title = f"{emoji} {project}" if project else ("Task complete" if success else "Task failed")
+
+            if success:
+                snippet = session_reply_text(result)
+            else:
+                snippet = short_failure_reason(result) or "Task failed"
+            snippet = " ".join(snippet.split())  # chat-preview style: single line, no markdown/newlines
+
+            machine_id = getattr(session, "machine_id", None) if session else None
+            model = getattr(session, "model", None) if session else None
+            node_model = "/".join(part for part in (machine_id, model) if part)
+            body = f"[{node_model}] {snippet}" if node_model else snippet
+
             url = f"/sessions/{session_id}" if session_id else "/"
             payload = build_task_payload(
                 title=title,
@@ -139,6 +156,16 @@ class NotificationService:
                 logger.debug("no running loop for push fanout task=%s", task_id)
         except Exception as e:
             logger.debug("maybe_push_outcome failed task=%s err=%s", task_id, e)
+
+    @staticmethod
+    def _project_name(repo_path: Optional[str]) -> Optional[str]:
+        """Last path segment, splitting on both ``/`` and ``\\`` — worker nodes may
+        report Windows paths (e.g. ``C:\\Users\\...\\AI-team``) to this Linux
+        gateway, where ``os.path.basename`` only recognizes ``/``."""
+        if not repo_path:
+            return None
+        parts = [p for p in re.split(r"[/\\]", str(repo_path)) if p]
+        return parts[-1] if parts else None
 
     # ------------------------------------------------------------------
     # Heartbeat (progress update for long-running work)
