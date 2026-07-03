@@ -114,6 +114,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._artifact_index_path = Path(config.system.results_dir) / "index.json"
         # Lazy-initialized context loader (simple functional helper encapsulated here)
         self._context_loader = None
+        # Task ids that have already had compact prior-context injected into their
+        # prompt (opt-in `continues:` continuation). Instance-local so the guard
+        # never leaks into task.metadata / the remote payload / persisted artifacts.
+        self._compact_injected_ids: set[str] = set()
         # Job completion polling (T3)
         self._last_job_poll = datetime.now().isoformat()
         self._last_remote_job_poll = datetime.now().isoformat()
@@ -1669,7 +1673,101 @@ class TaskOrchestrator(ITaskOrchestrator):
             from src.control.db import get_db
             self._context_loader = _ContextLoader(self._artifact_index_path, Path(config.system.results_dir), get_db)
         return self._context_loader.load(task_id)
-    
+
+    # Hard cap on the assembled prior-context prefix, independent of the loader's
+    # own per-field caps. Keeps the injected reference block from dominating the
+    # prompt even if a future loader returns larger fields.
+    _COMPACT_PREFIX_MAX_CHARS = 4000
+    _COMPACT_MAX_FILES = 20
+
+    async def _maybe_inject_compact_context(self, task: "Task") -> None:
+        """Opt-in: prepend bounded prior context when a task declares `continues:`.
+
+        No-op (prompt untouched, no loader call) unless `task.metadata["continues"]`
+        is a non-empty task id. Injects at most once per task id. Any failure is
+        swallowed and the original prompt is left intact — a continuation must never
+        crash a turn. The prior context is fenced as reference-only; the original
+        instruction is preserved verbatim inside `<current_instruction>`.
+        """
+        try:
+            meta = task.metadata or {}
+            raw = meta.get("continues", "")
+            # [F6] Coerce/validate cheaply; reject non-str (e.g. a YAML list) and blanks.
+            if not isinstance(raw, str):
+                if raw:
+                    logger.info(f"event=compact_context_skipped reason=continues_not_string task_id={task.id}")
+                return
+            parent_id = raw.strip()
+            if not parent_id:
+                return
+            # [F5/R1] Instance-local guard — inject once, never via task.metadata.
+            if task.id in self._compact_injected_ids:
+                return
+            # [F4] Self-reference is meaningless.
+            if parent_id == task.id:
+                logger.info(f"event=compact_context_skipped reason=self_reference task_id={task.id}")
+                return
+
+            # [F2] Loader is sync + does DB/file IO; keep it off the event loop.
+            ctx = await asyncio.to_thread(self.load_compact_context, parent_id)
+
+            # [F4] Nothing usable to inject.
+            summary = (ctx.get("summary") or "").strip()
+            files = [f for f in (ctx.get("files_modified") or []) if f]
+            if ctx.get("source") == "none" or (not summary and not files):
+                logger.info(f"event=compact_context_skipped reason=no_prior_context task_id={task.id} parent={parent_id}")
+                return
+
+            prefix = self._build_compact_prefix(parent_id, summary, files, ctx.get("errors") or [])
+            if not prefix:
+                return
+
+            original = task.prompt or ""
+            task.prompt = f"{prefix}\n\n<current_instruction>\n{original}\n</current_instruction>"
+            self._compact_injected_ids.add(task.id)
+            logger.info(
+                f"event=compact_context_injected task_id={task.id} parent={parent_id} "
+                f"prefix_chars={len(prefix)} files={len(files)}"
+            )
+        except Exception as e:
+            # [F4] Never raise into process_task; proceed with the original prompt.
+            logger.warning(f"event=compact_context_error task_id={getattr(task, 'id', '?')} error={e}")
+
+    @staticmethod
+    def _defuse_fence(text: str) -> str:
+        """Neutralize fence tokens inside interpolated prior-task content.
+
+        Prior summary/files/errors are a *prior task's stored output* and are not
+        trusted structure. If they contained a literal `</prior_context>` or a
+        `<current_instruction>` marker, they could break out of the reference fence
+        and be read as a live instruction. Strip the angle brackets on those tokens
+        so the fence can't be escaped.
+        """
+        for tok in ("</prior_context>", "<prior_context", "<current_instruction>", "</current_instruction>"):
+            text = text.replace(tok, tok.replace("<", "(").replace(">", ")"))
+        return text
+
+    def _build_compact_prefix(self, parent_id: str, summary: str, files: list, errors: list) -> str:
+        """Assemble the bounded, fenced prior-context block (reference only)."""
+        lines = [f'<prior_context source="task {self._defuse_fence(str(parent_id))}">']
+        if summary:
+            lines.append(f"summary: {self._defuse_fence(summary)}")
+        if files:
+            shown = [self._defuse_fence(str(f)) for f in files[: self._COMPACT_MAX_FILES]]
+            more = "" if len(files) <= self._COMPACT_MAX_FILES else f" (+{len(files) - self._COMPACT_MAX_FILES} more)"
+            lines.append("files_modified: " + ", ".join(shown) + more)
+        if errors:
+            first_err = self._defuse_fence(str(errors[0]))
+            lines.append(f"prior_errors: {first_err}")
+        lines.append("(Reference only. Your actual instruction follows.)")
+        lines.append("</prior_context>")
+        block = "\n".join(lines)
+        # [F3] Hard total cap regardless of field caps.
+        if len(block) > self._COMPACT_PREFIX_MAX_CHARS:
+            block = block[: self._COMPACT_PREFIX_MAX_CHARS - len("\n…(truncated)\n</prior_context>")]
+            block = block.rstrip() + "\n…(truncated)\n</prior_context>"
+        return block
+
     async def _handle_new_task_file(self, file_path: str):
         """Handle detection of a new `.task.md` file.
 
@@ -2011,7 +2109,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         
         try:
             task.status = TaskStatus.PROCESSING
-            
+
+            # Opt-in continuation: if this task declares `continues: <prior_task_id>`
+            # (via .task.md frontmatter or submit_instruction extra_metadata), prepend
+            # bounded, fenced prior context to the prompt exactly once, before the
+            # retry loop and the remote/local branch so every execution path carries
+            # it. Tasks without `continues:` are byte-identical to before.
+            await self._maybe_inject_compact_context(task)
+
             # Keep the user's prompt intact. Native Claude/Codex runtime should decide
             # how to approach the task rather than our local prompt-rewrite layer.
             logger.debug(f"Executing task {task.id}")
