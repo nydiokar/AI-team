@@ -56,12 +56,33 @@ tasks are introduced.
    are ALWAYS null + a reason (no backend emits them); usage-absent is null, not
    fabricated 0. Tests: `tests/test_backend_usage.py` (8). No provider quota was
    invented.
-3. **#5-#9 LLM Turn Observability remaining validation** — finish M1/M2 release
-   validation after the operator surfaces above are moving. #8 is already done;
-   2026-07-02 local Codex smoke and controlled worker/controller mesh Codex
-   smoke passed with graph/diagnostics/events/privacy scans recorded below, but
-   #9 is **not shipped** yet because a gateway-routed mesh smoke still needs to
-   pass with gateway-source telemetry before M3 Claude adapter scheduling.
+3. **#31/#32 Wire `load_compact_context` into a continuation path** — ✅ SHIPPED
+   2026-07-03 on branch `feat/compact-context` (dispatch:
+   `.ai/dispatch/AGENT_9_COMPACT_CONTEXT.md`, dispatch review `..._REVIEW.md`,
+   build review `AGENT_9_BUILD_REVIEW.md`). The previously dead-but-tested
+   `orchestrator.load_compact_context` now has a consumer: an **opt-in**
+   `continues: <prior_task_id>` frontmatter/metadata field makes `process_task`
+   prepend the prior task's bounded compact context to the prompt as a fenced,
+   reference-only `<prior_context>` block, with the live instruction preserved
+   verbatim in `<current_instruction>`. Guarded to inject once (instance-local set,
+   not `task.metadata`), off the event loop (`asyncio.to_thread`), hard-capped at
+   4 KB, fence-escape-hardened (`_defuse_fence`), and a no-op on
+   self-ref/unknown/empty/loader-failure. No new gateway state, no parser change,
+   no change to tasks without `continues:`. Also works via
+   `submit_instruction(extra_metadata=...)`. Docs: `docs/Task_harness_workflow.md`
+   §7/§14. Tests: `tests/test_compact_context_injection.py` (11) + unchanged
+   `tests/test_context_loader.py` (2) → 13 green.
+4. **#5-#9 LLM Turn Observability remaining validation** — #8 done. 2026-07-02 local
+   Codex smoke and controlled mesh Codex smoke passed. **#9 still pending**: gateway-
+   routed mesh smoke needs a live session (kanebra + Horse online) to verify non-null
+   `gateway_node_id` in `llm_turns`. Steps + DB verification query documented in
+   `.ai/dispatch/AGENT_10_M3_CLAUDE_TELEMETRY.md` T1 section. Until #9 passes, M1/M2
+   are not formally closed.
+5. **#10 M3 Claude adapter** — ✅ SHIPPED 2026-07-03 on `feat/m3-claude-telemetry`
+   (dispatch `.ai/dispatch/AGENT_10_M3_CLAUDE_TELEMETRY.md`). `ClaudeStreamJsonAdapter`
+   + `_maybe_emit_telemetry` at `ClaudeCodeBackend` boundary. 18 tests. Coverage:
+   `stream_only`. NOTE: shipped ahead of #9 formal closure; M3 is functional and
+   tested but the M1/M2→M3 scheduling gate (#9) is still pending the live smoke.
 
 Recently completed and should remain called out as done: **#34 Stop Task
 Behavior**, **#36 Remove Tasks Page / Replace With Jobs**, **#37 Move Job Event
