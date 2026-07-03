@@ -16,10 +16,15 @@ What is intentionally not on the hot path anymore:
 - local agent-template orchestration for Claude/Codex turns
 """
 import json
+import os
 import re
 import logging
+import subprocess
 import threading
 from typing import Dict, List, Any, Optional, TYPE_CHECKING
+
+# Hide the transient console window ollama child processes spawn on Windows.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 if TYPE_CHECKING:
     try:
@@ -77,11 +82,11 @@ class LlamaMediator(ILlamaMediator):
     def _check_ollama_availability(self) -> bool:
         """Check if Ollama is running and accessible."""
         try:
-            import subprocess
             result = subprocess.run(
-                ["ollama", "list"], 
-                capture_output=True, 
-                timeout=5
+                ["ollama", "list"],
+                capture_output=True,
+                timeout=5,
+                creationflags=_NO_WINDOW,
             )
             return result.returncode == 0
         except Exception:
@@ -92,12 +97,12 @@ class LlamaMediator(ILlamaMediator):
         if not self.ollama_available:
             return False
         try:
-            import subprocess
             result = subprocess.run(
                 ["ollama", "list"],
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                timeout=5
+                timeout=5,
+                creationflags=_NO_WINDOW,
             )
             output = (result.stdout or "") + (result.stderr or "")
             return model_name.split(":")[0] in output

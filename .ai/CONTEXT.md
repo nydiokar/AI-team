@@ -68,6 +68,8 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 |---|---|---|---|
 | — | ~~Build Task Harness Workflow Kernel (v1)~~ | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). | **built** (A9H) on `feat/task-harness` — see Shipped Ledger + `docs/harness/` |
 
+OWNER TASK IS TO RUN ONE REAL task from the harness - specifically the delta between the task harness v0.5 and v0.4 
+
 **To run a task through the harness:** start at
 [`docs/harness/dispatch_pipeline.md`](../docs/harness/dispatch_pipeline.md)
 (pick the level with `docs/harness/level_rubric.md`).
