@@ -22,6 +22,22 @@
 
 ---
 
+## Current Focus
+
+*What's active right now.* For per-job status see
+[`dispatch/DISPATCH_LOG.md`](dispatch/DISPATCH_LOG.md); for forward priorities see the
+**Current Priorities** table below; for who-owns-what-doc see [`DOC_MAP.md`](DOC_MAP.md).
+
+- **Doc-structure contract (A14, `feat/doc-structure`).** Set the doc-role contract so
+  autonomous-agent throughput doesn't turn the tree into a landfill: `DOC_MAP.md` names
+  each surface's single role, DISPATCH_LOG is a lean index again, and one dispatch now
+  grows ONE file (milestone + closure folded in, no siblings).
+- **Task harness — proven on docs, not yet on a real code task.** The v1 loop
+  (`docs/harness/`) has been dogfooded on docs-only dispatches (A12, A13, A14). The
+  adversarial-review / checkpoint half still wants a real code diff to validate.
+- Several dispatches are **awaiting an operator merge decision** (A9H, A12, A13, A14) —
+  all HOLD on their branches; see DISPATCH_LOG.
+
 ## What this project is
 
 A Telegram-controlled gateway for local coding agents (Claude Code, Codex,

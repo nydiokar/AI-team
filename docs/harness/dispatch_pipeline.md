@@ -15,9 +15,16 @@ executor should be able to run a small task from **this file alone**.
 > runtime tasks). So an un-approved Level-3 task is refused on the main door too,
 > not just the batch lane.
 
-**Zero new gateway state.** The XML packet, the milestone file, and the dispatch
+**Zero new gateway state.** The XML packet, the milestone section, and the dispatch
 convention *are* the state. No `flow_runs` table, no stage column (that is Phase 2,
 spec §16).
+
+> **ONE-FILE RULE (the doc contract — [`.ai/DOC_MAP.md`](../../.ai/DOC_MAP.md)).** A
+> dispatch grows **one living file**, `.ai/dispatch/AGENT_N_*.md`, through its whole
+> life: **packet → `## Milestone` burndown → `## Closure`**, all folded into that one
+> file. Do **not** spawn `.milestone.md` / `.closure.md` siblings. Materially-important
+> **reference artifacts (maps, specs, runbooks) go in `docs/`, NEVER `.ai/dispatch/`** —
+> the dispatch folder holds job packets and their inline lifecycle only.
 
 > ⚠️ **Test Cost Guard.** No stage invokes the paid Claude/Codex CLI to "verify".
 > Use targeted `pytest`, `--collect-only`, import smoke, `tsc -b`,
@@ -29,14 +36,17 @@ spec §16).
 ## The seven steps
 
 ```
-(1) DRAFT      intent + curated context → XML packet + milestone file
+(1) DRAFT      intent + curated context → XML packet + a `## Milestone` section in the dispatch doc
 (2) REVIEW     adversarial pass → F-tagged P0/P1 findings
 (3) FIX        revise packet inline per F-tag; cap 2 rounds; unresolved → non-goal/risk
-(4) DISPATCH   write .ai/dispatch/<NAME>.md (+ optional .task.md for auto-pickup)
-(5) EXECUTE    executor works the burndown, updates milestone, commits at checkpoints
+(4) DISPATCH   write .ai/dispatch/AGENT_N_<NAME>.md (+ optional .task.md for auto-pickup)
+(5) EXECUTE    executor works the burndown, updates the `## Milestone` section, commits at checkpoints
 (6) CHECKPOINT reviewer reviews the COMMITTED diff (/code-review + /security-review)
-(7) CLOSE      closure summary + milestone→closed; update CONTEXT.md + DISPATCH_LOG.md
+(7) CLOSE      append `## Closure` + set milestone closed; update CONTEXT.md + DISPATCH_LOG.md
 ```
+
+Every stage lives in the **one dispatch file** (§ ONE-FILE RULE above): the packet, the
+`## Milestone` burndown, and the `## Closure` are sections of `AGENT_N_*.md`, not siblings.
 
 Which steps run depends on the **level** — pick it FIRST with
 [`level_rubric.md`](level_rubric.md). Level 0 is just `intent → execute`; Level 3
@@ -48,9 +58,10 @@ runs all seven plus the operator-approval gate.
 
 ### 1. DRAFT — [`generators/draft_packet.md`](generators/draft_packet.md)
 Pick the level. Turn intent + curated `<context_snippets>` into a filled
-[`packet_template.xml`](packet_template.xml) and an initialized
-[`milestone_template.md`](milestone_template.md). Resume context, if any, comes
-from `load_compact_context(task_id)` + file-memory — invent no memory store.
+[`packet_template.xml`](packet_template.xml) and a `## Milestone` section (body from
+[`milestone_template.md`](milestone_template.md)) **inside the dispatch doc** — one file,
+no `.milestone.md` sibling. Resume context, if any, comes from
+`load_compact_context(task_id)` + file-memory — invent no memory store.
 
 ### 2. REVIEW — [`generators/adversarial_review.md`](generators/adversarial_review.md)
 Adversarial pass over the packet. Emit F-tags (`[Fn]`, one-line defect, concrete
@@ -62,9 +73,12 @@ becomes an explicit `<non_goal>` or a logged risk — never silently dropped. Re
 each tag's outcome (`fixed` / `accepted` / `no change needed`) for the closure log.
 
 ### 4. DISPATCH — the auto-pickup handoff
-Write the finalized packet to `.ai/dispatch/<NAME>.md`. Append a row to
-[`../../.ai/dispatch/DISPATCH_LOG.md`](../../.ai/dispatch/DISPATCH_LOG.md) as
-`dispatched`.
+Write the finalized packet to `.ai/dispatch/AGENT_N_<NAME>.md` — the one file that will
+also carry this job's `## Milestone` and `## Closure` sections. Append a **one-line** row
+to [`../../.ai/dispatch/DISPATCH_LOG.md`](../../.ai/dispatch/DISPATCH_LOG.md) as
+`dispatched` (index shape: `# · Dispatch · Date · Level · Status · One-line` — the log is
+an index, not a place for paragraphs). Any materially-important reference artifact the job
+produces (a map, a spec, a runbook) goes in `docs/`, **never `.ai/dispatch/`**.
 
 Optionally drop a `.task.md` (YAML frontmatter) into the watched directory so the
 file-watcher auto-enqueues it. **The existing auto-pickup primitive:**
@@ -90,9 +104,9 @@ continues: task_99bc7bec  # optional: prior task id to resume context from (spec
 ```
 
 ### 5. EXECUTE
-The executor picks up the task, works the Burndown, and **updates the milestone
-file after every meaningful step** (this is what kills hallucinated success). It
-commits at checkpoints. For rote/fragile extraction, use the **Single-Item
+The executor picks up the task, works the Burndown, and **updates the `## Milestone`
+section (in the dispatch doc) after every meaningful step** (this is what kills
+hallucinated success). It commits at checkpoints. For rote/fragile extraction, use the **Single-Item
 Long-Running lane** (spec §6): one item → verify → log → next; never batch and
 claim success.
 
@@ -103,10 +117,11 @@ live-tailing reviewer and no second agent on the working tree — dispatches are
 sequential single turns. Executor fixes bounded findings, then next slice.
 
 ### 7. CLOSE — [`generators/closure_summary.md`](generators/closure_summary.md)
-Honest summary: what changed (per file), verification commands + results, F-tag
-outcomes, what follows. Set the milestone `Current Status: closed`. Update
-`.ai/CONTEXT.md` (Shipped Ledger / Priorities) and move the `DISPATCH_LOG.md` row
-to `built`/`reviewed`/`merged`. The Level-3 wiki is optional and never a gate.
+Append a `## Closure` section **to the dispatch doc** (not a `.closure.md` sibling):
+honest summary of what changed (per file), verification commands + results, F-tag
+outcomes, what follows. Set the `## Milestone` `Current Status: closed`. Update
+`.ai/CONTEXT.md` (Shipped Ledger / Priorities) and advance the one-line `DISPATCH_LOG.md`
+row to `built`/`reviewed`/`merged`. The Level-3 wiki is optional and never a gate.
 
 ---
 
