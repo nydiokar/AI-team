@@ -47,10 +47,9 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
-| 1 | **Close #9 gateway-routed mesh smoke** | Single recorded gate to declaring LLM-Turn-Observability M1/M2 shipped; also unblocks merging M3. Manual op step (live kanebra + Horse). | **blocked on live session** — see `DISPATCH_LOG.md` › Open gates |
-| 2 | **Merge `feat/m3-claude-telemetry`** | M3 Claude adapter is built + reviewed; merge once #9 clears. | built, not merged (A10) |
-| 3 | **Build Task Harness Workflow Kernel (v1)** | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). Dispatched, not started. | dispatched (A9H) — spec `docs/Task_harness_workflow.md` |
-| 4 | **Operator TODO for Web Push** | Push shipped but inert until `VAPID_*` env set + `pip install -e ".[push]"`. | operator action (A8) |
+| 1 | **Merge `feat/m3-claude-telemetry`** | M3 Claude adapter is built + reviewed. M1/M2 are shipped; no gate remains. | built, ready to merge (A10) |
+| 2 | **Build Task Harness Workflow Kernel (v1)** | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). Dispatched, not started. | dispatched (A9H) — spec `docs/Task_harness_workflow.md` |
+| 3 | **Operator TODO for Web Push** | Push shipped but inert until `VAPID_*` env set + `pip install -e ".[push]"`. | operator action (A8) |
 
 Deferred-but-valid work lives in the two "Deferred" tables at the end of this file.
 
@@ -84,8 +83,9 @@ files. This is the "don't rebuild it, it's done" list.
 - **#31/#32** `load_compact_context` wired via opt-in `continues: <task_id>` frontmatter → `process_task` prepends bounded, fence-hardened `<prior_context>` block. No new gateway state. Docs: `docs/Task_harness_workflow.md` §7/§14.
 
 **LLM Turn Observability:**
-- **M1/M2** — local Codex smoke + controlled mesh smoke passed 2026-07-02; SQLite benchmarks passed (#8). **Formal "shipped" still gated on #9** (see Current Priorities #1). Spec: `docs/LLM_TURN_OBSERVABILITY_SPEC.md`.
-- **M3** — Claude stream-json telemetry adapter built + reviewed (A10). **M4** (OpenCode) deferred.
+- **M1/M2** — **SHIPPED** (2026-07-03). Local Codex smoke + controlled mesh smoke passed 2026-07-02; SQLite benchmarks passed (#8). Spec: `docs/LLM_TURN_OBSERVABILITY_SPEC.md`.
+- **M3** — Claude stream-json telemetry adapter built + reviewed (A10), ready to merge. **M4** (OpenCode) deferred.
+- **Fix (merged a3f734b)** — SDK `is_error` result no longer stored as a successful "Prompt is too long" reply; salvaged work + honest failure delivered instead. Memory `claude-iserror-prompt-too-long`.
 
 ---
 
