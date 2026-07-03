@@ -41,6 +41,7 @@ escalate one level.
 | [`generators/adversarial_review.md`](generators/adversarial_review.md) | REVIEW: packet → F-tagged findings (≤2 rounds) |
 | [`generators/closure_summary.md`](generators/closure_summary.md) | CLOSE: what changed, F-tag outcomes, doc updates |
 | [`dispatch_pipeline.md`](dispatch_pipeline.md) | the end-to-end runbook (start here to run a task) |
+| [`loop_config_map.md`](loop_config_map.md) | the loop's **control surface**: node table (driver/programmed-by/dials per stage), the "temperature" dials, Manager-vs-Executor behavior + Manager spec, and a failure→node→dial localization table (read this to debug a bad loop) |
 
 ## Cost guard (always)
 
