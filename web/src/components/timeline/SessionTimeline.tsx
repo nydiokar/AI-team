@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import {
   CircleDot,
   ShieldQuestion,
@@ -8,6 +8,8 @@ import {
   Info,
   Loader2,
   Coins,
+  Copy,
+  Check,
 } from "lucide-react";
 import type { TimelineItem, TokenUsage } from "../../fixtures/timeline";
 import type { ApprovalRequest } from "../../domain/models";
@@ -16,6 +18,12 @@ import { Button } from "../ui/Button";
 import { cn } from "../../lib/cn";
 import { useResolveApproval } from "../../hooks/useSessionActions";
 import { RichText } from "./RichText";
+
+/** DOM id for a user message bubble — shared with SessionDetailScreen so the
+ *  "jump to message" controls can scroll straight to it. */
+export function userAnchorId(messageId: string): string {
+  return `user-msg-${messageId}`;
+}
 
 function timeLabel(at: string): string {
   if (!at) return "";
@@ -128,12 +136,38 @@ function TokenBadge({ usage }: { usage: TokenUsage }) {
   );
 }
 
+async function copyToClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    // Clipboard API unavailable/blocked (older WebView, insecure context) —
+    // fall back to the hidden-textarea + execCommand trick.
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand("copy");
+  document.body.removeChild(ta);
+}
+
+const LONG_PRESS_MS = 450;
+const MOVE_CANCEL_PX = 10;
+
 /**
  * Grouped message bubble. When consecutive messages share a role we tighten
  * vertical spacing and suppress the role label on all but the first. The
  * timestamp only shows on the last bubble in a group (cleaner, less noise).
+ *
+ * Long-press (or right-click) selects the WHOLE bubble — Telegram-style —
+ * and surfaces a Copy action, rather than relying on native text selection
+ * (which only grabs a fragment and fights the touch scroller).
  */
 function MessageBubble({
+  id,
   role,
   text,
   at,
@@ -141,6 +175,7 @@ function MessageBubble({
   isLast,
   usage,
 }: {
+  id?: string;
   role: "user" | "assistant";
   text: string;
   at: string;
@@ -149,36 +184,95 @@ function MessageBubble({
   usage?: TokenUsage | null;
 }) {
   const mine = role === "user";
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pressStart = useRef<{ x: number; y: number } | null>(null);
+
+  const clearPressTimer = () => {
+    if (pressTimer.current) {
+      clearTimeout(pressTimer.current);
+      pressTimer.current = null;
+    }
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    pressStart.current = { x: e.clientX, y: e.clientY };
+    clearPressTimer();
+    pressTimer.current = setTimeout(() => {
+      setMenuOpen(true);
+      navigator.vibrate?.(12);
+    }, LONG_PRESS_MS);
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!pressStart.current) return;
+    const dx = e.clientX - pressStart.current.x;
+    const dy = e.clientY - pressStart.current.y;
+    if (Math.hypot(dx, dy) > MOVE_CANCEL_PX) clearPressTimer();
+  };
+
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setMenuOpen(true);
+  };
+
+  const handleCopy = () => {
+    copyToClipboard(text);
+    setCopied(true);
+    setTimeout(() => {
+      setMenuOpen(false);
+      setCopied(false);
+    }, 900);
+  };
+
   return (
     <div
+      id={id}
       className={cn(
-        "flex flex-col px-4",
+        "flex flex-col px-4 scroll-mt-16",
         mine ? "items-end" : "items-start",
         isFirst ? "mt-3" : "mt-0.5",
       )}
     >
       {/* Role label — only on first in a group */}
       {isFirst && (
-        <span className="mb-1 text-[11px] font-medium text-ink-muted">
+        <span
+          className={cn(
+            "mb-1 text-[11px] font-medium",
+            mine ? "text-user-label" : "text-ink-muted",
+          )}
+        >
           {mine ? "You" : "Agent"}
         </span>
       )}
 
       {/* Bubble. Assistant = a calm tonal surface with generous padding (not a
-          heavy outlined slab); user = a soft, lightly-tinted accent container. */}
+          heavy outlined slab); user = a flat, bright lilac fill — no gradient,
+          no glow, just a confident block of color that reads as yours.
+          Long-press/right-click selects the whole thing and offers Copy. */}
       <div
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={clearPressTimer}
+        onPointerCancel={clearPressTimer}
+        onPointerLeave={clearPressTimer}
+        onContextMenu={onContextMenu}
         className={cn(
-          "max-w-[90%] px-4 py-3 text-[15px] leading-relaxed",
+          "relative max-w-[90%] select-none px-4 py-3 text-[15px] leading-relaxed transition-transform",
+          menuOpen && "scale-[0.97]",
           // Shape: rounded on all corners except the "tail" corner (only first bubble)
           mine
             ? cn(
-                "bg-accent-dim/60 text-ink",
+                "bg-user-bubble text-user-text border-r-[3px] border-r-user-border",
                 isFirst ? "rounded-2xl rounded-tr-md" : "rounded-2xl",
               )
             : cn(
-                "bg-surface-2 text-ink",
+                "bg-surface-2 text-ink border-l-[3px] border-l-accent/50",
                 isFirst ? "rounded-2xl rounded-tl-md" : "rounded-2xl",
               ),
+          menuOpen && (mine ? "ring-2 ring-user-border" : "ring-2 ring-accent"),
         )}
       >
         {/* Agent output gets rich formatting (code/links/source refs); the user's
@@ -187,6 +281,34 @@ function MessageBubble({
           <p className="whitespace-pre-wrap break-words">{text}</p>
         ) : (
           <RichText text={text} />
+        )}
+
+        {menuOpen && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+            <div
+              className={cn(
+                "absolute -top-11 z-50 flex items-center gap-1 rounded-full border border-hairline bg-surface-3 p-1 shadow-xl",
+                mine ? "right-0" : "left-0",
+              )}
+            >
+              <button
+                type="button"
+                onClick={handleCopy}
+                className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium text-ink hover:bg-surface-2"
+              >
+                {copied ? (
+                  <>
+                    <Check className="size-3.5 text-ok" /> Copied
+                  </>
+                ) : (
+                  <>
+                    <Copy className="size-3.5" /> Copy
+                  </>
+                )}
+              </button>
+            </div>
+          </>
         )}
       </div>
 
@@ -243,6 +365,7 @@ export function SessionTimeline({ items }: { items: TimelineItem[] }) {
           return (
             <MessageBubble
               key={key}
+              id={item.message.role === "user" ? userAnchorId(item.message.id) : undefined}
               role={item.message.role}
               text={item.message.text}
               at={item.at}

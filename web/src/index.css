@@ -52,6 +52,14 @@
   --color-warn: #f3c969;
   --color-bad: #ff6f91;
 
+  /* User bubble — a flat, saturated lilac fill (no gradient) so "your" messages
+     read as unmistakably yours against the graphite ramp and the agent's cooler
+     surface-2 bubble. Bright enough to pop, not another dark tonal layer. */
+  --color-user-bubble: #7c4fe0;
+  --color-user-border: #d8c8ff;
+  --color-user-label: #e6d9ff;
+  --color-user-text: #ffffff;
+
   /* Radii — moderate, per spec §8. */
   --radius-sm: 6px;
   --radius-md: 10px;
