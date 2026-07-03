@@ -28,10 +28,24 @@ gateway state**. This is authoring + light tooling, not a workflow engine.
 
 v0.5 §0 locks it: **v1 adds ZERO new gateway state.** No `flow_runs` table, no
 stage machine, no orchestrator changes to carry flow state. The XML task packet +
-milestone file + the dispatch convention ARE the state. If you feel the urge to
-add a migration or a `current_stage` column, STOP — that is Phase 2 (§16) and is
-explicitly out of scope. The whole point of this dispatch is that it is cheap and
-un-platformy.
+milestone file + the dispatch convention ARE the *workflow-orchestration* state. If
+you feel the urge to add a migration or a `current_stage` column, STOP — that is
+Phase 2 (§16) and is explicitly out of scope. The whole point of this dispatch is
+that it is cheap and un-platformy.
+
+> **CLARIFICATION — this does NOT sideline the database. Two different "states":**
+> 1. **Conversation / task / artifact state stays DB-canonical** (`mesh_tasks`
+>    ledger, migration 17 — spec §7). The harness's resume memory is
+>    `load_compact_context(task_id)`, which reads *from the DB*. Nothing here
+>    competes with or bypasses the DB system of record.
+> 2. **Workflow-orchestration state** (`flow_run_id`, `current_stage`,
+>    `plan_review`, a stage machine) is **not built at all in v1** — not "in files
+>    instead of the DB," just *deferred* (§16), because the task model is
+>    single-turn and the discipline hasn't yet proven it needs a flow engine.
+>
+> The `docs/harness/` files are **templates + prompt artifacts** (authoring
+> material), NOT a state store. A milestone `.md` is a per-task scratchpad, not the
+> system of record. So: DB = truth for work; files = the reusable *loop discipline*.
 
 ---
 
