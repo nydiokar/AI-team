@@ -4,7 +4,11 @@ This is how a task moves from idea to executed change, repeatably. It is the
 workflow the `.ai/dispatch/AGENT_*` files already follow, codified. A fresh
 executor should be able to run a small task from **this file alone**.
 
-> **Scope.** This runbook governs the authoring loop and the `.task.md` batch lane.
+> **Scope — two lanes.** This runbook governs the **authoring loop** and the
+> **`.task.md` batch lane** (files dropped for the watcher to auto-pickup). It does
+> **not** describe the **live `submit_instruction` lane** — the Telegram/Web path
+> where an operator sends a turn to an existing session; that lane has no packet and
+> no burndown, it just enqueues.
 > The **Level-3 admission gate**, however, is NOT limited to `.task.md`: it runs in
 > `orchestrator._enqueue_task`, the choke point every ingestion lane shares
 > (`submit_instruction` from Telegram/Web, `.task.md` auto-pickup, and internal
@@ -148,24 +152,149 @@ the primary control everywhere else.
 
 ---
 
-## Worked example (a real small task — this dispatch's own doc update)
+## Worked example — the whole loop, copyable, on one tiny task
 
-A Level-1 run, to show the loop end-to-end without a paid call:
+This runs all seven stages on a **fictitious Level-1 task** with **real filled
+artifacts** (not placeholders), so a fresh executor can copy the shapes. The task:
+*"add a `curl /health` liveness one-liner to `docs/harness/README.md`."* No paid
+call anywhere.
 
-1. **DRAFT** — intent: *"tick the §13 checklist in `docs/Task_harness_workflow.md`
-   for what shipped."* Level = **1** (single doc file, low-risk; no Level-3
-   trigger). Packet `<real_objective>`: the spec's build-scope checklist reflects
-   reality. Milestone Burndown = the checklist items to tick.
-2. **REVIEW** — one plausible F-tag: *"[F1] don't tick item 9 (`continues:`) if it
-   was shipped by a PRIOR dispatch, not this one — ticking implies this task did
-   it."* Resolution: tick only what this dispatch delivered; note the rest as
-   already-shipped.
-3. **FIX** — packet updated inline; 1 round; done.
-4. **DISPATCH** — Level 1, no `.task.md` needed; done inline on the branch.
-5. **EXECUTE** — edit the checklist; milestone Live Log updated.
-6. **CHECKPOINT** — `git diff` reviewed; docs-only, no `/security-review` needed.
-7. **CLOSE** — summary in the dispatch Implementation log; `DISPATCH_LOG.md` row →
-   `built`.
+### Stage 1 — DRAFT ([`generators/draft_packet.md`](generators/draft_packet.md))
 
-That is the whole loop. A fresh executor repeats it for any task, scaling stages by
-level.
+Pick the level first: single doc file, no Level-3 trigger fires → **Level 1**
+([`level_rubric.md`](level_rubric.md)). Fill [`packet_template.xml`](packet_template.xml):
+
+```xml
+<task_packet>
+  <meta>
+    <task_name>T-042-health-oneliner</task_name>
+    <harness_level>1</harness_level>
+  </meta>
+  <objective_lock>
+    <real_objective>A fresh operator can copy one command from the harness README to
+      confirm the gateway is live, without grepping the codebase for the port.</real_objective>
+    <literal_request>"add a curl health check line to the harness readme"</literal_request>
+    <interpreted_task>Append one fenced curl http://127.0.0.1:9003/health line under a
+      "Check the gateway is up" note in docs/harness/README.md. No script, no new endpoint.</interpreted_task>
+    <constraints>Docs-only. No code. Must NOT tell the reader to run `python main.py status`
+      (kills the live gateway — Test Cost Guard).</constraints>
+    <non_goals>No healthcheck script, Makefile target, or CI probe. Does not document :9002
+      (worker-facing, not the operator port).</non_goals>
+    <assumptions>The operator port is 9003 — VERIFY against S1 before writing, not from memory.</assumptions>
+    <drift_risks>Scope-creep into a shell script; suggesting main.py status; wrong port.</drift_risks>
+  </objective_lock>
+  <approved_plan>
+    <steps>1. Edit docs/harness/README.md: add a "Check the gateway is up" line with the fenced
+      curl http://127.0.0.1:9003/health command.</steps>
+    <validation>Docs consistency check only — NO pytest needed.
+      grep -n "9003/health" docs/harness/README.md returns the new line; port matches S1;
+      grep -c "main.py status" docs/harness/README.md returns 0.</validation>
+    <definition_of_done>README shows the copyable curl one-liner; no main.py status reference; port is 9003.</definition_of_done>
+    <risks>None (single doc line).</risks>
+  </approved_plan>
+  <execution_rules>
+    <do>Update the milestone Live Log after the edit; commit docs-only.</do>
+    <do_not>No paid CLI. No python main.py status. No new script.</do_not>
+    <report_format>closure_summary.md shape.</report_format>
+  </execution_rules>
+  <context_snippets>
+    <snippet id="S1" source=".ai/CONTEXT.md Test Cost Guard">
+      <quote>Check the running gateway with curl http://127.0.0.1:9003/health. Do NOT run python main.py status.</quote>
+      <why_relevant>Pins the correct port and the command to avoid — guards the two drift risks.</why_relevant>
+    </snippet>
+  </context_snippets>
+</task_packet>
+```
+
+And the initialized [`milestone_template.md`](milestone_template.md) (shown here at
+its final, closed state — Burndown ticked, Live Log carrying the trail):
+
+```md
+# Milestone: T-042 health one-liner
+
+## Objective
+A fresh operator can copy one curl command from the harness README to confirm the gateway is live.
+
+## Current Status
+closed
+
+## Burndown
+- [x] README shows the copyable `curl http://127.0.0.1:9003/health` one-liner
+- [x] no `main.py status` reference
+- [x] port is 9003 (matches S1)
+
+## Live Log
+- 2026-07-03T17:20 — drafted packet + milestone (Level 1) → locked after 1 review round → edit README
+- 2026-07-03T17:24 — edited README.md → curl line added, grep checks pass → close
+
+## Blockers
+none
+
+## Next Action
+closed — none
+```
+
+### Stage 2 — REVIEW ([`generators/adversarial_review.md`](generators/adversarial_review.md))
+
+Adversarial pass over the packet above. Two genuine P1s (no P0 — docs-only):
+
+```
+### F1 (P1 — scope drift) — <validation> could be read as "run the test suite".
+Failure scenario: executor runs full pytest "to be safe" on a docs-only change, burning time.
+Resolution: fixed inline — <validation> now says "docs consistency check only — NO pytest needed".
+
+### F2 (P1 — stale assumption) — port 9003 taken from memory, not verified.
+Failure scenario: port changes to 9004; executor copies 9003 blindly; the one-liner is dead —
+the exact opposite of <real_objective>.
+Resolution: fixed inline — <assumptions> now says "VERIFY against S1 before writing"; <validation> greps that the port matches S1.
+```
+
+### Stage 3 — FIX (≤ 2 rounds)
+
+Both F-tags fixed inline at the fields they guard (the packet above is already the
+**locked, post-fix** copy). Re-review round 1: no new findings → **locked** (1
+round, under the 2-cap). Nothing unresolved, so nothing spills to `<non_goals>`.
+
+### Stage 4 — DISPATCH
+
+Level 1, same-branch, hand-run: **no `.task.md` needed** (auto-pickup is for
+dispatched batch tasks). The packet is executed inline on the working branch. A
+`DISPATCH_LOG.md` row is still appended as `dispatched`.
+
+### Stage 5 — EXECUTE
+
+Make the one edit; update the milestone Live Log (done above). One line lands in
+`README.md`:
+
+```md
+**Check the gateway is up:** `curl http://127.0.0.1:9003/health` — do not run
+`python main.py status` (it kills the live gateway).
+```
+
+### Stage 6 — CHECKPOINT
+
+Review the **committed diff**, not the working tree. Docs-only, so the consistency
+grep is the whole check — no `/security-review`, no `pytest`:
+
+```
+$ grep -n "9003/health" docs/harness/README.md   # → the new line
+$ grep -c "main.py status" docs/harness/README.md # → 1 (the "do not" warning), 0 as an instruction
+```
+
+### Stage 7 — CLOSE ([`generators/closure_summary.md`](generators/closure_summary.md))
+
+```
+### T-042-health-oneliner — SHIPPED (2026-07-03)
+What changed: docs/harness/README.md → adds a copyable `curl .../health` liveness line.
+Verification: grep for "9003/health" (present) and "main.py status" as an instruction (absent). No pytest (docs-only).
+F-tag outcomes: F1 → fixed; F2 → fixed.
+What follows: none. No follow-up task; no `continues:`.
+```
+
+Then set the milestone `Current Status: closed` (done above), add the one-line
+Shipped-Ledger entry to `.ai/CONTEXT.md`, and move the `DISPATCH_LOG.md` row to
+`built`.
+
+That is the whole loop. A fresh executor repeats it for any task, **scaling stages
+by level** — a Level-0 typo collapses to stages 1+5; a Level-3 task adds the
+operator-approval gate between stages 3 and 4.
