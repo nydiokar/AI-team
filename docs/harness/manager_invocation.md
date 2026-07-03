@@ -55,6 +55,16 @@ driver; it advances the loop by judgment, spawning workers, and updating files.
 > 4. **No paid-CLI verification.** Plain `pytest` only; never the full e2e suite, never
 >    `python main.py status`. Live gateway check is `curl http://127.0.0.1:9003/health`.
 >
+> **Before LOOP 0 — check the base branch is current (learned from A15).** Prior harness
+> loops may sit **unmerged** on their own branches, so `main` can be *stale* relative to the
+> docs this driver points at (e.g. `.ai/DOC_MAP.md`, the slimmed `DISPATCH_LOG`). Before
+> branching: `git branch --no-merged main` — if a predecessor loop's branch is unmerged and
+> your work depends on its docs, either (a) branch off **that** branch, not `main`, or (b)
+> surface a merge-to-main fork to the operator first. **Never** carry another loop's
+> unmerged edits onto your branch (that co-mingles indexes — rule 3). If `DISPATCH_LOG`/
+> structure on `main` looks older than what this driver describes, that is the stale-base
+> signal — resolve it before dispatching, don't paper over it.
+>
 > **Execute one full loop autonomously:**
 >
 > - **LOOP 0 — frame.** Read the spec/intent. Ground it (rule 1). From the project-wide
