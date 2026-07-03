@@ -95,8 +95,11 @@ FINAL LOOP — after the milestone is exhausted
   (`dispatched → built → reviewed → merged`, plus `blocked`/`deferred`). Manager updates it.
 - **MANAGER REVIEW (d)** → `/code-review` + `/security-review` on the committed diff,
   house F-tag style; this IS spec §5's checkpoint reviewer, run by the Manager.
-- **Milestone burndown** → `docs/harness/milestone_template.md`.
-- **Closure / derive** → `generators/closure_summary.md` + `.ai/CONTEXT.md` ledger update.
+- **Milestone burndown** → a `## Milestone` section INSIDE the dispatch doc (body from
+  `docs/harness/milestone_template.md`) — one file, no `.milestone.md` sibling.
+- **Closure / derive** → a `## Closure` section appended to the same dispatch doc (per
+  `generators/closure_summary.md`) + `.ai/CONTEXT.md` ledger update. One dispatch = one
+  living file; role contract in `.ai/DOC_MAP.md`.
 
 ---
 
