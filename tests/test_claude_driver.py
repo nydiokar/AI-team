@@ -350,7 +350,7 @@ class TestSDKClientDriver:
         drv = ClaudeSDKClientDriver()
         session = _make_session(repo_path="")
 
-        def fake_send(self_inner, message):
+        def fake_send(self_inner, message, **_kw):
             return _ok("turn one reply", "sid-001")
 
         with patch.object(_SDKSession, "send", fake_send):
@@ -366,7 +366,7 @@ class TestSDKClientDriver:
         session = _make_session()
         call_count = {"n": 0}
 
-        def fake_send(self_inner, message):
+        def fake_send(self_inner, message, **_kw):
             call_count["n"] += 1
             return _ok(f"reply-{call_count['n']}", "sid-stable")
 
@@ -389,7 +389,7 @@ class TestSDKClientDriver:
         s1 = _make_session()
         s2 = _make_session()
 
-        def fake_send(self_inner, message):
+        def fake_send(self_inner, message, **_kw):
             return _ok("ok")
 
         with patch.object(_SDKSession, "send", fake_send):
@@ -405,7 +405,7 @@ class TestSDKClientDriver:
         drv = ClaudeSDKClientDriver()
         session = _make_session()
 
-        def fake_send(self_inner, message):
+        def fake_send(self_inner, message, **_kw):
             return _ok("ok")
 
         with patch.object(_SDKSession, "send", fake_send):
@@ -420,7 +420,7 @@ class TestSDKClientDriver:
         drv = ClaudeSDKClientDriver()
         session = _make_session()
 
-        def fake_send(self_inner, message):
+        def fake_send(self_inner, message, **_kw):
             return _ok("ok")
 
         with patch.object(_SDKSession, "send", fake_send):
@@ -434,7 +434,7 @@ class TestSDKClientDriver:
         drv = ClaudeSDKClientDriver()
         session = _make_session()
 
-        def bad_send(self_inner, message):
+        def bad_send(self_inner, message, **_kw):
             raise RuntimeError("SDK connection lost")
 
         with patch.object(_SDKSession, "send", bad_send):
@@ -448,7 +448,7 @@ class TestSDKClientDriver:
         drv = ClaudeSDKClientDriver()
         session = _make_session()
 
-        def fake_send(self_inner, message):
+        def fake_send(self_inner, message, **_kw):
             return _ok("ok")
 
         with patch.object(_SDKSession, "send", fake_send):
@@ -489,7 +489,7 @@ class TestErrorResultTurn:
         drv = ClaudeSDKClientDriver()
         session = _make_session()
 
-        def fake_send(self_inner, message):
+        def fake_send(self_inner, message, **_kw):
             return TurnOutcome(
                 output="",  # driver sets output=salvaged for error turns
                 backend_session_id="sid-x",
@@ -519,7 +519,7 @@ class TestErrorResultTurn:
         drv = ClaudeSDKClientDriver()
         session = _make_session()
 
-        def fake_send(self_inner, message):
+        def fake_send(self_inner, message, **_kw):
             return TurnOutcome(
                 output="",
                 backend_session_id="sid-y",
@@ -569,7 +569,7 @@ class TestClaudeCodeBackendDriverIntegration:
         session = _make_session(repo_path="")
         session.last_user_message = "initial prompt"
 
-        def fake_send(self_inner, message):
+        def fake_send(self_inner, message, **_kw):
             return _ok("first response", "sess-aaa")
 
         monkeypatch.setattr(_SDKSession, "send", fake_send)
