@@ -2815,7 +2815,70 @@ class TaskOrchestrator(ITaskOrchestrator):
                     "backend": backend_name,
                     "target_node": target_node,
                 })
+                # A11 follow-up: attribute this turn's execution_node_id to the
+                # remote node instead of leaving it null. The worker's own rich
+                # per-invocation telemetry (tool calls, model usage) ships
+                # separately via the worker's own sink and may or may not arrive
+                # depending on its connectivity to this gateway (see the A10 §T1
+                # revalidation: it didn't, for the mesh path exercised there).
+                # This pair of events is the one fact the gateway can assert
+                # unconditionally around the dispatch call — that execution
+                # happened on `target_node`, not here. Without it,
+                # telemetry_projection.project_turn() has no event carrying
+                # event_name in ("invocation.started", "process.spawned") for
+                # mesh-dispatched turns, so execution_node_id (and
+                # llm_invocations.node_id, derived from it) silently default to
+                # null. If the worker's own telemetry later starts arriving too,
+                # this will show as a second invocation row for the same
+                # turn_id — acceptable overlap, not a correctness bug, since
+                # each invocation_id is independently minted.
+                _mesh_invocation_id = None
+                try:
+                    from src.core.telemetry import (
+                        EMITTER_PROCESS_INSTANCE_ID,
+                        build_event,
+                        new_telemetry_id,
+                    )
+                    _mesh_invocation_id = new_telemetry_id("inv")
+                    self._telemetry_sink.emit(
+                        build_event(
+                            "invocation.started",
+                            turn_id=task.id,
+                            session_id=session.session_id,
+                            node_id=target_node,
+                            emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                            source="worker",
+                            invocation_id=_mesh_invocation_id,
+                            backend=backend_name,
+                            model=getattr(session, "model", None),
+                            attributes={"action": "mesh_dispatch"},
+                        )
+                    )
+                except Exception:
+                    logger.warning("event=mesh_dispatch_telemetry_emit_failed task_id=%s", task.id, exc_info=True)
                 result = await self._dispatch_to_node(task, session, node)
+                if _mesh_invocation_id is not None:
+                    try:
+                        self._telemetry_sink.emit(
+                            build_event(
+                                "invocation.completed",
+                                turn_id=task.id,
+                                session_id=session.session_id,
+                                node_id=target_node,
+                                emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
+                                source="worker",
+                                invocation_id=_mesh_invocation_id,
+                                backend=backend_name,
+                                model=getattr(session, "model", None),
+                                attributes={
+                                    "status": "success" if getattr(result, "success", False) else "failed",
+                                    "duration_ms": int(getattr(result, "execution_time", 0.0) * 1000),
+                                    "exit_code": getattr(result, "return_code", None),
+                                },
+                            )
+                        )
+                    except Exception:
+                        logger.warning("event=mesh_dispatch_telemetry_emit_failed task_id=%s", task.id, exc_info=True)
             finally:
                 if heartbeat_task and not heartbeat_task.done():
                     heartbeat_task.cancel()
@@ -3905,33 +3968,8 @@ Generated from user description: {description}
 
     def _nudge_worker_for_dispatch(self, node: Any, node_id: str, db: Any) -> bool:
         """Best-effort wake-up for a worker after enqueuing remote work."""
-        import urllib.request
-
-        tailscale_ip = getattr(node, "tailscale_ip", "") if node is not None else ""
-        api_port = getattr(node, "api_port", 0) if node is not None else 0
-        if (not tailscale_ip or not api_port) and node_id and db is not None:
-            try:
-                row = db.get_node(node_id)
-            except Exception:
-                row = None
-            if row:
-                tailscale_ip = row.get("tailscale_ip") or tailscale_ip
-                api_port = row.get("api_port") or api_port
-
-        if not tailscale_ip or not api_port:
-            logger.debug("event=mesh_nudge_skipped node_id=%s reason=no_address", node_id)
-            return False
-
-        url = f"http://{tailscale_ip}:{api_port}/nudge"
-        try:
-            req = urllib.request.Request(url, method="POST", data=b"")
-            with urllib.request.urlopen(req, timeout=2):
-                pass
-            logger.debug("event=mesh_nudge_sent node_id=%s url=%s", node_id, url)
-            return True
-        except Exception as e:
-            logger.debug("event=mesh_nudge_failed node_id=%s url=%s err=%s", node_id, url, e)
-            return False
+        from src.control.node_inspector import nudge_node_direct
+        return nudge_node_direct(node_id, db)
 
     async def _refresh_capable_nodes_before_routing(self, registry: Any, backend_name: str) -> None:
         """Nudge capable workers and briefly wait for fresher live_state."""
