@@ -31,6 +31,7 @@ import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
 import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionActivity, useJobs } from "../hooks/useLiveData";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
+import { useTaskActivity } from "../hooks/useTaskActivity";
 import {
   useStopSession,
   useCloseSession,
@@ -426,6 +427,7 @@ export function SessionDetailScreen() {
   } = useSessionMessages(id);
   const { data: approvals } = useApprovals();
   const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? []);
+  const liveActivity = useTaskActivity(id, session?.lastTaskId ?? undefined);
   const running = session?.opState === "running";
   const closed = session?.lifecycle === "closed";
   // Only treat as "loading" on the very first fetch — subsequent polls use
@@ -823,7 +825,7 @@ export function SessionDetailScreen() {
               </div>
             ) : timeline.length > 0 ? (
               <>
-                <SessionTimeline items={timeline} />
+                <SessionTimeline items={timeline} liveActivity={liveActivity} />
                 <div ref={bottomRef} className="h-px" />
               </>
             ) : (

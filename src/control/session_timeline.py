@@ -134,6 +134,10 @@ def build_session_timeline(
     items: list[SessionTimelineItem] = []
     for task in tasks:
         task_id: str = str(task.get("id") or "")
+        # Skip internal mesh health-check tasks — they must not appear in the
+        # user-facing session timeline.
+        if task_id.startswith("inspect_"):
+            continue
         node_id: str = str(task.get("claimed_by") or task.get("machine_id") or "")
         derived = derive_task_execution_state(
             task,

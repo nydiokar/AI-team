@@ -67,6 +67,10 @@ export type GatewayEvent =
   //    🟡 file.changed (from TaskResult.files_modified, not an event today).
   | { type: "artifact.created"; artifact: Artifact }
   | { type: "file.changed"; file: RemoteFile }
+  // ── live agent activity ─ emitted per-block from the SDK stream so the
+  //    running pill in chat can show "Using Bash" / "Thinking…" in real time.
+  //    Scoped to (sessionId, taskId) so stale events from prior turns are ignored.
+  | { type: "task.activity"; sessionId: string; taskId: string; label: string }
   // ── run control ─ ✅ run.cancelled (rename `cancelled`).
   | { type: "run.cancelled"; runId: string; sessionId?: string | null; taskId?: string | null }
   // ── connection ─ 🟡 PARTIAL: derived from node heartbeat / transport.

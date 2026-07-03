@@ -157,6 +157,22 @@ export function adaptEvent(ev: RawEvent): GatewayEvent | null {
     return toNotice(ev);
   }
 
+  // ── task.activity — real-time agent state from the SDK stream ---------------
+  // Emitted by the SDK driver for each content block (ToolUseBlock, ThinkingBlock,
+  // TextBlock). Scoped to task_id + session_id so stale events from prior turns
+  // are filtered client-side. NOT surfaced as a notice — it only feeds the pill.
+  if (name === "task_activity") {
+    if (ev.task_id && ev.session_id) {
+      return {
+        type: "task.activity",
+        sessionId: String(ev.session_id),
+        taskId: String(ev.task_id),
+        label: String((ev as Record<string, unknown>).label ?? "Working…"),
+      };
+    }
+    return null;
+  }
+
   // Unknown backend event: don't lose it — surface as an info notice so the
   // timeline never silently drops signal (diagnostics value).
   return toNotice(ev);
