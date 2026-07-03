@@ -17,10 +17,12 @@ no DB, no backend, no paid CLI.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from src.core.interfaces import Task, TaskType, TaskPriority, TaskStatus
-from src.orchestrator import TaskOrchestrator
+from src.orchestrator import TaskOrchestrator, HarnessAdmissionBlocked
 
 GUARD = TaskOrchestrator._harness_level3_allows_autopickup
 
@@ -99,3 +101,57 @@ def test_on_unparseable_level_allowed(guard_on):
 def test_falsey_flag_values_leave_guard_off(monkeypatch, flag):
     monkeypatch.setenv("HARNESS_LEVEL3_GUARD", flag)
     assert GUARD(_task({"harness_level": 3})) is True
+
+
+# ---------------------------------------------------------------------------
+# Hot-path admission gate in `_enqueue_task` — the choke point every ingestion
+# lane (submit_instruction/Telegram/Web + .task.md) passes through. This is the
+# follow-up (build-review B1): the gate must fire on the MAIN door, not just the
+# .task.md lane. A blocked task must raise HarnessAdmissionBlocked and leave NO
+# side effect (not queued, not in active_tasks); an allowed task enqueues and
+# returns its id, byte-identical to before.
+# ---------------------------------------------------------------------------
+
+def _enqueue(orch: TaskOrchestrator, task: Task):
+    return asyncio.run(orch._enqueue_task(task))
+
+
+@pytest.fixture
+def orch():
+    # A bare orchestrator is enough: _enqueue_task only needs task_queue,
+    # active_tasks, and the event/telemetry emitters, all set in __init__.
+    return TaskOrchestrator()
+
+
+def test_enqueue_blocks_level3_unapproved_when_flag_on(orch, guard_on):
+    task = _task({"harness_level": 3})
+    with pytest.raises(HarnessAdmissionBlocked) as exc:
+        _enqueue(orch, task)
+    assert exc.value.task_id == task.id
+    assert exc.value.reason == "harness_level3_needs_approval"
+    # No side effect leaked past the gate.
+    assert task.id not in orch.active_tasks
+    assert orch.task_queue.qsize() == 0
+
+
+def test_enqueue_allows_level3_approved_when_flag_on(orch, guard_on):
+    task = _task({"harness_level": 3, "approved": True})
+    returned = _enqueue(orch, task)
+    assert returned == task.id
+    assert task.id in orch.active_tasks
+    assert orch.task_queue.qsize() == 1
+
+
+@pytest.mark.parametrize("meta", [{}, {"harness_level": 2}, {"harness_level": 1}])
+def test_enqueue_allows_non_level3_when_flag_on(orch, guard_on, meta):
+    task = _task(meta)
+    assert _enqueue(orch, task) == task.id
+    assert task.id in orch.active_tasks
+
+
+def test_enqueue_flag_off_allows_level3_unapproved(orch, guard_off):
+    # Byte-identical legacy behavior: with the flag off, a Level-3 task enqueues.
+    task = _task({"harness_level": 3})
+    assert _enqueue(orch, task) == task.id
+    assert task.id in orch.active_tasks
+    assert orch.task_queue.qsize() == 1

@@ -288,6 +288,40 @@ no skill-backed executable to import-smoke. Commit 2.
   OR the field is absent OR the level is ≤ 2 OR unparseable; `MESH_ENABLED`/default
   behavior is byte-identical. No flow table.
 
+### Post-build course-correction note (added 2026-07-03, after build-review B1/B2)
+
+**B1 (SCOPE — confirmed in code, awaiting operator).** The pipeline + Level-3 guard
+are wired onto the `.task.md` / `file_watcher` auto-pickup lane, which is the
+**secondary** ingestion path. Verified:
+- `find . -name '*.task.md'` → only June-7 e2e smoke fixtures in `tasks/processed/`
+  (already consumed) + one `tests/` file. No real work has ever entered via `.task.md`.
+- Guard invoked **only** at `orchestrator.py:1829` inside `_handle_new_task_file`
+  (callers: file_watcher + persistence-recovery only).
+- **Real work enters via Telegram/Web → `submit_instruction`** (5 call sites in
+  `src/telegram/interface.py`, 2 in `src/control/control_api.py`). Confirmed
+  `submit_instruction` / `_make_task` / `_enqueue_task` carry **zero** `harness_level`
+  reference — the main door is un-harnessed and unguarded.
+- Not a regression (guard is `HARNESS_LEVEL3_GUARD`-gated OFF, convention-first). The
+  aim, inherited from spec §14, is the defect: it treated "the auto-pickup primitive
+  lives here" as "work enters here." **Operator decision pending** — see the A9H row
+  in `DISPATCH_LOG.md`; do not merge until decided.
+
+**B2 (STALE-PROMPT claim — corrected by git evidence).** The build-review said the
+Level-3 guard "already existed in the tree before this dispatch" and that T3 was
+"uncommitted." Both are inaccurate:
+- `git show main:src/orchestrator.py` has **no** `_harness_level3_allows_autopickup`
+  / `harness_level` / `HARNESS_LEVEL3_GUARD`. `git log -S` shows the guard was
+  introduced by **this dispatch's T3 commit `356c2c2`** and nowhere else — it is
+  genuinely new, not pre-existing.
+- T3 **is committed** (clean working tree), not sitting uncommitted.
+- What *did* predate this dispatch is the **`continues:` compact-context injection**
+  (`_maybe_inject_compact_context`, from A9/#31/#32) — and notably **that** one *is*
+  already wired into the real `submit_instruction`/`process_task` path (works via
+  `extra_metadata` too). So the pre-existing harness-adjacent seam on the hot path is
+  `continues:`, not the Level-3 guard. Recording this so the history is honest and the
+  next dispatch aims at `submit_instruction`, where `continues:` already proved the
+  hot path is reachable.
+
 **Verification (no paid CLI):**
 - `pytest tests/test_harness_level3_guard.py -q` → **18 passed** (guard off ⇒
   allow; on: absent-field ⇒ allow, level ≤ 2 ⇒ allow, level 3 unapproved ⇒ BLOCK,
@@ -310,3 +344,49 @@ gateway behavior unchanged.
    running behavior; the convention is the primary control until then.
 2. Adversarial build-review → `DISPATCH_LOG.md` A9H `built` → `reviewed`, then
    merge `feat/task-harness` → `main` → `merged`.
+
+### T4 — Follow-up: move the Level-3 gate onto the HOT path (2026-07-03, Option 3)
+
+Operator picked build-review **Option 3**: keep what shipped and build the real
+follow-up now — attach the admission gate to the ingestion path work actually
+enters through. Done on `feat/task-harness` (commit 4).
+
+- **New:** `orchestrator.HarnessAdmissionBlocked(task_id, reason)` — raised, not
+  returned, so a blocked task can never be mistaken for an accepted one (no
+  `task_id` to hand back).
+- **Gate relocated to the choke point.** `_harness_level3_allows_autopickup` is now
+  invoked at the TOP of `_enqueue_task` (before any queue/event/telemetry
+  side-effect), which **every** lane passes through: `submit_instruction`
+  (Telegram 5 sites, Web/control-API 2 sites), `.task.md` auto-pickup, and internal
+  runtime tasks. On refusal it emits `task_blocked` and raises; nothing is queued
+  and `active_tasks` is untouched (verified).
+- **Redundant inline check removed** from `_handle_new_task_file`; that lane now
+  just catches `HarnessAdmissionBlocked` to release its file-tracking state (so an
+  `approved: true` re-write is re-picked-up). Single emit site now.
+- **Caller surfacing (honest, no faked acceptance):** control API
+  `POST /api/instructions` → **HTTP 409** `{error: harness_level3_needs_approval}`;
+  Telegram free-text handlers (`_submit_buffered_instruction`, `_queue_instruction`)
+  → "⛔ Level-3 … needs operator approval … not started". The file-upload submit
+  sites already had an `except Exception` reply, so they surface it too.
+- **Trap avoided (as flagged):** the gate is admission control in `_enqueue_task`,
+  **not** `process_task`/`_maybe_inject_compact_context` — the latter is
+  post-enqueue execution, too late to block. `continues:` living there is
+  irrelevant to where the gate belongs.
+- **Import safety:** `interface.py` imports `HarnessAdmissionBlocked` at module
+  level; safe because orchestrator imports interface only lazily (no cycle) —
+  verified by import smoke.
+
+**Verification (no paid CLI):**
+- `pytest tests/test_harness_level3_guard.py tests/test_compact_context_injection.py -q`
+  → **35 passed** (18 pure-predicate + 6 new `_enqueue_task` admission:
+  level-3-unapproved raises + no side effect / level-3-approved enqueues /
+  non-level-3 enqueues / flag-off enqueues; + 11 compact-context).
+- `pytest tests/test_control_api.py tests/test_control_api_write.py` → **51 passed**;
+  `tests/test_telegram_session_flow.py` → **24 passed** (caller catches don't
+  regress).
+- Import smoke: `interface` + `control_api` + `HarnessAdmissionBlocked` import clean,
+  no circular import.
+- Default behavior byte-identical: with `HARNESS_LEVEL3_GUARD` unset the gate is a
+  pure pass-through on all lanes.
+
+**Still not merged** — operator's call once green. DISPATCH_LOG A9H stays `built`.
