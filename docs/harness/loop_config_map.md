@@ -313,7 +313,11 @@ row 9; dial 8: row 2; dial 9: row 10; dial 10: row 11; dial 11: row 12). Load-be
   `operating_model.md`; this only writes down their per-node behavior.
 - **Noted future item (not built):** if model-route-per-node ("cheap DRAFT / strong
   REVIEW") is ever wanted as a real dial rather than a stated preference, that is a
-  Phase-2 promotion — out of scope here.
+  Phase-2 promotion — out of scope here. **Its promotion is governed by the evidence-gated
+  [`promotion_ladder.md`](promotion_ladder.md) (row 2):** it stays COLD — a stated
+  preference applied by hand — until the ladder's concrete trigger is *observed* (a bad
+  output traced to the wrong model on a node, after manual routing was actually tried and
+  recurs). Being named absent here does not promote it.
 
 **Spec:** full doctrine — [`../Task_harness_workflow.md`](../Task_harness_workflow.md)
 (v0.5). Deferred end-state — [`../Task_Harness_v0.4.md`](../Task_Harness_v0.4.md).
