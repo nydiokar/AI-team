@@ -31,12 +31,12 @@ explicitly instead of silently showing running/failed. Covered by targeted backe
 - #8 benchmark was not rerun; no ingestion/query/projection performance code changed.
 - Do **not** mark #9 shipped yet: the gateway-routed temporary mesh attempt did not reach a usable embedded task server on alternate port `9014`, so the completed mesh smoke lacks gateway-source events (`gateway_node_id` is null). Before scheduling #10 M3 Claude adapter, run/pass a gateway-routed mesh Codex smoke through the production controller/gateway path or a stable equivalent.
 
-### LLM Turn Observability — future milestones (not started)
+### LLM Turn Observability — future milestones
 
 | # | Task | Source | Depends on | Scope |
 |---|---|---|---|---|
-| 10 | **M3** — Claude adapter (stream-json parser, hook integration, coverage UI) | §9.5 | #9 | Backend |
-| 11 | **M4** — OpenCode CLI/server| §9.6–9.7 | #10 | Backend | DEFFER FOR NOW
+| 10 | **M3** — Claude adapter (stream-json parser, hook integration, coverage UI) | §9.5 | #9 | Backend ✅ SHIPPED 2026-07-03 on `feat/m3-claude-telemetry` (dispatch `.ai/dispatch/AGENT_10_M3_CLAUDE_TELEMETRY.md`). `ClaudeStreamJsonAdapter` post-processes `raw_stdout` at `ClaudeCodeBackend` public method boundary covering SDK + PrintResume paths. 18 tests. Token semantics: `includes_cache`. Double-count guard. Tool call mapping (name+category, input/content never stored). Coverage: `stream_only` (hooks not wired). NOTE: #9 gateway-routed mesh smoke is still pending live session — see T1 in dispatch. M3 is shipped but M1/M2 not yet formally closed pending #9. |
+| 11 | **M4** — OpenCode CLI/server | §9.6–9.7 | #10 | Backend | DEFERRED FOR NOW |
 
 ### Web UI Feature Requests / UX Issues
 
