@@ -37,12 +37,32 @@ class _MalformedSubscription(Exception):
     rather than retrying it on every outcome."""
 
 
+def _valid_vapid_public_key(key: str) -> bool:
+    """A browser applicationServerKey must be a P-256 uncompressed EC point:
+    65 bytes starting with 0x04, i.e. 87 base64url chars. A 32-byte key (a common
+    wrong-format mistake) is rejected here instead of failing in the browser."""
+    import base64
+
+    try:
+        pad = "=" * ((4 - len(key) % 4) % 4)
+        raw = base64.urlsafe_b64decode(key + pad)
+    except Exception:
+        return False
+    return len(raw) == 65 and raw[0] == 0x04
+
+
 def push_available(cfg: Any, db: Any) -> tuple[bool, Optional[str]]:
-    """Return (available, reason). Available iff VAPID configured, pywebpush
-    importable, and a DB is present. ``reason`` explains why not, for the UI."""
+    """Return (available, reason). Available iff VAPID configured (and the public
+    key is a valid EC point), pywebpush importable, and a DB is present. ``reason``
+    explains why not, for the UI/operator."""
     push_cfg = getattr(cfg, "push", None)
     if push_cfg is None or not getattr(push_cfg, "configured", False):
         return False, "vapid_not_configured"
+    if not _valid_vapid_public_key(getattr(push_cfg, "vapid_public_key", "") or ""):
+        # Wrong-format key (e.g. 32-byte instead of the 65-byte uncompressed
+        # point) — the browser would reject it as "applicationServerKey is not
+        # valid". Surface it here so the operator sees the real cause.
+        return False, "vapid_public_key_malformed"
     if db is None:
         return False, "db_unavailable"
     try:

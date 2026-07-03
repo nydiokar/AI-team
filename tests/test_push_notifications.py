@@ -99,6 +99,27 @@ def test_push_unavailable_without_vapid(db):
     assert reason == "vapid_not_configured"
 
 
+def test_push_rejects_malformed_public_key(db):
+    # A 32-byte (43-char) key is the common wrong-format mistake; the browser
+    # rejects it as "applicationServerKey is not valid". Catch it server-side.
+    cfg = _push_cfg(configured=True)
+    cfg.push.vapid_public_key = "YJIP-sRQ1mAzoTTowe63PyX_jjrEr0iFmUrtKt53pX0"  # 43 chars
+    ok, reason = push_available(cfg, db)
+    assert not ok
+    assert reason == "vapid_public_key_malformed"
+
+
+def test_valid_vapid_public_key_accepts_65_byte_point():
+    import base64
+    from src.services.push_service import _valid_vapid_public_key
+
+    raw = bytes([0x04]) + bytes(64)  # 65 bytes, uncompressed point marker
+    key = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    assert _valid_vapid_public_key(key) is True
+    assert _valid_vapid_public_key("") is False
+    assert _valid_vapid_public_key("short") is False
+
+
 def test_fanout_disables_gone_and_records_timeout(db):
     db.upsert_push_subscription("https://e/ok", "p", "a")
     db.upsert_push_subscription("https://e/gone", "p", "a")
