@@ -72,12 +72,17 @@ tasks are introduced.
    `submit_instruction(extra_metadata=...)`. Docs: `docs/Task_harness_workflow.md`
    §7/§14. Tests: `tests/test_compact_context_injection.py` (11) + unchanged
    `tests/test_context_loader.py` (2) → 13 green.
-4. **#5-#9 LLM Turn Observability remaining validation** — finish M1/M2 release
-   validation after the operator surfaces above are moving. #8 is already done;
-   2026-07-02 local Codex smoke and controlled worker/controller mesh Codex
-   smoke passed with graph/diagnostics/events/privacy scans recorded below, but
-   #9 is **not shipped** yet because a gateway-routed mesh smoke still needs to
-   pass with gateway-source telemetry before M3 Claude adapter scheduling.
+4. **#5-#9 LLM Turn Observability remaining validation** — #8 done. 2026-07-02 local
+   Codex smoke and controlled mesh Codex smoke passed. **#9 still pending**: gateway-
+   routed mesh smoke needs a live session (kanebra + Horse online) to verify non-null
+   `gateway_node_id` in `llm_turns`. Steps + DB verification query documented in
+   `.ai/dispatch/AGENT_10_M3_CLAUDE_TELEMETRY.md` T1 section. Until #9 passes, M1/M2
+   are not formally closed.
+5. **#10 M3 Claude adapter** — ✅ SHIPPED 2026-07-03 on `feat/m3-claude-telemetry`
+   (dispatch `.ai/dispatch/AGENT_10_M3_CLAUDE_TELEMETRY.md`). `ClaudeStreamJsonAdapter`
+   + `_maybe_emit_telemetry` at `ClaudeCodeBackend` boundary. 18 tests. Coverage:
+   `stream_only`. NOTE: shipped ahead of #9 formal closure; M3 is functional and
+   tested but the M1/M2→M3 scheduling gate (#9) is still pending the live smoke.
 
 Recently completed and should remain called out as done: **#34 Stop Task
 Behavior**, **#36 Remove Tasks Page / Replace With Jobs**, **#37 Move Job Event
