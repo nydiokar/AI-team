@@ -38,7 +38,17 @@ class SessionStore:
 
     def create(self, backend: str, repo_path: str,
                 telegram_chat_id: Optional[int] = None,
-                owner_user_id: Optional[int] = None) -> Session:
+                owner_user_id: Optional[int] = None,
+                machine_id: Optional[str] = None) -> Session:
+        # A11: stamp the pinned node atomically at create time. Previously this
+        # always wrote `socket.gethostname()` (the local host) and callers that
+        # wanted a remote pin had to set `machine_id` and `save()` afterwards —
+        # a window in which the just-written JSON/DB row named the LOCAL host.
+        # A concurrent read (e.g. the gateway's own worker pool picking the task
+        # off the queue) in that window saw machine_id=<local host>, so the
+        # affinity check ran the remote-pinned task locally. Accepting the pin
+        # here closes that window: the row never transiently names the wrong node.
+        pinned = (machine_id or "").strip() or socket.gethostname()
         session = Session(
             session_id=uuid.uuid4().hex[:12],
             backend=backend,
@@ -46,13 +56,13 @@ class SessionStore:
             status=SessionStatus.IDLE,
             created_at=datetime.now().isoformat(),
             updated_at=datetime.now().isoformat(),
-            machine_id=socket.gethostname(),
+            machine_id=pinned,
             telegram_chat_id=telegram_chat_id,
             owner_user_id=owner_user_id,
         )
         self._write(session)
         self._shadow_write(session)
-        logger.info(f"session_created id={session.session_id} backend={backend} path={repo_path}")
+        logger.info(f"session_created id={session.session_id} backend={backend} path={repo_path} machine_id={pinned}")
         return session
 
     def get(self, session_id: str) -> Optional[Session]:
