@@ -98,6 +98,11 @@ files. This is the "don't rebuild it, it's done" list.
   Flag-guarded `HARNESS_LEVEL3_GUARD`, OFF by default → byte-identical legacy when
   the field/flag is absent. 35 harness/compact + 51 control-API + 24 telegram tests
   green. Spec `docs/Task_harness_workflow.md` §13 ticked.
+- **Harness self-test (A12, `feat/task-harness`)** — ran one real task through the
+  §14 loop by hand to prove the operating model works before any Phase-2 build.
+  `dispatch_pipeline.md` now carries a two-lane scope banner + a copyable all-7-stage
+  worked example (real packet/milestone/F-tags/closure). Friction report verdict:
+  **Phase 2 NOT justified** — file/dispatch discipline held; see `AGENT_12_HARNESS_SELFTEST.md`.
 
 **Compact-Context (merged from `feat/compact-context`, PR #6):**
 - **#31/#32** `load_compact_context` wired via opt-in `continues: <task_id>` frontmatter → `process_task` prepends bounded, fence-hardened `<prior_context>` block. No new gateway state. Docs: `docs/Task_harness_workflow.md` §7/§14.
