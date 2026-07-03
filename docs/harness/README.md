@@ -42,6 +42,7 @@ escalate one level.
 | [`generators/closure_summary.md`](generators/closure_summary.md) | CLOSE: what changed, F-tag outcomes, doc updates |
 | [`dispatch_pipeline.md`](dispatch_pipeline.md) | the end-to-end runbook (start here to run a task) |
 | [`loop_config_map.md`](loop_config_map.md) | the loop's **control surface**: node table (driver/programmed-by/dials per stage), the "temperature" dials, Manager-vs-Executor behavior + Manager spec, and a failure→node→dial localization table (read this to debug a bad loop) |
+| [`promotion_ladder.md`](promotion_ladder.md) | the **evidence-gated roadmap** for the harness's own future: for each v0.4 element v0.5 deferred, the concrete observed trigger that would ever justify promoting it (model-routing promotion is governed here). Authorizes nothing; gates everything. |
 
 ## Cost guard (always)
 

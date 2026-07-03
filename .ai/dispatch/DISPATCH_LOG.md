@@ -24,8 +24,9 @@ is an operator merge decision.
 | A10 | `AGENT_10_M3_CLAUDE_TELEMETRY.md` | 2026-07-03 | 2 | merged (`c168028`) | M3 Claude stream-json telemetry adapter; #9 gateway-routed smoke CLOSED, T2 verified live. |
 | A11 | `AGENT_11_MESH_AFFINITY_ROUTING.md` | 2026-07-03 | 2 | merged | Fix: session pin honored at execution — no silent local fallback; `affinity_unrouted` guard; T3 re-validated. |
 | A12 | `AGENT_12_HARNESS_SELFTEST.md` | 2026-07-03 | 2 | built — op-merge | Ran the §14 loop by hand on the pipeline doc; two-lane banner + copyable example; friction verdict: Phase 2 NOT justified. |
-| A13 | `AGENT_13_LOOP_CONFIG_MAP.md` | 2026-07-03 | 2 | reviewed — op-merge | `docs/harness/loop_config_map.md`: node table + 11 dials + Manager spec + failure-localization; docs-only. |
-| A14 | `AGENT_14_DOC_STRUCTURE_CONTRACT.md` | 2026-07-03 | 2 | built — op-merge | Doc-role contract (`DOC_MAP.md`), slimmed this index, restored CONTEXT Current Focus, one-dispatch-one-file rule wired into harness templates. |
+| A13 | `AGENT_13_LOOP_CONFIG_MAP.md` | 2026-07-03 | 2 | merged | `docs/harness/loop_config_map.md`: node table + 11 dials + Manager spec + failure-localization; docs-only. |
+| A14 | `AGENT_14_DOC_STRUCTURE_CONTRACT.md` | 2026-07-03 | 2 | merged | Doc-role contract (`DOC_MAP.md`), slimmed this index, restored CONTEXT Current Focus, one-dispatch-one-file rule wired into harness templates. |
+| A15 | `AGENT_15_HARNESS_PROMOTION_LADDER.md` | 2026-07-04 | 2 | merged | Evidence-gated v0.5→v0.4 promotion ladder + `manager_invocation.md` driver; 3 of 6 v0.4 elements are drop-candidates. First loop via the driver. |
 | FX1 | `FIX_CLAUDE_ISERROR_PROMPT_TOO_LONG.md` | 2026-07-03 | — | merged (`a3f734b`) | SDK `is_error` no longer stored as a successful "Prompt is too long" reply; open: #41 context-fill gauge. |
 
 ---
