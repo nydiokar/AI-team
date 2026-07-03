@@ -15,6 +15,7 @@ import pytest
 from src.orchestrator import TaskOrchestrator
 from src.bridges.llama_mediator import LlamaMediator
 from src.core.interfaces import Task, TaskType, TaskPriority, TaskStatus, TaskResult
+from src.backends.claude_driver import _parse_print_resume as _parse_result
 
 
 def _make_task(task_id: str = "retry_test") -> Task:
@@ -57,7 +58,7 @@ async def test_retry_on_transient_then_success(monkeypatch):
         calls.append(1)
         if len(calls) == 1:
             # First call: transient failure
-            return orch._backends["claude"]._parse(  # type: ignore[attr-defined]
+            return _parse_result(
                 stdout="",
                 stderr="Rate limit exceeded. Please retry later.",
                 returncode=1,
@@ -65,7 +66,7 @@ async def test_retry_on_transient_then_success(monkeypatch):
                 known_session_id="",
             )
         # Second call: success
-        return orch._backends["claude"]._parse(  # type: ignore[attr-defined]
+        return _parse_result(
             stdout="OK",
             stderr="",
             returncode=0,
@@ -103,7 +104,7 @@ async def test_no_retry_on_fatal(monkeypatch):
 
     def fake_run_oneoff(cwd: str, message: str):
         # Fatal failure (no transient markers)
-        return orch._backends["claude"]._parse(  # type: ignore[attr-defined]
+        return _parse_result(
             stdout="",
             stderr="Compilation failed",
             returncode=1,
