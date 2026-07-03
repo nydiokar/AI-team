@@ -3,9 +3,13 @@
 **Role:** Manager (spec §4 / §14 step 7). Runs after execution + checkpoint review.
 Produces the record of what changed and what follows, and the doc-update stub.
 
-**Input:** the finished work + the milestone file + the review's F-tags.
-**Output:** a closure summary + a `.ai/CONTEXT.md` / `.ai/dispatch/DISPATCH_LOG.md`
-update stub. The Level-3 wiki is **optional and never a gate**.
+**Input:** the finished work + the `## Milestone` section + the review's F-tags (all in
+the one dispatch doc).
+**Output (ONE-FILE RULE):** a `## Closure` **section appended to the same dispatch doc**
+`.ai/dispatch/AGENT_N_*.md` — NOT a separate `.closure.md` sibling — plus a
+`.ai/CONTEXT.md` / `.ai/dispatch/DISPATCH_LOG.md` update stub. One dispatch = one living
+file (packet → milestone → closure). The Level-3 wiki is **optional and never a gate**.
+(Contract: `.ai/DOC_MAP.md`.)
 
 ---
 
@@ -31,10 +35,11 @@ update stub. The Level-3 wiki is **optional and never a gate**.
 > Then produce the **doc-update stub**:
 > - `.ai/CONTEXT.md` — a one-line Shipped-Ledger entry (or a Priorities-table
 >   status change).
-> - `.ai/dispatch/DISPATCH_LOG.md` — move this dispatch's row to
->   `built` / `reviewed` / `merged` and shrink "What's left".
+> - `.ai/dispatch/DISPATCH_LOG.md` — advance this dispatch's ONE-line index row to
+>   `built` / `reviewed` / `merged` (keep it one line — all detail stays in the
+>   dispatch doc's `## Closure` section).
 >
-> Set the milestone file `Current Status: closed`.
+> Set the dispatch doc's `## Milestone` section `Current Status: closed`.
 
 ---
 
