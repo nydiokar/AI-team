@@ -1,56 +1,21 @@
 # Roadmap
 
-This roadmap is for the current product: a session-first Telegram gateway for local coding agents.
+> **This file is a pointer, not the source of truth.** The live roadmap, current
+> priorities, and dispatched-job state moved into the `.ai/` context hub. This page
+> exists so anyone landing here from `docs/` is redirected to the right place.
 
-## Current State
+## Where the real state lives
 
-Implemented:
-- session creation and routing from Telegram
-- native resume through Claude Code and Codex backends
-- file-backed session state and summaries
-- per-session event logs
-- path validation and path suggestions
-- one-off task fallback
-- basic git helper commands
+| You want… | Read |
+|---|---|
+| Current priorities + what's shipped + how it's wired now | [`.ai/CONTEXT.md`](../.ai/CONTEXT.md) |
+| State of every dispatched job (the manual state machine) | [`.ai/dispatch/DISPATCH_LOG.md`](../.ai/dispatch/DISPATCH_LOG.md) |
+| Strategic product intent + anti-goals | [`.ai/context/production_vision.md`](../.ai/context/production_vision.md) |
+| Completed-work history | [`docs/archive/progress/_archive_PROGRESS_LOG.md`](archive/progress/_archive_PROGRESS_LOG.md) |
 
-## Before Calling It Production
+## The one constraint that never changes
 
-### 1. Live session-resume validation
-
-Required:
-- create a real Telegram session
-- verify backend session id capture
-- verify second turn resumes the same backend session
-
-### 2. Workspace boundary decision
-
-Required:
-- set `CLAUDE_BASE_CWD`
-- set `CLAUDE_ALLOWED_ROOT`
-- confirm the chosen root includes every repo the gateway should be able to edit
-
-### 3. Test-suite reconciliation
-
-Required:
-- continue removing stale legacy tests
-- keep focused tests around session routing, path validation, and backend behavior
-- make sure the remaining suite reflects the session-first product rather than the historical orchestrator/agent-template design
-
-### 4. Publish cleanup
-
-Required:
-- keep docs small and canonical
-- archive or remove historical docs that describe the wrong product
-- leave dormant LLAMA/local-agent code clearly marked as future-facing rather than active
-
-## Later
-
-Possible future work, only if it still fits the product:
-- stronger real-repo E2E coverage
-- richer session inspection
-- safer git/approval flows
-- optional local operational layer using LLAMA or local agents
-
-The key constraint remains the same:
-- backend-native runtime stays primary
-- the gateway should not drift into a broad autonomous orchestration framework
+- The product is a **session-first Telegram/Web gateway for local coding agents**.
+- Backend-native resume (Claude Code / Codex) stays the primary runtime.
+- The gateway must **not** drift into a broad autonomous orchestration framework,
+  opaque memory, or PTY-persistence-as-backbone. See `production_vision.md` §6/§7.

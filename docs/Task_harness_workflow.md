@@ -403,7 +403,7 @@ runs repeatably and, where safe, hands off automatically.
 (6) CHECKPOINT   a reviewer reviews the committed diff (§5), P0/P1 only, F-tags;
                  executor fixes bounded findings.
 (7) CLOSE        closure summary + milestone → closed; update `.ai/CONTEXT.md` /
-                 `.ai/NEXT_TASKS.md`; (Level 3) optional wiki.
+                 `.ai/dispatch/DISPATCH_LOG.md`; (Level 3) optional wiki.
 ```
 
 **F-tag convention (house style, from AGENT_8):** each finding gets a stable id
