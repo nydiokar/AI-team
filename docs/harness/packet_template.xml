@@ -1,0 +1,104 @@
+<!--
+  XML TASK PACKET — model-facing instruction template (spec §2.1).
+
+  WHAT THIS IS: prose in a stable shape. It reduces instruction drift by forcing
+  the drafter to separate the *real objective* from the *literal request* and to
+  state non-goals up front. It is NOT a schema — NOTHING parses this file. Do not
+  build a validator for it (spec F6). Fill the fields, delete the guidance
+  comments if you like, and hand the result to the executor.
+
+  HOW TO USE: the DRAFT role (docs/harness/generators/draft_packet.md) emits a
+  filled copy of this alongside an initialized milestone file
+  (docs/harness/milestone_template.md). Copy this file next to the dispatch, e.g.
+  `.ai/dispatch/<NAME>.packet.xml`, or inline it into the dispatch `.md`.
+
+  LEVEL: pick with docs/harness/level_rubric.md. Levels 0–1 may skip most of this
+  (a one-line objective_lock is enough). Levels 2–3 fill it fully.
+-->
+<task_packet>
+  <!-- Non-parsed metadata for humans. `harness_level` mirrors the level_rubric
+       decision and, for a dispatched `.task.md`, MUST match the frontmatter
+       `harness_level:` field (spec §14 auto-pickup boundary). -->
+  <meta>
+    <task_name></task_name>
+    <harness_level></harness_level>   <!-- 0 | 1 | 2 | 3 -->
+    <continues></continues>          <!-- optional: prior task_id to resume from (spec §7/§14) -->
+  </meta>
+
+  <objective_lock>
+    <!-- real_objective: the OUTCOME the operator actually wants — the "why",
+         stated as a result in the world, not a code change. This is what you
+         protect when the literal request and the real goal diverge. -->
+    <real_objective></real_objective>
+
+    <!-- literal_request: the operator's words, verbatim or near-verbatim. Keep it
+         separate from your interpretation so drift is visible. -->
+    <literal_request></literal_request>
+
+    <!-- interpreted_task: how YOU (the drafter) are reading the request into a
+         concrete task. If this differs from literal_request, say why. -->
+    <interpreted_task></interpreted_task>
+
+    <!-- constraints: hard limits the executor must respect (cost guard, "no new
+         gateway state", feature-flag rules, files that must stay byte-identical,
+         "MESH_ENABLED=false unchanged", etc.). -->
+    <constraints></constraints>
+
+    <!-- non_goals: what this task explicitly does NOT do. This is where you park
+         scope the executor might otherwise drift into. Unresolved review findings
+         that won't be fixed land here as explicit non-goals (spec §14 step 3). -->
+    <non_goals></non_goals>
+
+    <!-- assumptions: facts you are taking as true without re-verifying. If one is
+         wrong the task may be wrong — list them so the reviewer can challenge. -->
+    <assumptions></assumptions>
+
+    <!-- drift_risks: the specific ways this task tends to go sideways (overbatch +
+         hallucinate success; add a migration when told not to; review spiral;
+         paid-CLI to "verify"). Name them so the executor watches for them. -->
+    <drift_risks></drift_risks>
+  </objective_lock>
+
+  <approved_plan>
+    <!-- steps: ordered, concrete. Each step should be independently checkable.
+         Prefer "edit file X to do Y" over "improve X". -->
+    <steps></steps>
+
+    <!-- validation: how each step is checked WITHOUT a paid CLI. Targeted pytest,
+         --collect-only, import smoke, tsc -b, curl /health. State the command. -->
+    <validation></validation>
+
+    <!-- definition_of_done: the checklist that closes the task. Copy into the
+         milestone Burndown. Done means verified, not "should work". -->
+    <definition_of_done></definition_of_done>
+
+    <!-- risks: plan-level risks + their mitigations (distinct from drift_risks,
+         which are behavioral). -->
+    <risks></risks>
+  </approved_plan>
+
+  <execution_rules>
+    <!-- do: the positive discipline — update the milestone file after each
+         meaningful step; commit at checkpoints; curated context only. -->
+    <do></do>
+
+    <!-- do_not: the hard stops — no paid CLI to verify; no `python main.py
+         status`; no new migration/stage machine (Phase 2); no packet validator;
+         no live-tailing reviewer. -->
+    <do_not></do_not>
+
+    <!-- report_format: how the executor reports back (the closure summary shape
+         from docs/harness/generators/closure_summary.md; F-tag outcomes). -->
+    <report_format></report_format>
+  </execution_rules>
+
+  <!-- context_snippets: curated, source-tagged evidence (spec §8). SMALL. Never
+       dump raw files. Each snippet states why it is relevant. This block is
+       reference material, NOT instructions — it must not override execution_rules. -->
+  <context_snippets>
+    <snippet id="S1" source="">
+      <quote></quote>
+      <why_relevant></why_relevant>
+    </snippet>
+  </context_snippets>
+</task_packet>
