@@ -84,20 +84,47 @@ class PushService:
     def available(self) -> tuple[bool, Optional[str]]:
         return push_available(self._cfg, self._db)
 
+    def _enabled_sub_count(self) -> int:
+        try:
+            return len(self._db.list_push_subscriptions(enabled_only=True))
+        except Exception:
+            return 0
+
     async def fanout(self, payload: dict) -> None:
         """Send ``payload`` to every enabled subscription, bounded by concurrency
         and per-send timeout. Never raises. Expired subscriptions are disabled;
         transient errors are recorded but the subscription is kept."""
         ok, reason = self.available()
         if not ok:
-            logger.debug("event=push_fanout_skipped reason=%s", reason)
+            # If subscribers exist but we're skipping for a config reason, the
+            # operator is EXPECTING notifications and getting silence — make that
+            # visible (WARNING), naming the missing env vars. Otherwise stay quiet.
+            sub_count = self._enabled_sub_count()
+            if sub_count > 0:
+                missing = ""
+                try:
+                    push_cfg = getattr(self._cfg, "push", None)
+                    if push_cfg is not None and hasattr(push_cfg, "missing_config"):
+                        missing = ",".join(push_cfg.missing_config())
+                except Exception:
+                    pass
+                logger.warning(
+                    "event=push_fanout_skipped reason=%s subscribers=%d missing_env=%s",
+                    reason, sub_count, missing or "-",
+                )
+            else:
+                logger.debug("event=push_fanout_skipped reason=%s subscribers=0", reason)
             return
 
         try:
             subs = self._db.list_push_subscriptions(enabled_only=True)
         except Exception as e:
-            logger.debug("event=push_fanout_list_failed err=%s", e)
+            logger.warning("event=push_fanout_list_failed err=%s", e)
             return
+        if not subs:
+            logger.debug("event=push_fanout_no_subscribers")
+            return
+        logger.info("event=push_fanout_start subscribers=%d", len(subs))
         if not subs:
             return
 

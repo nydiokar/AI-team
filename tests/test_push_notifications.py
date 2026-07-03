@@ -261,3 +261,20 @@ def test_status_reports_unavailable_without_vapid(client):
     body = r.json()
     assert body["available"] is False
     assert body["vapid_public_key"] == ""
+    # Operator diagnostics name the missing env var(s). (The ambient test .env may
+    # have some VAPID vars set; VAPID_SUBJECT is the one this suite never sets.)
+    assert "VAPID_SUBJECT" in body["missing_env"]
+    assert body["enabled_subscriptions"] == 0
+
+
+def test_fanout_warns_when_subscribers_exist_but_misconfigured(db, caplog):
+    import logging
+
+    db.upsert_push_subscription("https://e/1", "p", "a")  # a real subscriber
+    svc = PushService(_push_cfg(configured=False), db)     # but VAPID not configured
+    # Give the config a missing_config() like the real PushConfig.
+    svc._cfg.push.missing_config = lambda: ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"]
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(svc.fanout({"title": "t", "body": "b", "url": "/"}))
+    assert any("push_fanout_skipped" in r.message and "subscribers=1" in r.message
+               for r in caplog.records)

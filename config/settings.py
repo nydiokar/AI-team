@@ -274,6 +274,17 @@ class PushConfig:
     def configured(self) -> bool:
         return bool(self.vapid_public_key and self.vapid_private_key and self.vapid_subject)
 
+    def missing_config(self) -> list:
+        """Names of the required env vars that are unset — for operator diagnosis."""
+        missing = []
+        if not self.vapid_public_key:
+            missing.append("VAPID_PUBLIC_KEY")
+        if not self.vapid_private_key:
+            missing.append("VAPID_PRIVATE_KEY")
+        if not self.vapid_subject:
+            missing.append("VAPID_SUBJECT")
+        return missing
+
 
 class Config:
     """Main configuration class"""

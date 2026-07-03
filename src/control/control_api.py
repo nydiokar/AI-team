@@ -933,12 +933,24 @@ def build_control_api(orchestrator) -> FastAPI:
         from src.services.push_service import push_available
         from config import config as _cfg
 
-        available, reason = push_available(_cfg, _db())
-        pub = getattr(getattr(_cfg, "push", None), "vapid_public_key", "") or ""
+        db = _db()
+        available, reason = push_available(_cfg, db)
+        push_cfg = getattr(_cfg, "push", None)
+        pub = getattr(push_cfg, "vapid_public_key", "") or ""
+        missing = push_cfg.missing_config() if push_cfg and hasattr(push_cfg, "missing_config") else []
+        sub_count = 0
+        try:
+            if db is not None:
+                sub_count = len(db.list_push_subscriptions(enabled_only=True))
+        except Exception:
+            sub_count = 0
         return JSONResponse({
             "available": available,
             "reason": reason,
             "vapid_public_key": pub if available else "",
+            # Operator diagnostics: names the exact unset env vars + live sub count.
+            "missing_env": missing,
+            "enabled_subscriptions": sub_count,
         })
 
     @app.post("/api/push/subscribe", dependencies=[Depends(_require_auth)])
