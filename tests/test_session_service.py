@@ -50,6 +50,33 @@ def test_create_session_local_node_keeps_default_machine_id(service, tmp_path):
     assert res.session.machine_id  # store.create sets it to the hostname
 
 
+def test_store_create_stamps_pin_atomically(tmp_path):
+    """A11 regression: SessionStore.create(machine_id=X) must stamp X on the
+    FIRST written row — no transient window where it names the local host.
+
+    Before A11, create() always wrote socket.gethostname() and the pin was
+    applied by a later save(); a concurrent read in that window saw the local
+    host and ran a remote-pinned task locally (the #9 gateway smoke failure)."""
+    import socket
+    store = SessionStore()
+    s = store.create(backend="codex", repo_path=str(tmp_path), machine_id="Horse")
+    # The returned object AND the immediately-reloaded row both say Horse,
+    # never the local hostname.
+    assert s.machine_id == "Horse"
+    reloaded = store.get(s.session_id)
+    assert reloaded is not None
+    assert reloaded.machine_id == "Horse"
+    assert reloaded.machine_id != socket.gethostname()
+
+
+def test_store_create_defaults_to_local_host_when_unpinned(tmp_path):
+    """No machine_id arg → keep the legacy default (local hostname)."""
+    import socket
+    store = SessionStore()
+    s = store.create(backend="codex", repo_path=str(tmp_path))
+    assert s.machine_id == socket.gethostname()
+
+
 def test_create_session_pins_model(service, tmp_path):
     res = service.create_session(backend="claude", repo_path=str(tmp_path), model="opus")
     assert res.ok

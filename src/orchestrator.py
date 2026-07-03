@@ -2238,13 +2238,63 @@ class TaskOrchestrator(ITaskOrchestrator):
             # (`session.machine_id` set) with MESH_ENABLED=true take this path.
             # Everything else falls through to the untouched local retry loop
             # below — zero behavior change for ordinary local sessions.
-            route_remote = bool(
-                config.mesh.enabled
-                and session
-                and session.machine_id
-                and session.machine_id != socket.gethostname()
+            _host = socket.gethostname()
+            _pinned_elsewhere = bool(
+                session and session.machine_id and session.machine_id != _host
             )
-            if route_remote:
+            route_remote = bool(config.mesh.enabled and _pinned_elsewhere)
+
+            # Affinity guard (A11): a session pinned to a *different* node must NOT
+            # execute in this host's local worker pool. Before A11, if `route_remote`
+            # came out False for any reason (mesh flag not seen at this call site,
+            # etc.) while the session named another node, the task silently ran
+            # locally on the wrong machine — corrupting backend_session_id continuity
+            # and producing a null/duplicate gateway_node_id (the #9 smoke failure).
+            # Make that case loud instead of silent: log the exact sub-conditions and
+            # refuse local execution.
+            if _pinned_elsewhere and not route_remote:
+                logger.error(
+                    "event=affinity_unrouted task_id=%s session_id=%s machine_id=%s host=%s "
+                    "mesh_enabled=%s — refusing local execution of a remote-pinned session",
+                    task.id, getattr(session, "session_id", None),
+                    getattr(session, "machine_id", None), _host, config.mesh.enabled,
+                )
+                self._emit_event(
+                    "affinity_unrouted",
+                    task,
+                    {
+                        "session_id": getattr(session, "session_id", None),
+                        "machine_id": getattr(session, "machine_id", None),
+                        "host": _host,
+                        "mesh_enabled": bool(config.mesh.enabled),
+                    },
+                )
+                if config.mesh.enabled:
+                    # Mesh is on and the node is named — honor the pin via the remote
+                    # path (which fails loudly if the node is offline; no local fallback).
+                    route_remote = True
+                else:
+                    # Mesh disabled but the session is pinned elsewhere: we cannot
+                    # honor affinity and must not run on the wrong host. Fail honestly.
+                    last_result = TaskResult(
+                        task_id=task.id,
+                        success=False,
+                        output="",
+                        errors=[
+                            f"Session pinned to node {session.machine_id!r} but mesh is "
+                            f"disabled on {_host!r}; cannot execute without violating "
+                            f"session affinity."
+                        ],
+                        files_modified=[],
+                        execution_time=time.time() - start_time,
+                        timestamp=datetime.now().isoformat(),
+                    )
+                    setattr(last_result, "backend_name", getattr(session, "backend", None))
+                    last_result.error_class = self._classify_error(last_result)
+                    last_result.retries = 0
+                    route_remote = True  # skip the local loop below
+
+            if route_remote and last_result is None:
                 last_result = await self._process_task_remote(task, session, start_time, timeout_s)
 
             while not route_remote:
