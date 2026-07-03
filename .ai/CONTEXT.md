@@ -47,9 +47,12 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
-| 1 | **Merge `feat/m3-claude-telemetry`** | M3 Claude adapter is built + reviewed. M1/M2 are shipped; no gate remains. | built, ready to merge (A10) |
-| 2 | **Build Task Harness Workflow Kernel (v1)** | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). Dispatched, not started. | dispatched (A9H) — spec `docs/Task_harness_workflow.md` |
-| 3 | **Operator TODO for Web Push** | Push shipped but inert until `VAPID_*` env set + `pip install -e ".[push]"`. | operator action (A8) |
+| 1 | **Build Task Harness Workflow Kernel (v1)** | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). Dispatched, not started — hand off to a build agent. | dispatched (A9H) — spec `docs/Task_harness_workflow.md` |
+
+Everything else in the recent dispatch set is **shipped and on `main`**: M1/M2 + M3
+observability, Operator Signal (Web Push + Backend Usage), Compact-Context, the
+is_error fix. Web Push VAPID setup is **done** (operator, 2026-07-03). See the
+Shipped Ledger below and `dispatch/DISPATCH_LOG.md`.
 
 Deferred-but-valid work lives in the two "Deferred" tables at the end of this file.
 
@@ -77,14 +80,14 @@ files. This is the "don't rebuild it, it's done" list.
 - **#34** Stop Task = run outcome, not lifecycle (cancelled sessions stay resumable) · **#36** Tasks page removed, jobs render in Session Detail · **#37** job/task history owned by durable timeline API · **#38** System tab is infra-focused · **#39** honest worker/session state reporting.
 
 **Operator Signal (merged from `feat/operator-signal`, PR #5):**
-- **#21** Web Push (migration 20, `push_service.py`, SW handlers; notification fan-out only, NOT approval-gated; inert until VAPID env) · **#30/#33** Backend Account + Usage Visibility (`backend_usage.py`, `/api/backends/usage`; honesty-first — unknown limits return `null` + reason, never fabricated).
+- **#21** Web Push (migration 20, `push_service.py`, SW handlers; notification fan-out only, NOT approval-gated). **VAPID env configured 2026-07-03 — push is live.** · **#30/#33** Backend Account + Usage Visibility (`backend_usage.py`, `/api/backends/usage`; honesty-first — unknown limits return `null` + reason, never fabricated).
 
 **Compact-Context (merged from `feat/compact-context`, PR #6):**
 - **#31/#32** `load_compact_context` wired via opt-in `continues: <task_id>` frontmatter → `process_task` prepends bounded, fence-hardened `<prior_context>` block. No new gateway state. Docs: `docs/Task_harness_workflow.md` §7/§14.
 
 **LLM Turn Observability:**
 - **M1/M2** — **SHIPPED** (2026-07-03). Local Codex smoke + controlled mesh smoke passed 2026-07-02; SQLite benchmarks passed (#8). Spec: `docs/LLM_TURN_OBSERVABILITY_SPEC.md`.
-- **M3** — Claude stream-json telemetry adapter built + reviewed (A10), ready to merge. **M4** (OpenCode) deferred.
+- **M3** — Claude stream-json telemetry adapter **merged on `main`** (commit `c168028`, A10). **M4** (OpenCode) deferred.
 - **Fix (merged a3f734b)** — SDK `is_error` result no longer stored as a successful "Prompt is too long" reply; salvaged work + honest failure delivered instead. Memory `claude-iserror-prompt-too-long`.
 
 ---
