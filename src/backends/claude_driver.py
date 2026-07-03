@@ -100,6 +100,86 @@ def _plain_usage_dict(usage: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Turn outcome + error classification
+# ---------------------------------------------------------------------------
+
+# Phrases that mean "the cumulative context exceeded the model's window". These
+# mirror the checks in src/services/result_text.py and src/orchestrator.py so the
+# whole stack agrees on what "context_overflow" looks like. Keep them in sync.
+_CONTEXT_OVERFLOW_MARKERS = (
+    "prompt is too long",
+    "context_window",
+    "context window",
+    "blocking_limit",
+    "exceeds the maximum",
+    "too many tokens",
+)
+
+
+def classify_error_text(text: str) -> str:
+    """Map a backend error string to an ExecutionResult.error_class.
+
+    Returns ``"context_overflow"`` for context-window errors (the case worth
+    special recovery), else ``"backend_error"``.
+    """
+    low = (text or "").lower()
+    if any(m in low for m in _CONTEXT_OVERFLOW_MARKERS):
+        return "context_overflow"
+    return "backend_error"
+
+
+# Max chars of salvaged progress we inline into the chat reply. The FULL text is
+# always stored untruncated in the DB (reply_text) and reachable via the artifact
+# / "show full" path — this only bounds what lands in the bubble so a context
+# overflow never becomes a 100k-token unreadable dump.
+_SALVAGE_INLINE_CAP = 4000
+
+
+def _build_salvaged_reply(error_class: str, salvaged: str) -> str:
+    """Compose the user-facing reply for an error turn: a short actionable banner
+    followed by the salvaged progress (bounded). Never returns the raw error
+    string alone — that was the original bug.
+    """
+    salvaged = (salvaged or "").strip()
+    if error_class == "context_overflow":
+        banner = (
+            "⚠️ Context window full — the agent did the work but ran out of room to "
+            "write its final summary. Use /compact or start a new session to continue."
+        )
+    else:
+        banner = (
+            "⚠️ The turn ended with a backend error before a final summary. "
+            "The agent's progress up to that point is below."
+        )
+    if not salvaged:
+        return banner
+    body = salvaged
+    if len(body) > _SALVAGE_INLINE_CAP:
+        head = body[:_SALVAGE_INLINE_CAP].rstrip()
+        omitted = len(body) - len(head)
+        body = (
+            head
+            + f"\n\n[… {omitted:,} more chars — open the full reply in the web UI …]"
+        )
+    return f"{banner}\n\n---\n\n{body}"
+
+
+@dataclass
+class TurnOutcome:
+    """Structured result of one SDK turn — carries the error signal so an
+    ``is_error`` ResultMessage is never silently treated as a success reply."""
+    output: str
+    backend_session_id: str
+    raw_ndjson: str
+    is_error: bool = False
+    error_class: str = ""
+    error_text: str = ""
+    # The last streamed assistant narration — the real work done this turn,
+    # surfaced when the terminal result was an error (e.g. wrap-up overflow).
+    salvaged_output: str = ""
+
+
 def parse_cache_stats_from_ndjson(raw_stdout: str) -> Optional[CacheStats]:
     """Extract first usage stats from NDJSON stream output."""
     for line in raw_stdout.splitlines():
@@ -294,24 +374,31 @@ class _SDKSession:
             fut.cancel()  # don't leave the coroutine dangling on the loop thread
             raise
 
-    async def _do_query(self, message: str) -> Tuple[str, str, str]:
-        """Run one turn and return (output, backend_session_id, raw_ndjson).
+    async def _do_query(self, message: str) -> "TurnOutcome":
+        """Run one turn and return a :class:`TurnOutcome`.
 
         Output priority (highest → lowest):
           1. ``ResultMessage.result`` — the terminal result event's clean final
              answer.  This is the text Claude addressed to the user at the end
-             of the agentic loop.  It is always present on successful turns and
-             is the right thing to show in chat.
-          2. Last ``AssistantMessage`` text blocks — fallback for unusual turns
-             where the SDK emits no ResultMessage (e.g. error paths).  Only the
-             LAST assistant message is kept; earlier ones are intermediate
-             narration ("I'll now read file X…") that is not useful in chat.
+             of the agentic loop.  It is present on SUCCESSFUL turns and is the
+             right thing to show in chat.
+          2. Last ``AssistantMessage`` text blocks — the streamed narration of
+             what the agent actually did this turn.  This is the SALVAGE source:
+             on an error result (e.g. the final wrap-up message overflows the
+             context window) ``ResultMessage.result`` is an error string, NOT an
+             answer, so we surface this real progress instead of the error text.
 
-        The raw_ndjson is synthesised from the SDK's typed message objects into
-        the same NDJSON shape that ``parse_cache_stats_from_ndjson`` and the
-        ``_extract_from_ndjson`` result-text helpers expect.  The terminal
-        ``result`` line carries both usage and the result text so that raw_stdout
-        fallback paths also get the clean answer.
+        Error handling (critical): the SDK yields a terminal ``ResultMessage``
+        with ``is_error=True`` and terminates normally — it does NOT raise on a
+        long-lived stream-json session (the claude process stays alive for the
+        next turn, so no non-zero exit, so no ProcessError). Verified against
+        claude-agent-sdk 0.2.110. We therefore MUST inspect ``is_error`` here;
+        we cannot rely on an exception reaching the caller.
+
+        The synthesised terminal ``result`` NDJSON line carries usage AND the
+        structural error fields (``is_error``/``subtype``/``stop_reason``) so the
+        M3 telemetry adapter classifies the turn honestly and raw_stdout stays
+        diagnosable on error turns.
         """
         if self._client is None:
             raise RuntimeError("SDK client not initialised")
@@ -323,12 +410,15 @@ class _SDKSession:
 
         # Authoritative answer from the terminal ResultMessage.
         result_text: str = ""
-        # Last assistant turn text — fallback only.  We intentionally overwrite
-        # on each AssistantMessage so only the last one is retained; earlier
-        # messages are agentic intermediate steps, not the final answer.
+        # Last assistant turn text — the salvage source on error paths.  We
+        # intentionally overwrite on each AssistantMessage so only the last one
+        # is retained; earlier ones are intermediate agentic steps.
         last_assistant_text: str = ""
         backend_session_id = self.backend_session_id
         ndjson_lines: List[str] = []
+        is_error = False
+        subtype = ""
+        error_text = ""
 
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
@@ -352,24 +442,62 @@ class _SDKSession:
                 if sid:
                     backend_session_id = sid
                     self.backend_session_id = sid
+                is_error = bool(getattr(msg, "is_error", False))
+                subtype = str(getattr(msg, "subtype", "") or "")
+                stop_reason = str(getattr(msg, "stop_reason", "") or "") or None
+                errors = getattr(msg, "errors", None)
                 r = getattr(msg, "result", None)
                 if r and isinstance(r, str):
                     result_text = r.strip()
+                if is_error:
+                    # On an error result, `result` is the error message, not an
+                    # answer. Capture it for classification/diagnostics; do NOT
+                    # let it become the chat reply.
+                    if isinstance(errors, list) and errors:
+                        error_text = "; ".join(str(e).strip() for e in errors if str(e).strip())
+                    error_text = error_text or result_text or subtype or "backend error result"
                 usage = _plain_usage_dict(getattr(msg, "usage", None))
+                # Always emit the terminal result line (even without usage) so
+                # error turns stay diagnosable and telemetry sees is_error.
+                result_line: Dict[str, Any] = {"type": "result"}
+                if subtype:
+                    result_line["subtype"] = subtype
+                result_line["is_error"] = is_error
+                if stop_reason:
+                    result_line["stop_reason"] = stop_reason
                 if usage is not None:
-                    # Include the result text so raw_stdout fallback paths
-                    # (parse_cache_stats, _extract_from_ndjson) see the same
-                    # clean answer without re-parsing the assistant stream.
-                    result_line: Dict[str, Any] = {"type": "result", "usage": usage}
-                    if result_text:
-                        result_line["result"] = result_text
-                    ndjson_lines.append(json.dumps(result_line))
+                    result_line["usage"] = usage
+                if result_text:
+                    result_line["result"] = result_text
+                if isinstance(errors, list) and errors:
+                    result_line["errors"] = [str(e) for e in errors]
+                ndjson_lines.append(json.dumps(result_line))
 
-        # Prefer the authoritative terminal result; fall back to last assistant text.
+        if is_error:
+            # Salvage: hand back the real streamed progress (may be "") so the
+            # caller can deliver useful work; the error itself travels in the
+            # error fields, not in `output`.
+            return TurnOutcome(
+                output=last_assistant_text,
+                backend_session_id=backend_session_id,
+                raw_ndjson="\n".join(ndjson_lines),
+                is_error=True,
+                error_class=classify_error_text(error_text),
+                error_text=error_text,
+                salvaged_output=last_assistant_text,
+            )
+
+        # Success: prefer the authoritative terminal result; fall back to last
+        # assistant text for unusual turns that emit no result string.
         output = result_text or last_assistant_text
-        return output, backend_session_id, "\n".join(ndjson_lines)
+        return TurnOutcome(
+            output=output,
+            backend_session_id=backend_session_id,
+            raw_ndjson="\n".join(ndjson_lines),
+            is_error=False,
+        )
 
-    def send(self, message: str) -> Tuple[str, str, str]:
+    def send(self, message: str) -> "TurnOutcome":
         # sdk_turn_timeout_sec is the total deadline for one turn (send → full response).
         # 0 means no limit. Default 36000 (10 h) — distinct from inactivity_timeout_sec
         # which is a per-stdout-line timeout used only by the PrintResume driver.
@@ -430,16 +558,35 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         try:
             sdk_sess = self._get_or_create(session, model, proc_env)
             session.driver_type = "sdk"
-            output, backend_session_id, raw_ndjson = sdk_sess.send(message)
+            outcome = sdk_sess.send(message)
             elapsed = time.time() - start
             session.driver_status = "live"
+
+            if outcome.is_error:
+                # The turn did real work but its terminal result was an error
+                # (typically the final wrap-up message overflowed the context
+                # window). Fail honestly so retry/compact policy engages, but
+                # DELIVER the salvaged progress + an actionable banner instead of
+                # discarding 4 minutes of work or dumping a bare error string.
+                reply = _build_salvaged_reply(outcome.error_class, outcome.salvaged_output)
+                return ExecutionResult(
+                    success=False,
+                    output=reply,
+                    backend_session_id=outcome.backend_session_id,
+                    errors=[outcome.error_text or "backend returned an error result"],
+                    error_class=outcome.error_class or "backend_error",
+                    execution_time=elapsed,
+                    raw_stdout=outcome.raw_ndjson,
+                    raw_stderr="",
+                )
+
             return ExecutionResult(
                 success=True,
-                output=output,
-                backend_session_id=backend_session_id,
+                output=outcome.output,
+                backend_session_id=outcome.backend_session_id,
                 errors=[],
                 execution_time=elapsed,
-                raw_stdout=raw_ndjson,
+                raw_stdout=outcome.raw_ndjson,
                 raw_stderr="",
             )
         except Exception as e:
