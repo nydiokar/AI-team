@@ -119,11 +119,15 @@ The main production gate that still matters is a live end-to-end validation:
 
 ## Canonical Internal Docs
 
-- [.ai/CONTEXT.md](C:/Users/Cicada38/Projects/AI-team/.ai/CONTEXT.md)
-- [.ai/context/production_vision.md](C:/Users/Cicada38/Projects/AI-team/.ai/context/production_vision.md)
-- [QUICK_START.md](C:/Users/Cicada38/Projects/AI-team/docs/QUICK_START.md)
-- [OPERATIONS_PM2.md](C:/Users/Cicada38/Projects/AI-team/docs/OPERATIONS_PM2.md)
-- [ROADMAP.md](C:/Users/Cicada38/Projects/AI-team/docs/ROADMAP.md)
-- [CLAUDE_HOOK_IDEAS.md](C:/Users/Cicada38/Projects/AI-team/docs/CLAUDE_HOOK_IDEAS.md)
+**Source of truth (read these first):**
+- [.ai/CONTEXT.md](../.ai/CONTEXT.md) — current priorities, wiring, constraints, shipped ledger
+- [.ai/dispatch/DISPATCH_LOG.md](../.ai/dispatch/DISPATCH_LOG.md) — state of every dispatched job
+- [.ai/context/production_vision.md](../.ai/context/production_vision.md) — strategic intent + anti-goals
+
+**Supporting reference:**
+- [QUICK_START.md](QUICK_START.md)
+- [RUNBOOKS/OPERATIONS_PM2.md](RUNBOOKS/OPERATIONS_PM2.md)
+- [ROADMAP.md](ROADMAP.md) — pointer to `.ai/`
+- [TBD/CLAUDE_HOOK_IDEAS.md](TBD/CLAUDE_HOOK_IDEAS.md)
 - [LLM_TURN_OBSERVABILITY_SPEC.md](LLM_TURN_OBSERVABILITY_SPEC.md)
-- [PROGRESS_LOG.md](PROGRESS_LOG.md)
+- [archive/progress/_archive_PROGRESS_LOG.md](archive/progress/_archive_PROGRESS_LOG.md) — completed-work history
