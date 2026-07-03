@@ -20,6 +20,7 @@ import {
   ChevronDown,
   ChevronUp,
   MessagesSquare,
+  FolderOpen,
 } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
@@ -344,21 +345,29 @@ function SessionInfoTab({
   const { data: sessions } = useSessions();
   const session = sessions?.find((s) => s.id === sessionId);
   const [dirs, setDirs] = useState<string[] | null>(null);
+  const [dirsPath, setDirsPath] = useState<string>("");
+  const [dirsExpanded, setDirsExpanded] = useState(false);
   const inspect = useInspectSession();
   const { data: turns, isLoading: turnsLoading } = useSessionTurns(sessionId);
 
-  useEffect(() => {
-    inspect.mutate(
-      { sessionId, op: "list_dirs", params: { limit: 12, sort_by_recent: true } },
-      {
-        onSuccess: (r) => {
-          const res = r as { dirs?: string[] };
-          setDirs(res.dirs ?? []);
+  // Lazy: only fetch dirs when the section is expanded for the first time,
+  // not on every mount. Matches the original SessionInfoPanel pattern.
+  const toggleDirs = () => {
+    const next = !dirsExpanded;
+    setDirsExpanded(next);
+    if (next && dirs === null) {
+      inspect.mutate(
+        { sessionId, op: "list_dirs", params: { limit: 12, sort_by_recent: true } },
+        {
+          onSuccess: (r) => {
+            const res = r as { dirs?: string[]; path?: string };
+            setDirs(res.dirs ?? []);
+            setDirsPath(res.path ?? "");
+          },
         },
-      },
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+      );
+    }
+  };
 
   if (!session) return null;
 
@@ -389,24 +398,39 @@ function SessionInfoTab({
 
       <SessionJobsSection sessionId={sessionId} />
 
-      {dirs !== null && dirs.length > 0 && (
-        <div>
-          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">
-            Subdirectories
-          </p>
-          <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
-            {dirs.map((d) => (
-              <div key={d} className="px-4 py-2.5 font-mono text-[12px] text-ink-soft">
-                {d.split("/").pop() ?? d}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <div>
+        <button
+          onClick={toggleDirs}
+          className="flex w-full items-center gap-1.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-ink-muted hover:text-ink-soft"
+          aria-expanded={dirsExpanded}
+        >
+          <ChevronDown
+            className={cn("size-3.5 transition-transform", dirsExpanded && "rotate-180")}
+          />
+          Subdirectories{dirsPath ? ` in ${dirsPath.split("/").pop() ?? dirsPath}` : ""}
+        </button>
 
-      {inspect.isPending && dirs === null && (
-        <p className="text-center text-sm text-ink-muted">Loading directories…</p>
-      )}
+        {dirsExpanded && (
+          <>
+            {inspect.isPending && dirs === null && (
+              <p className="mt-1 text-sm text-ink-muted">Loading…</p>
+            )}
+            {dirs !== null && dirs.length === 0 && (
+              <p className="mt-1 text-sm text-ink-muted">No subdirectories found.</p>
+            )}
+            {dirs !== null && dirs.length > 0 && (
+              <div className="card-elev mt-2 overflow-hidden rounded-xl divide-y divide-hairline">
+                {dirs.map((d) => (
+                  <div key={d} className="flex items-center gap-1.5 px-4 py-2.5 font-mono text-[12px] text-ink-soft">
+                    <FolderOpen className="size-3 shrink-0 text-ink-muted" />
+                    {d.split("/").pop() ?? d}
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
