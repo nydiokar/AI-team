@@ -73,8 +73,9 @@ def test_resolve_advisory_passes_unknown_through():
 
 # --------------------------------------------------------------------------- backend cmd
 def test_claude_build_cmd_model_placement():
-    from src.backends.claude_code import ClaudeCodeBackend
-    b = ClaudeCodeBackend()
+    # _build_cmd now lives only on ClaudePrintResumeDriver (single source of truth).
+    from src.backends.claude_driver import ClaudePrintResumeDriver
+    b = ClaudePrintResumeDriver()
     fresh = b._build_cmd(None, "sid", "opus")
     assert fresh[fresh.index("--model") + 1] == "opus"
     resume = b._build_cmd("rid", None, "sonnet")

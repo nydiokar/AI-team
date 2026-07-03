@@ -712,6 +712,30 @@ class ClaudePrintResumeDriver(ClaudeDriver):
     def close(self, session: Session) -> None:
         pass
 
+    def run_oneoff(
+        self,
+        cwd: str,
+        message: str,
+        *,
+        model: Optional[str] = None,
+        proc_env: Optional[Dict[str, str]] = None,
+    ) -> ExecutionResult:
+        """One-shot (stateless) call — no session, no resume.
+
+        Replaces the legacy ``ClaudeCodeBackend._run`` path so ``run_oneoff``
+        goes through the driver and benefits from the hard-cap timeout.
+        """
+        from src.core.test_guard import assert_live_calls_allowed
+        assert_live_calls_allowed("claude")
+        return self._run(
+            cwd, message,
+            resume_id=None,
+            session_id=None,
+            session_key=None,
+            model=model,
+            proc_env=proc_env or {},
+        )
+
     def driver_type(self) -> str:
         return "print_resume"
 
