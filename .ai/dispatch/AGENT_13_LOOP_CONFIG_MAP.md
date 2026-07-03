@@ -222,3 +222,91 @@ pytest (docs-only, no code touched); no paid CLI; no gateway call.
 table+prose only, one small Mermaid *illustration*), F2 (`none (fixed behavior)` for
 dial-less nodes), F3 (≥1 localization row per dial), F4 (branch off main) were all
 **honored in the deliverable**.
+
+---
+
+<!-- Folded in by A14 (2026-07-03) under the one-file rule: this Milestone section was
+     `AGENT_13_LOOP_CONFIG_MAP.milestone.md`, now removed. -->
+## Milestone
+
+### Objective
+A person or a fresh Manager/Executor agent can open ONE document
+(`docs/harness/loop_config_map.md`) and see the whole harness loop as a set of
+configurable nodes — for each node: who drives it, which file programs it, its
+input/output contract, and the dials that change its output quality. No loop
+behavior is a blackbox; any bad output localizes to one named node + one named
+dial. Plus: fill the one real gap — a Manager behavior spec.
+
+### Current Status
+closed
+
+### Burndown
+- [x] Branch `feat/harness-config-map` cut off current `main` tip (2b26115), not `feat/task-harness`
+- [x] Ground the real control surface (read-only): operating_model, dispatch_pipeline, 3 generators, level_rubric, packet_template, milestone_template, spec §2.1/§3/§5/§7/§14/§16
+- [x] `loop_config_map.md` section (a): node table, exactly 8 rows (level-select + 7 stages), every dial cited or `none (fixed behavior)`
+- [x] `loop_config_map.md` section (b): quality-dials enumeration, each cited to a source file, cost-vs-quality direction stated
+- [x] `loop_config_map.md` section (c): Manager vs Executor roles separated, where each is configured
+- [x] `loop_config_map.md` section (d): failure-localization table, ≥1 row per named dial
+- [x] Manager behavior spec (decision: headed section inside the map; see log) — grounding reflex, objective-lock, review gate, iterate/close/derive
+- [x] README cross-link added; all cross-refs resolve (grep check)
+- [x] No code in src/; no machinery; no paid CLI; docs-only
+- [x] Milestone + closure produced; DISPATCH_LOG A13 → built; packet implementation log filled; committed
+
+### Live Log
+- 2026-07-03 — cut branch off main tip 2b26115 (confirmed not feat/task-harness) → clean base → ground
+- 2026-07-03 — read all named sources → full control surface inventoried, every dial has a real source line → write the map
+- 2026-07-03 — wrote loop_config_map.md sections (a)-(d) + Manager behavior spec as a headed section (chose in-file over separate manager_behavior.md) → all four sections present, 8-row node table → cross-link + verify
+- 2026-07-03 — added README "Which file to use when" row; grep-verified every cross-ref target exists → all resolve → close
+- 2026-07-03 — wrote closure summary; flipped DISPATCH_LOG A13 row to built; filled packet implementation log; committed on feat/harness-config-map → done
+
+### Blockers
+none
+
+### Next Action
+closed — none (HOLD on branch; do NOT merge — operator fork)
+
+---
+
+<!-- Folded in by A14 (2026-07-03) under the one-file rule: this Closure section was
+     `AGENT_13_LOOP_CONFIG_MAP.closure.md`, now removed. -->
+## Closure
+
+### A13-loop-config-map — SHIPPED (2026-07-03)
+
+**What changed (per file):**
+- `docs/harness/loop_config_map.md` — NEW. The loop's control-surface contract: (a) an
+  8-row node table (level-select + 7 stages; driver / programmed-by / IO-contract /
+  quality-dials, each cited); (b) 11 enumerated "temperature" dials, each cited to a
+  real source line with cost↔quality direction; (c) Manager-vs-Executor separation +
+  a headed **Manager behavior spec** (the filled gap); (d) a 12-row failure→node→dial
+  localization table (≥1 row per dial). One small Mermaid *illustration* of the linear
+  flow; no rendered/interactive graphic.
+- `docs/harness/README.md` — added a "Which file to use when" row cross-linking the map.
+- `.ai/dispatch/AGENT_13_LOOP_CONFIG_MAP.md` — implementation log filled.
+- `.ai/dispatch/DISPATCH_LOG.md` — A13 row `dispatched` → `built — awaiting Manager review`.
+
+**Verification (non-paid, per the guard):**
+- `grep` link-target existence for all cross-refs in the new doc: **10/10 resolve**.
+- Cited-line spot checks: adversarial_review round-cap, milestone update-rule,
+  `HARNESS_LEVEL3_GUARD` flag, grounding rule — all match.
+- README target `loop_config_map.md` exists.
+- No pytest (docs-only, no `src/` touched); no paid Claude/Codex CLI; no gateway call.
+
+**F-tag outcomes:** F1 (table+prose, not a graphic) → done; F2 (`none (fixed behavior)`
+honesty) → done; F3 (≥1 localization row per dial) → done; F4 (branch off `main` tip) → done.
+
+**Findings surfaced (not defects — map results):**
+1. **No provider/model "temperature" dial exists inside the loop.** The loop's quality
+   "temperature" is *entirely* prompt/artifact discipline (the 11 dials). §9's
+   low-temperature sampling is onboarding-only. Cheap-DRAFT / strong-REVIEW is a *stated
+   preference*, not a wired per-node dial. Promoting it would be Phase-2 machinery.
+2. **The Manager behavior spec gap was real.** `operating_model.md` listed the Manager's
+   responsibilities but not its ordered per-node driving behavior; now filled.
+3. **Dogfood friction:** a solo Level-2 docs run collapses DRAFT→REVIEW→FIX into
+   "read the locked packet," and node 6's review gate is under-exercised without a real
+   code diff. Milestone + objective-lock discipline demonstrably worked.
+
+**What follows (not code):**
+- Manager reviews the committed diff; then operator decides merge.
+- HOLD on `feat/harness-config-map` — no merge, no push (operator fork).
+- A future real *code* loop is the true test of the review-gate half of the harness.
