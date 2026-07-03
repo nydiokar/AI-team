@@ -20,6 +20,18 @@ import type {
 // ── Target (machine) ─ ✅ PRESENT (gap-doc §2) ─────────────────────────────
 // Derived from `/api/nodes` rows + the dashboard's derived `live` flag. We use
 // the live flag + heartbeat age, NOT the stale `status` column (gap-doc §2 note).
+
+/** One active task as reported in a worker's live_state heartbeat. */
+export interface ActiveTaskDetail {
+  taskId: string;
+  backend: string;
+  /** Simplified mesh action label (run_oneoff, run_session, …). */
+  action: string;
+  phase: string;
+  /** ISO start timestamp; null when worker didn't capture it. */
+  startedAt: string | null;
+}
+
 export interface Target {
   /** node_id (PK in `nodes`). */
   id: string;
@@ -33,6 +45,11 @@ export interface Target {
   backends: string[];
   tailscaleIp: string;
   maxConcurrent: number;
+  /** Slot usage from the latest live_state heartbeat; null when not yet reported. */
+  slotsUsed: number | null;
+  slotsTotal: number | null;
+  /** Active tasks from the latest live_state heartbeat (empty when idle). */
+  activeTasks: ActiveTaskDetail[];
 }
 
 // ── Workspace ─ 🟡 PARTIAL (gap-doc §2) ────────────────────────────────────

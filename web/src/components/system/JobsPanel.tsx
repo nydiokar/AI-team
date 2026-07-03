@@ -12,7 +12,9 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  ChevronRight,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { useJobs } from "../../hooks/useLiveData";
 import type { RawJob } from "../../transport/rawApi";
 import { relAgeFrom } from "../../lib/time";
@@ -36,8 +38,10 @@ const STATUS_VISUAL: Record<
 export function JobRow({ job, running }: { job: RawJob; running?: boolean }) {
   const v = STATUS_VISUAL[running ? "running" : job.status] ?? STATUS_VISUAL.lost;
   const { Icon, tint, spin } = v;
-  return (
-    <div className="flex items-start gap-2.5 px-4 py-2.5 text-[13px]">
+  const sessionHref = job.session_id ? `/sessions/${job.session_id}` : null;
+
+  const inner = (
+    <>
       <Icon className={`mt-0.5 size-3.5 shrink-0 ${tint} ${spin ? "animate-spin" : ""}`} />
       <div className="min-w-0 flex-1">
         <p className="truncate font-medium text-ink">{job.label ?? job.id}</p>
@@ -61,6 +65,24 @@ export function JobRow({ job, running }: { job: RawJob; running?: boolean }) {
           )}
         </div>
       </div>
+      {sessionHref && <ChevronRight className="mt-0.5 size-3.5 shrink-0 text-ink-muted/60" />}
+    </>
+  );
+
+  if (sessionHref) {
+    return (
+      <Link
+        to={sessionHref}
+        className="flex items-start gap-2.5 px-4 py-2.5 text-[13px] transition-colors hover:bg-surface-2/40"
+      >
+        {inner}
+      </Link>
+    );
+  }
+
+  return (
+    <div className="flex items-start gap-2.5 px-4 py-2.5 text-[13px]">
+      {inner}
     </div>
   );
 }

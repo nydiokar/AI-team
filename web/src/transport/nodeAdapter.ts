@@ -3,9 +3,9 @@
  * `heartbeat_age_sec`, NEVER the stale `status` column (gap-doc §2 note —
  * dashboard derives `live` per-request; `status` is owned by another process).
  */
-import type { Target } from "../domain/models";
+import type { Target, ActiveTaskDetail } from "../domain/models";
 import type { TargetHealth } from "../domain/status";
-import type { RawNode } from "./rawApi";
+import type { RawNode, RawLiveStateTask } from "./rawApi";
 
 function parseBackends(b: string | string[]): string[] {
   if (Array.isArray(b)) return b;
@@ -31,7 +31,20 @@ export function deriveHealth(raw: RawNode): TargetHealth {
   return "offline";
 }
 
+function parseLiveStateTasks(raw: RawNode): ActiveTaskDetail[] {
+  const ls = raw.live_state;
+  if (!ls || !Array.isArray(ls.active_task_details)) return [];
+  return ls.active_task_details.map((d: RawLiveStateTask) => ({
+    taskId: d.task_id,
+    backend: d.backend,
+    action: d.action,
+    phase: d.phase ?? "",
+    startedAt: d.started_at ?? null,
+  }));
+}
+
 export function toTarget(raw: RawNode): Target {
+  const ls = raw.live_state ?? null;
   return {
     id: raw.node_id,
     health: deriveHealth(raw),
@@ -40,6 +53,9 @@ export function toTarget(raw: RawNode): Target {
     backends: parseBackends(raw.backends),
     tailscaleIp: raw.tailscale_ip,
     maxConcurrent: raw.max_concurrent,
+    slotsUsed: ls?.slots_used ?? null,
+    slotsTotal: ls?.slots_total ?? null,
+    activeTasks: parseLiveStateTasks(raw),
   };
 }
 
