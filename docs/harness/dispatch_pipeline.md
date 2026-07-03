@@ -4,6 +4,13 @@ This is how a task moves from idea to executed change, repeatably. It is the
 workflow the `.ai/dispatch/AGENT_*` files already follow, codified. A fresh
 executor should be able to run a small task from **this file alone**.
 
+> **Scope.** This runbook governs the authoring loop and the `.task.md` batch lane.
+> The **Level-3 admission gate**, however, is NOT limited to `.task.md`: it runs in
+> `orchestrator._enqueue_task`, the choke point every ingestion lane shares
+> (`submit_instruction` from Telegram/Web, `.task.md` auto-pickup, and internal
+> runtime tasks). So an un-approved Level-3 task is refused on the main door too,
+> not just the batch lane.
+
 **Zero new gateway state.** The XML packet, the milestone file, and the dispatch
 convention *are* the state. No `flow_runs` table, no stage column (that is Phase 2,
 spec §16).
@@ -107,24 +114,32 @@ is allowed for **Level ≤ 2** only. A `harness_level: 3` task
 clear the **operator-approval stage before dispatch**. Approval is expressed as
 `approved: true` in the frontmatter.
 
-**Enforcement backstop (code, flag-guarded, OFF by default):**
-`orchestrator.py::_harness_level3_allows_autopickup` runs between parse and enqueue
-in `_handle_new_task_file`. It is opt-in via the `HARNESS_LEVEL3_GUARD` env flag:
+**Enforcement backstop (code, flag-guarded, OFF by default):** the decision
+predicate `orchestrator.py::_harness_level3_allows_autopickup` is invoked at
+admission in `_enqueue_task` — the shared choke point — so it covers **every**
+lane (`submit_instruction` from Telegram/Web, `.task.md` auto-pickup, internal
+tasks). It is opt-in via the `HARNESS_LEVEL3_GUARD` env flag:
 
 | `HARNESS_LEVEL3_GUARD` | `harness_level` | `approved` | Result |
 |------------------------|-----------------|-----------|--------|
 | unset / falsey         | *(anything)*    | —         | **allow** (byte-identical legacy behavior) |
 | on (`1`/`true`/`yes`/`on`) | absent      | —         | allow (unchanged) |
-| on                     | 0 / 1 / 2       | —         | allow (auto-enqueue) |
-| on                     | 3               | absent / false | **BLOCK** — emits `task_blocked`, leaves the file un-enqueued |
+| on                     | 0 / 1 / 2       | —         | allow (enqueue) |
+| on                     | 3               | absent / false | **BLOCK** — emits `task_blocked`, raises `HarnessAdmissionBlocked`, nothing queued |
 | on                     | 3               | `true`    | allow |
 | on                     | unparseable     | —         | allow (never invents a block) |
 
-A blocked file is not enqueued; re-writing it with `approved: true` (after the
-operator approves) lets a later watch event pick it up. Covered by
-`tests/test_harness_level3_guard.py` (18 cases). When the flag is unset the guard
-is a pure pass-through — enable it on a host that wants the hard boundary; the
-convention is the primary control everywhere else.
+On a block, `_enqueue_task` raises `HarnessAdmissionBlocked(task_id, reason)`
+**instead of returning a task_id** — so no caller can mistake a blocked task for
+an accepted one, and no side effect (queue / `active_tasks`) leaks past the gate.
+Operator-facing callers catch it and surface it honestly: the control API returns
+**HTTP 409** (`harness_level3_needs_approval`); Telegram replies "needs operator
+approval, not started". The `.task.md` lane releases its file-tracking state so an
+`approved: true` re-write is picked up on the next watch event. Covered by
+`tests/test_harness_level3_guard.py` (24 cases: the pure predicate + the
+`_enqueue_task` admission behavior). When the flag is unset the gate is a pure
+pass-through — enable it on a host that wants the hard boundary; the convention is
+the primary control everywhere else.
 
 ---
 

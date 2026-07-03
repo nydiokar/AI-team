@@ -27,7 +27,7 @@ Referenced from [`.ai/CONTEXT.md`](../CONTEXT.md). Each dispatch has its own
 |---|---|---|---|---|---|---|
 | A8 | Operator Signal (Web Push #21, Backend Usage #30/#33, unblock M1/M2) | `AGENT_8_OPERATOR_SIGNAL.md` (+ `_REVIEW`, `_T1_BUILD_REVIEW`) | `feat/operator-signal` | **merged** (PR #5) | T1 Web Push (migration 20, `push_service.py`, SW handlers, 15 tests) + T2 Backend Usage (`backend_usage.py`, `/api/backends/usage`, `BackendUsagePanel`, 8 tests), both reviewed & fixed (per-call VAPID, size cap, malformed-sub disable). | **Operator TODO:** set `VAPID_*` env, `pip install -e ".[push]"`, add VAPID vars to `.env.example` (env files weren't editable from build env). |
 | A9 | Compact-Context Continuation (#31/#32) | `AGENT_9_COMPACT_CONTEXT.md` (+ `_REVIEW`, `AGENT_9_BUILD_REVIEW`) | `feat/compact-context` | **merged** (PR #6) | Wired dead-but-tested `load_compact_context` into opt-in `continues: <task_id>` path in `process_task`; fence-escape hardened (`_defuse_fence`); instance-local re-injection guard; 13 tests. Docs: `docs/Task_harness_workflow.md` §7/§14. | — (complete) |
-| A9H | Task Harness Workflow Kernel (v1) | `AGENT_9_TASK_HARNESS.md` (+ `_REVIEW`) | `feat/task-harness` | **built** | v0.5 loop as prompt+artifact discipline: `docs/harness/` templates (packet XML, milestone, level rubric, README), DRAFT/REVIEW/CLOSE generators, `dispatch_pipeline.md` runbook. Level-3 auto-pickup guard = convention + flag-guarded backstop (`_harness_level3_allows_autopickup`, `HARNESS_LEVEL3_GUARD`, OFF by default, byte-identical legacy). ZERO new gateway state. 18 guard tests + compact-context tests green. Spec §13 ticked; CONTEXT.md updated. 3 commits (T1/T2/T3). | Adversarial build-review → `reviewed`; then merge to `main` → `merged`. |
+| A9H | Task Harness Workflow Kernel (v1) | `AGENT_9_TASK_HARNESS.md` (+ `_REVIEW`, `_BUILD_REVIEW`) | `feat/task-harness` | **built — B1 resolved (Option 3), awaiting operator merge** | v0.5 loop as prompt+artifact discipline: `docs/harness/` templates + DRAFT/REVIEW/CLOSE generators + `dispatch_pipeline.md` runbook. **T4 follow-up (Option 3, commit 4):** Level-3 admission gate moved to the HOT path — `_harness_level3_allows_autopickup` now runs in `_enqueue_task` (the choke point every lane shares: Telegram/Web `submit_instruction`, `.task.md`, internal). Blocked ⇒ raises `HarnessAdmissionBlocked` (no faked task_id, no side effect); control API ⇒ 409, Telegram ⇒ approval reply. Flag-guarded `HARNESS_LEVEL3_GUARD` OFF by default, byte-identical legacy. ZERO new gateway state. 35 harness/compact tests + 51 control-API + 24 telegram green. B2 corrected: guard is NEW (git-verified), not pre-existing. | **OPERATOR: merge decision only.** B1 (gate on the secondary lane) is fixed — the gate is now on the real ingestion path. Nothing merged; review commit 4 diff, then `feat/task-harness` → `main` if satisfied. Optional: set `HARNESS_LEVEL3_GUARD=1` to arm it. |
 | A10 | M3 Claude Telemetry (#10) | `AGENT_10_M3_CLAUDE_TELEMETRY.md` (+ `_REVIEW`) | commit `c168028` (+ `896990f`) on `main` | **merged** | M3 `ClaudeStreamJsonAdapter` (`src/core/telemetry_adapters/claude_stream_json.py`) + wiring at `ClaudeCodeBackend` public boundary; token semantics `includes_cache`; double-count guard; tool-name/category mapping (no input/content stored); coverage `stream_only`. Went straight to `main`, NOT via a `feat/m3-claude-telemetry` branch (that branch never existed — earlier docs said "ready to merge" in error). | — (complete; live on main) |
 | FX1 | Fix: SDK `is_error` stored as successful reply ("Prompt is too long") | `FIX_CLAUDE_ISERROR_PROMPT_TOO_LONG.md` | `feat/compact-context` → main | **merged** (a3f734b) | `ClaudeSDKClientDriver` now inspects `ResultMessage.is_error`/`.subtype` and delivers salvaged work + honest failure instead of copying `"Prompt is too long"` into the reply as `success=True`. Root cause: long-lived `claude` process never exits non-zero, so the SDK yields (not raises) the error result. `task_server.py` + timeline refinements. Tests in `test_claude_driver.py`. | Memory `claude-iserror-prompt-too-long`: **Horse redeploy needed** (this restart covers it); #41 context-fill gauge still open. |
 
@@ -40,6 +40,20 @@ Codex smoke + controlled mesh smoke passed 2026-07-02; SQLite benchmarks passed 
 The old "#9 gateway-routed mesh smoke" gate is **retired** — the `gateway_node_id`-null
 detail was a nice-to-have validation artifact, not a real product blocker, and is no
 longer treated as one. **M3 (A10) is already merged on `main`** (commit `c168028`).
+
+**A10 T1 re-attempt (2026-07-03, from Horse) — BLOCKED, gate NOT passed.** The optional
+"prove `gateway_node_id` non-null" smoke (packet §T1) was re-attempted from the Horse
+worker box. Prereqs confirmed live (worker `online`+registered to kanebra; task-server
+`/health` shows `nodes_online=2`, mesh not degraded). DB read confirms the gate is still
+open: `llm_turns` has **no** row with a distinct non-null `(gateway_node_id,
+execution_node_id)` pair — only `(None,'Horse',146)`, `(None,'smoke-mesh-20260702',1)`,
+and `('DESKTOP-3PGTBMF','DESKTOP-3PGTBMF',33)` (same-host, not distinct). Could not close
+it: the production submit path (control API `:9003` / Telegram) lives on kanebra and is
+**not reachable from Horse** (9003 refuses on the tailnet; only the worker-facing task
+server `:9002` is exposed, which per [F1] must not be used). To close, run §T1 steps from
+a shell on kanebra (or expose `:9003` on the tailnet). Full detail + handoff in
+`AGENT_10_M3_CLAUDE_TELEMETRY.md` Implementation log → T1. This is a validation artifact
+only; M3/A10 itself remains merged and unaffected.
 
 ---
 

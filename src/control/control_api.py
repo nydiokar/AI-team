@@ -734,30 +734,40 @@ def build_control_api(orchestrator) -> FastAPI:
             if cached is not None:
                 return JSONResponse(cached)
 
+            from src.orchestrator import HarnessAdmissionBlocked
+
             session = None
-            if body.session_id:
-                session = orchestrator.session_service.store.get(body.session_id)
-                if session is None:
-                    raise HTTPException(status_code=404, detail="session_not_found")
-                # Status write (BUSY + last_user_message) lives on the service.
-                orchestrator.session_service.mark_busy(
-                    session.session_id, last_user_message=body.description)
-                session = orchestrator.session_service.store.get(session.session_id)
-                task_id = await orchestrator.submit_instruction(
-                    description=body.description,
-                    session_id=session.session_id,
-                    cwd=session.repo_path or body.cwd,
-                    target_files=body.target_files,
-                    source="web_session",
-                )
-                session.last_task_id = task_id
-                orchestrator.session_service.store.save(session)
-            else:
-                task_id = await orchestrator.submit_instruction(
-                    description=body.description,
-                    cwd=body.cwd,
-                    target_files=body.target_files,
-                    source="web_oneoff",
+            try:
+                if body.session_id:
+                    session = orchestrator.session_service.store.get(body.session_id)
+                    if session is None:
+                        raise HTTPException(status_code=404, detail="session_not_found")
+                    # Status write (BUSY + last_user_message) lives on the service.
+                    orchestrator.session_service.mark_busy(
+                        session.session_id, last_user_message=body.description)
+                    session = orchestrator.session_service.store.get(session.session_id)
+                    task_id = await orchestrator.submit_instruction(
+                        description=body.description,
+                        session_id=session.session_id,
+                        cwd=session.repo_path or body.cwd,
+                        target_files=body.target_files,
+                        source="web_session",
+                    )
+                    session.last_task_id = task_id
+                    orchestrator.session_service.store.save(session)
+                else:
+                    task_id = await orchestrator.submit_instruction(
+                        description=body.description,
+                        cwd=body.cwd,
+                        target_files=body.target_files,
+                        source="web_oneoff",
+                    )
+            except HarnessAdmissionBlocked as blocked:
+                # Level-3 harness gate refused the task at admission. Surface an
+                # honest 409 — the task was NOT accepted; there is no task_id.
+                raise HTTPException(
+                    status_code=409,
+                    detail={"error": "harness_level3_needs_approval", "reason": blocked.reason},
                 )
 
             resp = {"ok": True, "task_id": task_id, "session": _session_payload(session)}

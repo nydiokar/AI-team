@@ -86,21 +86,24 @@ files. This is the "don't rebuild it, it's done" list.
 **Operator Signal (merged from `feat/operator-signal`, PR #5):**
 - **#21** Web Push (migration 20, `push_service.py`, SW handlers; notification fan-out only, NOT approval-gated). **VAPID env configured 2026-07-03 — push is live.** · **#30/#33** Backend Account + Usage Visibility (`backend_usage.py`, `/api/backends/usage`; honesty-first — unknown limits return `null` + reason, never fabricated).
 
-**Task Harness Workflow Kernel v1 (built on `feat/task-harness`, A9H):**
+**Task Harness Workflow Kernel v1 (built on `feat/task-harness`, A9H — not yet merged):**
 - Prompt-and-artifact task-quality loop under `docs/harness/` — templates (packet
   XML, milestone, level rubric, README), DRAFT/REVIEW/CLOSE generators, and the
-  `dispatch_pipeline.md` runbook. **Zero new gateway state** (spec §0). Level-3
-  auto-pickup guard = convention + flag-guarded backstop
-  (`orchestrator.py::_harness_level3_allows_autopickup`, OFF unless
-  `HARNESS_LEVEL3_GUARD` set; byte-identical legacy behavior when the field/flag is
-  absent). 18 tests (`tests/test_harness_level3_guard.py`). Spec:
-  `docs/Task_harness_workflow.md` §13 ticked.
+  `dispatch_pipeline.md` runbook. **Zero new gateway state** (spec §0). **Level-3
+  admission gate on the HOT path** (build-review B1 follow-up, Option 3):
+  `_harness_level3_allows_autopickup` runs in `orchestrator._enqueue_task` — the
+  choke point every ingestion lane shares (Telegram/Web `submit_instruction`,
+  `.task.md`, internal). Blocked ⇒ raises `HarnessAdmissionBlocked` (no faked
+  task_id / no side effect); control API → 409, Telegram → approval reply.
+  Flag-guarded `HARNESS_LEVEL3_GUARD`, OFF by default → byte-identical legacy when
+  the field/flag is absent. 35 harness/compact + 51 control-API + 24 telegram tests
+  green. Spec `docs/Task_harness_workflow.md` §13 ticked.
 
 **Compact-Context (merged from `feat/compact-context`, PR #6):**
 - **#31/#32** `load_compact_context` wired via opt-in `continues: <task_id>` frontmatter → `process_task` prepends bounded, fence-hardened `<prior_context>` block. No new gateway state. Docs: `docs/Task_harness_workflow.md` §7/§14.
 
 **LLM Turn Observability:**
-- **M1/M2** — **SHIPPED** (2026-07-03). Local Codex smoke + controlled mesh smoke passed 2026-07-02; SQLite benchmarks passed (#8). Spec: `docs/LLM_TURN_OBSERVABILITY_SPEC.md`.
+- **M1/M2** — **SHIPPED** (2026-07-03). Local Codex smoke + controlled mesh smoke passed 2026-07-02; SQLite benchmarks passed (#8). Spec: `docs/LLM_TURN_OBSERVABILITY_SPEC.md`. Optional `gateway_node_id`-non-null smoke (A10 §T1) re-attempted from Horse 2026-07-03 → **BLOCKED, not passed**: gate still open (no distinct non-null `(gateway,execution)` pair in `llm_turns`), but the gateway submit path (control API `:9003`/Telegram) lives on kanebra and is unreachable from the Horse worker box. Close by running §T1 on kanebra or exposing `:9003` on the tailnet. Detail in `dispatch/AGENT_10_M3_CLAUDE_TELEMETRY.md` (T1 log) + `DISPATCH_LOG.md`.
 - **M3** — Claude stream-json telemetry adapter **merged on `main`** (commit `c168028`, A10). **M4** (OpenCode) deferred.
 - **Fix (merged a3f734b)** — SDK `is_error` result no longer stored as a successful "Prompt is too long" reply; salvaged work + honest failure delivered instead. Memory `claude-iserror-prompt-too-long`.
 
