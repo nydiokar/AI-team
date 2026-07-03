@@ -132,11 +132,16 @@ tasks). It is opt-in via the `HARNESS_LEVEL3_GUARD` env flag:
 On a block, `_enqueue_task` raises `HarnessAdmissionBlocked(task_id, reason)`
 **instead of returning a task_id** — so no caller can mistake a blocked task for
 an accepted one, and no side effect (queue / `active_tasks`) leaks past the gate.
-Operator-facing callers catch it and surface it honestly: the control API returns
-**HTTP 409** (`harness_level3_needs_approval`); Telegram replies "needs operator
-approval, not started". The `.task.md` lane releases its file-tracking state so an
-`approved: true` re-write is picked up on the next watch event. Covered by
-`tests/test_harness_level3_guard.py` (24 cases: the pure predicate + the
+
+**Surface handling is intentionally NOT built in this pass (backend-only).** The
+gate raises a typed signal at the choke point and stops there. How each surface
+presents "blocked" — an HTTP status on the control API, a message on Telegram — is
+a **separate, later, WebUI-first integration task**, not part of the backend gate.
+Until then a raised `HarnessAdmissionBlocked` propagates to the caller as an
+unhandled error (and the `.task.md` lane still releases its file-tracking state so
+an `approved: true` re-write is re-picked-up). Do not wire per-surface UX here.
+
+Covered by `tests/test_harness_level3_guard.py` (24 cases: the pure predicate + the
 `_enqueue_task` admission behavior). When the flag is unset the gate is a pure
 pass-through — enable it on a host that wants the hard boundary; the convention is
 the primary control everywhere else.

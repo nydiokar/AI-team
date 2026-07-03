@@ -20,7 +20,6 @@ from src.core.process_utils import (
     terminate_process_tree,
 )
 from src.services.session_store import SessionStore
-from src.orchestrator import HarnessAdmissionBlocked
 from src.core.interfaces import Session, SessionStatus
 from src.services.path_resolver import PathResolver, PathResolution
 from src.backends.registry import valid_backend_names
@@ -323,19 +322,12 @@ class TelegramInterface:
                 return
             active_session.last_user_message = message_text
             active_session.status = SessionStatus.BUSY
-            try:
-                task_id = await self.orchestrator.submit_instruction(
-                    description=message_text,
-                    session_id=active_session.session_id,
-                    cwd=active_session.repo_path,
-                    source="telegram_session",
-                )
-            except HarnessAdmissionBlocked:
-                await self.app.bot.send_message(
-                    chat_id=chat_id,
-                    text="⛔ This is a Level-3 (high-risk) task and needs operator approval before it runs. It was not started.",
-                )
-                return
+            task_id = await self.orchestrator.submit_instruction(
+                description=message_text,
+                session_id=active_session.session_id,
+                cwd=active_session.repo_path,
+                source="telegram_session",
+            )
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
             await self.app.bot.send_message(
@@ -355,17 +347,10 @@ class TelegramInterface:
             await self.app.bot.send_message(chat_id=chat_id, text="❌ No active session. Use /session_new first.")
             return
 
-        try:
-            task_id = await self.orchestrator.submit_instruction(
-                description=message_text,
-                source="telegram_oneoff",
-            )
-        except HarnessAdmissionBlocked:
-            await self.app.bot.send_message(
-                chat_id=chat_id,
-                text="⛔ This is a Level-3 (high-risk) task and needs operator approval before it runs. It was not started.",
-            )
-            return
+        task_id = await self.orchestrator.submit_instruction(
+            description=message_text,
+            source="telegram_oneoff",
+        )
         await self.app.bot.send_message(
             chat_id=chat_id,
             text=(
@@ -1229,18 +1214,12 @@ class TelegramInterface:
                 return
             active_session.last_user_message = message_text
             active_session.status = SessionStatus.BUSY
-            try:
-                task_id = await self.orchestrator.submit_instruction(
-                    description=message_text,
-                    session_id=active_session.session_id,
-                    cwd=active_session.repo_path,
-                    source="telegram_session",
-                )
-            except HarnessAdmissionBlocked:
-                await update.message.reply_text(
-                    "⛔ This is a Level-3 (high-risk) task and needs operator approval before it runs. It was not started."
-                )
-                return
+            task_id = await self.orchestrator.submit_instruction(
+                description=message_text,
+                session_id=active_session.session_id,
+                cwd=active_session.repo_path,
+                source="telegram_session",
+            )
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
             await update.message.reply_text(f"⏳ Working... {self._session_message_ref(active_session, task_id)}")
@@ -1257,16 +1236,10 @@ class TelegramInterface:
             await update.message.reply_text("❌ No active session. Use /session_new first.")
             return
 
-        try:
-            task_id = await self.orchestrator.submit_instruction(
-                description=message_text,
-                source="telegram_oneoff",
-            )
-        except HarnessAdmissionBlocked:
-            await update.message.reply_text(
-                "⛔ This is a Level-3 (high-risk) task and needs operator approval before it runs. It was not started."
-            )
-            return
+        task_id = await self.orchestrator.submit_instruction(
+            description=message_text,
+            source="telegram_oneoff",
+        )
         await update.message.reply_text(
             f"One-off task created: `{task_id}`\n"
             f"Tip: use /session_new to open a persistent coding session."

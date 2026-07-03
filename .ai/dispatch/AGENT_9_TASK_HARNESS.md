@@ -363,11 +363,11 @@ enters through. Done on `feat/task-harness` (commit 4).
 - **Redundant inline check removed** from `_handle_new_task_file`; that lane now
   just catches `HarnessAdmissionBlocked` to release its file-tracking state (so an
   `approved: true` re-write is re-picked-up). Single emit site now.
-- **Caller surfacing (honest, no faked acceptance):** control API
-  `POST /api/instructions` → **HTTP 409** `{error: harness_level3_needs_approval}`;
-  Telegram free-text handlers (`_submit_buffered_instruction`, `_queue_instruction`)
-  → "⛔ Level-3 … needs operator approval … not started". The file-upload submit
-  sites already had an `except Exception` reply, so they surface it too.
+- **Caller surfacing — REVERTED in T5 (see below).** T4 originally added a control
+  API 409 and Telegram approval replies. That was out-of-scope: it turned a backend
+  admission gate into a cross-surface UX change, unprompted, and against the
+  WebUI-first migration order. Stripped in T5 — the backend now raises the typed
+  signal and stops; surface handling is a later WebUI-first task.
 - **Trap avoided (as flagged):** the gate is admission control in `_enqueue_task`,
   **not** `process_task`/`_maybe_inject_compact_context` — the latter is
   post-enqueue execution, too late to block. `continues:` living there is
@@ -390,3 +390,35 @@ enters through. Done on `feat/task-harness` (commit 4).
   pure pass-through on all lanes.
 
 **Still not merged** — operator's call once green. DISPATCH_LOG A9H stays `built`.
+
+### T5 — Strip to backend-only (2026-07-03, operator course-correction)
+
+Operator flagged the T4 surface catches as out-of-scope: the job was **backend
+admission control**, and wiring the block's UX into Telegram (and the control API)
+first is backwards while the product is migrating to the WebUI ("build v1, test it
+in isolation, then integrate — WebUI first"). Reverted on `feat/task-harness`
+(commit 5).
+
+- **Reverted** `src/telegram/interface.py` and `src/control/control_api.py` to their
+  exact pre-T4 state (`git checkout 356c2c2 -- …`; verified those files had no other
+  change between T4 and `356c2c2`, so this is a clean, surgical revert). Zero
+  `HarnessAdmissionBlocked` references remain in either surface.
+- **Kept (backend-only):** `orchestrator.HarnessAdmissionBlocked` + the Level-3
+  admission gate at the top of `_enqueue_task` (emit `task_blocked` + raise), and
+  the 24 guard tests.
+- **Behavior now:** a blocked Level-3 task raises `HarnessAdmissionBlocked` at the
+  choke point; with no surface catch it propagates to the caller as an unhandled
+  error (acceptable — the gate is flag-OFF by default, so this path is only reached
+  when an operator deliberately arms it). **How each surface presents "blocked" is a
+  separate WebUI-first task** (see "Next" below). Docs updated: `dispatch_pipeline.md`
+  now states surface handling is intentionally not built here.
+
+**Verification (no paid CLI):**
+- `pytest tests/test_harness_level3_guard.py -q` → **24 passed** (gate + predicate).
+- `src/orchestrator.py`, `src/telegram/interface.py`, `src/control/control_api.py`
+  parse clean; no harness references in the two surfaces.
+
+**Next (not in this dispatch):** WebUI-first integration of the "Level-3 blocked"
+state — surface the raised signal in the Web UI (the target surface), then decide
+whether Telegram/control-API need their own presentation. That is a new task, to be
+built and tested on the WebUI before any Telegram wiring.
