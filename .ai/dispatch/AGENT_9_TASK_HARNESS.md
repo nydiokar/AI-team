@@ -205,5 +205,108 @@ up — do not restart it.
 
 ## Implementation log
 
-_(executor fills this in the AGENT_8 style: per-file summary, F-tag outcomes,
-verification commands + results, operator follow-ups)_
+### T1 — Templates + Level rubric — SHIPPED (2026-07-03)
+
+Pure docs under `docs/harness/` (new dir), zero code. Files:
+- **`packet_template.xml`** — §2.1 skeleton with inline `<!-- guidance -->` per
+  field (real vs literal vs interpreted objective; non_goals/drift_risks as
+  first-class), plus a `<meta><harness_level>` field that mirrors the rubric and,
+  for a dispatched `.task.md`, must match the frontmatter. Header states plainly:
+  nothing parses this — **no validator** (F6).
+- **`milestone_template.md`** — §2.2 burndown (Objective / Current Status /
+  Burndown / Live Log / Blockers / Next Action). **Update rule stated at top:**
+  executor updates after every meaningful step; on resume this file +
+  `load_compact_context(task_id)` is ground truth, not model memory.
+- **`level_rubric.md`** — §3 as a deterministic checklist. **Leads with the
+  Level-3 triggers** (migration/security/mesh/trading/autonomy/destructive/>~5
+  files/service-boundary) + "when in doubt, escalate one level" + the cost cap
+  (review off for Level ≤ 1; plan↔review loop ≤ 2 rounds; no paid-CLI verify).
+- **`README.md`** — one screen: what the harness is, the level ladder,
+  which-file-when table, cost guard, spec pointer.
+
+**[F1] outcome — `no change needed` (honored):** every T1 file is a document. No
+migration, no orchestrator edit, no `flow_runs`. Where a template says "state" it
+means the milestone file + the existing `mesh_tasks` ledger.
+
+**Verification:** four files render as markdown/xml; a human can pick a level and
+fill a packet from them with no other context. No tests (docs). Commit 1.
+
+### T2 — Generators (DRAFT / REVIEW / CLOSE) — SHIPPED (2026-07-03)
+
+Prompt artifacts under `docs/harness/generators/` (not services). Files:
+- **`draft_packet.md`** — §14 step 1 "text engine" role: intent + curated
+  `<context_snippets>` + level → filled packet + initialized milestone. Explicitly
+  curates snippets (small, source-tagged, relevance stated); never dumps context.
+- **`adversarial_review.md`** — §14 step 2: challenge assumptions, P0/P1 only,
+  F-tags in the house style (stable `[Fn]`, one-line defect, concrete failure
+  scenario). Documents the inline FIX loop **capped at 2 rounds**; unresolved →
+  explicit non-goal / logged risk, never dropped.
+- **`closure_summary.md`** — §14 step 7: what changed / verification / F-tag
+  outcomes / what follows, plus the `.ai/CONTEXT.md` + `DISPATCH_LOG.md` update
+  stub. Level-3 wiki optional, never a gate.
+
+**F-tag outcomes:**
+- **[F2] `fixed`** — memory rule points ONLY at `load_compact_context` +
+  file-memory (`MEMORY.md`); `<memory_entry>` framed as a *write format*. No memory
+  store, no async-compression job.
+- **[F3] `fixed`** — no per-task model smoke; `adversarial_review.md` states the
+  provider smoke (§9) is onboarding-only and cost-guarded, and that implementation
+  review uses `/code-review` + `/security-review` on the committed diff.
+- **[F6] `fixed`** — no parser/validator; the packet is called out as model-facing
+  prose; the wiki is optional and never blocks closure.
+
+**Verification:** dry-ran the loop by hand on one real small task (this dispatch's
+own §13 checklist tick — the worked example in `dispatch_pipeline.md`): DRAFT → a
+packet + milestone, REVIEW → one plausible F-tag, CLOSE → a summary. No paid CLI;
+no skill-backed executable to import-smoke. Commit 2.
+
+### T3 — Dispatch Pipeline + auto-pickup guard — SHIPPED (2026-07-03)
+
+- **`docs/harness/dispatch_pipeline.md`** — the §14 runbook, self-sufficient for a
+  fresh executor: the seven steps, the auto-pickup primitive referenced by
+  file:function (`file_watcher._is_task_file → _handle_new_task_file →
+  task_parser.parse_task_file → _enqueue_task`), the `.task.md` frontmatter shape
+  (incl. `harness_level` + `approved`), the guard truth-table, and an end-to-end
+  worked example.
+- **Auto-pickup guard (code, minimal, flag-guarded).** Convention alone can't
+  *stop* a mis-declared file (the watcher enqueues any `*.task.md`), so per the
+  packet's "only if a convention can't hold it" clause, added the backstop:
+  `orchestrator.py::_harness_level3_allows_autopickup` (a `@staticmethod`), called
+  in `_handle_new_task_file` between `parse_task_file` and `_enqueue_task`. A
+  blocked file emits a `task_blocked` event and is left un-enqueued (re-writable
+  with `approved: true`). Opt-in via `HARNESS_LEVEL3_GUARD`.
+- **`docs/Task_harness_workflow.md` §13** ticked (all 9 items + the guard);
+  **`.ai/CONTEXT.md`** got the harness pointer (Priorities row → built, a Shipped
+  Ledger entry, a Key-files row, and a "how to run the harness" pointer).
+
+**F-tag outcomes:**
+- **[F4] `no change needed`** — checkpoint reviewer is documented as sequential on
+  the committed diff; no live tailer, no two agents on one tree.
+- **[F5] `fixed`** — the pipeline selects level via `level_rubric.md` triggers,
+  not vibes; guard coerces `harness_level` deterministically.
+- **[F1-again] `fixed`** — the guard is a pure pass-through when the flag is unset
+  OR the field is absent OR the level is ≤ 2 OR unparseable; `MESH_ENABLED`/default
+  behavior is byte-identical. No flow table.
+
+**Verification (no paid CLI):**
+- `pytest tests/test_harness_level3_guard.py -q` → **18 passed** (guard off ⇒
+  allow; on: absent-field ⇒ allow, level ≤ 2 ⇒ allow, level 3 unapproved ⇒ BLOCK,
+  level 3 approved ⇒ allow, unparseable ⇒ allow, falsey flag values ⇒ off).
+- `pytest tests/test_compact_context_injection.py -q` → **11 passed** (adjacent
+  `_handle_new_task_file` region unbroken).
+- No gateway restart; `python main.py status` NOT run (Test Cost Guard). Commit 3.
+
+**Definition-of-done check:** ✅ `docs/harness/` holds the four T1 files + 3
+generators + the pipeline runbook; ✅ a fresh executor can run intent→close from
+`dispatch_pipeline.md` alone; ✅ the Level-3 guard holds (18 unit tests + documented
+convention); ✅ spec §13 ticked, CONTEXT.md + DISPATCH_LOG.md updated (note:
+`.ai/NEXT_TASKS.md` no longer exists — used CONTEXT.md + DISPATCH_LOG.md per the
+current doc layout); ✅ zero new gateway state; ✅ zero paid-CLI calls; ✅ default
+gateway behavior unchanged.
+
+**Operator follow-ups (not code):**
+1. To enable the hard Level-3 boundary on a host, set `HARNESS_LEVEL3_GUARD=1`
+   (e.g. in `ecosystem.config.js` env). Left OFF by default so this pass changes no
+   running behavior; the convention is the primary control until then.
+2. Adversarial build-review → `DISPATCH_LOG.md` A9H `built` → `reviewed`, then
+   merge `feat/task-harness` → `main` → `merged`.
