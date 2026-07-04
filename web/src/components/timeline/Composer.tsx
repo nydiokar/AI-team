@@ -1,7 +1,7 @@
 import { useState, useRef, useLayoutEffect } from "react";
 import { ArrowUp, Square, Paperclip } from "lucide-react";
 import { Button } from "../ui/Button";
-import { newIdempotencyKey } from "../../transport/apiClient";
+import { ApiError, newIdempotencyKey } from "../../transport/apiClient";
 import {
   useSubmitInstruction,
   useStopSession,
@@ -95,6 +95,13 @@ export function Composer({
   };
 
   const rejected = submit.isError;
+  // A 409 from the Level-3 admission gate is terminal for this send — retrying
+  // will not help; it needs operator approval. Surface the backend's human copy
+  // instead of the generic "tap send to retry" (which would be misleading here).
+  const blockedMessage =
+    submit.error instanceof ApiError && submit.error.status === 409
+      ? submit.error.message
+      : null;
 
   const sendOnEnter = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -113,7 +120,7 @@ export function Composer({
       )}
       {rejected && !uploadBanner && (
         <p className="mb-1.5 px-1 text-[11px] text-bad">
-          Send failed — tap send to retry.
+          {blockedMessage ?? "Send failed — tap send to retry."}
         </p>
       )}
       <div className="flex items-end gap-2">

@@ -191,6 +191,25 @@ class SessionService:
         self.store.save(s)
         return CommandResult(True, session=s)
 
+    def mark_idle(self, session_id: str) -> CommandResult:
+        """Return a session to IDLE — the inverse of ``mark_busy``.
+
+        Used when a send was optimistically marked BUSY but never actually
+        dispatched (e.g. the task-harness Level-3 admission gate refuses the task
+        at the queue choke point *after* ``mark_busy`` already ran). Without this
+        the session would be stranded BUSY with no in-flight task. Idempotent: a
+        session that is already IDLE stays IDLE. Does not touch CLOSED/CANCELLED
+        sessions — only an active BUSY/IDLE session is reset.
+        """
+        s = self.store.get(session_id)
+        if not s:
+            return CommandResult(False, reason="session_not_found")
+        if s.status in (SessionStatus.CLOSED, SessionStatus.CANCELLED):
+            return CommandResult(False, reason="not_active", session=s)
+        s.status = SessionStatus.IDLE
+        self.store.save(s)
+        return CommandResult(True, session=s)
+
     def restore_session(self, session_id: str) -> CommandResult:
         """Reopen a CLOSED session (→ IDLE). Caller binds it to a chat if needed."""
         s = self.store.get(session_id)

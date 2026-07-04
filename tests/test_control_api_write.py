@@ -39,9 +39,16 @@ class _StubOrchestrator:
         self.compacted = []          # session_ids
         self._backends = {"claude": _FakeBackend()}
         self._next_task_id = "task_web_1"
+        # When set, submit_instruction raises the harness admission block instead of
+        # accepting the task — mirrors orchestrator._enqueue_task with the Level-3
+        # guard armed. None ⇒ normal accept.
+        self.block_task_id = None
 
     async def submit_instruction(self, description, session_id=None, cwd=None,
                                  target_files=None, source="runtime", **_):
+        if self.block_task_id is not None:
+            from src.orchestrator import HarnessAdmissionBlocked
+            raise HarnessAdmissionBlocked(self.block_task_id)
         self.submitted.append((description, session_id, cwd, source))
         return self._next_task_id
 
@@ -156,6 +163,40 @@ def test_instruction_unknown_session_404(client):
     r = client.post("/api/instructions", headers=_auth(),
                     json={"description": "x", "session_id": "nope"})
     assert r.status_code == 404
+
+
+# --- harness Level-3 admission block (A13) ----------------------------------
+
+def test_blocked_oneoff_instruction_is_409_with_reason(client, orch):
+    """A one-off submit refused by the Level-3 admission gate returns a clean 409
+    with the stable machine reason + human detail — not an opaque 500."""
+    orch.block_task_id = "task_blocked_1"
+    r = client.post("/api/instructions", headers=_auth(),
+                    json={"description": "migrate the auth schema"})
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["reason"] == "harness_level3_needs_approval"
+    assert detail["task_id"] == "task_blocked_1"
+    assert detail["detail"]  # non-empty human copy
+    # Nothing was accepted.
+    assert orch.submitted == []
+
+
+def test_blocked_session_instruction_reverts_busy_to_idle(client, orch, tmp_path):
+    """When a session submit is blocked AFTER the optimistic mark_busy, the session
+    must be returned to IDLE — never stranded BUSY with no in-flight task."""
+    from src.core.interfaces import SessionStatus
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    sid = res.session.session_id
+    orch.block_task_id = "task_blocked_2"
+
+    r = client.post("/api/instructions", headers=_auth(),
+                    json={"description": "rewrite the mesh router", "session_id": sid})
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "harness_level3_needs_approval"
+    # The session is usable again, not stuck BUSY.
+    s = orch.session_service.store.get(sid)
+    assert s.status == SessionStatus.IDLE
 
 
 # --- idempotency ------------------------------------------------------------

@@ -34,7 +34,7 @@ import sys
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 # ---------------------------------------------------------------------------
 # Module state — set once by init_logging()
@@ -42,6 +42,22 @@ from typing import Any, Dict, Optional
 
 _NODE_ID: str = ""
 _LOGS_DIR: Optional[Path] = None
+# Optional out-of-process fan-out for emitted events. A remote worker registers a
+# forwarder here so its live activity reaches the gateway that owns the SSE
+# stream (the worker's own events.ndjson is never tailed by the UI). Best-effort:
+# a forwarder must never break local NDJSON logging.
+_event_forwarder: Optional[Callable[[Dict[str, Any]], None]] = None
+
+
+def register_event_forwarder(fn: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Install (or clear with ``None``) a best-effort per-event forwarder.
+
+    ``fn`` receives a shallow copy of the emitted event payload dict and must not
+    raise or block; callers that do network I/O should offload to a background
+    queue. Only one forwarder is active at a time (last registration wins).
+    """
+    global _event_forwarder
+    _event_forwarder = fn
 
 # Per-task correlation context. Set/cleared around a unit of work so the
 # formatter and emit_event can pick up task_id/session_id automatically.
@@ -339,6 +355,15 @@ def emit_event(
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
         _maybe_rotate(path)
+
+        # Best-effort out-of-process fan-out (e.g. remote worker → gateway SSE).
+        # Guarded separately so a forwarder failure can't lose the local line.
+        fwd = _event_forwarder
+        if fwd is not None:
+            try:
+                fwd(dict(payload))
+            except Exception:
+                pass
     except Exception:
         # Observability must never break the caller.
         pass

@@ -47,7 +47,8 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
-| — | ~~Build Task Harness Workflow Kernel (v1)~~ | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). | **built** (A9H) on `feat/task-harness` — see Shipped Ledger + `docs/harness/` |
+| — | ~~Build Task Harness Workflow Kernel (v1)~~ | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). | **merged** (A9H, PR #8) on `main` — see Shipped Ledger + `docs/harness/` |
+| — | ~~WebUI-first surfacing of the Level-3 admission block~~ (A9H "Next") | A blocked Level-3 submit must read as "needs approval," not an opaque 500 / stuck session. | **built** (A13) on `feat/harness-block-surface` — awaiting operator merge |
 
 **To run a task through the harness:** start at
 [`docs/harness/dispatch_pipeline.md`](../docs/harness/dispatch_pipeline.md)
@@ -86,7 +87,7 @@ files. This is the "don't rebuild it, it's done" list.
 **Operator Signal (merged from `feat/operator-signal`, PR #5):**
 - **#21** Web Push (migration 20, `push_service.py`, SW handlers; notification fan-out only, NOT approval-gated). **VAPID env configured 2026-07-03 — push is live.** · **#30/#33** Backend Account + Usage Visibility (`backend_usage.py`, `/api/backends/usage`; honesty-first — unknown limits return `null` + reason, never fabricated).
 
-**Task Harness Workflow Kernel v1 (built on `feat/task-harness`, A9H — not yet merged):**
+**Task Harness Workflow Kernel v1 (A9H + A12 — MERGED to `main` via PR #8, `fd90a46`):**
 - Prompt-and-artifact task-quality loop under `docs/harness/` — templates (packet
   XML, milestone, level rubric, README), DRAFT/REVIEW/CLOSE generators, and the
   `dispatch_pipeline.md` runbook. **Zero new gateway state** (spec §0). **Level-3
@@ -103,6 +104,14 @@ files. This is the "don't rebuild it, it's done" list.
   `dispatch_pipeline.md` now carries a two-lane scope banner + a copyable all-7-stage
   worked example (real packet/milestone/F-tags/closure). Friction report verdict:
   **Phase 2 NOT justified** — file/dispatch discipline held; see `AGENT_12_HARNESS_SELFTEST.md`.
+- **A13 admission-block surfacing (built, `feat/harness-block-surface`, awaiting merge)** —
+  the Web `/api/instructions` lane now catches `HarnessAdmissionBlocked` → **409**
+  (`reason=harness_level3_needs_approval` + human `detail` + `task_id`) instead of an
+  opaque 500; `session_service.mark_idle` reverts the optimistically-BUSY session; the
+  Composer renders the approval-needed copy, not "tap send to retry". Gate predicate
+  untouched; guard OFF ⇒ byte-identical. ZERO new gateway state. See
+  `dispatch/AGENT_13_HARNESS_BLOCK_SURFACE.md`. Telegram surfacing + approve-from-UI
+  remain out of scope (deferred).
 
 **Compact-Context (merged from `feat/compact-context`, PR #6):**
 - **#31/#32** `load_compact_context` wired via opt-in `continues: <task_id>` frontmatter → `process_task` prepends bounded, fence-hardened `<prior_context>` block. No new gateway state. Docs: `docs/Task_harness_workflow.md` §7/§14.

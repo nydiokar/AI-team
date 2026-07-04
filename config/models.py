@@ -51,8 +51,8 @@ _OPENCODE_MODELS: List[ModelOption] = [
 
 BACKEND_MODELS: Dict[str, List[ModelOption]] = {
     "claude": [
-        ModelOption("sonnet", is_default=True),
-        ModelOption("opus"),
+        ModelOption("sonnet"),
+        ModelOption("opus", is_default=True),
         ModelOption("haiku"),
         ModelOption("fable"),
     ],

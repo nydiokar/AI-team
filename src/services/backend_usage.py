@@ -19,8 +19,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Token fields we know how to sum if a backend's usage dict carries them. Unknown
-# keys are ignored; missing keys contribute nothing (never fabricated).
+# Token fields we know how to aggregate if a backend's usage dict carries them.
+# Unknown keys are ignored; missing keys contribute nothing (never fabricated).
 _TOKEN_KEYS = (
     "input_tokens",
     "output_tokens",
@@ -28,6 +28,18 @@ _TOKEN_KEYS = (
     "cache_creation_tokens",
     "total_tokens",
 )
+
+# Backends whose per-turn token counters are CUMULATIVE (a running context/session
+# total that grows each turn) rather than additive per-invocation deltas. Summing
+# cumulative snapshots across turns is meaningless — it produced figures like
+# "166,700,822 tok" (74 context snapshots added together, individual turns already
+# reporting 40M+). For these we take the PEAK (max) observed instead of a sum, so
+# the number reflects "largest context reached," which is honest and finite.
+#
+# This is a stopgap keyed by backend name. The durable fix is to carry per-turn
+# ``counter_semantics`` through the projection into ``metrics`` and branch on that
+# (see LLM turn observability work); until then this map is the truth source.
+_CUMULATIVE_TOKEN_BACKENDS = frozenset({"codex"})
 
 # Why a limit/identity field is null. These are honest, not placeholders.
 _REASON_NO_LIMIT_SOURCE = "no_backend_limit_source"
@@ -51,13 +63,23 @@ def _configured_model(cfg: Any, backend: str) -> Optional[str]:
         return None
 
 
-def _sum_usage(dst: Dict[str, int], usage: Any) -> None:
+def _aggregate_usage(dst: Dict[str, int], usage: Any, *, cumulative: bool) -> None:
+    """Fold one turn's usage into the running totals.
+
+    ``cumulative=False`` (default backends): additive per-invocation counters →
+    sum. ``cumulative=True`` (e.g. Codex): running totals → take the peak (max)
+    so we never add snapshots of the same growing counter.
+    """
     if not isinstance(usage, dict):
         return
     for key in _TOKEN_KEYS:
         val = usage.get(key)
         if isinstance(val, (int, float)):
-            dst[key] = dst.get(key, 0) + int(val)
+            v = int(val)
+            if cumulative:
+                dst[key] = max(dst.get(key, 0), v)
+            else:
+                dst[key] = dst.get(key, 0) + v
 
 
 def build_backend_usage(
@@ -77,12 +99,17 @@ def build_backend_usage(
     backends: List[Dict[str, Any]] = []
 
     for name in valid_backends:
+        cumulative = name in _CUMULATIVE_TOKEN_BACKENDS
         entry: Dict[str, Any] = {
             "backend": name,
             "configured_model": _configured_model(cfg, name),
             "observed_models": [],
-            "recent_usage": None,          # summed tokens from recent turns, or null
+            "recent_usage": None,          # aggregated tokens from recent turns, or null
             "recent_turn_count": 0,
+            # How recent_usage was aggregated across turns: "sum" (additive
+            # per-invocation counters) or "peak" (cumulative counters — the max
+            # observed, since summing running totals is meaningless).
+            "usage_aggregation": "peak" if cumulative else "sum",
             # Facts no backend proves locally — honest nulls, not zeros:
             "account_identity": None,
             "account_identity_reason": _REASON_NO_IDENTITY_SOURCE,
@@ -111,7 +138,7 @@ def build_backend_usage(
                     if rm and rm not in observed:
                         observed.append(rm)
                     # metrics carries the turn's rolled-up usage when present.
-                    _sum_usage(usage_totals, turn.get("metrics"))
+                    _aggregate_usage(usage_totals, turn.get("metrics"), cumulative=cumulative)
                 entry["observed_models"] = observed[:10]
                 entry["recent_turn_count"] = len(turns)
                 if usage_totals:

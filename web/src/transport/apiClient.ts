@@ -460,6 +460,9 @@ export interface BackendUsageRow {
   observed_models: string[];
   recent_usage: Record<string, number> | null;
   recent_turn_count: number;
+  /** How recent_usage was aggregated: "sum" (additive) or "peak" (cumulative
+   *  counters, e.g. Codex context size — max observed, not a running total). */
+  usage_aggregation?: string;
   account_identity: string | null;
   account_identity_reason: string | null;
   daily_limit: number | null;
