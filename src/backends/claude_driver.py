@@ -175,7 +175,16 @@ def _make_activity_cb(session_id: Optional[str], task_id: Optional[str]):
     def cb(label: str) -> None:
         try:
             from src.core.observability import emit_event
-            emit_event("task_activity", session_id=session_id, task_id=task_id, label=label)
+            # Pass turn_id explicitly (= task_id in this context) so the stale
+            # contextvar inherited by the reused SDK background thread doesn't
+            # overwrite the correct current-turn value inside emit_event.
+            emit_event(
+                "task_activity",
+                session_id=session_id,
+                task_id=task_id,
+                turn_id=task_id,
+                label=label,
+            )
         except Exception:
             pass
 
@@ -388,7 +397,16 @@ class _SDKSession:
         try:
             return fut.result(timeout=timeout)
         except Exception:
-            fut.cancel()  # don't leave the coroutine dangling on the loop thread
+            # The coroutine can still be alive on the SDK's own loop thread —
+            # e.g. mid `receive_response()` with the real claude subprocess
+            # still generating output — when this raises (most commonly a
+            # `sdk_turn_timeout_sec` timeout, the SDK-driver equivalent of the
+            # legacy driver's inactivity/hard-cap kill). Cancelling the
+            # wrapper future alone doesn't reach it: that's the same gap the
+            # cancel-button bug had. Interrupt the actual turn so it stops for
+            # real instead of running unattended in the background.
+            fut.cancel()
+            self.cancel_inflight()
             raise
 
     async def _do_query(self, message: str, progress_cb=None) -> "TurnOutcome":
@@ -535,10 +553,69 @@ class _SDKSession:
             timeout = None if int(raw) == 0 else float(max(60, int(raw)))
         except Exception:
             pass
-        with self._lock:
+        # Guard against a stale turn still holding the lock (e.g. a cancel that
+        # didn't reach this session in time, or a caller that never cancelled at
+        # all). Queuing silently behind it is what produced the ever-growing
+        # transcript bug: the new message would only get sent once the old,
+        # abandoned turn finally finished on its own, appending straight into
+        # the same live conversation. Interrupt it up front instead so the new
+        # turn starts promptly on a clean, still-live session.
+        if not self._lock.acquire(blocking=False):
+            logger.warning(
+                "event=sdk_session_turn_conflict session_key=%s — a previous turn "
+                "is still in flight; interrupting it before starting this one",
+                self.session_key,
+            )
+            self.cancel_inflight()
+            self._lock.acquire()
+        try:
             return self.submit(self._do_query(message, progress_cb=progress_cb), timeout=timeout)
+        finally:
+            self._lock.release()
+
+    def cancel_inflight(self) -> None:
+        """Best-effort interrupt of a turn in progress.
+
+        Without this, cancelling only detaches the caller from the session —
+        the claude subprocess is still inside `_do_query`'s
+        `receive_response()` loop and keeps running the turn to completion in
+        the background thread. A cancelled-then-resent prompt would then race
+        a brand-new session against the still-live old one, both writing to
+        their own transcripts (the ever-growing-session bug). Sending the
+        SDK's control-protocol interrupt makes the CLI end the current turn so
+        `receive_response()` returns promptly and the background thread can
+        actually stop.
+        """
+        if not self._loop or not self._loop.is_running() or self._client is None:
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(self._client.interrupt(), self._loop)
+            fut.result(timeout=10)
+        except Exception:
+            # The legacy print/resume driver's answer to an unresponsive turn
+            # was unconditional: terminate_many_popen(), no cooperation
+            # required. A cooperative interrupt that doesn't land within 10s
+            # means the CLI itself is wedged, so the same escalation applies
+            # here — force the session closed. `_async_run`'s idle loop picks
+            # up `_closed` on its next tick and disconnects, which itself
+            # escalates through SIGTERM then SIGKILL (see claude_agent_sdk's
+            # transport.close()) if the process still won't exit gracefully.
+            # This also unblocks whatever `send()` call is still stuck in
+            # `submit()` for this session: once the subprocess actually dies,
+            # its blocked read raises and that call returns. The pool
+            # (`ClaudeSDKClientDriver._get_or_create`) discards a `_closed`
+            # entry rather than handing a dead client to the next turn.
+            logger.warning(
+                "event=sdk_interrupt_failed session_key=%s — forcing a hard "
+                "teardown instead of leaving an unresponsive session running",
+                self.session_key, exc_info=True,
+            )
+            self._closed = True
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(lambda: None)
 
     def close(self) -> None:
+        self.cancel_inflight()
         self._closed = True
         # Poke the event loop so the await sleep(0.5) unblocks
         if self._loop and self._loop.is_running():
@@ -564,7 +641,17 @@ class ClaudeSDKClientDriver(ClaudeDriver):
     ) -> _SDKSession:
         key = session.session_id
         with self._lock:
-            if key not in self._sessions:
+            existing = self._sessions.get(key)
+            if existing is not None and existing._closed:
+                # A prior turn force-closed this session (its interrupt never
+                # landed — see _SDKSession.cancel_inflight). Handing it to the
+                # next turn would just fail immediately ("loop is not
+                # running"); start clean instead, same as the legacy driver's
+                # `_register_process` replacing a stale Popen for the same
+                # session key before spawning the next one.
+                self._sessions.pop(key, None)
+                existing = None
+            if existing is None:
                 sdk_sess = _SDKSession(key, session.repo_path, model, proc_env)
                 sdk_sess.start()
                 self._sessions[key] = sdk_sess
@@ -640,9 +727,19 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             )
 
     def cancel(self, session: Session) -> None:
-        sdk_sess = self._remove(session.session_id)
+        """Abort the in-flight turn but keep the session's process alive.
+
+        This is "stop what you're doing", not "close the session" — the
+        subprocess and its conversation state stay pooled so the next turn on
+        this session resumes the same live process instead of paying to spin
+        up a fresh one. Popping/closing here was the bug: it looked like
+        cleanup but actually just abandoned the running query with no one
+        watching it, while the pool no longer knew about it either.
+        """
+        with self._lock:
+            sdk_sess = self._sessions.get(session.session_id)
         if sdk_sess is not None:
-            sdk_sess.close()
+            sdk_sess.cancel_inflight()
 
     def close(self, session: Session) -> None:
         sdk_sess = self._remove(session.session_id)
