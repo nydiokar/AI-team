@@ -171,6 +171,21 @@ class TelemetryBatchPayload(BaseModel):
     events: List[Dict[str, Any]] = Field(default_factory=list, max_length=200)
 
 
+class ActivityPayload(BaseModel):
+    """A single live ``task_activity`` signal forwarded by a remote worker.
+
+    The gateway re-emits it into its own event stream so the UI pill shows the
+    worker's granular state ("Using Bash", "Thinking…") instead of a bare
+    "Working…". This is ephemeral live signal only — durable turn/token facts
+    still travel via /telemetry/batches, never here.
+    """
+    node_id: str = Field(min_length=1, max_length=128)
+    session_id: Optional[str] = Field(default=None, max_length=128)
+    task_id: Optional[str] = Field(default=None, max_length=128)
+    turn_id: Optional[str] = Field(default=None, max_length=128)
+    label: str = Field(min_length=1, max_length=200)
+
+
 # ---------------------------------------------------------------------------
 # Job models (T3)
 # ---------------------------------------------------------------------------
@@ -281,6 +296,30 @@ def submit_telemetry_batch(
         "rejected": len(rejections),
         "rejections": rejections,
     }
+
+
+@app.post("/events/activity", dependencies=[Depends(_require_auth)])
+def submit_activity(payload: ActivityPayload) -> Dict[str, Any]:
+    """Re-emit a remote worker's live ``task_activity`` into the gateway stream.
+
+    The gateway owns the SSE feed the UI tails; a remote worker's own
+    events.ndjson is never read, so without this hop the pill is stuck on
+    "Working…". Requires a session/task scope so stale cross-turn events can be
+    filtered client-side, matching the in-process emitter's contract.
+    """
+    if not payload.session_id and not payload.task_id:
+        raise HTTPException(status_code=422, detail="session_id or task_id required")
+    from src.core.observability import emit_event
+
+    emit_event(
+        "task_activity",
+        node_id=payload.node_id,
+        session_id=payload.session_id,
+        task_id=payload.task_id,
+        turn_id=payload.turn_id,
+        label=payload.label,
+    )
+    return {"accepted": True}
 
 
 # ---------------------------------------------------------------------------

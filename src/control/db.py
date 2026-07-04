@@ -1911,8 +1911,11 @@ class MeshDB:
             "tasks_claimed":    conn.execute("SELECT COUNT(*) FROM mesh_tasks WHERE status='claimed'").fetchone()[0],
             "tasks_completed":  conn.execute("SELECT COUNT(*) FROM mesh_tasks WHERE status='completed'").fetchone()[0],
             "tasks_failed":     conn.execute("SELECT COUNT(*) FROM mesh_tasks WHERE status IN ('failed','failed_node_offline')").fetchone()[0],
-            "nodes_online":     conn.execute("SELECT COUNT(*) FROM nodes WHERE status='online'").fetchone()[0],
-            "nodes_total":      conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0],
+            # Derived from the same `nodes` snapshot as mesh_load (consistent view).
+            # nodes_total is the current fleet, not every row ever registered, so
+            # long-dead test/canary inventory no longer inflates "N/M online".
+            "nodes_online":     sum(1 for n in nodes if n.get("status") == "online"),
+            "nodes_total":      _count_fleet_nodes(nodes),
             "schema_version":   conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] or 0,
             "db_path":          str(self._path),
             "mesh_load":        mesh_load,
@@ -2038,8 +2041,45 @@ def _origin_json(origin: Any) -> str:
     return json.dumps({"channel": channel, "kind": kind})
 
 
+# A node not seen within this window is decommissioned inventory (e.g. old
+# test/canary rows never pruned), not part of the current fleet. Excluding it
+# keeps "nodes online N/M" honest instead of counting long-dead ghosts.
+_NODE_FLEET_RETENTION_SEC = 2 * 86400
+
+
+def _count_fleet_nodes(nodes: List[Dict[str, Any]]) -> int:
+    """Count nodes that belong to the *current* fleet: online, or offline but
+    heartbeated within the retention window. Long-dead inventory is excluded."""
+    now = datetime.now(timezone.utc)
+    count = 0
+    for row in nodes:
+        if row.get("status") == "online":
+            count += 1
+            continue
+        hb = row.get("last_heartbeat")
+        if not hb:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(hb))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        if (now - ts).total_seconds() <= _NODE_FLEET_RETENTION_SEC:
+            count += 1
+    return count
+
+
 def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Aggregate node live_state blobs into network-wide slot/task counters."""
+    """Aggregate node live_state blobs into network-wide slot/task counters.
+
+    Only ``online`` nodes contribute. An offline node holds no live capacity and
+    is not "heartbeating but scheduler-invisible" — it is simply gone. Counting
+    offline nodes here previously (a) inflated ``slots_total`` with dead-node
+    capacity and (b) reported long-dead inventory in ``nodes_without_live_state``
+    as if it were live-but-silent, producing the misleading
+    "N nodes heartbeating but scheduler-invisible" banner.
+    """
     slots_used = 0
     slots_total = 0
     active_tasks = 0
@@ -2047,9 +2087,17 @@ def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict
     nodes_without_state = 0
     stale_state_nodes: List[str] = []
 
-    now = datetime.utcnow()
+    # tz-aware "now": live_state_updated_at is written tz-aware (+00:00) by the
+    # registry heartbeat, so subtracting it from a naive utcnow() raised
+    # TypeError — caught below — which silently marked EVERY fresh online node
+    # stale (zeroing slots and dropping active tasks). Compare aware-to-aware.
+    now = datetime.now(timezone.utc)
     _live_state_max_age_s = 120
     for row in nodes:
+        # Offline nodes are inventory, not live mesh — skip them entirely.
+        if row.get("status") != "online":
+            continue
+
         live_raw = row.get("live_state")
         live: Dict[str, Any] = {}
         if isinstance(live_raw, dict):
@@ -2068,7 +2116,12 @@ def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict
         updated = row.get("live_state_updated_at")
         if live and updated:
             try:
-                age_s = (now - datetime.fromisoformat(str(updated))).total_seconds()
+                parsed_ts = datetime.fromisoformat(str(updated))
+                if parsed_ts.tzinfo is None:
+                    # Legacy naive timestamps are assumed UTC (that's how they
+                    # were written before the registry moved to tz-aware).
+                    parsed_ts = parsed_ts.replace(tzinfo=timezone.utc)
+                age_s = (now - parsed_ts).total_seconds()
                 live_is_fresh = age_s <= _live_state_max_age_s
             except Exception:
                 live_is_fresh = False
@@ -2095,7 +2148,9 @@ def _mesh_load_stats(nodes: List[Dict[str, Any]], stale_busy: Optional[List[Dict
             except Exception:
                 pass
 
-        if row.get("status") == "online" and (not updated or not live_is_fresh):
+        # Reached only for online nodes (offline skipped above): an online node
+        # with missing/stale live_state is genuinely reporting-silent.
+        if not updated or not live_is_fresh:
             stale_state_nodes.append(row.get("node_id", ""))
 
     return {

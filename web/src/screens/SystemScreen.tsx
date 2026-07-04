@@ -374,7 +374,7 @@ function MeshHealthPanel({
         <div className="mt-3 space-y-1.5 border-t border-hairline/60 pt-3 text-[12px] text-ink-soft">
           {nodesNoLiveState > 0 && (
             <div className="text-warn">
-              ⚠ {nodesNoLiveState} node{nodesNoLiveState > 1 ? "s" : ""} heartbeating but scheduler-invisible (no live state)
+              ⚠ {nodesNoLiveState} online node{nodesNoLiveState > 1 ? "s" : ""} not reporting live state (slots/tasks unknown)
             </div>
           )}
           {staleNodes.length > 0 && (

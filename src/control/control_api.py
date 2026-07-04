@@ -54,7 +54,35 @@ _REASON_STATUS = {
     "no_repo_path": 400,
     "dangerous_extension": 400,
     "file_too_large": 413,
+    # Task-harness Level-3 admission gate (A13) — task refused before enqueue.
+    "harness_level3_needs_approval": 409,
 }
+
+# Human copy for the admission block. The backend owns a single sentence; the
+# client may still map the stable `reason` to its own richer UI treatment.
+_HARNESS_BLOCK_DETAIL = (
+    "This is a Level-3 task and needs operator approval before it can run "
+    "(HARNESS_LEVEL3_GUARD is armed). Retrying will not help."
+)
+
+
+def _harness_blocked_http(blocked: Exception) -> HTTPException:
+    """Build the 409 for a task-harness Level-3 admission block.
+
+    Mirrors the ``invalid_repo_path`` envelope shape: a stable machine ``reason``
+    plus a human ``detail`` the client can surface verbatim. ``task_id`` echoes the
+    refused task's id for logs/telemetry — no queue side-effect happened.
+    """
+    reason = getattr(blocked, "reason", "harness_level3_needs_approval")
+    return HTTPException(
+        status_code=_REASON_STATUS.get(reason, 409),
+        detail={
+            "ok": False,
+            "reason": reason,
+            "detail": _HARNESS_BLOCK_DETAIL,
+            "task_id": getattr(blocked, "task_id", None),
+        },
+    )
 
 
 class InstructionBody(BaseModel):
@@ -730,6 +758,13 @@ def build_control_api(orchestrator) -> FastAPI:
     ) -> JSONResponse:
         """Submit an instruction. With session_id it mirrors the Telegram session
         path (session → BUSY, source=web_session); otherwise a one-off."""
+        # The task-harness Level-3 admission gate (orchestrator._enqueue_task)
+        # RAISES `HarnessAdmissionBlocked` rather than returning a task_id, so a
+        # blocked task can never be mistaken for an accepted one. Translate it to a
+        # clean 409 here (not an opaque 500) and, crucially, undo the optimistic
+        # BUSY write on the session so it is not stranded with no in-flight task.
+        from src.orchestrator import HarnessAdmissionBlocked
+
         async with _idem_guard_async("instructions", idempotency_key) as cached:
             if cached is not None:
                 return JSONResponse(cached)
@@ -743,22 +778,30 @@ def build_control_api(orchestrator) -> FastAPI:
                 orchestrator.session_service.mark_busy(
                     session.session_id, last_user_message=body.description)
                 session = orchestrator.session_service.store.get(session.session_id)
-                task_id = await orchestrator.submit_instruction(
-                    description=body.description,
-                    session_id=session.session_id,
-                    cwd=session.repo_path or body.cwd,
-                    target_files=body.target_files,
-                    source="web_session",
-                )
+                try:
+                    task_id = await orchestrator.submit_instruction(
+                        description=body.description,
+                        session_id=session.session_id,
+                        cwd=session.repo_path or body.cwd,
+                        target_files=body.target_files,
+                        source="web_session",
+                    )
+                except HarnessAdmissionBlocked as blocked:
+                    # No task ran — return the session to IDLE so it stays usable.
+                    orchestrator.session_service.mark_idle(session.session_id)
+                    raise _harness_blocked_http(blocked)
                 session.last_task_id = task_id
                 orchestrator.session_service.store.save(session)
             else:
-                task_id = await orchestrator.submit_instruction(
-                    description=body.description,
-                    cwd=body.cwd,
-                    target_files=body.target_files,
-                    source="web_oneoff",
-                )
+                try:
+                    task_id = await orchestrator.submit_instruction(
+                        description=body.description,
+                        cwd=body.cwd,
+                        target_files=body.target_files,
+                        source="web_oneoff",
+                    )
+                except HarnessAdmissionBlocked as blocked:
+                    raise _harness_blocked_http(blocked)
 
             resp = {"ok": True, "task_id": task_id, "session": _session_payload(session)}
             _idem_put("instructions", idempotency_key, resp)

@@ -20,9 +20,12 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -780,6 +783,63 @@ async def _execute_task(
 
 
 # ---------------------------------------------------------------------------
+# Live activity forwarder (remote worker → gateway SSE)
+# ---------------------------------------------------------------------------
+
+class _ActivityForwarder:
+    """Best-effort background sender for live ``task_activity`` signals.
+
+    A remote worker's granular pill labels ("Using Bash", "Thinking…") are
+    written to *its own* events.ndjson, which the gateway's SSE never tails — so
+    the UI shows a bare "Working…". This forwards them over the existing
+    controller HTTP channel; the gateway re-emits them into the feed the UI reads.
+
+    Single daemon thread + bounded queue: it never blocks the SDK stream thread
+    and drops live signal under backpressure (durable telemetry is unaffected).
+    Only meaningful for genuinely remote workers — a co-located worker already
+    shares the gateway's events.ndjson, so its caller must not register one
+    (that would double-emit).
+    """
+
+    def __init__(self, http: "_HTTP", node_id: str, *, max_queue: int = 256) -> None:
+        self._http = http
+        self._node_id = node_id
+        self._q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max_queue)
+        self._thread = threading.Thread(
+            target=self._run, name="activity-forwarder", daemon=True
+        )
+        self._thread.start()
+
+    def offer(self, payload: Dict[str, Any]) -> None:
+        """Observability forwarder hook — enqueue a task_activity event, else ignore."""
+        if payload.get("event") != "task_activity":
+            return
+        body = {
+            "node_id": self._node_id,
+            "session_id": payload.get("session_id"),
+            "task_id": payload.get("task_id"),
+            "turn_id": payload.get("turn_id"),
+            "label": payload.get("label"),
+        }
+        if not body["session_id"] and not body["task_id"]:
+            return
+        if not body["label"]:
+            return
+        try:
+            self._q.put_nowait(body)
+        except queue.Full:
+            pass  # drop under backpressure; the pill self-heals on the next event
+
+    def _run(self) -> None:
+        while True:
+            body = self._q.get()
+            try:
+                self._http.post("/events/activity", body, timeout=3)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Worker daemon
 # ---------------------------------------------------------------------------
 
@@ -812,6 +872,33 @@ class WorkerAgent:
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
         self._canary = (os.getenv("WORKER_CANARY") or "").lower() in {"1", "true", "yes"}
         self._incarnation_id = uuid.uuid4().hex
+        self._activity_forwarder: Optional[_ActivityForwarder] = None
+        self._setup_activity_forwarding()
+
+    def _setup_activity_forwarding(self) -> None:
+        """Forward live task_activity to the gateway when we are a *remote* worker.
+
+        Skipped when co-located: a worker whose controller is on this same host
+        already writes into the gateway's events.ndjson, so forwarding would make
+        the gateway re-emit a duplicate. Co-location is detected by the controller
+        host resolving to loopback, our own tailscale IP, or our hostname.
+        """
+        try:
+            host = (urllib.parse.urlparse(self.cfg.controller_url).hostname or "").lower()
+            local = {"", "127.0.0.1", "localhost", "::1", (self.cfg.tailscale_ip or "").lower()}
+            try:
+                local.add(socket.gethostname().lower())
+            except Exception:
+                pass
+            if host in local:
+                logger.info("event=activity_forward_disabled reason=colocated controller_host=%s", host)
+                return
+            self._activity_forwarder = _ActivityForwarder(self._http, self.cfg.node_id)
+            from src.core.observability import register_event_forwarder
+            register_event_forwarder(self._activity_forwarder.offer)
+            logger.info("event=activity_forward_enabled controller_host=%s node_id=%s", host, self.cfg.node_id)
+        except Exception:
+            logger.warning("event=activity_forward_setup_failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Registration
