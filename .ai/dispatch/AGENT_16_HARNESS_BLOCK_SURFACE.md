@@ -1,4 +1,4 @@
-# A13 — WebUI-first surfacing of the Level-3 admission block
+# A16 — WebUI-first surfacing of the Level-3 admission block
 
 > ⚠️ **TEST COST GUARD.** No paid Claude/Codex CLI in tests. Do **not** run the
 > full e2e suite. Do **not** run `python main.py status` (it kills the live PM2
@@ -78,7 +78,7 @@ path is unreachable in production until an operator arms `HARNESS_LEVEL3_GUARD`.
       - Blocked session is IDLE, not BUSY.
       - Composer message distinguishes "needs approval" from "retry".
       - Guard OFF ⇒ byte-identical (a normal submit still 200s; existing tests pass).
-      - Docs reconciled: harness merged; A13 logged; "Next" ticked.
+      - Docs reconciled: harness merged; A16 logged; "Next" ticked.
     </definition_of_done>
     <risks>
       - Low. Reversible (git revert). Unreachable path under default flag.
@@ -93,7 +93,28 @@ path is unreachable in production until an operator arms `HARNESS_LEVEL3_GUARD`.
 </task_packet>
 ```
 
-See `AGENT_13_HARNESS_BLOCK_SURFACE.milestone.md` for the live burndown.
+---
+
+## Milestone
+
+**Status:** closed
+
+**Burndown:**
+- [x] 1. `session_service.mark_idle()` — BUSY→IDLE revert helper
+- [x] 2. `control_api` — 409 translation + session revert + reason in `_REASON_STATUS`
+- [x] 3. `Composer.tsx` — distinct approval-needed message for 409
+- [x] 4. Tests — blocked one-off (409+reason) & blocked session (409+IDLE)
+- [x] 5. Adversarial F-tag self-review + fixes (5 tags; no P0/P1; see below)
+- [x] 6. Run targeted pytest (no paid CLI) — 64 control-API + 25 session + 689 collect clean
+- [x] 7. Docs reconciled (harness merged, A16 row, "Next" ticked)
+
+**Live log:**
+- 2026-07-04: branch `feat/harness-block-surface` cut from main; packet + milestone written.
+- 2026-07-04: backend done — `mark_idle` added; `/api/instructions` wraps both submit lanes,
+  reverts BUSY→IDLE on block, raises 409 via `_harness_blocked_http`. Gate predicate untouched.
+- 2026-07-04: merged `origin/main` (A13-A15 doc restructuring landed under this branch's dispatch
+  numbers meanwhile) — renumbered this dispatch A13 → A16 to resolve the collision, folded this
+  `.milestone.md` sibling into the one-file convention (A14 contract).
 
 ---
 

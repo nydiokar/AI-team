@@ -22,6 +22,25 @@
 
 ---
 
+## Current Focus
+
+*What's active right now.* For per-job status see
+[`dispatch/DISPATCH_LOG.md`](dispatch/DISPATCH_LOG.md); for forward priorities see the
+**Current Priorities** table below; for who-owns-what-doc see [`DOC_MAP.md`](DOC_MAP.md).
+
+- **Task harness is COMPLETE and on `main` (one branch).** A13/A14/A15 all merged
+  2026-07-03/04. The loop now has: the `docs/harness/` templates + generators, the
+  **config map** (`loop_config_map.md` — the knobs), the **doc-structure contract**
+  (`DOC_MAP.md`, lean DISPATCH_LOG, one-dispatch-one-file), the **promotion ladder**
+  (`promotion_ladder.md` — evidence-gated v0.4 roadmap; 3 of 6 elements are drop-candidates),
+  and the **driver** (`manager_invocation.md` — paste this to fire a loop).
+- **Proven on docs (A12/A13/A14/A15); NOT yet on a real code task.** The adversarial-review
+  / checkpoint half still wants a real *code* diff to validate — the next loop should run
+  on a real feature/fix.
+- **How to start a loop:** paste `docs/harness/manager_invocation.md`, fill the spec slot.
+- Leftover: `feat/task-harness` (old A9H/A12 branch) is stale/divergent vs `main` — safe to
+  delete; its harness content already landed via earlier merges.
+
 ## What this project is
 
 A Telegram-controlled gateway for local coding agents (Claude Code, Codex,
@@ -48,7 +67,7 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
 | — | ~~Build Task Harness Workflow Kernel (v1)~~ | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). | **merged** (A9H, PR #8) on `main` — see Shipped Ledger + `docs/harness/` |
-| — | ~~WebUI-first surfacing of the Level-3 admission block~~ (A9H "Next") | A blocked Level-3 submit must read as "needs approval," not an opaque 500 / stuck session. | **built** (A13) on `feat/harness-block-surface` — awaiting operator merge |
+| — | ~~WebUI-first surfacing of the Level-3 admission block~~ (A9H "Next") | A blocked Level-3 submit must read as "needs approval," not an opaque 500 / stuck session. | **built** (A16) on `feat/harness-block-surface` — awaiting operator merge |
 
 **To run a task through the harness:** start at
 [`docs/harness/dispatch_pipeline.md`](../docs/harness/dispatch_pipeline.md)
@@ -104,13 +123,13 @@ files. This is the "don't rebuild it, it's done" list.
   `dispatch_pipeline.md` now carries a two-lane scope banner + a copyable all-7-stage
   worked example (real packet/milestone/F-tags/closure). Friction report verdict:
   **Phase 2 NOT justified** — file/dispatch discipline held; see `AGENT_12_HARNESS_SELFTEST.md`.
-- **A13 admission-block surfacing (built, `feat/harness-block-surface`, awaiting merge)** —
+- **A16 admission-block surfacing (built, `feat/harness-block-surface`, awaiting merge)** —
   the Web `/api/instructions` lane now catches `HarnessAdmissionBlocked` → **409**
   (`reason=harness_level3_needs_approval` + human `detail` + `task_id`) instead of an
   opaque 500; `session_service.mark_idle` reverts the optimistically-BUSY session; the
   Composer renders the approval-needed copy, not "tap send to retry". Gate predicate
   untouched; guard OFF ⇒ byte-identical. ZERO new gateway state. See
-  `dispatch/AGENT_13_HARNESS_BLOCK_SURFACE.md`. Telegram surfacing + approve-from-UI
+  `dispatch/AGENT_16_HARNESS_BLOCK_SURFACE.md`. Telegram surfacing + approve-from-UI
   remain out of scope (deferred).
 
 **Compact-Context (merged from `feat/compact-context`, PR #6):**

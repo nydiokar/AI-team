@@ -138,3 +138,9 @@ Fixes 1 & 3 land in the repo run by BOTH kanebra (gateway) and Horse (worker) �
 be redeployed** (it's a Windows mesh node running the SDK driver) for Fix 1 to take effect on
 remote turns; Fix 2 protects the gateway even before Horse is updated. Confirm Horse's
 `claude-agent-sdk` version — behavior above is verified for 0.2.110.
+
+## Open follow-ups (relocated from DISPATCH_LOG on the 2026-07-03 index slim)
+
+- **Horse redeploy** for Fix 1 to take on remote turns (the 2026-07-03 restart covers it).
+- **#41 context-fill gauge still open** — a proactive context-fill indicator (warn before
+  overflow) is not built; this fix only handles the overflow *after* it happens honestly.

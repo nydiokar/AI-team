@@ -1,6 +1,7 @@
 """
 Git-based file change detector - Simple and reliable way to detect file changes
 """
+import os
 import subprocess
 import logging
 import re
@@ -9,6 +10,9 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# Hide the transient console window each git child spawns on Windows (blank cmd flash).
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 class GitFileDetector:
     """Detects file changes using git commands and provides git automation"""
@@ -30,7 +34,8 @@ class GitFileDetector:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                check=False
+                check=False,
+                creationflags=_NO_WINDOW,
             )
             return result.returncode == 0
         except Exception as e:
@@ -48,7 +53,8 @@ class GitFileDetector:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                check=True
+                check=True,
+                creationflags=_NO_WINDOW,
             )
             return result.stdout.strip()
         except subprocess.CalledProcessError as e:
@@ -70,7 +76,8 @@ class GitFileDetector:
                     cwd=self.repo_path,
                     capture_output=True,
                     text=True, encoding="utf-8", errors="replace",
-                    check=True
+                    check=True,
+                    creationflags=_NO_WINDOW,
                 )
             else:
                 result = subprocess.run(
@@ -78,7 +85,8 @@ class GitFileDetector:
                     cwd=self.repo_path,
                     capture_output=True,
                     text=True, encoding="utf-8", errors="replace",
-                    check=True
+                    check=True,
+                    creationflags=_NO_WINDOW,
                 )
             return result.stdout
         except subprocess.CalledProcessError as e:
@@ -100,14 +108,16 @@ class GitFileDetector:
                     subprocess.run(
                         ['git', 'add', pattern],
                         cwd=self.repo_path,
-                        check=True
+                        check=True,
+                        creationflags=_NO_WINDOW,
                     )
             else:
                 # Stage all changes
                 subprocess.run(
                     ['git', 'add', '.'],
                     cwd=self.repo_path,
-                    check=True
+                    check=True,
+                    creationflags=_NO_WINDOW,
                 )
             return True
         except subprocess.CalledProcessError as e:
@@ -138,7 +148,8 @@ class GitFileDetector:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                check=True
+                check=True,
+                creationflags=_NO_WINDOW,
             )
             
             if result.stdout.strip():
@@ -149,7 +160,8 @@ class GitFileDetector:
             subprocess.run(
                 ['git', 'checkout', '-b', branch_name],
                 cwd=self.repo_path,
-                check=True
+                check=True,
+                creationflags=_NO_WINDOW,
             )
             
             logger.info(f"Created and switched to branch: {branch_name}")
@@ -173,7 +185,8 @@ class GitFileDetector:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                check=True
+                check=True,
+                creationflags=_NO_WINDOW,
             )
             logger.info(f"Committed changes: {commit_message}")
             return True
@@ -202,7 +215,8 @@ class GitFileDetector:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                check=True
+                check=True,
+                creationflags=_NO_WINDOW,
             )
             logger.info(f"Pushed branch {branch_name} to remote")
             return True
@@ -224,7 +238,8 @@ class GitFileDetector:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                check=True
+                check=True,
+                creationflags=_NO_WINDOW,
             )
             
             commits = []
@@ -260,7 +275,8 @@ class GitFileDetector:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                check=True
+                check=True,
+                creationflags=_NO_WINDOW,
             )
             return not result.stdout.strip()
         except subprocess.CalledProcessError as e:
@@ -281,7 +297,8 @@ class GitFileDetector:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                check=True
+                check=True,
+                creationflags=_NO_WINDOW,
             )
             
             files = []
@@ -309,7 +326,8 @@ class GitFileDetector:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
-                check=True
+                check=True,
+                creationflags=_NO_WINDOW,
             )
             
             changes = {

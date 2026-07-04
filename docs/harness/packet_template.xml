@@ -8,9 +8,11 @@
   comments if you like, and hand the result to the executor.
 
   HOW TO USE: the DRAFT role (docs/harness/generators/draft_packet.md) emits a
-  filled copy of this alongside an initialized milestone file
-  (docs/harness/milestone_template.md). Copy this file next to the dispatch, e.g.
-  `.ai/dispatch/<NAME>.packet.xml`, or inline it into the dispatch `.md`.
+  filled copy of this together with a `## Milestone` section (body from
+  docs/harness/milestone_template.md). ONE-FILE RULE (.ai/DOC_MAP.md): inline the
+  filled packet into the ONE dispatch doc `.ai/dispatch/AGENT_N_<NAME>.md` — the same
+  file that carries the `## Milestone` and `## Closure` sections. Do not spawn a
+  separate `.packet.xml` / `.milestone.md` / `.closure.md` sibling.
 
   LEVEL: pick with docs/harness/level_rubric.md. Levels 0–1 may skip most of this
   (a one-line objective_lock is enough). Levels 2–3 fill it fully.
