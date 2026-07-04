@@ -401,7 +401,10 @@ class TestSDKClientDriver:
         assert s1.session_id in drv._sessions
         assert s2.session_id in drv._sessions
 
-    def test_cancel_removes_session(self):
+    def test_cancel_interrupts_but_keeps_session_pooled(self):
+        # Cancel is "stop this turn", not "close the session" — the process
+        # stays pooled so the next turn resumes it instead of paying to spin
+        # up (and re-establish conversation continuity in) a fresh one.
         drv = ClaudeSDKClientDriver()
         session = _make_session()
 
@@ -413,8 +416,10 @@ class TestSDKClientDriver:
                 drv.start_session(session, "msg")
 
         assert session.session_id in drv._sessions
-        drv.cancel(session)
-        assert session.session_id not in drv._sessions
+        with patch.object(_SDKSession, "cancel_inflight") as mock_interrupt:
+            drv.cancel(session)
+            mock_interrupt.assert_called_once()
+        assert session.session_id in drv._sessions
 
     def test_close_removes_session(self):
         drv = ClaudeSDKClientDriver()
@@ -429,6 +434,30 @@ class TestSDKClientDriver:
 
         drv.close(session)
         assert session.session_id not in drv._sessions
+
+    def test_get_or_create_discards_a_force_closed_session(self):
+        # A prior turn's interrupt can escalate to a hard close (the CLI was
+        # wedged and never responded — see cancel_inflight's fallback). The
+        # pool must not hand that dead entry to the next turn; it should
+        # start a fresh session under the same key instead.
+        drv = ClaudeSDKClientDriver()
+        session = _make_session()
+
+        def fake_send(self_inner, message, **_kw):
+            return _ok("ok")
+
+        with patch.object(_SDKSession, "send", fake_send):
+            with patch.object(_SDKSession, "start", lambda self_inner: None):
+                drv.start_session(session, "msg")
+
+        dead = drv._sessions[session.session_id]
+        dead._closed = True
+
+        with patch.object(_SDKSession, "start", lambda self_inner: None):
+            fresh = drv._get_or_create(session, None, {})
+
+        assert fresh is not dead
+        assert drv._sessions[session.session_id] is fresh
 
     def test_sdk_error_returns_failed_result(self):
         drv = ClaudeSDKClientDriver()
@@ -721,6 +750,35 @@ class TestSDKSessionSendSerialisation:
         assert set(call_order) == {"A", "B"}
         assert results["A"][0] == "reply-A"
         assert results["B"][0] == "reply-B"
+
+
+class TestSDKSessionTurnConflictGuard:
+    def test_send_interrupts_a_stale_inflight_turn_instead_of_queuing_silently(self):
+        """A held lock (an abandoned prior turn that was never cancelled
+        cleanly) must be interrupted up front, not queued behind — queuing
+        silently is what let a resent prompt land in the same live
+        conversation as the abandoned one (the ever-growing-session bug)."""
+        sess = _SDKSession("key", "/tmp", None, {})
+        calls = []
+
+        def fake_cancel_inflight(self_inner):
+            calls.append("interrupted")
+            # Simulate the interrupt landing and the stale turn's `finally`
+            # releasing the lock it held.
+            sess._lock.release()
+
+        def fake_submit(coro, timeout=None):
+            coro.close()  # avoid "never awaited" noise; we're not exercising _do_query here
+            return _ok("new turn")
+
+        with patch.object(_SDKSession, "cancel_inflight", fake_cancel_inflight):
+            with patch.object(sess, "submit", fake_submit):
+                sess._lock.acquire()  # simulate a still-running stale turn
+                result = sess.send("hello")
+
+        assert calls == ["interrupted"]
+        assert result.output == "new turn"
+        assert not sess._lock.locked()
 
 
 

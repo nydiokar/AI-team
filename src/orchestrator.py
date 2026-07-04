@@ -3216,12 +3216,40 @@ created: {task.created}
                 return False
         if not ev.is_set():
             ev.set()
+            t = self.active_tasks.get(task_id)
+            # Interrupt the live backend turn directly, right now. The execution
+            # loop's own graceful-cancel branch (which calls backend.cancel(session)
+            # before tearing down exec_task) only fires if it's watching a
+            # cancel_waiter built from THIS event — but that loop reads
+            # `self._task_cancel_events.get(task.id)` once, before the task starts,
+            # so for any task that was already running when cancel is requested
+            # (the normal case) the event created just above is invisible to it.
+            # Without this direct call, only the asyncio wrapper around
+            # `asyncio.to_thread(...)` gets cancelled: the backend thread and its
+            # live subprocess/session keep running unattended, never removed from
+            # the driver's session pool, so the next turn on this session queues
+            # up behind the abandoned one and appends the same prompt into the
+            # same still-live conversation (the ever-growing-session bug).
+            if t is not None:
+                try:
+                    session_id = (t.metadata or {}).get("session_id", "").strip()
+                    session = self.session_store.get(session_id) if session_id else None
+                    if session is not None:
+                        backend_name = str(
+                            (t.metadata or {}).get("backend") or session.backend or "claude"
+                        ).strip().lower()
+                        backend = self._backends.get(backend_name)
+                        if backend is not None:
+                            backend.cancel(session)
+                except Exception:
+                    logger.warning(
+                        "event=cancel_backend_interrupt_failed task_id=%s", task_id, exc_info=True
+                    )
             # Best-effort cancel running exec task
             task = self._running_exec_tasks.get(task_id)
             if task is not None and not task.done():
                 task.cancel()
             # Emit cancel_requested event
-            t = self.active_tasks.get(task_id)
             self._emit_event("cancel_requested", t if t else None, None)
             return True
         return False
@@ -3967,7 +3995,32 @@ Generated from user description: {description}
             await _aio.sleep(poll_interval)
 
     def _nudge_worker_for_dispatch(self, node: Any, node_id: str, db: Any) -> bool:
-        """Best-effort wake-up for a worker after enqueuing remote work."""
+        """Best-effort wake-up for a worker after enqueuing remote work.
+
+        Prefers the in-memory node object (avoids a DB round-trip when we
+        already have fresh registration data). Falls back to a DB lookup when
+        the node object is absent or lacks address fields.
+        """
+        import urllib.request
+
+        # Fast path: use the in-memory node's address when available.
+        tailscale_ip = getattr(node, "tailscale_ip", None) or ""
+        api_port = getattr(node, "api_port", None) or 0
+        if tailscale_ip and api_port:
+            try:
+                url = f"http://{tailscale_ip}:{api_port}/nudge"
+                req = urllib.request.Request(url, method="POST", data=b"")
+                with urllib.request.urlopen(req, timeout=2):
+                    pass
+                return True
+            except Exception as e:
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "event=nudge_failed node_id=%s err=%s", node_id, e
+                )
+                return False
+
+        # Slow path: look up from DB (covers cases where node=None or has no address).
         from src.control.node_inspector import nudge_node_direct
         return nudge_node_direct(node_id, db)
 
