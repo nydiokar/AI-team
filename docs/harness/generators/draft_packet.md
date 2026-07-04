@@ -1,4 +1,4 @@
-# DRAFT — intent → XML Task Packet + milestone file
+# DRAFT — intent → XML Task Packet + `## Milestone` section (one dispatch file)
 
 **Role:** the "text engine" (spec §4 Manager / §14 step 1). This is a *drafting
 mode any capable model can play* — a cheaper route is fine for DRAFT. It is NOT a
@@ -30,8 +30,9 @@ curated context.
 >      `--collect-only`, import smoke, `tsc -b`, `curl /health`).
 >    - `<meta><harness_level>` = the given level. Set `<continues>` only if this
 >      resumes a prior task id.
-> 2. An initialized copy of `docs/harness/milestone_template.md`: header filled,
->    `Current Status: drafting`, Burndown = the definition_of_done items,
+> 2. An initialized `## Milestone` section INSIDE the dispatch doc (body from
+>    `docs/harness/milestone_template.md`, ONE-FILE RULE — no `.milestone.md` sibling):
+>    header filled, `Current Status: drafting`, Burndown = the definition_of_done items,
 >    `Next Action` = the first step.
 >
 > **Curate context, never dump it.** Any evidence goes in `<context_snippets>`:

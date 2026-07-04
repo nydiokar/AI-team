@@ -7,10 +7,12 @@
   This is what replaces vague "keep working" behavior with visible milestone
   pressure and directly targets the recorded overbatch/hallucinate-success scar.
 
-  WHERE IT LIVES: next to the dispatch, e.g. `.ai/dispatch/<task-id>.milestone.md`.
-  Nothing parses it — it is a human/model-readable record, not a schema.
-
-  Copy this file, fill the header, and keep it current as you work.
+  WHERE IT LIVES (ONE-FILE RULE): the burndown is a `## Milestone` SECTION *inside*
+  the dispatch doc `.ai/dispatch/AGENT_N_*.md` — NOT a separate `.milestone.md`
+  sibling. One dispatch = one living file (packet → milestone → closure). Paste this
+  template's body under a `## Milestone` heading in the dispatch doc and keep it
+  current there. Nothing parses it — it is a human/model-readable record, not a schema.
+  (Contract: `.ai/DOC_MAP.md`.)
 -->
 # Milestone: <TASK-ID> <short title>
 
