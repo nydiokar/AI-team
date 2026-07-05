@@ -194,7 +194,7 @@ Re-review round 2: no new P0/P1. **Locked** (1 fix round, under the 2-cap). Noth
 Persist + query a minimal `flow_runs` record (5 fields) as the first additive code brick of the v0.4 loop engine, under an explicit operator override of the COLD verdict — without building any stage machine or touching existing task execution.
 
 ## Current Status
-executed — SHIPPED, committed, awaiting Manager closure
+closed
 
 ## Burndown
 - [x] Migration 21: `flow_runs` table in `_DDL` + `_get_migrations()` + `_CURRENT_VERSION`→21
@@ -202,7 +202,7 @@ executed — SHIPPED, committed, awaiting Manager closure
 - [x] Best-effort (try/except) orchestrator write hook at dispatch-start + one transition
 - [x] `tests/test_flow_runs.py`: migration, round-trip, guarded-hook-swallows-failure
 - [x] Targeted regression suites green; committed additive diff
-- [ ] (Manager) closure records the override in `promotion_ladder.md`
+- [x] (Manager) closure records the override in `promotion_ladder.md`
 
 ## Live Log
 - 2026-07-05 — Manager drafted packet (Level 3, operator override grounded), self-reviewed → 5 F-tags fixed inline → locked after 1 round → dispatched to Executor.
@@ -215,4 +215,60 @@ executed — SHIPPED, committed, awaiting Manager closure
 none
 
 ## Next Action
-Manager: review committed additive diff; record the operator override in `promotion_ladder.md` at closure (Row 1 — NOT a tripped trigger).
+closed — none. Follow-ups (NOT dispatched): `/api/flows` HTTP read path; richer stage emission at real execution transitions; whether to populate the remaining v0.4 §11 fields. All gated on continued operator direction, since the base capability remains a COLD-overridden experiment.
+
+---
+
+## Closure
+
+### A19-flow-runs-record — SHIPPED (2026-07-05)
+
+**Verdict: CLOSE.** First real CODE loop through the harness. The committed diff
+(`d195f1b`) matches the locked packet exactly; every self-review F-tag held under real
+code; tests reproduce green independently.
+
+**What changed (per file — all additive):**
+- `src/control/db.py` — `flow_runs` table (5 named cols: `flow_run_id` PK, `task_id`,
+  `current_stage`, `objective_lock`, `created_at`; + `idx_flow_runs_task`) in **both**
+  `_DDL` and migration `(21, …)`, `_CURRENT_VERSION` 20→21 (fresh & existing DBs
+  converge). New methods `create_flow_run()` / `update_flow_stage()` / `list_flow_runs()`
+  using the transactional `_write()` context + `_now()` + `uuid4().hex`.
+- `src/orchestrator.py` — best-effort `_record_flow_run_start()` / `_record_flow_stage()`
+  helpers wired into `_enqueue_task` (the shared ingestion choke point). `get_db()`
+  None-guarded, try/except, warning-logged — a DB write can never fail or delay a task.
+- `tests/test_flow_runs.py` — migration (version==21 + exactly-5-columns), create/update/
+  list round-trip w/ task_id filter, guarded-hook-swallows-failure.
+
+**Manager verification (git evidence, not the worker's summary):**
+- `git show d195f1b --stat` → 4 files, additive (`244 ins / 8 del`); `mesh_tasks`,
+  `_enqueue_task` admission, and all stage/gate logic untouched.
+- Read the full `db.py`/`orchestrator.py` hunks: migration in both paths + version bump
+  confirmed; `_write()` is a real committing transaction context (L448–459); `get_db`,
+  `_conn`, `_enqueue_task` all real symbols (not invented).
+- **F1 drift check (the load-bearing one):** grepped — **nothing reads `current_stage`**
+  to drive behavior. It is a RECORD, not a stage machine. ✅
+- Reproduced tests independently in `.venv`:
+  `pytest tests/test_flow_runs.py tests/test_control_api.py tests/test_telemetry_store.py`
+  → **39 passed**. The one existing schema assertion (`test_control_api.py:116`,
+  `schema_version >= 19`) is a floor — bump to 21 is compatible.
+- `/code-review` (high effort) on the committed diff: **0 P0/P1**. One P2-only nit
+  (per-call lazy `get_db` import) is below the severity floor and matches the codebase's
+  circular-import-avoidance pattern — not a finding.
+
+**F-tag outcomes:** F1 → held (no stage machine); F2 → held (best-effort hook, guard test
+passes); F3 → held (both-paths migration + version bump, fresh-DB test asserts it);
+F4 → held (columns==5 test); F5 → held (`db.list_flow_runs`, no HTTP endpoint).
+
+**Deviation from packet (accepted, an improvement):** the packet suggested `_conn()` for
+the write methods; the Executor correctly used `_write()` (the serialized committing
+transaction context) instead. Better than specified.
+
+**⚠️ Override provenance (must survive):** this shipped `flow_runs` because the **operator
+explicitly overrode** promotion_ladder.md Row 1's COLD verdict on 2026-07-05. The Row 1
+trigger (≥2 lost-handoff resumes) was **never observed**. This is an operator-directed
+experiment, **not** a satisfied gate — recorded in `promotion_ladder.md` so a future
+Manager does not mistake the existence of the table for a tripped trigger.
+
+**What follows:** nothing auto-dispatched. See Next Action for the un-drafted follow-ups
+(HTTP read path, real stage emission, §11 field expansion) — all gated on operator
+direction, since the capability itself is a COLD-overridden experiment.
