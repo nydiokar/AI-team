@@ -125,6 +125,7 @@ The main production gate that still matters is a live end-to-end validation:
 - [.ai/context/production_vision.md](../.ai/context/production_vision.md) — strategic intent + anti-goals
 
 **Supporting reference:**
+- [OVERVIEW.md](OVERVIEW.md) — newcomer front door / router to owning docs
 - [QUICK_START.md](QUICK_START.md)
 - [RUNBOOKS/OPERATIONS_PM2.md](RUNBOOKS/OPERATIONS_PM2.md)
 - [ROADMAP.md](ROADMAP.md) — pointer to `.ai/`
