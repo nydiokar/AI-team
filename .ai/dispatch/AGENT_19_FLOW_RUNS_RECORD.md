@@ -194,21 +194,25 @@ Re-review round 2: no new P0/P1. **Locked** (1 fix round, under the 2-cap). Noth
 Persist + query a minimal `flow_runs` record (5 fields) as the first additive code brick of the v0.4 loop engine, under an explicit operator override of the COLD verdict — without building any stage machine or touching existing task execution.
 
 ## Current Status
-dispatched
+executed — SHIPPED, committed, awaiting Manager closure
 
 ## Burndown
-- [ ] Migration 21: `flow_runs` table in `_DDL` + `_get_migrations()` + `_CURRENT_VERSION`→21
-- [ ] `db.create_flow_run()` / `db.update_flow_stage()` / `db.list_flow_runs()`
-- [ ] Best-effort (try/except) orchestrator write hook at dispatch-start + one transition
-- [ ] `tests/test_flow_runs.py`: migration, round-trip, guarded-hook-swallows-failure
-- [ ] Targeted regression suites green; committed additive diff
+- [x] Migration 21: `flow_runs` table in `_DDL` + `_get_migrations()` + `_CURRENT_VERSION`→21
+- [x] `db.create_flow_run()` / `db.update_flow_stage()` / `db.list_flow_runs()`
+- [x] Best-effort (try/except) orchestrator write hook at dispatch-start + one transition
+- [x] `tests/test_flow_runs.py`: migration, round-trip, guarded-hook-swallows-failure
+- [x] Targeted regression suites green; committed additive diff
 - [ ] (Manager) closure records the override in `promotion_ladder.md`
 
 ## Live Log
 - 2026-07-05 — Manager drafted packet (Level 3, operator override grounded), self-reviewed → 5 F-tags fixed inline → locked after 1 round → dispatched to Executor.
+- 2026-07-05 — Executor: added `flow_runs` table to `_DDL` (5 named cols + PK + `idx_flow_runs_task`) AND migration `(21, ...)`, bumped `_CURRENT_VERSION` 20→21. Mirrors the 19/20 both-paths shape.
+- 2026-07-05 — Executor: added `create_flow_run()` / `update_flow_stage()` / `list_flow_runs()` to `MeshDB` (uuid4 hex id, `_now()` created_at, `self._write()` lock/commit). These do NOT internally swallow — the best-effort guard lives in the orchestrator hook so the failure-swallow test is meaningful.
+- 2026-07-05 — Executor: orchestrator hook in `_enqueue_task` (the shared dispatch/admission choke point). `_record_flow_run_start(task)` after the admission gate passes writes stage `dispatch_start`; `_record_flow_stage(fid, "queued")` fires after the successful `put_nowait`. Both helpers are try/except best-effort (get_db None-guarded), log at warning, and can never fail/delay the task. Chose `_enqueue_task` because every ingestion lane (Telegram/Web/`.task.md`/runtime) funnels through it — it is the narrowest correct dispatch-start site.
+- 2026-07-05 — Executor: verification green. `pytest tests/test_flow_runs.py -q` → 3 passed. `pytest tests/test_control_api.py tests/test_telemetry_store.py -q` → 36 passed. No stage-machine, no HTTP endpoint, no extra columns, mesh_tasks/enqueue admission untouched.
 
 ## Blockers
 none
 
 ## Next Action
-Executor: implement per the locked packet; update this Live Log after each step.
+Manager: review committed additive diff; record the operator override in `promotion_ladder.md` at closure (Row 1 — NOT a tripped trigger).

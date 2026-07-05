@@ -1598,6 +1598,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info(f"event=task_created task_id={task.id} source={(task.metadata or {}).get('source', 'runtime')}")
         self._emit_event("task_created", task, {"source": (task.metadata or {}).get("source", "runtime")})
         self._emit_event("parsed", task)
+
+        # [FlowRun A19] Best-effort dispatch-start record. This is a RECORD only —
+        # nothing reads current_stage to drive behavior. Wrapped so a DB write
+        # failure can NEVER fail or delay the real task (best-effort telemetry).
+        flow_run_id = self._record_flow_run_start(task)
         self._emit_turn_telemetry(
             "turn.accepted",
             task,
@@ -1616,6 +1621,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 {"priority": getattr(task.priority, "value", str(task.priority))},
             )
             logger.info(f"Queued runtime task: {task.id} ({task.type.value}, {task.priority.value})")
+            # [FlowRun A19] Best-effort stage transition (dispatch_start → queued).
+            self._record_flow_stage(flow_run_id, "queued")
         except asyncio.QueueFull:
             priority_val = getattr(task.priority, "value", str(task.priority))
             if priority_val == "low":
@@ -1638,6 +1645,37 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._emit_event("dropped_after_throttle", task, {"timeout": 5.0})
                 raise RuntimeError("Task queue is full") from exc
         return task.id
+
+    def _record_flow_run_start(self, task: Task) -> Optional[str]:
+        """Best-effort FlowRun dispatch-start record (A19, v0.4 §13 item 1).
+
+        Writes one flow_runs row at dispatch-start. This is a RECORD only — no
+        code reads current_stage to drive behavior. Any failure is swallowed and
+        logged: a telemetry write must never fail or delay a real task. Returns
+        the flow_run_id on success, or None if the write was skipped/failed.
+        """
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return None
+            return db.create_flow_run(task.id, "dispatch_start")
+        except Exception as e:
+            logger.warning("event=flow_run_start_failed task_id=%s err=%s", task.id, e)
+            return None
+
+    def _record_flow_stage(self, flow_run_id: Optional[str], stage: str) -> None:
+        """Best-effort FlowRun stage-transition update (A19). Swallows failures."""
+        if not flow_run_id:
+            return
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return
+            db.update_flow_stage(flow_run_id, stage)
+        except Exception as e:
+            logger.warning("event=flow_run_stage_failed flow_run_id=%s err=%s", flow_run_id, e)
 
     async def submit_instruction(
         self,
