@@ -38,6 +38,10 @@
   / checkpoint half still wants a real *code* diff to validate — the next loop should run
   on a real feature/fix.
 - **How to start a loop:** paste `docs/harness/manager_invocation.md`, fill the spec slot.
+- **Newcomer front door shipped (A18, `docs/orientation-overview`, awaiting op-merge):**
+  `docs/OVERVIEW.md` — a static "you are here" router (what-it-is + ASCII shape thumbnail +
+  link table to owning docs). Holds NO state; links owners (DOC_MAP anti-overlap). The
+  v0.4 §2.3 human-orientation *need*, NOT the deferred wiki renderer. Docs-only.
 - Leftover: `feat/task-harness` (old A9H/A12 branch) is stale/divergent vs `main` — safe to
   delete; its harness content already landed via earlier merges.
 - **Known drift (A17 audit, `d1556ad`):** the "WIP snapshot before main merge" commit landed
