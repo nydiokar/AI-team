@@ -911,11 +911,28 @@ export function SessionDetailScreen() {
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}
         {id && !closed ? (
           <Composer sessionId={id} running={running} />
-        ) : (
-          <div className="border-t border-hairline bg-surface-1/70 px-4 py-3 text-center text-[12px] text-ink-muted">
-            Session closed · open the menu to restore
+        ) : id ? (
+          // Closed sessions (e.g. a completed one-off opened from a push
+          // notification) used to be a dead read-only view. Offer resume inline
+          // so you can immediately continue instead of hunting the menu.
+          <div
+            className="border-t border-hairline bg-surface-1/95 px-3 py-3 backdrop-blur-xl"
+            style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+          >
+            <button
+              onClick={() => restore.mutate(id)}
+              disabled={restore.isPending}
+              className="flex w-full items-center justify-center gap-2 rounded-2xl bg-accent-dim/60 py-3 text-[14px] font-medium text-accent ring-1 ring-inset ring-accent/30 transition-colors hover:bg-accent-dim disabled:opacity-60"
+            >
+              {restore.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RotateCcw className="size-4" />
+              )}
+              {restore.isPending ? "Resuming…" : "Resume session to reply"}
+            </button>
           </div>
-        )}
+        ) : null}
         </div>
       )}
 

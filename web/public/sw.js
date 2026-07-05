@@ -1,4 +1,4 @@
-const CACHE = "ai-team-shell-v3";
+const CACHE = "ai-team-shell-v4";
 const SHELL = ["/", "/index.html"];
 
 self.addEventListener("install", (e) => {
@@ -59,6 +59,11 @@ self.addEventListener("push", (e) => {
   const title = data.title || "AI-Team";
   const options = {
     body: data.body || "",
+    // Large icon shown in the notification body (colored app mark).
+    icon: "/icons/icon-192.png",
+    // Small status-bar icon (Android). Must be a monochrome/transparent PNG —
+    // the system tints it. This replaces the generic browser bell.
+    badge: "/icons/badge-96.png",
     tag: data.session_id || data.task_id || "ai-team",
     data: { url: data.url || "/" },
   };
