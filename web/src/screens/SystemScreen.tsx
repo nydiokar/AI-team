@@ -1,15 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Cpu,
   Layers,
   Download,
   CheckCircle2,
-  Clock,
   Activity,
-  ChevronRight,
   ChevronDown,
 } from "lucide-react";
-import { Link } from "react-router-dom";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { HealthChip } from "../components/ui/StatusChip";
@@ -18,21 +15,10 @@ import { NodeDetailSheet } from "../components/system/NodeDetailSheet";
 import { JobsPanel } from "../components/system/JobsPanel";
 import { PushSetting } from "../components/system/PushSetting";
 import { BackendUsagePanel } from "../components/system/BackendUsagePanel";
-import { useMeshHealth, useSessions, useTargets } from "../hooks/useLiveData";
-import { useActivityLog } from "../hooks/useActivityLog";
+import { useMeshHealth, useTargets } from "../hooks/useLiveData";
 import type { Target } from "../domain/models";
-import type { LogSeverity } from "../transport/eventLog";
 import type { RawMeshHealthResponse } from "../transport/rawApi";
-import { relAge, clockLabel, elapsed } from "../lib/time";
-import {
-  enrichLine,
-  indexSessions,
-  isSystemActivity,
-  repoName,
-  type EnrichedLine,
-} from "../lib/activityFormat";
-
-const MAX_ROWS = 60;
+import { relAge, elapsed } from "../lib/time";
 
 type BeforeInstallPromptEvent = Event & { prompt: () => Promise<void> };
 
@@ -61,87 +47,6 @@ function useInstallPrompt() {
   };
 
   return { canInstall, isIos, install };
-}
-
-// Routine lifecycle chatter (started/running) is quieted so the eye lands on
-// what MATTERS (a success, a block, a failure). We keep every event — honesty
-// is the point of this feed — but stop giving them all equal weight.
-const SEVERITY_TEXT: Record<LogSeverity, string> = {
-  info: "text-ink-muted",
-  success: "text-ok",
-  warning: "text-warn",
-  error: "text-bad",
-};
-
-const SEVERITY_DOT: Record<LogSeverity, string> = {
-  info: "bg-ink-muted",
-  success: "bg-ok",
-  warning: "bg-warn",
-  error: "bg-bad",
-};
-
-/** ONE row = ONE real event, but NAMED and (when it has an owner) tappable.
- *  Top line = what happened. Sub-line = which work it happened to (repo ·
- *  backend), resolved from the live sessions — so "Task running" becomes
- *  "Task running / payments-api · codex ›". System lines with no owner stay
- *  honest and non-clickable; we never fabricate a destination. */
-function shortId(id: string): string {
-  const tail = id.replace(/^.*[_-]/, "");
-  return tail.slice(0, 8) || id.slice(0, 8);
-}
-
-function ActivityRow({ e, showTime }: { e: EnrichedLine; showTime: boolean }) {
-  const { line, session } = e;
-
-  // Subject = the concrete thing this event is about. Prefer the resolved
-  // session (repo · backend, tappable); else name the task/host so the row is
-  // still identifiable rather than an anonymous "system".
-  const subject = session
-    ? `${repoName(session.workspace.path)} · ${session.backend}`
-    : line.taskId
-      ? `task ${shortId(line.taskId)}`
-      : e.host ?? "system";
-
-  const inner = (
-    <>
-      <span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${SEVERITY_DOT[line.severity]}`} />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-2">
-          <p
-            className={`min-w-0 flex-1 truncate leading-snug ${SEVERITY_TEXT[line.severity]} ${
-              line.severity === "info" ? "" : "font-medium"
-            }`}
-          >
-            {e.title}
-          </p>
-          {showTime && clockLabel(line.at) && (
-            <span className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums text-ink-muted">
-              <Clock className="size-2.5 opacity-50" />
-              {clockLabel(line.at)}
-            </span>
-          )}
-        </div>
-        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-muted">
-          <span className={`min-w-0 truncate ${session ? "text-ink-soft" : "font-mono opacity-70"}`}>
-            {subject}
-          </span>
-          {e.href && <ChevronRight className="ml-auto size-3 shrink-0 text-ink-muted/60" />}
-        </div>
-      </div>
-    </>
-  );
-
-  if (e.href) {
-    return (
-      <Link
-        to={e.href}
-        className="flex items-start gap-2.5 px-4 py-2.5 text-[13px] transition-colors hover:bg-surface-2/40"
-      >
-        {inner}
-      </Link>
-    );
-  }
-  return <div className="flex items-start gap-2.5 px-4 py-2.5 text-[13px]">{inner}</div>;
 }
 
 /** Simplified mesh action → readable label for the task list. */
@@ -395,9 +300,7 @@ function MeshHealthPanel({
 
 export function SystemScreen() {
   const { data: targets, isLoading, error } = useTargets();
-  const { data: sessions } = useSessions();
   const { data: meshHealth, isLoading: meshHealthLoading, error: meshHealthError } = useMeshHealth();
-  const { lines, connection } = useActivityLog();
   const { canInstall, isIos, install } = useInstallPrompt();
   const [selectedTarget, setSelectedTarget] = useState<Target | null>(null);
   const [jobsExpanded, setJobsExpanded] = useState(true);
@@ -407,36 +310,9 @@ export function SystemScreen() {
   const liveNodes = all.filter((t) => t.live);
   const offlineNodes = all.filter((t) => !t.live);
 
-  const enriched = useMemo(() => {
-    const idx = indexSessions(sessions ?? []);
-    return lines
-      .map((line) => enrichLine(line, idx))
-      .filter(isSystemActivity)
-      .slice(0, MAX_ROWS);
-  }, [lines, sessions]);
-
   return (
     <div className="pb-8">
       <CompactTopBar title="System" subtitle="Infrastructure health" />
-
-      {/* ── Jobs — one collapsible header; hidden entirely when there's none ── */}
-      {(jobs.total > 0 || jobsExpanded) && (
-        <SectionHeader
-          label="Jobs"
-          count={jobs.total || undefined}
-          onToggle={() => setJobsExpanded((v) => !v)}
-          expanded={jobsExpanded}
-          action={
-            jobs.running > 0 ? (
-              <span className="flex items-center gap-1 rounded-full bg-accent-dim/60 px-1.5 py-0.5 text-[10px] font-medium text-accent">
-                <span className="size-1 rounded-full bg-accent pulse-dot" />
-                {jobs.running} running
-              </span>
-            ) : undefined
-          }
-        />
-      )}
-      <JobsPanel expanded={jobsExpanded} onSummary={setJobs} owned="unowned" />
 
       <SectionHeader label="Mesh" />
       <MeshHealthPanel data={meshHealth} isLoading={meshHealthLoading} error={meshHealthError} />
@@ -480,41 +356,25 @@ export function SystemScreen() {
         <OfflineNodes nodes={offlineNodes} onPick={setSelectedTarget} />
       </div>
 
-      {/* ── Live activity — one row per piece of WORK, newest-touched first ── */}
-      <SectionHeader
-        label="Infra activity"
-        count={enriched.length > 0 ? enriched.length : undefined}
-        action={
-          connection === "reconnecting" ? (
-            <span className="flex items-center gap-1 text-[11px] text-warn">
-              <Activity className="size-3" />
-              Reconnecting…
-            </span>
-          ) : (
-            <span className="flex items-center gap-1 text-[11px] text-ink-muted">
-              <span className="size-1.5 rounded-full bg-ok pulse-dot" />
-              Live
-            </span>
-          )
-        }
-      />
-      <div className="card-elev mx-4 divide-y divide-hairline overflow-hidden rounded-xl">
-        {enriched.length === 0 ? (
-          <p className="px-4 py-6 text-center text-sm text-ink-muted">
-            {connection === "reconnecting"
-              ? "Reconnecting — showing last known activity…"
-              : "No infrastructure activity yet."}
-          </p>
-        ) : (
-          enriched.map((e, i) => (
-            <ActivityRow
-              key={e.line.id}
-              e={e}
-              showTime={clockLabel(e.line.at) !== clockLabel(enriched[i - 1]?.line.at ?? "")}
-            />
-          ))
-        )}
-      </div>
+      {/* ── Jobs — sits below the live infra (mesh + nodes); one collapsible
+          header, hidden entirely when there's nothing to watch. ── */}
+      {(jobs.total > 0 || jobsExpanded) && (
+        <SectionHeader
+          label="Jobs"
+          count={jobs.total || undefined}
+          onToggle={() => setJobsExpanded((v) => !v)}
+          expanded={jobsExpanded}
+          action={
+            jobs.running > 0 ? (
+              <span className="flex items-center gap-1 rounded-full bg-accent-dim/60 px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                <span className="size-1 rounded-full bg-accent pulse-dot" />
+                {jobs.running} running
+              </span>
+            ) : undefined
+          }
+        />
+      )}
+      <JobsPanel expanded={jobsExpanded} onSummary={setJobs} owned="unowned" />
 
       <BackendUsagePanel />
 

@@ -40,6 +40,16 @@
 - **How to start a loop:** paste `docs/harness/manager_invocation.md`, fill the spec slot.
 - Leftover: `feat/task-harness` (old A9H/A12 branch) is stale/divergent vs `main` — safe to
   delete; its harness content already landed via earlier merges.
+- **Known drift (A17 audit, `d1556ad`):** the "WIP snapshot before main merge" commit landed
+  the reviewed A16 admission-block scope (4 files, verified on main) **plus 9 files of
+  undispatched, unreviewed orphan code** in 4 clusters — **activity-forwarder** (live
+  `_ActivityForwarder` @ `src/worker/agent.py:896`, remote-worker path, zero tests),
+  **backend-usage-ext** (Codex peak-vs-sum token fix — untested), **mesh-fleet-count**
+  (`_count_fleet_nodes` + tz-aware `_mesh_load_stats` fix in `src/control/db.py` — untested),
+  and **models-default** (`config/models.py` flips Claude default `sonnet`→`opus`). Well-formed
+  and two clusters fix real bugs, but none went through the harness. Not cleanly shipped → not
+  a Shipped-Ledger entry. **Remediation (keep+test / retro-dispatch / revert) is a Level-3
+  fork needing operator approval** — see `dispatch/AGENT_17_WIP_MERGE_RECONCILE.md`.
 
 ## What this project is
 
