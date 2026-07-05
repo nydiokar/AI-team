@@ -29,6 +29,7 @@ is an operator merge decision.
 | A15 | `AGENT_15_HARNESS_PROMOTION_LADDER.md` | 2026-07-04 | 2 | merged | Evidence-gated v0.5→v0.4 promotion ladder + `manager_invocation.md` driver; 3 of 6 v0.4 elements are drop-candidates. First loop via the driver. |
 | A16 | `AGENT_16_HARNESS_BLOCK_SURFACE.md` | 2026-07-04 | 2 | built — op-merge | WebUI-first surfacing of the Level-3 admission block (A9H "Next"): `HarnessAdmissionBlocked` → clean 409 + `mark_idle` session revert + Composer approval-needed copy. Gate untouched, guard OFF ⇒ byte-identical. |
 | FX1 | `FIX_CLAUDE_ISERROR_PROMPT_TOO_LONG.md` | 2026-07-03 | — | merged (`a3f734b`) | SDK `is_error` no longer stored as a successful "Prompt is too long" reply; open: #41 context-fill gauge. |
+| A17 | `AGENT_17_BACKEND_USAGE_AGGREGATION_TESTS.md` | 2026-07-05 | 2 | built — op-merge (`029477f`) | First real-*code* harness loop. Regression-locks backend-usage sum-vs-peak token aggregation (the "166M tok" fix); test-only +112; mutation-verified. |
 
 ---
 

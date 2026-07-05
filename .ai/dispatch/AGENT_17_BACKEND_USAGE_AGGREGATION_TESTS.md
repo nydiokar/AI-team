@@ -24,7 +24,7 @@
 
 ## Milestone
 
-**Status:** Complete (pending manager review)
+**Status:** closed
 
 ### Burndown
 - [x] 1. Read src/services/backend_usage.py + tests/test_backend_usage.py to confirm fixture shapes.
@@ -46,7 +46,41 @@
 None.
 
 ### Next Action
-Manager review.
+closed — operator merge decision (branch `harness/A17-backend-usage-aggregation-tests`).
 
 ## Closure
-closure: pending manager review
+
+**SHIPPED (2026-07-05, branch `harness/A17-backend-usage-aggregation-tests`, commit `029477f`).**
+
+**What changed (per file):**
+- `tests/test_backend_usage.py` (+60) — 3 regression tests locking the sum-vs-peak
+  aggregation contract in `src/services/backend_usage.py`:
+  `test_codex_cumulative_usage_takes_peak_not_sum`,
+  `test_usage_aggregation_field_reflects_backend`,
+  `test_additive_backend_still_sums_two_keys`.
+- `.ai/dispatch/AGENT_17_*.md` — this dispatch doc (packet + Milestone + Closure).
+- **No `src/` change** — test-only, as scoped.
+
+**Verification (Manager-run, independent of worker report):**
+- `git show 029477f --stat` → 2 files, +112, test-only. ✓
+- `pytest tests/test_backend_usage.py -q` → **11 passed** (re-run in the worktree). ✓
+- **Mutation test (gold gate):** reverting `_aggregate_usage` cumulative branch from
+  `max()` to `+` made `test_codex_cumulative_usage_takes_peak_not_sum` FAIL with
+  `assert 240000000 == 120000000` (the "166M balloon" shape); restored → 11 passed.
+  The regression test genuinely bites. ✓
+- Worktree loads its own `src` (confirmed path); the live gateway dir was never touched. ✓
+
+**F-tag outcomes (from DRAFT self-review):** F1 (assert ≥2 token keys) → applied;
+F2 (monotonic distinct values so sum≠peak) → applied; F3 (test-only, no scope creep
+into the deferred `counter_semantics` refactor) → held; F4 (assert `recent_turn_count`
+first to prove turns were read) → applied.
+
+**Worker observation carried forward (NOT built — deferred by design):** the stopgap is
+keyed by backend *name* (`_CUMULATIVE_TOKEN_BACKENDS`). If a backend ever emits *mixed*
+per-turn semantics (additive delta interleaved with cumulative snapshots), the name-keyed
+switch misclassifies every turn. The durable fix is per-turn `counter_semantics` through
+the projection (already flagged in the code comment at `backend_usage.py:39-41` and in the
+LLM turn-observability track). Logged as a follow-up, not in this scope.
+
+**Follow-up:** none required for this dispatch. Durable `counter_semantics` fix remains a
+separate future task.
