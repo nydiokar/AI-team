@@ -29,6 +29,7 @@ is an operator merge decision.
 | A15 | `AGENT_15_HARNESS_PROMOTION_LADDER.md` | 2026-07-04 | 2 | merged | Evidence-gated v0.5→v0.4 promotion ladder + `manager_invocation.md` driver; 3 of 6 v0.4 elements are drop-candidates. First loop via the driver. |
 | A16 | `AGENT_16_HARNESS_BLOCK_SURFACE.md` | 2026-07-04 | 2 | built — op-merge | WebUI-first surfacing of the Level-3 admission block (A9H "Next"): `HarnessAdmissionBlocked` → clean 409 + `mark_idle` session revert + Composer approval-needed copy. Gate untouched, guard OFF ⇒ byte-identical. |
 | FX1 | `FIX_CLAUDE_ISERROR_PROMPT_TOO_LONG.md` | 2026-07-03 | — | merged (`a3f734b`) | SDK `is_error` no longer stored as a successful "Prompt is too long" reply; open: #41 context-fill gauge. |
+| A18 | `AGENT_18_ORIENTATION_PAGE.md` | 2026-07-04 | 2 | built — op-merge | Static `docs/OVERVIEW.md` newcomer front-door: what-it-is + ASCII shape thumbnail + router table to owning docs. Links, never restates (DOC_MAP anti-overlap). No renderer/mkdocs — v0.4 §2.3 need, not the deferred tooling. |
 | A17 | `AGENT_17_WIP_MERGE_RECONCILE.md` | 2026-07-05 | 2 | reviewed | Audited `d1556ad`: 4 A16 + 9 orphan + 4 doc; A16 verified on main; 4 orphan clusters assessed (activity-forwarder live/untested, backend-usage & mesh-fleet fix real bugs, opus-default flip). No P0/P1. Keep-vs-revert per cluster = Level-3 fork (op approval). |
 
 ---

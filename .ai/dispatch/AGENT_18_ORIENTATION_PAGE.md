@@ -203,7 +203,7 @@ as-it-runs shape, and be routed to the owning doc for anything deeper — withou
 page becoming a new source of truth.
 
 ## Current Status
-shipped
+closed
 
 ## Burndown
 - [x] `docs/OVERVIEW.md` created: what-it-is (≤3 lines) + shape thumbnail + router table + liveness one-liner
@@ -226,3 +226,42 @@ none
 
 ## Next Action
 Done — docs-only commit on `docs/orientation-overview`. Closure reported.
+
+## Closure
+
+### A18-orientation-overview-page — SHIPPED (2026-07-04)
+
+**What changed (per file):**
+- `docs/OVERVIEW.md` (new, 50 lines) — newcomer "you are here" front door: title + "not a
+  source of truth / router" framing; "What this is" (3 lines: session-first Telegram/Web
+  gateway, Claude Code/Codex native resume runtime, not a generic autonomous framework →
+  links production_vision anti-goals); "The shape" plain-ASCII thumbnail (one process
+  `python main.py` = Telegram + Control API :9003/Web UI + mesh :9002; workers separate) →
+  links ARCHITECTURE.md; 8-row router table (relative link + ≤6-word category label per
+  cell, NO restated state); "Check it's alive" `curl :9003/health` with explicit do-NOT-run
+  `python main.py status` warning.
+- `docs/README.md` (+1 line) — link to OVERVIEW.md inserted into the existing "Supporting
+  reference" list (line 128).
+- This dispatch doc — packet + milestone + this closure (one-file rule).
+
+**Verification (Manager, on the committed diff `151732e`, not the worker's summary):**
+- `git show --stat HEAD` → exactly 3 files, +279, zero code / zero orphan clusters.
+- Link-target grep loop → all 8 router targets print `OK` (no dead links).
+- `grep -nE "Current Priorities|Shipped Ledger" docs/OVERVIEW.md` → exit 1 (nothing) — the
+  page LINKS, never restates state (the DOC_MAP anti-overlap check, the load-bearing one).
+- `grep -ni mermaid docs/OVERVIEW.md` → nothing; no mkdocs.yml/renderer/code added.
+- `main.py status` appears only in the "do NOT" warning; `curl .../9003/health` present.
+- README link lands (line 128).
+
+**F-tag outcomes:** F1 (router cells = label not value) → fixed & verified; F2 (README
+anchor verified before edit) → fixed & verified; F3 (no Mermaid/renderer temptation) →
+fixed & verified. All three held in the shipped artifact.
+
+**Review skipped honestly:** `/code-review` + `/security-review` not run — zero-code docs
+router; per level_rubric the implementation review floor is P0/P1 correctness/security, none
+applicable to a static link page. Manual anti-overlap + link + guard checks stand in.
+
+**What follows:** none required. OVERVIEW is now the discoverable front door. It stays a
+router — if a future edit tempts restating priorities/shipped/architecture into it, that is
+the drift to reject (link the owner instead). Branch `docs/orientation-overview` awaiting
+operator merge to `main` (docs-only, no conflicts).
