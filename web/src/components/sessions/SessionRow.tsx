@@ -1,10 +1,11 @@
 import { Link } from "react-router-dom";
-import { ChevronRight, GitBranch, Clock } from "lucide-react";
+import { ChevronRight, GitBranch, Clock, Pencil } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { Session } from "../../domain/models";
 import { SessionStatusChip } from "../ui/StatusChip";
 import { api } from "../../transport/apiClient";
 import { useAuthStore } from "../../stores/authStore";
+import { useDraftStore } from "../../stores/draftStore";
 import { cn } from "../../lib/cn";
 
 /** Extract just the project/repo name from any path. */
@@ -31,6 +32,10 @@ export function SessionRow({ session }: { session: Session }) {
 
   const qc = useQueryClient();
   const token = useAuthStore((s) => s.token);
+  // An unsent instruction still sitting in this session's composer. Surfaced in
+  // the overview (Telegram-style) so you know there's text waiting before you
+  // open it — the whole point of persisting the draft.
+  const draft = useDraftStore((s) => s.bySession[session.id]);
 
   // Warm the conversation before navigation so the detail screen renders the
   // chat immediately instead of flashing a spinner. Fires on pointerdown (before
@@ -82,7 +87,13 @@ export function SessionRow({ session }: { session: Session }) {
           view, not the overview — keeping it here was machine noise. */}
       <div className="mt-2.5 flex items-start gap-1.5">
         <div className="min-w-0 flex-1">
-          {session.lastSummary ? (
+          {draft ? (
+            <p className="flex min-w-0 items-center gap-1 text-[13px] leading-snug text-ink-soft">
+              <Pencil className="size-3 shrink-0 text-accent" />
+              <span className="shrink-0 font-medium text-accent">Draft:</span>
+              <span className="truncate">{draft}</span>
+            </p>
+          ) : session.lastSummary ? (
             <p className="truncate text-[13px] leading-snug text-ink-soft">
               {session.lastSummary}
             </p>

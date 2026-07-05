@@ -1,4 +1,4 @@
-import { useState, useRef, useLayoutEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { ArrowUp, Square, Paperclip } from "lucide-react";
 import { Button } from "../ui/Button";
 import { ApiError, newIdempotencyKey } from "../../transport/apiClient";
@@ -8,6 +8,7 @@ import {
   useUploadFile,
 } from "../../hooks/useSessionActions";
 import { useSentStore } from "../../stores/sentStore";
+import { useDraftStore } from "../../stores/draftStore";
 
 export function Composer({
   sessionId,
@@ -16,10 +17,35 @@ export function Composer({
   sessionId: string;
   running: boolean;
 }) {
-  const [text, setText] = useState("");
+  // Seed from any persisted draft for this session so a half-typed instruction
+  // survives navigating away and back (and full reloads / PWA restarts).
+  const setDraft = useDraftStore((s) => s.setDraft);
+  const clearDraft = useDraftStore((s) => s.clearDraft);
+  const [text, setText] = useState(
+    () => useDraftStore.getState().bySession[sessionId] ?? "",
+  );
   const [uploadBanner, setUploadBanner] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // When the Composer is reused for a different session (route param change
+  // without a remount), swap in that session's draft instead of leaking this
+  // session's text into it.
+  const lastSessionRef = useRef(sessionId);
+  useEffect(() => {
+    if (lastSessionRef.current !== sessionId) {
+      lastSessionRef.current = sessionId;
+      setText(useDraftStore.getState().bySession[sessionId] ?? "");
+    }
+  }, [sessionId]);
+
+  // Single writer for the input: keeps the visible text and the persisted draft
+  // in lockstep so every code path (typing, send, upload, error-restore) stays
+  // consistent without repeating the store call.
+  const updateText = (value: string) => {
+    setText(value);
+    setDraft(sessionId, value);
+  };
 
   useLayoutEffect(() => {
     const el = textareaRef.current;
@@ -46,7 +72,10 @@ export function Composer({
       delivery: "sending",
       taskId: null,
     });
+    // Sent → the draft's job is done. Clear both the input and the persisted
+    // draft; restore them together if the submit is rejected.
     setText("");
+    clearDraft(sessionId);
     submit.mutate(
       { description: body, sessionId, idempotencyKey: id },
       {
@@ -54,7 +83,7 @@ export function Composer({
           updateSent(id, { delivery: "acknowledged", taskId: res.task_id }),
         onError: () => {
           updateSent(id, { delivery: "rejected" });
-          setText(body);
+          updateText(body);
         },
       },
     );
@@ -73,7 +102,7 @@ export function Composer({
           const fileRef = `📎 File: ${res.path}`;
           const instruction = text.trim() ? `${text.trim()}\n\n${fileRef}` : null;
           if (instruction) {
-            setText("");
+            updateText("");
             send(instruction);
           } else {
             // No instruction yet — show a transient banner with the saved path.
@@ -88,7 +117,7 @@ export function Composer({
         },
         onError: (err) => {
           setUploadBanner(null);
-          setText(`Upload failed: ${String(err.message)}. `);
+          updateText(`Upload failed: ${String(err.message)}. `);
         },
       },
     );
@@ -156,7 +185,7 @@ export function Composer({
           ref={textareaRef}
           value={text}
           aria-label="Instruction text"
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => updateText(e.target.value)}
           onKeyDown={sendOnEnter}
           placeholder={running ? "Task running…" : "Send an instruction…"}
           rows={1}
