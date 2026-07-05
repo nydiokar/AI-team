@@ -133,6 +133,15 @@ files. This is the "don't rebuild it, it's done" list.
   `dispatch_pipeline.md` now carries a two-lane scope banner + a copyable all-7-stage
   worked example (real packet/milestone/F-tags/closure). Friction report verdict:
   **Phase 2 NOT justified** — file/dispatch discipline held; see `AGENT_12_HARNESS_SELFTEST.md`.
+- **⚠️ A19 FlowRun record — Phase-2 `flow_runs` shipped under an OPERATOR OVERRIDE**
+  (`feat/harness-flow-runs`, 2026-07-05, awaiting op merge-to-main). Migration 21 + a
+  5-col `flow_runs` table + `create/update/list_flow_runs` + a best-effort orchestrator
+  write hook in `_enqueue_task` + `tests/test_flow_runs.py` (39 passed w/ regressions).
+  It is a **RECORD, not a stage machine** — nothing reads `current_stage`; existing task
+  execution is untouched and it is trivially revertible. **The promotion-ladder Row 1
+  trigger was NOT observed** — this is an operator-directed experiment, recorded as such
+  in `docs/harness/promotion_ladder.md`. Do NOT treat the table's existence as a tripped
+  gate. First real *code* loop driven through the harness (`AGENT_19_FLOW_RUNS_RECORD.md`).
 - **A16 admission-block surfacing (built, `feat/harness-block-surface`, awaiting merge)** —
   the Web `/api/instructions` lane now catches `HarnessAdmissionBlocked` → **409**
   (`reason=harness_level3_needs_approval` + human `detail` + `task_id`) instead of an

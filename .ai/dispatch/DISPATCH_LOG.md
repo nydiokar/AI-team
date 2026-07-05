@@ -30,7 +30,7 @@ is an operator merge decision.
 | A16 | `AGENT_16_HARNESS_BLOCK_SURFACE.md` | 2026-07-04 | 2 | built — op-merge | WebUI-first surfacing of the Level-3 admission block (A9H "Next"): `HarnessAdmissionBlocked` → clean 409 + `mark_idle` session revert + Composer approval-needed copy. Gate untouched, guard OFF ⇒ byte-identical. |
 | FX1 | `FIX_CLAUDE_ISERROR_PROMPT_TOO_LONG.md` | 2026-07-03 | — | merged (`a3f734b`) | SDK `is_error` no longer stored as a successful "Prompt is too long" reply; open: #41 context-fill gauge. |
 | A17 | `AGENT_17_WIP_MERGE_RECONCILE.md` | 2026-07-05 | 2 | reviewed | Audited `d1556ad`: 4 A16 + 9 orphan + 4 doc; A16 verified on main; 4 orphan clusters assessed (activity-forwarder live/untested, backend-usage & mesh-fleet fix real bugs, opus-default flip). No P0/P1. Keep-vs-revert per cluster = Level-3 fork (op approval). |
-| A19 | `AGENT_19_FLOW_RUNS_RECORD.md` | 2026-07-05 | 3 | dispatched | **First CODE loop.** `flow_runs` record (v0.4 §13 item 1) — migration 21 + create/update/list + guarded orchestrator hook + pytest. **OPERATOR OVERRIDE of COLD ladder Row 1** (trigger never observed); additive-only, no stage machine, no HTTP. |
+| A19 | `AGENT_19_FLOW_RUNS_RECORD.md` | 2026-07-05 | 3 | reviewed — op-merge | **First CODE loop.** `flow_runs` record (v0.4 §13 item 1): migration 21 + create/update/list + guarded orchestrator hook + pytest (39 passed). Manager review: 0 P0/P1, F1–F5 held, additive/revertible. **OPERATOR OVERRIDE of COLD ladder Row 1** (trigger NOT observed) — recorded in `promotion_ladder.md`; RECORD not stage-machine. Awaiting op merge-to-main. |
 
 ---
 
