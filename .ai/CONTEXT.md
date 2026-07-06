@@ -38,12 +38,17 @@
   / checkpoint half still wants a real *code* diff to validate — the next loop should run
   on a real feature/fix.
 - **How to start a loop:** paste `docs/harness/manager_invocation.md`, fill the spec slot.
-- **Newcomer front door shipped (A18, `docs/orientation-overview`, awaiting op-merge):**
-  `docs/OVERVIEW.md` — a static "you are here" router (what-it-is + ASCII shape thumbnail +
-  link table to owning docs). Holds NO state; links owners (DOC_MAP anti-overlap). The
-  v0.4 §2.3 human-orientation *need*, NOT the deferred wiki renderer. Docs-only.
-- Leftover: `feat/task-harness` (old A9H/A12 branch) is stale/divergent vs `main` — safe to
-  delete; its harness content already landed via earlier merges.
+- **Branch policy (anti-sprawl, 2026-07-06):** the driver no longer reflexively branches.
+  **Docs-only loops commit straight to `main`** (no branch/PR/merge); **code loops** cut
+  `feat/<loop>-<slug>` and **open a PR at close** (`gh pr create`) — never a dangling local
+  branch. See `manager_invocation.md` "Branch policy" + CLOSE step.
+- **Newcomer front door shipped (A18) — MERGED to `main`.** `docs/OVERVIEW.md`: a static
+  "you are here" router. v0.4 §2.3 human-orientation need, not the deferred wiki renderer.
+- **Branch cleanup done (2026-07-06):** merged A18 + A19 to `main`, deleted them + the stale
+  `feat/task-harness` (already fully in `main`). ⚠️ **`phase1-quota-window-coordinator` left
+  UNMERGED on purpose** — it branches from an ancient base; its diff to `main` deletes ~293
+  files (the whole `web/src/transport` layer). Do NOT merge as-is; rebase onto `main` to
+  salvage its 2 quota-coordinator commits, or drop it. Operator's call.
 - **Known drift (A17 audit, `d1556ad`):** the "WIP snapshot before main merge" commit landed
   the reviewed A16 admission-block scope (4 files, verified on main) **plus 9 files of
   undispatched, unreviewed orphan code** in 4 clusters — **activity-forwarder** (live
