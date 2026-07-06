@@ -32,9 +32,13 @@ def _make_session(status: SessionStatus, **kw) -> Session:
 _ACTIVE_STATUSES = {
     SessionStatus.IDLE, SessionStatus.BUSY, SessionStatus.AWAITING_INPUT,
     SessionStatus.CANCELLED,
+    # A18: an in-flight hold behaves like BUSY.
+    SessionStatus.PAUSED_PINNED_NODE_OFFLINE,
 }
 _INACTIVE_STATUSES = {
     SessionStatus.CLOSED, SessionStatus.ERROR,
+    # A18: a needs-attention terminal behaves like ERROR (resumable, but inactive).
+    SessionStatus.PINNED_NODE_OFFLINE,
 }
 
 

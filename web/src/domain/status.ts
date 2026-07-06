@@ -19,7 +19,9 @@ export type SessionLifecycle = "open" | "closed";
 
 // ── Session operational state ──────────────────────────────────────────────
 // Derived from backend SessionStatus (idle|busy|awaiting_input|error|
-// cancelled|closed) — gap-doc §3 mapping.
+// cancelled|closed, plus A18 paused_pinned_node_offline|pinned_node_offline)
+// — gap-doc §3 mapping. The two A18 states fold into running / failed_attention
+// respectively (see ../transport/sessionAdapter.ts); no new op-state is minted.
 //   `connection_unknown` ⛔ DROPPED: connection liveness is a property of the
 //   node/target (heartbeat), surfaced on the System screen — not a per-session
 //   state. `waiting_for_approval` is 🟡 PARTIAL — gated on backend Move H

@@ -610,6 +610,9 @@ class TelegramInterface:
             SessionStatus.ERROR: "🔴 needs attention",
             SessionStatus.CANCELLED: "⚪ cancelled",
             SessionStatus.CLOSED: "⚫ closed",
+            # A18 — pinned-worker offline fallback states.
+            SessionStatus.PAUSED_PINNED_NODE_OFFLINE: "⏸ paused (pinned worker offline)",
+            SessionStatus.PINNED_NODE_OFFLINE: "🔴 pinned worker offline",
         }
         return labels.get(status, status.value)
 
@@ -689,6 +692,8 @@ class TelegramInterface:
         SessionStatus.ERROR: "🔴",
         SessionStatus.CANCELLED: "⚪",
         SessionStatus.CLOSED: "⚫",
+        SessionStatus.PAUSED_PINNED_NODE_OFFLINE: "⏸",
+        SessionStatus.PINNED_NODE_OFFLINE: "🔴",
     }
     _STATUS_WORD = {
         SessionStatus.IDLE: "idle",
@@ -697,6 +702,8 @@ class TelegramInterface:
         SessionStatus.ERROR: "needs attention",
         SessionStatus.CANCELLED: "cancelled",
         SessionStatus.CLOSED: "closed",
+        SessionStatus.PAUSED_PINNED_NODE_OFFLINE: "paused (worker offline)",
+        SessionStatus.PINNED_NODE_OFFLINE: "pinned worker offline",
     }
 
     @classmethod

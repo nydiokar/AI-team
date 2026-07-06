@@ -30,6 +30,7 @@ is an operator merge decision.
 | A16 | `AGENT_16_HARNESS_BLOCK_SURFACE.md` | 2026-07-04 | 2 | built — op-merge | WebUI-first surfacing of the Level-3 admission block (A9H "Next"): `HarnessAdmissionBlocked` → clean 409 + `mark_idle` session revert + Composer approval-needed copy. Gate untouched, guard OFF ⇒ byte-identical. |
 | FX1 | `FIX_CLAUDE_ISERROR_PROMPT_TOO_LONG.md` | 2026-07-03 | — | merged (`a3f734b`) | SDK `is_error` no longer stored as a successful "Prompt is too long" reply; open: #41 context-fill gauge. |
 | A17 | `AGENT_17_WIP_MERGE_RECONCILE.md` | 2026-07-05 | 2 | reviewed | Audited `d1556ad`: 4 A16 + 9 orphan + 4 doc; A16 verified on main; 4 orphan clusters assessed (activity-forwarder live/untested, backend-usage & mesh-fleet fix real bugs, opus-default flip). No P0/P1. Keep-vs-revert per cluster = Level-3 fork (op approval). |
+| A18 | `AGENT_18_WORKER_AFFINITY_FALLBACK.md` | 2026-07-05 | 2 | built — op-review | Option A shipped behind `MESH_AFFINITY_OFFLINE_GRACE_SEC` (default **0 ⇒ byte-identical A11**): offline pinned node now holds in `PAUSED_PINNED_NODE_OFFLINE` + polls liveness, resolves to dispatch if the node returns, else honest resumable `PINNED_NODE_OFFLINE` (not bare ERROR). Two-class rule in CONTEXT; defense-in-depth affinity assert at dispatch; 8 tests green (no paid CLI). Pending: operator enable + optional T-final + gateway redeploy. |
 
 ---
 

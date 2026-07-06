@@ -178,7 +178,12 @@ export interface RawTokenUsage {
 
 export interface RawTranscriptTurn {
   task_id: string;
+  /** Back-compat single timestamp (completion-preferred). */
   timestamp: string;
+  /** When the turn started (~when the user sent the message). Falls back to `timestamp`. */
+  started_at?: string;
+  /** When the reply landed (start + time spent working). Falls back to `timestamp`. */
+  completed_at?: string;
   success: boolean;
   instruction: string;
   result: string;
