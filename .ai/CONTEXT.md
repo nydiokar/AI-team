@@ -38,8 +38,17 @@
   / checkpoint half still wants a real *code* diff to validate — the next loop should run
   on a real feature/fix.
 - **How to start a loop:** paste `docs/harness/manager_invocation.md`, fill the spec slot.
-- Leftover: `feat/task-harness` (old A9H/A12 branch) is stale/divergent vs `main` — safe to
-  delete; its harness content already landed via earlier merges.
+- **Branch policy (anti-sprawl, 2026-07-06):** the driver no longer reflexively branches.
+  **Docs-only loops commit straight to `main`** (no branch/PR/merge); **code loops** cut
+  `feat/<loop>-<slug>` and **open a PR at close** (`gh pr create`) — never a dangling local
+  branch. See `manager_invocation.md` "Branch policy" + CLOSE step.
+- **Newcomer front door shipped (A18) — MERGED to `main`.** `docs/OVERVIEW.md`: a static
+  "you are here" router. v0.4 §2.3 human-orientation need, not the deferred wiki renderer.
+- **Branch cleanup done (2026-07-06):** merged A18 + A19 to `main`, deleted them + the stale
+  `feat/task-harness` (already fully in `main`). ⚠️ **`phase1-quota-window-coordinator` left
+  UNMERGED on purpose** — it branches from an ancient base; its diff to `main` deletes ~293
+  files (the whole `web/src/transport` layer). Do NOT merge as-is; rebase onto `main` to
+  salvage its 2 quota-coordinator commits, or drop it. Operator's call.
 - **Known drift (A17 audit, `d1556ad`):** the "WIP snapshot before main merge" commit landed
   the reviewed A16 admission-block scope (4 files, verified on main) **plus 9 files of
   undispatched, unreviewed orphan code** in 4 clusters — **activity-forwarder** (live
@@ -133,6 +142,15 @@ files. This is the "don't rebuild it, it's done" list.
   `dispatch_pipeline.md` now carries a two-lane scope banner + a copyable all-7-stage
   worked example (real packet/milestone/F-tags/closure). Friction report verdict:
   **Phase 2 NOT justified** — file/dispatch discipline held; see `AGENT_12_HARNESS_SELFTEST.md`.
+- **⚠️ A19 FlowRun record — Phase-2 `flow_runs` shipped under an OPERATOR OVERRIDE**
+  (`feat/harness-flow-runs`, 2026-07-05, awaiting op merge-to-main). Migration 21 + a
+  5-col `flow_runs` table + `create/update/list_flow_runs` + a best-effort orchestrator
+  write hook in `_enqueue_task` + `tests/test_flow_runs.py` (39 passed w/ regressions).
+  It is a **RECORD, not a stage machine** — nothing reads `current_stage`; existing task
+  execution is untouched and it is trivially revertible. **The promotion-ladder Row 1
+  trigger was NOT observed** — this is an operator-directed experiment, recorded as such
+  in `docs/harness/promotion_ladder.md`. Do NOT treat the table's existence as a tripped
+  gate. First real *code* loop driven through the harness (`AGENT_19_FLOW_RUNS_RECORD.md`).
 - **A16 admission-block surfacing (built, `feat/harness-block-surface`, awaiting merge)** —
   the Web `/api/instructions` lane now catches `HarnessAdmissionBlocked` → **409**
   (`reason=harness_level3_needs_approval` + human `detail` + `task_id`) instead of an

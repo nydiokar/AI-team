@@ -55,15 +55,29 @@ driver; it advances the loop by judgment, spawning workers, and updating files.
 > 4. **No paid-CLI verification.** Plain `pytest` only; never the full e2e suite, never
 >    `python main.py status`. Live gateway check is `curl http://127.0.0.1:9003/health`.
 >
-> **Before LOOP 0 — check the base branch is current (learned from A15).** Prior harness
-> loops may sit **unmerged** on their own branches, so `main` can be *stale* relative to the
-> docs this driver points at (e.g. `.ai/DOC_MAP.md`, the slimmed `DISPATCH_LOG`). Before
-> branching: `git branch --no-merged main` — if a predecessor loop's branch is unmerged and
-> your work depends on its docs, either (a) branch off **that** branch, not `main`, or (b)
-> surface a merge-to-main fork to the operator first. **Never** carry another loop's
-> unmerged edits onto your branch (that co-mingles indexes — rule 3). If `DISPATCH_LOG`/
-> structure on `main` looks older than what this driver describes, that is the stale-base
-> signal — resolve it before dispatching, don't paper over it.
+> **Branch policy (the anti-sprawl rule — learned 2026-07-06).** Do NOT reflexively cut a
+> branch. A branch is only for **code** work; **docs-only loops commit straight to `main`**.
+> Decide by the dispatch's blast radius (you know it at DRAFT time from the level + files):
+> - **Docs-only** — the diff touches only `*.md`, `.ai/`, `docs/`, or test-doc fixtures and
+>   NO runtime code (`src/`, `web/`, configs, migrations). → **Work directly on `main`.**
+>   Commit the packet, milestone, and closure straight there. **No branch, no PR, no merge
+>   step, nothing to clean up.** (Docs get authored on `main` anyway; branching only traps
+>   them — that is the sprawl we are killing.)
+> - **Touches code** — any `src/`/`web/`/config/migration change. → **Cut one branch**
+>   `feat/<loop>-<slug>` and, at close, **open a PR** (`gh pr create`), don't leave a
+>   dangling local branch (see the CLOSE step). The `{{BRANCH}}` slot below is only a
+>   *default* for the code case; a docs loop overrides it to "work on main."
+>
+> **Before LOOP 0 — check the base branch is current (learned from A15).** Prior code loops
+> may sit **unmerged** on their own branches, so `main` can be *stale* relative to the docs
+> this driver points at (e.g. `.ai/DOC_MAP.md`, the slimmed `DISPATCH_LOG`). Run
+> `git branch --no-merged main` first: if a predecessor's branch is unmerged and your work
+> depends on its code, either (a) branch off **that** branch, not `main`, or (b) surface a
+> merge-to-main fork to the operator first. **Never** carry another loop's unmerged edits
+> onto your branch (co-mingles indexes — rule 3). If `DISPATCH_LOG`/structure on `main` looks
+> older than what this driver describes, that is the stale-base signal — resolve it before
+> dispatching. *(Because docs-only loops now land on `main` directly, doc drift between `main`
+> and branches should largely disappear.)*
 >
 > **Execute one full loop autonomously:**
 >
@@ -84,9 +98,18 @@ driver; it advances the loop by judgment, spawning workers, and updating files.
 >   trust the summary. Run `/code-review` on real code diffs. Then DECIDE: **iterate**
 >   (send back with bounded findings), **close** (update DISPATCH_LOG + CONTEXT), or
 >   **derive** (open the next loop's packet from what was learned).
-> - **REPORT** to the operator at the end: what spec you picked, what you dispatched, what
->   the worker did, your review verdict (with git evidence), and the decision. Update
->   DISPATCH_LOG.
+> - **CLOSE — land the work, don't leave a branch (anti-sprawl).** Per the branch policy:
+>   - **Docs-only loop:** you were already on `main` — just commit the closure. **Done.**
+>     No branch, no PR. (If you or a predecessor is still on a leftover branch, and its
+>     unmerged diff is docs-only + clean, fast-merge it to `main` and delete the branch as
+>     part of housekeeping.)
+>   - **Code loop:** open a PR — `gh pr create --fill --base main` (or push the branch and
+>     `gh pr create`). Put the closure summary in the PR body. **The merge itself is the
+>     operator's fork** — but the work must live as a *PR*, never a dangling local branch.
+>     Record the PR number in the DISPATCH_LOG row (`reviewed — PR #NN`).
+> - **REPORT** to the operator at the end: what spec you picked, whether it ran on `main`
+>   (docs) or a PR branch (code) **and why**, what the worker did, your review verdict (git
+>   evidence), the decision, and — for a code loop — the PR link. Update DISPATCH_LOG.
 >
 > **Only interrupt the operator for genuine forks:** a merge-to-main decision, a Level-3
 > approval, a strategic direction change, or a spec conflict you can't resolve.
@@ -101,7 +124,10 @@ driver; it advances the loop by judgment, spawning workers, and updating files.
 
 - `{{SPEC_OR_INTENT}}` — the spec file or operator intent the Manager drives this session
   (e.g. `docs/Task_Harness_v0.4.md — extract the evidence-gated milestone ladder`).
-- `{{BRANCH}}` — the working branch (or "cut a fresh branch from main").
+- `{{BRANCH}}` — the working branch. **Default: leave empty / "decide by blast radius."**
+  Per the **branch policy** above the Manager decides: a **docs-only** loop works directly on
+  `main` (no branch), a **code** loop cuts `feat/<loop>-<slug>` and opens a PR at close. Only
+  pin this slot to force a specific branch; otherwise the policy chooses.
 - `{{DATE}}` — today (Manager converts relative dates to absolute in what it writes).
 
 ## Notes

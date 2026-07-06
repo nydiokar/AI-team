@@ -54,7 +54,7 @@ _mesh_health_last_sample: Dict[str, float] = {}
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 20
+_CURRENT_VERSION = 21
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +216,21 @@ CREATE INDEX IF NOT EXISTS idx_jobs_node_status
 
 CREATE INDEX IF NOT EXISTS idx_jobs_session
     ON jobs(session_id);
+
+-- FlowRun record (v0.4 §13 item 1) — one row per dispatch flow.
+-- This is a RECORD, not a stage machine: nothing reads current_stage to decide
+-- what runs next. Written best-effort by the orchestrator at dispatch-start and
+-- updated at a stage transition; a write failure never affects task execution.
+CREATE TABLE IF NOT EXISTS flow_runs (
+    flow_run_id     TEXT PRIMARY KEY,
+    task_id         TEXT,
+    current_stage   TEXT,
+    objective_lock  TEXT,
+    created_at      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_flow_runs_task
+    ON flow_runs(task_id);
 """
 
 _APPROVALS_SCHEMA_SQL = """
@@ -1227,6 +1242,60 @@ class MeshDB:
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # FlowRun record (v0.4 §13 item 1, A19) — one row per dispatch flow.
+    #
+    # This is a RECORD, not a driver/stage-machine. Nothing in the codebase
+    # reads current_stage to decide what runs next; these methods only persist
+    # and query the flow-state row. The orchestrator write hook is best-effort
+    # (try/except) so a failure here can never fail or delay a real task.
+    # ------------------------------------------------------------------
+
+    def create_flow_run(
+        self,
+        task_id: str,
+        current_stage: str,
+        objective_lock: Optional[str] = None,
+    ) -> str:
+        """Insert a new flow_runs row. Returns the generated flow_run_id."""
+        flow_run_id = uuid.uuid4().hex
+        with self._write() as conn:
+            conn.execute(
+                """
+                INSERT INTO flow_runs (
+                    flow_run_id, task_id, current_stage, objective_lock, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (flow_run_id, task_id, current_stage, objective_lock, _now()),
+            )
+        return flow_run_id
+
+    def update_flow_stage(self, flow_run_id: str, current_stage: str) -> None:
+        """Update the current_stage of an existing flow_runs row."""
+        with self._write() as conn:
+            conn.execute(
+                "UPDATE flow_runs SET current_stage = ? WHERE flow_run_id = ?",
+                (current_stage, flow_run_id),
+            )
+
+    def list_flow_runs(
+        self,
+        task_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Read path for flow_runs. Optional task_id filter; newest first."""
+        clauses, params = [], []
+        if task_id:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        rows = self._conn().execute(
+            f"SELECT * FROM flow_runs {where} ORDER BY created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
     # Approvals (Move H) — durable approval gate. A pending approval is a
     # promise of a NOT-yet-dispatched action; resolving it is what triggers
     # dispatch. Persisting it here is what lets it survive a gateway restart
@@ -2015,6 +2084,18 @@ def _get_migrations() -> List[tuple]:
             )
         """),  # #21 Web Push: durable browser push subscriptions. endpoint is the
                # natural key (unique per browser/device); re-subscribe is an upsert.
+        (21, """
+            CREATE TABLE IF NOT EXISTS flow_runs (
+                flow_run_id     TEXT PRIMARY KEY,
+                task_id         TEXT,
+                current_stage   TEXT,
+                objective_lock  TEXT,
+                created_at      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_flow_runs_task
+                ON flow_runs(task_id)
+        """),  # A19 v0.4 §13 item 1: FlowRun RECORD (not a stage machine). One row
+               # per dispatch flow; nothing reads current_stage to drive behavior.
     ]
 
 
