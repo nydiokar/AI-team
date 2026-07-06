@@ -14,7 +14,7 @@ import re
 import socket
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional, Tuple
 from datetime import datetime
 import uuid
 import random
@@ -413,6 +413,25 @@ class TaskOrchestrator(ITaskOrchestrator):
             pass
 
         for session in self.session_store.list_all():
+            # A18: a session caught mid-hold (PAUSED_PINNED_NODE_OFFLINE) by a
+            # gateway restart has lost its in-memory liveness poll. It was never
+            # dispatched off-host (the hold polls *before* dispatch), so there is
+            # nothing to reattach — surface the honest, resumable terminal state
+            # so the operator can retry / re-pin, instead of wedging it in a
+            # transient PAUSED state forever. (Never occurs while the feature is
+            # disabled, i.e. MESH_AFFINITY_OFFLINE_GRACE_SEC=0.)
+            if session.status == SessionStatus.PAUSED_PINNED_NODE_OFFLINE:
+                session.status = SessionStatus.PINNED_NODE_OFFLINE
+                session.last_result_summary = (
+                    "Pinned node was offline and the gateway restarted during the "
+                    "affinity hold; retry when the node is back, or re-pin."
+                )
+                self.session_store.save(session)
+                self._emit_event("affinity_hold_interrupted_by_restart", None, {
+                    "session_id": session.session_id,
+                    "machine_id": session.machine_id,
+                })
+                continue
             if session.status != SessionStatus.BUSY:
                 continue
             is_remote = bool(session.machine_id and session.machine_id != host)
@@ -2297,6 +2316,20 @@ class TaskOrchestrator(ITaskOrchestrator):
             if route_remote and last_result is None:
                 last_result = await self._process_task_remote(task, session, start_time, timeout_s)
 
+            # Defense-in-depth (A11/A18 invariant): the local worker loop must
+            # never execute a turn for a session pinned to a *different* host —
+            # that would fork backend_session_id continuity onto the wrong box.
+            # The affinity guard above already forces route_remote=True for such
+            # sessions (so this loop is unreachable for them); assert it rather
+            # than trust the guard alone. The mesh claim filter (db.py) is the
+            # other, independent line of defense at claim time.
+            if not route_remote:
+                assert not _pinned_elsewhere, (
+                    f"affinity invariant violated: session {getattr(session, 'session_id', None)!r} "
+                    f"pinned to {getattr(session, 'machine_id', None)!r} reached the local worker "
+                    f"loop on host {_host!r}"
+                )
+
             while not route_remote:
                 attempt += 1
                 from src.core.telemetry import TelemetryContext
@@ -2774,28 +2807,140 @@ class TaskOrchestrator(ITaskOrchestrator):
             return result
 
         registry = get_registry()
-        node = registry.get(session.machine_id)
-        node_online = node is not None and node.status == "online"
 
-        # The gateway's in-memory registry is only populated if this process
-        # is also running the task server (co-located deployment). In a split
-        # setup (separate task server process, or after a gateway restart that
-        # wiped the in-memory registry), the node may only exist in the DB.
-        # Fall back to the DB so a gateway restart doesn't kill in-flight sessions.
-        if not node_online:
-            from src.control.db import get_db as _get_db
-            _db = _get_db()
-            if _db is not None:
-                _row = _db.get_node(session.machine_id)
-                node_online = bool(_row and _row.get("status") == "online")
+        def _check_pinned_liveness() -> Tuple[Any, bool]:
+            """Return ``(node_handle_or_None, is_online)`` for the pinned node.
+
+            Checks the in-memory registry first, then falls back to the shared
+            DB. The in-memory registry is only populated when this process also
+            runs the task server (co-located deployment); in a split setup, or
+            after a gateway restart that wiped the in-memory registry, the node
+            may only exist in the DB — without the fallback a live node reads as
+            offline and needlessly kills the session. Used both for the initial
+            check and for each poll during the A18 offline grace hold."""
+            _node = registry.get(session.machine_id)
+            if _node is not None and _node.status == "online":
+                return _node, True
+            try:
+                from src.control.db import get_db as _get_db
+                _db = _get_db()
+                if _db is not None:
+                    _row = _db.get_node(session.machine_id)
+                    if _row and _row.get("status") == "online":
+                        return _node, True
+            except Exception:
+                logger.warning(
+                    "event=affinity_liveness_db_check_failed task_id=%s machine_id=%s",
+                    task.id, session.machine_id, exc_info=True,
+                )
+            return _node, False
+
+        node, node_online = _check_pinned_liveness()
 
         if not node_online:
-            result = _routing_failure(f"Node {session.machine_id!r} is offline; cannot continue session (no local fallback — affinity is required)")
-            session.status = SessionStatus.ERROR
+            # A18 — pinned-worker offline fallback. `grace=0` ⇒ disabled: reproduce
+            # the pre-A18 (A11) behavior byte-for-byte (immediate honest fail,
+            # terminal ERROR, no hold). `grace>0` ⇒ bounded hold-and-requeue: a
+            # transient worker blip no longer permanently kills a healthy session.
+            grace_sec = max(0, int(getattr(config.mesh, "affinity_offline_grace_sec", 0) or 0))
+            if grace_sec <= 0:
+                result = _routing_failure(f"Node {session.machine_id!r} is offline; cannot continue session (no local fallback — affinity is required)")
+                session.status = SessionStatus.ERROR
+                self.session_store.save(session)
+                result.error_class = self._classify_error(result)
+                result.retries = 0
+                return result
+
+            # Option A — bounded hold-and-requeue. The pinned node is offline right
+            # now, but the outage may clear within the grace window. Hold the
+            # session in a distinct, honest PAUSED state and poll liveness. The
+            # turn is NEVER relocated: it is only dispatched (below) once the node
+            # is confirmed online again, and the mesh claim filter (db.py) still
+            # guarantees only the pinned node can ever claim it. A11 invariant is
+            # preserved exactly — no off-host execution, ever.
+            poll_interval = max(0.5, float(getattr(config.mesh, "affinity_offline_poll_interval_sec", 5.0) or 5.0))
+            poll_interval = min(poll_interval, float(grace_sec))
+            deadline = time.time() + grace_sec
+
+            logger.warning(
+                "event=affinity_hold_started task_id=%s session_id=%s machine_id=%s grace_sec=%s poll_sec=%.1f",
+                task.id, session.session_id, session.machine_id, grace_sec, poll_interval,
+            )
+            self._emit_event("affinity_hold_started", task, {
+                "session_id": session.session_id,
+                "machine_id": session.machine_id,
+                "grace_sec": grace_sec,
+            })
+            session.status = SessionStatus.PAUSED_PINNED_NODE_OFFLINE
             self.session_store.save(session)
-            result.error_class = self._classify_error(result)
-            result.retries = 0
-            return result
+
+            hold_cancel_ev = self._task_cancel_events.get(task.id)
+            polls = 0
+            while time.time() < deadline:
+                # Honor an operator cancel during the hold rather than pinning the
+                # session to a node that may never return.
+                if hold_cancel_ev is not None and hold_cancel_ev.is_set():
+                    break
+                await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.time())))
+                polls += 1
+                node, node_online = _check_pinned_liveness()
+                if node_online:
+                    break
+
+            if not node_online:
+                # Grace expired (or cancelled) with the node still down. Honest,
+                # resumable terminal state + a distinct event — the operator can
+                # retry once the node returns, or re-pin the session to another
+                # node. Not a bare ERROR; not an off-host fallback.
+                cancelled = hold_cancel_ev is not None and hold_cancel_ev.is_set()
+                reason = (
+                    f"Node {session.machine_id!r} still offline after {grace_sec}s affinity "
+                    f"grace window; session paused (retry when the node returns, or re-pin to "
+                    f"another node). No off-host fallback — affinity is required."
+                )
+                logger.error(
+                    "event=affinity_offline_timeout task_id=%s session_id=%s machine_id=%s "
+                    "grace_sec=%s polls=%s cancelled=%s",
+                    task.id, session.session_id, session.machine_id, grace_sec, polls, cancelled,
+                )
+                self._emit_event("affinity_offline_timeout", task, {
+                    "session_id": session.session_id,
+                    "machine_id": session.machine_id,
+                    "grace_sec": grace_sec,
+                    "polls": polls,
+                    "cancelled": cancelled,
+                })
+                result = TaskResult(
+                    task_id=task.id,
+                    success=False,
+                    output="",
+                    errors=[reason],
+                    files_modified=[],
+                    execution_time=time.time() - start_time,
+                    timestamp=datetime.now().isoformat(),
+                )
+                setattr(result, "backend_name", backend_name)
+                session.status = (
+                    SessionStatus.CANCELLED if cancelled else SessionStatus.PINNED_NODE_OFFLINE
+                )
+                self.session_store.save(session)
+                result.error_class = self._classify_error(result)
+                result.retries = polls
+                return result
+
+            # Node re-registered within the grace window — the blip was invisible
+            # to the operator. Resume normal dispatch below (emits mesh_dispatch).
+            logger.info(
+                "event=affinity_hold_resolved task_id=%s session_id=%s machine_id=%s polls=%s",
+                task.id, session.session_id, session.machine_id, polls,
+            )
+            self._emit_event("affinity_hold_resolved", task, {
+                "session_id": session.session_id,
+                "machine_id": session.machine_id,
+                "polls": polls,
+            })
+            session.status = SessionStatus.BUSY
+            self.session_store.save(session)
 
         cancel_ev = self._task_cancel_events.get(task.id)
         heartbeat_task: Optional[asyncio.Task] = None
@@ -2810,6 +2955,24 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # fallback (the in-memory registry didn't have it). machine_id is
                 # the reliable identifier in every case.
                 target_node = node.node_id if node is not None else session.machine_id
+                # A18/A11 defense-in-depth: a pinned turn dispatches to its own
+                # node or not at all. The mesh claim filter (db.py) already keeps
+                # the local worker pool from ever claiming a pinned task; enforce
+                # the invariant here too so a routing regression fails CLOSED
+                # rather than silently forking the conversation on a substitute
+                # host. Deliberately NOT an `assert` — this is a hard correctness
+                # invariant that must survive `python -O` / PYTHONOPTIMIZE, which
+                # strips asserts. Never reached for unpinned/mesh-disabled work.
+                if target_node != session.machine_id:
+                    result = _routing_failure(
+                        f"affinity violation: session pinned to {session.machine_id!r} "
+                        f"but dispatch target resolved to {target_node!r}; refusing off-host dispatch"
+                    )
+                    session.status = SessionStatus.ERROR
+                    self.session_store.save(session)
+                    result.error_class = self._classify_error(result)
+                    result.retries = 0
+                    return result
                 logger.info("mesh_dispatch backend=%s -> %s", backend_name, target_node)
                 self._emit_event("mesh_dispatch", task, {
                     "backend": backend_name,

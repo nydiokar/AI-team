@@ -35,7 +35,7 @@ class SessionView:
     last_summary: str
     last_files_modified: List[str]
     needs_input: bool           # status == AWAITING_INPUT
-    is_active: bool             # status not in {CLOSED, ERROR}
+    is_active: bool             # status not in {CLOSED, ERROR, PINNED_NODE_OFFLINE}
     origin_channel: str         # where the session came from (SessionOrigin.channel)
     origin_kind: str            # SessionOrigin.kind
     updated_at: str
@@ -61,7 +61,15 @@ class SessionView:
             last_summary=s.last_result_summary or s.last_summary,
             last_files_modified=list(s.last_files_modified or []),
             needs_input=(s.status == SessionStatus.AWAITING_INPUT),
-            is_active=s.status not in (SessionStatus.CLOSED, SessionStatus.ERROR),
+            # A18: PINNED_NODE_OFFLINE is a needs-attention terminal, parallel to
+            # ERROR (a turn that did not complete) — inactive but still resumable
+            # via the normal path. PAUSED_PINNED_NODE_OFFLINE is an in-flight hold,
+            # so it stays active like BUSY.
+            is_active=s.status not in (
+                SessionStatus.CLOSED,
+                SessionStatus.ERROR,
+                SessionStatus.PINNED_NODE_OFFLINE,
+            ),
             origin_channel=origin.channel if origin else "telegram",
             origin_kind=origin.kind if origin else "user",
             updated_at=s.updated_at,
