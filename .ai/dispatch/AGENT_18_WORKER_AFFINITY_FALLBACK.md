@@ -225,9 +225,17 @@ maximally-reversible reading that lets code land now without changing any live b
       `test_mesh_dispatch_timeout / test_mesh_self_awareness / test_telemetry_mesh_integration /
       test_session_service{,_lifecycle} / test_control_api / test_claim_reaper /
       test_mesh_reconcile_spool` (104 passed total); web `adapters.test.ts` (21 passed); `tsc` clean
-- [ ] Build-review folded (operator review)
+- [x] Build-review folded — adversarial review pass caught & fixed: `view_models.is_active`
+      semantics for the two new statuses (PAUSED→active like BUSY, PINNED_NODE_OFFLINE→
+      inactive-but-resumable like ERROR) + its parametrized test; Telegram status label maps.
+      Relay partner added two hardening pieces (owned in review): **gateway-restart recovery**
+      (a session wedged mid-hold → surfaced as PINNED_NODE_OFFLINE, event
+      `affinity_hold_interrupted_by_restart`) and a **third affinity guard** (assert at the
+      local-loop entry, complementing the dispatch-site assert + the db claim filter).
+- [x] Merged to `main`: `739e3e4` (A18) + `19ade75` (merge). Branches consolidated;
+      `fix/worker-affinity-fallback` + `feat/composer-draft-persistence` deleted.
 - [ ] (optional) T-final one-turn re-validation, operator-scheduled
-- [ ] Gateway redeploy on kanebra (operator) + `CONTEXT.md`/`DISPATCH_LOG.md` updated
+- [ ] Gateway redeploy on kanebra (operator) + set `MESH_AFFINITY_OFFLINE_GRACE_SEC` to activate
 
 ## Closure
 
@@ -240,6 +248,11 @@ returns, else to the honest, resumable `PINNED_NODE_OFFLINE` (events
 `affinity_hold_started` / `affinity_hold_resolved` / `affinity_offline_timeout`). A11
 invariant preserved: the claim filter (`db.py:get_pending_tasks`) already keeps the local
 pool from claiming a pinned task, and a defense-in-depth assert at the dispatch site fails
-closed if the resolved target ever differs from the pinned host. **Verification:** 6 unit
-tests + regression suites green, no paid CLI turn. **Deploy note:** ships inert; enable per
-node with `MESH_AFFINITY_OFFLINE_GRACE_SEC=120` after operator review + optional T-final.
+closed if the resolved target ever differs from the pinned host (a **third** guard, the
+local-loop-entry assert, was added in review). **Verification:** 8 affinity unit tests +
+full unit sweep green on `main` (695 passed; the 2 failures are pre-existing/env — VAPID
+push config + a Windows-only path — and touch none of this code), no paid CLI turn.
+**Status: MERGED to `main`, feature OFF by default.** **Deploy note:** ships inert; the
+original bug is only actually resolved once the operator sets
+`MESH_AFFINITY_OFFLINE_GRACE_SEC` > 0 (proposed 120) and redeploys — until then `main` is
+byte-identical to A11 for the offline path. Optional T-final one-turn smoke first.
