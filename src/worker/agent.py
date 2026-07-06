@@ -854,6 +854,7 @@ class WorkerAgent:
             base_url=self.cfg.controller_url,
             token=self.cfg.worker_token,
             logs_dir="logs",
+            is_gateway=False,
         )
         try:
             replay = getattr(self._telemetry_sink, "replay_spool", None)

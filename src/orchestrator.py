@@ -87,6 +87,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._telemetry_sink = build_runtime_telemetry_sink(
             node_id=socket.gethostname(),
             logs_dir=config.system.logs_dir,
+            is_gateway=True,
         )
         with contextlib.suppress(Exception):
             replay = getattr(self._telemetry_sink, "replay_spool", None)

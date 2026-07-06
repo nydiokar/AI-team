@@ -40,18 +40,23 @@ export function useSessionTimeline(
     // 1 — real conversation turns. Each task is one exchange.
     const seenInstructions = new Set<string>();
     for (const t of turns) {
-      const at = t.timestamp || "";
+      // Distinct anchors: the USER bubble is stamped when the turn STARTED (when
+      // the message was sent); the ASSISTANT bubble when the reply LANDED (start +
+      // time spent working). Older turns without the split fall back to the single
+      // coarse `timestamp` so nothing renders blank.
+      const startedAt = t.started_at || t.timestamp || "";
+      const completedAt = t.completed_at || t.timestamp || "";
       if (t.instruction) {
         seenInstructions.add(t.instruction.trim());
         items.push({
           kind: "message",
-          at,
+          at: startedAt,
           message: {
             id: `${t.task_id}-u`,
             sessionId,
             role: "user",
             text: t.instruction,
-            createdAt: at,
+            createdAt: startedAt,
           },
         });
       }
@@ -59,13 +64,13 @@ export function useSessionTimeline(
         const u = t.usage;
         items.push({
           kind: "message",
-          at,
+          at: completedAt,
           message: {
             id: `${t.task_id}-a`,
             sessionId,
             role: "assistant",
             text: t.result,
-            createdAt: at,
+            createdAt: completedAt,
           },
           usage: u
             ? {
