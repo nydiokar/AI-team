@@ -3,8 +3,28 @@ import os
 import time
 import urllib.error
 
-from src.control.telemetry_sink import BufferedHttpTelemetrySink
+import src.control.telemetry_sink as sink_mod
+from src.control.telemetry_sink import (
+    BufferedHttpTelemetrySink,
+    FanOutTelemetrySink,
+    build_runtime_telemetry_sink,
+)
 from src.core.telemetry import build_event
+
+
+class _RecordingSink:
+    def __init__(self):
+        self.events = []
+        self.flushed = 0
+
+    def emit(self, event):
+        self.events.append(event)
+
+    def emit_many(self, events):
+        self.events.extend(events)
+
+    def flush(self):
+        self.flushed += 1
 
 
 def _event(event_id_suffix="1"):
@@ -175,6 +195,56 @@ def test_schema_rejection_is_not_spooled_for_future_retry(tmp_path, monkeypatch)
     sink.emit(_event("permanent"))
 
     assert list(tmp_path.glob("*.json")) == []
+
+
+def test_gateway_writes_local_db_and_never_ships(monkeypatch):
+    """The gateway owns the store — it must write locally, not HTTP-ship to itself."""
+    local = _RecordingSink()
+    monkeypatch.setattr(sink_mod, "_build_local_db_sink", lambda: local)
+    sink = build_runtime_telemetry_sink(node_id="kanebra", is_gateway=True)
+    assert sink is local
+
+
+def test_worker_without_local_db_ships_over_http(monkeypatch):
+    monkeypatch.setattr(sink_mod, "_build_local_db_sink", lambda: None)
+    sink = build_runtime_telemetry_sink(
+        node_id="Horse", base_url="http://gateway:9001", token="tok", is_gateway=False
+    )
+    assert isinstance(sink, BufferedHttpTelemetrySink)
+
+
+def test_worker_with_shadow_db_fans_out_and_still_ships(monkeypatch):
+    """The blindness fix: a worker with a local shadow DB must STILL ship to the
+    gateway (HTTP) while also mirroring to its local ledger."""
+    local = _RecordingSink()
+    monkeypatch.setattr(sink_mod, "_build_local_db_sink", lambda: local)
+    sink = build_runtime_telemetry_sink(
+        node_id="Horse", base_url="http://gateway:9001", token="tok", is_gateway=False
+    )
+    assert isinstance(sink, FanOutTelemetrySink)
+    assert local in sink._sinks
+    assert any(isinstance(s, BufferedHttpTelemetrySink) for s in sink._sinks)
+
+
+def test_fanout_isolates_a_failing_sink(tmp_path):
+    class _Boom:
+        def emit(self, event):
+            raise RuntimeError("boom")
+
+        def emit_many(self, events):
+            raise RuntimeError("boom")
+
+        def flush(self):
+            raise RuntimeError("boom")
+
+    good = _RecordingSink()
+    fan = FanOutTelemetrySink([_Boom(), good])
+    event = _event("fan")
+    fan.emit(event)
+    fan.emit_many([event])
+    fan.flush()
+    assert good.events == [event, event]
+    assert good.flushed == 1
 
 
 def test_expired_spool_files_are_removed_before_replay(tmp_path, monkeypatch):

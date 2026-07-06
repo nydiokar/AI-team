@@ -219,6 +219,17 @@ class MeshConfig:
     worker_token: str = ""                  # WORKER_TOKEN — shared mesh auth secret
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
     oneoff_queue_timeout_sec: int = 36000   # MESH_ONEOFF_QUEUE_TIMEOUT_SEC (10 hours)
+    # AGENT_18 — pinned-worker offline fallback (Option A, bounded hold-and-requeue).
+    # When a session pinned to a remote node is dispatched while that node reads
+    # offline, wait up to this many seconds for it to re-register (polling liveness)
+    # instead of immediately driving the session to ERROR. A transient worker blip
+    # (e.g. a 30s reboot) then stays invisible. 0 ⇒ DISABLED: byte-identical to the
+    # pre-A18 (A11) behavior — fail immediately, no hold. Never relocates a pinned
+    # turn to another host (that would break backend_session_id continuity — A11).
+    affinity_offline_grace_sec: int = 0     # MESH_AFFINITY_OFFLINE_GRACE_SEC
+    # Poll cadence while holding for the pinned node to come back. Clamped to the
+    # grace window at use-site so a large interval can't overshoot the deadline.
+    affinity_offline_poll_interval_sec: float = 5.0  # MESH_AFFINITY_OFFLINE_POLL_INTERVAL_SEC
     claim_lease_sec: int = 300              # MESH_CLAIM_LEASE_SEC — stale-claim reaper threshold (T4)
     claim_max_runtime_sec: int = 36000      # MESH_CLAIM_MAX_RUNTIME_SEC — hard cap for active claimed tasks (10 hours)
     session_reconcile_interval_sec: int = 60  # MESH_SESSION_RECONCILE_INTERVAL_SEC — 0 disables M3 loop
@@ -618,6 +629,18 @@ class Config:
             v = os.getenv("MESH_ONEOFF_QUEUE_TIMEOUT_SEC")
             if v is not None:
                 self.mesh.oneoff_queue_timeout_sec = max(60, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_AFFINITY_OFFLINE_GRACE_SEC")
+            if v is not None:
+                self.mesh.affinity_offline_grace_sec = max(0, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_AFFINITY_OFFLINE_POLL_INTERVAL_SEC")
+            if v is not None:
+                self.mesh.affinity_offline_poll_interval_sec = max(0.5, float(v))
         except Exception:
             pass
         try:

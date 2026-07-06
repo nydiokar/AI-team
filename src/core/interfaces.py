@@ -153,6 +153,16 @@ class SessionStatus(Enum):
     ERROR = "error"
     CANCELLED = "cancelled"
     CLOSED = "closed"
+    # Affinity fallback (A18) — a session pinned to a remote mesh node whose
+    # node is currently offline. Never runs the turn off-host (A11 invariant).
+    #   PAUSED_PINNED_NODE_OFFLINE — transient: bounded hold, polling liveness,
+    #       within AFFINITY_OFFLINE_GRACE_SEC. Resolves back to BUSY when the
+    #       node re-registers, or to PINNED_NODE_OFFLINE when the grace expires.
+    #   PINNED_NODE_OFFLINE — honest terminal-but-resumable: grace expired with
+    #       the node still down. NOT a bare ERROR; the operator can retry once
+    #       the node is back, or re-pin the session to another node.
+    PAUSED_PINNED_NODE_OFFLINE = "paused_pinned_node_offline"
+    PINNED_NODE_OFFLINE = "pinned_node_offline"
 
 @dataclass(frozen=True)
 class SessionOrigin:
