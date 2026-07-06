@@ -18,6 +18,19 @@ own future.
 > HARNESS FRICTION REPORT). A13 and A14 added two more docs loops that held with zero lost
 > handoff state. Three real loops, no gate tripped. This ladder must not contradict that —
 > see [§ Evidence consistency](#evidence-consistency-a12a13a14).
+>
+> ### ⚠️ Operator override on Row 1 (2026-07-05) — a partial `flow_runs` record now exists in code, NOT because the gate tripped.
+> A19 (`.ai/dispatch/AGENT_19_FLOW_RUNS_RECORD.md`) shipped a **minimal `flow_runs` record**
+> — migration 21, a 5-column table (`flow_run_id`, `task_id`, `current_stage`,
+> `objective_lock`, `created_at`), `create/update/list` methods, and a best-effort
+> orchestrator write hook — under an **explicit operator override** of this row's COLD
+> verdict. **The Row 1 trigger was NOT observed** (no ≥2-resume lost-handoff event; A12/A13/
+> A14/A18 all ran with zero lost state). What shipped is a **RECORD, not a stage machine /
+> driver** — nothing reads `current_stage` to drive behavior; existing task execution is
+> untouched. Treat this as an operator-directed **experiment**, not a satisfied gate: the
+> record's *existence in code does not promote Row 1*, and the trigger above is still the
+> condition that would justify building the *driver* on top of it. A future Manager must not
+> cite "the table already exists" as evidence the gate tripped.
 
 ## How to read a row
 
