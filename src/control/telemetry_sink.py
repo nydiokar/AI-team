@@ -308,45 +308,141 @@ class BufferedHttpTelemetrySink:
             logger.warning("event=telemetry_spool_cap_check_failed", exc_info=True)
 
 
+class FanOutTelemetrySink:
+    """Deliver every event to more than one sink.
+
+    Used on a worker that both ships to the gateway (authoritative store) AND
+    mirrors to a local DB ledger (``shadow_write``). A failure in one sink never
+    blocks delivery to the others — telemetry is best-effort per destination.
+    Duplicate delivery is harmless: ``llm_events`` inserts are ``INSERT OR
+    IGNORE`` keyed on ``event_id``, so a co-located worker whose local DB *is*
+    the gateway DB never double-counts.
+    """
+
+    def __init__(self, sinks: Iterable[TelemetrySink]) -> None:
+        self._sinks = [s for s in sinks if s is not None]
+
+    def _safe(self, method: str, *args) -> None:
+        for sink in self._sinks:
+            try:
+                getattr(sink, method)(*args)
+            except Exception:
+                logger.warning(
+                    "event=telemetry_fanout_sink_failed method=%s sink=%s",
+                    method,
+                    type(sink).__name__,
+                    exc_info=True,
+                )
+
+    def emit(self, event: TelemetryEvent) -> None:
+        self._safe("emit", event)
+
+    def emit_many(self, events: Iterable[TelemetryEvent]) -> None:
+        materialized = list(events)
+        self._safe("emit_many", materialized)
+
+    def flush(self) -> None:
+        self._safe("flush")
+
+    def replay_spool(self) -> int:
+        total = 0
+        for sink in self._sinks:
+            replay = getattr(sink, "replay_spool", None)
+            if callable(replay):
+                try:
+                    total += int(replay() or 0)
+                except Exception:
+                    logger.warning(
+                        "event=telemetry_fanout_replay_failed sink=%s",
+                        type(sink).__name__,
+                        exc_info=True,
+                    )
+        return total
+
+
+def _build_local_db_sink() -> TelemetrySink | None:
+    """A DatabaseTelemetrySink over the local shadow DB, or None if unavailable.
+
+    ``get_db()`` returns a handle only when ``mesh.shadow_write`` is enabled.
+    """
+    try:
+        from src.control.db import get_db
+        from src.control.telemetry_store import TelemetryStore
+        db = get_db()
+        if db is not None:
+            return DatabaseTelemetrySink(TelemetryStore(db))
+    except Exception:
+        logger.warning("event=telemetry_local_db_sink_failed", exc_info=True)
+    return None
+
+
 def build_runtime_telemetry_sink(
     *,
     node_id: str,
     base_url: str = "",
     token: str = "",
     logs_dir: str = "logs",
+    is_gateway: bool = False,
 ) -> TelemetrySink:
-    """Build the safe runtime sink without importing gateway/worker classes."""
+    """Build the safe runtime sink without importing gateway/worker classes.
+
+    Delivery is decided by ROLE, never by "do I happen to have a local DB":
+
+    * Gateway (``is_gateway=True``) OWNS the authoritative store and serves the
+      ``/telemetry/batches`` ingest endpoint, so it writes straight to the local
+      DB — no HTTP round-trip to itself.
+
+    * A worker (``is_gateway=False``) MUST ship its usage/telemetry to the
+      gateway over HTTP; that is what makes remote turns visible. If
+      ``shadow_write`` also gave the worker a local DB, it *additionally* mirrors
+      there as a self-sufficient local ledger (idempotent, so co-located workers
+      never double-count). This was the blindness bug: a worker with
+      ``shadow_write=true`` (the default) previously wrote ONLY to its own local
+      DB and never shipped, so every remote turn's tokens vanished.
+    """
     try:
         from config import config
         if not config.telemetry.enabled:
             return NullTelemetrySink()
-        # Gateway path: write directly to the local DB — no HTTP round-trip to ourselves.
-        # Workers don't have a local DB (shadow_write=false), so they fall through to HTTP.
-        try:
-            from src.control.db import get_db
-            from src.control.telemetry_store import TelemetryStore
-            db = get_db()
-            if db is not None:
-                return DatabaseTelemetrySink(TelemetryStore(db))
-        except Exception:
-            pass
+
+        local_sink = _build_local_db_sink()
+
+        # Gateway: the local DB is the destination. No self-HTTP.
+        if is_gateway:
+            return local_sink or NullTelemetrySink()
+
+        # Worker: ship to the gateway. Build the HTTP sink.
+        http_sink: TelemetrySink | None = None
         resolved_url = (base_url or config.telemetry.task_server_url).rstrip("/")
         if not resolved_url:
             host = config.mesh.tailscale_ip or "127.0.0.1"
             resolved_url = f"http://{host}:{config.mesh.task_server_port}"
         resolved_token = token or config.mesh.worker_token
-        if not resolved_token:
+        if resolved_url and resolved_token:
+            http_sink = BufferedHttpTelemetrySink(
+                resolved_url,
+                resolved_token,
+                node_id=node_id,
+                spool_dir=Path(logs_dir) / "telemetry_spool",
+                batch_size=config.telemetry.upload_batch_size,
+                flush_interval_ms=config.telemetry.upload_interval_ms,
+                spool_max_bytes=config.telemetry.spool_max_bytes,
+                upload_max_bytes=config.telemetry.upload_max_bytes,
+                detailed_events=config.telemetry.detailed_events,
+            )
+        else:
+            logger.warning(
+                "event=telemetry_worker_http_unconfigured node_id=%s has_url=%s has_token=%s",
+                node_id,
+                bool(resolved_url),
+                bool(resolved_token),
+            )
+
+        sinks = [s for s in (http_sink, local_sink) if s is not None]
+        if not sinks:
             return NullTelemetrySink()
-        return BufferedHttpTelemetrySink(
-            resolved_url,
-            resolved_token,
-            node_id=node_id,
-            spool_dir=Path(logs_dir) / "telemetry_spool",
-            batch_size=config.telemetry.upload_batch_size,
-            flush_interval_ms=config.telemetry.upload_interval_ms,
-            spool_max_bytes=config.telemetry.spool_max_bytes,
-            upload_max_bytes=config.telemetry.upload_max_bytes,
-            detailed_events=config.telemetry.detailed_events,
-        )
+        if len(sinks) == 1:
+            return sinks[0]
+        return FanOutTelemetrySink(sinks)
     except Exception:
         return NullTelemetrySink()

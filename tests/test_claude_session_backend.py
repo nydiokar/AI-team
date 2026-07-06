@@ -246,6 +246,54 @@ def test_recover_stale_busy_session_marks_error_and_notifies(monkeypatch):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_recover_paused_pinned_hold_becomes_honest_terminal(monkeypatch):
+    """A18: a session caught mid affinity-hold by a restart must resolve to the
+    honest, resumable PINNED_NODE_OFFLINE state — never wedged in PAUSED, never a
+    bare ERROR, and no spurious 'interrupted' completion notification."""
+    root = Path.cwd() / ".test_session_artifacts" / uuid.uuid4().hex[:8]
+    from config import config
+    try:
+        results_dir = root / "results"
+        summaries_dir = root / "summaries"
+        logs_dir = root / "logs"
+        state_dir = root / "state"
+        for path in (results_dir, summaries_dir, logs_dir, state_dir):
+            path.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(config.system, "results_dir", str(results_dir), raising=False)
+        monkeypatch.setattr(config.system, "summaries_dir", str(summaries_dir), raising=False)
+        monkeypatch.setattr(config.system, "logs_dir", str(logs_dir), raising=False)
+
+        import src.services.session_store as session_store_module
+        monkeypatch.setattr(session_store_module, "_SESSIONS_DIR", state_dir / "sessions", raising=False)
+        monkeypatch.setattr(session_store_module, "_BINDINGS_FILE", state_dir / "telegram" / "active_bindings.json", raising=False)
+
+        orch = TaskOrchestrator()
+        session = orch.session_store.create("claude", str(root), telegram_chat_id=1, owner_user_id=2)
+        session.status = SessionStatus.PAUSED_PINNED_NODE_OFFLINE
+        session.machine_id = "remote-worker-01"
+        orch.session_store.save(session)
+
+        captured = []
+
+        class _FakeTelegram:
+            async def notify_completion(self, task_id, summary, success=True, chat_id=None):
+                captured.append(task_id)
+
+        orch.telegram_interface = _FakeTelegram()
+
+        asyncio.run(orch._recover_stale_busy_sessions())
+
+        reloaded = orch.session_store.get(session.session_id)
+        assert reloaded is not None
+        assert reloaded.status == SessionStatus.PINNED_NODE_OFFLINE
+        assert reloaded.status != SessionStatus.ERROR
+        assert "re-pin" in reloaded.last_result_summary
+        assert captured == []  # not a bare interrupted-ERROR; no completion notice
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_compute_turn_changes_filters_unchanged_dirty_files(monkeypatch):
     before = {
         "old.ts": {"status": " M", "fingerprint": "same"},

@@ -24,12 +24,27 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 _INDEX_NAME = "index.json"
+
+
+def _shift_iso(ts: str, delta_seconds: float) -> str:
+    """Return ``ts`` shifted by ``delta_seconds`` (ISO in, ISO out).
+
+    Used to derive a turn's *start* time from its completion timestamp minus the
+    measured execution time when a distinct start isn't stored. Best-effort: an
+    unparseable timestamp is returned unchanged rather than raising."""
+    if not ts or not delta_seconds:
+        return ts
+    try:
+        return (datetime.fromisoformat(ts) + timedelta(seconds=delta_seconds)).isoformat()
+    except Exception:
+        return ts
 
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -263,9 +278,16 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
             except Exception:
                 usage = None
 
+        created = r.get("created_at") or ""
+        completed = r.get("completed_at") or ""
         turns.append({
             "task_id": r.get("task_id") or "",
-            "timestamp": r.get("completed_at") or r.get("created_at") or "",
+            # Back-compat single timestamp (completion-preferred, used for sort).
+            "timestamp": completed or created or "",
+            # Distinct anchors so the UI can stamp the USER bubble with when the
+            # turn started and the ASSISTANT bubble with when the reply landed.
+            "started_at": created or completed or "",
+            "completed_at": completed or created or "",
             "success": success,
             "instruction": instruction,
             "result": result,
@@ -310,9 +332,21 @@ def _turn_from_history(
     if not result:
         result = _clean_result("", success, None)
 
+    # task_history records ONE timestamp — the completion time — plus the measured
+    # execution_time. Derive the start (user-message time) as completion minus
+    # duration so the two bubbles get honest, distinct anchors.
+    completed_at = entry.get("timestamp") or ""
+    try:
+        exec_secs = float(entry.get("execution_time") or 0.0)
+    except (TypeError, ValueError):
+        exec_secs = 0.0
+    started_at = _shift_iso(completed_at, -exec_secs) if exec_secs > 0 else completed_at
+
     return {
         "task_id": task_id,
-        "timestamp": entry.get("timestamp") or "",
+        "timestamp": completed_at,
+        "started_at": started_at,
+        "completed_at": completed_at,
         "success": success,
         "instruction": instruction,
         "result": result,
