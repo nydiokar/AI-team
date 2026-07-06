@@ -54,7 +54,26 @@ _mesh_health_last_sample: Dict[str, float] = {}
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 21
+_CURRENT_VERSION = 22
+
+
+# ---------------------------------------------------------------------------
+# FlowRun stage vocabulary (v0.4 §11) — the canonical ordered stage names for a
+# dispatch flow. This is a DESCRIPTIVE constant only: nothing reads current_stage
+# to decide what runs next (see the flow_runs table note). A19's legacy free-text
+# values (e.g. "dispatch_start", "queued") remain valid — current_stage is not
+# constrained by a CHECK, so this constant does not reject older/other values.
+# ---------------------------------------------------------------------------
+
+FLOW_STAGES = (
+    "intent",
+    "objective_lock",
+    "plan",
+    "plan_review",
+    "execution",
+    "impl_review",
+    "closure",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1250,32 +1269,100 @@ class MeshDB:
     # (try/except) so a failure here can never fail or delay a real task.
     # ------------------------------------------------------------------
 
+    # Full v0.4 §11 field set + dispatch lineage (A21). All optional and
+    # NULLable — an A19-style 5-arg write leaves every one of these NULL.
+    # Structured fields (plan_review, burn_down_items, execution_result,
+    # implementation_review, waived_findings, role_assignments, artifact_links)
+    # are stored as caller-supplied JSON-encoded TEXT; db.py does not interpret
+    # them. These are RECORD columns: nothing reads them to drive execution.
+    _FLOW_EXTRA_FIELDS = (
+        "approved_plan",
+        "plan_review",
+        "burn_down_items",
+        "execution_result",
+        "implementation_review",
+        "waived_findings",
+        "closure_summary",
+        "role_assignments",
+        "artifact_links",
+        "status",
+        "parent_flow_run_id",
+        "dispatched_by",
+        "dispatch_file",
+    )
+
     def create_flow_run(
         self,
         task_id: str,
         current_stage: str,
         objective_lock: Optional[str] = None,
+        **fields: Optional[str],
     ) -> str:
-        """Insert a new flow_runs row. Returns the generated flow_run_id."""
+        """Insert a new flow_runs row. Returns the generated flow_run_id.
+
+        The A19 3-arg form (task_id, current_stage, objective_lock) is
+        unchanged. Any of the §11/lineage columns in _FLOW_EXTRA_FIELDS may be
+        passed as keyword args; absent ones stay NULL. updated_at is left NULL
+        on create (it marks a later update).
+        """
+        unknown = set(fields) - set(self._FLOW_EXTRA_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown flow_run field(s): {sorted(unknown)}")
+
         flow_run_id = uuid.uuid4().hex
+        cols = ["flow_run_id", "task_id", "current_stage", "objective_lock", "created_at"]
+        vals = [flow_run_id, task_id, current_stage, objective_lock, _now()]
+        for name in self._FLOW_EXTRA_FIELDS:
+            if name in fields:
+                cols.append(name)
+                vals.append(fields[name])
+        placeholders = ", ".join("?" for _ in cols)
         with self._write() as conn:
             conn.execute(
-                """
-                INSERT INTO flow_runs (
-                    flow_run_id, task_id, current_stage, objective_lock, created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (flow_run_id, task_id, current_stage, objective_lock, _now()),
+                f"INSERT INTO flow_runs ({', '.join(cols)}) VALUES ({placeholders})",
+                vals,
             )
         return flow_run_id
 
     def update_flow_stage(self, flow_run_id: str, current_stage: str) -> None:
-        """Update the current_stage of an existing flow_runs row."""
+        """Update the current_stage of an existing flow_runs row (A19 path).
+
+        Also stamps updated_at so a stage transition is timestamped.
+        """
         with self._write() as conn:
             conn.execute(
-                "UPDATE flow_runs SET current_stage = ? WHERE flow_run_id = ?",
-                (current_stage, flow_run_id),
+                "UPDATE flow_runs SET current_stage = ?, updated_at = ? WHERE flow_run_id = ?",
+                (current_stage, _now(), flow_run_id),
             )
+
+    def update_flow_run(self, flow_run_id: str, **fields: Optional[str]) -> None:
+        """Update any subset of the §11/lineage columns (and/or current_stage).
+
+        Only the passed fields are written; each update stamps updated_at. A
+        RECORD write only — nothing reads these fields to drive execution.
+        """
+        allowed = set(self._FLOW_EXTRA_FIELDS) | {"current_stage", "objective_lock"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"unknown flow_run field(s): {sorted(unknown)}")
+        if not fields:
+            return
+        set_cols = list(fields.keys())
+        assignments = ", ".join(f"{c} = ?" for c in set_cols) + ", updated_at = ?"
+        params = [fields[c] for c in set_cols] + [_now(), flow_run_id]
+        with self._write() as conn:
+            conn.execute(
+                f"UPDATE flow_runs SET {assignments} WHERE flow_run_id = ?",
+                params,
+            )
+
+    def get_flow_run(self, flow_run_id: str) -> Optional[Dict[str, Any]]:
+        """Read a single flow_runs row by id, or None if absent."""
+        row = self._conn().execute(
+            "SELECT * FROM flow_runs WHERE flow_run_id = ?",
+            (flow_run_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     def list_flow_runs(
         self,
@@ -2096,6 +2183,30 @@ def _get_migrations() -> List[tuple]:
                 ON flow_runs(task_id)
         """),  # A19 v0.4 §13 item 1: FlowRun RECORD (not a stage machine). One row
                # per dispatch flow; nothing reads current_stage to drive behavior.
+        (22, """
+            ALTER TABLE flow_runs ADD COLUMN approved_plan TEXT;
+            ALTER TABLE flow_runs ADD COLUMN plan_review TEXT;
+            ALTER TABLE flow_runs ADD COLUMN burn_down_items TEXT;
+            ALTER TABLE flow_runs ADD COLUMN execution_result TEXT;
+            ALTER TABLE flow_runs ADD COLUMN implementation_review TEXT;
+            ALTER TABLE flow_runs ADD COLUMN waived_findings TEXT;
+            ALTER TABLE flow_runs ADD COLUMN closure_summary TEXT;
+            ALTER TABLE flow_runs ADD COLUMN role_assignments TEXT;
+            ALTER TABLE flow_runs ADD COLUMN artifact_links TEXT;
+            ALTER TABLE flow_runs ADD COLUMN status TEXT;
+            ALTER TABLE flow_runs ADD COLUMN updated_at TEXT;
+            ALTER TABLE flow_runs ADD COLUMN parent_flow_run_id TEXT;
+            ALTER TABLE flow_runs ADD COLUMN dispatched_by TEXT;
+            ALTER TABLE flow_runs ADD COLUMN dispatch_file TEXT
+        """),  # A21 v0.4 §11: promote the 5-column FlowRun RECORD to the full
+               # state model + dispatch lineage. All ADDITIVE + NULLable so A19's
+               # byte-identical write stays valid and existing rows are untouched.
+               # Still a RECORD: nothing reads these to drive execution. Structured
+               # fields (plan_review, burn_down_items, execution_result,
+               # implementation_review, waived_findings, role_assignments,
+               # artifact_links) are JSON-encoded TEXT. parent_flow_run_id is the
+               # lineage back-reference (child→parent recovered by reverse-lookup;
+               # no redundant worker_task_ids column).
     ]
 
 

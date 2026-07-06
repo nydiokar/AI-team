@@ -21,7 +21,9 @@ def _fresh_db(tmp_path) -> MeshDB:
 
 
 # ---------------------------------------------------------------------------
-# (a) Migration: fresh temp DB converges at version 21 and has the table.
+# (a) Migration: fresh temp DB converges at version 22 and has the table.
+#     A21 promoted the record to the full §11 model, so the 5 A19 columns
+#     remain (byte-identical writes) alongside the new NULLable columns.
 # ---------------------------------------------------------------------------
 
 def test_migration_version_and_table(tmp_path):
@@ -29,23 +31,23 @@ def test_migration_version_and_table(tmp_path):
     conn = db._conn()
 
     max_version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-    assert max_version == 21
-    assert _CURRENT_VERSION == 21
+    assert max_version == 22
+    assert _CURRENT_VERSION == 22
 
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='flow_runs'"
     ).fetchone()
     assert row is not None, "flow_runs table missing after migration"
 
-    # Exactly the 5 named columns (+ PK) — no v0.4 §11 column creep.
+    # The 5 original A19 columns must still be present (additive-only guarantee).
     cols = {r[1] for r in conn.execute("PRAGMA table_info(flow_runs)").fetchall()}
-    assert cols == {
+    assert {
         "flow_run_id",
         "task_id",
         "current_stage",
         "objective_lock",
         "created_at",
-    }
+    } <= cols
 
 
 # ---------------------------------------------------------------------------
