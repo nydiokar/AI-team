@@ -20,10 +20,18 @@ export function deriveLifecycle(raw: RawSessionView): SessionLifecycle {
 export function deriveOpState(raw: RawSessionView): SessionOpState {
   switch (raw.status) {
     case "busy":
+    // A18: pinned node briefly offline, gateway is holding + polling for it to
+    // return (bounded grace). The turn is still in-flight and needs no operator
+    // action, so present it as running like any other live turn.
+    case "paused_pinned_node_offline":
       return "running";
     case "awaiting_input":
       return "waiting_for_input";
     case "error":
+    // A18: grace window expired with the pinned node still down. Honest,
+    // resumable terminal state — the operator must retry (once the node returns)
+    // or re-pin to another node, so it belongs in "Needs attention" like error.
+    case "pinned_node_offline":
       return "failed_attention";
     case "idle":
     case "closed":

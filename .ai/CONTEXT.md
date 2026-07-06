@@ -205,10 +205,27 @@ logs/events.ndjson                    system-wide event log
   17); the fat files are droppable (see `docs/RUNBOOK_db_self_sufficient.md`).
 - The gateway host keeps its **own embedded worker capacity** (configurable pool,
   default ≥1 — **not** capped at 1) that runs tasks when no remote node is available.
-  Prefer remote nodes when online.
-- `MESH_ENABLED=false` ⇒ gateway is byte-for-byte the old behavior.
+  Prefer remote nodes when online. **This applies to UNPINNED work only** — see the
+  two-class rule below.
+- **Two task classes, two routing policies (A11/A18 — do not conflate):**
+  - **Unpinned** (`session.machine_id` empty / `machine_id IS NULL`): may run
+    anywhere. Local embedded capacity is a legitimate fallback when no remote node
+    is online. *Unchanged.*
+  - **Pinned** (`session.machine_id = <node>`): **host-or-nothing.** The turn runs on
+    its pinned host or does not run. Fallback for a pinned turn means **wait / requeue /
+    operator re-pin — never relocate** to a substitute host (that silently forks the
+    conversation; `backend_session_id` is machine-local). The embedded worker pool must
+    NEVER claim a pinned task (enforced by the mesh claim filter in `db.py` + a
+    defense-in-depth assert at dispatch in `_process_task_remote`).
 - Session affinity is a hard correctness requirement: a session pinned to a machine
   must execute on that machine. `backend_session_id` is machine-local.
+- **Pinned-node-offline handling (A18):** when a pinned node is offline at dispatch,
+  the gateway holds the session in `PAUSED_PINNED_NODE_OFFLINE` and polls liveness for
+  up to `MESH_AFFINITY_OFFLINE_GRACE_SEC` (default **0 = disabled** ⇒ legacy immediate
+  ERROR). If the node returns within the window the turn dispatches normally; if the
+  window expires the session ends in the honest, resumable `PINNED_NODE_OFFLINE` state
+  (retry or operator re-pin) — never a bare ERROR, never an off-host run.
+- `MESH_ENABLED=false` ⇒ gateway is byte-for-byte the old behavior.
 - No uncontrolled autonomous behavior. Ollama is optional/helper-only. Per-turn audit
   data (full reply, files changed, usage) is **mandatory** — it lives canonically in
   `mesh_tasks`.
