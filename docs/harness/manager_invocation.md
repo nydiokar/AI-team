@@ -10,6 +10,16 @@ is Phase 2 — deferred until the file-and-dispatch discipline demonstrably stra
 (`Task_harness_workflow.md` §16; A12 verdict "Phase 2 = NO"). The Manager *is* the
 driver; it advances the loop by judgment, spawning workers, and updating files.
 
+> **⚠️ SUPERSEDED IN PART (2026-07-06) — see `docs/Task_Harness_v0.6_AUTOMATION.md`.** The
+> "Phase 2 = NO" verdict answered the *prototype* question ("build the platform at all?"),
+> now **closed by operator decision.** v0.6 authorizes building the `flow_runs` state machine
+> / stage-driver / read-API (v0.6 §0.1–0.3, M1). So the flat "code driver is deferred"
+> framing above and **rule 2 below no longer forbid that specific build.** What survives: the
+> Manager is *still* the human-judgment driver for now (the code machine is **shadow /
+> flag-guarded**, `HARNESS_FLOW_DRIVE` default OFF — nothing reads `current_stage` to drive
+> execution), and the anti-sprawl spirit is intact — only the `flow_runs` prohibition is
+> lifted, not a license for UNplanned machinery.
+
 **How to use:** paste the block below to a fresh capable agent (Opus-class). Fill the two
 `{{...}}` slots. Everything else is self-contained — a cold Manager can execute it.
 
@@ -46,9 +56,14 @@ driver; it advances the loop by judgment, spawning workers, and updating files.
 >    grep, file reads. If intent conflicts with the spec (asks for something deferred or
 >    forbidden), **surface the conflict with a recommendation and wait** — don't silently
 >    build it or silently override it.
-> 2. **No speculative machinery.** Harness v1 is done; Phase 2 (`flow_runs`, driver,
->    node-graph UI) is forbidden until a real, evidenced need appears (`§16` + A12
->    verdict). "Advancing" = *using* the harness on real work, not extending it.
+> 2. **No speculative machinery — with the v0.6 carve-out.** Harness v1 is done; do not
+>    build UNplanned platform machinery on a hunch. **Carve-out (2026-07-06):** the
+>    `flow_runs` state machine / stage-driver / read-API **is now authorized** by
+>    `docs/Task_Harness_v0.6_AUTOMATION.md` (§0.1–0.3, M1) — the "Phase 2 = NO / §16 / A12
+>    verdict" prohibition no longer applies to *that* build (it answered a now-closed
+>    prototype question). Everything ELSE (node-graph UI, autonomous swarm, un-specced
+>    services) stays forbidden until a real, evidenced need appears. "Advancing" outside the
+>    v0.6 roadmap still = *using* the harness on real work, not extending it.
 > 3. **One worker per branch/tree at a time.** Two workers on one tree co-mingle git
 >    indexes (this actually happened: A12 committed A11's work). A worker owns its tree
 >    until done. Concurrency needs separate worktrees.

@@ -28,6 +28,14 @@
 [`dispatch/DISPATCH_LOG.md`](dispatch/DISPATCH_LOG.md); for forward priorities see the
 **Current Priorities** table below; for who-owns-what-doc see [`DOC_MAP.md`](DOC_MAP.md).
 
+> **➡️ FORWARD POINTER (2026-07-06): the harness is now being AUTOMATED.** The active
+> roadmap is [`docs/Task_Harness_v0.6_AUTOMATION.md`](../docs/Task_Harness_v0.6_AUTOMATION.md)
+> (operator-authorized build spec). It promotes the proven manual kernel + the A19
+> `flow_runs` record into a gateway-driven, queryable state machine (M0 reconcile → M1
+> flow-state machine → M2 dispatch lineage → M3 invoked-Manager → M4 spec layer). The
+> prototype-era `docs/harness/promotion_ladder.md` is **RETIRED** by it (§0.3) — do not cite
+> its "Phase 2 = NO / deferred / drop" verdicts against v0.6 work. First jobs: A20–A23.
+
 - **Task harness is COMPLETE and on `main` (one branch).** A13/A14/A15 all merged
   2026-07-03/04. The loop now has: the `docs/harness/` templates + generators, the
   **config map** (`loop_config_map.md` — the knobs), the **doc-structure contract**
@@ -45,10 +53,25 @@
 - **Newcomer front door shipped (A18) — MERGED to `main`.** `docs/OVERVIEW.md`: a static
   "you are here" router. v0.4 §2.3 human-orientation need, not the deferred wiki renderer.
 - **Branch cleanup done (2026-07-06):** merged A18 + A19 to `main`, deleted them + the stale
-  `feat/task-harness` (already fully in `main`). ⚠️ **`phase1-quota-window-coordinator` left
-  UNMERGED on purpose** — it branches from an ancient base; its diff to `main` deletes ~293
-  files (the whole `web/src/transport` layer). Do NOT merge as-is; rebase onto `main` to
-  salvage its 2 quota-coordinator commits, or drop it. Operator's call.
+  `feat/task-harness` (already fully in `main`).
+- **⚠️ OPERATOR FORK 1 — `phase1-quota-window-coordinator` (unmerged remote branch).**
+  **State VERIFIED in git 2026-07-07:** it is **9 ahead / 2 behind `main`**, **+1773 / −0
+  across 6 files** vs its merge-base (`eec87c4`) — a stale *additive* feature branch, NOT the
+  "~293-file-deleting" branch an earlier read reported (the only "deletions" are files `main`
+  added while it sat behind). It is **salvageable via rebase-to-current, not destructive.**
+  **Recommendation:** rebase onto current `main` to salvage its quota-coordinator commits when
+  the quota work is scheduled; until then keep it a **separate fork, never entangled with the
+  v0.6 flow-machine (M1) work.** Do NOT merge/rebase/delete it now — operator's call.
+  (v0.6 §M0 / §4 F1 carry the same verified state; the A20 DISPATCH_LOG row too.)
+- **⚠️ OPERATOR FORK 2 — A17 orphan-code drift (`d1556ad`, `AGENT_17_WIP_MERGE_RECONCILE.md`).**
+  The "WIP snapshot before main merge" commit landed the reviewed A16 admission-block scope
+  (4 files, verified on main) **plus 9 files of undispatched, unreviewed orphan code** — see
+  the "Known drift" bullet below for the four clusters. **Recommendation:** retro-dispatch the
+  two clusters that fix real bugs (backend-usage peak-vs-sum — already done as A17b; mesh-fleet
+  tz/count) through a Level-3 harness loop, and take an explicit keep-with-tests-vs-revert
+  decision on `_ActivityForwarder` (live, zero tests) and the `sonnet→opus` default flip.
+  Remediation touches worker/mesh code ⇒ **Level-3 fork needing operator approval** — surfaced
+  here, not resolved.
 - **Known drift (A17 audit, `d1556ad`):** the "WIP snapshot before main merge" commit landed
   the reviewed A16 admission-block scope (4 files, verified on main) **plus 9 files of
   undispatched, unreviewed orphan code** in 4 clusters — **activity-forwarder** (live
@@ -142,8 +165,8 @@ files. This is the "don't rebuild it, it's done" list.
   `dispatch_pipeline.md` now carries a two-lane scope banner + a copyable all-7-stage
   worked example (real packet/milestone/F-tags/closure). Friction report verdict:
   **Phase 2 NOT justified** — file/dispatch discipline held; see `AGENT_12_HARNESS_SELFTEST.md`.
-- **⚠️ A19 FlowRun record — Phase-2 `flow_runs` shipped under an OPERATOR OVERRIDE**
-  (`feat/harness-flow-runs`, 2026-07-05, awaiting op merge-to-main). Migration 21 + a
+- **⚠️ A19 FlowRun record — Phase-2 `flow_runs` shipped under an OPERATOR OVERRIDE —
+  MERGED to `main` (`0b6b1ec`, 2026-07-05).** Migration 21 + a
   5-col `flow_runs` table + `create/update/list_flow_runs` + a best-effort orchestrator
   write hook in `_enqueue_task` + `tests/test_flow_runs.py` (39 passed w/ regressions).
   It is a **RECORD, not a stage machine** — nothing reads `current_stage`; existing task

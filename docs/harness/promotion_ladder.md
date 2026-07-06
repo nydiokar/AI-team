@@ -1,7 +1,15 @@
 # Harness Promotion Ladder — the evidence-gated roadmap from v0.5 → v0.4 end-state
 
-**Status:** reference doctrine (2026-07-03). The harness's decision instrument for its
-own future.
+> ## ⛔ RETIRED (2026-07-06) — superseded by `docs/Task_Harness_v0.6_AUTOMATION.md`.
+> This ladder was the **prototype-phase** instrument for deciding whether to build the
+> automation platform *at all*. That question is now **closed by operator decision**: the
+> automation is authorized and scoped in v0.6. **Do not cite this file's "deferred / drop /
+> Phase 2 = NO" verdicts against v0.6 work** — they answered a question that is no longer open.
+> Kept for historical evidence only (the concurrency scars in § Evidence consistency remain
+> real and worth honoring). Operator may delete it once v0.6 M1 lands.
+
+**Status:** ~~reference doctrine (2026-07-03)~~ **RETIRED** — historical evidence only.
+The harness's *prototype-era* decision instrument for its own future.
 
 > ## This document authorizes NOTHING.
 >
