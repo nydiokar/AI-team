@@ -45,7 +45,31 @@ task_server.py; A22 = orchestrator surface).
 ```
 
 ## Milestone: A23 flow read API
-**Current Status:** dispatched
-**Burndown:** [ ] read API+auth pattern · [ ] get_flow_run · [ ] 2 read routes · [ ] tests (list/detail/404/null) · [ ] live curl from kanebra · [ ] PR
-**Live Log:** — dispatched 2026-07-06
-**Next Action:** worker studies the existing control-API route pattern before adding routes.
+**Current Status:** merged to `main` (Manager-reviewed against git; 36 tests green, /code+/security-review clean)
+**Burndown:** [x] read API+auth pattern · [x] get_flow_run (from A21) · [x] 2 read routes · [x] tests (list/detail/404/null) · [~] live curl (deferred — code not deployed to live gateway; verified via TestClient instead) · [x] branch pushed (gh not installed → no PR opened)
+**Live Log:**
+- dispatched 2026-07-06
+- 2026-07-07 — Studied precedent. The `/api/*` control surface is `src/control/control_api.py` (NOT
+  `task_server.py`, which is the mesh/worker Bearer API). Precedent routes: `api_turns` (list →
+  `JSONResponse({"turns": ...})`) + `api_turn_detail` (detail → 404 `turn_not_found`). Auth =
+  `Depends(_require_auth)` (Bearer DASHBOARD_TOKEN/WORKER_TOKEN). Bind = the same in-process app,
+  served by `EmbeddedControlServer` on `config.mesh.control_api_host or tailscale_ip or 127.0.0.1`
+  (orchestrator.py:1381) — loopback/tailnet, never 0.0.0.0.
+- 2026-07-07 — Dependency reality check: this worktree branched off `main` BEFORE A21 merged;
+  local `main` has only the 5-col A19 flow_runs record and NO `get_flow_run`. The §11 migration 22 +
+  `get_flow_run` + `list_flow_runs` live on branch `feat/m1-flow-schema` (A21). Per standing-rule-1
+  (verify in-file, don't trust the prompt), based `feat/m1-flow-read-api` on `feat/m1-flow-schema`
+  so A23 builds on the real A21 foundation.
+- 2026-07-07 — Added two READ-ONLY routes to control_api.py: `GET /api/flows` (list, summary
+  projection, optional task_id filter, limit 1..500) + `GET /api/flows/{id}` (full §11 record, 404
+  `flow_not_found`). Both delegate verbatim to `db.list_flow_runs` / `db.get_flow_run`; no mutation,
+  no new state, honest nulls. Grep-proof: diff adds only `@app.get`, no post/put/patch/delete, no
+  `0.0.0.0`/host change.
+- 2026-07-07 — Tests (tests/test_control_api_flows.py, plain pytest + FastAPI TestClient + injected
+  MeshDB): 8 passed. Full control-API suite (test_control_api.py + new): 36 passed, no regressions.
+  Live gateway `127.0.0.1:9003/health` = ok (untouched — not redeployed).
+- 2026-07-07 — /code-review + /security-review on the committed diff: no P0/P1 (no findings). Branch
+  `feat/m1-flow-read-api` pushed to origin. gh not installed → PR link:
+  https://github.com/nydiokar/AI-team/pull/new/feat/m1-flow-read-api
+- 2026-07-07 — Manager verified read-only (no mutation route, no public bind), re-ran tests (36 passed), merged to `main`.
+**Next Action:** closed. M1 backbone complete (A21 schema + A22 stage writes + A23 read API).
