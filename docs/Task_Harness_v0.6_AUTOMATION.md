@@ -268,7 +268,6 @@ byte-identical to today**.
 - Retired instrument: `docs/harness/promotion_ladder.md` (historical evidence only — see §0.3).
 - Manager driver: `docs/harness/manager_invocation.md`. Pipeline: `docs/harness/dispatch_pipeline.md`.
 - First-milestone dispatch jobs: `.ai/dispatch/AGENT_20_*` … `AGENT_23_*` (M1).
-- Prior-art salvage: `docs/PRIOR_ART_MAX_REUSE.md` — retired-MAX audit; *idea-only* inputs to
-  **M3** (Manager coordination scope + expand-step prompt shape) and **M4** (spec→dispatch
-  `SubTask` DAG shape). Explicitly **does not** touch the in-flight M0/M1 jobs (A20–A23), adds
-  no scope (bounded by §0.2), imports no MAX code.
+- Prior-art salvage: the retired-MAX audit (see the salvage map in `docs/`, linked from v0.4
+  §12 + `.ai/CONTEXT.md`) — *idea-only* inputs to **M4** (decomposition/schema) and **M2/M3**
+  (delegation pattern); bounded by §0.2, imports no MAX code, off the in-flight A20–A23 jobs.

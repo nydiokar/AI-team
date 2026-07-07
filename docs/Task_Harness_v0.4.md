@@ -470,6 +470,12 @@ Adapters are tested after the core works.
 
 The harness must run without them.
 
+> The **task-orchestrator MCP** row is the slot where a decomposition / task-graph
+> backend would dock **if ever wired**. `docs/PRIOR_ART_MAX_REUSE.md` records what the
+> retired MAX project contributes to that slot (a `SubTask` DAG shape + a decomposer
+> *prompt pattern*) and the load-bearing rule that keeps it optional: the kernel must
+> keep running with all of it off ("Required: no").
+
 ---
 
 ## 13. One-Week Build Scope
