@@ -36,6 +36,14 @@
 > prototype-era `docs/harness/promotion_ladder.md` is **RETIRED** by it (§0.3) — do not cite
 > its "Phase 2 = NO / deferred / drop" verdicts against v0.6 work. First jobs: A20–A23.
 
+- **v0.6 M0 + M1 SHIPPED on `main` (2026-07-07).** A20 (M0 base reconcile), then A21→A22→A23
+  merged in order (`6fdf8f0` → `56e4180` → `d1ea2f7`): `flow_runs` now carries the full §11
+  field set + lineage cols (A21, migration 22 — additive/NULLable/version-guarded idempotent),
+  `current_stage` is written at each loop transition behind `HARNESS_FLOW_DRIVE` (**default OFF
+  ⇒ byte-identical A19; SHADOW only — nothing reads stage to drive execution**), and the flow
+  record is queryable via read-only `GET /api/flows` + `/api/flows/{id}` (A23, auth-guarded,
+  loopback/tailnet, no mutation/public bind). 41/41 M1 tests green in-tree. **Next: M2 dispatch
+  lineage** (wiring-only — the `parent_flow_run_id`/`dispatched_by` cols already exist).
 - **Task harness is COMPLETE and on `main` (one branch).** A13/A14/A15 all merged
   2026-07-03/04. The loop now has: the `docs/harness/` templates + generators, the
   **config map** (`loop_config_map.md` — the knobs), the **doc-structure contract**
@@ -291,6 +299,8 @@ logs/events.ndjson                    system-wide event log
 | `docs/RUNBOOK_db_self_sufficient.md` | backfill `mesh_tasks` + drop fat `results/*.json` |
 | `docs/LLM_TURN_OBSERVABILITY_SPEC.md` | turn-observability spec (M1–M4) |
 | `docs/Task_harness_workflow.md` | task-quality loop spec (v0.5) — A9H |
+| `docs/Task_Harness_v0.6_AUTOMATION.md` | automation roadmap (M0–M4) — the active harness spec |
+| `docs/PRIOR_ART_MAX_REUSE.md` | salvage map of the retired MAX orchestrator — idea-only inputs to harness M3/M4 (decomposer prompt + `SubTask` DAG shape); mirror & warning, not a platform |
 | `docs/harness/` | task-harness v1: templates, generators, `dispatch_pipeline.md` runbook |
 | `docs/RUNBOOKS/PHASE_4_RUNBOOK.md` | VPS cutover runbook (= State Sep end-state) |
 | `docs/archive/progress/_archive_PROGRESS_LOG.md` | completed-work history |
