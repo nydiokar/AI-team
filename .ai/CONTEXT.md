@@ -294,6 +294,7 @@ logs/events.ndjson                    system-wide event log
 | `src/control/task_server.py` | FastAPI task server (embedded); `/metrics.history.recent` = M5 health samples |
 | `src/worker/agent.py` | worker daemon (own process on worker nodes) |
 | `config/settings.py` | all config incl. `MeshConfig` |
+| `docs/ENV_FEATURE_FLAGS.md` | feature-flag reference — default-OFF gates that must be enabled separately (incl. M1 `HARNESS_FLOW_DRIVE`) |
 | `docs/CONTROL_CONTRACT.md` | **M1** — event + inbound-command + backend + read-model contract |
 | `docs/CONVERSATION_DATA_FLOW.md` | conversation+artifact data-flow audit (§0 = DB-canonical, migration 17) |
 | `docs/RUNBOOK_db_self_sufficient.md` | backfill `mesh_tasks` + drop fat `results/*.json` |
