@@ -64,7 +64,12 @@
 ```
 
 ## Milestone: A21 flow schema extension
-**Current Status:** dispatched
-**Burndown:** [ ] read DDL + migration-21 pattern · [ ] additive migration (§11 + 3 lineage cols) · [ ] extend create/update + get_flow_run · [ ] stage-vocab constant · [ ] tests (fresh + existing + idempotent + A19 intact) · [ ] PR
-**Live Log:** — dispatched 2026-07-06
-**Next Action:** worker verifies current schema + A19 methods, then writes the additive migration.
+**Current Status:** merged to `main` (Manager-reviewed against git; 13 tests green)
+**Burndown:** [x] read DDL + migration-21 pattern · [x] additive migration (§11 + 3 lineage cols) · [x] extend create/update + get_flow_run · [x] stage-vocab constant · [x] tests (fresh + existing + idempotent + A19 intact) · [x] PR
+**Live Log:**
+- dispatched 2026-07-06
+- 2026-07-07: verified live state in src/control/db.py — flow_runs was exactly 5 cols (L224); A19 create_flow_run/update_flow_stage/list_flow_runs at L1253; migration 21 = A19; `_CURRENT_VERSION` was 21.
+- 2026-07-07: added migration 22 (14 additive TEXT/NULLable cols: 11 §11 fields + parent_flow_run_id/dispatched_by/dispatch_file). Extended create_flow_run (optional kwargs), update_flow_stage (now stamps updated_at), added update_flow_run + get_flow_run. Added FLOW_STAGES constant. Bumped `_CURRENT_VERSION` to 22.
+- 2026-07-07: tests green — 10 new (test_flow_schema_extension.py) + 3 existing (test_flow_runs.py, version/col assertions updated for the additive migration); 63 db/flow/migration tests pass overall. Committed 7a57e2b.
+- 2026-07-07: Manager reviewed diff in git (additive-only, idempotent guard, no current_stage reader), re-ran tests (13 passed), merged to `main`.
+**Next Action:** closed. A22 + A23 (Wave 2) now branch off this schema.
