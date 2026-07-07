@@ -1641,8 +1641,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                 {"priority": getattr(task.priority, "value", str(task.priority))},
             )
             logger.info(f"Queued runtime task: {task.id} ({task.type.value}, {task.priority.value})")
-            # [FlowRun A19] Best-effort stage transition (dispatch_start → queued).
-            self._record_flow_stage(flow_run_id, "queued")
+            # [FlowRun A19/A22] Best-effort stage transition. When HARNESS_FLOW_DRIVE
+            # is OFF this is A19's exact `queued` write (byte-identical). When ON the
+            # task is now admitted/queued ⇒ the objective is locked in: write the
+            # §11 `objective_lock` stage instead (SHADOW record; nothing reads it).
+            if self._harness_flow_drive_enabled():
+                self._record_flow_stage(flow_run_id, "objective_lock")
+            else:
+                self._record_flow_stage(flow_run_id, "queued")
         except asyncio.QueueFull:
             priority_val = getattr(task.priority, "value", str(task.priority))
             if priority_val == "low":
@@ -1673,19 +1679,40 @@ class TaskOrchestrator(ITaskOrchestrator):
         code reads current_stage to drive behavior. Any failure is swallowed and
         logged: a telemetry write must never fail or delay a real task. Returns
         the flow_run_id on success, or None if the write was skipped/failed.
+
+        The initial stage is `intent` (the first §11 stage) when HARNESS_FLOW_DRIVE
+        is ON, and A19's legacy `dispatch_start` when it is OFF — so OFF behavior is
+        byte-identical to A19. The generated flow_run_id is stashed on
+        ``task.metadata[_FLOW_RUN_META_KEY]`` so later transition points on the
+        worker loop can resolve it without new plumbing.
         """
         try:
             from src.control.db import get_db
             db = get_db()
             if db is None:
                 return None
-            return db.create_flow_run(task.id, "dispatch_start")
+            drive_on = self._harness_flow_drive_enabled()
+            initial_stage = "intent" if drive_on else "dispatch_start"
+            flow_run_id = db.create_flow_run(task.id, initial_stage)
+            if flow_run_id and drive_on:
+                try:
+                    if task.metadata is None:
+                        task.metadata = {}
+                    task.metadata[self._FLOW_RUN_META_KEY] = flow_run_id
+                except Exception:
+                    pass
+            return flow_run_id
         except Exception as e:
             logger.warning("event=flow_run_start_failed task_id=%s err=%s", task.id, e)
             return None
 
     def _record_flow_stage(self, flow_run_id: Optional[str], stage: str) -> None:
-        """Best-effort FlowRun stage-transition update (A19). Swallows failures."""
+        """Best-effort FlowRun stage-transition update (A19). Swallows failures.
+
+        SHADOW ONLY: this WRITES current_stage; nothing reads it to decide what
+        runs. Wrapped so a write failure logs and returns — it can never raise
+        into task execution.
+        """
         if not flow_run_id:
             return
         try:
@@ -1696,6 +1723,49 @@ class TaskOrchestrator(ITaskOrchestrator):
             db.update_flow_stage(flow_run_id, stage)
         except Exception as e:
             logger.warning("event=flow_run_stage_failed flow_run_id=%s err=%s", flow_run_id, e)
+
+    # [FlowRun A22] Metadata key under which the flow_run_id is stashed on a task
+    # so the worker-loop transition points (execution / impl_review / closure)
+    # can resolve it. Underscored so it never collides with a user metadata field.
+    _FLOW_RUN_META_KEY = "__flow_run_id"
+
+    @staticmethod
+    def _harness_flow_drive_enabled() -> bool:
+        """Whether authoritative stage transitions are written (A22).
+
+        Opt-in via ``HARNESS_FLOW_DRIVE`` (truthy: 1/true/yes/on); default OFF.
+        When OFF, flow-stage behavior is byte-identical to A19 (legacy
+        `dispatch_start`/`queued` record only). When ON, the §11 vocabulary
+        (FLOW_STAGES) is written at each harness transition — a SHADOW record:
+        NO code path reads current_stage to decide what runs.
+        """
+        flag = os.environ.get("HARNESS_FLOW_DRIVE", "").strip().lower()
+        return flag in ("1", "true", "yes", "on")
+
+    def _flow_stage_transition(self, task: "Task", stage: str) -> None:
+        """[A22] Single flag-guarded, best-effort stage-transition helper.
+
+        Called at each harness transition on the loop/driver surface. When
+        HARNESS_FLOW_DRIVE is OFF this is a no-op (⇒ byte-identical to A19). When
+        ON it resolves the flow_run_id stashed on the task and writes the given
+        FLOW_STAGES vocabulary stage (update_flow_stage also stamps updated_at).
+
+        SHADOW ONLY — this only ever WRITES current_stage. It is wrapped so any
+        failure logs and returns; it can NEVER raise into task execution.
+        """
+        try:
+            if not self._harness_flow_drive_enabled():
+                return
+            meta = getattr(task, "metadata", None) or {}
+            flow_run_id = meta.get(self._FLOW_RUN_META_KEY)
+            if not flow_run_id:
+                return
+            self._record_flow_stage(flow_run_id, stage)
+        except Exception as e:
+            logger.warning(
+                "event=flow_stage_transition_failed task_id=%s stage=%s err=%s",
+                getattr(task, "id", "?"), stage, e,
+            )
 
     async def submit_instruction(
         self,
@@ -2044,6 +2114,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._emit_turn_telemetry("turn.started", task, backend=backend_name)
                 self._mesh_enqueue_task(task, backend_name)
 
+                # [FlowRun A22] Harness transition → `execution`. Flag-guarded,
+                # best-effort SHADOW write (no-op when HARNESS_FLOW_DRIVE is OFF);
+                # nothing below reads current_stage to decide what runs.
+                self._flow_stage_transition(task, "execution")
+
                 # Process the task
                 result = await self.process_task(task)
 
@@ -2106,6 +2181,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                     invocation_id=getattr(result, "telemetry_invocation_id", None),
                     backend=finish_backend,
                 )
+                # [FlowRun A22] Harness transition → `impl_review` (result produced,
+                # under review). Flag-guarded, best-effort SHADOW write.
+                self._flow_stage_transition(task, "impl_review")
                 self._emit_turn_telemetry(
                     "turn.completed",
                     task,
@@ -2120,7 +2198,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                     backend=finish_backend,
                     flush=True,
                 )
-                
+                # [FlowRun A22] Harness transition → `closure` (turn complete). The
+                # final §11 stage; flag-guarded, best-effort SHADOW write.
+                self._flow_stage_transition(task, "closure")
+
                 # Send notification via the central notification dispatcher
                 try:
                     session_id_for_notify = (task.metadata or {}).get("session_id", "").strip()
