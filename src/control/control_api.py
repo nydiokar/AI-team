@@ -719,6 +719,47 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=404, detail="turn_not_found")
         return JSONResponse({"events": store.list_events(turn_id, after=after, limit=limit)})
 
+    # --- flows (A23) — read-only FlowRun record surface -------------------
+    # "let me see the flows": the first payoff of the durable state machine —
+    # state you can query, not grep. READ ONLY: nothing here mutates a flow or
+    # drives a transition (those are the orchestrator's write path, not an API).
+    # Honest fields: every value is served exactly as the DB holds it, so a NULL
+    # §11 column serializes as JSON null — never a fabricated default.
+
+    # The summary columns for the list view (packet §11): the six a human scans
+    # to answer "what flows exist and at what stage". The full record (all §11
+    # columns) is only served by the detail route, so the list stays cheap.
+    _FLOW_SUMMARY_FIELDS = (
+        "flow_run_id", "task_id", "current_stage", "status", "created_at", "updated_at",
+    )
+
+    @app.get("/api/flows", dependencies=[Depends(_require_auth)])
+    def api_flows(
+        task_id: Optional[str] = Query(default=None),
+        limit: int = Query(50, ge=1, le=500),
+    ) -> JSONResponse:
+        """List flow-run records (newest first), projected to summary fields.
+
+        Optional ``task_id`` filters to one task's flows. Read-only: reuses
+        ``db.list_flow_runs`` verbatim, then projects each row to the summary
+        columns. Absent §11 columns stay null (never fabricated)."""
+        db = _db()
+        rows = db.list_flow_runs(task_id=task_id, limit=limit) if db is not None else []
+        flows = [{k: row.get(k) for k in _FLOW_SUMMARY_FIELDS} for row in rows]
+        return JSONResponse({"flows": flows})
+
+    @app.get("/api/flows/{flow_run_id}", dependencies=[Depends(_require_auth)])
+    def api_flow_detail(flow_run_id: str) -> JSONResponse:
+        """One flow's full §11 record. 404 (``flow_not_found``) on an unknown id.
+
+        Read-only: reuses ``db.get_flow_run`` verbatim. The whole DB row is
+        returned as-is, so NULL columns serialize as JSON null."""
+        db = _db()
+        flow = db.get_flow_run(flow_run_id) if db is not None else None
+        if flow is None:
+            raise HTTPException(status_code=404, detail="flow_not_found")
+        return JSONResponse({"flow": flow})
+
     @app.get("/api/events/stream")
     async def api_events_stream(
         request: Request,
