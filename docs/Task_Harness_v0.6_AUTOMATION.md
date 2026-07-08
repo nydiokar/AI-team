@@ -145,6 +145,12 @@ task/session, populate `parent_flow_run_id`/`dispatched_by` (columns added in M1
 with this result. Extend the read API + a minimal cockpit view to render the tree.
 - **Why after M1:** you can only link rows once the rows are real and queryable. Building the
   autonomous dispatcher (M3) *before* this substrate would recreate the exact opacity pain.
+- **2026-07-08 scope refinement:** a code-grounded read-model review found that `flow_runs`
+  + `mesh_tasks` + sessions + approvals are not enough for a truthful mobile Work UI without
+  fragile heuristics. M2 therefore expands into the **Work Control Substrate** milestone:
+  authoritative `flow_links`, append-only `flow_events`, write-path population, a read-only
+  Work/Case read model, and a mobile read-only Work surface before M3. See
+  [`WORK_CONTROL_SUBSTRATE_MILESTONE.md`](WORK_CONTROL_SUBSTRATE_MILESTONE.md).
 
 ### M3 — Manager-as-invoked-role: operator invokes → expand → dispatch through the machine · Level 3
 
@@ -200,8 +206,22 @@ Applying v0.4 §5 discipline to the plan itself. P0/P1 only.
   job that removes the invocation bound is rejected at review. *Held.*
 - **[F3 · P1 · ordering] Should lineage (M2) precede the invoked Manager (M3)?** Yes — building
   an autonomous dispatcher before the trace substrate recreates the opacity scar. Order is
-  correct. To de-risk further, M1 already lands the lineage *columns*, so M2 is wiring-only.
-  *Held.*
+  correct. To de-risk further, M1 already lands the lineage *columns*, so the column-level wiring
+  is cheap. *Held.*
+  > **⚠️ Clarified 2026-07-08 (was "M2 is wiring-only" — that phrasing spawned a duplicate lane).**
+  > M2 has **two coordinated halves, not one**, and they must not both stamp the same parent→child
+  > edge independently:
+  > 1. **A26a — flow_runs lineage wiring** (the literal "wiring-only" piece): populate the mig-22
+  >    columns `parent_flow_run_id`/`dispatched_by`/`dispatch_file` at the child-dispatch seam
+  >    behind `HARNESS_FLOW_DRIVE`, and expose the `_stamp_child_dispatch_lineage` **supplier** +
+  >    `list_child_flow_runs` reverse-lookup. This is the convenience-column + stamping half.
+  > 2. **A25–A29 — Work Control Substrate** (the scope refinement below): the authoritative
+  >    `flow_links`/`flow_events` ledger + write path + read model + Work UI.
+  >
+  > **Authority rule:** `flow_links(role=child_flow)` is authoritative; the `flow_runs` column is a
+  > convenience index (milestone §"Optional Direct Columns"). **A26 consumes A26a's stamped
+  > `parent_flow_run_id` — it does NOT add a second stamping hook** (that would trip the milestone's
+  > own F4 "duplicate ledger"). One seam, one stamper (A26a), two stores with a clear order.
 - **[F4 · P1 · hidden phase] M3 assumes a spawned session can orchestrate sub-sessions.** That
   capability is unproven against the current backend surface and could be a whole phase.
   **Resolution:** M3 opens with a capability spike; if orchestration isn't supported, that

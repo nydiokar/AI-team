@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-03
+**Last Updated:** 2026-07-08
 **Active branch:** `main` (webui-ui0, operator-signal, compact-context all merged — PRs #4/#5/#6)
 
 > This is the **fast-orientation** doc: what the project is, how it's wired *right
@@ -28,13 +28,16 @@
 [`dispatch/DISPATCH_LOG.md`](dispatch/DISPATCH_LOG.md); for forward priorities see the
 **Current Priorities** table below; for who-owns-what-doc see [`DOC_MAP.md`](DOC_MAP.md).
 
-> **➡️ FORWARD POINTER (2026-07-06): the harness is now being AUTOMATED.** The active
+> **➡️ FORWARD POINTER (2026-07-08): the harness is now being AUTOMATED, and Work
+> Control Substrate is the next dependency.** The active
 > roadmap is [`docs/Task_Harness_v0.6_AUTOMATION.md`](../docs/Task_Harness_v0.6_AUTOMATION.md)
 > (operator-authorized build spec). It promotes the proven manual kernel + the A19
 > `flow_runs` record into a gateway-driven, queryable state machine (M0 reconcile → M1
 > flow-state machine → M2 dispatch lineage → M3 invoked-Manager → M4 spec layer). The
 > prototype-era `docs/harness/promotion_ladder.md` is **RETIRED** by it (§0.3) — do not cite
-> its "Phase 2 = NO / deferred / drop" verdicts against v0.6 work. First jobs: A20–A23.
+> its "Phase 2 = NO / deferred / drop" verdicts against v0.6 work. A20–A23 shipped M0/M1.
+> **A25–A29 now implement Work Control Substrate** before any Manager automation or product-grade
+> Work UI that could infer too much.
 
 - **v0.6 M0 + M1 SHIPPED on `main` (2026-07-07).** A20 (M0 base reconcile), then A21→A22→A23
   merged in order (`6fdf8f0` → `56e4180` → `d1ea2f7`): `flow_runs` now carries the full §11
@@ -42,8 +45,27 @@
   `current_stage` is written at each loop transition behind `HARNESS_FLOW_DRIVE` (**default OFF
   ⇒ byte-identical A19; SHADOW only — nothing reads stage to drive execution**), and the flow
   record is queryable via read-only `GET /api/flows` + `/api/flows/{id}` (A23, auth-guarded,
-  loopback/tailnet, no mutation/public bind). 41/41 M1 tests green in-tree. **Next: M2 dispatch
-  lineage** (wiring-only — the `parent_flow_run_id`/`dispatched_by` cols already exist).
+  loopback/tailnet, no mutation/public bind). 41/41 M1 tests green in-tree. **Next: Work Control
+  Substrate (A25-A29)** — M2 dispatch lineage plus the minimal authoritative relationships needed
+  before a truthful mobile Work UI or M3 Manager automation: `flow_links`, append-only
+  `flow_events`, write wiring, read model, read-only Work surface, and Session affiliation labels.
+  See [`docs/WORK_CONTROL_SUBSTRATE_MILESTONE.md`](../docs/WORK_CONTROL_SUBSTRATE_MILESTONE.md).
+- **⚠️ M2 has TWO coordinated halves — reconciled 2026-07-08 (was an overlapping-lane risk).**
+  M2 dispatch lineage = **(A26a)** the `flow_runs` column wiring — `parent_flow_run_id`/
+  `dispatched_by`/`dispatch_file` stamped at the child-dispatch seam behind `HARNESS_FLOW_DRIVE`
+  (default OFF ⇒ byte-identical), plus the `_stamp_child_dispatch_lineage` **supplier** +
+  `list_child_flow_runs` — **built** on `feat/m2-dispatch-lineage-wiring`, 19/19 tests green,
+  awaiting op-merge — **and (A25–A29)** the authoritative `flow_links`/`flow_events` substrate.
+  **Authority:** `flow_links(child_flow)` is authoritative; the `flow_runs` column is a convenience
+  index. **A26 CONSUMES A26a's stamped edge — it must NOT add a second stamping hook** (avoids the
+  milestone's F4 "duplicate ledger"). The old roadmap phrase "M2 is wiring-only" (which spawned the
+  duplicate lane) is corrected in `Task_Harness_v0.6_AUTOMATION.md` §F3.
+- **⚠️ CONCURRENCY (2026-07-08): A25 is being built by another agent** on
+  `feat/work-control-substrate` (migration 23 + `flow_links`/`flow_events`). One worker per branch —
+  do NOT open a second substrate lane; A26a (this reconciliation's foundation) is a separate branch.
+- **A24 decomposer generator is deferred (2026-07-08).** It remains valid M4 prompt work, but
+  decomposition before durable Work/Case linkage creates more loose artifacts. Resume A24 only
+  after the Work Control Substrate can attach decomposed packets/tasks to cases.
 - **Task harness is COMPLETE and on `main` (one branch).** A13/A14/A15 all merged
   2026-07-03/04. The loop now has: the `docs/harness/` templates + generators, the
   **config map** (`loop_config_map.md` — the knobs), the **doc-structure contract**
