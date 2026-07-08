@@ -31,8 +31,8 @@ def test_migration_version_and_table(tmp_path):
     conn = db._conn()
 
     max_version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-    assert max_version == 22
-    assert _CURRENT_VERSION == 22
+    assert max_version == 23  # A25 Work Control Substrate added migration 23
+    assert _CURRENT_VERSION == 23
 
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='flow_runs'"

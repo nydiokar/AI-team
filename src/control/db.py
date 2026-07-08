@@ -54,7 +54,7 @@ _mesh_health_last_sample: Dict[str, float] = {}
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 22
+_CURRENT_VERSION = 23
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +73,67 @@ FLOW_STAGES = (
     "execution",
     "impl_review",
     "closure",
+)
+
+
+# ---------------------------------------------------------------------------
+# Work Control Substrate vocabulary (A25, WORK_CONTROL_SUBSTRATE_MILESTONE.md).
+# DESCRIPTIVE constants only — like FLOW_STAGES, they document the intended
+# vocabulary for callers/tests and are NOT enforced by a CHECK constraint, so
+# older/other values remain valid and a bad value can never break a best-effort
+# write. flow_links relate a case (flow_run) to entities the gateway already
+# owns; flow_events are the append-only case audit trail. Nothing here is read
+# to DRIVE execution — this is a RECORD/relationship layer only.
+# ---------------------------------------------------------------------------
+
+FLOW_LINK_ENTITY_TYPES = (
+    "task",
+    "session",
+    "approval",
+    "artifact",
+    "job",
+    "flow",
+)
+
+FLOW_LINK_ROLES = (
+    "root_task",
+    "manager",
+    "worker",
+    "reviewer",
+    "approval",
+    "artifact",
+    "job",
+    "child_flow",
+    "evidence",
+)
+
+FLOW_EVENT_ACTORS = (
+    "operator",
+    "manager",
+    "worker",
+    "reviewer",
+    "system",
+)
+
+FLOW_EVENT_TYPES = (
+    "flow.created",
+    "flow.stage_changed",
+    "flow.status_changed",
+    "flow.linked",
+    "flow.unlinked",
+    "task.dispatched",
+    "session.attached",
+    "approval.requested",
+    "approval.resolved",
+    "review.requested",
+    "review.accepted",
+    "review.rework_requested",
+    "review.waived",
+    "flow.blocked",
+    "flow.unblocked",
+    "flow.interrupted",
+    "flow.superseded",
+    "flow.closed",
 )
 
 
@@ -492,6 +553,7 @@ class MeshDB:
             try:
                 self._run_migrations(conn)
                 self._ensure_merged_schema(conn)
+                self._ensure_substrate_columns(conn)
                 conn.execute("COMMIT;")
             except Exception:
                 try:
@@ -499,6 +561,30 @@ class MeshDB:
                 except Exception:
                     pass
                 raise
+
+    def _ensure_substrate_columns(self, conn: sqlite3.Connection) -> None:
+        """Add the A25 optional convenience `flow_run_id` columns idempotently.
+
+        These are pure conveniences (they remove repeated joins on hot paths);
+        they are NOT replacements for flow_links/flow_events. Done here rather
+        than in the raw migration so a DB that legitimately lacks an optional
+        table (or a partial/hand-built one) can never abort the migration — the
+        add is skipped if the table is absent or the column already exists.
+        Additive + NULLable; existing writers are unaffected.
+        """
+        for table in ("mesh_tasks", "approvals"):
+            try:
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if not exists:
+                    continue
+                cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if "flow_run_id" not in cols:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN flow_run_id TEXT")
+            except Exception as e:
+                logger.warning("event=substrate_column_add_failed table=%s err=%s", table, e)
 
     def _run_migrations(self, conn: sqlite3.Connection) -> None:
         """Apply any pending numbered migrations in order."""
@@ -1401,6 +1487,132 @@ class MeshDB:
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # Work Control Substrate (A25) — authoritative case relationships +
+    # append-only case audit trail. flow_links relate a case (flow_run) to
+    # EXISTING gateway entities (task/session/approval/artifact/job/flow); it is
+    # NOT a second task ledger. flow_events are append-only lifecycle evidence.
+    # A RECORD/relationship layer only: nothing here is read to DRIVE execution.
+    # ------------------------------------------------------------------
+
+    def create_flow_link(
+        self,
+        flow_run_id: str,
+        entity_type: str,
+        entity_id: str,
+        role: str,
+        created_by: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[int]:
+        """Create (or reuse) an authoritative case↔entity link. Idempotent.
+
+        The unique index on (flow_run_id, entity_type, entity_id, role) makes a
+        repeat call a no-op — the existing row's id is returned rather than
+        raising or duplicating. Returns the link id, or None on unexpected error.
+        `metadata` is JSON-encoded verbatim; db.py does not interpret it.
+        """
+        payload = json.dumps(metadata) if metadata is not None else None
+        with self._write() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO flow_links (
+                    flow_run_id, entity_type, entity_id, role,
+                    created_at, created_by, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (flow_run_id, entity_type, entity_id, role,
+                 _now(), created_by, payload),
+            )
+            if cur.rowcount:
+                return int(cur.lastrowid)
+            # Already existed (unique conflict ignored) — return the existing id.
+            row = conn.execute(
+                """
+                SELECT id FROM flow_links
+                WHERE flow_run_id = ? AND entity_type = ? AND entity_id = ? AND role = ?
+                """,
+                (flow_run_id, entity_type, entity_id, role),
+            ).fetchone()
+            return int(row["id"]) if row is not None else None
+
+    def list_flow_links(
+        self,
+        flow_run_id: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        role: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """List authoritative case links, optionally filtered. Oldest-first.
+
+        With `flow_run_id` this is the forward lookup (all entities linked to a
+        case); with `entity_type`+`entity_id` it is the reverse lookup (which
+        cases reference this entity). Read-only.
+        """
+        clauses, params = [], []
+        if flow_run_id:
+            clauses.append("flow_run_id = ?")
+            params.append(flow_run_id)
+        if entity_type:
+            clauses.append("entity_type = ?")
+            params.append(entity_type)
+        if entity_id:
+            clauses.append("entity_id = ?")
+            params.append(entity_id)
+        if role:
+            clauses.append("role = ?")
+            params.append(role)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        rows = self._conn().execute(
+            f"SELECT * FROM flow_links {where} ORDER BY id ASC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def append_flow_event(
+        self,
+        flow_run_id: str,
+        event_type: str,
+        actor: str,
+        from_state: Optional[str] = None,
+        to_state: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Optional[int]:
+        """Append one case lifecycle event. Append-only (never updated/deleted).
+
+        Returns the new event id. `payload` is JSON-encoded verbatim and should
+        stay a COMPACT reference + short reason — bulk evidence lives in
+        artifacts/timelines/task results, not here.
+        """
+        payload_json = json.dumps(payload) if payload is not None else None
+        with self._write() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO flow_events (
+                    flow_run_id, event_type, actor, from_state, to_state,
+                    entity_type, entity_id, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (flow_run_id, event_type, actor, from_state, to_state,
+                 entity_type, entity_id, payload_json, _now()),
+            )
+            return int(cur.lastrowid)
+
+    def list_flow_events(
+        self,
+        flow_run_id: str,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        """List a case's events in insertion order (the audit trail). Read-only."""
+        rows = self._conn().execute(
+            "SELECT * FROM flow_events WHERE flow_run_id = ? ORDER BY id ASC LIMIT ?",
+            (flow_run_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
     # Approvals (Move H) — durable approval gate. A pending approval is a
     # promise of a NOT-yet-dispatched action; resolving it is what triggers
     # dispatch. Persisting it here is what lets it survive a gateway restart
@@ -2225,6 +2437,46 @@ def _get_migrations() -> List[tuple]:
                # artifact_links) are JSON-encoded TEXT. parent_flow_run_id is the
                # lineage back-reference (child→parent recovered by reverse-lookup;
                # no redundant worker_task_ids column).
+        (23, """
+            CREATE TABLE IF NOT EXISTS flow_links (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                flow_run_id   TEXT NOT NULL,
+                entity_type   TEXT NOT NULL,
+                entity_id     TEXT NOT NULL,
+                role          TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                created_by    TEXT,
+                metadata_json TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_flow_links_unique
+                ON flow_links(flow_run_id, entity_type, entity_id, role);
+            CREATE INDEX IF NOT EXISTS idx_flow_links_flow
+                ON flow_links(flow_run_id);
+            CREATE INDEX IF NOT EXISTS idx_flow_links_entity
+                ON flow_links(entity_type, entity_id);
+            CREATE TABLE IF NOT EXISTS flow_events (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                flow_run_id   TEXT NOT NULL,
+                event_type    TEXT NOT NULL,
+                actor         TEXT NOT NULL,
+                from_state    TEXT,
+                to_state      TEXT,
+                entity_type   TEXT,
+                entity_id     TEXT,
+                payload_json  TEXT,
+                created_at    TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_flow_events_flow
+                ON flow_events(flow_run_id, id)
+        """),  # A25 Work Control Substrate: authoritative case↔entity relationship
+               # ledger (flow_links) + append-only case audit trail (flow_events).
+               # ADDITIVE + NULLable; a RECORD/relationship layer — nothing here is
+               # read to DRIVE execution. flow_links relate EXISTING entities only
+               # (not a second task ledger); flow_events store compact references,
+               # not bulk evidence. The unique index makes link writes idempotent.
+               # The optional convenience columns (mesh_tasks/approvals.flow_run_id)
+               # are added defensively in _ensure_substrate_columns (below) so a
+               # DB missing an optional table can never abort this migration.
     ]
 
 
