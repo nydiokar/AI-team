@@ -59,14 +59,33 @@
 
 ## Milestone
 
-**Current Status:** dispatched
+**Current Status:** built (`feat/work-control-substrate`) — awaiting review/merge
 **Burndown:**
-- [ ] Verify current flow_runs/mesh_tasks/approvals schema in code
-- [ ] Add additive migration for flow_links + flow_events
-- [ ] Decide and implement safe nullable flow_run_id convenience columns
-- [ ] Add DB helpers for links/events
-- [ ] Add migration/helper tests
-- [ ] Run targeted pytest
-- [ ] Append Closure and advance DISPATCH_LOG
+- [x] Verify current flow_runs/mesh_tasks/approvals schema in code
+- [x] Add additive migration 23 for flow_links + flow_events (+ indexes)
+- [x] Safe nullable flow_run_id convenience columns (defensive `_ensure_substrate_columns`)
+- [x] DB helpers: create_flow_link (idempotent) / list_flow_links / append_flow_event /
+      list_flow_events + FLOW_LINK_*/FLOW_EVENT_* vocab constants
+- [x] Migration/helper tests (`tests/test_flow_links_events.py`)
+- [x] Run targeted pytest (green)
+- [ ] Manager advances DISPATCH_LOG/CONTEXT at merge
 
-**Next Action:** start with schema verification in `src/control/db.py`, then implement the migration.
+## Closure
+
+**Outcome:** Additive migration 23 lands `flow_links` (authoritative case↔entity
+relationship ledger, unique-keyed → idempotent) + `flow_events` (append-only case audit
+trail), plus optional convenience `flow_run_id` columns on `mesh_tasks`/`approvals`. The
+convenience columns are added by `_ensure_substrate_columns` (provenance-independent,
+per-table guarded) rather than inside the raw migration, so a DB legitimately missing an
+optional table can never abort the migration. **Runtime behavior unchanged** — a
+RECORD/relationship layer; nothing reads these to drive execution, and no existing writer
+is affected (legacy approval rows carry NULL flow_run_id).
+
+**Schema:** `flow_links(id, flow_run_id, entity_type, entity_id, role, created_at,
+created_by, metadata_json)` with unique `(flow_run_id, entity_type, entity_id, role)` +
+flow/entity indexes; `flow_events(id, flow_run_id, event_type, actor, from_state, to_state,
+entity_type, entity_id, payload_json, created_at)` indexed by `(flow_run_id, id)`.
+
+**Tests:** `tests/test_flow_links_events.py` (9): schema presence + idempotent re-open,
+link round-trip/idempotence/forward+reverse lookup, append-only ordering, legacy writer
+NULL, vocab constants. Version-hardcoded assertions in existing flow tests bumped 22→23.

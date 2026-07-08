@@ -71,14 +71,41 @@ lineage stamping/supplier half of M2).
 
 ## Milestone
 
-**Current Status:** dispatched
+**Current Status:** built (`feat/work-control-substrate`) — awaiting review/merge
 **Burndown:**
-- [ ] Read current flow-run, dispatch, session, and approval write paths
-- [ ] Wire root task/session/approval/entity links
-- [ ] Wire append-only flow events at known lifecycle points
-- [ ] Add duplicate/missing-flow safeguards
-- [ ] Add legacy parity and fault-isolation tests
-- [ ] Run targeted pytest
-- [ ] Append Closure and advance DISPATCH_LOG
+- [x] Read current flow-run/dispatch write paths (orchestrator `_record_flow_run_start`,
+      `_flow_stage_transition`, A26a lineage supplier)
+- [x] Wire root_task + child_flow links at the flow-creation seam
+- [x] Wire append-only events (flow.created, task.dispatched, flow.stage_changed)
+- [x] Consume A26a's stamped edge (no second stamping hook); DB-level idempotent links
+- [x] Legacy parity (flag OFF ⇒ zero substrate writes) + fault-isolation tests
+- [x] Run targeted pytest (A26 write-path suite + regressions green)
+- [ ] Manager advances DISPATCH_LOG/CONTEXT at merge
 
-**Next Action:** wait for A25, then identify the exact write hooks before editing.
+## Closure
+
+**Outcome:** Authoritative case relationships + audit trail are populated from the
+orchestrator flow seams, flag-gated behind `HARNESS_FLOW_DRIVE` (default OFF ⇒
+byte-identical). Best-effort/isolated: `_record_flow_link`/`_record_flow_event` mirror
+`_record_flow_stage` — a link/event failure logs and returns, never raising into task
+execution (proven by `test_link_write_failure_does_not_raise`).
+
+**Relationships/events POPULATED (this job):**
+- `flow.created` event + `flow_links(role=root_task, entity=task)` at flow creation.
+- **child→parent lineage:** `flow_links(role=child_flow, entity=flow)` on the PARENT +
+  `task.dispatched` event — CONSUMING A26a's stamped edge (`_dispatch_lineage_fields`),
+  no second stamping hook. `flow_links(child_flow)` is authoritative; the
+  `flow_runs.parent_flow_run_id` column stays a convenience index.
+- `flow.stage_changed` events mirrored at each `_flow_stage_transition`.
+
+**Intentionally MISSING (deferred, per report rule — narrower blast radius, cross-file):**
+- Approval links/events (`approval` role, `approval.requested/resolved`) — lives in the
+  approval service / `control_api.py`; deferred to keep this job orchestrator-scoped.
+- Session role links (`manager/worker/reviewer/evidence`) — needs the session-attach seam
+  (`session_service`/telegram) and an explicit role signal, not present today.
+- Terminal task OUTCOME events (`review.*`, `flow.closed`) with real result payloads —
+  needs the completion seam; the stage `closure` transition is recorded, the outcome is not.
+These are a clean A26-follow-up (or fold into A27's consumers) — all additive, same helpers.
+
+**Tests:** `tests/test_flow_link_write_path.py` (5) green; full flow+control regression 91 green;
+workflow+telegram-session 35 green.

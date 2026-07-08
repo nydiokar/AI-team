@@ -1713,6 +1713,37 @@ class TaskOrchestrator(ITaskOrchestrator):
                     task.metadata[self._FLOW_RUN_META_KEY] = flow_run_id
                 except Exception:
                     pass
+                # [A26] Populate authoritative case relationships/events at the
+                # moment the flow is created. Best-effort/isolated — see the
+                # _record_flow_link/_record_flow_event wrappers. Flag-gated (only
+                # under drive_on) ⇒ OFF stays byte-identical to A19/A22.
+                self._record_flow_event(
+                    flow_run_id, "flow.created", "system",
+                    to_state=initial_stage, entity_type="task", entity_id=task.id,
+                )
+                # The flow's own root task (flow → task it was dispatched for).
+                self._record_flow_link(
+                    flow_run_id, "task", task.id, "root_task", created_by="system",
+                )
+                # Child-flow lineage: CONSUME the edge A26a stamped (do NOT add a
+                # second stamping hook). flow_links(child_flow) on the PARENT is the
+                # authoritative child→parent ledger; flow_runs.parent_flow_run_id
+                # (already written above) stays a convenience index.
+                parent_fid = lineage.get("parent_flow_run_id")
+                if parent_fid:
+                    self._record_flow_link(
+                        parent_fid, "flow", flow_run_id, "child_flow",
+                        created_by=lineage.get("dispatched_by"),
+                    )
+                    self._record_flow_event(
+                        parent_fid, "task.dispatched", "system",
+                        entity_type="flow", entity_id=flow_run_id,
+                        payload={
+                            "dispatched_by": lineage.get("dispatched_by"),
+                            "dispatch_file": lineage.get("dispatch_file"),
+                            "child_task_id": task.id,
+                        },
+                    )
             return flow_run_id
         except Exception as e:
             logger.warning("event=flow_run_start_failed task_id=%s err=%s", task.id, e)
@@ -1735,6 +1766,73 @@ class TaskOrchestrator(ITaskOrchestrator):
             db.update_flow_stage(flow_run_id, stage)
         except Exception as e:
             logger.warning("event=flow_run_stage_failed flow_run_id=%s err=%s", flow_run_id, e)
+
+    def _record_flow_link(
+        self,
+        flow_run_id: Optional[str],
+        entity_type: str,
+        entity_id: str,
+        role: str,
+        created_by: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """[A26] Best-effort authoritative case↔entity link. Swallows failures.
+
+        SHADOW/RECORD ONLY — a relationship row, never read to drive execution.
+        Idempotent at the DB layer (unique-keyed). Wrapped so any failure logs and
+        returns; a link write can NEVER raise into task execution.
+        """
+        if not flow_run_id:
+            return
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return
+            db.create_flow_link(
+                flow_run_id, entity_type, entity_id, role,
+                created_by=created_by, metadata=metadata,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=flow_link_failed flow_run_id=%s role=%s err=%s",
+                flow_run_id, role, e,
+            )
+
+    def _record_flow_event(
+        self,
+        flow_run_id: Optional[str],
+        event_type: str,
+        actor: str,
+        from_state: Optional[str] = None,
+        to_state: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """[A26] Best-effort append-only case lifecycle event. Swallows failures.
+
+        SHADOW/RECORD ONLY — audit trail, never read to drive execution. Wrapped
+        so any failure logs and returns; an event write can NEVER raise into task
+        execution.
+        """
+        if not flow_run_id:
+            return
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return
+            db.append_flow_event(
+                flow_run_id, event_type, actor,
+                from_state=from_state, to_state=to_state,
+                entity_type=entity_type, entity_id=entity_id, payload=payload,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=flow_event_failed flow_run_id=%s type=%s err=%s",
+                flow_run_id, event_type, e,
+            )
 
     # [FlowRun A22] Metadata key under which the flow_run_id is stashed on a task
     # so the worker-loop transition points (execution / impl_review / closure)
@@ -1852,6 +1950,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             if not flow_run_id:
                 return
             self._record_flow_stage(flow_run_id, stage)
+            # [A26] Mirror the transition into the append-only case audit trail.
+            # current_stage stays the mutable summary; flow_events is the trail.
+            self._record_flow_event(
+                flow_run_id, "flow.stage_changed", "system", to_state=stage,
+            )
         except Exception as e:
             logger.warning(
                 "event=flow_stage_transition_failed task_id=%s stage=%s err=%s",
