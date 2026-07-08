@@ -62,7 +62,12 @@
   duplicate lane) is corrected in `Task_Harness_v0.6_AUTOMATION.md` §F3.
 - **⚠️ CONCURRENCY (2026-07-08): A25 is being built by another agent** on
   `feat/work-control-substrate` (migration 23 + `flow_links`/`flow_events`). One worker per branch —
-  do NOT open a second substrate lane; A26a (this reconciliation's foundation) is a separate branch.
+  do NOT open a second substrate lane.
+- **⚠️ MERGE ORDER (avoid a double-apply): `feat/work-control-substrate` is built ON TOP of the exact
+  A26a code** (byte-identical), i.e. it already contains A26a's `_stamp_child_dispatch_lineage` +
+  `list_child_flow_runs`. So merging that branch lands A26a + A25+ together. **Do NOT also merge
+  `feat/m2-dispatch-lineage-wiring` separately** — it would double-apply A26a and conflict. That
+  standalone branch is now the packet/closure/reference home for A26a only.
 - **A24 decomposer generator is deferred (2026-07-08).** It remains valid M4 prompt work, but
   decomposition before durable Work/Case linkage creates more loose artifacts. Resume A24 only
   after the Work Control Substrate can attach decomposed packets/tasks to cases.
