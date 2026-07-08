@@ -440,3 +440,125 @@ export interface RawSessionTimelineResponse {
   generated_at: string;
   coverage: Record<string, string>;
 }
+
+// ── Work / Case read model (A27) ───────────────────────────────────────────
+// Shapes = src/control/work_read_model.py builders, EXACTLY as the /api/work*
+// routes return them. Honesty-first: buckets/ledger/lineage come only from
+// authoritative flow_runs/flow_links/flow_events — absent relationships arrive
+// as empty arrays or nulls, NEVER inferred. Do not add derived fields here;
+// derivation belongs in workAdapter.ts.
+
+/** An attention bucket key (work_read_model.BUCKETS). */
+export type RawWorkBucket =
+  | "needs_decision"
+  | "blocked"
+  | "review"
+  | "active"
+  | "closed"
+  | "unknown";
+
+// One case summary (work_read_model._case_summary). `objective_lock` is the raw
+// stored objective text/XML — the adapter derives a short display title from it.
+export interface RawCaseSummary {
+  flow_run_id: string;
+  task_id: string | null;
+  objective_lock: string | null;
+  current_stage: string | null;
+  status: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  parent_flow_run_id: string | null;
+  dispatched_by: string | null;
+  dispatch_file: string | null;
+  bucket: RawWorkBucket;
+}
+
+// GET /api/work → work_read_model.build_work_list
+export interface RawWorkListResponse {
+  cases: RawCaseSummary[];
+  bucket_counts: Record<RawWorkBucket, number>;
+  total: number;
+}
+
+// One authoritative link row (work_read_model._link_view).
+export interface RawFlowLink {
+  entity_type: string | null;
+  entity_id: string | null;
+  role: string | null;
+  created_by: string | null;
+  created_at: string | null;
+  metadata_json: string | null;
+}
+
+// Grouped ledger sections (work_read_model.build_case_ledger). Every section is
+// always present (empty array when unlinked) so the UI shows "none linked"
+// explicitly rather than inferring from other signals.
+export interface RawCaseLedger {
+  tasks: RawFlowLink[];
+  sessions: RawFlowLink[];
+  approvals: RawFlowLink[];
+  artifacts: RawFlowLink[];
+  jobs: RawFlowLink[];
+  flows: RawFlowLink[];
+  other: RawFlowLink[];
+}
+
+// GET /api/work/{id} → work_read_model.build_case_detail
+export interface RawCaseDetailResponse {
+  case: RawCaseSummary;
+  record: Record<string, unknown>;
+  ledger: RawCaseLedger;
+  parent: RawCaseSummary | null;
+  children: RawCaseSummary[];
+  counts: { links: number; events: number; children: number };
+  coverage: {
+    has_links: boolean;
+    has_events: boolean;
+    has_parent: boolean;
+    is_root: boolean;
+  };
+}
+
+// One append-only audit event (work_read_model._event_view).
+export interface RawFlowEvent {
+  id: number | string | null;
+  event_type: string | null;
+  actor: string | null;
+  from_state: string | null;
+  to_state: string | null;
+  entity_type: string | null;
+  entity_id: string | null;
+  payload_json: string | null;
+  created_at: string | null;
+}
+
+// GET /api/work/{id}/timeline → work_read_model.build_case_timeline
+export interface RawCaseTimelineResponse {
+  flow_run_id: string;
+  events: RawFlowEvent[];
+  evidence: RawFlowLink[];
+  event_count: number;
+}
+
+// One lineage node (work_read_model.build_case_graph._node).
+export interface RawGraphNode {
+  flow_run_id: string | null;
+  rel: "self" | "parent" | "child";
+  current_stage: string | null;
+  status: string | null;
+  bucket: RawWorkBucket;
+  objective_lock: string | null;
+}
+
+export interface RawGraphEdge {
+  from: string | null;
+  to: string | null;
+  role: string | null;
+}
+
+// GET /api/work/{id}/graph → work_read_model.build_case_graph
+export interface RawCaseGraphResponse {
+  flow_run_id: string;
+  nodes: RawGraphNode[];
+  edges: RawGraphEdge[];
+}

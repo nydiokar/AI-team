@@ -6,7 +6,9 @@ import { SectionHeader } from "../components/ui/SectionHeader";
 import { SessionRow } from "../components/sessions/SessionRow";
 import { NewSessionSheet } from "../components/sessions/NewSessionSheet";
 import { useSessions } from "../hooks/useLiveData";
+import { useSessionAffiliations } from "../hooks/useWork";
 import type { Session } from "../domain/models";
+import type { SessionAffiliation } from "../domain/work";
 import { cn } from "../lib/cn";
 
 function SkeletonCard() {
@@ -25,7 +27,13 @@ function SkeletonCard() {
   );
 }
 
-function CardList({ sessions }: { sessions: Session[] }) {
+function CardList({
+  sessions,
+  affiliations,
+}: {
+  sessions: Session[];
+  affiliations: Map<string, SessionAffiliation>;
+}) {
   return (
     <div className="space-y-3 px-4">
       {sessions.map((s, i) => (
@@ -35,7 +43,7 @@ function CardList({ sessions }: { sessions: Session[] }) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.2) }}
         >
-          <SessionRow session={s} />
+          <SessionRow session={s} affiliation={affiliations.get(s.id)} />
         </motion.div>
       ))}
     </div>
@@ -44,6 +52,9 @@ function CardList({ sessions }: { sessions: Session[] }) {
 
 export function SessionsScreen() {
   const { data, isLoading, error } = useSessions();
+  // Authoritative session→case affiliation labels (empty until the Work
+  // substrate records links; never inferred). Absent ⇒ session shows standalone.
+  const { index: affiliations } = useSessionAffiliations();
   const [closedExpanded, setClosedExpanded] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
 
@@ -94,14 +105,14 @@ export function SessionsScreen() {
           {groups.attention.length > 0 && (
             <>
               <SectionHeader label="Needs attention" count={groups.attention.length} accent="warn" />
-              <CardList sessions={groups.attention} />
+              <CardList sessions={groups.attention} affiliations={affiliations} />
             </>
           )}
 
           {groups.open.length > 0 && (
             <>
               <SectionHeader label="Active" count={groups.open.length} />
-              <CardList sessions={groups.open} />
+              <CardList sessions={groups.open} affiliations={affiliations} />
             </>
           )}
 
@@ -123,7 +134,9 @@ export function SessionsScreen() {
                   </button>
                 }
               />
-              {closedExpanded && <CardList sessions={groups.closed} />}
+              {closedExpanded && (
+                <CardList sessions={groups.closed} affiliations={affiliations} />
+              )}
             </>
           )}
         </>

@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
+import { SessionAffiliationLink } from "../components/work/SessionAffiliationLabel";
 import { SessionTimeline, userAnchorId } from "../components/timeline/SessionTimeline";
 import { SessionTurns } from "../components/timeline/SessionTurns";
 import { Composer } from "../components/timeline/Composer";
@@ -31,6 +32,7 @@ import { JobRow } from "../components/system/JobsPanel";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
 import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionActivity, useJobs } from "../hooks/useLiveData";
+import { useSessionAffiliations } from "../hooks/useWork";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
 import { useTaskActivity } from "../hooks/useTaskActivity";
 import {
@@ -442,6 +444,10 @@ export function SessionDetailScreen() {
   const navigate = useNavigate();
   const { data, isLoading: sessionsLoading } = useSessions();
   const session = data?.find((s) => s.id === id);
+  // Authoritative case membership for this session (Work substrate). undefined ⇒
+  // standalone; never inferred from task adjacency.
+  const { index: affiliations } = useSessionAffiliations();
+  const affiliation = id ? affiliations.get(id) : undefined;
   const {
     data: turns,
     isLoading: messagesLoading,
@@ -828,6 +834,15 @@ export function SessionDetailScreen() {
               }
             />
           </div>
+
+          {/* Authoritative Work affiliation: which case owns this session, and
+              in what role. Absent ⇒ standalone. Links out to the case. */}
+          {session && (
+            <div className="flex items-center gap-2 border-b border-hairline bg-base/40 px-4 py-2">
+              <span className="text-[11px] text-ink-muted">Affiliation</span>
+              <SessionAffiliationLink affiliation={affiliation} />
+            </div>
+          )}
 
           {compactBanner && (
             <div className="border-b border-hairline bg-surface-1 px-4 py-2 text-[12px] text-ink-soft">

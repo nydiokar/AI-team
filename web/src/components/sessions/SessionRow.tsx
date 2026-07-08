@@ -2,6 +2,8 @@ import { Link } from "react-router-dom";
 import { ChevronRight, GitBranch, Clock, Pencil } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { Session } from "../../domain/models";
+import type { SessionAffiliation } from "../../domain/work";
+import { SessionAffiliationChip } from "../work/SessionAffiliationLabel";
 import { SessionStatusChip } from "../ui/StatusChip";
 import { api } from "../../transport/apiClient";
 import { useAuthStore } from "../../stores/authStore";
@@ -25,7 +27,15 @@ function relativeTime(iso: string): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function SessionRow({ session }: { session: Session }) {
+export function SessionRow({
+  session,
+  affiliation,
+}: {
+  session: Session;
+  /** Authoritative case membership from the Work read model; undefined ⇒ shown
+   *  as standalone (no chip). Never inferred client-side. */
+  affiliation?: SessionAffiliation;
+}) {
   const closed = session.lifecycle === "closed";
   const proj = projectName(session.workspace.path);
   const age = relativeTime(session.updatedAt);
@@ -103,6 +113,14 @@ export function SessionRow({ session }: { session: Session }) {
         </div>
         <ChevronRight className="mt-0.5 size-4 shrink-0 text-ink-muted transition-transform group-hover:translate-x-0.5" />
       </div>
+
+      {/* Row 4 (optional): authoritative case affiliation. Only rendered when a
+          case actually links this session — absence means standalone. */}
+      {affiliation && (
+        <div className="mt-2 flex">
+          <SessionAffiliationChip affiliation={affiliation} />
+        </div>
+      )}
     </Link>
   );
 }

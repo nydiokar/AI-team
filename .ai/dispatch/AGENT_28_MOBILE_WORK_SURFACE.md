@@ -53,14 +53,65 @@
 
 ## Milestone
 
-**Current Status:** dispatched
+**Current Status:** built (pending live device screenshots — needs flag ON, see Closure)
 **Burndown:**
-- [ ] Add Work domain/transport/hooks
-- [ ] Add Work bottom-nav tab
-- [ ] Build Work list screen
-- [ ] Build Work detail screen
-- [ ] Add session affiliation labels
-- [ ] Run frontend tests/typecheck/build and mobile sanity
-- [ ] Append Closure and advance DISPATCH_LOG
+- [x] Add Work domain/transport/hooks
+- [x] Add Work bottom-nav tab
+- [x] Build Work list screen
+- [x] Build Work detail screen
+- [x] Add session affiliation labels
+- [x] Run frontend tests/typecheck/build and mobile sanity
+- [~] Append Closure (below); DISPATCH_LOG/CONTEXT advanced by manager at merge (handoff §4)
 
-**Next Action:** wait for A27, then build frontend adapters before UI components.
+**Next Action:** operator merges `feat/work-surface-a28-a29`; to see populated Work
+data live, set `HARNESS_FLOW_DRIVE=on` + restart gateway (handoff §3), then capture
+device screenshots. A29 wires the session-role links that fill affiliations.
+
+## Closure
+
+**Date:** 2026-07-08 · **Branch:** `feat/work-surface-a28-a29`
+
+### What shipped (read-only, honesty-first)
+A mobile **Work** tab (bottom nav is now Work | Sessions | System), backed ONLY by
+the A27 read model — no mutations, no editable DAG, no client-side ownership
+inference.
+
+- **Transport/domain/hooks:** `transport/rawApi.ts` (RawCase*/RawFlow* shapes),
+  `transport/workAdapter.ts` (+ pure `caseTitle` derivation), `domain/work.ts`,
+  `transport/apiClient.ts` (`work`/`workDetail`/`workTimeline`/`workGraph`),
+  `hooks/useWork.ts` (`useWorkList`/`useWorkDetail`/`useWorkTimeline`/`useWorkGraph`
+  + `useSessionAffiliations`).
+- **WorkScreen** (`screens/WorkScreen.tsx`): operations inbox grouped by the
+  AUTHORITATIVE bucket order — Needs decision, Blocked/rework, In review, Active,
+  Recently closed (collapsed). Empty substrate renders an honest "No cases yet"
+  that points runtime users at the Sessions tab (does not hide sessions).
+- **WorkDetailScreen** (`screens/WorkDetailScreen.tsx`): header (bucket + status +
+  stage + flow/task/dispatch facts), compact vertical **lineage** (parent/self/
+  children from `/graph`), grouped **ledger** (sessions deep-link to Sessions;
+  other entities shown as honest id+role refs; empty sections explicit), and the
+  append-only **timeline**. 404 → "Case not found".
+- **Session affiliation labels:** `SessionRow` + `SessionDetail` show a session's
+  authoritative case role (Manager/Worker/Reviewer/Evidence) sourced ONLY from
+  each case's `ledger.sessions`. Absent ⇒ standalone, never inferred.
+
+### Validation
+- `npm run typecheck` clean · `npm test` 86 passed (12 files; +8 new: 20-case
+  `workAdapter.test.ts` already present in tree, matched exactly + verified; new
+  `workPresentation.test.ts`) · `npm run build` OK.
+- Live gateway healthy (`/health` ok, untouched). `/api/work*` routes confirmed
+  live on the running gateway (403 without token, identical to `/api/sessions`).
+
+### Residual gaps (honest)
+1. **Affiliations render "Standalone" until A29.** Confirmed the A26 write path
+   only stamps `task/root_task` + `child_flow` links today; **session-role links
+   are the A29 deferred seam** (handoff §5). The UI is built and correct — it will
+   light up the moment A29 lands those links, with ZERO UI change. Until then,
+   honest standalone is the correct render.
+2. **No populated live screenshots.** The substrate only fills with
+   `HARNESS_FLOW_DRIVE=on` (default OFF; a restart drops the operator session —
+   handoff §3, operator's call). Empty-state and route wiring are verified; a
+   populated device pass is the one remaining manual check, to run post-flag.
+3. `useSessionAffiliations` resolves one cached case-detail fetch per case (no
+   bulk reverse endpoint in A27); shares the WorkDetail query key so it is warm
+   and makes ZERO fetches while the substrate is empty. If a bulk session→case
+   index is wanted later, that is an A29/backend follow-up, not a UI change.
