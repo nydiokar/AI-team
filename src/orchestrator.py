@@ -1129,6 +1129,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                     cwd=getattr(session, "repo_path", None),
                     source="watched_job",
                     extra_metadata={"job_id": job_id, "source": "watched_job"},
+                    # [M2] This follow-up task is dispatched BY the watched-job
+                    # subsystem — record that provenance on its flow_runs row
+                    # (flag-guarded; no-op when HARNESS_FLOW_DRIVE is OFF).
+                    dispatched_by=f"watched_job:{job_id}",
                 )
             except Exception as e:
                 logger.warning("event=job_notify_agent_failed job_id=%s err=%s", job_id, e)
@@ -1693,7 +1697,15 @@ class TaskOrchestrator(ITaskOrchestrator):
                 return None
             drive_on = self._harness_flow_drive_enabled()
             initial_stage = "intent" if drive_on else "dispatch_start"
-            flow_run_id = db.create_flow_run(task.id, initial_stage)
+            # [M2] Dispatch lineage — RECORD only. When HARNESS_FLOW_DRIVE is ON
+            # and this child task was stamped with parent linkage (see
+            # _stamp_child_dispatch_lineage), persist parent_flow_run_id /
+            # dispatched_by / dispatch_file onto the child's flow_runs row so
+            # child→parent is recoverable via db.list_child_flow_runs. When OFF,
+            # `lineage` stays empty ⇒ create_flow_run is called exactly as A19
+            # did (byte-identical). NOTHING reads these columns to drive execution.
+            lineage = self._dispatch_lineage_fields(task) if drive_on else {}
+            flow_run_id = db.create_flow_run(task.id, initial_stage, **lineage)
             if flow_run_id and drive_on:
                 try:
                     if task.metadata is None:
@@ -1728,6 +1740,85 @@ class TaskOrchestrator(ITaskOrchestrator):
     # so the worker-loop transition points (execution / impl_review / closure)
     # can resolve it. Underscored so it never collides with a user metadata field.
     _FLOW_RUN_META_KEY = "__flow_run_id"
+
+    # [M2] Dispatch-lineage metadata keys. When a parent flow/task dispatches a
+    # child task, these are stamped onto the CHILD task's metadata (flag-guarded,
+    # by _stamp_child_dispatch_lineage) so _record_flow_run_start can persist them
+    # onto the child's flow_runs row. Underscored so they never collide with a
+    # user metadata field. RECORD only — nothing reads them to drive execution.
+    _PARENT_FLOW_RUN_META_KEY = "__parent_flow_run_id"
+    _DISPATCHED_BY_META_KEY = "__dispatched_by"
+    _DISPATCH_FILE_META_KEY = "__dispatch_file"
+
+    def _dispatch_lineage_fields(self, task: "Task") -> Dict[str, str]:
+        """[M2] Extract the flow_runs lineage columns from a child task's metadata.
+
+        Reads the lineage keys a spawn site stamped on the child (via
+        _stamp_child_dispatch_lineage) and maps them to create_flow_run kwargs
+        (parent_flow_run_id / dispatched_by / dispatch_file). Only present keys
+        are returned, so an unstamped task yields ``{}`` (⇒ NULL columns). Pure
+        read of metadata; never raises (returns ``{}`` on any error).
+        """
+        try:
+            meta = getattr(task, "metadata", None) or {}
+            fields: Dict[str, str] = {}
+            parent = meta.get(self._PARENT_FLOW_RUN_META_KEY)
+            if parent:
+                fields["parent_flow_run_id"] = parent
+            dispatched_by = meta.get(self._DISPATCHED_BY_META_KEY)
+            if dispatched_by:
+                fields["dispatched_by"] = dispatched_by
+            dispatch_file = meta.get(self._DISPATCH_FILE_META_KEY)
+            if dispatch_file:
+                fields["dispatch_file"] = dispatch_file
+            return fields
+        except Exception:
+            return {}
+
+    def _stamp_child_dispatch_lineage(
+        self,
+        child_task: "Task",
+        parent_task: Optional["Task"] = None,
+        *,
+        dispatched_by: Optional[str] = None,
+        dispatch_file: Optional[str] = None,
+    ) -> None:
+        """[M2] Stamp dispatch-lineage onto a CHILD task before it is enqueued.
+
+        Called at the seam where one flow/task dispatches another. The parent's
+        own flow_run_id is stashed on ``parent_task.metadata[_FLOW_RUN_META_KEY]``
+        (set by _record_flow_run_start); this copies it — plus dispatched_by and
+        dispatch_file — onto the child so its flow_runs row records the link.
+
+        Flag-guarded: when HARNESS_FLOW_DRIVE is OFF this is a NO-OP — the child's
+        metadata is left untouched ⇒ byte-identical to today. SHADOW/best-effort:
+        wrapped so any failure logs and returns; it can NEVER raise into the
+        dispatch path. Nothing reads the stamped keys to drive execution.
+        """
+        try:
+            if not self._harness_flow_drive_enabled():
+                return
+            parent_flow_run_id: Optional[str] = None
+            if parent_task is not None:
+                pmeta = getattr(parent_task, "metadata", None) or {}
+                parent_flow_run_id = pmeta.get(self._FLOW_RUN_META_KEY)
+                if dispatched_by is None:
+                    dispatched_by = getattr(parent_task, "id", None)
+            if not (parent_flow_run_id or dispatched_by or dispatch_file):
+                return
+            if child_task.metadata is None:
+                child_task.metadata = {}
+            if parent_flow_run_id:
+                child_task.metadata[self._PARENT_FLOW_RUN_META_KEY] = parent_flow_run_id
+            if dispatched_by:
+                child_task.metadata[self._DISPATCHED_BY_META_KEY] = dispatched_by
+            if dispatch_file:
+                child_task.metadata[self._DISPATCH_FILE_META_KEY] = dispatch_file
+        except Exception as e:
+            logger.warning(
+                "event=dispatch_lineage_stamp_failed child_task_id=%s err=%s",
+                getattr(child_task, "id", "?"), e,
+            )
 
     @staticmethod
     def _harness_flow_drive_enabled() -> bool:
@@ -1776,8 +1867,18 @@ class TaskOrchestrator(ITaskOrchestrator):
         cwd: Optional[str] = None,
         source: str = "telegram",
         extra_metadata: Optional[Dict] = None,
+        parent_task: Optional["Task"] = None,
+        dispatched_by: Optional[str] = None,
+        dispatch_file: Optional[str] = None,
     ) -> str:
-        """Direct runtime entrypoint for Telegram/CLI instructions."""
+        """Direct runtime entrypoint for Telegram/CLI instructions.
+
+        [M2] When this call is a child dispatch (a parent flow/task spawning
+        another), pass ``parent_task`` (whose metadata carries the parent
+        flow_run_id) and/or ``dispatched_by`` / ``dispatch_file``. These are
+        stamped onto the child task's flow_runs row for lineage — but ONLY when
+        HARNESS_FLOW_DRIVE is ON; otherwise stamping is a no-op ⇒ byte-identical.
+        """
         task = self._make_task(
             description=description,
             task_type=task_type,
@@ -1787,6 +1888,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             source=source,
             extra_metadata=extra_metadata,
         )
+        # [M2] Stamp dispatch lineage before enqueue (flag-guarded no-op when OFF).
+        if parent_task is not None or dispatched_by or dispatch_file:
+            self._stamp_child_dispatch_lineage(
+                task,
+                parent_task,
+                dispatched_by=dispatched_by,
+                dispatch_file=dispatch_file,
+            )
         return await self._enqueue_task(task)
 
     async def compact_session(self, session_id: str):

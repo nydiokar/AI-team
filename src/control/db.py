@@ -1382,6 +1382,24 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_child_flow_runs(
+        self,
+        parent_flow_run_id: str,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Reverse-lookup: flow_runs whose parent_flow_run_id is the given id.
+
+        This is the child→parent recovery path (M2 dispatch lineage): given a
+        Manager/parent flow_run, list the child flows it dispatched. Read-only —
+        nothing reads these rows to drive execution. Oldest-first (dispatch order).
+        """
+        rows = self._conn().execute(
+            "SELECT * FROM flow_runs WHERE parent_flow_run_id = ? "
+            "ORDER BY created_at ASC LIMIT ?",
+            (parent_flow_run_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ------------------------------------------------------------------
     # Approvals (Move H) — durable approval gate. A pending approval is a
     # promise of a NOT-yet-dispatched action; resolving it is what triggers
