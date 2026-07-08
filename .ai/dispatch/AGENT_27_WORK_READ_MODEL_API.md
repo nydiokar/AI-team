@@ -54,14 +54,39 @@
 
 ## Milestone
 
-**Current Status:** dispatched
+**Current Status:** built (`feat/work-control-substrate`) — awaiting review/merge
 **Burndown:**
-- [ ] Define Work list/detail/timeline/graph response shapes
-- [ ] Implement pure read-model builder
-- [ ] Add read-only control API routes
-- [ ] Add fixtures for linked, unlinked, stale, blocked, review, and closed cases
-- [ ] Add tests for no heuristic inference
-- [ ] Run targeted pytest
-- [ ] Append Closure and advance DISPATCH_LOG
+- [x] Define Work list/detail/timeline/graph response shapes
+- [x] Implement pure read-model builder (`src/control/work_read_model.py`)
+- [x] Add read-only control API routes
+- [x] Fixtures for linked, unlinked, blocked, review, closed, unknown cases
+- [x] Tests for no heuristic inference (buckets from authoritative fields only)
+- [x] Run targeted pytest (green)
+- [ ] Manager advances DISPATCH_LOG/CONTEXT at merge
 
-**Next Action:** wait for A25/A26, then design response fixtures before adding routes.
+## Closure
+
+**Outcome:** Read-only Work/Case read model over the A25/A26 substrate. A PURE
+builder module (`work_read_model.py`, no DB access — takes fetched rows) feeds four
+auth-guarded GET routes. Honesty-first: buckets derive ONLY from authoritative
+`status`/`current_stage` (never "closed" when unknown → `unknown`); missing links
+render as present-and-empty ledger sections, never inferred.
+
+**Endpoints (all GET, `_require_auth`, read-only — no mutation verbs):**
+- `GET /api/work?bucket=&limit=` — case summaries + `bucket_counts` (needs_decision |
+  blocked | review | active | closed | unknown). Small: no per-case link/event queries.
+- `GET /api/work/{flow_run_id}` — summary + full record + grouped ledger
+  (tasks/sessions/approvals/artifacts/jobs/flows/other) + parent + children + coverage
+  flags. 404 `case_not_found`.
+- `GET /api/work/{flow_run_id}/timeline` — append-only flow_events in order + linked
+  evidence pointers.
+- `GET /api/work/{flow_run_id}/graph` — compact parent/self/children lineage graph with
+  parent→child edges from authoritative lineage (parent_flow_run_id / child_flow links).
+
+**Authority rules honored:** current_stage/status = summary; flow_events = trail; links =
+the only relationship source; unknown renders as `unknown`/empty. No prose parsing, no
+timestamp/adjacency inference, no N+1 on the list.
+
+**Tests:** `tests/test_work_read_model.py` (11, pure) + `tests/test_control_api_work.py`
+(9, routes incl. auth/404/405/limit/bucket-filter). Regression: 146 green across
+flow+substrate+control+workflow+telegram suites.

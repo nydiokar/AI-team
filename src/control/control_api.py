@@ -760,6 +760,80 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=404, detail="flow_not_found")
         return JSONResponse({"flow": flow})
 
+    # ----------------------------------------------------------------------
+    # Work / Case read model (A27) — read-only projections over the A25/A26
+    # substrate (flow_runs + flow_links + flow_events). Honesty-first: missing
+    # links render as empty/unknown, never inferred. No mutation endpoints.
+    # ----------------------------------------------------------------------
+
+    @app.get("/api/work", dependencies=[Depends(_require_auth)])
+    def api_work_list(
+        bucket: Optional[str] = Query(default=None),
+        limit: int = Query(50, ge=1, le=500),
+    ) -> JSONResponse:
+        """List Work/Case summaries (newest first) with attention buckets.
+
+        Small summaries only (no per-case link/event queries). Optional ``bucket``
+        filters to one attention section (needs_decision|blocked|review|active|
+        closed|unknown). Buckets derive from AUTHORITATIVE status/current_stage
+        only — never from timestamps or prose."""
+        from src.control import work_read_model as _wrm
+        db = _db()
+        rows = db.list_flow_runs(limit=limit) if db is not None else []
+        model = _wrm.build_work_list(rows)
+        if bucket:
+            model["cases"] = [c for c in model["cases"] if c["bucket"] == bucket]
+        return JSONResponse(model)
+
+    @app.get("/api/work/{flow_run_id}", dependencies=[Depends(_require_auth)])
+    def api_work_detail(flow_run_id: str) -> JSONResponse:
+        """One case: summary + full record + grouped ledger + parent/children.
+
+        404 (``case_not_found``) on an unknown flow_run_id. Linked entities come
+        from flow_links only; absent sections render empty, not inferred."""
+        from src.control import work_read_model as _wrm
+        db = _db()
+        flow = db.get_flow_run(flow_run_id) if db is not None else None
+        if flow is None:
+            raise HTTPException(status_code=404, detail="case_not_found")
+        links = db.list_flow_links(flow_run_id=flow_run_id)
+        events = db.list_flow_events(flow_run_id, limit=1000)
+        parent_id = flow.get("parent_flow_run_id")
+        parent = db.get_flow_run(parent_id) if parent_id else None
+        children = db.list_child_flow_runs(flow_run_id)
+        model = _wrm.build_case_detail(flow, links, len(events), parent, children)
+        return JSONResponse(model)
+
+    @app.get("/api/work/{flow_run_id}/timeline", dependencies=[Depends(_require_auth)])
+    def api_work_timeline(
+        flow_run_id: str,
+        limit: int = Query(500, ge=1, le=2000),
+    ) -> JSONResponse:
+        """The case audit trail: append-only flow_events in order + linked
+        evidence pointers. 404 on unknown case."""
+        from src.control import work_read_model as _wrm
+        db = _db()
+        flow = db.get_flow_run(flow_run_id) if db is not None else None
+        if flow is None:
+            raise HTTPException(status_code=404, detail="case_not_found")
+        events = db.list_flow_events(flow_run_id, limit=limit)
+        links = db.list_flow_links(flow_run_id=flow_run_id)
+        return JSONResponse(_wrm.build_case_timeline(flow_run_id, events, links))
+
+    @app.get("/api/work/{flow_run_id}/graph", dependencies=[Depends(_require_auth)])
+    def api_work_graph(flow_run_id: str) -> JSONResponse:
+        """Compact lineage graph: the case, its parent, and direct children, with
+        parent→child edges from authoritative lineage. 404 on unknown case."""
+        from src.control import work_read_model as _wrm
+        db = _db()
+        flow = db.get_flow_run(flow_run_id) if db is not None else None
+        if flow is None:
+            raise HTTPException(status_code=404, detail="case_not_found")
+        parent_id = flow.get("parent_flow_run_id")
+        parent = db.get_flow_run(parent_id) if parent_id else None
+        children = db.list_child_flow_runs(flow_run_id)
+        return JSONResponse(_wrm.build_case_graph(flow_run_id, flow, parent, children))
+
     @app.get("/api/events/stream")
     async def api_events_stream(
         request: Request,
