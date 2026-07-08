@@ -27,6 +27,11 @@ import type {
   RawTurn,
   RawMeshHealthResponse,
   RawSessionTimelineResponse,
+  RawWorkListResponse,
+  RawCaseDetailResponse,
+  RawCaseTimelineResponse,
+  RawCaseGraphResponse,
+  RawWorkBucket,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -417,6 +422,46 @@ export const api = {
 
   async meshHealth(token: string, limit = 24): Promise<RawMeshHealthResponse> {
     return get(`/api/mesh/health?limit=${limit}`, token);
+  },
+
+  // ── Work / Case read model (A27) — read-only ─────────────────────────────
+
+  /** GET /api/work — case summaries + attention bucket tallies (newest first). */
+  async work(
+    token: string,
+    opts: { bucket?: RawWorkBucket; limit?: number } = {},
+  ): Promise<RawWorkListResponse> {
+    const qs = new URLSearchParams({ limit: String(opts.limit ?? 50) });
+    if (opts.bucket) qs.set("bucket", opts.bucket);
+    return get<RawWorkListResponse>(`/api/work?${qs.toString()}`, token);
+  },
+
+  /** GET /api/work/{id} — one case: summary + ledger + parent/children. */
+  async workDetail(token: string, flowRunId: string): Promise<RawCaseDetailResponse> {
+    return get<RawCaseDetailResponse>(
+      `/api/work/${encodeURIComponent(flowRunId)}`,
+      token,
+    );
+  },
+
+  /** GET /api/work/{id}/timeline — append-only audit events + evidence pointers. */
+  async workTimeline(
+    token: string,
+    flowRunId: string,
+    limit = 500,
+  ): Promise<RawCaseTimelineResponse> {
+    return get<RawCaseTimelineResponse>(
+      `/api/work/${encodeURIComponent(flowRunId)}/timeline?limit=${limit}`,
+      token,
+    );
+  },
+
+  /** GET /api/work/{id}/graph — compact parent/self/children lineage graph. */
+  async workGraph(token: string, flowRunId: string): Promise<RawCaseGraphResponse> {
+    return get<RawCaseGraphResponse>(
+      `/api/work/${encodeURIComponent(flowRunId)}/graph`,
+      token,
+    );
   },
 
   // ── web push (#21) ───────────────────────────────────────────────────────

@@ -9,6 +9,8 @@ import { TokenGate } from "./components/shell/TokenGate";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { SystemScreen } from "./screens/SystemScreen";
 import { SessionDetailScreen } from "./screens/SessionDetailScreen";
+import { WorkScreen } from "./screens/WorkScreen";
+import { WorkDetailScreen } from "./screens/WorkDetailScreen";
 import { useAuthStore } from "./stores/authStore";
 import { EventStreamProvider } from "./hooks/eventStreamContext";
 
@@ -28,6 +30,7 @@ export function App() {
       <Routes>
         {/* Full-screen detail — outside the bottom-nav shell. */}
         <Route path="/sessions/:id" element={<SessionDetailScreen />} />
+        <Route path="/work/:id" element={<WorkDetailScreen />} />
 
         {/* Root tabs — inside the shell. */}
         <Route
@@ -35,6 +38,7 @@ export function App() {
           element={
             <MobileAppShell>
               <Routes>
+                <Route path="/work" element={<WorkScreen />} />
                 <Route path="/sessions" element={<SessionsScreen />} />
                 <Route path="/tasks" element={<Navigate to="/system" replace />} />
                 <Route path="/system" element={<SystemScreen />} />
