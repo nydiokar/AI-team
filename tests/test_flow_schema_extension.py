@@ -66,8 +66,10 @@ def test_fresh_db_has_full_schema(tmp_path):
     conn = db._conn()
 
     max_version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-    assert max_version == 22
-    assert _CURRENT_VERSION == 22
+    # A fresh DB now converges at 23 (A25 substrate); migration 22's columns
+    # (asserted below) remain part of that convergence.
+    assert max_version == 23
+    assert _CURRENT_VERSION == 23
 
     cols = _cols(conn)
     assert _A19_COLUMNS <= cols, "A19 columns must remain (additive-only)"
@@ -123,10 +125,11 @@ def test_existing_db_migrates_and_legacy_row_reads(tmp_path):
     assert raw.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 21
     raw.close()
 
-    # Opening with MeshDB applies migration 22.
+    # Opening with MeshDB applies migration 22 (and the later 23 substrate);
+    # the v21 DB converges at the current version with migration-22's columns.
     db = MeshDB(path)
     conn = db._conn()
-    assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 22
+    assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 23
     assert _A21_COLUMNS <= _cols(conn)
 
     # The pre-existing 5-column row still reads; new fields are NULL.
@@ -156,7 +159,7 @@ def test_migration_is_idempotent(tmp_path):
     v2 = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
     n2 = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
 
-    assert v1 == v2 == 22
+    assert v1 == v2 == 23
     assert n1 == n2, "no duplicate schema_version rows on re-open"
     assert _A21_COLUMNS <= _cols(conn)
 
