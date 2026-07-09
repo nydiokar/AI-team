@@ -39,6 +39,7 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -204,6 +205,36 @@ class TurnOutcome:
     # The last streamed assistant narration — the real work done this turn,
     # surfaced when the terminal result was an error (e.g. wrap-up overflow).
     salvaged_output: str = ""
+    # True when this turn was NOT triggered by a user query we sent — i.e. the
+    # live session continued on its own (a run_in_background job finished and the
+    # agent produced a follow-up). These are delivered as proactive messages.
+    proactive: bool = False
+
+
+@dataclass
+class _TurnAccumulator:
+    """Per-turn scratch state built up by the persistent stream reader.
+
+    One accumulator spans the messages of a single agent turn (all the
+    ``AssistantMessage`` deltas up to and including the terminal
+    ``ResultMessage``). It is reset after every ``ResultMessage`` so the next
+    turn — solicited or autonomous — starts clean.
+    """
+    last_assistant_text: str = ""
+    backend_session_id: str = ""
+    ndjson_lines: List[str] = field(default_factory=list)
+
+
+@dataclass
+class _PendingTurn:
+    """A user query we sent and are still awaiting the terminal result for.
+
+    The reader fulfils ``future`` when the matching ``ResultMessage`` arrives.
+    ``progress_cb`` is the activity callback for *this* turn, routed by the
+    reader while this turn is the active (head) one.
+    """
+    future: "asyncio.Future"
+    progress_cb: Any = None
 
 
 def parse_cache_stats_from_ndjson(raw_stdout: str) -> Optional[CacheStats]:
@@ -313,6 +344,15 @@ class _SDKSession:
         self._ready = threading.Event()
         self._error: Optional[Exception] = None
         self._closed = False
+        # Persistent stream reader + FIFO of unfulfilled user turns. The reader
+        # drains receive_messages() continuously so a result is NEVER left
+        # buffered to be mis-attributed to the next query (the -1 turn offset
+        # bug). Every entry is touched only on the SDK loop thread.
+        self._reader_task: Optional["asyncio.Task"] = None
+        self._pending: "deque[_PendingTurn]" = deque()
+        # Sink for autonomous turns (background-job continuations). Set by the
+        # driver; called as on_proactive(session_key, outcome) off the loop.
+        self._on_proactive: Optional[Any] = None
 
     def start(self) -> None:
         """Boot the background event loop and SDK client."""
@@ -374,12 +414,22 @@ class _SDKSession:
                 pass
             return
         self._ready.set()
+        # One long-lived consumer of the message stream for the life of the
+        # session. This is the SDK's intended pattern for an interactive chat:
+        # receive_response() (read-until-first-ResultMessage) is only correct
+        # when the stream is empty between turns, which is false here — the CLI
+        # emits unsolicited turns (a run_in_background job finishing, task
+        # notifications) with no new query(). Draining continuously keeps every
+        # result matched to the turn it belongs to.
+        self._reader_task = asyncio.create_task(self._reader_loop())
         try:
             # Keep the event loop alive; work arrives via run_coroutine_threadsafe
             # We run a simple await loop so the loop stays spinning until close.
             while not self._closed:
                 await asyncio.sleep(0.5)
         finally:
+            if self._reader_task is not None:
+                self._reader_task.cancel()
             try:
                 await self._client.disconnect()
             except Exception:
@@ -409,138 +459,208 @@ class _SDKSession:
             self.cancel_inflight()
             raise
 
-    async def _do_query(self, message: str, progress_cb=None) -> "TurnOutcome":
-        """Run one turn and return a :class:`TurnOutcome`.
+    async def _reader_loop(self) -> None:
+        """Drain the SDK message stream for the life of the session.
 
-        Output priority (highest → lowest):
-          1. ``ResultMessage.result`` — the terminal result event's clean final
-             answer.  This is the text Claude addressed to the user at the end
-             of the agentic loop.  It is present on SUCCESSFUL turns and is the
-             right thing to show in chat.
-          2. Last ``AssistantMessage`` text blocks — the streamed narration of
-             what the agent actually did this turn.  This is the SALVAGE source:
-             on an error result (e.g. the final wrap-up message overflows the
-             context window) ``ResultMessage.result`` is an error string, NOT an
-             answer, so we surface this real progress instead of the error text.
+        This is the single consumer of ``receive_messages()``. It accumulates
+        each turn's assistant narration and, on the terminal ``ResultMessage``,
+        builds a :class:`TurnOutcome` and dispatches it:
 
-        Error handling (critical): the SDK yields a terminal ``ResultMessage``
-        with ``is_error=True`` and terminates normally — it does NOT raise on a
-        long-lived stream-json session (the claude process stays alive for the
-        next turn, so no non-zero exit, so no ProcessError). Verified against
-        claude-agent-sdk 0.2.110. We therefore MUST inspect ``is_error`` here;
-        we cannot rely on an exception reaching the caller.
+          * If a user query is awaiting a result (``self._pending``), the oldest
+            one is fulfilled — that's the reply to that prompt.
+          * Otherwise the turn is *autonomous* (a run_in_background job finished
+            and the agent kept going) — it's routed to the proactive sink so the
+            user gets it as its own message instead of it silently buffering and
+            being mis-served as the reply to their *next* prompt (the -1 offset).
 
-        The synthesised terminal ``result`` NDJSON line carries usage AND the
-        structural error fields (``is_error``/``subtype``/``stop_reason``) so the
-        M3 telemetry adapter classifies the turn honestly and raw_stdout stays
-        diagnosable on error turns.
+        Draining continuously is what guarantees no result is ever left waiting
+        in the transport between turns, which is the whole bug.
         """
         if self._client is None:
-            raise RuntimeError("SDK client not initialised")
-
-        # session_id here is the SDK's *internal* conversation-thread selector,
-        # not the gateway session id; one _SDKSession owns one claude process,
-        # so the default thread is correct. Do not pass the gateway key.
-        await self._client.query(message)
-
-        # Authoritative answer from the terminal ResultMessage.
-        result_text: str = ""
-        # Last assistant turn text — the salvage source on error paths.  We
-        # intentionally overwrite on each AssistantMessage so only the last one
-        # is retained; earlier ones are intermediate agentic steps.
-        last_assistant_text: str = ""
-        backend_session_id = self.backend_session_id
-        ndjson_lines: List[str] = []
-        is_error = False
-        subtype = ""
-        error_text = ""
-
+            return
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock, ThinkingBlock
 
-        async for msg in self._client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                # Overwrite (not append) so only the last assistant turn survives.
-                blocks_text = "".join(
-                    block.text for block in msg.content if isinstance(block, TextBlock)
-                ).strip()
-                if blocks_text:
-                    last_assistant_text = blocks_text
-                # Emit real-time activity signals for each content block type so
-                # the chat UI can show what the agent is doing instead of "Working…"
-                if progress_cb is not None:
-                    for block in msg.content:
-                        if isinstance(block, ToolUseBlock):
-                            progress_cb(f"Using {block.name}")
-                        elif isinstance(block, ThinkingBlock):
-                            progress_cb("Thinking…")
-                        elif isinstance(block, TextBlock) and block.text:
-                            progress_cb("Writing response…")
-                usage = _plain_usage_dict(getattr(msg, "usage", None))
-                if usage is not None:
-                    ndjson_lines.append(json.dumps({"type": "assistant", "message": {"usage": usage}}))
-                sid = getattr(msg, "session_id", None) or ""
-                if sid:
-                    backend_session_id = sid
-                    self.backend_session_id = sid
-            elif isinstance(msg, ResultMessage):
-                sid = getattr(msg, "session_id", "") or ""
-                if sid:
-                    backend_session_id = sid
-                    self.backend_session_id = sid
-                is_error = bool(getattr(msg, "is_error", False))
-                subtype = str(getattr(msg, "subtype", "") or "")
-                stop_reason = str(getattr(msg, "stop_reason", "") or "") or None
-                errors = getattr(msg, "errors", None)
-                r = getattr(msg, "result", None)
-                if r and isinstance(r, str):
-                    result_text = r.strip()
-                if is_error:
-                    # On an error result, `result` is the error message, not an
-                    # answer. Capture it for classification/diagnostics; do NOT
-                    # let it become the chat reply.
-                    if isinstance(errors, list) and errors:
-                        error_text = "; ".join(str(e).strip() for e in errors if str(e).strip())
-                    error_text = error_text or result_text or subtype or "backend error result"
-                usage = _plain_usage_dict(getattr(msg, "usage", None))
-                # Always emit the terminal result line (even without usage) so
-                # error turns stay diagnosable and telemetry sees is_error.
-                result_line: Dict[str, Any] = {"type": "result"}
-                if subtype:
-                    result_line["subtype"] = subtype
-                result_line["is_error"] = is_error
-                if stop_reason:
-                    result_line["stop_reason"] = stop_reason
-                if usage is not None:
-                    result_line["usage"] = usage
-                if result_text:
-                    result_line["result"] = result_text
-                if isinstance(errors, list) and errors:
-                    result_line["errors"] = [str(e) for e in errors]
-                ndjson_lines.append(json.dumps(result_line))
+        acc = _TurnAccumulator(backend_session_id=self.backend_session_id)
+        try:
+            async for msg in self._client.receive_messages():
+                if isinstance(msg, AssistantMessage):
+                    # Overwrite (not append) so only the last assistant block of
+                    # the turn survives as the salvage source.
+                    blocks_text = "".join(
+                        block.text for block in msg.content if isinstance(block, TextBlock)
+                    ).strip()
+                    if blocks_text:
+                        acc.last_assistant_text = blocks_text
+                    # Real-time activity signals for the head (active) turn only.
+                    progress_cb = self._head_progress_cb()
+                    if progress_cb is not None:
+                        for block in msg.content:
+                            if isinstance(block, ToolUseBlock):
+                                progress_cb(f"Using {block.name}")
+                            elif isinstance(block, ThinkingBlock):
+                                progress_cb("Thinking…")
+                            elif isinstance(block, TextBlock) and block.text:
+                                progress_cb("Writing response…")
+                    usage = _plain_usage_dict(getattr(msg, "usage", None))
+                    if usage is not None:
+                        acc.ndjson_lines.append(json.dumps({"type": "assistant", "message": {"usage": usage}}))
+                    sid = getattr(msg, "session_id", None) or ""
+                    if sid:
+                        acc.backend_session_id = sid
+                        self.backend_session_id = sid
+                elif isinstance(msg, ResultMessage):
+                    outcome = self._outcome_from_result(acc, msg)
+                    self._dispatch(outcome)
+                    acc = _TurnAccumulator(backend_session_id=self.backend_session_id)
+        except asyncio.CancelledError:
+            # Session closing. Fall through to `finally` so waiters don't hang.
+            raise
+        except Exception as e:
+            # The stream broke (subprocess died, transport closed). Don't leave
+            # callers blocked forever — fail every pending turn with the error.
+            logger.warning(
+                "event=sdk_reader_stream_ended session_key=%s err=%s",
+                self.session_key, e,
+            )
+            self._closed = True
+        finally:
+            # Any turn still waiting when the stream stops will never get a
+            # result — reject it rather than block the worker thread forever.
+            if self._pending:
+                self._fail_pending(RuntimeError("SDK session stream closed before the turn completed"))
 
+    def _outcome_from_result(self, acc: "_TurnAccumulator", msg: Any) -> "TurnOutcome":
+        """Build a :class:`TurnOutcome` from the accumulated turn + its terminal
+        ``ResultMessage``.
+
+        Error handling (critical): the SDK yields a terminal ``ResultMessage``
+        with ``is_error=True`` and terminates the turn normally — it does NOT
+        raise on a long-lived stream-json session. So we MUST inspect
+        ``is_error`` here; we cannot rely on an exception. On an error result
+        ``ResultMessage.result`` is the error string, NOT an answer, so we
+        surface the salvaged narration as ``output`` and carry the error in the
+        error fields. The synthesised terminal ``result`` NDJSON line keeps
+        usage + structural error fields so the M3 telemetry adapter classifies
+        the turn honestly.
+        """
+        sid = getattr(msg, "session_id", "") or ""
+        if sid:
+            acc.backend_session_id = sid
+            self.backend_session_id = sid
+        is_error = bool(getattr(msg, "is_error", False))
+        subtype = str(getattr(msg, "subtype", "") or "")
+        stop_reason = str(getattr(msg, "stop_reason", "") or "") or None
+        errors = getattr(msg, "errors", None)
+        result_text = ""
+        r = getattr(msg, "result", None)
+        if r and isinstance(r, str):
+            result_text = r.strip()
+        error_text = ""
         if is_error:
-            # Salvage: hand back the real streamed progress (may be "") so the
-            # caller can deliver useful work; the error itself travels in the
-            # error fields, not in `output`.
+            if isinstance(errors, list) and errors:
+                error_text = "; ".join(str(e).strip() for e in errors if str(e).strip())
+            error_text = error_text or result_text or subtype or "backend error result"
+        usage = _plain_usage_dict(getattr(msg, "usage", None))
+        result_line: Dict[str, Any] = {"type": "result"}
+        if subtype:
+            result_line["subtype"] = subtype
+        result_line["is_error"] = is_error
+        if stop_reason:
+            result_line["stop_reason"] = stop_reason
+        if usage is not None:
+            result_line["usage"] = usage
+        if result_text:
+            result_line["result"] = result_text
+        if isinstance(errors, list) and errors:
+            result_line["errors"] = [str(e) for e in errors]
+        acc.ndjson_lines.append(json.dumps(result_line))
+
+        raw_ndjson = "\n".join(acc.ndjson_lines)
+        if is_error:
             return TurnOutcome(
-                output=last_assistant_text,
-                backend_session_id=backend_session_id,
-                raw_ndjson="\n".join(ndjson_lines),
+                output=acc.last_assistant_text,
+                backend_session_id=acc.backend_session_id,
+                raw_ndjson=raw_ndjson,
                 is_error=True,
                 error_class=classify_error_text(error_text),
                 error_text=error_text,
-                salvaged_output=last_assistant_text,
+                salvaged_output=acc.last_assistant_text,
             )
-
-        # Success: prefer the authoritative terminal result; fall back to last
-        # assistant text for unusual turns that emit no result string.
-        output = result_text or last_assistant_text
         return TurnOutcome(
-            output=output,
-            backend_session_id=backend_session_id,
-            raw_ndjson="\n".join(ndjson_lines),
+            output=result_text or acc.last_assistant_text,
+            backend_session_id=acc.backend_session_id,
+            raw_ndjson=raw_ndjson,
             is_error=False,
         )
+
+    def _head_progress_cb(self) -> Any:
+        """Activity callback of the active (oldest unfulfilled) turn, or None."""
+        return self._pending[0].progress_cb if self._pending else None
+
+    def _dispatch(self, outcome: "TurnOutcome") -> None:
+        """Route a finished turn: fulfil the oldest pending query, or — if none
+        is waiting — treat it as an autonomous turn and hand it to the proactive
+        sink. Runs on the SDK loop thread."""
+        if self._pending:
+            pending = self._pending.popleft()
+            if not pending.future.done():
+                pending.future.set_result(outcome)
+            return
+        # No one asked for this turn — it's a background-job continuation.
+        outcome.proactive = True
+        if self._on_proactive is None:
+            logger.info(
+                "event=sdk_proactive_turn_dropped session_key=%s chars=%d "
+                "(no proactive sink configured)",
+                self.session_key, len(outcome.output or ""),
+            )
+            return
+        asyncio.create_task(self._run_proactive(outcome))
+
+    async def _run_proactive(self, outcome: "TurnOutcome") -> None:
+        """Deliver an autonomous turn without blocking the reader loop."""
+        try:
+            await asyncio.to_thread(self._on_proactive, self.session_key, outcome)
+        except Exception:
+            logger.warning(
+                "event=sdk_proactive_delivery_failed session_key=%s",
+                self.session_key, exc_info=True,
+            )
+
+    def _fail_pending(self, err: Exception) -> None:
+        """Reject every waiting turn — used when the stream dies."""
+        while self._pending:
+            pending = self._pending.popleft()
+            if not pending.future.done():
+                pending.future.set_exception(err)
+
+    async def _submit_turn(self, message: str, progress_cb=None) -> "TurnOutcome":
+        """Send one user turn and await its terminal result.
+
+        Registers a pending entry BEFORE writing the query so the reader can
+        never fulfil it out of order, then writes the query and awaits the
+        future the reader will complete. Runs on the SDK loop thread.
+        """
+        if self._client is None:
+            raise RuntimeError("SDK client not initialised")
+        loop = asyncio.get_event_loop()
+        future: "asyncio.Future" = loop.create_future()
+        pending = _PendingTurn(future=future, progress_cb=progress_cb)
+        self._pending.append(pending)
+        try:
+            # session_id here is the SDK's *internal* conversation-thread
+            # selector, not the gateway session id; one _SDKSession owns one
+            # claude process, so the default thread is correct.
+            await self._client.query(message)
+        except Exception:
+            # Query never landed — drop the pending entry so it can't swallow a
+            # later result and re-introduce an offset.
+            try:
+                self._pending.remove(pending)
+            except ValueError:
+                pass
+            raise
+        return await future
 
     def send(self, message: str, progress_cb=None) -> "TurnOutcome":
         # sdk_turn_timeout_sec is the total deadline for one turn (send → full response).
@@ -569,7 +689,7 @@ class _SDKSession:
             self.cancel_inflight()
             self._lock.acquire()
         try:
-            return self.submit(self._do_query(message, progress_cb=progress_cb), timeout=timeout)
+            return self.submit(self._submit_turn(message, progress_cb=progress_cb), timeout=timeout)
         finally:
             self._lock.release()
 
@@ -577,9 +697,9 @@ class _SDKSession:
         """Best-effort interrupt of a turn in progress.
 
         Without this, cancelling only detaches the caller from the session —
-        the claude subprocess is still inside `_do_query`'s
-        `receive_response()` loop and keeps running the turn to completion in
-        the background thread. A cancelled-then-resent prompt would then race
+        the claude subprocess is still generating the turn, which the reader
+        loop keeps consuming to completion in the background thread. A
+        cancelled-then-resent prompt would then race
         a brand-new session against the still-live old one, both writing to
         their own transcripts (the ever-growing-session bug). Sending the
         SDK's control-protocol interrupt makes the CLI end the current turn so
@@ -632,6 +752,18 @@ class ClaudeSDKClientDriver(ClaudeDriver):
     def __init__(self):
         self._sessions: Dict[str, _SDKSession] = {}
         self._lock = threading.Lock()
+        # Sink for autonomous (background-job continuation) turns. Injected by
+        # the worker at startup; propagated to every _SDKSession. Signature:
+        # on_proactive(session_key: str, outcome: TurnOutcome) -> None.
+        self._on_proactive: Optional[Any] = None
+
+    def set_proactive_sink(self, sink: Any) -> None:
+        """Register the callback that delivers autonomous turns. Applies to
+        sessions created after this call and back-fills live ones."""
+        self._on_proactive = sink
+        with self._lock:
+            for sess in self._sessions.values():
+                sess._on_proactive = sink
 
     def _get_or_create(
         self,
@@ -653,6 +785,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 existing = None
             if existing is None:
                 sdk_sess = _SDKSession(key, session.repo_path, model, proc_env)
+                sdk_sess._on_proactive = self._on_proactive
                 sdk_sess.start()
                 self._sessions[key] = sdk_sess
         return self._sessions[key]

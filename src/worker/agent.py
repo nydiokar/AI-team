@@ -875,6 +875,57 @@ class WorkerAgent:
         self._incarnation_id = uuid.uuid4().hex
         self._activity_forwarder: Optional[_ActivityForwarder] = None
         self._setup_activity_forwarding()
+        self._setup_proactive_delivery()
+
+    def _setup_proactive_delivery(self) -> None:
+        """Wire autonomous (background-job continuation) turns back to the gateway.
+
+        A live SDK session can produce a turn no one prompted for — when a
+        run_in_background job finishes and the agent keeps going. The driver
+        surfaces those via a sink; we report each to the gateway so it lands in
+        the conversation and reaches the user, instead of being dropped."""
+        for name, backend in (self._backends or {}).items():
+            setter = getattr(backend, "set_proactive_sink", None)
+            if callable(setter):
+                try:
+                    setter(self._deliver_proactive_turn)
+                    logger.info("event=proactive_sink_registered backend=%s", name)
+                except Exception:
+                    logger.warning("event=proactive_sink_register_failed backend=%s", name, exc_info=True)
+
+    def _deliver_proactive_turn(self, session_id: str, outcome: Any) -> None:
+        """Sink called by the driver (off the SDK loop) for an autonomous turn.
+
+        Blocking HTTP is fine here — the driver runs this in a worker thread, not
+        on its event loop. Best-effort: a delivery failure must never crash the
+        session that produced the turn."""
+        try:
+            text = (getattr(outcome, "output", "") or "").strip()
+            if not text:
+                return
+            usage = None
+            try:
+                from src.services.result_text import extract_usage_from_ndjson
+                usage = extract_usage_from_ndjson(getattr(outcome, "raw_ndjson", "") or "")
+            except Exception:
+                usage = None
+            self._http.post(
+                f"/sessions/{session_id}/proactive-turn",
+                {
+                    "node_id": self.cfg.node_id,
+                    "session_id": session_id,
+                    "backend": "claude",
+                    "output": text,
+                    "backend_session_id": getattr(outcome, "backend_session_id", "") or "",
+                    "usage": usage,
+                    "is_error": bool(getattr(outcome, "is_error", False)),
+                    "error_text": getattr(outcome, "error_text", "") or "",
+                },
+                timeout=15,
+            )
+            logger.info("event=proactive_turn_reported session_id=%s chars=%d", session_id, len(text))
+        except Exception:
+            logger.warning("event=proactive_turn_report_failed session_id=%s", session_id, exc_info=True)
 
     def _setup_activity_forwarding(self) -> None:
         """Forward live task_activity to the gateway when we are a *remote* worker.

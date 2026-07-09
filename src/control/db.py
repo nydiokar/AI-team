@@ -868,6 +868,56 @@ class MeshDB:
         except Exception as e:
             logger.warning("event=db_enqueue_task_failed task_id=%s err=%s", task_id, e)
 
+    def record_proactive_turn(
+        self,
+        task_id: str,
+        session_id: str,
+        backend: str,
+        machine_id: Optional[str],
+        reply_text: str,
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist an autonomous (background-job continuation) turn as a first-
+        class, already-completed conversation turn.
+
+        Unlike a normal turn there is no user prompt — the agent produced this on
+        its own after a run_in_background job finished. It is stored with
+        ``action='proactive_turn'`` and an empty prompt so the transcript renders
+        it as an assistant-only message. Everything lives in the DB (no artifact
+        file), the same as an enriched normal turn.
+        """
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO mesh_tasks (
+                        id, session_id, machine_id, backend, action,
+                        payload, status, prompt, reply_text, usage_json,
+                        files_modified_json, created_at, updated_at, completed_at
+                    ) VALUES (?, ?, ?, ?, 'proactive_turn', '{}', 'completed',
+                              '', ?, ?, '[]', ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        session_id,
+                        machine_id,
+                        backend,
+                        reply_text,
+                        json.dumps(usage) if usage else None,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed: mesh_tasks.id" in str(e):
+                logger.debug("event=db_record_proactive_duplicate task_id=%s", task_id)
+            else:
+                logger.warning("event=db_record_proactive_integrity_failed task_id=%s err=%s", task_id, e)
+        except Exception as e:
+            logger.warning("event=db_record_proactive_failed task_id=%s err=%s", task_id, e)
+
     def claim_task(self, task_id: str, node_id: str) -> bool:
         """Atomically claim a pending task. Returns True if claim succeeded."""
         now = _now()
@@ -1329,7 +1379,7 @@ class MeshDB:
             """
             SELECT id AS task_id, session_id, prompt, reply_text,
                    parsed_output_json, file_changes_json, files_modified_json,
-                   usage_json, error_class, return_code, status, result,
+                   usage_json, error_class, return_code, status, result, action,
                    created_at, completed_at
             FROM mesh_tasks
             WHERE session_id = ?

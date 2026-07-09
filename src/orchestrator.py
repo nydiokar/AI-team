@@ -1346,6 +1346,17 @@ class TaskOrchestrator(ITaskOrchestrator):
             server = EmbeddedTaskServer(host=host, port=port)
             await server.start()
             self._embedded_task_server = server
+            # Bind the proactive-turn hook so autonomous (background-job) turns a
+            # worker reports get delivered through the gateway's notification
+            # fan-out. Capture the running loop here (we ARE on it) so the hook,
+            # invoked from the server's threadpool, can marshal the async notify
+            # back onto it.
+            try:
+                self._loop = asyncio.get_running_loop()
+                from src.control import task_server as _task_server
+                _task_server.bind_proactive_hook(self._handle_proactive_turn)
+            except Exception as e:
+                logger.warning(f"event=proactive_hook_bind_failed err={e}")
             logger.info(
                 f"event=embedded_task_server_up host={host} port={port}"
             )
@@ -5072,6 +5083,87 @@ Generated from user description: {description}
             "oldest_pending_at": oldest_pending_at,
             "latest_reconciled_at": latest_reconciled_at,
         }
+
+    def _handle_proactive_turn(
+        self,
+        session_id: str,
+        task_id: str,
+        text: str,
+        backend_session_id: str = "",
+    ) -> None:
+        """Hook invoked by the mesh task server (on its threadpool) when a worker
+        reports an autonomous turn. The turn is already persisted to the DB; here
+        we marshal the live notification onto the orchestrator loop so the user
+        gets actively reached (web push / Telegram) — the "reach back"."""
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._notify_proactive_turn(session_id, task_id, text, backend_session_id),
+                loop,
+            )
+        except Exception as e:
+            logger.warning("event=proactive_notify_schedule_failed session_id=%s err=%s", session_id, e)
+
+    async def _notify_proactive_turn(
+        self,
+        session_id: str,
+        task_id: str,
+        text: str,
+        backend_session_id: str = "",
+    ) -> None:
+        """Deliver a proactive turn through the same UI-agnostic notifier every
+        normal turn uses, so WebUI (SSE), web push and Telegram all inherit it."""
+        from types import SimpleNamespace
+        try:
+            session = self.session_store.get(session_id)
+            if session is None:
+                return
+            # The autonomous turn advanced the live backend session — keep the
+            # gateway's record in step so the next resume continues cleanly.
+            if backend_session_id and backend_session_id != getattr(session, "backend_session_id", ""):
+                session.backend_session_id = backend_session_id
+            # Mirror it into the session's file-side history too (the file
+            # transcript fallback), flagged so it's never shown with a fake user
+            # message.
+            try:
+                session.task_history.append({
+                    "task_id": task_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "success": True,
+                    "execution_time": 0.0,
+                    "user_message": "",
+                    "result_summary": text,
+                    "files_modified": [],
+                    "proactive": True,
+                })
+                session.task_history = session.task_history[-20:]
+                session.last_result_summary = text[-400:] if len(text) > 400 else text
+                session.last_summary = session.last_result_summary
+                self.session_store.save(session)
+            except Exception:
+                pass
+            self._emit_event("proactive_turn", None, {"session_id": session_id, "task_id": task_id})
+            result_like = SimpleNamespace(
+                success=True,
+                output=text,
+                files_modified=[],
+                parsed_output=None,
+                raw_stdout="",
+                errors=[],
+                usage=None,
+                execution_time=0.0,
+                error_class="",
+                return_code=0,
+                timestamp=datetime.now().isoformat(),
+            )
+            chat_id = getattr(session, "telegram_chat_id", None)
+            await self.notifier.notify_task_outcome(
+                task_id, result_like, session=session, chat_id=chat_id,
+            )
+        except Exception as e:
+            logger.warning("event=proactive_notify_failed session_id=%s err=%s", session_id, e)
 
     def _mesh_complete_task(self, task: Task, result: "TaskResult", artifact_path: Optional[str]) -> None:
         """Shadow-write the task result into mesh_tasks — the canonical, file-free store.

@@ -370,6 +370,16 @@ class ClaudeCodeBackend(CodingBackend):
         self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
         return result
 
+    def set_proactive_sink(self, sink: Any) -> None:
+        """Register a sink for autonomous turns (background-job continuations).
+
+        Delegates to the SDK driver; a no-op on drivers that don't support it
+        (e.g. the legacy print/resume fallback, which has no live session to
+        continue on its own)."""
+        setter = getattr(self._driver, "set_proactive_sink", None)
+        if callable(setter):
+            setter(sink)
+
     def cancel(self, session: Session) -> None:
         self._driver.cancel(session)
 
