@@ -1,7 +1,7 @@
 # AI-Team Gateway — Hot Context
 
 **Last Updated:** 2026-07-09
-**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. Next: **M3** (`docs/M3_MANAGER_INVOCATION_SPEC.md`).
+**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. **M3 Phase 3.0 STARTED** (A31, branch `feat/m3-phase30-mcp-manager`): `scripts/mcp_manager.py` tool surface (`dispatch_worker`+`wait_for_worker`) **built + 19 tests green, NOT merged/closed**. **Blockers before Phase 3.0 acceptance:** (1) 🔴 `/api/instructions` doesn't forward parent lineage → `dispatch_worker` child has no `/api/flows` parent edge yet (next dispatch **A32**); (2) 🟡 live F4 spike + session wiring (`~/.claude.json`+`claude_driver`) not run (cost guard). See `dispatch/AGENT_31_M3_PHASE30_MCP_MANAGER.md`.
 
 > This is the **fast-orientation** doc: what the project is, how it's wired *right
 > now*, the current priorities, and the constraints. It is intentionally short.
