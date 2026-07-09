@@ -30,6 +30,7 @@ and the ad-hoc `os.getenv` reads listed per row.
 |------|----------|---------|-----------------|-----------|
 | `HARNESS_FLOW_DRIVE` | ⚠ NO | off | M1: authoritative §11 stage writes at each harness transition. **SHADOW-only** — nothing reads the stage to drive execution; OFF ⇒ byte-identical to A19. Turning this ON right now is safe but cosmetic: it writes pretty stage labels to `flow_runs.current_stage`, which nothing reads back. | `orchestrator.py:1742` |
 | `HARNESS_LEVEL3_GUARD` | ⚠ NO | off | Level-3 admission gate on `_enqueue_task`: blocks over-scoped submits, returns clean 409. OFF ⇒ no gate, everything passes. | `orchestrator.py:2036` |
+| `MANAGER_TOOLS_ENABLED` | ⚠ NO | off | **M3 A34** — grant a Claude session the Manager MCP tools (`mcp__manager__dispatch_worker` / `wait_for_worker`). **Double-gated:** the tools are added ONLY if this is ON **and** the `manager` server is registered in `~/.claude.json` (`scripts/setup_mcp.py --with-manager`). OFF ⇒ byte-identical even if the server is registered. This is the operator-controlled kill switch for the dispatch primitive; the tools also stay inert until the gateway is restarted to pick up the code. | `backends/claude_driver.py:_manager_tools_enabled` |
 | `MESH_AFFINITY_OFFLINE_GRACE_SEC` | ⚠ NO | 0 (= off) | A18b: when a session's pinned node goes offline, hold it in `PAUSED_PINNED_NODE_OFFLINE` and poll liveness instead of hard-failing. `0` ⇒ byte-identical A11 behavior (hard-fail). | `config/settings.py:635` |
 | `MESH_AFFINITY_OFFLINE_POLL_INTERVAL_SEC` | ⚠ NO | (settings default) | Companion to above: how often to probe the offline node. Meaningless unless `MESH_AFFINITY_OFFLINE_GRACE_SEC > 0`. | `config/settings.py:641` |
 | `MESH_EMBEDDED_SERVER` | ✅ YES | false | Run the mesh task server embedded in the gateway process vs. standalone. | `config/settings.py:593` |
@@ -177,6 +178,7 @@ then remove them from `.env`:
 |-----|----------------------------------|
 | `HARNESS_FLOW_DRIVE` | Could leave stage writes ON after you remove it from `.env` |
 | `HARNESS_LEVEL3_GUARD` | Could leave the admission gate ON/OFF unexpectedly |
+| `MANAGER_TOOLS_ENABLED` | Could leave the Manager dispatch tools granted to sessions after removal from `.env` (still also requires the `~/.claude.json` `manager` server) |
 | `CONTROL_API_DOCS` | Could expose OpenAPI docs unintentionally |
 | `TG_REPLY_MAX_CHARS` | Message truncation stuck at old value |
 | `MESH_AFFINITY_OFFLINE_GRACE_SEC` | A18b grace mode stuck on |
