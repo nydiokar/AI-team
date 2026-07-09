@@ -1,7 +1,7 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-09
-**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. **M3 Phase 3.0 STARTED** (A31, branch `feat/m3-phase30-mcp-manager`): `scripts/mcp_manager.py` tool surface (`dispatch_worker`+`wait_for_worker`) **built + 19 tests green, NOT merged/closed**. **Blockers before Phase 3.0 acceptance:** (1) 🔴 `/api/instructions` doesn't forward parent lineage → `dispatch_worker` child has no `/api/flows` parent edge yet (next dispatch **A32**); (2) 🟡 live F4 spike + session wiring (`~/.claude.json`+`claude_driver`) not run (cost guard). See `dispatch/AGENT_31_M3_PHASE30_MCP_MANAGER.md`.
+**Last Updated:** 2026-07-10
+**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. **M3 Phase 3.0 IN PROGRESS** (branch `feat/m3-phase30-mcp-manager`, NOT merged): A31 `scripts/mcp_manager.py` tool surface (`dispatch_worker`+`wait_for_worker`, 19 tests); **A32 CLOSED the 🔴 lineage blocker** — optional `parent_flow_run_id` on `POST /api/instructions` now threads to the child `flow_runs` row via the M2 stamp/record substrate (flag-gated, byte-identical when unused; 38 tests); **A33 wires `mcp_manager.dispatch_worker` to send it** (+ `wait_for_worker` transient-poll retry tolerance). **Remaining before Phase 3.0 acceptance:** 🟡 live F4 spike + session wiring (`~/.claude.json`+`claude_driver`) not run (cost guard / global+live change — operator/next-agent). See `dispatch/AGENT_31_*`, `AGENT_32_*`, `AGENT_33_*`.
 
 > This is the **fast-orientation** doc: what the project is, how it's wired *right
 > now*, the current priorities, and the constraints. It is intentionally short.

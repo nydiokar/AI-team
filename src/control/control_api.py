@@ -90,6 +90,11 @@ class InstructionBody(BaseModel):
     session_id: Optional[str] = None
     cwd: Optional[str] = None
     target_files: Optional[List[str]] = None
+    # [A32] Optional Manager→worker lineage. When a Manager session dispatches a
+    # worker via mcp_manager, it passes its own flow_run id (the case). Stamped
+    # onto the child's flow_runs row ONLY when HARNESS_FLOW_DRIVE is ON (else a
+    # no-op ⇒ byte-identical). Absent/None on every normal Telegram/Web request.
+    parent_flow_run_id: Optional[str] = None
 
 
 class CreateSessionBody(BaseModel):
@@ -914,6 +919,7 @@ def build_control_api(orchestrator) -> FastAPI:
                         cwd=session.repo_path or body.cwd,
                         target_files=body.target_files,
                         source="web_session",
+                        parent_flow_run_id=body.parent_flow_run_id,
                     )
                 except HarnessAdmissionBlocked as blocked:
                     # No task ran — return the session to IDLE so it stays usable.
@@ -928,6 +934,7 @@ def build_control_api(orchestrator) -> FastAPI:
                         cwd=body.cwd,
                         target_files=body.target_files,
                         source="web_oneoff",
+                        parent_flow_run_id=body.parent_flow_run_id,
                     )
                 except HarnessAdmissionBlocked as blocked:
                     raise _harness_blocked_http(blocked)
