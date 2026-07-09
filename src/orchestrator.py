@@ -1905,6 +1905,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         child_task: "Task",
         parent_task: Optional["Task"] = None,
         *,
+        parent_flow_run_id: Optional[str] = None,
         dispatched_by: Optional[str] = None,
         dispatch_file: Optional[str] = None,
     ) -> None:
@@ -1915,6 +1916,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         (set by _record_flow_run_start); this copies it — plus dispatched_by and
         dispatch_file — onto the child so its flow_runs row records the link.
 
+        [A32] A caller that only has the parent's *loose* flow_run_id (e.g. the
+        HTTP ``/api/instructions`` path, where a Manager session passes its own
+        case id but there is no in-process parent ``Task`` object) may pass
+        ``parent_flow_run_id`` directly. An explicit value takes precedence over
+        one derived from ``parent_task``; either seam records the same edge.
+
         Flag-guarded: when HARNESS_FLOW_DRIVE is OFF this is a NO-OP — the child's
         metadata is left untouched ⇒ byte-identical to today. SHADOW/best-effort:
         wrapped so any failure logs and returns; it can NEVER raise into the
@@ -1923,10 +1930,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         try:
             if not self._harness_flow_drive_enabled():
                 return
-            parent_flow_run_id: Optional[str] = None
+            # Explicit loose id (A32 HTTP seam) wins; else derive from parent_task.
             if parent_task is not None:
                 pmeta = getattr(parent_task, "metadata", None) or {}
-                parent_flow_run_id = pmeta.get(self._FLOW_RUN_META_KEY)
+                if not parent_flow_run_id:
+                    parent_flow_run_id = pmeta.get(self._FLOW_RUN_META_KEY)
                 if dispatched_by is None:
                     dispatched_by = getattr(parent_task, "id", None)
             if not (parent_flow_run_id or dispatched_by or dispatch_file):
@@ -2056,6 +2064,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         source: str = "telegram",
         extra_metadata: Optional[Dict] = None,
         parent_task: Optional["Task"] = None,
+        parent_flow_run_id: Optional[str] = None,
         dispatched_by: Optional[str] = None,
         dispatch_file: Optional[str] = None,
     ) -> str:
@@ -2066,6 +2075,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         flow_run_id) and/or ``dispatched_by`` / ``dispatch_file``. These are
         stamped onto the child task's flow_runs row for lineage — but ONLY when
         HARNESS_FLOW_DRIVE is ON; otherwise stamping is a no-op ⇒ byte-identical.
+
+        [A32] When the caller only has the parent's *loose* flow_run_id (the HTTP
+        ``/api/instructions`` seam — a Manager session dispatching a worker via
+        ``mcp_manager``), pass ``parent_flow_run_id`` directly; it is stamped onto
+        the child's flow_runs row exactly like the ``parent_task``-derived edge.
         """
         task = self._make_task(
             description=description,
@@ -2076,11 +2090,12 @@ class TaskOrchestrator(ITaskOrchestrator):
             source=source,
             extra_metadata=extra_metadata,
         )
-        # [M2] Stamp dispatch lineage before enqueue (flag-guarded no-op when OFF).
-        if parent_task is not None or dispatched_by or dispatch_file:
+        # [M2/A32] Stamp dispatch lineage before enqueue (flag-guarded no-op when OFF).
+        if parent_task is not None or parent_flow_run_id or dispatched_by or dispatch_file:
             self._stamp_child_dispatch_lineage(
                 task,
                 parent_task,
+                parent_flow_run_id=parent_flow_run_id,
                 dispatched_by=dispatched_by,
                 dispatch_file=dispatch_file,
             )
