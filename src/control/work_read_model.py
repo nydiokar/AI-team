@@ -205,8 +205,10 @@ def build_session_affiliations(
     Honesty-first: a session appears here ONLY if the substrate links it to a
     case; absent sessions are simply not present (the UI then renders Standalone,
     never inferred). A session linked by more than one case resolves to the FIRST
-    (oldest link) deterministically — we never fabricate a "primary" the substrate
-    did not assert. Covers the WHOLE substrate (no per-case fanout, no cap).
+    row deterministically — and because ``db.list_session_case_links`` is ordered
+    newest-link-first, that FIRST row is the session's MOST RECENT case ("what is
+    it on now?"). We never fabricate a "primary" the substrate did not assert.
+    Covers the WHOLE substrate (no per-case fanout, no cap).
 
     The case's raw ``objective_lock`` rides along so the FRONTEND derives the
     display title with the SAME ``caseTitle`` logic it uses for the Work list and

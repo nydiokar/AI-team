@@ -250,6 +250,9 @@ export function toSessionAffiliationIndex(
       role: normalizeSessionRole(a.role),
       // Same derivation as the Work list/detail — one source of truth for titles.
       caseTitle: caseTitle(a.objective_lock, a.flow_run_id),
+      // Authoritative case status, copied verbatim — the label derives closed vs
+      // active from it (never inferred).
+      caseStatus: a.case_status ?? null,
     });
   }
   return map;

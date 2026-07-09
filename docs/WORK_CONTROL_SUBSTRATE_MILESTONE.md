@@ -343,3 +343,35 @@ Backend: `test_flow_substrate_hardening.py`, `test_session_affiliations.py`,
 `npm run typecheck` clean, `vitest` 90 passed (+4 `toSessionAffiliationIndex`). Live gateway
 untouched (`/health` ok); populating the substrate live still needs `HARNESS_FLOW_DRIVE=on`
 + a gateway restart (operator's call — drops the active session).
+
+## A30 — Post-closure truthfulness polish (2026-07-09)
+
+A fresh adversarial pass over the shipped A28+A29 surface (write-path seams re-reviewed:
+session attachment, terminal outcome, approval lifecycle — all confirmed correct,
+flag-gated, isolated, and covered by `test_flow_substrate_hardening.py`). The milestone
+code is sound; the remaining functional gaps (`review.*`, `flow.interrupted`, inbox
+list-cap pagination) are **deliberately parked** for M3/operator and were left parked —
+reopening a parked UX decision unprompted would be the wrong move.
+
+Two real defects were found and fixed, both **doc/label truthfulness** (this milestone's
+own thesis — labels must not lie):
+
+- **Docs lied about affiliation resolution order.** `build_session_affiliations`'s
+  docstring and the `useSessionAffiliations` hook comment claimed a multi-case session
+  resolves to the "FIRST (oldest link)". The code is correct — `db.list_session_case_links`
+  is `ORDER BY fl.id DESC` (newest-first), so the kept row is the **most recent** case — but
+  the comments described the opposite, a trap for the next maintainer. Comments corrected to
+  match the code + the DB layer + this doc. No behavior change.
+- **Affiliation label hid the case's terminal state.** The read model already returns each
+  case's authoritative `status`, but the frontend adapter dropped it, so a session showed
+  "Worker · ‹case›" identically whether the case was active or closed weeks ago — implying
+  active work on finished cases. `SessionAffiliation` now carries `caseStatus`; the chip/link
+  read a **closed** case as muted history with a "closed" marker (closed/active derived only
+  from the case's own status via `isClosedCaseStatus`, mirroring the backend
+  `_CLOSED_STATUSES` authority set — never inferred). Also refreshed the stale `useWork.ts`
+  poll comment that still described the pre-A29 per-case fanout.
+
+Tests: backend substrate suite green (37); frontend `typecheck` clean, `vitest` 93 passed
+(+3: `caseStatus` surfaced/nulled in `toSessionAffiliationIndex`, `isClosedCaseStatus`
+authority mirror), production build OK. Additive/read-only; live gateway untouched
+(`/health` ok). No schema change.
