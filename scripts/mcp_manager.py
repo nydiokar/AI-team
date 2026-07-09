@@ -21,14 +21,15 @@ Design invariants (why this is safe for the F4 spike):
   * dispatch_worker only wraps the existing, auth-guarded, Level-3-gated
     POST /api/instructions. It introduces no new dispatch path.
 
-⚠️ KNOWN GAP (for the next agent — see AGENT_31_*.md): POST /api/instructions
-   (InstructionBody) does NOT currently accept/forward parent lineage
-   (parent_flow_run_id / dispatched_by / dispatch_file). So a child dispatched
-   here will NOT yet show a parent edge in /api/flows. `parent_flow_run_id` is
-   accepted by dispatch_worker but is currently INFORMATIONAL ONLY (surfaced in
-   the reply, not persisted). The §6 "child flow visible ... with lineage" clause
-   needs a small server-side extension (add parent_flow_run_id to InstructionBody
-   -> submit_instruction) before it is met. This tool does not fake it.
+LINEAGE (A32): POST /api/instructions now accepts an optional parent_flow_run_id.
+   dispatch_worker forwards it so a child dispatched here records a parent edge in
+   /api/flows (the §6 "child flow visible ... with lineage" clause). This is a
+   SHADOW record wired through the M2 substrate: it is persisted only when the
+   gateway runs with HARNESS_FLOW_DRIVE ON (it is, in the live env); with the flag
+   OFF the server no-ops the stamp and the field is silently ignored. Either way
+   nothing reads the edge to drive execution — so a Manager should confirm lineage
+   via /api/flows rather than assume it, and always review the child's committed
+   git diff (never a self-reported summary).
 """
 from __future__ import annotations
 
@@ -112,6 +113,11 @@ _WAIT_TIMEOUT_DEFAULT = 300.0
 _WAIT_TIMEOUT_MAX = 3600.0
 _POLL_INTERVAL_DEFAULT = 3.0
 _POLL_INTERVAL_MIN = 1.0
+
+# [A33] Transient-blip tolerance: a long wait must not abort on a single gateway
+# hiccup. Tolerate this many CONSECUTIVE poll failures (a clean poll resets the
+# streak) before giving up. Still bounded by the overall deadline.
+_MAX_CONSECUTIVE_POLL_ERRORS = 5
 
 # ---------------------------------------------------------------------------
 # HTTP  (single choke point — tests monkeypatch this)
@@ -222,10 +228,11 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         body["cwd"] = cwd
     if files:
         body["target_files"] = files
-    # NOTE: parent_flow_run_id is intentionally NOT sent — /api/instructions does
-    # not accept it yet (see module docstring KNOWN GAP). Sending it would be
-    # silently dropped by the strict InstructionBody model, which would falsely
-    # imply lineage was recorded. We surface it honestly in the reply instead.
+    if parent_flow_run_id:
+        # [A32] The endpoint now accepts this and stamps it onto the child's
+        # flow_runs row via the M2 substrate — but ONLY when the gateway runs with
+        # HARNESS_FLOW_DRIVE ON (a SHADOW record; nothing reads it to drive work).
+        body["parent_flow_run_id"] = parent_flow_run_id
 
     result = _api_request("POST", "/api/instructions", body)
     task_id = result.get("task_id", "?")
@@ -241,8 +248,9 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     ]
     if parent_flow_run_id:
         lines.append(
-            f"parent_flow_run_id: {parent_flow_run_id} — ⚠️ NOT yet persisted as a "
-            f"flow lineage edge (endpoint gap; see AGENT_31). Track the child by task_id."
+            f"parent_flow_run_id: {parent_flow_run_id} — sent as the Manager→worker "
+            f"lineage edge (recorded when the gateway runs HARNESS_FLOW_DRIVE ON; it is a "
+            f"SHADOW record — confirm via /api/flows, don't assume)."
         )
     lines.append("")
     lines.append(
@@ -278,35 +286,53 @@ def _wait_for_worker(args: Dict[str, Any]) -> str:
     resolved_id = flow_run_id
     last_status: Optional[str] = None
     polls = 0
+    consecutive_errors = 0
+    last_error: Optional[str] = None
 
     while True:
         polls += 1
-        if resolved_id is None and task_id is not None:
-            resolved_id = _resolve_flow_run_id(task_id)
+        # [A33] Tolerate transient gateway blips: a single poll failure must not
+        # abort a long wait. Only the HTTP transport (_api_request → RuntimeError)
+        # is caught here; validation (ValueError) already ran before the loop.
+        try:
+            if resolved_id is None and task_id is not None:
+                resolved_id = _resolve_flow_run_id(task_id)
 
-        if resolved_id is not None:
-            detail = _api_request("GET", f"/api/flows/{urllib.parse.quote(resolved_id)}")
-            flow = detail.get("flow") or {}
-            last_status = flow.get("status")
-            kind = classify_status(last_status)
-            if kind in ("done", "attention"):
-                stage = flow.get("current_stage")
+            if resolved_id is not None:
+                detail = _api_request("GET", f"/api/flows/{urllib.parse.quote(resolved_id)}")
+                flow = detail.get("flow") or {}
+                last_status = flow.get("status")
+                kind = classify_status(last_status)
+                if kind in ("done", "attention"):
+                    stage = flow.get("current_stage")
+                    return (
+                        f"Worker flow {resolved_id} reached: {kind.upper()}\n"
+                        f"status={last_status!r} current_stage={stage!r}\n"
+                        f"task_id={task_id or '(unknown)'} polls={polls}\n"
+                        + ("\nNeeds attention (blocked/review/decision) — not a clean completion; "
+                           "the Manager should inspect the case before continuing."
+                           if kind == "attention" else
+                           "\nTerminal. Review the worker's committed diff in git before closing "
+                           "the case (do NOT trust a self-reported summary).")
+                    )
+            consecutive_errors = 0  # a clean poll resets the streak
+        except RuntimeError as exc:
+            consecutive_errors += 1
+            last_error = str(exc)
+            if consecutive_errors >= _MAX_CONSECUTIVE_POLL_ERRORS:
                 return (
-                    f"Worker flow {resolved_id} reached: {kind.upper()}\n"
-                    f"status={last_status!r} current_stage={stage!r}\n"
-                    f"task_id={task_id or '(unknown)'} polls={polls}\n"
-                    + ("\nNeeds attention (blocked/review/decision) — not a clean completion; "
-                       "the Manager should inspect the case before continuing."
-                       if kind == "attention" else
-                       "\nTerminal. Review the worker's committed diff in git before closing "
-                       "the case (do NOT trust a self-reported summary).")
+                    f"ERROR: wait_for_worker gave up after {consecutive_errors} consecutive "
+                    f"poll failures ({polls} polls). Last error: {last_error}. The worker may "
+                    f"still be running — inspect /api/work manually and re-call if needed."
                 )
+            # Otherwise fall through: sleep and retry until the deadline.
 
         if time.monotonic() >= deadline:
             where = resolved_id or (f"(unresolved flow for task {task_id})" if task_id else "(no id)")
+            err_note = f" last poll error={last_error!r}." if last_error else ""
             return (
                 f"TIMEOUT after {timeout:.0f}s ({polls} polls). "
-                f"Worker flow {where} last status={last_status!r} (still active/unresolved). "
+                f"Worker flow {where} last status={last_status!r} (still active/unresolved).{err_note} "
                 f"The worker may still be running — re-call wait_for_worker or inspect "
                 f"/api/work manually. NOTE: if the flow_run row never appears, confirm "
                 f"HARNESS_FLOW_DRIVE is ON and that a plain worker dispatch writes a flow "
@@ -332,8 +358,8 @@ _TOOLS = [
             "auth-guarded, Level-3-gated POST /api/instructions. Returns the worker's task_id; "
             "track it with wait_for_worker. Provide a professional, not-overstated objective. "
             "If session_id is given the work runs in that existing worker session (cheaper — "
-            "reuses orientation); omit it for a one-off. NOTE: parent lineage is not yet "
-            "persisted server-side (endpoint gap) — track the child by task_id for now."
+            "reuses orientation); omit it for a one-off. Pass your own flow_run id as "
+            "parent_flow_run_id to record the Manager→worker lineage edge (visible in /api/flows)."
         ),
         "inputSchema": {
             "type": "object",
@@ -342,7 +368,7 @@ _TOOLS = [
                 "session_id": {"type": "string", "description": "Existing worker session to run in. Omit for a one-off dispatch."},
                 "cwd": {"type": "string", "description": "Working directory / repo path. Defaults to the session's repo or the request default."},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Target files to focus the worker on (optional)."},
-                "parent_flow_run_id": {"type": "string", "description": "The Manager's own flow_run id (the case). CURRENTLY INFORMATIONAL — not yet persisted as a lineage edge."},
+                "parent_flow_run_id": {"type": "string", "description": "The Manager's own flow_run id (the case). Recorded as the child→parent lineage edge in /api/flows (a SHADOW record — persisted when the gateway runs HARNESS_FLOW_DRIVE ON)."},
             },
             "required": ["objective"],
         },
