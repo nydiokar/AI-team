@@ -39,8 +39,8 @@ flowchart TD
     K["_flow_stage_transition(task, 'impl_review')\norchestrator.py:2186\ncurrent_stage → 'impl_review'"]
     L["_flow_stage_transition(task, 'closure')\norchestrator.py:2203\ncurrent_stage → 'closure'"]
     M["GET /api/flows\nGET /api/flows/{id}\ncontrol_api.py:736,751"]
-    N["🔲 M2 NOT YET WIRED\nparent_flow_run_id / dispatched_by / dispatch_file\n(columns exist, not populated)"]
-    O["🔲 M3 NOT YET\nManager-as-invoked-role\nspawns worker sessions"]
+    N["✅ M2 DONE (A25–A30, merged 24dff9b)\nflow_links + flow_events + Work read model\nlineage populated; HARNESS_FLOW_DRIVE ON"]
+    O["🔲 M3 NEXT — spec authored\nManager-as-invoked-role via mcp_manager tool\nspawns worker SESSIONS (not sub-agents)"]
     P["🔲 M4 NOT YET\nSpec authoring +\nscored review layer"]
 
     A --> B
@@ -70,7 +70,7 @@ flowchart TD
     style K fill:#d4edda,stroke:#28a745
     style L fill:#d4edda,stroke:#28a745
     style M fill:#d4edda,stroke:#28a745
-    style N fill:#fff3cd,stroke:#ffc107
+    style N fill:#d4edda,stroke:#28a745
     style O fill:#f8d7da,stroke:#dc3545
     style P fill:#f8d7da,stroke:#dc3545
     style BLOCKED fill:#f8d7da,stroke:#dc3545
@@ -213,6 +213,6 @@ FLOW_STAGES = (
 |---|---|---|
 | **M0** | Base reconciled — stale docs corrected, drift forks surfaced | **DONE** (2026-07-06) |
 | **M1** | `flow_runs` schema promoted to full §11 model; `HARNESS_FLOW_DRIVE` flag; `/api/flows` read API | **LIVE** |
-| **M2** | Dispatch lineage: `parent_flow_run_id` / `dispatched_by` / `dispatch_file` populated; cockpit tree view | **NOT YET** (columns exist, wiring not built; see [WORK_CONTROL_SUBSTRATE_MILESTONE.md](../WORK_CONTROL_SUBSTRATE_MILESTONE.md)) |
-| **M3** | Manager as gateway-invokable role: intent → expand → dispatch worker(s) → review → close | **NOT YET** |
-| **M4** | Feature-spec authoring + scored review layer; generators can ship early (docs) | **NOT YET** |
+| **M2** | Dispatch lineage + **Work Control Substrate** (A25–A30): `flow_links`, append-only `flow_events`, write-path seams, Work/Case read model, mobile Work surface, honest session affiliations | **DONE & merged to `main` (`24dff9b`, 2026-07-09)**; `HARNESS_FLOW_DRIVE` **ON** in live env → substrate populates from real execution. See [WORK_CONTROL_SUBSTRATE_MILESTONE.md](../WORK_CONTROL_SUBSTRATE_MILESTONE.md) |
+| **M3** | Manager as gateway-invokable role: intent → expand → dispatch worker(s) → review → close | **NOT YET — spec authored**, backend-readiness audited (F4 answered YES). See [M3_MANAGER_INVOCATION_SPEC.md](../M3_MANAGER_INVOCATION_SPEC.md) |
+| **M4** | Feature-spec authoring + scored review layer; generators can ship early (docs) | **NOT YET** (generators may land opportunistically as docs) |
