@@ -37,6 +37,21 @@ from src.core.telemetry import TelemetryEvent
 logger = logging.getLogger(__name__)
 
 
+# Optional hook into the in-process orchestrator, set only when this server runs
+# EMBEDDED in the gateway. Lets a worker-reported proactive turn trigger the
+# gateway's live notification fan-out (web push / Telegram). When unset (the
+# server runs standalone) the turn is still persisted to the DB, so the
+# conversation stays correct — only the live "reach back" ping is skipped.
+_PROACTIVE_HOOK: Optional[Any] = None
+
+
+def bind_proactive_hook(hook: Optional[Any]) -> None:
+    """Register (or clear) the proactive-turn notification hook. Signature:
+    ``hook(session_id, task_id, text, backend_session_id)``. Best-effort."""
+    global _PROACTIVE_HOOK
+    _PROACTIVE_HOOK = hook
+
+
 # Backend error phrases that can leak into `output` when a pre-fix worker treats
 # an is_error result as a successful reply. A NORMAL reply that merely *mentions*
 # these words won't match: we only test a short output that IS essentially the
@@ -207,6 +222,19 @@ class JobDonePayload(BaseModel):
     exit_code: int
     tail: str = ""
     status: Optional[str] = None
+
+
+class ProactiveTurnPayload(BaseModel):
+    """A turn the agent produced on its own (a run_in_background job finished and
+    it kept going), reported by the worker so the gateway can deliver it."""
+    node_id: str = Field(min_length=1, max_length=128)
+    session_id: str = Field(min_length=1, max_length=128)
+    backend: str = Field(default="claude", max_length=64)
+    output: str = ""
+    backend_session_id: str = Field(default="", max_length=256)
+    usage: Optional[Dict[str, Any]] = None
+    is_error: bool = False
+    error_text: str = Field(default="", max_length=2000)
 
 
 class JobStartPayload(BaseModel):
@@ -883,6 +911,52 @@ def report_job_done(job_id: str, payload: JobDonePayload) -> Dict[str, str]:
         db.fail_job(job_id, err)
 
     return {"status": "accepted", "job_id": job_id}
+
+
+@app.post("/sessions/{session_id}/proactive-turn", dependencies=[Depends(_require_auth)])
+def report_proactive_turn(session_id: str, payload: ProactiveTurnPayload) -> Dict[str, str]:
+    """A worker reports an autonomous turn — the live SDK session continued on
+    its own after a run_in_background job finished. Persist it as a first-class
+    conversation turn and (if embedded) trigger the gateway's notification
+    fan-out so the user is actively reached, not just updated on next load."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    session = db.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+
+    text = (payload.output or "").strip()
+    if not text:
+        # An autonomous turn that produced only tool activity / no user-facing
+        # text — nothing to deliver. Acknowledge without creating an empty turn.
+        return {"status": "empty", "session_id": session_id}
+
+    task_id = f"proactive_{uuid.uuid4().hex[:12]}"
+    machine_id = session.get("machine_id") or payload.node_id
+    db.record_proactive_turn(
+        task_id=task_id,
+        session_id=session_id,
+        backend=payload.backend or session.get("backend") or "claude",
+        machine_id=machine_id,
+        reply_text=text,
+        usage=payload.usage,
+    )
+    logger.info(
+        "event=proactive_turn_recorded session_id=%s task_id=%s node=%s chars=%d",
+        session_id, task_id, payload.node_id, len(text),
+    )
+
+    hook = _PROACTIVE_HOOK
+    if hook is not None:
+        try:
+            hook(session_id, task_id, text, payload.backend_session_id)
+        except Exception:
+            logger.warning(
+                "event=proactive_hook_failed session_id=%s task_id=%s",
+                session_id, task_id, exc_info=True,
+            )
+    return {"status": "accepted", "session_id": session_id, "task_id": task_id}
 
 
 @app.get("/jobs", dependencies=[Depends(_require_auth)])

@@ -280,8 +280,13 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
 
         created = r.get("created_at") or ""
         completed = r.get("completed_at") or ""
+        # A proactive turn is an autonomous message the agent produced after a
+        # background job finished — no user prompt. Flag it so the UI can render
+        # it as an assistant-only bubble rather than a turn with a blank user side.
+        proactive = (r.get("action") == "proactive_turn")
         turns.append({
             "task_id": r.get("task_id") or "",
+            "proactive": proactive,
             # Back-compat single timestamp (completion-preferred, used for sort).
             "timestamp": completed or created or "",
             # Distinct anchors so the UI can stamp the USER bubble with when the
@@ -350,6 +355,7 @@ def _turn_from_history(
         "success": success,
         "instruction": instruction,
         "result": result,
+        "proactive": bool(entry.get("proactive", False)),
         "file_count": len(files) if isinstance(files, (list, tuple)) else 0,
         "usage": _usage_from_artifact(art) if art is not None else None,
     }
