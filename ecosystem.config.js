@@ -40,7 +40,7 @@ module.exports = {
       out_file: path.join(__dirname, "logs", "pm2-out.log"),
       error_file: path.join(__dirname, "logs", "pm2-error.log"),
       merge_logs: true,
-      time: true,
+      time: false,
     },
 
     // ---------------------------------------------------------------
@@ -85,7 +85,7 @@ module.exports = {
       out_file: path.join(__dirname, "logs", "pm2-server-out.log"),
       error_file: path.join(__dirname, "logs", "pm2-server-error.log"),
       merge_logs: true,
-      time: true,
+      time: false,
     },
 
     // ---------------------------------------------------------------
@@ -137,7 +137,7 @@ module.exports = {
       out_file: path.join(__dirname, "logs", "pm2-worker-out.log"),
       error_file: path.join(__dirname, "logs", "pm2-worker-error.log"),
       merge_logs: true,
-      time: true,
+      time: false,
     },
 
     // ---------------------------------------------------------------
@@ -179,7 +179,7 @@ module.exports = {
       out_file: path.join(__dirname, "logs", "pm2-deploy-out.log"),
       error_file: path.join(__dirname, "logs", "pm2-deploy-error.log"),
       merge_logs: true,
-      time: true,
+      time: false,
     },
   ],
 };
