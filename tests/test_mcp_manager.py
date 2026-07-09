@@ -109,9 +109,10 @@ def test_dispatch_worker_posts_and_reports(monkeypatch):
     assert "wait_for_worker" in out
 
 
-def test_dispatch_worker_does_not_send_parent_lineage(monkeypatch):
-    """The known endpoint gap: parent_flow_run_id must NOT be sent (would be
-    silently dropped and falsely imply lineage was recorded)."""
+def test_dispatch_worker_sends_parent_lineage(monkeypatch):
+    """[A32/A33] Endpoint now accepts parent_flow_run_id, so dispatch_worker sends
+    it as the Manager→worker lineage edge (persisted server-side when
+    HARNESS_FLOW_DRIVE is ON)."""
     seen = {}
 
     def fake_request(method, path, payload=None, timeout=20.0):
@@ -120,10 +121,25 @@ def test_dispatch_worker_does_not_send_parent_lineage(monkeypatch):
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
     out = mcp_manager._dispatch_worker({"objective": "do x", "parent_flow_run_id": "flow_parent"})
-    assert "parent_flow_run_id" not in seen["payload"]
-    # ...but it IS surfaced honestly in the human-readable reply, flagged as not persisted.
+    assert seen["payload"]["parent_flow_run_id"] == "flow_parent"
+    # Surfaced in the reply as a lineage edge (SHADOW record — not the old "not persisted" note).
     assert "flow_parent" in out
-    assert "NOT yet persisted" in out
+    assert "lineage edge" in out
+    assert "NOT yet persisted" not in out
+
+
+def test_dispatch_worker_omits_parent_lineage_when_absent(monkeypatch):
+    """No parent_flow_run_id ⇒ the key is not in the payload (byte-identical to a
+    plain dispatch; no null/empty field leaks)."""
+    seen = {}
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        seen["payload"] = payload
+        return {"task_id": "t1", "session": None}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    mcp_manager._dispatch_worker({"objective": "do x"})
+    assert "parent_flow_run_id" not in seen["payload"]
 
 
 def test_dispatch_worker_requires_objective(monkeypatch):
@@ -182,6 +198,39 @@ def test_wait_times_out_without_busy_loop(monkeypatch):
     out = mcp_manager._wait_for_worker({"flow_run_id": "flow_x", "timeout": 2, "poll_interval": 1})
     assert "TIMEOUT" in out
     assert sleeps, "wait loop must sleep between polls"
+
+
+def test_wait_tolerates_transient_poll_errors(monkeypatch):
+    """[A33] A transient gateway blip mid-poll must NOT abort the wait — the poll
+    recovers and returns DONE once the gateway responds again."""
+    monkeypatch.setattr(mcp_manager.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("Could not reach control API: transient blip")
+        return {"flow": {"status": "completed", "current_stage": "close"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._wait_for_worker({"flow_run_id": "flow_1", "timeout": 30, "poll_interval": 1})
+    assert "DONE" in out
+    assert calls["n"] >= 3  # recovered after the transient failures
+
+
+def test_wait_gives_up_after_persistent_errors(monkeypatch):
+    """[A33] Persistent poll failures give up after the consecutive-error cap with
+    a clean ERROR (not a raised exception), well before a long timeout expires."""
+    monkeypatch.setattr(mcp_manager.time, "sleep", lambda s: None)
+
+    def always_fail(method, path, payload=None, timeout=20.0):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(mcp_manager, "_api_request", always_fail)
+    out = mcp_manager._wait_for_worker({"flow_run_id": "flow_1", "timeout": 3600, "poll_interval": 1})
+    assert "ERROR" in out
+    assert "gave up" in out
+    assert "gateway down" in out
 
 
 def test_api_request_requires_token(monkeypatch):
