@@ -1,9 +1,11 @@
 # Work Control Substrate Milestone
 
-**Status:** planned milestone, operator-aligned on 2026-07-08.
-**Roadmap position:** v0.6 M2 foundation, before Manager-as-invoked-role (M3) and before
-any product-grade mobile Work UI.
-**Recommendation:** build now as a foundational dependency.
+**Status:** ✅ **SHIPPED (A25–A30) & merged to `main` (`24dff9b`, 2026-07-09).**
+`HARNESS_FLOW_DRIVE` is **ON in the live environment** (gateway restarted on the merged code),
+so the substrate now populates from real execution — the earlier "empty until the flag is on"
+caveat no longer applies live. (Originally: planned milestone, operator-aligned 2026-07-08.)
+**Roadmap position:** v0.6 M2 foundation — now complete; unblocks Manager-as-invoked-role
+(**M3**, see [`M3_MANAGER_INVOCATION_SPEC.md`](M3_MANAGER_INVOCATION_SPEC.md)).
 
 This milestone turns the current `flow_runs` record into an honest operational substrate
 for mobile work control. It does **not** build autonomous manager behavior. It does **not**

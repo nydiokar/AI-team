@@ -1,7 +1,7 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-08
-**Active branch:** `main` (webui-ui0, operator-signal, compact-context all merged — PRs #4/#5/#6)
+**Last Updated:** 2026-07-09
+**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. Next: **M3** (`docs/M3_MANAGER_INVOCATION_SPEC.md`).
 
 > This is the **fast-orientation** doc: what the project is, how it's wired *right
 > now*, the current priorities, and the constraints. It is intentionally short.
@@ -36,8 +36,15 @@
 > flow-state machine → M2 dispatch lineage → M3 invoked-Manager → M4 spec layer). The
 > prototype-era `docs/harness/promotion_ladder.md` is **RETIRED** by it (§0.3) — do not cite
 > its "Phase 2 = NO / deferred / drop" verdicts against v0.6 work. A20–A23 shipped M0/M1.
-> **A25–A29 now implement Work Control Substrate** before any Manager automation or product-grade
-> Work UI that could infer too much.
+>
+> **➡️ STATUS 2026-07-09: M2 (Work Control Substrate, A25–A30) DONE & merged to `main`
+> (`24dff9b`).** `HARNESS_FLOW_DRIVE` is **ON in the live environment** (gateway restarted on the
+> merged code) so the substrate now populates from real execution. **M3 is the next milestone and
+> is UNBLOCKED** — spec + backend-readiness dossier authored at
+> [`docs/M3_MANAGER_INVOCATION_SPEC.md`](../docs/M3_MANAGER_INVOCATION_SPEC.md) (F4 spike answered
+> on paper: the dispatch/session/approval/read-model primitives + the MCP-tool-to-session pattern
+> all exist; M3 = a new `mcp_manager` tool surface + Manager role wiring + loop guardrails, in 4
+> reversible flag-gated phases). **Next unblocked build: M3 Phase 3.0 (F4 spike).**
 
 - **v0.6 M0 + M1 SHIPPED on `main` (2026-07-07).** A20 (M0 base reconcile), then A21→A22→A23
   merged in order (`6fdf8f0` → `56e4180` → `d1ea2f7`): `flow_runs` now carries the full §11
@@ -45,17 +52,20 @@
   `current_stage` is written at each loop transition behind `HARNESS_FLOW_DRIVE` (**default OFF
   ⇒ byte-identical A19; SHADOW only — nothing reads stage to drive execution**), and the flow
   record is queryable via read-only `GET /api/flows` + `/api/flows/{id}` (A23, auth-guarded,
-  loopback/tailnet, no mutation/public bind). 41/41 M1 tests green in-tree. **Next: Work Control
-  Substrate (A25-A29)** — M2 dispatch lineage plus the minimal authoritative relationships needed
-  before a truthful mobile Work UI or M3 Manager automation: `flow_links`, append-only
-  `flow_events`, write wiring, read model, read-only Work surface, and Session affiliation labels.
+  loopback/tailnet, no mutation/public bind). 41/41 M1 tests green in-tree. **M2 Work Control
+  Substrate (A25–A30) is now DONE & merged (`24dff9b`)** — `flow_links`, append-only `flow_events`,
+  write wiring, read model, read-only mobile Work surface, and honest uncapped session affiliations.
   See [`docs/WORK_CONTROL_SUBSTRATE_MILESTONE.md`](../docs/WORK_CONTROL_SUBSTRATE_MILESTONE.md).
+  **Next: M3** (Manager-as-invoked-role) — spec at
+  [`docs/M3_MANAGER_INVOCATION_SPEC.md`](../docs/M3_MANAGER_INVOCATION_SPEC.md); start with Phase 3.0
+  (F4 spike: prove a gateway-spawned session can dispatch a child worker session via `mcp_manager`).
 - **⚠️ M2 has TWO coordinated halves — reconciled 2026-07-08 (was an overlapping-lane risk).**
   M2 dispatch lineage = **(A26a)** the `flow_runs` column wiring — `parent_flow_run_id`/
   `dispatched_by`/`dispatch_file` stamped at the child-dispatch seam behind `HARNESS_FLOW_DRIVE`
   (default OFF ⇒ byte-identical), plus the `_stamp_child_dispatch_lineage` **supplier** +
-  `list_child_flow_runs` — **built** on `feat/m2-dispatch-lineage-wiring`, 19/19 tests green,
-  awaiting op-merge — **and (A25–A29)** the authoritative `flow_links`/`flow_events` substrate.
+  `list_child_flow_runs` — **now MERGED to `main` (`24dff9b`)** via the substrate branch, which was
+  built byte-identically on top of A26a, 19/19 tests green — **and (A25–A30)** the authoritative
+  `flow_links`/`flow_events` substrate, also merged.
   **Authority:** `flow_links(child_flow)` is authoritative; the `flow_runs` column is a convenience
   index. **A26 CONSUMES A26a's stamped edge — it must NOT add a second stamping hook** (avoids the
   milestone's F4 "duplicate ledger"). The old roadmap phrase "M2 is wiring-only" (which spawned the
