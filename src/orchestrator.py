@@ -4702,20 +4702,29 @@ Generated from user description: {description}
     def _mesh_enqueue_task(self, task: Task, backend_name: str) -> None:
         """Shadow-write a dispatched task into mesh_tasks.
 
-        Two cases:
+        Two cases (the split MUST match `process_task`'s local/remote decision,
+        which routes remote ⟺ machine_id is set AND machine_id != this host):
 
-        Local execution (session.machine_id not set, or MESH_ENABLED=false):
+        Local execution (no machine_id, OR machine_id names THIS host, OR
+        MESH_ENABLED=false):
           Insert + immediately self-claim under this host's identity so no
           worker daemon can pick up the row as claimable work. The row is a
           faithful historical mirror; `_mesh_complete_task` finalises it.
 
-        Remote dispatch (session.machine_id set and MESH_ENABLED=true):
+        Remote dispatch (machine_id names a DIFFERENT host and MESH_ENABLED=true):
           Insert as 'pending' WITHOUT self-claiming. The row is the actual
           dispatch signal — the pinned worker polls `get_pending_tasks`, sees
           it (machine_id filter matches), claims it, executes, and posts the
           result. `process_task` (via `_dispatch_to_node`) polls the DB for
           completion. `_mesh_complete_task` later enriches the row with the
           local artifact_path.
+
+        BUGFIX: the self-claim used to fire only when machine_id was UNSET, so a
+        session pinned to THIS host (e.g. a standalone worker daemon sharing the
+        gateway's hostname as its node_id) left the row 'pending' AND was run
+        locally by `process_task` — the daemon then claimed the same row and ran
+        it a SECOND time (two agents for one task). Treating machine_id == host as
+        local closes that: the gateway owns host-local execution, single-writer.
         """
         try:
             from src.control.db import get_db
@@ -4767,6 +4776,11 @@ Generated from user description: {description}
                     "cache_unhealthy_count": session.cache_unhealthy_count,
                     "previous_backend_session_ids": session.previous_backend_session_ids or [],
                 }
+            # Runs on THIS host ⟺ no pin, or the pin names this host. Only a pin
+            # to a DIFFERENT host is a true remote dispatch. This MUST mirror
+            # process_task's `_pinned_elsewhere` test, or a host-pinned task both
+            # runs locally AND stays claimable by a daemon → double execution.
+            runs_locally = (not machine_id) or (machine_id == host)
             db.enqueue_task(
                 task_id=task.id,
                 session_id=session_id,
@@ -4775,10 +4789,10 @@ Generated from user description: {description}
                 action=action,
                 payload=payload,
             )
-            # Self-claim only when this task runs locally (no remote machine_id).
-            # When machine_id is set, the row must stay 'pending' so the
-            # pinned remote worker can claim it via get_pending_tasks.
-            if not machine_id:
+            # Self-claim when this task runs on THIS host so no worker daemon can
+            # pick up the row. A row pinned to a DIFFERENT host stays 'pending' so
+            # that remote worker can claim it via get_pending_tasks.
+            if runs_locally:
                 if not db.claim_task(task.id, host):
                     logger.warning(
                         "event=mesh_self_claim_failed task_id=%s host=%s — "
@@ -4786,7 +4800,7 @@ Generated from user description: {description}
                         task.id, host,
                     )
         except Exception as e:
-            if machine_id:
+            if machine_id and machine_id != host:
                 # Remote dispatch depends on this row existing — log loudly so
                 # the operator sees it immediately rather than after a 600s poll timeout.
                 logger.error(
