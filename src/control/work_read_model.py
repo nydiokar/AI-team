@@ -186,6 +186,48 @@ def build_case_timeline(
     }
 
 
+# Authoritative session roles a link may carry (flow_links.role vocab for a
+# session entity). Anything else collapses to the generic "session".
+_SESSION_ROLES = ("manager", "worker", "reviewer", "evidence")
+
+
+def _session_role(role: Optional[str]) -> str:
+    r = (role or "").strip().lower()
+    return r if r in _SESSION_ROLES else "session"
+
+
+def build_session_affiliations(
+    link_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Project session→case links (db.list_session_case_links rows) into an
+    authoritative affiliation index for the Sessions surface.
+
+    Honesty-first: a session appears here ONLY if the substrate links it to a
+    case; absent sessions are simply not present (the UI then renders Standalone,
+    never inferred). A session linked by more than one case resolves to the FIRST
+    (oldest link) deterministically — we never fabricate a "primary" the substrate
+    did not assert. Covers the WHOLE substrate (no per-case fanout, no cap).
+
+    The case's raw ``objective_lock`` rides along so the FRONTEND derives the
+    display title with the SAME ``caseTitle`` logic it uses for the Work list and
+    detail — one source of truth, so a case never shows two different titles.
+    """
+    seen: Dict[str, Dict[str, Any]] = {}
+    for row in link_rows or []:
+        sid = row.get("session_id")
+        if not sid or sid in seen:
+            continue
+        seen[sid] = {
+            "session_id": sid,
+            "flow_run_id": row.get("flow_run_id"),
+            "role": _session_role(row.get("role")),
+            "objective_lock": row.get("objective_lock"),
+            "case_status": row.get("status"),
+        }
+    affiliations = list(seen.values())
+    return {"affiliations": affiliations, "total": len(affiliations)}
+
+
 def build_case_graph(
     flow_run_id: str,
     flow_row: Dict[str, Any],

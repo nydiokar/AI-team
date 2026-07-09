@@ -8,6 +8,7 @@ import {
   toCaseTimeline,
   toCaseGraph,
   normalizeSessionRole,
+  toSessionAffiliationIndex,
 } from "./workAdapter";
 import type {
   RawCaseSummary,
@@ -15,6 +16,7 @@ import type {
   RawWorkListResponse,
   RawCaseTimelineResponse,
   RawCaseGraphResponse,
+  RawSessionAffiliationsResponse,
 } from "./rawApi";
 
 const baseCase: RawCaseSummary = {
@@ -232,5 +234,58 @@ describe("normalizeSessionRole — authoritative role, never invented", () => {
     expect(normalizeSessionRole(null)).toBe("session");
     expect(normalizeSessionRole("")).toBe("session");
     expect(normalizeSessionRole("root_task")).toBe("session");
+  });
+});
+
+describe("toSessionAffiliationIndex — whole-substrate, never fabricated", () => {
+  it("keys by session id with normalized role and derived case title", () => {
+    const raw: RawSessionAffiliationsResponse = {
+      affiliations: [
+        { session_id: "s1", flow_run_id: "flow_1", role: "worker",
+          objective_lock: "<real_objective>Ship it</real_objective>", case_status: "active" },
+        { session_id: "s2", flow_run_id: "flow_2", role: "custodian",
+          objective_lock: null, case_status: null },
+      ],
+      total: 2,
+    };
+    const idx = toSessionAffiliationIndex(raw);
+    expect(idx.size).toBe(2);
+    // Title derived by the SAME caseTitle logic as the Work list/detail.
+    expect(idx.get("s1")).toEqual({
+      sessionId: "s1", flowRunId: "flow_1", role: "worker", caseTitle: "Ship it",
+    });
+    // Unknown role normalized; missing objective falls back to a short case id.
+    expect(idx.get("s2")!.role).toBe("session");
+    expect(idx.get("s2")!.caseTitle.startsWith("case ")).toBe(true);
+  });
+
+  it("drops rows without a flow_run_id and never invents entries", () => {
+    const raw: RawSessionAffiliationsResponse = {
+      affiliations: [
+        { session_id: "s1", flow_run_id: null, role: "worker",
+          objective_lock: "x", case_status: null },
+        { session_id: "", flow_run_id: "flow_1", role: "worker",
+          objective_lock: "x", case_status: null },
+      ],
+      total: 2,
+    };
+    expect(toSessionAffiliationIndex(raw).size).toBe(0);
+  });
+
+  it("keeps the first of duplicate session ids (server dedup is authoritative)", () => {
+    const raw: RawSessionAffiliationsResponse = {
+      affiliations: [
+        { session_id: "s1", flow_run_id: "flow_first", role: "worker",
+          objective_lock: "First", case_status: "active" },
+        { session_id: "s1", flow_run_id: "flow_second", role: "reviewer",
+          objective_lock: "Second", case_status: "closed" },
+      ],
+      total: 2,
+    };
+    expect(toSessionAffiliationIndex(raw).get("s1")!.flowRunId).toBe("flow_first");
+  });
+
+  it("empty index for an empty/absent substrate", () => {
+    expect(toSessionAffiliationIndex({ affiliations: [], total: 0 }).size).toBe(0);
   });
 });

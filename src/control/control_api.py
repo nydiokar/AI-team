@@ -785,6 +785,20 @@ def build_control_api(orchestrator) -> FastAPI:
             model["cases"] = [c for c in model["cases"] if c["bucket"] == bucket]
         return JSONResponse(model)
 
+    @app.get("/api/work/affiliations/sessions", dependencies=[Depends(_require_auth)])
+    def api_work_session_affiliations() -> JSONResponse:
+        """Authoritative session→case affiliation index over the WHOLE substrate.
+
+        One JOIN (flow_links entity_type='session' → flow_runs) — no per-case
+        fanout, no cap — so a session linked to a case anywhere in the backlog is
+        resolved, never a false Standalone (milestone authority rule 7). Registered
+        BEFORE ``/api/work/{flow_run_id}`` so the literal path is never captured as
+        a flow id. Empty ``affiliations`` when the substrate has no session links."""
+        from src.control import work_read_model as _wrm
+        db = _db()
+        rows = db.list_session_case_links() if db is not None else []
+        return JSONResponse(_wrm.build_session_affiliations(rows))
+
     @app.get("/api/work/{flow_run_id}", dependencies=[Depends(_require_auth)])
     def api_work_detail(flow_run_id: str) -> JSONResponse:
         """One case: summary + full record + grouped ledger + parent/children.

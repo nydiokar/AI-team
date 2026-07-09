@@ -562,3 +562,24 @@ export interface RawCaseGraphResponse {
   nodes: RawGraphNode[];
   edges: RawGraphEdge[];
 }
+
+// One session→case affiliation (work_read_model.build_session_affiliations). A
+// session appears here ONLY if the substrate authoritatively links it to a case;
+// absent sessions are simply not present (⇒ the UI renders Standalone).
+export interface RawSessionAffiliation {
+  session_id: string;
+  flow_run_id: string | null;
+  role: string | null;
+  /** Raw case objective_lock — the adapter derives the title with `caseTitle`
+   *  (same logic as the Work list/detail) so a case never shows two titles. */
+  objective_lock: string | null;
+  case_status: string | null;
+}
+
+// GET /api/work/affiliations/sessions → whole-substrate session affiliation index
+// (one JOIN, no per-case fanout, no cap — resolves a session linked to a case
+// anywhere in the backlog, never a false Standalone).
+export interface RawSessionAffiliationsResponse {
+  affiliations: RawSessionAffiliation[];
+  total: number;
+}

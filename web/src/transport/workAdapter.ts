@@ -16,6 +16,7 @@ import type {
   RawCaseTimelineResponse,
   RawGraphNode,
   RawCaseGraphResponse,
+  RawSessionAffiliationsResponse,
   RawWorkBucket,
 } from "./rawApi";
 import type {
@@ -30,6 +31,7 @@ import type {
   WorkList,
   WorkBucket,
   CaseSessionRole,
+  SessionAffiliation,
 } from "../domain/work";
 
 const BUCKETS: WorkBucket[] = [
@@ -226,4 +228,29 @@ export function normalizeSessionRole(role: string | null): CaseSessionRole {
   return (KNOWN_SESSION_ROLES as string[]).includes(r)
     ? (r as CaseSessionRole)
     : "session";
+}
+
+/**
+ * Build the session→case affiliation Map from the authoritative whole-substrate
+ * index (GET /api/work/affiliations/sessions). One entry per session, keyed by
+ * session id. A row missing its flow_run_id is dropped (an affiliation with no
+ * case to link to is not renderable) — never fabricated. The server already
+ * deduplicates by session, but we keep the first defensively.
+ */
+export function toSessionAffiliationIndex(
+  raw: RawSessionAffiliationsResponse,
+): Map<string, SessionAffiliation> {
+  const map = new Map<string, SessionAffiliation>();
+  for (const a of raw.affiliations ?? []) {
+    const sid = a.session_id;
+    if (!sid || !a.flow_run_id || map.has(sid)) continue;
+    map.set(sid, {
+      sessionId: sid,
+      flowRunId: a.flow_run_id,
+      role: normalizeSessionRole(a.role),
+      // Same derivation as the Work list/detail — one source of truth for titles.
+      caseTitle: caseTitle(a.objective_lock, a.flow_run_id),
+    });
+  }
+  return map;
 }

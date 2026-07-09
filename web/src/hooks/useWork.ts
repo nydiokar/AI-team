@@ -7,18 +7,19 @@
  * substrate only populates when the gateway runs with HARNESS_FLOW_DRIVE on;
  * until then these return empty lists — which the UI renders honestly.
  */
-import { useMemo } from "react";
-import { useQuery, useQueries } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../transport/apiClient";
 import {
   toWorkList,
   toCaseDetail,
   toCaseTimeline,
   toCaseGraph,
-  normalizeSessionRole,
+  toSessionAffiliationIndex,
 } from "../transport/workAdapter";
-import type { CaseDetail, SessionAffiliation, WorkBucket } from "../domain/work";
+import type { SessionAffiliation, WorkBucket } from "../domain/work";
 import { useAuthStore } from "../stores/authStore";
+
+const EMPTY_AFFILIATIONS = new Map<string, SessionAffiliation>();
 
 const POLL_MS = 3000;
 // Case detail/lineage change far less often than the live list; the affiliation
@@ -82,62 +83,35 @@ export function useWorkGraph(flowRunId: string | undefined) {
 /**
  * Authoritative session→case affiliation index.
  *
- * There is no bulk reverse (session→case) endpoint in A27, so we resolve each
- * case's detail and read its `ledger.sessions` links — the ONLY authoritative
- * source of a session's role in a case. A session absent from every ledger has
- * NO entry (the Sessions surface then shows it as standalone — never inferred).
+ * A29 backs this with ONE whole-substrate endpoint
+ * (`/api/work/affiliations/sessions`) — a single JOIN of the session flow_links
+ * to their cases. This replaces the A28 approach (fetch each case's detail and
+ * read `ledger.sessions`), which was O(N) requests AND capped at the first 100
+ * cases: a session linked to a case beyond that window rendered a FALSE
+ * "Standalone". Now every session link in the backlog resolves, regardless of
+ * how large the case set grows.
  *
- * Cost: one cached detail fetch per case, shared by the same query key with
- * WorkDetail (so opening a case is warm) and polled gently. With the substrate
- * flag OFF the work list is empty, so this makes ZERO detail fetches.
- *
- * If a session is linked by more than one case (should not happen for an owned
- * role), the first resolved wins and we keep it stable — we never fabricate a
- * "primary" the substrate didn't assert.
+ * A session absent from the index has NO entry (the Sessions surface shows it as
+ * standalone — never inferred). Multi-case links are deduplicated server-side to
+ * the first (oldest) link; we never fabricate a "primary" the substrate did not
+ * assert. With the substrate flag OFF the response is empty (zero cost).
  */
 export function useSessionAffiliations(): {
   index: Map<string, SessionAffiliation>;
   isLoading: boolean;
 } {
   const token = useAuthStore((s) => s.token);
-  const list = useWorkList();
-  const cases = list.data?.cases ?? [];
-
-  const detailQueries = useQueries({
-    queries: cases.map((c) => ({
-      queryKey: ["work-detail", c.flowRunId],
-      queryFn: async () =>
-        toCaseDetail(await api.workDetail(token, c.flowRunId)),
-      enabled: Boolean(token),
-      refetchInterval: DETAIL_POLL_MS,
-      staleTime: DETAIL_POLL_MS,
-      retry,
-    })),
+  const query = useQuery({
+    queryKey: ["work-affiliations"],
+    queryFn: async () => toSessionAffiliationIndex(await api.workAffiliations(token)),
+    enabled: Boolean(token),
+    refetchInterval: DETAIL_POLL_MS,
+    placeholderData: (prev) => prev,
+    retry,
   });
 
-  const index = useMemo(() => {
-    const map = new Map<string, SessionAffiliation>();
-    for (const q of detailQueries) {
-      const detail = q.data as CaseDetail | undefined;
-      if (!detail) continue;
-      for (const link of detail.ledger.sessions) {
-        const sid = link.entityId;
-        if (!sid || map.has(sid)) continue;
-        map.set(sid, {
-          sessionId: sid,
-          flowRunId: detail.summary.flowRunId,
-          role: normalizeSessionRole(link.role),
-          caseTitle: detail.summary.title,
-        });
-      }
-    }
-    return map;
-    // Re-derive when any detail payload changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detailQueries.map((q) => q.dataUpdatedAt).join(",")]);
-
   return {
-    index,
-    isLoading: list.isLoading || detailQueries.some((q) => q.isLoading),
+    index: query.data ?? EMPTY_AFFILIATIONS,
+    isLoading: query.isLoading,
   };
 }
