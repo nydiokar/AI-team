@@ -1725,6 +1725,22 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._record_flow_link(
                     flow_run_id, "task", task.id, "root_task", created_by="system",
                 )
+                # [A29] Session attachment (deferred A26 seam). The session this
+                # task executes in is the case's WORKER session — an AUTHORITATIVE
+                # relationship (it is the session actually running the flow, not an
+                # inferred owner). Absent session_id ⇒ no link (run_oneoff etc.).
+                # This is what lights up the Sessions affiliation labels.
+                session_id = str((task.metadata or {}).get("session_id") or "").strip()
+                if session_id:
+                    self._record_flow_link(
+                        flow_run_id, "session", session_id, "worker",
+                        created_by="system",
+                    )
+                    self._record_flow_event(
+                        flow_run_id, "session.attached", "system",
+                        entity_type="session", entity_id=session_id,
+                        payload={"role": "worker"},
+                    )
                 # Child-flow lineage: CONSUME the edge A26a stamped (do NOT add a
                 # second stamping hook). flow_links(child_flow) on the PARENT is the
                 # authoritative child→parent ledger; flow_runs.parent_flow_run_id
@@ -1959,6 +1975,64 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.warning(
                 "event=flow_stage_transition_failed task_id=%s stage=%s err=%s",
                 getattr(task, "id", "?"), stage, e,
+            )
+
+    def _flow_terminal_outcome(
+        self, task: "Task", *, success: bool, error_class: str = "",
+    ) -> None:
+        """[A29] Record the authoritative terminal OUTCOME of a case's root task.
+
+        Flag-guarded (no-op when HARNESS_FLOW_DRIVE is OFF ⇒ byte-identical) and
+        best-effort/isolated (a write failure logs and returns; it can NEVER raise
+        into task execution). SUMMARY: sets flow_runs.status ('closed' on success,
+        'blocked' on failure) so the read model's attention bucket leaves 'active'.
+        AUDIT: appends the matching terminal flow_event ('flow.closed' / a
+        'flow.status_changed' to 'blocked'). Both are SHADOW records — nothing
+        reads them to drive execution.
+
+        NOTE: review.accepted / review.rework_requested / review.waived are NOT
+        emitted here — there is no reviewer role or review gate in the harness yet
+        (that arrives with M3). Emitting them now would fabricate an outcome the
+        substrate cannot observe, so they stay deferred (honesty-first).
+        """
+        try:
+            if not self._harness_flow_drive_enabled():
+                return
+            meta = getattr(task, "metadata", None) or {}
+            flow_run_id = meta.get(self._FLOW_RUN_META_KEY)
+            if not flow_run_id:
+                return
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return
+            new_status = "closed" if success else "blocked"
+            # SUMMARY (flow_runs.status). Isolated: a summary write failure must
+            # not stop the audit event below.
+            try:
+                db.update_flow_run(flow_run_id, status=new_status)
+            except Exception as e:
+                logger.warning(
+                    "event=flow_terminal_status_failed flow_run_id=%s err=%s",
+                    flow_run_id, e,
+                )
+            # AUDIT trail (append-only). Payload stays a compact reference.
+            if success:
+                self._record_flow_event(
+                    flow_run_id, "flow.closed", "system", to_state="closed",
+                    entity_type="task", entity_id=getattr(task, "id", None),
+                    payload={"outcome": "success"},
+                )
+            else:
+                self._record_flow_event(
+                    flow_run_id, "flow.status_changed", "system", to_state="blocked",
+                    entity_type="task", entity_id=getattr(task, "id", None),
+                    payload={"outcome": "failed", "error_class": error_class or None},
+                )
+        except Exception as e:
+            logger.warning(
+                "event=flow_terminal_outcome_failed task_id=%s err=%s",
+                getattr(task, "id", "?"), e,
             )
 
     async def submit_instruction(
@@ -2413,6 +2487,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # [FlowRun A22] Harness transition → `closure` (turn complete). The
                 # final §11 stage; flag-guarded, best-effort SHADOW write.
                 self._flow_stage_transition(task, "closure")
+                # [A29] Terminal OUTCOME (deferred A26 seam). `closure` is only a
+                # STAGE; this records the authoritative case OUTCOME — success
+                # closes the case, a failure blocks it (needs attention) — so the
+                # inbox bucket and the audit trail reflect the real result of the
+                # task (mesh terminal state), not just "reached closure".
+                self._flow_terminal_outcome(
+                    task,
+                    success=bool(result.success),
+                    error_class=str(getattr(result, "error_class", "") or ""),
+                )
 
                 # Send notification via the central notification dispatcher
                 try:

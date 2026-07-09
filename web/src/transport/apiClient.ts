@@ -31,6 +31,7 @@ import type {
   RawCaseDetailResponse,
   RawCaseTimelineResponse,
   RawCaseGraphResponse,
+  RawSessionAffiliationsResponse,
   RawWorkBucket,
 } from "./rawApi";
 
@@ -460,6 +461,19 @@ export const api = {
   async workGraph(token: string, flowRunId: string): Promise<RawCaseGraphResponse> {
     return get<RawCaseGraphResponse>(
       `/api/work/${encodeURIComponent(flowRunId)}/graph`,
+      token,
+    );
+  },
+
+  /**
+   * GET /api/work/affiliations/sessions — the whole-substrate session→case
+   * affiliation index (one authoritative JOIN; no per-case fanout, no cap). Used
+   * by the Sessions surface to label a session's case role. A session absent from
+   * the response is standalone (never inferred).
+   */
+  async workAffiliations(token: string): Promise<RawSessionAffiliationsResponse> {
+    return get<RawSessionAffiliationsResponse>(
+      "/api/work/affiliations/sessions",
       token,
     );
   },

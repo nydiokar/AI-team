@@ -53,14 +53,54 @@
 
 ## Milestone
 
-**Current Status:** dispatched
+**Current Status:** built (pending merge + optional live flag pass)
 **Burndown:**
-- [ ] Read A25-A28 closures and implemented code
-- [ ] Run adversarial review with F-tags
-- [ ] Add/fix stale/conflict/no-heuristic tests
-- [ ] Patch P0/P1 defects only
-- [ ] Update durable docs and milestone status
-- [ ] Run targeted verification
-- [ ] Append Closure and advance DISPATCH_LOG
+- [x] Read A25-A28 closures and implemented code
+- [x] Run adversarial review with F-tags
+- [x] Add/fix stale/conflict/no-heuristic tests
+- [x] Patch P0/P1 defects only
+- [x] Update durable docs and milestone status
+- [x] Run targeted verification
+- [~] Append Closure (below); DISPATCH_LOG/CONTEXT advanced by manager at merge
 
-**Next Action:** wait for A25-A28, then review integrated behavior before making fixes.
+**Next Action:** operator merges `feat/work-surface-a28-a29`. To see populated Work/affiliation
+data live: `HARNESS_FLOW_DRIVE=on` + gateway restart (drops the active session — operator's call).
+
+## Closure
+
+**Date:** 2026-07-09 · **Branch:** `feat/work-surface-a28-a29`
+
+### Spot-check of A28 (built upon)
+Swept A28's frontend + the A25–A27 substrate it consumes. Verdict: clean, honesty-first,
+well-tested (typecheck clean, 86 tests green at entry). **One real defect** — the session
+affiliation index fetched only the first 100 cases and fanned out one detail request per
+case, so a session authoritatively linked to a case in a >100 backlog rendered a **false
+`Standalone`** (violates authority rule 7). Fixed as the P0 of this job.
+
+### What shipped
+1. **Affiliation index — de-capped + de-fanned (P0 fix).** New authoritative whole-substrate
+   JOIN `db.list_session_case_links` (newest-link-first, unbounded) → pure
+   `build_session_affiliations` → read-only `GET /api/work/affiliations/sessions`. Frontend
+   `useSessionAffiliations` now issues ONE query (was N); `toSessionAffiliationIndex` derives
+   the title with the SAME `caseTitle` used elsewhere (one source of truth). No UI/component
+   change — labels just stop lying at scale.
+2. **Deferred A26 seams (additive, flag-gated, best-effort):** session attachment
+   (`session`/`worker` link + `session.attached`), terminal OUTCOME
+   (`flow.closed`+status`closed` / `flow.status_changed`+status`blocked`), approval lifecycle
+   (`approval` link + `approval.requested`/`approval.resolved`).
+3. **Adversarial fixtures/tests:** `tests/test_flow_substrate_hardening.py`,
+   `tests/test_session_affiliations.py`, read-model authority fixtures in
+   `tests/test_work_read_model.py`, + `toSessionAffiliationIndex` frontend tests.
+
+### F-tag outcomes
+F1 held, **F2 defect found & fixed** (false Standalone cap), F3/F4/F7/F8 held. Full write-up
+in `docs/WORK_CONTROL_SUBSTRATE_MILESTONE.md` → "A29 Closure — Milestone Achieved".
+
+### Deliberately deferred (honest, not fabricated)
+`review.*` events (no reviewer role until M3); `flow.interrupted` on cancel; mobile inbox
+100-case list cap (attention-first UX bound — the *affiliation* index is uncapped).
+
+### Validation
+Backend: 244 passed / 2 skipped across the substrate+control+approval regression. Frontend:
+typecheck clean, vitest 90 passed. **No schema change** (reuses existing `flow_runs.status` +
+A25 tables). Flag OFF ⇒ byte-identical (proven by tests). Live gateway untouched (`/health` ok).

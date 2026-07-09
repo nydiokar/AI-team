@@ -36,6 +36,7 @@ agent_runs         — fine-grained per-tool-call log (dashboard/audit)
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -135,6 +136,20 @@ FLOW_EVENT_TYPES = (
     "flow.superseded",
     "flow.closed",
 )
+
+
+def flow_drive_enabled() -> bool:
+    """Whether the Work Control Substrate write path is active (A22/A26/A29).
+
+    Canonical read of ``HARNESS_FLOW_DRIVE`` (truthy: 1/true/yes/on); default OFF.
+    This is the SINGLE source of truth for the flag so every substrate writer
+    (orchestrator flow seams, ApprovalService approval seams) agrees byte-for-byte.
+    When OFF, no flow_links/flow_events are written ⇒ behavior is byte-identical to
+    A19. It never reads a substrate row to DRIVE execution — it only gates RECORDS.
+    """
+    return os.environ.get("HARNESS_FLOW_DRIVE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1567,6 +1582,41 @@ class MeshDB:
             f"SELECT * FROM flow_links {where} ORDER BY id ASC LIMIT ?",
             params,
         ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_session_case_links(
+        self,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Reverse index: EVERY session→case link joined to its case summary.
+
+        This is the authoritative, whole-substrate session affiliation source.
+        A single JOIN of ``flow_links`` (entity_type='session') to ``flow_runs``
+        replaces the frontend's old N+1 per-case fanout AND its 100-case cap — so
+        a session linked to a case anywhere in the backlog is resolved, never
+        rendered a false Standalone (milestone authority rule 7). Read-only.
+
+        ``limit`` is None by default (unbounded — no artificial cap); pass an int
+        only for a defensive ceiling. Ordered by link id DESC (NEWEST link first):
+        a long-lived session that worked several cases resolves to its MOST RECENT
+        one (the builder keeps the first per session) — the useful "what is it on
+        now?" answer, and deterministic.
+        """
+        sql = (
+            "SELECT fl.flow_run_id AS flow_run_id, fl.entity_id AS session_id, "
+            "       fl.role AS role, fl.created_at AS created_at, "
+            "       fr.objective_lock AS objective_lock, fr.status AS status, "
+            "       fr.current_stage AS current_stage "
+            "FROM flow_links fl "
+            "LEFT JOIN flow_runs fr ON fr.flow_run_id = fl.flow_run_id "
+            "WHERE fl.entity_type = 'session' "
+            "ORDER BY fl.id DESC"
+        )
+        params: List[Any] = []
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self._conn().execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     def append_flow_event(

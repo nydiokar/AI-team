@@ -28,11 +28,25 @@ Separation of concerns
 """
 from __future__ import annotations
 
+import logging
+import os
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src.services.session_service import CommandResult
 from src.services.workflow_service import WorkflowService
+
+logger = logging.getLogger(__name__)
+
+
+def _flow_drive_enabled() -> bool:
+    """Whether the Work Control Substrate write path is active (HARNESS_FLOW_DRIVE).
+
+    Mirrors Orchestrator._harness_flow_drive_enabled; default OFF ⇒ the approval
+    gate behaves byte-identically to before this seam existed."""
+    return os.environ.get("HARNESS_FLOW_DRIVE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 # Called when an approval is APPROVED, with the approval row. May be sync or
 # async; the resolver awaits it if it returns an awaitable. Optional — a service
@@ -96,9 +110,60 @@ class ApprovalService:
                 session_id=session_id, action=action,
                 task_id=task_id, requested_by=requested_by,
             )
+        # [A29] Record the approval on the case substrate (deferred A26 seam):
+        # link approval→flow + append `approval.requested`. Best-effort/isolated
+        # and flag-guarded — it can NEVER affect the approval gate itself.
+        self._record_approval_flow(
+            approval_id=approval_id, task_id=task_id,
+            event_type="approval.requested", actor="system",
+            to_state="pending",
+        )
         # The id is what the caller needs; carry it in reason ONLY here where it
         # is an identifier, not an error (documented exception).
         return CommandResult(True, reason=approval_id)
+
+    # -- substrate seam (A29) ---------------------------------------------
+
+    def _record_approval_flow(
+        self,
+        *,
+        approval_id: str,
+        task_id: Optional[str],
+        event_type: str,
+        actor: str,
+        to_state: Optional[str] = None,
+    ) -> None:
+        """Best-effort Work-substrate record for an approval lifecycle change.
+
+        Links the approval to the case that owns its task (via the task's
+        flow_run) and appends an append-only case event. Flag-guarded (no-op when
+        HARNESS_FLOW_DRIVE is OFF) and fully isolated: any failure logs and
+        returns — an approval must resolve/persist regardless. SHADOW only —
+        nothing reads these rows to drive execution. Missing task/flow ⇒ no-op
+        (never inferred)."""
+        try:
+            if not _flow_drive_enabled() or not task_id:
+                return
+            runs = self._db.list_flow_runs(task_id=task_id, limit=1)
+            if not runs:
+                return
+            flow_run_id = runs[0].get("flow_run_id")
+            if not flow_run_id:
+                return
+            # Idempotent link (unique-keyed); safe to repeat across request/resolve.
+            self._db.create_flow_link(
+                flow_run_id, "approval", approval_id, "approval",
+                created_by="system",
+            )
+            self._db.append_flow_event(
+                flow_run_id, event_type, actor,
+                to_state=to_state, entity_type="approval", entity_id=approval_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=approval_flow_record_failed approval_id=%s type=%s err=%s",
+                approval_id, event_type, e,
+            )
 
     # -- resolve -----------------------------------------------------------
 
@@ -139,6 +204,15 @@ class ApprovalService:
                 task_id=existing.get("task_id"),
                 approver=resolved_by,
             )
+
+        # [A29] Append the terminal `approval.resolved` case event (deferred A26
+        # seam). Actor is the operator who decided; to_state carries the decision.
+        # Best-effort/isolated/flag-guarded — never affects the gate.
+        self._record_approval_flow(
+            approval_id=approval_id, task_id=existing.get("task_id"),
+            event_type="approval.resolved", actor="operator",
+            to_state=decision,
+        )
 
         if decision == "approved" and self._on_approve is not None:
             row = self._db.get_approval(approval_id)

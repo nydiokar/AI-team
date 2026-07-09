@@ -48,6 +48,48 @@ def test_bucket_membership():
         assert case_bucket(row) in BUCKETS
 
 
+# --- A29 adversarial authority fixtures ------------------------------------
+
+def test_rework_status_buckets_as_blocked():
+    # A29 terminal-failure seam writes status='blocked'; rework variants join it.
+    assert case_bucket(_flow("a", status="blocked")) == "blocked"
+    assert case_bucket(_flow("a", status="rework")) == "blocked"
+    assert case_bucket(_flow("a", status="rework_requested")) == "blocked"
+
+
+def test_terminal_status_wins_over_stage():
+    # Authority rule: a terminal case status overrides a stale in-flight stage —
+    # a closed case that still carries current_stage='execution' renders closed,
+    # not active. (The A29 outcome seam sets status alongside the closure stage.)
+    assert case_bucket(_flow("a", status="closed", current_stage="execution")) == "closed"
+    assert case_bucket(_flow("a", status="blocked", current_stage="execution")) == "blocked"
+
+
+def test_conflict_flow_summary_vs_task_link_is_not_silently_resolved():
+    # Milestone F1/authority-rule scenario: the flow SUMMARY still says 'active'
+    # while a terminal task link exists in the ledger. The read model renders the
+    # summary bucket AS-IS (never fabricating 'closed') AND surfaces the task link,
+    # so the UI has both authoritative truths — it does not silently override one.
+    flow = _flow("case-1", current_stage="execution")  # summary: no terminal status
+    links = [
+        {"entity_type": "task", "entity_id": "t-done", "role": "root_task",
+         "created_by": "system", "created_at": "t1", "metadata_json": None},
+    ]
+    detail = build_case_detail(flow, links, event_count=1)
+    assert detail["case"]["bucket"] == "active"        # summary rendered honestly
+    assert detail["ledger"]["tasks"][0]["entity_id"] == "t-done"  # task truth present
+    assert detail["coverage"]["has_links"] is True
+
+
+def test_unlinked_case_renders_empty_not_inferred():
+    # No links ⇒ every ledger section explicitly empty; coverage says has_links=False.
+    detail = build_case_detail(_flow("bare"), [], event_count=0)
+    assert all(detail["ledger"][s] == [] for s in detail["ledger"])
+    assert detail["coverage"] == {
+        "has_links": False, "has_events": False, "has_parent": False, "is_root": True,
+    }
+
+
 # --- work list -------------------------------------------------------------
 
 def test_build_work_list_counts_buckets():

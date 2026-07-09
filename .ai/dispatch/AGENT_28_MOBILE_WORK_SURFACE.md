@@ -102,16 +102,14 @@ inference.
   live on the running gateway (403 without token, identical to `/api/sessions`).
 
 ### Residual gaps (honest)
-1. **Affiliations render "Standalone" until A29.** Confirmed the A26 write path
-   only stamps `task/root_task` + `child_flow` links today; **session-role links
-   are the A29 deferred seam** (handoff §5). The UI is built and correct — it will
-   light up the moment A29 lands those links, with ZERO UI change. Until then,
-   honest standalone is the correct render.
+1. ~~**Affiliations render "Standalone" until A29.**~~ **RESOLVED by A29:** the
+   session-role link seam (`session`/`worker` + `session.attached`) now lands at
+   flow creation; affiliations light up under `HARNESS_FLOW_DRIVE`, ZERO UI change.
 2. **No populated live screenshots.** The substrate only fills with
    `HARNESS_FLOW_DRIVE=on` (default OFF; a restart drops the operator session —
    handoff §3, operator's call). Empty-state and route wiring are verified; a
    populated device pass is the one remaining manual check, to run post-flag.
-3. `useSessionAffiliations` resolves one cached case-detail fetch per case (no
-   bulk reverse endpoint in A27); shares the WorkDetail query key so it is warm
-   and makes ZERO fetches while the substrate is empty. If a bulk session→case
-   index is wanted later, that is an A29/backend follow-up, not a UI change.
+3. ~~`useSessionAffiliations` resolves one cached case-detail fetch per case~~
+   **RESOLVED by A29:** replaced by one whole-substrate JOIN endpoint
+   (`GET /api/work/affiliations/sessions`) — no per-case fanout AND no 100-case
+   cap (which had produced false `Standalone` beyond the window).

@@ -275,3 +275,71 @@ The milestone is achieved when:
 
 Verdict: the milestone fits v0.6 M2 and should precede M3/M4 wiring. The dispatch split is
 properly ordered: schema first, then write path, then read model, then UI, then hardening.
+
+## A29 Closure — Milestone Achieved (2026-07-09)
+
+A29 ran the integrated adversarial review over A25–A28, folded in the deferred write-path
+seams, and removed the one truthfulness defect found in A28. **The milestone is achieved.**
+
+### Final shipped state (what is now true)
+
+- **Session affiliations are authoritative and whole-substrate.** A28 resolved a session's
+  case role by fetching each case's detail (O(N) requests) and reading `ledger.sessions`,
+  **capped at the first 100 cases** — a session linked to a case beyond that window rendered
+  a **false `Standalone`** (a silent violation of authority rule 7). A29 replaces this with a
+  single authoritative JOIN, `db.list_session_case_links` → `build_session_affiliations`,
+  exposed read-only at **`GET /api/work/affiliations/sessions`**. No per-case fanout, **no
+  cap** — every session link in the backlog resolves regardless of case-set size. A
+  multi-case session resolves to its **most recent** case deterministically. Absent ⇒
+  `Standalone`, never inferred.
+- **Deferred write-path seams are wired** (additive, `HARNESS_FLOW_DRIVE`-gated, best-effort
+  — OFF stays byte-identical; a write failure can never raise into task/approval execution):
+  - **Session attachment:** a flow's worker session is linked (`session`/`worker`) and
+    `session.attached` appended at flow creation, sourced from `task.metadata.session_id`
+    (the actual execution session — authoritative, not adjacency). This is what lights the
+    affiliation labels.
+  - **Terminal OUTCOME:** `closure` is only a *stage*; the case now records its real result —
+    success closes it (`flow.closed` + `flow_runs.status='closed'`), a failure blocks it
+    (`flow.status_changed`→`blocked` + `status='blocked'`). This is what moves a case out of
+    the `active` bucket into `closed`/`blocked` so the inbox sections are live.
+  - **Approval lifecycle:** an approval on a task that owns a flow links `approval`→flow and
+    appends `approval.requested` / `approval.resolved` (actor = system / operator).
+
+### Deliberately still deferred (honesty-first — no fabrication)
+
+- **`review.accepted` / `review.rework_requested` / `review.waived`** are NOT emitted: there
+  is no reviewer role or review gate in the harness yet (arrives with **M3**). Emitting them
+  now would fabricate an outcome the substrate cannot observe. The read model + UI already
+  render them the moment M3 produces them (zero change needed).
+- **`flow.interrupted` on cancellation** is not wired (the cancel path exits before the
+  completion seam). Low value until managed multi-step work exists; parked for M3.
+- **Mobile inbox list cap (100, newest-first).** The Work *inbox* still fetches the newest
+  100 cases — an intentional attention-first UX bound, not a correctness limit (the
+  *affiliation* index, the operator-flagged concern, is uncapped). `bucket_counts` reflect
+  the returned window. Revisit with server-side pagination if the active set routinely
+  exceeds 100.
+
+### Adversarial review outcomes (F-tags)
+
+- **F1 (false authority)** — held: `current_stage` never drives execution; terminal outcome
+  is written as an explicit `flow_events` record + summary `status`. Test:
+  `test_terminal_status_wins_over_stage`, `test_conflict_flow_summary_vs_task_link_is_not_silently_resolved`.
+- **F2 (heuristic linkage)** — **defect found & fixed**: the 100-case cap produced false
+  `Standalone`. Now a whole-substrate authoritative JOIN. The worker-session link is from
+  the real execution `session_id`, not timestamp/adjacency.
+- **F3 (autonomous drift)** — held: A29 adds only link/audit records + one read endpoint. No
+  Manager automation; all writes flag-gated + shadow.
+- **F4 (duplicate ledger)** — held: links only relate existing entities; execution truth
+  stays in `mesh_tasks`, gate truth in `approvals`.
+- **F7 (event bloat)** — held: new event payloads are compact references (`{outcome,...}`).
+- **F8 (migration risk)** — held: **no schema change** in A29 (reuses the existing
+  `flow_runs.status` column and A25 tables); flag-OFF byte-identical proven by tests.
+
+### Verification (2026-07-09)
+
+Backend: `test_flow_substrate_hardening.py`, `test_session_affiliations.py`,
+`test_work_read_model.py` (+ A29 authority fixtures), plus the A25–A28 suite —
+244 passed / 2 skipped in the substrate+control+approval regression. Frontend:
+`npm run typecheck` clean, `vitest` 90 passed (+4 `toSessionAffiliationIndex`). Live gateway
+untouched (`/health` ok); populating the substrate live still needs `HARNESS_FLOW_DRIVE=on`
++ a gateway restart (operator's call — drops the active session).
