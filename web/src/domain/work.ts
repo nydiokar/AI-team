@@ -145,4 +145,8 @@ export interface SessionAffiliation {
   flowRunId: string;
   role: CaseSessionRole;
   caseTitle: string;
+  /** Authoritative status of the affiliated case (from flow_runs.status). Lets
+   *  the label read a closed case as history, so an idle session is not shown as
+   *  if it were on active work. `null` when the case has no status yet. */
+  caseStatus: string | null;
 }

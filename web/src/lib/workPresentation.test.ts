@@ -5,6 +5,7 @@ import {
   roleLabel,
   roleTone,
   eventTypeLabel,
+  isClosedCaseStatus,
 } from "./workPresentation";
 import type { WorkBucket } from "../domain/work";
 
@@ -64,5 +65,24 @@ describe("workPresentation — event type humanization", () => {
   it("handles a bare (no-namespace) type and null", () => {
     expect(eventTypeLabel("blocked")).toBe("Blocked");
     expect(eventTypeLabel(null)).toBe("Event");
+  });
+});
+
+describe("workPresentation — closed case status (mirrors backend authority)", () => {
+  it("matches every terminal status in work_read_model._CLOSED_STATUSES", () => {
+    for (const s of ["closed", "superseded", "done", "complete", "completed"]) {
+      expect(isClosedCaseStatus(s)).toBe(true);
+    }
+  });
+
+  it("is case/whitespace-insensitive", () => {
+    expect(isClosedCaseStatus("  CLOSED ")).toBe(true);
+    expect(isClosedCaseStatus("Completed")).toBe(true);
+  });
+
+  it("treats active/blocked/absent statuses as NOT closed (never inferred)", () => {
+    for (const s of ["active", "blocked", "review", "needs_decision", "", null, undefined]) {
+      expect(isClosedCaseStatus(s)).toBe(false);
+    }
   });
 });

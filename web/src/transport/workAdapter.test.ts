@@ -250,10 +250,14 @@ describe("toSessionAffiliationIndex — whole-substrate, never fabricated", () =
     };
     const idx = toSessionAffiliationIndex(raw);
     expect(idx.size).toBe(2);
-    // Title derived by the SAME caseTitle logic as the Work list/detail.
+    // Title derived by the SAME caseTitle logic as the Work list/detail;
+    // authoritative case status carried verbatim for the label.
     expect(idx.get("s1")).toEqual({
       sessionId: "s1", flowRunId: "flow_1", role: "worker", caseTitle: "Ship it",
+      caseStatus: "active",
     });
+    // Absent case status is carried as null (never inferred).
+    expect(idx.get("s2")!.caseStatus).toBeNull();
     // Unknown role normalized; missing objective falls back to a short case id.
     expect(idx.get("s2")!.role).toBe("session");
     expect(idx.get("s2")!.caseTitle.startsWith("case ")).toBe(true);

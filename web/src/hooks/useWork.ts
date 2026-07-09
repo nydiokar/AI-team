@@ -22,8 +22,9 @@ import { useAuthStore } from "../stores/authStore";
 const EMPTY_AFFILIATIONS = new Map<string, SessionAffiliation>();
 
 const POLL_MS = 3000;
-// Case detail/lineage change far less often than the live list; the affiliation
-// index fans out one detail fetch per case, so we poll it gently.
+// Case detail/lineage/affiliations change far less often than the live list, so
+// we poll them gently. (The affiliation index is one whole-substrate query since
+// A29 — no per-case fanout.)
 const DETAIL_POLL_MS = 15000;
 
 const retry = (count: number, err: unknown) =>
@@ -93,8 +94,9 @@ export function useWorkGraph(flowRunId: string | undefined) {
  *
  * A session absent from the index has NO entry (the Sessions surface shows it as
  * standalone — never inferred). Multi-case links are deduplicated server-side to
- * the first (oldest) link; we never fabricate a "primary" the substrate did not
- * assert. With the substrate flag OFF the response is empty (zero cost).
+ * the session's MOST RECENT case (the endpoint is newest-link-first); we never
+ * fabricate a "primary" the substrate did not assert. With the substrate flag OFF
+ * the response is empty (zero cost).
  */
 export function useSessionAffiliations(): {
   index: Map<string, SessionAffiliation>;

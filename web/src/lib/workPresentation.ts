@@ -66,6 +66,22 @@ export function roleTone(role: CaseSessionRole): Tone {
   return ROLE_TONE[role] ?? "idle";
 }
 
+// Terminal (closed) case statuses — mirrors the backend authority set in
+// work_read_model._CLOSED_STATUSES so the UI reads "closed" the same way the
+// read model buckets it. A closed affiliated case is history, not active work.
+const CLOSED_CASE_STATUSES = new Set([
+  "closed",
+  "superseded",
+  "done",
+  "complete",
+  "completed",
+]);
+
+/** Whether an affiliated case's authoritative status is terminal (closed). */
+export function isClosedCaseStatus(status: string | null | undefined): boolean {
+  return CLOSED_CASE_STATUSES.has((status ?? "").trim().toLowerCase());
+}
+
 /** Humanize a flow_events event_type ("review.rework_requested" → "Rework requested"). */
 export function eventTypeLabel(eventType: string | null): string {
   if (!eventType) return "Event";
