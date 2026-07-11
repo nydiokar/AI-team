@@ -28,6 +28,17 @@
 [`dispatch/DISPATCH_LOG.md`](dispatch/DISPATCH_LOG.md); for forward priorities see the
 **Current Priorities** table below; for who-owns-what-doc see [`DOC_MAP.md`](DOC_MAP.md).
 
+> **🛑 KNOWN FOUNDATION DEFECT (2026-07-11 architecture audit) — fix BEFORE M3.1.** With
+> `HARNESS_FLOW_DRIVE` ON (live), `_enqueue_task` mints one `flow_run` (**Case**) + one
+> `session→worker` link **per turn**, and auto-stamps `impl_review`/`closure` + auto-closes
+> the Case on the single task's success — so a reused session shatters into one fake Case per
+> message and `Task finished == Case completed` (spec forbids this). It's a **writer-policy bug
+> over a sound substrate** (`flow_links` already supports N tasks/sessions per Case); M1/M2 are
+> valid, nothing rolls back. Fix = new milestone **M2.5** (`docs/Task_Harness_v0.7_AUTOMATION.md`),
+> packets `AGENT_36` (Case admission) + `AGENT_37` (continuity/closure). Full audit:
+> [`.ai/workflow_architecture_audit.md`](workflow_architecture_audit.md). **v0.7 supersedes
+> v0.6** (kept as trace).
+
 > **➡️ FORWARD POINTER (2026-07-08): the harness is now being AUTOMATED, and Work
 > Control Substrate is the next dependency.** The active
 > roadmap is [`docs/Task_Harness_v0.6_AUTOMATION.md`](../docs/Task_Harness_v0.6_AUTOMATION.md)
@@ -153,6 +164,8 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
+| **1** | **M2.5 Case Admission (A36)** — stop minting a Case per turn | Foundation defect from the 2026-07-11 audit; **blocks M3.1**. `flow_run` born per turn ⇒ session shatters into fake Cases; `Task finished == Case completed`. Writer-policy fix over the sound substrate. | **dispatched** — `AGENT_36_CASE_ADMISSION.md`; **unblocked, next to build** (branch `feat/m2.5-case-admission`). |
+| **2** | **M2.5 Case Continuity & Closure (A37)** — honest stages + authoritative + checkable close | Removes auto `impl_review`/`closure` stamps + task-end auto-close; `close_case` demands `completion_criteria` (MAX salvage). | **dispatched** — `AGENT_37_CASE_CONTINUITY_CLOSURE.md`; **depends on A36**. |
 | — | ~~Build Task Harness Workflow Kernel (v1)~~ | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). | **merged** (A9H, PR #8) on `main` — see Shipped Ledger + `docs/harness/` |
 | — | ~~WebUI-first surfacing of the Level-3 admission block~~ (A9H "Next") | A blocked Level-3 submit must read as "needs approval," not an opaque 500 / stuck session. | **built** (A16) on `feat/harness-block-surface` — awaiting operator merge |
 

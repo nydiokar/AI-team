@@ -386,6 +386,11 @@ class ClaudeCodeBackend(CodingBackend):
     def close(self, session: Session) -> None:
         self._driver.close(session)
 
+    def live_session_count(self) -> int:
+        """Count of pooled live backend sessions (SDK driver only; else 0)."""
+        counter = getattr(self._driver, "live_session_count", None)
+        return counter() if callable(counter) else 0
+
     def mark_sessions_lost(self) -> None:
         """Called on worker restart — all live SDK sessions are orphaned."""
         from src.backends.claude_driver import ClaudeSDKClientDriver

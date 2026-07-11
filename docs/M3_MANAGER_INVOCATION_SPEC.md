@@ -5,10 +5,25 @@
 *here*, after the F4 capability audit — not before). Nothing in this doc is built yet; it
 is the bounded plan the first M3 dispatch executes against.
 
-**Reads with:** `docs/Task_Harness_v0.6_AUTOMATION.md` (§1 target, §3 M3, §4 F4, §5
-guardrails) · `docs/harness/manager_invocation.md` (the role prompt this promotes to a
-gateway role) · `docs/harness/FLOW_MAP.md` · `docs/WORK_CONTROL_SUBSTRATE_MILESTONE.md`
-(the now-shipped substrate M3 hangs off).
+**Reads with:** `docs/Task_Harness_v0.7_AUTOMATION.md` (supersedes v0.6; §3 M2.5/M3) ·
+`docs/Task_Harness_v0.6_AUTOMATION.md` (trace) · `docs/harness/manager_invocation.md` (the
+role prompt this promotes to a gateway role) · `docs/harness/FLOW_MAP.md` ·
+`docs/WORK_CONTROL_SUBSTRATE_MILESTONE.md` (the now-shipped substrate M3 hangs off).
+
+> **⚠️ AMENDMENT 2026-07-11 (architecture audit) — Phase 3.1 is BLOCKED on a new prerequisite.**
+> The audit ([`.ai/workflow_architecture_audit.md`](../.ai/workflow_architecture_audit.md))
+> found this spec silently assumes a **durable per-objective Case** exists. It does not: today
+> `_enqueue_task` mints a fresh `flow_run` (Case) **per turn** plus a fresh `session→worker`
+> link per turn, and auto-closes the Case on the single task's success. So "one intent → one
+> dispatch → one review → close, **all durable**" (§1) is false until fixed.
+> - **New prerequisite milestone M2.5 (Case Admission & Affiliation)** — see
+>   `docs/Task_Harness_v0.7_AUTOMATION.md` §3 + packets `AGENT_36`/`AGENT_37` — must land
+>   **before Phase 3.1**.
+> - **§1/§5 correction:** a **reused worker session must stay in ONE Case** (accumulate
+>   `task_attached` links), NOT multiply `session→worker` links across turns. A worker the
+>   Manager dispatches **joins the Manager's Case** (shared membership), rather than spawning
+>   its own separate Case as Phase 3.0's `dispatch_worker` currently does.
+> - Phase 3.0 dispatch/wait plumbing stays valid; it just must not define Case semantics.
 
 ---
 

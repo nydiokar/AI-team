@@ -42,13 +42,18 @@ class SessionService:
     """Transport-neutral session lifecycle. Owns *session lifecycle only*."""
 
     def __init__(self, session_store: SessionStore,
-                 repo_path_validator: Optional[Callable[[str], Optional["CommandResult"]]] = None):
+                 repo_path_validator: Optional[Callable[[str], Optional["CommandResult"]]] = None,
+                 remote_close_dispatcher: Optional[Callable[[Session], None]] = None):
         # Reuse the orchestrator's store — never construct a second one.
         self.store = session_store
         # Injectable so tests can supply a permissive validator and the real path
         # policy (PathResolver against the configured allowed_root) isn't reached
         # implicitly. Defaults to the real local-repo validator (Feature #38).
         self._repo_path_validator = repo_path_validator or self._validate_local_repo_path
+        # Injected by the orchestrator: given a remote (mesh) session, enqueue a
+        # close_session task pinned to its owning node so the worker tears down
+        # the live backend process. Absent ⇒ legacy no-op (remote close skipped).
+        self._remote_close_dispatcher = remote_close_dispatcher
 
     def create_session(self, *, backend: str, repo_path: str,
                         chat_id: Optional[int] = None,
@@ -157,10 +162,23 @@ class SessionService:
                         s.session_id, s.backend, e,
                     )
             elif not is_local:
-                logger.info(
-                    "event=session_backend_close_remote_skipped session_id=%s backend=%s node=%s",
-                    s.session_id, s.backend, s.machine_id,
-                )
+                if self._remote_close_dispatcher is not None:
+                    try:
+                        self._remote_close_dispatcher(s)
+                        logger.info(
+                            "event=session_backend_close_remote_dispatched session_id=%s backend=%s node=%s",
+                            s.session_id, s.backend, s.machine_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "event=session_remote_close_dispatch_failed session_id=%s backend=%s node=%s err=%s",
+                            s.session_id, s.backend, s.machine_id, e,
+                        )
+                else:
+                    logger.info(
+                        "event=session_backend_close_remote_skipped session_id=%s backend=%s node=%s",
+                        s.session_id, s.backend, s.machine_id,
+                    )
             s.backend_session_id = ""
         s.status = SessionStatus.CLOSED
         self.store.save(s)

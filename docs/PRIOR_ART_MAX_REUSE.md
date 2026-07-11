@@ -180,6 +180,35 @@ and **no** new state model. Converges, does not diverge.
 
 ---
 
+## 8. Re-anchor after the 2026-07-11 architecture audit (v0.7 / M2.5)
+
+This map predates the [workflow architecture audit](../.ai/workflow_architecture_audit.md) and
+the **M2.5 Case Admission** milestone (`Task_Harness_v0.7_AUTOMATION.md`). The audit changes
+*where two salvages land* — the salvages themselves stand, they just anchor better now:
+
+- **`completion_criteria` is PROMOTED from an M4 packet field to the M2.5 Case-closure
+  contract.** The audit proved Cases currently **auto-close on task-end** and that even the
+  M2.5 fix (authoritative-actor-only closure, `AGENT_37`) is a rubber-stamp without a checkable
+  done-condition. Tier B already called `completion_criteria` "the single most useful field to
+  steal (fights the #1 scar)" — it is now wired into `open_case` (`AGENT_36`) + `close_case`
+  (`AGENT_37`, item 3b): a Case cannot reach `closed` with unmet, unwaived criteria. **M3.2**
+  later automates a *reviewer verifying* those criteria. This is the salvage's highest-value
+  landing and it was invisible until a durable Case existed to attach a done-condition to.
+- **The decomposer/TaskExpert finally has a concrete home.** §4 said MAX "plugs in at Stage 1
+  DRAFT" and sequencing is "a parent flow with ordered child dispatches." With M2.5 that is now
+  literal: an expanded objective is **`open_case()` + N `task_attached` links forming a DAG**
+  (dependency edges ride `flow_links.metadata_json` / `parent_flow_run_id`) — **one Case
+  containing the task-DAG, NOT N orphan flow_runs.** No new table; the seam exists. Design M4
+  against this container, not against per-turn rows.
+- **SupervisorAgent cautionary tale binds M3.1, not M3-generic.** The "stalled at the
+  coordination layer" evidence (Tier A) is now the explicit guardrail for **M3.1 Manager role**
+  (`M3_MANAGER_INVOCATION_SPEC.md`): one role driving a chain of command, sole authoritative
+  Case closer — not a team-of-agents platform.
+- **Everything else is unchanged:** Tier D stays discarded; `BLOCKED`→`status=blocked` and
+  `ExecutionHistoryEntry`→`flow_events` are already shipped; `human_task`/`agent_task` ≈
+  approvals + the audit's "request user input" gap (M3.1). No new milestone; converges on
+  M2.5/M3/M4.
+
 ## 7. Cross-references
 - Kernel: `docs/Task_Harness_v0.4.md` (§2.1 packet, §5 review, §11 fields, §12 optional adapters, §13 build order, §7 memory rule).
 - Automation roadmap: `docs/Task_Harness_v0.6_AUTOMATION.md` (§0.2 anti-goal bound, M2 lineage, M3 Manager, M4 spec-authoring).
