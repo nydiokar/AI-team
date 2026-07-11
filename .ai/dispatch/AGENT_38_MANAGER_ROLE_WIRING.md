@@ -62,8 +62,16 @@ the same Case · worker completion leaves the Case OPEN · same Manager Session 
 worker · Manager closes via A37 `close_case` · architecture records role/skill/tool/policy/adapter
 separation · ordinary sessions and flag-OFF behavior byte-identical.
 
-**Out of scope:** generic skill loader, full tool surface, reviewer role (3.2), durable relay +
-cost caps (3.3), multi-worker. Live proof deferred to the combined A35+3.1 acceptance run.
+**Out of scope:** generic skill loader, full tool surface, durable relay + cost caps (3.3),
+multi-worker. Live proof deferred to the combined A35+3.1 acceptance run.
+
+**KNOWN GAP (→ M3.2, not a new role):** the Manager already REVIEWS worker deliverables (core
+duty, shipped here in `roles/manager.md`), but the loop emits **no `review.*` event** when it
+accepts/reworks — so the Case ledger shows dispatch→`task.finished`→close *without the Manager's
+verdict*. M3.2 = a `record_review` tool wiring that verdict into `flow_events` (`review.accepted`/
+`review.rework_requested`/`review.waived`, vocab already reserved in `db.py`) + a close-gate on
+unresolved rework + an optional distinct *plan*-reviewer pass. "Reviewer role" is a misnomer — the
+reviewer is the Manager; 3.2 is durability plumbing only.
 
 ---
 

@@ -23,6 +23,17 @@ Confirm **live** that a gateway-spawned Claude session, given `mcp_manager`, can
 
 If any part fails, that failure *is* M3's first real job (as §4 F4 warns) — capture it here.
 
+> **⚠️ SCOPE UPDATE (2026-07-12) — run this COMBINED with M3.1 (A38, PR #10).** A38 landed the
+> Manager-role boot + `case_id` JOIN + `close_case`, so this spike should now also flip
+> `MANAGER_ROLE_ENABLED=1` and additionally verify: (a) a real Claude manager session boots with
+> the role prompt (`system_prompt` preset+append took, `manager_v1` tools granted), (b)
+> `POST /api/manager` opens ONE Case (`case_role="manager"`), (c) the dispatched worker **JOINS**
+> that Case (`task` link, NO child Case), (d) `wait_for_worker(task_id, flow_run_id=<case_id>)`
+> resolves via the Case timeline, (e) `close_case` closes it. **`review.*` events are OUT OF SCOPE
+> here** — the Manager reviews, but wiring its verdict into `flow_events` is **M3.2**; expect NO
+> `review.*` in the timeline and do NOT flag its absence as a bug. **Do the cheap A39 integration
+> proof (no paid CLI) BEFORE spending on this run** — see `.ai/CONTEXT.md` M3 sequencing note.
+
 ---
 
 ## Preconditions (verify first — all currently satisfied on the live box)
