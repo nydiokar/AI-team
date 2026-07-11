@@ -207,6 +207,13 @@ class Session:
     cache_unhealthy_count: int = 0
     previous_backend_session_ids: List[str] = None  # history when rolling over
 
+    # [A36] Durable Case affiliation. A session attached to (or opened for) a
+    # managed Case carries its flow_run_id + role here so membership survives
+    # across turns — set on attach/open, cleared on Case close (A37). None ⇒ the
+    # session is standalone (Pattern A: many Tasks, no Case).
+    current_case_id: Optional[str] = None
+    case_role: Optional[str] = None     # "manager" | "worker" | "reviewer"
+
     def __post_init__(self):
         if self.last_files_modified is None:
             self.last_files_modified = []

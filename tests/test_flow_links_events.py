@@ -4,7 +4,7 @@ A25 — Work Control Substrate schema tests: flow_links + flow_events.
 Proves the additive migration-23 substrate:
   * fresh + re-opened DBs both carry flow_links, flow_events, and the optional
     convenience flow_run_id columns on mesh_tasks/approvals;
-  * the migration is idempotent (re-open is a no-op, schema_version stays 23);
+  * the migration is idempotent (re-open is a no-op, schema_version stays 24);
   * create_flow_link round-trips and is IDEMPOTENT on the unique key;
   * list_flow_links supports forward (by case) and reverse (by entity) lookups;
   * flow_events are append-only and preserve insertion order;
@@ -48,7 +48,7 @@ def test_fresh_db_has_substrate_schema(tmp_path):
     # Optional convenience columns on hot tables.
     assert "flow_run_id" in _columns(db, "mesh_tasks")
     assert "flow_run_id" in _columns(db, "approvals")
-    assert _schema_version(db) == 23
+    assert _schema_version(db) == 24
 
 
 def test_reopen_is_idempotent(tmp_path):
@@ -57,7 +57,7 @@ def test_reopen_is_idempotent(tmp_path):
     v1 = _schema_version(db1)
     # Re-open the same file → migrations must be a no-op, not re-applied/erroring.
     db2 = MeshDB(str(p))
-    assert _schema_version(db2) == v1 == 23
+    assert _schema_version(db2) == v1 == 24
     assert "id" in _columns(db2, "flow_links")
 
 
