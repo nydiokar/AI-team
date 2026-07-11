@@ -31,7 +31,7 @@ operator objective
 |---|---|---|
 | **1 Role profile** (stable identity) | `docs/harness/roles/manager.md` (NEW, provider-neutral) | Extract stable identity/authority/boundaries/obligations/decision-vocab/honesty from `manager_invocation.md`. **No** objective/Case/branch/date/provider config. `manager_invocation.md` stays as manual compat wrapper. |
 | **2 Skills** (reusable procedures) | `docs/harness/skills/<skill>/SKILL.md` (future) | **Seam + boundaries recorded only.** No generic loader. First loop's procedure inlined in the role. Boundaries: ground-and-frame · open/decompose-case · dispatch-worker · supervise/redirect · review-delivery · bounded-rework · close-or-derive. |
-| **3 Tools** (operational interface) | `scripts/mcp_manager.py` | Reuse `dispatch_worker`/`wait_for_worker`; add minimal `get_case`. Worker joins Manager's Case via `parent_flow_run_id`→A36 admission. Target surface (Case/Task/Timeline/Worker/Evidence/Decision) recorded, `manager_v1` profile. |
+| **3 Tools** (operational interface) | `scripts/mcp_manager.py` | Reuse `dispatch_worker`/`wait_for_worker`; add `get_case` (read) + `close_case` (Decision). Worker joins Manager's Case via the new `case_id` JOIN signal (admission branch J). `manager_v1` = 4 tools; wider surface (Task/Timeline/Evidence) recorded for later. |
 | **4 Gateway workflow/state** (durable progression) | `orchestrator` / `db` | Unchanged. `open_case` (`orchestrator.py:1895`), `close_case` (`:1927`), admission (`:1612`). Manager owns judgment; gateway owns durable progression + gates. |
 | **5 Policy & schemas** | `db.CaseCloseBlocked` (`db.py:61`); new Pydantic in `src/core/roles.py` | Policy already machine-enforced (Level-3, open-child, criteria) — relied on, not re-encoded in the prompt. New schemas: `ManagerInvocation`, `ManagerDecision`. Dynamic data travels here / as first user turn, never the system role. |
 | **6 Provider seam + Claude adapter** | `src/core/roles.py` (neutral) + `src/backends/claude_role_adapter.py` | `AgentRoleDefinition{role_id, system_instructions, declared_skills, tool_profile, output_contract}` — **no Claude imports.** ONE Claude adapter → `system_prompt={"type":"preset","preset":"claude_code","append":<manager.md>}` (verified `SystemPromptPreset`, SDK types.py:36) **+** manager tools. **Preset preserved, instructions appended.** Thin seam only — no registry, no Codex adapter (decided 2026-07-12). |
@@ -82,15 +82,31 @@ cost caps (3.3), multi-worker. Live proof deferred to the combined A35+3.1 accep
    (legacy A34 process-wide grant preserved when flag OFF).
 5. ✅ `orchestrator.invoke_manager()` + `POST /api/manager` (`ManagerInvokeBody`) — create
    session → `open_case` (`case_role="manager"`) → deliver objective as first assignment.
-6. ✅ `mcp_manager.py` — `get_case` tool + `case_id` (JOIN) arg on `dispatch_worker`; admission
-   branch (J): a `join_case_id` attaches the worker task to the Manager's open Case (task link +
-   `task.attached`), verified-open, stashed under `_CASE_ID_META_KEY` ⇒ completion leaves the
+6. ✅ `mcp_manager.py` — `get_case` + `close_case` tools + `case_id` (JOIN) arg on `dispatch_worker`;
+   admission branch (J): a `join_case_id` attaches the worker task to the Manager's open Case (task
+   link + `task.attached`), verified-open, stashed under `_CASE_ID_META_KEY` ⇒ completion leaves the
    Case OPEN. No child Case.
-7. ✅ `docs/ENV_FEATURE_FLAGS.md` row (`MANAGER_ROLE_ENABLED`); `tests/test_manager_role.py` (14
-   new). `test_mcp_manager` tool-set assertion updated for `get_case`.
+7. ✅ `docs/ENV_FEATURE_FLAGS.md` row (`MANAGER_ROLE_ENABLED`); `tests/test_manager_role.py`;
+   `test_mcp_manager` tool-set assertion updated.
 
-**Verification:** 919 passed / 15 skipped (2 pre-existing env fails unrelated: push VAPID, mcp_jobs
-Windows-sleep). Flag OFF ⇒ byte-identical (A34 manager-tools suite + full admission/closure/lineage
-suites green). **Live proof (Claude preset+append boot, per-session tools, real dispatch) deferred
-to the operator-gated combined A35+3.1 acceptance run.** Acceptance assertions covered by the new
-suite except the paid live boot.
+## Adversarial-review fixes (2026-07-12, post-build)
+
+Traced the loop end-to-end against intent; fixed three real gaps that would have broken the loop:
+
+- **`wait_for_worker` couldn't observe a JOINED worker.** A joined worker owns NO flow_run, so
+  `wait_for_worker(task_id)` (which resolves a flow_run *owned* by the task) returned None and
+  looped to timeout — and `dispatch_worker`'s own "Next" hint recommended exactly that broken form.
+  Fix: when dispatched with `case_id`, the hint + tool desc now direct
+  `wait_for_worker(task_id, flow_run_id=<case_id>)`, which watches the Case timeline filtered by
+  the worker's `task.finished` (`_terminal_task_event` already filters by `task_id`).
+- **Manager had no way to CLOSE its Case** (acceptance said it must). `orchestrator.close_case`
+  had no endpoint/tool. Fix: `POST /api/cases/{id}/close` (returns the structured
+  `{ok,closed,reason}` at 200 — a blocked close is a decision signal, not an HTTP error) + a
+  `close_case` MCP tool (now in `manager_v1`).
+- **`MANAGER_ROLE_ENABLED` silently half-works without `HARNESS_FLOW_DRIVE`.** invoke_manager now
+  logs a warning; the flag doc records the dependency.
+
+**Verification:** full suite green (2 pre-existing env fails unrelated: push VAPID, mcp_jobs
+Windows-sleep). Flag OFF ⇒ byte-identical (A34 manager-tools + full admission/closure/lineage suites
+green). **Live proof (Claude preset+append boot, per-session tools, real dispatch/close) deferred to
+the operator-gated combined A35+3.1 acceptance run.**

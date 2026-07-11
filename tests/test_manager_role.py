@@ -85,6 +85,7 @@ def test_claude_adapter_appends_to_preset():
         "mcp__manager__dispatch_worker",
         "mcp__manager__wait_for_worker",
         "mcp__manager__get_case",
+        "mcp__manager__close_case",
     ]
 
 
@@ -264,3 +265,98 @@ def test_api_manager_ok(monkeypatch):
                     json={"objective": "x", "repo_path": "/x"})
     assert r.status_code == 200
     assert r.json() == {"ok": True, "session_id": "s1", "case_id": "c1", "task_id": "t1"}
+
+
+# ---------------------------------------------------------------------------
+# Tool: dispatch_worker JOIN hint + wait_for_worker resolution for a joined worker
+# ---------------------------------------------------------------------------
+
+def test_dispatch_worker_join_hint_points_wait_at_case(monkeypatch):
+    import scripts.mcp_manager as m
+    monkeypatch.setattr(m, "_api_request", lambda *a, **k: {"task_id": "wt-9", "session": {}})
+    out = m._dispatch_worker({"objective": "do a bounded thing", "case_id": "case-7"})
+    # A joined worker has no own flow_run — the wait hint MUST carry the Case id.
+    assert "wait_for_worker(task_id='wt-9', flow_run_id='case-7')" in out
+    assert "JOINS" in out
+
+
+def test_wait_for_worker_resolves_joined_worker_via_case_timeline(monkeypatch):
+    import scripts.mcp_manager as m
+
+    def fake(method, path, *a, **k):
+        if path.startswith("/api/flows/"):
+            return {"flow": {"status": None, "current_stage": "execution"}}  # Case OPEN
+        if "/timeline" in path:
+            return {"events": [
+                {"event_type": "task.attached", "entity_id": "wt-9"},
+                {"event_type": "task.finished", "entity_id": "wt-9",
+                 "payload_json": {"outcome": "success"}},
+            ]}
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr(m, "_api_request", fake)
+    out = m._wait_for_worker({"task_id": "wt-9", "flow_run_id": "case-7", "poll_interval": 1})
+    assert "DONE" in out and "task.finished" in out
+
+
+def test_wait_for_worker_ignores_other_tasks_finished_on_case(monkeypatch):
+    """The Manager's own turn also emits task.finished on the Case — wait must
+    filter by the worker's task_id and NOT return on the manager's event."""
+    import scripts.mcp_manager as m
+    state = {"polls": 0}
+
+    def fake(method, path, *a, **k):
+        if path.startswith("/api/flows/"):
+            return {"flow": {"status": None}}
+        if "/timeline" in path:
+            state["polls"] += 1
+            events = [{"event_type": "task.finished", "entity_id": "mgr-turn-1",
+                       "payload_json": {"outcome": "success"}}]
+            if state["polls"] >= 2:  # worker finishes on the 2nd poll
+                events.append({"event_type": "task.finished", "entity_id": "wt-9",
+                               "payload_json": {"outcome": "success"}})
+            return {"events": events}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(m, "_api_request", fake)
+    out = m._wait_for_worker({"task_id": "wt-9", "flow_run_id": "case-7", "poll_interval": 0.01})
+    assert "DONE" in out
+    assert state["polls"] >= 2  # did not falsely return on the manager's own task.finished
+
+
+# ---------------------------------------------------------------------------
+# Tool: close_case + POST /api/cases/{id}/close (the Decision surface)
+# ---------------------------------------------------------------------------
+
+def test_close_case_tool_success_and_refusal(monkeypatch):
+    import scripts.mcp_manager as m
+
+    monkeypatch.setattr(m, "_api_request", lambda *a, **k: {"ok": True, "closed": True, "reason": None})
+    assert "CLOSED" in m._close_case({"case_id": "c1"})
+
+    monkeypatch.setattr(
+        m, "_api_request",
+        lambda *a, **k: {"ok": False, "closed": False, "reason": "completion_criteria not reconciled: ['tests green']"},
+    )
+    refused = m._close_case({"case_id": "c1"})
+    assert "REFUSED" in refused and "completion_criteria" in refused
+
+
+def test_api_close_case_returns_result_dict(monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.control import control_api
+
+    calls = {}
+
+    def _close(case_id, *, outcome="closed", actor="operator", criteria_reconciliation=None):
+        calls.update(case_id=case_id, actor=actor, outcome=outcome)
+        return {"ok": False, "closed": False, "reason": "case has 1 open child flow(s)"}
+
+    orch = types.SimpleNamespace(close_case=_close)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
+    client = TestClient(control_api.build_control_api(orch))
+    r = client.post("/api/cases/c1/close", headers={"Authorization": "Bearer tok"}, json={})
+    # A blocked close is a normal 200 decision signal, not an HTTP error.
+    assert r.status_code == 200
+    assert r.json()["reason"] == "case has 1 open child flow(s)"
+    assert calls["case_id"] == "c1" and calls["actor"] == "manager"

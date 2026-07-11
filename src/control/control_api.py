@@ -121,6 +121,14 @@ class ManagerInvokeBody(BaseModel):
     branch: Optional[str] = None
 
 
+class CaseCloseBody(BaseModel):
+    """[A38] Authoritatively close a Case (A37 close_case). ``outcome`` must be a
+    terminal status; ``criteria_reconciliation`` records each completion_criterion
+    as met or waived-with-reason so an honest close can proceed."""
+    outcome: str = "closed"
+    criteria_reconciliation: Optional[List[Dict[str, Any]]] = None
+
+
 class BindBody(BaseModel):
     chat_id: Optional[int] = None
 
@@ -1023,6 +1031,21 @@ def build_control_api(orchestrator) -> FastAPI:
 
             _idem_put("manager", idempotency_key, result)
             return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/close", dependencies=[Depends(_require_auth)])
+    def api_close_case(case_id: str, body: CaseCloseBody) -> JSONResponse:
+        """[A38] Authoritative Case closure (A37 ``close_case``) — the Manager's
+        Decision surface. Returns the structured ``{ok, closed, reason}``: a
+        REFUSAL (``ok:false`` with a human ``reason`` — unmet criteria, open child
+        work, pending approval, unknown case) is a normal 200 decision signal the
+        Manager must act on, NOT an HTTP error. ``close_case`` never raises."""
+        result = orchestrator.close_case(
+            case_id,
+            outcome=body.outcome,
+            actor="manager",
+            criteria_reconciliation=body.criteria_reconciliation,
+        )
+        return JSONResponse(result)
 
     @app.post("/api/sessions/{session_id}/bind", dependencies=[Depends(_require_auth)])
     def api_bind_session(session_id: str, body: BindBody) -> JSONResponse:

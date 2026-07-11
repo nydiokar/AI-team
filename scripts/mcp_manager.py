@@ -267,10 +267,22 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
             f"SHADOW record — confirm via /api/flows, don't assume)."
         )
     lines.append("")
-    lines.append(
-        f"Next: call wait_for_worker(task_id='{task_id}') to block until the worker's "
-        f"flow reaches a terminal/attention status. That poll does NOT hold a task slot."
-    )
+    if case_id:
+        # [A38] A JOINED worker has NO flow_run of its own — its completion is a
+        # `task.finished` event on the Manager's Case timeline. wait_for_worker must
+        # therefore be given the Case as flow_run_id (task_id alone can't resolve a
+        # flow that does not exist); it filters the Case timeline by this task_id.
+        lines.append(
+            f"Next: call wait_for_worker(task_id='{task_id}', flow_run_id='{case_id}') to "
+            f"block until this worker's task.finished lands on the Case timeline. (A joined "
+            f"worker has no own flow_run, so task_id ALONE cannot resolve it.) The poll holds "
+            f"no task slot."
+        )
+    else:
+        lines.append(
+            f"Next: call wait_for_worker(task_id='{task_id}') to block until the worker's "
+            f"flow reaches a terminal/attention status. That poll does NOT hold a task slot."
+        )
     return "\n".join(lines)
 
 
@@ -445,6 +457,42 @@ def _get_case(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: close_case  (the Manager's Decision surface — A37 authoritative close)
+# ---------------------------------------------------------------------------
+
+def _close_case(args: Dict[str, Any]) -> str:
+    """Authoritatively close the Manager's Case via A37 ``close_case``.
+
+    A REFUSAL (unmet completion_criteria / open child work / pending approval) is a
+    normal decision signal, not an error — the Manager must resolve it and retry.
+    ``criteria_reconciliation`` is an optional list recording each criterion as met
+    or waived-with-reason."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    outcome = _bounded_text(args.get("outcome"), "outcome", 32, required=False) or "closed"
+    reconciliation = args.get("criteria_reconciliation")
+    body: Dict[str, Any] = {"outcome": outcome}
+    if reconciliation is not None:
+        if not isinstance(reconciliation, list):
+            raise ValueError("criteria_reconciliation must be a list")
+        body["criteria_reconciliation"] = reconciliation
+
+    result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/close", body)
+    ok = bool(result.get("ok"))
+    closed = bool(result.get("closed"))
+    reason = result.get("reason")
+    if ok and closed:
+        return f"Case {case_id} CLOSED (outcome={outcome!r})."
+    if ok and not closed:
+        return f"Case {case_id} was already terminal — idempotent no-op."
+    return (
+        f"Close REFUSED for Case {case_id}: {reason}. This is a DECISION SIGNAL, not an error — "
+        f"resolve it (finish/verify the work in git, reconcile or waive-with-reason each "
+        f"completion criterion, close any open child work, or resolve the pending approval) and "
+        f"retry close_case."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool catalogue
 # ---------------------------------------------------------------------------
 _TOOLS = [
@@ -489,19 +537,45 @@ _TOOLS = [
         },
     },
     {
+        "name": "close_case",
+        "description": (
+            "Authoritatively close the Manager's Case (A37 close_case) — the Decision surface. "
+            "REFUSES (returns a reason, not an error) while completion_criteria are unreconciled, "
+            "a child flow is still open, or a required approval is pending: a finished worker Task "
+            "does NOT close the Case, only this call does. Pass criteria_reconciliation to record "
+            "each criterion met or waived-with-reason. Verify the work in git BEFORE closing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Case (flow_run) id to close — the Manager's own case."},
+                "outcome": {"type": "string", "description": "Terminal status: 'closed' (default) or 'cancelled'."},
+                "criteria_reconciliation": {
+                    "type": "array",
+                    "description": "Optional list reconciling each completion criterion, e.g. [{\"criterion\":\"tests green\",\"met\":true}] or waived-with-reason.",
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["case_id"],
+        },
+    },
+    {
         "name": "wait_for_worker",
         "description": (
             "Block (read-only long-poll) until a dispatched worker's flow reaches a terminal "
             "status (done/failed/cancelled) or an attention status (blocked/review/needs-decision), "
-            "or until timeout. Give task_id (preferred) or flow_run_id. This poll does NOT hold a "
-            "worker task slot, so waiting here cannot starve the slot the child worker needs. "
-            "On return, verify the worker's committed diff in git — never trust a self-reported summary."
+            "or until timeout. Give task_id (preferred) or flow_run_id. **For a worker dispatched "
+            "into your Case (dispatch_worker with case_id), pass BOTH task_id AND flow_run_id=<your "
+            "case_id>** — a joined worker has no flow_run of its own, so task_id alone cannot resolve "
+            "it; the poll then watches your Case timeline for that task's task.finished. This poll "
+            "does NOT hold a worker task slot, so waiting here cannot starve the slot the worker "
+            "needs. On return, verify the worker's committed diff in git — never trust a self-reported summary."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "The task_id returned by dispatch_worker."},
-                "flow_run_id": {"type": "string", "description": "The flow_run id, if already known (skips task->flow resolution)."},
+                "flow_run_id": {"type": "string", "description": "The flow_run id. REQUIRED (alongside task_id) for a worker joined into your Case — pass your own case_id. Optional otherwise (skips task->flow resolution)."},
                 "timeout": {"type": "number", "description": f"Max seconds to wait (default {int(_WAIT_TIMEOUT_DEFAULT)}, max {int(_WAIT_TIMEOUT_MAX)})."},
                 "poll_interval": {"type": "number", "description": f"Seconds between polls (default {int(_POLL_INTERVAL_DEFAULT)}, min {int(_POLL_INTERVAL_MIN)})."},
             },
@@ -513,6 +587,7 @@ _TOOL_IMPLS = {
     "dispatch_worker": _dispatch_worker,
     "wait_for_worker": _wait_for_worker,
     "get_case": _get_case,
+    "close_case": _close_case,
 }
 
 # ---------------------------------------------------------------------------

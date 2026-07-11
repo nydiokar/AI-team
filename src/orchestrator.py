@@ -2066,6 +2066,17 @@ class TaskOrchestrator(ITaskOrchestrator):
         if not self._manager_role_enabled():
             return {"ok": False, "reason": "manager_role_disabled"}
 
+        # The Manager's Case machinery (per-turn attach + worker JOIN + task.finished
+        # timeline) is all guarded by HARNESS_FLOW_DRIVE. With it OFF the Manager still
+        # boots with its role prompt, but workers can't join the Case and wait_for_worker
+        # has no timeline to watch — surface that mismatch instead of failing silently.
+        if not self._harness_flow_drive_enabled():
+            logger.warning(
+                "event=manager_invoke_without_flow_drive session_repo=%s — MANAGER_ROLE_ENABLED "
+                "is ON but HARNESS_FLOW_DRIVE is OFF; Case attach/JOIN/timeline are inert.",
+                repo_path,
+            )
+
         result = self.session_service.create_session(
             backend=backend, repo_path=repo_path, model=model, node_id=node_id,
             origin=SessionOrigin(channel="web", kind="user"), bind_chat=False,
