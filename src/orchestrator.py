@@ -1710,41 +1710,78 @@ class TaskOrchestrator(ITaskOrchestrator):
             if db is None:
                 return None
             drive_on = self._harness_flow_drive_enabled()
-            initial_stage = "intent" if drive_on else "dispatch_start"
-            # [M2] Dispatch lineage — RECORD only. When HARNESS_FLOW_DRIVE is ON
-            # and this child task was stamped with parent linkage (see
-            # _stamp_child_dispatch_lineage), persist parent_flow_run_id /
-            # dispatched_by / dispatch_file onto the child's flow_runs row so
-            # child→parent is recoverable via db.list_child_flow_runs. When OFF,
-            # `lineage` stays empty ⇒ create_flow_run is called exactly as A19
-            # did (byte-identical). NOTHING reads these columns to drive execution.
-            lineage = self._dispatch_lineage_fields(task) if drive_on else {}
-            flow_run_id = db.create_flow_run(task.id, initial_stage, **lineage)
-            if flow_run_id and drive_on:
-                try:
-                    if task.metadata is None:
-                        task.metadata = {}
-                    task.metadata[self._FLOW_RUN_META_KEY] = flow_run_id
-                except Exception:
-                    pass
-                # [A26] Populate authoritative case relationships/events at the
-                # moment the flow is created. Best-effort/isolated — see the
-                # _record_flow_link/_record_flow_event wrappers. Flag-gated (only
-                # under drive_on) ⇒ OFF stays byte-identical to A19/A22.
+
+            # OFF path — byte-identical to A19: exactly one dispatch-start RECORD
+            # per task, no admission, no stash. Nothing reads current_stage.
+            if not drive_on:
+                return db.create_flow_run(task.id, "dispatch_start")
+
+            # ---- Flag ON: A36 Case-admission policy -------------------------
+            # The retired per-turn mint is replaced. A turn now: (A) BIRTHS a Case
+            # iff it is a dispatched child (M2 lineage) or an explicit managed
+            # root; (B) ATTACHES to the session's open Case; or (C) runs Case-less
+            # (Pattern A: standalone session, many Tasks, no Case). Only (A)
+            # creates a flow_run — so a reused session no longer shatters into one
+            # fake Case per turn.
+            # [M2] Dispatch lineage — RECORD only. A stamped child carries
+            # parent_flow_run_id / dispatched_by / dispatch_file (see
+            # _stamp_child_dispatch_lineage); persisted onto the child's row so
+            # child→parent is recoverable via db.list_child_flow_runs.
+            lineage = self._dispatch_lineage_fields(task)
+            parent_fid = lineage.get("parent_flow_run_id")
+            session_id = str((task.metadata or {}).get("session_id") or "").strip()
+            managed = bool((task.metadata or {}).get(self._MANAGED_CASE_META_KEY))
+
+            # (B) ATTACH — a non-birthing turn on a session that already owns an
+            # open Case joins it as a Task: a per-turn `task` link + a
+            # `task.attached` event, and NOTHING else (no new flow_run, no second
+            # session link). The Case id is stashed under `_CASE_ID_META_KEY`
+            # (NOT `_FLOW_RUN_META_KEY`) precisely so the per-turn stage/terminal
+            # helpers do not fire on the shared Case and auto-close it.
+            if not lineage and not managed and session_id:
+                open_case_id = db.find_open_case_for_session(session_id)
+                if open_case_id:
+                    self._stash_task_meta(task, self._CASE_ID_META_KEY, open_case_id)
+                    self._record_flow_link(
+                        open_case_id, "task", task.id, "task", created_by="system",
+                    )
+                    self._record_flow_event(
+                        open_case_id, "task.attached", "system",
+                        entity_type="task", entity_id=task.id,
+                    )
+                    self._set_session_case_affiliation(session_id, open_case_id)
+                    return None
+
+            # (C) Standalone — no dispatch lineage, not managed, no open Case to
+            # join ⇒ create nothing. Ordinary ad-hoc interaction needs no Case.
+            if not lineage and not managed:
+                return None
+
+            # (A) BIRTH a Case (flow_run): a dispatched task (M2 lineage — a child
+            # with parent_flow_run_id, or a watched-job dispatch carrying only
+            # dispatched_by) or an explicit managed root. The A26/A29 authoritative
+            # machinery below now runs ONLY on a genuine Case birth — never per
+            # ordinary turn.
+            objective = (task.metadata or {}).get(self._MANAGED_CASE_OBJECTIVE_KEY)
+            criteria = (task.metadata or {}).get(self._MANAGED_CASE_CRITERIA_KEY)
+            create_fields = dict(lineage)
+            if criteria:
+                create_fields["completion_criteria"] = criteria
+            flow_run_id = db.create_flow_run(
+                task.id, "intent", objective_lock=objective, **create_fields,
+            )
+            if flow_run_id:
+                self._stash_task_meta(task, self._FLOW_RUN_META_KEY, flow_run_id)
+                # [A26] flow.created event + root_task link at the moment of birth.
                 self._record_flow_event(
                     flow_run_id, "flow.created", "system",
-                    to_state=initial_stage, entity_type="task", entity_id=task.id,
+                    to_state="intent", entity_type="task", entity_id=task.id,
                 )
-                # The flow's own root task (flow → task it was dispatched for).
                 self._record_flow_link(
                     flow_run_id, "task", task.id, "root_task", created_by="system",
                 )
-                # [A29] Session attachment (deferred A26 seam). The session this
-                # task executes in is the case's WORKER session — an AUTHORITATIVE
-                # relationship (it is the session actually running the flow, not an
-                # inferred owner). Absent session_id ⇒ no link (run_oneoff etc.).
-                # This is what lights up the Sessions affiliation labels.
-                session_id = str((task.metadata or {}).get("session_id") or "").strip()
+                # [A29] The session running this Case is its WORKER session — an
+                # AUTHORITATIVE relationship. Absent session_id ⇒ no link (oneoff).
                 if session_id:
                     self._record_flow_link(
                         flow_run_id, "session", session_id, "worker",
@@ -1755,11 +1792,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                         entity_type="session", entity_id=session_id,
                         payload={"role": "worker"},
                     )
+                    self._set_session_case_affiliation(
+                        session_id, flow_run_id, role="worker",
+                    )
                 # Child-flow lineage: CONSUME the edge A26a stamped (do NOT add a
                 # second stamping hook). flow_links(child_flow) on the PARENT is the
                 # authoritative child→parent ledger; flow_runs.parent_flow_run_id
                 # (already written above) stays a convenience index.
-                parent_fid = lineage.get("parent_flow_run_id")
                 if parent_fid:
                     self._record_flow_link(
                         parent_fid, "flow", flow_run_id, "child_flow",
@@ -1777,6 +1816,112 @@ class TaskOrchestrator(ITaskOrchestrator):
             return flow_run_id
         except Exception as e:
             logger.warning("event=flow_run_start_failed task_id=%s err=%s", task.id, e)
+            return None
+
+    def _stash_task_meta(self, task: "Task", key: str, value: str) -> None:
+        """Best-effort stash of a value on ``task.metadata[key]``. Never raises."""
+        try:
+            if getattr(task, "metadata", None) is None:
+                task.metadata = {}
+            task.metadata[key] = value
+        except Exception:
+            pass
+
+    def _set_session_case_affiliation(
+        self,
+        session_id: str,
+        case_id: str,
+        role: Optional[str] = None,
+    ) -> None:
+        """[A36] Persist a session's DURABLE Case affiliation (best-effort).
+
+        Writes ``current_case_id`` + ``case_role`` on the Session so membership
+        survives across turns, replacing the per-read most-recent-link derive.
+        Isolated and idempotent: a no-op when the value is already current (so a
+        long-lived attachment writes ONCE, not per turn), and any failure logs and
+        returns — a session write must never fail or delay admission. When ``role``
+        is None it is resolved from the authoritative session→case link, defaulting
+        to 'worker'. Cleared on Case close (A37).
+        """
+        try:
+            sid = (session_id or "").strip()
+            if not sid or not case_id:
+                return
+            store = getattr(self, "session_store", None)
+            if store is None:
+                return
+            session = store.get(sid)
+            if session is None:
+                return
+            # Steady-state fast path: already affiliated to this Case and no
+            # explicit role override ⇒ nothing to change. Return BEFORE resolving
+            # the role, so a long-lived attachment costs zero extra DB reads per
+            # turn (the role lookup only runs on a genuine first attach / switch).
+            already_here = getattr(session, "current_case_id", None) == case_id
+            if role is None:
+                if already_here:
+                    return
+                role = self._resolve_session_case_role(case_id, sid)
+            if already_here and getattr(session, "case_role", None) == role:
+                return  # steady-state: no redundant write
+            session.current_case_id = case_id
+            session.case_role = role
+            store.save(session)
+        except Exception as e:
+            logger.warning(
+                "event=session_case_affiliation_failed session_id=%s err=%s",
+                session_id, e,
+            )
+
+    def _resolve_session_case_role(self, case_id: str, session_id: str) -> str:
+        """Role a session holds in a Case, read from the authoritative link.
+
+        Defaults to 'worker' when no explicit link role is found. Never raises.
+        """
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return "worker"
+            links = db.list_flow_links(
+                flow_run_id=case_id, entity_type="session", entity_id=session_id,
+            )
+            if links:
+                return str(links[0].get("role") or "worker")
+        except Exception:
+            pass
+        return "worker"
+
+    def open_case(
+        self,
+        objective: str,
+        session_id: str,
+        role: str = "manager",
+        completion_criteria: Optional[str] = None,
+    ) -> Optional[str]:
+        """[A36] Orchestrator seam over ``db.open_case`` — the sanctioned Case birth.
+
+        Creates a managed Case and durably affiliates the session to it. This is
+        the entrypoint the Manager role (M3.1) drives; it is NOT called inside the
+        per-turn enqueue path (that is admission's job). Best-effort/isolated:
+        returns the new flow_run_id, or None if the DB is unavailable / the write
+        failed (a Case-birth failure must never crash the caller).
+        """
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return None
+            flow_run_id = db.open_case(
+                objective, session_id, role=role,
+                completion_criteria=completion_criteria,
+            )
+            self._set_session_case_affiliation(session_id, flow_run_id, role=role)
+            return flow_run_id
+        except Exception as e:
+            logger.warning(
+                "event=open_case_failed session_id=%s err=%s", session_id, e,
+            )
             return None
 
     def _record_flow_stage(self, flow_run_id: Optional[str], stage: str) -> None:
@@ -1868,6 +2013,18 @@ class TaskOrchestrator(ITaskOrchestrator):
     # so the worker-loop transition points (execution / impl_review / closure)
     # can resolve it. Underscored so it never collides with a user metadata field.
     _FLOW_RUN_META_KEY = "__flow_run_id"
+
+    # [A36] Metadata keys for Case admission. `_CASE_ID_META_KEY` stashes the
+    # SHARED Case a turn ATTACHED to — deliberately DISTINCT from
+    # `_FLOW_RUN_META_KEY` so the per-turn stage/terminal helpers (which key off
+    # `_FLOW_RUN_META_KEY`) never fire on the shared Case and auto-close it. The
+    # `_MANAGED_CASE_*` keys mark a task as an explicit managed-Case root (the
+    # producer is the Manager role / open_case dispatch at M3.1); when present,
+    # `_record_flow_run_start` BIRTHS a Case for the task rather than attaching.
+    _CASE_ID_META_KEY = "__case_id"
+    _MANAGED_CASE_META_KEY = "__managed_case"
+    _MANAGED_CASE_OBJECTIVE_KEY = "__managed_case_objective"
+    _MANAGED_CASE_CRITERIA_KEY = "__managed_case_criteria"
 
     # [M2] Dispatch-lineage metadata keys. When a parent flow/task dispatches a
     # child task, these are stamped onto the CHILD task's metadata (flag-guarded,

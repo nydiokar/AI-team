@@ -55,7 +55,7 @@ _mesh_health_last_sample: Dict[str, float] = {}
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 23
+_CURRENT_VERSION = 24
 
 
 # ---------------------------------------------------------------------------
@@ -674,7 +674,8 @@ class MeshDB:
                         telegram_chat_id, telegram_thread_id, owner_user_id, task_history,
                         origin,
                         driver_type, driver_status, cache_health, cache_unhealthy_count,
-                        previous_backend_session_ids
+                        previous_backend_session_ids,
+                        current_case_id, case_role
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
                         :created_at, :updated_at, :machine_id, :backend_session_id, :model,
@@ -683,7 +684,8 @@ class MeshDB:
                         :telegram_chat_id, :telegram_thread_id, :owner_user_id, :task_history,
                         :origin,
                         :driver_type, :driver_status, :cache_health, :cache_unhealthy_count,
-                        :previous_backend_session_ids
+                        :previous_backend_session_ids,
+                        :current_case_id, :case_role
                     )
                     ON CONFLICT(session_id) DO UPDATE SET
                         backend             = excluded.backend,
@@ -708,7 +710,9 @@ class MeshDB:
                         driver_status                = excluded.driver_status,
                         cache_health                 = excluded.cache_health,
                         cache_unhealthy_count        = excluded.cache_unhealthy_count,
-                        previous_backend_session_ids = excluded.previous_backend_session_ids
+                        previous_backend_session_ids = excluded.previous_backend_session_ids,
+                        current_case_id              = excluded.current_case_id,
+                        case_role                    = excluded.case_role
                     """,
                     {
                         "session_id":          session.session_id,
@@ -736,6 +740,8 @@ class MeshDB:
                         "cache_health":          getattr(session, "cache_health", "unknown") or "unknown",
                         "cache_unhealthy_count": int(getattr(session, "cache_unhealthy_count", 0) or 0),
                         "previous_backend_session_ids": json.dumps(getattr(session, "previous_backend_session_ids", None) or []),
+                        "current_case_id":       getattr(session, "current_case_id", None) or None,
+                        "case_role":             getattr(session, "case_role", None) or None,
                     },
                 )
         except Exception as e:
@@ -1440,7 +1446,14 @@ class MeshDB:
         "parent_flow_run_id",
         "dispatched_by",
         "dispatch_file",
+        "completion_criteria",
     )
+
+    # [A36] A Case (flow_run) is considered CLOSED — and therefore ineligible for
+    # a new turn to attach to — only in these terminal statuses. A NULL status or
+    # 'blocked' (needs-attention) is still OPEN: a follow-up turn on a blocked Case
+    # legitimately attaches to the SAME Case rather than minting a replacement.
+    _CLOSED_STATUSES = ("closed", "cancelled")
 
     def create_flow_run(
         self,
@@ -1668,6 +1681,82 @@ class MeshDB:
             params.append(limit)
         rows = self._conn().execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+    def find_open_case_for_session(self, session_id: str) -> Optional[str]:
+        """[A36] The session's newest still-OPEN Case, or None.
+
+        Returns the ``flow_run_id`` of the most recent Case (flow_run) linked to
+        this session via ``flow_links`` (entity_type='session') whose status is
+        NOT in ``_CLOSED_STATUSES`` (NULL/'blocked' count as open — see the
+        constant). This is the lookup-or-reuse the admission path (A36) uses to
+        ATTACH a turn to an existing Case instead of minting one per turn.
+
+        Read-only; served by ``idx_flow_links_entity``. A blank session_id ⇒ None
+        (⇒ the caller takes the Case-less standalone path). Never raises: any DB
+        error is swallowed to None so admission can always fall back to standalone.
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            return None
+        placeholders = ", ".join("?" for _ in self._CLOSED_STATUSES)
+        try:
+            row = self._conn().execute(
+                f"""
+                SELECT fl.flow_run_id AS flow_run_id
+                FROM flow_links fl
+                JOIN flow_runs fr ON fr.flow_run_id = fl.flow_run_id
+                WHERE fl.entity_type = 'session' AND fl.entity_id = ?
+                  AND (fr.status IS NULL OR fr.status NOT IN ({placeholders}))
+                ORDER BY fl.id DESC
+                LIMIT 1
+                """,
+                (sid, *self._CLOSED_STATUSES),
+            ).fetchone()
+            return str(row["flow_run_id"]) if row is not None else None
+        except Exception as e:
+            logger.warning(
+                "event=find_open_case_failed session_id=%s err=%s", sid, e,
+            )
+            return None
+
+    def open_case(
+        self,
+        objective: str,
+        session_id: str,
+        role: str = "manager",
+        completion_criteria: Optional[str] = None,
+    ) -> str:
+        """[A36] The ONLY sanctioned Case-birth path.
+
+        Creates exactly one Case (flow_run) for an explicit managed objective and
+        attaches ``session_id`` to it in ``role`` (manager|worker|reviewer). Unlike
+        the retired per-turn mint, this is called deliberately by a managed
+        entrypoint (the Manager role, M3.1) — never unconditionally inside the
+        enqueue path. The optional ``completion_criteria`` (MAX salvage — the
+        checkable "done" condition) is persisted on the Case and later demanded by
+        ``close_case`` in A37. Returns the new flow_run_id.
+
+        Writes the Case row + the session link + a ``flow.created`` event as one
+        logical birth. current_stage starts at 'objective_lock' (the objective is
+        locked at open); status stays NULL (open). task_id is NULL — a Case is an
+        objective, not a task.
+        """
+        flow_run_id = self.create_flow_run(
+            None,
+            "objective_lock",
+            objective_lock=objective,
+            completion_criteria=completion_criteria,
+        )
+        self.create_flow_link(
+            flow_run_id, "session", session_id, role, created_by="manager",
+        )
+        self.append_flow_event(
+            flow_run_id, "flow.created", "manager",
+            to_state="objective_lock",
+            entity_type="session", entity_id=session_id,
+            payload={"role": role, "objective": objective},
+        )
+        return flow_run_id
 
     def append_flow_event(
         self,
@@ -2577,6 +2666,16 @@ def _get_migrations() -> List[tuple]:
                # The optional convenience columns (mesh_tasks/approvals.flow_run_id)
                # are added defensively in _ensure_substrate_columns (below) so a
                # DB missing an optional table can never abort this migration.
+        (24, """
+            ALTER TABLE flow_runs ADD COLUMN completion_criteria TEXT;
+            ALTER TABLE sessions ADD COLUMN current_case_id TEXT;
+            ALTER TABLE sessions ADD COLUMN case_role TEXT
+        """),  # A36 M2.5 Case admission: `completion_criteria` is the checkable
+               # "done" condition a Case is opened with (demanded by close_case in
+               # A37). `current_case_id`/`case_role` give a Session a DURABLE Case
+               # affiliation that survives across turns (set on attach/open, cleared
+               # on close in A37) — replacing the per-read most-recent-link derive.
+               # All ADDITIVE + NULLable ⇒ existing rows/writers untouched.
     ]
 
 
