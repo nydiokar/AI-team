@@ -2052,6 +2052,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         ``{ok: False, reason}`` when the role path is disabled or a step fails.
         Raises ``HarnessAdmissionBlocked`` from the first-turn submit (the caller
         translates it), exactly like the ``/api/instructions`` seam.
+
+        DEFERRED EDGE (A38): if the Level-3 guard blocks the first-turn submit, the
+        already-created session (left IDLE, reusable) and the freshly-opened Case
+        (left OPEN, visible in /api/flows) are NOT rolled back — a clean cancel is
+        blocked by close_case's completion_criteria guard when criteria were set.
+        Low-risk on this OFF-by-default path (a short rendered assignment rarely
+        trips Level-3); revisit with a criteria-waiving cancel if it shows up live.
         """
         from src.core.interfaces import SessionOrigin
         from src.core.roles import ManagerInvocation, render_first_assignment

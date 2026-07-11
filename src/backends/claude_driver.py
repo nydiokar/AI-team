@@ -399,7 +399,7 @@ class _SDKSession:
         model: Optional[str],
         proc_env: Dict[str, str],
         *,
-        system_prompt: Optional[Any] = None,
+        system_prompt: Optional[Dict[str, object]] = None,
         allowed_tools: Optional[List[str]] = None,
     ):
         self.session_key = session_key
@@ -839,7 +839,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             for sess in self._sessions.values():
                 sess._on_proactive = sink
 
-    def _role_boot(self, session: Session) -> Tuple[Optional[Any], Optional[List[str]]]:
+    def _role_boot(self, session: Session) -> Tuple[Optional[Dict[str, object]], Optional[List[str]]]:
         """[A38] Resolve (system_prompt, allowed_tools) for a role-bound session.
 
         Returns ``(None, None)`` — the default path — unless MANAGER_ROLE_ENABLED
