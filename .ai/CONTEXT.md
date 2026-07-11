@@ -28,16 +28,16 @@
 [`dispatch/DISPATCH_LOG.md`](dispatch/DISPATCH_LOG.md); for forward priorities see the
 **Current Priorities** table below; for who-owns-what-doc see [`DOC_MAP.md`](DOC_MAP.md).
 
-> **🛑 KNOWN FOUNDATION DEFECT (2026-07-11 architecture audit) — fix BEFORE M3.1.** With
-> `HARNESS_FLOW_DRIVE` ON (live), `_enqueue_task` mints one `flow_run` (**Case**) + one
-> `session→worker` link **per turn**, and auto-stamps `impl_review`/`closure` + auto-closes
-> the Case on the single task's success — so a reused session shatters into one fake Case per
-> message and `Task finished == Case completed` (spec forbids this). It's a **writer-policy bug
-> over a sound substrate** (`flow_links` already supports N tasks/sessions per Case); M1/M2 are
-> valid, nothing rolls back. Fix = new milestone **M2.5** (`docs/Task_Harness_v0.7_AUTOMATION.md`),
-> packets `AGENT_36` (Case admission) + `AGENT_37` (continuity/closure). Full audit:
-> [`.ai/workflow_architecture_audit.md`](workflow_architecture_audit.md). **v0.7 supersedes
-> v0.6** (kept as trace).
+> **✅ FOUNDATION DEFECT RESOLVED (2026-07-11 audit → M2.5 built on `feat/m2.5-case-admission`).**
+> The per-turn Case shatter + `Task finished == Case completed` defect is fixed by **A36** (Case
+> admission: a turn attaches to the session's open Case or runs Case-less; Cases born only via
+> `open_case`/dispatch) + **A37** (task-end is task-only, no auto stage-stamps or auto-close;
+> authoritative `close_case` with open-child/approval/`completion_criteria` guards). It was a
+> **writer-policy bug over a sound substrate** — M1/M2 stayed valid, nothing rolled back. Flag OFF
+> ⇒ byte-identical. **Status: built on the branch (not yet merged — open PR).** Full audit:
+> [`.ai/workflow_architecture_audit.md`](workflow_architecture_audit.md); v0.7 spec
+> `docs/Task_Harness_v0.7_AUTOMATION.md`. **M3.1 is now unblocked** (its `wait_for_worker` already
+> adapted to honest closure via the `task.finished` event).
 
 > **➡️ FORWARD POINTER (2026-07-08): the harness is now being AUTOMATED, and Work
 > Control Substrate is the next dependency.** The active
@@ -165,7 +165,7 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
 | **1** | **M2.5 Case Admission (A36)** — stop minting a Case per turn | Foundation defect from the 2026-07-11 audit; **blocks M3.1**. `flow_run` born per turn ⇒ session shatters into fake Cases; `Task finished == Case completed`. Writer-policy fix over the sound substrate. | **built** — `feat/m2.5-case-admission`. Admission policy (attach-to-open-Case / standalone / birth-only-on-`open_case`-or-dispatch) + migration 24 + durable affiliation. Flag OFF ⇒ byte-identical. 884 tests pass; review clean. **A37 in progress on same branch.** |
-| **2** | **M2.5 Case Continuity & Closure (A37)** — honest stages + authoritative + checkable close | Removes auto `impl_review`/`closure` stamps + task-end auto-close; `close_case` demands `completion_criteria` (MAX salvage). | **dispatched** — `AGENT_37_CASE_CONTINUITY_CLOSURE.md`; **depends on A36**. |
+| **2** | **M2.5 Case Continuity & Closure (A37)** — honest stages + authoritative + checkable close | Removes auto `impl_review`/`closure` stamps + task-end auto-close; `close_case` demands `completion_criteria` (MAX salvage). | **built** — `feat/m2.5-case-admission`. Task-end is task-only (`task.finished`, no status write); authoritative `close_case` with open-child/pending-approval/criteria guards; `wait_for_worker` updated to detect `task.finished` (preserves the live manager path). Flag OFF ⇒ byte-identical. 905 tests pass; review clean. **M2.5 complete — M3.1 unblocked.** |
 | — | ~~Build Task Harness Workflow Kernel (v1)~~ | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). | **merged** (A9H, PR #8) on `main` — see Shipped Ledger + `docs/harness/` |
 | — | ~~WebUI-first surfacing of the Level-3 admission block~~ (A9H "Next") | A blocked Level-3 submit must read as "needs approval," not an opaque 500 / stuck session. | **built** (A16) on `feat/harness-block-surface` — awaiting operator merge |
 

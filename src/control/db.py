@@ -58,6 +58,17 @@ _mesh_health_last_sample: Dict[str, float] = {}
 _CURRENT_VERSION = 24
 
 
+class CaseCloseBlocked(Exception):
+    """[A37] Raised by ``close_case`` when a Case cannot honestly close yet:
+    unresolved required approval, open child work, or unmet/unwaived
+    completion_criteria. A structured refusal — NOT a crash. The ``reason`` string
+    is safe to surface to the caller/operator."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 # ---------------------------------------------------------------------------
 # FlowRun stage vocabulary (v0.4 §11) — the canonical ordered stage names for a
 # dispatch flow. This is a DESCRIPTIVE constant only: nothing reads current_stage
@@ -1664,6 +1675,12 @@ class MeshDB:
         a long-lived session that worked several cases resolves to its MOST RECENT
         one (the builder keeps the first per session) — the useful "what is it on
         now?" answer, and deterministic.
+
+        [A37] The "most-recent" resolution is no longer a SHATTER MASK: A36 stopped
+        the per-turn Case mint, so a session now carries ONE authoritative session
+        link per Case (from ``open_case``/birth), never one per turn. The durable
+        ``sessions.current_case_id`` is the canonical "current Case"; this derived
+        index remains for the whole-substrate Sessions surface and history.
         """
         sql = (
             "SELECT fl.flow_run_id AS flow_run_id, fl.entity_id AS session_id, "
@@ -1757,6 +1774,98 @@ class MeshDB:
             payload={"role": role, "objective": objective},
         )
         return flow_run_id
+
+    def _case_has_unresolved_approval(self, flow_run_id: str) -> bool:
+        """[A37] Whether the Case has an approval linked to it still 'pending'.
+
+        Uses the authoritative approval→case links (entity_type='approval'; written
+        by the approval service) joined to the approvals row in a SINGLE indexed
+        query (no per-link fanout — CLAUDE.md §8). Read-only; swallows errors to
+        False so a lookup glitch never falsely blocks a close (the caller's other
+        guards still apply)."""
+        try:
+            row = self._conn().execute(
+                """
+                SELECT 1 FROM flow_links fl
+                JOIN approvals a ON a.id = fl.entity_id
+                WHERE fl.flow_run_id = ? AND fl.entity_type = 'approval'
+                  AND a.status = 'pending'
+                LIMIT 1
+                """,
+                (flow_run_id,),
+            ).fetchone()
+            return row is not None
+        except Exception as e:
+            logger.warning(
+                "event=case_approval_guard_failed flow_run_id=%s err=%s",
+                flow_run_id, e,
+            )
+        return False
+
+    def close_case(
+        self,
+        flow_run_id: str,
+        *,
+        outcome: str = "closed",
+        actor: str = "operator",
+        criteria_reconciliation: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """[A37] Authoritatively close a Case — the ONLY status→terminal write path.
+
+        Sets ``flow_runs.status`` to a terminal value and appends the matching
+        ``flow.closed`` / ``flow.status_changed`` event, but ONLY when the Case can
+        honestly close. Refuses (``CaseCloseBlocked``, a structured error — never a
+        crash) while:
+          * an approval linked to the Case is still pending;
+          * a child flow of the Case is still open;
+          * the Case's ``completion_criteria`` are not each recorded met or
+            explicitly waived-with-reason in ``criteria_reconciliation``.
+
+        Idempotent: closing an already-terminal Case returns False (no-op, no
+        duplicate event). ``outcome`` must be a terminal status (see
+        ``_CLOSED_STATUSES``). Returns True iff this call performed the close.
+        Distinct from a task ending — ``Task finished != Case completed``; a task's
+        terminal outcome NEVER reaches here."""
+        if outcome not in self._CLOSED_STATUSES:
+            raise ValueError(
+                f"close outcome must be terminal {self._CLOSED_STATUSES}, got {outcome!r}"
+            )
+        row = self.get_flow_run(flow_run_id)
+        if row is None:
+            raise ValueError(f"unknown case: {flow_run_id}")
+        if (row.get("status") or "") in self._CLOSED_STATUSES:
+            return False  # already terminal — idempotent no-op
+
+        open_children = [
+            c for c in self.list_child_flow_runs(flow_run_id)
+            if (c.get("status") or "") not in self._CLOSED_STATUSES
+        ]
+        if open_children:
+            raise CaseCloseBlocked(
+                f"case has {len(open_children)} open child flow(s)"
+            )
+        if self._case_has_unresolved_approval(flow_run_id):
+            raise CaseCloseBlocked("case has an unresolved required approval")
+
+        unresolved = _unreconciled_criteria(
+            row.get("completion_criteria"), criteria_reconciliation,
+        )
+        if unresolved:
+            raise CaseCloseBlocked(
+                f"completion_criteria not reconciled: {unresolved}"
+            )
+
+        self.update_flow_run(flow_run_id, status=outcome)
+        self.append_flow_event(
+            flow_run_id,
+            "flow.closed" if outcome == "closed" else "flow.status_changed",
+            actor, to_state=outcome,
+            payload={
+                "outcome": outcome,
+                "reconciliation": criteria_reconciliation or None,
+            },
+        )
+        return True
 
     def append_flow_event(
         self,
@@ -2682,6 +2791,59 @@ def _get_migrations() -> List[tuple]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _parse_completion_criteria(raw: Optional[str]) -> List[str]:
+    """[A37] A Case's ``completion_criteria`` → a list of criterion strings.
+
+    A JSON array yields its (non-blank) items; any other non-blank value is a
+    single-criterion list; None/blank yields an empty list (⇒ no criteria to
+    reconcile). Pure; never raises."""
+    if raw is None:
+        return []
+    try:
+        v = json.loads(raw)
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        if isinstance(v, str):
+            return [v.strip()] if v.strip() else []
+    except Exception:
+        pass
+    s = str(raw).strip()
+    return [s] if s else []
+
+
+def _criterion_resolved(entry: Any) -> bool:
+    """[A37] A reconciliation entry resolves its criterion iff it is recorded
+    ``met``, or explicitly ``waived`` with a non-empty reason (mirrors the
+    ``waived_findings`` honesty contract). Anything else is unresolved."""
+    if not isinstance(entry, dict):
+        return False
+    status = str(entry.get("status") or "").strip().lower()
+    if status == "met":
+        return True
+    if status == "waived" and str(entry.get("reason") or "").strip():
+        return True
+    return False
+
+
+def _unreconciled_criteria(
+    raw: Optional[str], reconciliation: Optional[List[Dict[str, Any]]],
+) -> List[str]:
+    """[A37] The criterion strings NOT resolved by ``reconciliation``.
+
+    Each reconciliation entry claims a criterion by its ``criterion`` text and is
+    honored only when :func:`_criterion_resolved`. An empty list means every
+    criterion is met/waived ⇒ the Case may close. Pure; never raises."""
+    criteria = _parse_completion_criteria(raw)
+    if not criteria:
+        return []
+    resolved = {
+        str(e.get("criterion") or "").strip()
+        for e in (reconciliation or [])
+        if _criterion_resolved(e)
+    }
+    return [c for c in criteria if c not in resolved]
+
 
 def _now() -> str:
     # Always produce a timezone-aware UTC string so the browser can correctly
