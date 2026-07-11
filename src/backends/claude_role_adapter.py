@@ -36,15 +36,6 @@ def claude_system_prompt(role: AgentRoleDefinition) -> Dict[str, object]:
     }
 
 
-def profile_tools(role: AgentRoleDefinition) -> List[str]:
-    """Concrete Claude tool names for a role's declared tool profile.
-
-    Returns an empty list for an unknown profile — the adapter never invents a
-    grant it was not asked for.
-    """
-    return list(_PROFILE_TOOLS.get(role.tool_profile, []))
-
-
 def manager_tool_names() -> List[str]:
     """Static ``manager_v1`` tool names — no role object / file read required.
 
