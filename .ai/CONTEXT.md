@@ -1,7 +1,7 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-09
-**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. Next: **M3** (`docs/M3_MANAGER_INVOCATION_SPEC.md`).
+**Last Updated:** 2026-07-10
+**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. **M3 Phase 3.0 CODE-COMPLETE** (branch `feat/m3-phase30-mcp-manager`, NOT merged; stack A31→A34): A31 `scripts/mcp_manager.py` tool surface; **A32** optional `parent_flow_run_id` on `POST /api/instructions` → child `flow_runs` lineage edge (flag-gated); **A33** `dispatch_worker` sends it + `wait_for_worker` retry tolerance; **A34** `claude_driver` grants the manager tools to a session, **double-gated** (`MANAGER_TOOLS_ENABLED` env + `manager` in `~/.claude.json`; `setup_mcp.py --with-manager`) ⇒ byte-identical until the operator opts in. **97 M3 tests green; zero live-gateway blast (not restarted).** **Remaining = the paid live proof only:** 🟡 **A35** (operator-gated runbook, `dispatch/AGENT_35_LIVE_F4_SPIKE.md`) — register server + flag + restart + spawn a manager session + verify parent→child lineage in `/api/flows` with no slot starvation (live box has `MAX_CONCURRENT_TASKS=4` + `Horse`/`kanebra-worker` online ⇒ low starvation risk). NOT run autonomously (cost scar #1 + PM2 restart + global-config edit). See `dispatch/AGENT_31_*`…`AGENT_35_*`.
 
 > This is the **fast-orientation** doc: what the project is, how it's wired *right
 > now*, the current priorities, and the constraints. It is intentionally short.

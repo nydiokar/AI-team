@@ -104,6 +104,53 @@ def test_flag_on_child_row_gets_lineage(db, flag_on):
     assert row["current_stage"] == "intent"
 
 
+def test_flag_on_loose_parent_flow_run_id_records_edge(db, flag_on):
+    """[A32] The HTTP seam: a caller with only the parent's LOOSE flow_run_id
+    (no in-process parent Task) records the same child→parent edge — mirrors
+    submit_instruction(parent_flow_run_id=...) → stamp → record."""
+    orch = _orch()
+    parent_fr = db.create_flow_run("task_parent", "intent")
+
+    child = _task("task_child")
+    orch._stamp_child_dispatch_lineage(child, None, parent_flow_run_id=parent_fr)
+
+    child_fr = orch._record_flow_run_start(child)
+    assert child_fr is not None
+    row = db.get_flow_run(child_fr)
+    assert row["parent_flow_run_id"] == parent_fr
+    # No parent_task ⇒ no auto dispatched_by; the edge still records.
+    assert row["dispatched_by"] is None
+    # Reverse lookup finds the child from the loose parent id.
+    children = db.list_child_flow_runs(parent_fr)
+    assert child_fr in {c["flow_run_id"] for c in children}
+
+
+def test_flag_on_explicit_parent_flow_run_id_wins_over_parent_task(db, flag_on):
+    """[A32] When both a parent_task and an explicit loose parent_flow_run_id are
+    given, the explicit loose id wins (the caller was specific on purpose)."""
+    orch = _orch()
+    task_derived_fr = db.create_flow_run("task_parent", "intent")
+    explicit_fr = db.create_flow_run("task_explicit", "intent")
+    parent = _task("task_parent", {TaskOrchestrator._FLOW_RUN_META_KEY: task_derived_fr})
+
+    child = _task("task_child")
+    orch._stamp_child_dispatch_lineage(child, parent, parent_flow_run_id=explicit_fr)
+
+    child_fr = orch._record_flow_run_start(child)
+    row = db.get_flow_run(child_fr)
+    assert row["parent_flow_run_id"] == explicit_fr
+
+
+def test_flag_off_loose_parent_flow_run_id_is_noop(db, flag_off):
+    """[A32] OFF path: even an explicit loose parent_flow_run_id must not mutate
+    the child's metadata ⇒ byte-identical."""
+    orch = _orch()
+    child = _task("task_child", {"user_key": "keep"})
+    before = dict(child.metadata)
+    orch._stamp_child_dispatch_lineage(child, None, parent_flow_run_id="parent-fr-1")
+    assert child.metadata == before
+
+
 def test_flag_on_explicit_dispatched_by_wins(db, flag_on):
     """An explicit dispatched_by (e.g. 'watched_job:<id>') is recorded verbatim,
     even without a parent_task — parent_flow_run_id then stays NULL."""
