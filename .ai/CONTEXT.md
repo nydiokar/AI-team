@@ -43,8 +43,29 @@
 > (one Case, `case_role="manager"`) → Manager Session boots with the role prompt via the Claude adapter
 > (`system_prompt` preset+append) + per-session tools → worker JOINS the same Case (not a child) →
 > completion leaves the Case OPEN → A37 `close_case`. New flag `MANAGER_ROLE_ENABLED` (default OFF ⇒
-> byte-identical). 919 tests pass; 14 new. **Not yet merged (open PR); live proof deferred to the
+> byte-identical). 924 tests pass. **Not yet merged (PR #10 open); live proof deferred to the
 > combined A35+3.1 operator-gated run.**
+
+> **⚠️ M3 SEQUENCING & KNOWN GAPS (2026-07-12) — read before building further.**
+> Phases 3.0 (dispatch/wait plumbing, on `main`) + 3.1 (A38, PR #10) are **built entirely on tests
+> — NEVER run live.** Do **NOT** stack 3.2/3.3 before the base is proven: the adversarial pass on
+> A38 found two loop-breaking bugs (wait-for-joined-worker, missing close path) that unit tests
+> missed. Order:
+> 1. **A39 — cheap integration proof (no paid CLI):** `TestClient` over a real `TaskOrchestrator`
+>    + real `MeshDB` + a fake `claude` backend, `HARNESS_FLOW_DRIVE`+`MANAGER_ROLE_ENABLED` ON;
+>    drive `/api/manager` → dispatch worker with `case_id` → assert one Case (no child), worker
+>    task JOINs, `task.finished` on timeline, `wait_for_worker(task_id, flow_run_id=case)`
+>    resolves, `close_case` refuses-then-closes. De-risks ~90% of the surface for free.
+> 2. **A35+3.1 combined live spike (operator-gated, paid):** the only proof of the real Claude
+>    boot (`system_prompt` preset+append + scoped tools) + real dispatch/join/close. Prereq: PR #10
+>    merged/deployed.
+> 3. **M3.2 = `review.*` verdict emitter (NOT a new role).** The reviewer **IS the Manager**
+>    (reviewing is already a shipped Manager duty). The gap: the A38 loop emits **no `review.*`
+>    event** when the Manager accepts/reworks — the Case ledger shows dispatch→finished→close but
+>    not the *verdict*. 3.2 wires `record_review` → `flow_events` (vocab already reserved in
+>    `db.py`) + a close-gate on unresolved rework + an optional distinct *plan*-reviewer pass.
+> **The live spike (step 2) does NOT test `review.*`** — expect its absence in the timeline; that
+> is by design until 3.2, not a bug.
 
 > **➡️ FORWARD POINTER (2026-07-08): the harness is now being AUTOMATED, and Work
 > Control Substrate is the next dependency.** The active
