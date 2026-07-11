@@ -36,8 +36,15 @@
 > **writer-policy bug over a sound substrate** — M1/M2 stayed valid, nothing rolled back. Flag OFF
 > ⇒ byte-identical. **Status: MERGED to `main` (`33b3f76`, PR #9, 2026-07-11).** Full audit:
 > [`.ai/workflow_architecture_audit.md`](workflow_architecture_audit.md); v0.7 spec
-> `docs/Task_Harness_v0.7_AUTOMATION.md`. **M3.1 is now unblocked** (its `wait_for_worker` already
-> adapted to honest closure via the `task.finished` event).
+> `docs/Task_Harness_v0.7_AUTOMATION.md`. **M3 Phase 3.1 vertical slice is now BUILT** on
+> `feat/m3-phase31-manager-role` (**A38**): canonical Manager-role layer separation (role profile
+> `docs/harness/roles/manager.md` / skills-seam / `manager_v1` tools / gateway-state / provider-neutral
+> `AgentRoleDefinition`+Claude adapter) + a thin end-to-end path — `POST /api/manager` → `open_case`
+> (one Case, `case_role="manager"`) → Manager Session boots with the role prompt via the Claude adapter
+> (`system_prompt` preset+append) + per-session tools → worker JOINS the same Case (not a child) →
+> completion leaves the Case OPEN → A37 `close_case`. New flag `MANAGER_ROLE_ENABLED` (default OFF ⇒
+> byte-identical). 919 tests pass; 14 new. **Not yet merged (open PR); live proof deferred to the
+> combined A35+3.1 operator-gated run.**
 
 > **➡️ FORWARD POINTER (2026-07-08): the harness is now being AUTOMATED, and Work
 > Control Substrate is the next dependency.** The active
