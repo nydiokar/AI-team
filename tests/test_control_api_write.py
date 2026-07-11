@@ -35,6 +35,7 @@ class _StubOrchestrator:
     def __init__(self):
         self.session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
         self.submitted = []          # (description, session_id, cwd, source)
+        self.parent_flow_run_ids = []  # [A32] loose lineage id per submit
         self.cancelled = []          # task_ids
         self.compacted = []          # session_ids
         self._backends = {"claude": _FakeBackend()}
@@ -45,11 +46,15 @@ class _StubOrchestrator:
         self.block_task_id = None
 
     async def submit_instruction(self, description, session_id=None, cwd=None,
-                                 target_files=None, source="runtime", **_):
+                                 target_files=None, source="runtime",
+                                 parent_flow_run_id=None, **_):
         if self.block_task_id is not None:
             from src.orchestrator import HarnessAdmissionBlocked
             raise HarnessAdmissionBlocked(self.block_task_id)
         self.submitted.append((description, session_id, cwd, source))
+        # [A32] Record the loose lineage id separately so tests can assert it is
+        # threaded from InstructionBody without disturbing the legacy tuple shape.
+        self.parent_flow_run_ids.append(parent_flow_run_id)
         return self._next_task_id
 
     def cancel_task(self, task_id):
@@ -138,6 +143,18 @@ def test_instruction_one_off(client, orch):
     assert r.status_code == 200
     assert r.json()["task_id"] == "task_web_1"
     assert orch.submitted[-1] == ("do a thing", None, None, "web_oneoff")
+    # [A32] No lineage supplied ⇒ None threaded (byte-identical to pre-A32).
+    assert orch.parent_flow_run_ids[-1] is None
+
+
+def test_instruction_threads_parent_flow_run_id(client, orch):
+    """[A32] A Manager→worker dispatch passes parent_flow_run_id; it must reach
+    submit_instruction (which stamps it onto the child flow_runs row when
+    HARNESS_FLOW_DRIVE is ON). Endpoint just threads it — no gating here."""
+    r = client.post("/api/instructions", headers=_auth(),
+                    json={"description": "child work", "parent_flow_run_id": "flow_parent_1"})
+    assert r.status_code == 200
+    assert orch.parent_flow_run_ids[-1] == "flow_parent_1"
 
 
 def test_instruction_to_session_flips_busy(client, orch, tmp_path):

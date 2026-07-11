@@ -24,6 +24,37 @@ def _script_path() -> Path:
     return (Path(__file__).parent / "mcp_jobs.py").resolve()
 
 
+def _manager_script_path() -> Path:
+    return (Path(__file__).parent / "mcp_manager.py").resolve()
+
+
+def _register_claude_manager(script: Path) -> None:
+    """[M3 A34] OPT-IN: register the ai-team 'manager' MCP server in Claude Code's
+    user config (~/.claude.json). Only runs with `--with-manager`. Gives a session
+    the dispatch_worker / wait_for_worker tools — but the gateway ALSO requires
+    MANAGER_TOOLS_ENABLED=1 in its env before those tools are actually granted
+    (see claude_driver._manager_tools_enabled), so registering here alone is inert."""
+    cfg_path = Path.home() / ".claude.json"
+    existing: dict = {}
+    if cfg_path.exists():
+        try:
+            existing = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            backup = cfg_path.with_suffix(".json.bak")
+            print(f"Warning: could not parse {cfg_path}: {e}", file=sys.stderr)
+            print(f"Backing up to {backup}", file=sys.stderr)
+            cfg_path.replace(backup)
+            existing = {}
+
+    existing.setdefault("mcpServers", {})
+    existing["mcpServers"]["manager"] = {
+        "command": sys.executable,
+        "args": [str(script)],
+    }
+    cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    print(f"  [claude-code]  manager → {cfg_path}")
+
+
 def _register_claude(script: Path) -> None:
     """Register in Claude Code's user config (~/.claude.json)."""
     cfg_path = Path.home() / ".claude.json"
@@ -126,6 +157,8 @@ def _register_codex(script: Path) -> None:
 
 
 def main() -> None:
+    with_manager = "--with-manager" in sys.argv[1:]
+
     script = _script_path()
     if not script.exists():
         print(f"Error: mcp_jobs.py not found at {script}", file=sys.stderr)
@@ -137,8 +170,20 @@ def main() -> None:
     _register_opencode(script)
     _register_codex(script)
 
+    if with_manager:
+        manager_script = _manager_script_path()
+        if not manager_script.exists():
+            print(f"Error: mcp_manager.py not found at {manager_script}", file=sys.stderr)
+            sys.exit(1)
+        print(f"\n[--with-manager] Registering manager MCP server (Claude Code only): {manager_script}")
+        _register_claude_manager(manager_script)
+
     print()
     print("Tool available as:  mcp__jobs__watch_job")
+    if with_manager:
+        print("Manager tools:      mcp__manager__dispatch_worker, mcp__manager__wait_for_worker")
+        print("  ⚠️  Also set MANAGER_TOOLS_ENABLED=1 in the gateway env — the tools stay")
+        print("      inert until that flag is on (see docs/ENV_FEATURE_FLAGS.md).")
     print()
     print("Backends load MCP automatically from their configs.")
     print("If a gateway worker was already running, restart it to pick up changes.")

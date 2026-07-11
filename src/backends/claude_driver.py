@@ -315,6 +315,42 @@ def _mcp_jobs_configured() -> bool:
         return False
 
 
+def _mcp_manager_configured() -> bool:
+    """[M3 A34] Whether the ai-team 'manager' MCP server is registered in
+    ~/.claude.json. Mirrors _mcp_jobs_configured(); absent ⇒ never offered."""
+    try:
+        cfg = json.loads((Path.home() / ".claude.json").read_text(encoding="utf-8"))
+        return "manager" in cfg.get("mcpServers", {})
+    except Exception:
+        return False
+
+
+def _manager_tools_enabled() -> bool:
+    """[M3 A34] Second, INDEPENDENT gate for the Manager tool grant.
+
+    Default OFF ⇒ byte-identical: even if ~/.claude.json has the 'manager' server,
+    dispatch_worker / wait_for_worker are NOT added to a session's allowed_tools
+    unless MANAGER_TOOLS_ENABLED is truthy. Rationale: dispatch_worker is a
+    DISPATCH primitive (materially more powerful than jobs' read-only watch_job),
+    so its grant gets a kill switch the operator controls in the gateway env —
+    not just the global config file. Both gates must be satisfied to grant.
+    """
+    return os.environ.get("MANAGER_TOOLS_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _session_allowed_tools() -> List[str]:
+    """Assemble a Claude session's allowed-tool list: the defaults plus any
+    opt-in MCP tool grants. Pure + gated so the grant logic is unit-testable
+    without booting the SDK. Byte-identical to the prior inline logic for the
+    jobs path; the manager grant is double-gated (env flag AND ~/.claude.json)."""
+    tools = list(_DEFAULT_TOOLS)
+    if _mcp_jobs_configured():
+        tools.append("mcp__jobs__watch_job")
+    if _manager_tools_enabled() and _mcp_manager_configured():
+        tools.extend(["mcp__manager__dispatch_worker", "mcp__manager__wait_for_worker"])
+    return tools
+
+
 class _SDKSession:
     """Holds the live async SDK client and its dedicated asyncio event loop,
     both running in a background daemon thread.
@@ -388,9 +424,7 @@ class _SDKSession:
             self._ready.set()
             return
 
-        tools = list(_DEFAULT_TOOLS)
-        if _mcp_jobs_configured():
-            tools.append("mcp__jobs__watch_job")
+        tools = _session_allowed_tools()
 
         options = ClaudeAgentOptions(
             cwd=self.cwd,
@@ -970,9 +1004,7 @@ class ClaudePrintResumeDriver(ClaudeDriver):
         return "print_resume"
 
     def _build_cmd(self, resume_id: Optional[str], session_id: Optional[str], model: Optional[str] = None) -> List[str]:
-        tools = list(_DEFAULT_TOOLS)
-        if _mcp_jobs_configured():
-            tools.append("mcp__jobs__watch_job")
+        tools = _session_allowed_tools()
 
         if resume_id:
             cmd = [
