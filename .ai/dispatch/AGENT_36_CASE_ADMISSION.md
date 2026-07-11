@@ -117,8 +117,41 @@ attach/open) and read from a durable field, not re-derived-and-masked.
 
 ## Milestone
 
-_(burndown to be filled by the build agent — F-tags, per-step status)_
+- **F1 — db layer.** ✅ `find_open_case_for_session` (newest session→case link whose
+  status ∉ `_CLOSED_STATUSES={closed,cancelled}`; NULL/`blocked` stay open) +
+  `open_case(objective, session_id, role='manager', completion_criteria=None)` (one
+  `create_flow_run` + session link + `flow.created`). `completion_criteria` added to
+  `_FLOW_EXTRA_FIELDS`. Migration **24**: `flow_runs.completion_criteria`,
+  `sessions.current_case_id`, `sessions.case_role` (additive/NULLable). `_CURRENT_VERSION`→24.
+- **F2 — admission rewrite** (`_record_flow_run_start`, flag-ON only). Branches: **(A)**
+  dispatched task (any lineage — child `parent_flow_run_id` OR watched-job `dispatched_by`)
+  or explicit managed root (`__managed_case`) → BIRTH a Case (the A26/A29 machinery, now
+  gated to genuine births); **(B)** session with an open Case → ATTACH (per-turn `task` link +
+  `task.attached`; stash under `_CASE_ID_META_KEY`, NOT `_FLOW_RUN_META_KEY`, so the per-turn
+  stage/terminal helpers never auto-close the shared Case); **(C)** else standalone → create
+  nothing. OFF path early-returns A19's `create_flow_run(task.id,"dispatch_start")` — byte-identical.
+- **F3 — durable affiliation.** `Session.current_case_id`/`case_role` (interfaces) + upsert +
+  `_from_dict` read. `_set_session_case_affiliation` (best-effort, steady-state no-op — zero
+  extra DB reads per turn once affiliated) + orchestrator `open_case` seam.
+- **F4 — tests.** New `tests/test_case_admission.py` (15 cases: open_case-creates-one,
+  find-open skips-closed/keeps-blocked, standalone-0-cases, attach, **10-turns→1 flow_run/10
+  task links/1 session link**, no-reclose continuity, durable-affiliation-once, OFF parity).
+  Re-pointed the A26/A29 flag-ON machinery tests (which encoded the retired per-turn mint) to
+  the managed-root birth path; bumped migration-version asserts 23→24. **Full suite: 884 passed**
+  (2 pre-existing env failures unrelated: push-VAPID, windows-only mcp_jobs).
+- **Adversarial review (`/code-review --fix`):** 2 findings, both fixed — (1) CLAUDE.md §3
+  `@staticmethod` prohibition (converted the 2 new helpers to instance methods); (2) efficiency:
+  role-resolution query ran on every steady-state attach turn (added the fast-path return).
+- **Forward note for M3.1:** the in-process `_stamp_child_dispatch_lineage(child, parent_task)`
+  derivation reads the parent's `_FLOW_RUN_META_KEY`; a Manager turn now attaches under
+  `_CASE_ID_META_KEY`, so a future in-process Manager dispatch must pass the case id explicitly
+  (the live `mcp_manager` path already does — it threads `parent_flow_run_id` via the API, so
+  no live path is affected today; there is currently **no** `parent_task=` caller in `src/`).
 
 ## Closure
 
-_(to be filled at build close)_
+**Status: built** on `feat/m2.5-case-admission`. Acceptance met — SQL evidence:
+standalone session (5 turns) → **0** Cases minted; managed session (open_case + 5 turns) → **1**
+flow_run, **5** `task` links, **1** `session` link, Case status stays open (`NULL`) across all
+turns, `completion_criteria` persisted. Flag OFF ⇒ byte-identical (A19 `dispatch_start`). Next:
+**A37** (continuity, honest stages & closure) on the same branch — depends on this.

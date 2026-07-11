@@ -41,8 +41,16 @@ def _bind(db):
     return orch
 
 
-def _task(task_id="task-1"):
-    return types.SimpleNamespace(id=task_id, metadata=None)
+def _task(task_id="task-1", metadata=None):
+    return types.SimpleNamespace(id=task_id, metadata=metadata)
+
+
+# [A36] A birth marker: under the flag-ON admission policy an ordinary turn no
+# longer mints a Case — only a dispatched/managed task births a flow_run. These
+# stage-machine tests exercise the birth+transition path, so the driving task is
+# flagged an explicit managed-Case root.
+def _managed_task(task_id="task-1"):
+    return _task(task_id, {TaskOrchestrator._MANAGED_CASE_META_KEY: True})
 
 
 @pytest.fixture(autouse=True)
@@ -124,7 +132,7 @@ def test_on_start_writes_intent_and_stashes(tmp_path, monkeypatch):
     monkeypatch.setattr(db_mod, "get_db", lambda: db)
 
     orch = _bind(db)
-    task = _task("task-on")
+    task = _managed_task("task-on")
     fid = orch._record_flow_run_start(task)
 
     assert db.get_flow_run(fid)["current_stage"] == "intent"
@@ -141,7 +149,7 @@ def test_on_stages_advance_in_order(tmp_path, monkeypatch):
     monkeypatch.setattr(db_mod, "get_db", lambda: db)
 
     orch = _bind(db)
-    task = _task("task-seq")
+    task = _managed_task("task-seq")
 
     observed = []
 
@@ -183,7 +191,7 @@ def test_on_transition_stamps_updated_at(tmp_path, monkeypatch):
     monkeypatch.setattr(db_mod, "get_db", lambda: db)
 
     orch = _bind(db)
-    task = _task("task-ts")
+    task = _managed_task("task-ts")
     fid = orch._record_flow_run_start(task)
     assert db.get_flow_run(fid)["updated_at"] is None  # create leaves it NULL
 

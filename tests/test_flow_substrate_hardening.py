@@ -35,6 +35,15 @@ def _task(task_id, metadata=None):
     return types.SimpleNamespace(id=task_id, metadata=metadata)
 
 
+# [A36] Under flag-ON admission an ordinary turn no longer births a Case — only a
+# dispatched/managed task does. These A29 seam tests drive the birth machinery,
+# so the task is flagged an explicit managed-Case root.
+def _managed_task(task_id, metadata=None):
+    meta = dict(metadata or {})
+    meta[TaskOrchestrator._MANAGED_CASE_META_KEY] = True
+    return _task(task_id, meta)
+
+
 def _result(success=True, error_class=""):
     return types.SimpleNamespace(success=success, error_class=error_class)
 
@@ -59,7 +68,7 @@ def test_on_session_attached_link_and_event(tmp_path, monkeypatch):
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    fid = orch._record_flow_run_start(_task("t-1", {"session_id": "sess-abc"}))
+    fid = orch._record_flow_run_start(_managed_task("t-1", {"session_id": "sess-abc"}))
 
     sess_links = db.list_flow_links(flow_run_id=fid, role="worker")
     assert len(sess_links) == 1
@@ -77,7 +86,7 @@ def test_no_session_id_means_no_session_link(tmp_path, monkeypatch):
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    fid = orch._record_flow_run_start(_task("t-oneoff", {}))
+    fid = orch._record_flow_run_start(_managed_task("t-oneoff", {}))
     assert db.list_flow_links(flow_run_id=fid, entity_type="session") == []
     assert [e for e in db.list_flow_events(fid) if e["event_type"] == "session.attached"] == []
 
@@ -102,7 +111,7 @@ def test_terminal_success_closes_case(tmp_path, monkeypatch):
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    task = _task("t-ok", {"session_id": "s"})
+    task = _managed_task("t-ok", {"session_id": "s"})
     orch._record_flow_run_start(task)
     orch._flow_terminal_outcome(task, success=True)
 
@@ -118,7 +127,7 @@ def test_terminal_failure_blocks_case(tmp_path, monkeypatch):
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    task = _task("t-bad", {})
+    task = _managed_task("t-bad", {})
     orch._record_flow_run_start(task)
     orch._flow_terminal_outcome(task, success=False, error_class="timeout")
 
