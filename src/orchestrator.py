@@ -80,7 +80,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.file_watcher = AsyncFileWatcher(config.system.tasks_dir)
         self.llama_mediator = LlamaMediator()
         self.session_store = SessionStore()
-        self.session_service = SessionService(self.session_store)
+        self.session_service = SessionService(
+            self.session_store,
+            remote_close_dispatcher=self._dispatch_remote_close,
+        )
         self.workflow_service = WorkflowService()
         self._backends = build_backends()
         from src.control.telemetry_sink import build_runtime_telemetry_sink
@@ -4378,6 +4381,59 @@ Generated from user description: {description}
         )
         setattr(result, "backend_name", backend_name)
         return result
+
+    def _dispatch_remote_close(self, session: Any) -> None:
+        """Enqueue a fire-and-forget close_session task pinned to the session's
+        owning node so the remote worker tears down its live backend session and
+        frees the claude process.
+
+        Injected into SessionService: a mesh /close used to be a no-op on the
+        worker (event=session_backend_close_remote_skipped), leaking the process.
+        This does NOT block the caller — the worker claims the pending task on its
+        next poll. If the node is offline the task simply waits; the worker's boot
+        reaper reclaims the process on restart regardless, so no leak survives.
+        """
+        machine_id = getattr(session, "machine_id", "") or ""
+        if not machine_id:
+            return
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            logger.warning(
+                "event=remote_close_no_db session_id=%s node=%s",
+                getattr(session, "session_id", ""), machine_id,
+            )
+            return
+        session_id = getattr(session, "session_id", "") or ""
+        backend = getattr(session, "backend", "") or "claude"
+        payload = {
+            "session": {
+                "session_id": session_id,
+                "backend": backend,
+                "backend_session_id": getattr(session, "backend_session_id", "") or "",
+                "machine_id": machine_id,
+            }
+        }
+        task_id = f"close-{session_id}-{uuid.uuid4().hex[:8]}"
+        try:
+            db.enqueue_task(
+                task_id=task_id,
+                session_id=session_id,
+                machine_id=machine_id,
+                backend=backend,
+                action="close_session",
+                payload=payload,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=remote_close_enqueue_failed session_id=%s node=%s err=%s",
+                session_id, machine_id, e,
+            )
+            return
+        logger.info(
+            "event=remote_close_enqueued session_id=%s node=%s task_id=%s",
+            session_id, machine_id, task_id,
+        )
 
     async def _dispatch_to_node(
         self,
