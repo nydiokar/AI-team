@@ -95,6 +95,11 @@ class InstructionBody(BaseModel):
     # onto the child's flow_runs row ONLY when HARNESS_FLOW_DRIVE is ON (else a
     # no-op ⇒ byte-identical). Absent/None on every normal Telegram/Web request.
     parent_flow_run_id: Optional[str] = None
+    # [A38] Manager→worker MEMBERSHIP. When set, the worker task JOINS this existing
+    # Case (a `task` link on it) instead of birthing a child Case — the M3.1 default
+    # for a Manager dispatching into its own Case. Attach only happens when
+    # HARNESS_FLOW_DRIVE is ON; absent/None on every normal request ⇒ byte-identical.
+    case_id: Optional[str] = None
 
 
 class CreateSessionBody(BaseModel):
@@ -102,6 +107,18 @@ class CreateSessionBody(BaseModel):
     repo_path: str
     model: Optional[str] = None
     node_id: Optional[str] = None
+
+
+class ManagerInvokeBody(BaseModel):
+    """[A38] Boot a Manager session bound to one new Case (M3 Phase 3.1)."""
+    objective: str
+    repo_path: str
+    backend: str = "claude"
+    model: Optional[str] = None
+    node_id: Optional[str] = None
+    completion_criteria: Optional[str] = None
+    context_refs: Optional[List[str]] = None
+    branch: Optional[str] = None
 
 
 class BindBody(BaseModel):
@@ -920,6 +937,7 @@ def build_control_api(orchestrator) -> FastAPI:
                         target_files=body.target_files,
                         source="web_session",
                         parent_flow_run_id=body.parent_flow_run_id,
+                        join_case_id=body.case_id,
                     )
                 except HarnessAdmissionBlocked as blocked:
                     # No task ran — return the session to IDLE so it stays usable.
@@ -935,6 +953,7 @@ def build_control_api(orchestrator) -> FastAPI:
                         target_files=body.target_files,
                         source="web_oneoff",
                         parent_flow_run_id=body.parent_flow_run_id,
+                        join_case_id=body.case_id,
                     )
                 except HarnessAdmissionBlocked as blocked:
                     raise _harness_blocked_http(blocked)
@@ -967,6 +986,43 @@ def build_control_api(orchestrator) -> FastAPI:
                 raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
             _idem_put("create_session", idempotency_key, env)
             return JSONResponse(env)
+
+    @app.post("/api/manager", dependencies=[Depends(_require_auth)])
+    async def api_manager(
+        body: ManagerInvokeBody,
+        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        """[A38] Invoke a Manager: create a Case-owning session, open one Case, and
+        deliver the objective as its first assignment. Refuses with 409 when the
+        Manager-role path is disabled (MANAGER_ROLE_ENABLED OFF ⇒ new surface inert).
+        Translates the Level-3 admission block to a clean 409, like /api/instructions."""
+        from src.orchestrator import HarnessAdmissionBlocked
+
+        async with _idem_guard_async("manager", idempotency_key) as cached:
+            if cached is not None:
+                return JSONResponse(cached)
+
+            try:
+                result = await orchestrator.invoke_manager(
+                    objective=body.objective,
+                    repo_path=body.repo_path,
+                    backend=body.backend,
+                    model=body.model,
+                    node_id=body.node_id or "__local__",
+                    completion_criteria=body.completion_criteria,
+                    context_refs=body.context_refs,
+                    branch=body.branch,
+                )
+            except HarnessAdmissionBlocked as blocked:
+                raise _harness_blocked_http(blocked)
+
+            if not result.get("ok"):
+                reason = result.get("reason") or "manager_invoke_failed"
+                status = 409 if reason == "manager_role_disabled" else _REASON_STATUS.get(reason, 400)
+                raise HTTPException(status_code=status, detail={"ok": False, "reason": reason})
+
+            _idem_put("manager", idempotency_key, result)
+            return JSONResponse(result)
 
     @app.post("/api/sessions/{session_id}/bind", dependencies=[Depends(_require_auth)])
     def api_bind_session(session_id: str, body: BindBody) -> JSONResponse:

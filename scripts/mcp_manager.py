@@ -220,6 +220,7 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     files = _bounded_files(args.get("files"))
     parent_flow_run_id = _bounded_text(
         args.get("parent_flow_run_id"), "parent_flow_run_id", _MAX_ID_CHARS, required=False)
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=False)
 
     body: Dict[str, Any] = {"description": objective}
     if session_id:
@@ -228,10 +229,17 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         body["cwd"] = cwd
     if files:
         body["target_files"] = files
+    if case_id:
+        # [A38] Manager→worker MEMBERSHIP: the worker task JOINS the Manager's
+        # existing Case (a `task` link on that Case), rather than spawning its own
+        # child Case. This is the M3.1 default — the Manager passes its OWN case_id.
+        body["case_id"] = case_id
     if parent_flow_run_id:
         # [A32] The endpoint now accepts this and stamps it onto the child's
         # flow_runs row via the M2 substrate — but ONLY when the gateway runs with
         # HARNESS_FLOW_DRIVE ON (a SHADOW record; nothing reads it to drive work).
+        # Use for a genuine child-CASE lineage edge; use case_id (above) to make the
+        # worker JOIN the Manager's Case instead.
         body["parent_flow_run_id"] = parent_flow_run_id
 
     result = _api_request("POST", "/api/instructions", body)
@@ -246,6 +254,12 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         f"CWD:       {cwd or '(session/default)'}",
         f"Files:     {', '.join(files) if files else '(none)'}",
     ]
+    if case_id:
+        lines.append(
+            f"case_id: {case_id} — the worker JOINS this (the Manager's) Case as a member "
+            f"task; it does NOT spawn a child Case. Worker completion leaves the Case OPEN "
+            f"(Task finished != Case completed)."
+        )
     if parent_flow_run_id:
         lines.append(
             f"parent_flow_run_id: {parent_flow_run_id} — sent as the Manager→worker "
@@ -400,6 +414,37 @@ def _wait_for_worker(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: get_case  (minimal Case-aware read for the M3.1 vertical slice)
+# ---------------------------------------------------------------------------
+
+def _get_case(args: Dict[str, Any]) -> str:
+    """Read the Manager's Case: status + completion_criteria + current stage.
+
+    Read-only over GET /api/flows/{case_id}. The minimum Case awareness the loop
+    needs to decide close vs. rework — it does NOT close anything (closure is the
+    authoritative close_case gateway op)."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    detail = _api_request("GET", f"/api/flows/{urllib.parse.quote(case_id)}")
+    flow = detail.get("flow") or {}
+    status = flow.get("status")
+    criteria = flow.get("completion_criteria")
+    stage = flow.get("current_stage")
+    objective = flow.get("objective_lock") or flow.get("objective")
+    lines = [
+        f"Case {case_id}",
+        f"status:              {status!r} (a Case with status NULL/open is still IN PROGRESS — "
+        "a finished worker Task does NOT close it)",
+        f"current_stage:       {stage!r}",
+        f"completion_criteria: {criteria!r}",
+        f"objective:           {objective!r}",
+        "",
+        "Decide from git evidence + these criteria: close (via close_case) only when the "
+        "criteria are truly met; otherwise rework/derive/block.",
+    ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Tool catalogue
 # ---------------------------------------------------------------------------
 _TOOLS = [
@@ -421,9 +466,26 @@ _TOOLS = [
                 "session_id": {"type": "string", "description": "Existing worker session to run in. Omit for a one-off dispatch."},
                 "cwd": {"type": "string", "description": "Working directory / repo path. Defaults to the session's repo or the request default."},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Target files to focus the worker on (optional)."},
-                "parent_flow_run_id": {"type": "string", "description": "The Manager's own flow_run id (the case). Recorded as the child→parent lineage edge in /api/flows (a SHADOW record — persisted when the gateway runs HARNESS_FLOW_DRIVE ON)."},
+                "case_id": {"type": "string", "description": "The Manager's OWN Case id. Pass it to make the worker JOIN this Case (member task, shared membership) instead of spawning a child Case — the M3.1 default. Worker completion leaves the Case OPEN."},
+                "parent_flow_run_id": {"type": "string", "description": "Use ONLY for a genuine child-CASE lineage edge (child→parent in /api/flows). To keep the worker inside the Manager's Case, use case_id instead."},
             },
             "required": ["objective"],
+        },
+    },
+    {
+        "name": "get_case",
+        "description": (
+            "Read the Manager's Case (read-only over GET /api/flows/{case_id}): status, "
+            "current_stage, completion_criteria, objective. A Case with an open/NULL status is "
+            "still in progress — a finished worker Task does NOT close it. Use before deciding "
+            "close vs. rework; closure itself is the authoritative close_case gateway operation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Case (flow_run) id to inspect — the Manager's own case."},
+            },
+            "required": ["case_id"],
         },
     },
     {
@@ -450,6 +512,7 @@ _TOOLS = [
 _TOOL_IMPLS = {
     "dispatch_worker": _dispatch_worker,
     "wait_for_worker": _wait_for_worker,
+    "get_case": _get_case,
 }
 
 # ---------------------------------------------------------------------------
