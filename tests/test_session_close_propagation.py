@@ -136,4 +136,9 @@ def test_backend_live_session_count_reported():
 
 def test_reaper_no_op_cases():
     from src.core.process_utils import reap_stale_worker_children
-    assert reap_stale_worker_children("") == []   # empty incarnation → no-op
+    # Either identity empty → no-op (never scans/kills).
+    assert reap_stale_worker_children("", "node-a") == []
+    assert reap_stale_worker_children("incarn-1", "") == []
+    # A live, non-matching incarnation/node finds nothing to reap on this host
+    # (current claude procs predate the stamp, so they carry no node/incarnation).
+    assert reap_stale_worker_children("incarn-xyz", "no-such-node") == []
