@@ -36,6 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.core.process_utils import WORKER_INCARNATION_ENV, reap_stale_worker_children
+
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 logger = logging.getLogger(__name__)
@@ -555,6 +557,39 @@ async def _execute_task(
             "return_code": 0,
         }
 
+    # Session close: the gateway dispatches this when a mesh session is /closed
+    # so the OWNING worker actually tears down its pooled backend session (frees
+    # the claude process). Previously remote /close was a no-op on the worker and
+    # the process leaked. No slot needed — handled outside the semaphore.
+    if action == "close_session":
+        session = _make_session_from_payload(payload)
+        closed = False
+        if session is not None:
+            backend = backends.get(session.backend or "claude")
+            closer = getattr(backend, "close", None) if backend is not None else None
+            if callable(closer):
+                try:
+                    await asyncio.to_thread(closer, session)
+                    closed = True
+                except Exception as e:
+                    logger.warning(
+                        "event=close_session_backend_failed session_id=%s err=%s",
+                        getattr(session, "session_id", ""), e,
+                    )
+        logger.info(
+            "event=close_session_handled session_id=%s closed=%s",
+            getattr(session, "session_id", "") if session else "", closed,
+        )
+        return {
+            "success": True,
+            "output": "session closed" if closed else "no live session to close",
+            "errors": [],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 0,
+        }
+
     backend_name = task_row.get("backend", "claude")
     backend = backends.get(backend_name)
     if backend is None:
@@ -873,6 +908,10 @@ class WorkerAgent:
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
         self._canary = (os.getenv("WORKER_CANARY") or "").lower() in {"1", "true", "yes"}
         self._incarnation_id = uuid.uuid4().hex
+        # Stamp our incarnation into the environment so every backend child we
+        # spawn (the Claude SDK `claude` process inherits os.environ) carries it.
+        # A later worker boot reaps children whose stamp != its own incarnation.
+        os.environ[WORKER_INCARNATION_ENV] = self._incarnation_id
         self._activity_forwarder: Optional[_ActivityForwarder] = None
         self._setup_activity_forwarding()
         self._setup_proactive_delivery()
@@ -983,6 +1022,41 @@ class WorkerAgent:
     # Heartbeat loop
     # ------------------------------------------------------------------
 
+    def _reap_stale_backend_children(self) -> None:
+        """On boot, kill backend children left by a PRIOR worker incarnation.
+
+        Their stdin/stdout pipes died with the previous worker, so they are
+        unreachable and unusable — pure leak. Reaping is narrow (only children
+        stamped with a different incarnation) and default-ON; disable with
+        WORKER_REAP_STALE_SESSIONS=0."""
+        disabled = os.environ.get("WORKER_REAP_STALE_SESSIONS", "1").strip().lower()
+        if disabled in ("0", "false", "no", "off"):
+            logger.info("event=boot_reap_disabled node_id=%s", self.cfg.node_id)
+            return
+        try:
+            reaped = reap_stale_worker_children(self._incarnation_id)
+            if reaped:
+                logger.warning(
+                    "event=boot_reaped_stale_children node_id=%s count=%d pids=%s",
+                    self.cfg.node_id, len(reaped), reaped,
+                )
+        except Exception as e:
+            logger.warning("event=boot_reap_failed node_id=%s err=%s", self.cfg.node_id, e)
+
+    def _count_live_backend_sessions(self) -> int:
+        """Sum of pooled live backend sessions across all backends (SDK claude
+        pool, etc.). Reported in live_state so the mesh can reconcile pooled
+        processes against the gateway's session view."""
+        total = 0
+        for backend in (self._backends or {}).values():
+            counter = getattr(backend, "live_session_count", None)
+            if callable(counter):
+                try:
+                    total += int(counter())
+                except Exception:
+                    pass
+        return total
+
     def _live_state(self) -> dict:
         """Snapshot of current operational state for heartbeat reporting.
 
@@ -999,6 +1073,9 @@ class WorkerAgent:
             "slots_total": self.cfg.max_concurrent,
             "canary": self._canary,
             "incarnation_id": self._incarnation_id,
+            # Pooled live backend sessions (may exceed active_tasks: an idle
+            # session keeps its claude process warm between turns).
+            "live_sessions": self._count_live_backend_sessions(),
         }
 
     async def _heartbeat_loop(self) -> None:
@@ -1339,6 +1416,11 @@ class WorkerAgent:
         session_id = task_row.get("session_id", "")
         # Correlate every line + event for this task with task_id/session_id.
         set_log_context(task_id=task_id, session_id=session_id)
+        # Lightweight control action — must NOT consume a turn slot or it could
+        # wait hours behind long-running turns before the process is freed.
+        if task_row.get("action") == "close_session":
+            await self._handle_close_session(task_row)
+            return
         async with self._semaphore:
             self._slots_used += 1
             try:
@@ -1401,11 +1483,47 @@ class WorkerAgent:
                 self._slots_used -= 1
                 self._heartbeat_now.set()  # push slots_used=0 immediately after task ends
 
+    async def _handle_close_session(self, task_row: Dict[str, Any]) -> None:
+        """Claim + execute a close_session control task outside the slot semaphore.
+
+        Claims the task (so it leaves the pending queue and is not re-polled),
+        runs the backend teardown via _execute_task's close_session branch, and
+        posts a terminal result. Kept deliberately separate from the turn path so
+        a close is never blocked by a full slot pool."""
+        task_id = task_row.get("id", "unknown")
+        try:
+            await asyncio.to_thread(
+                self._http.post, f"/tasks/{task_id}/claim", {"node_id": self.cfg.node_id}
+            )
+        except urllib.error.HTTPError as e:
+            if e.code != 409:
+                logger.warning("close_claim_failed err=%s", e)
+            return
+        except Exception as e:
+            logger.warning("close_claim_failed err=%s", e)
+            return
+        result = await _execute_task(
+            task_row,
+            self._backends,
+            self._http,
+            telemetry_sink=self._telemetry_sink,
+            node_id=self.cfg.node_id,
+        )
+        try:
+            await asyncio.to_thread(
+                self._http.post,
+                f"/tasks/{task_id}/result",
+                {"node_id": self.cfg.node_id, **result},
+            )
+        except Exception as e:
+            logger.error("close_result_post_failed err=%s", e)
+
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
+        self._reap_stale_backend_children()
         self._register()
 
         nudge_listener = asyncio.create_task(

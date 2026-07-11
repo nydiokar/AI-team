@@ -170,3 +170,55 @@ def terminate_many_popen(procs: Iterable[subprocess.Popen], timeout: float = 8.0
     """Terminate a collection of subprocess handles."""
     for proc in list(procs):
         terminate_subprocess_tree(proc, timeout=timeout)
+
+
+# Env var stamped into every worker-spawned backend child (inherited from the
+# worker's os.environ). A boot reaper uses it to distinguish THIS worker
+# incarnation's live children from prior-incarnation orphans.
+WORKER_INCARNATION_ENV = "WORKER_INCARNATION_ID"
+
+
+def reap_stale_worker_children(
+    current_incarnation: str,
+    *,
+    names: Iterable[str] = ("claude", "claude.exe"),
+    env_key: str = WORKER_INCARNATION_ENV,
+) -> list[int]:
+    """Kill backend child processes left behind by a PRIOR worker incarnation.
+
+    A worker-spawned backend (e.g. the Claude SDK ``claude`` process) communicates
+    over stdin/stdout pipes owned by the worker process; when that worker dies the
+    pipes die with it, so the surviving child is permanently unreachable — it can
+    never receive another turn. Keeping it alive preserves nothing and leaks RAM +
+    an auth/token slot. On a fresh worker boot we therefore reap any such child
+    whose stamped incarnation differs from ours.
+
+    Selection is deliberately narrow: a process is reaped ONLY if it carries the
+    ``env_key`` env var AND its value is non-empty AND != ``current_incarnation``.
+    Interactive ``claude`` sessions a human launched never carry the stamp, so they
+    are never touched; nor are this incarnation's own children.
+
+    Returns the list of reaped pids. No-op (returns ``[]``) when psutil is absent
+    or ``current_incarnation`` is empty.
+    """
+    if not current_incarnation or psutil is None:
+        return []
+    wanted = {n.lower() for n in names}
+    reaped: list[int] = []
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            name = (proc.info.get("name") or "").lower()
+            if name not in wanted:
+                continue
+            stamp = proc.environ().get(env_key, "")
+            if not stamp or stamp == current_incarnation:
+                continue
+        except Exception:
+            # environ() can raise (permission, process gone) — skip, never guess.
+            continue
+        try:
+            terminate_process_tree(proc.info["pid"])
+            reaped.append(int(proc.info["pid"]))
+        except Exception:
+            continue
+    return reaped

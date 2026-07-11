@@ -918,6 +918,15 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         with self._lock:
             self._sessions.pop(session_id, None)
 
+    def live_session_count(self) -> int:
+        """Number of pooled live SDK sessions (each owns one claude process).
+
+        Reported in worker live_state so the mesh can reconcile pooled backend
+        processes against the gateway's session view — the delta is orphans.
+        """
+        with self._lock:
+            return len(self._sessions)
+
     def driver_type(self) -> str:
         return "sdk"
 
