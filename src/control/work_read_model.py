@@ -210,6 +210,12 @@ def build_session_affiliations(
     it on now?"). We never fabricate a "primary" the substrate did not assert.
     Covers the WHOLE substrate (no per-case fanout, no cap).
 
+    [A37] Post-A36 this "most recent" is honest, not a shatter mask: a session now
+    holds ONE session link per Case (not one per turn), so "what is it on now?"
+    reflects real Case membership. The durable ``sessions.current_case_id`` is the
+    authoritative current-Case pointer; this projection is the Sessions-surface
+    view over the link ledger (current + history).
+
     The case's raw ``objective_lock`` rides along so the FRONTEND derives the
     display title with the SAME ``caseTitle`` logic it uses for the Work list and
     detail — one source of truth, so a case never shows two different titles.

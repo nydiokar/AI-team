@@ -4,9 +4,9 @@ A29 — Work substrate hardening: deferred write-path seams (flag-guarded, shado
 Covers the seams A26 deferred to A29:
   * session attachment  — the case's worker session is linked + `session.attached`
     is appended when a flow is created for a task that runs in a session.
-  * terminal OUTCOME    — task success closes the case (`flow.closed` + status
-    'closed'); a failure blocks it (`flow.status_changed`→'blocked' + status
-    'blocked'). `closure` is only a STAGE; this records the real result.
+  * terminal OUTCOME    — [A37] task-only: a task ending records `task.finished`
+    (outcome success/failed) and leaves the Case status UNTOUCHED. Closure is a
+    separate authoritative decision (close_case), never a task-end side effect.
   * approval lifecycle  — an approval on a task with a flow links approval→flow
     and appends `approval.requested` / `approval.resolved`.
 
@@ -35,6 +35,15 @@ def _task(task_id, metadata=None):
     return types.SimpleNamespace(id=task_id, metadata=metadata)
 
 
+# [A36] Under flag-ON admission an ordinary turn no longer births a Case — only a
+# dispatched/managed task does. These A29 seam tests drive the birth machinery,
+# so the task is flagged an explicit managed-Case root.
+def _managed_task(task_id, metadata=None):
+    meta = dict(metadata or {})
+    meta[TaskOrchestrator._MANAGED_CASE_META_KEY] = True
+    return _task(task_id, meta)
+
+
 def _result(success=True, error_class=""):
     return types.SimpleNamespace(success=success, error_class=error_class)
 
@@ -59,7 +68,7 @@ def test_on_session_attached_link_and_event(tmp_path, monkeypatch):
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    fid = orch._record_flow_run_start(_task("t-1", {"session_id": "sess-abc"}))
+    fid = orch._record_flow_run_start(_managed_task("t-1", {"session_id": "sess-abc"}))
 
     sess_links = db.list_flow_links(flow_run_id=fid, role="worker")
     assert len(sess_links) == 1
@@ -77,7 +86,7 @@ def test_no_session_id_means_no_session_link(tmp_path, monkeypatch):
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    fid = orch._record_flow_run_start(_task("t-oneoff", {}))
+    fid = orch._record_flow_run_start(_managed_task("t-oneoff", {}))
     assert db.list_flow_links(flow_run_id=fid, entity_type="session") == []
     assert [e for e in db.list_flow_events(fid) if e["event_type"] == "session.attached"] == []
 
@@ -96,36 +105,47 @@ def test_off_writes_no_session_link(tmp_path, monkeypatch):
 # Terminal OUTCOME
 # ---------------------------------------------------------------------------
 
-def test_terminal_success_closes_case(tmp_path, monkeypatch):
+def test_terminal_success_records_finished_leaves_case_open(tmp_path, monkeypatch):
+    # [A37] Task-only outcome: a completed task records `task.finished` but leaves
+    # the Case status untouched (Task finished != Case completed).
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    task = _task("t-ok", {"session_id": "s"})
+    task = _managed_task("t-ok", {"session_id": "s"})
     orch._record_flow_run_start(task)
     orch._flow_terminal_outcome(task, success=True)
 
     fid = task.metadata[TaskOrchestrator._FLOW_RUN_META_KEY]
-    assert db.get_flow_run(fid)["status"] == "closed"
-    closed = [e for e in db.list_flow_events(fid) if e["event_type"] == "flow.closed"]
-    assert len(closed) == 1 and closed[0]["to_state"] == "closed"
+    assert db.get_flow_run(fid)["status"] is None  # Case still OPEN, not closed
+    finished = [e for e in db.list_flow_events(fid) if e["event_type"] == "task.finished"]
+    assert len(finished) == 1
+    import json as _json
+    assert _json.loads(finished[0]["payload_json"])["outcome"] == "success"
+    # No fabricated closure/status-change event.
+    assert [e for e in db.list_flow_events(fid) if e["event_type"] in ("flow.closed", "flow.status_changed")] == []
 
 
-def test_terminal_failure_blocks_case(tmp_path, monkeypatch):
+def test_terminal_failure_records_finished_leaves_case_open(tmp_path, monkeypatch):
+    # [A37] A failing task does NOT auto-block the Case; it records the failure and
+    # leaves the Case open for an authoritative closer/reviewer to decide.
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    task = _task("t-bad", {})
+    task = _managed_task("t-bad", {})
     orch._record_flow_run_start(task)
     orch._flow_terminal_outcome(task, success=False, error_class="timeout")
 
     fid = task.metadata[TaskOrchestrator._FLOW_RUN_META_KEY]
-    assert db.get_flow_run(fid)["status"] == "blocked"
-    changed = [e for e in db.list_flow_events(fid) if e["event_type"] == "flow.status_changed"]
-    assert len(changed) == 1 and changed[0]["to_state"] == "blocked"
+    assert db.get_flow_run(fid)["status"] is None  # NOT auto-blocked
+    finished = [e for e in db.list_flow_events(fid) if e["event_type"] == "task.finished"]
+    assert len(finished) == 1
+    import json as _json
+    payload = _json.loads(finished[0]["payload_json"])
+    assert payload["outcome"] == "failed" and payload["error_class"] == "timeout"
 
 
 def test_terminal_off_is_noop(tmp_path, monkeypatch):

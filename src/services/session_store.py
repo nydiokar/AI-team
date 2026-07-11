@@ -273,4 +273,6 @@ class SessionStore:
             cache_health=d.get("cache_health", "unknown") or "unknown",
             cache_unhealthy_count=int(d.get("cache_unhealthy_count", 0) or 0),
             previous_backend_session_ids=_parse_list(d.get("previous_backend_session_ids", [])),
+            current_case_id=d.get("current_case_id") or None,
+            case_role=d.get("case_role") or None,
         )

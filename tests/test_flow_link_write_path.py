@@ -37,6 +37,16 @@ def _task(task_id, metadata=None):
     return types.SimpleNamespace(id=task_id, metadata=metadata)
 
 
+# [A36] Under flag-ON admission an ordinary turn no longer mints a Case — only a
+# dispatched/managed task births a flow_run. A managed-root marker drives the
+# birth path these link/event tests exercise (a lineage-stamped child is the
+# other birth path, covered explicitly by the child-dispatch test).
+def _managed_task(task_id, metadata=None):
+    meta = dict(metadata or {})
+    meta[TaskOrchestrator._MANAGED_CASE_META_KEY] = True
+    return _task(task_id, meta)
+
+
 @pytest.fixture(autouse=True)
 def _clear_flag(monkeypatch):
     monkeypatch.delenv("HARNESS_FLOW_DRIVE", raising=False)
@@ -57,7 +67,7 @@ def test_on_flow_creation_records_event_and_root_link(tmp_path, monkeypatch):
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    fid = orch._record_flow_run_start(_task("task-root"))
+    fid = orch._record_flow_run_start(_managed_task("task-root"))
 
     events = db.list_flow_events(fid)
     assert [e["event_type"] for e in events] == ["flow.created"]
@@ -118,7 +128,7 @@ def test_on_stage_transition_appends_event(tmp_path, monkeypatch):
     _patch_db(monkeypatch, db)
     orch = _orch()
 
-    task = _task("task-seq")
+    task = _managed_task("task-seq")
     orch._record_flow_run_start(task)  # flow.created
     orch._flow_stage_transition(task, "execution")
     orch._flow_stage_transition(task, "closure")
@@ -168,6 +178,6 @@ def test_link_write_failure_does_not_raise(tmp_path, monkeypatch):
 
     # The flow row is still created and the id returned; the broken substrate
     # writes are swallowed — dispatch is unaffected.
-    fid = orch._record_flow_run_start(_task("task-boom"))
+    fid = orch._record_flow_run_start(_managed_task("task-boom"))
     assert fid is not None
     assert db.get_flow_run(fid) is not None

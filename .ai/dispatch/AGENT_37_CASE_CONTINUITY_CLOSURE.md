@@ -113,8 +113,49 @@ actually occurred; the Work UI shows one Case = one objective with its real task
 
 ## Milestone
 
-_(burndown to be filled by the build agent)_
+- **F1 — honest stages.** ✅ Removed the loop's auto `impl_review` + `closure` stage stamps
+  (`orchestrator.py`); `execution` stays (a real transition). No stage is written for a phase
+  that did not happen.
+- **F2 — task outcome decoupled from Case status.** `_flow_terminal_outcome` rewritten task-only:
+  emits one append-only `task.finished` event (outcome success/failed) onto the task's owning
+  Case, resolving the Case id from `_FLOW_RUN_META_KEY` (birth) **or** `_CASE_ID_META_KEY`
+  (attached turn) so both first and Nth turn leave an audit trail. **It no longer writes
+  `flow_runs.status`.** A completed/failed task leaves its Case OPEN.
+- **F3 — authoritative `db.close_case`** (the ONLY status→terminal write path) + `CaseCloseBlocked`
+  structured refusal. Guards: open child flow, unresolved (pending) approval linked to the Case
+  (single indexed JOIN — no N+1), and **completion_criteria reconciliation** (each criterion
+  recorded `met` or `waived`-with-reason via `_parse_completion_criteria`/`_criterion_resolved`/
+  `_unreconciled_criteria`). Idempotent (already-closed → False). Orchestrator `close_case` seam
+  returns `{ok,closed,reason}` and clears the durable session affiliation of every linked session
+  on a real close (A36 item 4; only if the session still points at this Case).
+- **F4 — pause/resume reuse.** No new code needed — A36 admission already guarantees it: a paused
+  Case (status NULL/`blocked`, both OPEN) is re-found by `find_open_case_for_session`, so a resume
+  turn re-attaches to the SAME `flow_run_id` (test `test_resume_reuses_same_case`).
+- **F5 — read-model truth.** Item-5 acceptance is met by A36 + the existing read model: standalone
+  turns create no `flow_run` ⇒ absent from `build_work_list` (no fake Case rows); `build_case_ledger`
+  groups a Case's N `task`/`session` links. Retired the "most-recent-link" **mask** narrative in
+  `db.list_session_case_links` + `work_read_model.build_session_affiliations` docstrings (the shatter
+  is fixed at the source; `sessions.current_case_id` is now the authoritative current-Case pointer).
+- **F6 — cross-seam fix (`scripts/mcp_manager.py`, the live A33/A35 path).** `wait_for_worker` polled
+  `flow_runs.status` to detect worker completion; A37 stops task-end from writing status, which would
+  hang the poll until timeout. Added `_terminal_task_event`: when status is non-terminal, poll
+  `/api/work/{id}/timeline` for the authoritative `task.finished` event and return DONE/ATTENTION by
+  its outcome (Case stays OPEN — the reply tells the Manager to close via `close_case`). Preserves the
+  opt-in, operator-tested manager path under honest closure. 2 new tests.
+- **F7 — tests.** New `tests/test_case_closure.py` (19: criteria helpers, close success/idempotent/
+  cancel/invalid/unknown, guards for open-child/pending-approval/unmet-criteria/waive-without-reason,
+  orch seam ok/blocked/unknown/moved-on, resume-reuse). Updated the 2 A29 terminal tests to the new
+  honest behavior (task.finished + status untouched). **Full suite: 905 passed** (2 pre-existing env
+  fails unrelated).
+- **Adversarial review (`/code-review --fix`):** 2 findings, both fixed — (1) the `wait_for_worker`
+  cross-seam regression above; (2) N+1 in the approval close-guard → single indexed JOIN (CLAUDE.md §8).
 
 ## Closure
 
-_(to be filled at build close)_
+**Status: built** on `feat/m2.5-case-admission` (continues A36). Acceptance met — evidence: a worker
+task completes → its Case row stays `status IS NULL` (open); events are `flow.created` + `task.attached`
++ `task.finished` with **no** fabricated `impl_review`/`closure`/`flow.closed`; `close_case` refuses a
+Case with unmet `completion_criteria` (`{ok:false, reason:"…not reconciled…"}`) and closes it once each
+criterion is met/waived. Flag OFF ⇒ byte-identical. **M2.5 (A36+A37) complete — unblocks M3.1.**
+Deferred to their owning stages (unchanged): reviewer role + `review.*` (M3.2), durable relay/Manager-
+resume (M3.3), Manager control tools (M3.1), Web Work-inbox visual polish (frontend, no backend gap).
