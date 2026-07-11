@@ -172,36 +172,43 @@ def terminate_many_popen(procs: Iterable[subprocess.Popen], timeout: float = 8.0
         terminate_subprocess_tree(proc, timeout=timeout)
 
 
-# Env var stamped into every worker-spawned backend child (inherited from the
-# worker's os.environ). A boot reaper uses it to distinguish THIS worker
-# incarnation's live children from prior-incarnation orphans.
+# Env vars stamped into every worker-spawned backend child (inherited from the
+# worker's os.environ). A boot reaper uses them to distinguish THIS worker
+# incarnation's live children from its own prior-incarnation orphans — scoped by
+# node so a co-located second worker's children are never touched.
 WORKER_INCARNATION_ENV = "WORKER_INCARNATION_ID"
+WORKER_NODE_ENV = "WORKER_NODE_ID"
 
 
 def reap_stale_worker_children(
     current_incarnation: str,
+    current_node_id: str,
     *,
     names: Iterable[str] = ("claude", "claude.exe"),
-    env_key: str = WORKER_INCARNATION_ENV,
+    incarnation_key: str = WORKER_INCARNATION_ENV,
+    node_key: str = WORKER_NODE_ENV,
 ) -> list[int]:
-    """Kill backend child processes left behind by a PRIOR worker incarnation.
+    """Kill backend child processes left behind by a PRIOR incarnation of THIS node.
 
     A worker-spawned backend (e.g. the Claude SDK ``claude`` process) communicates
     over stdin/stdout pipes owned by the worker process; when that worker dies the
     pipes die with it, so the surviving child is permanently unreachable — it can
     never receive another turn. Keeping it alive preserves nothing and leaks RAM +
-    an auth/token slot. On a fresh worker boot we therefore reap any such child
-    whose stamped incarnation differs from ours.
+    an auth/token slot. On a fresh worker boot we therefore reap such orphans.
 
-    Selection is deliberately narrow: a process is reaped ONLY if it carries the
-    ``env_key`` env var AND its value is non-empty AND != ``current_incarnation``.
-    Interactive ``claude`` sessions a human launched never carry the stamp, so they
-    are never touched; nor are this incarnation's own children.
+    Selection is deliberately narrow — a process is reaped ONLY if it carries BOTH
+    stamps AND its node stamp EQUALS ``current_node_id`` AND its incarnation stamp
+    is non-empty and != ``current_incarnation``. Consequences:
+      * interactive/human ``claude`` (unstamped) — never touched;
+      * a co-located gateway's children (unstamped) — never touched;
+      * a DIFFERENT worker/canary on the same host (different node stamp) — never
+        touched (the node scope is what makes multi-worker hosts safe);
+      * only this node's own prior-incarnation orphans are reaped.
 
-    Returns the list of reaped pids. No-op (returns ``[]``) when psutil is absent
-    or ``current_incarnation`` is empty.
+    Returns the list of reaped pids. No-op (``[]``) when psutil is absent or either
+    identity is empty.
     """
-    if not current_incarnation or psutil is None:
+    if not current_incarnation or not current_node_id or psutil is None:
         return []
     wanted = {n.lower() for n in names}
     reaped: list[int] = []
@@ -210,7 +217,10 @@ def reap_stale_worker_children(
             name = (proc.info.get("name") or "").lower()
             if name not in wanted:
                 continue
-            stamp = proc.environ().get(env_key, "")
+            env = proc.environ()
+            if env.get(node_key, "") != current_node_id:
+                continue
+            stamp = env.get(incarnation_key, "")
             if not stamp or stamp == current_incarnation:
                 continue
         except Exception:

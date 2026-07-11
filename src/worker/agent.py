@@ -36,7 +36,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.core.process_utils import WORKER_INCARNATION_ENV, reap_stale_worker_children
+from src.core.process_utils import (
+    WORKER_INCARNATION_ENV,
+    WORKER_NODE_ENV,
+    reap_stale_worker_children,
+)
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
@@ -908,9 +912,12 @@ class WorkerAgent:
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
         self._canary = (os.getenv("WORKER_CANARY") or "").lower() in {"1", "true", "yes"}
         self._incarnation_id = uuid.uuid4().hex
-        # Stamp our incarnation into the environment so every backend child we
-        # spawn (the Claude SDK `claude` process inherits os.environ) carries it.
-        # A later worker boot reaps children whose stamp != its own incarnation.
+        # Stamp our node + incarnation into the environment so every backend child
+        # we spawn (the Claude SDK `claude` process inherits os.environ) carries
+        # both. A later worker boot reaps children stamped with OUR node id but a
+        # different incarnation — node scoping keeps a co-located second worker's
+        # children safe.
+        os.environ[WORKER_NODE_ENV] = self.cfg.node_id
         os.environ[WORKER_INCARNATION_ENV] = self._incarnation_id
         self._activity_forwarder: Optional[_ActivityForwarder] = None
         self._setup_activity_forwarding()
@@ -1034,7 +1041,7 @@ class WorkerAgent:
             logger.info("event=boot_reap_disabled node_id=%s", self.cfg.node_id)
             return
         try:
-            reaped = reap_stale_worker_children(self._incarnation_id)
+            reaped = reap_stale_worker_children(self._incarnation_id, self.cfg.node_id)
             if reaped:
                 logger.warning(
                     "event=boot_reaped_stale_children node_id=%s count=%d pids=%s",
