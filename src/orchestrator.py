@@ -1924,6 +1924,77 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
             return None
 
+    def close_case(
+        self,
+        flow_run_id: str,
+        *,
+        outcome: str = "closed",
+        actor: str = "operator",
+        criteria_reconciliation: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """[A37] Orchestrator seam over ``db.close_case`` — authoritative closure.
+
+        Returns ``{"ok", "closed", "reason"}``: ``ok`` False with a human ``reason``
+        when the Case cannot honestly close (unresolved approval / open child work /
+        unmet completion_criteria) or the id is unknown — a structured refusal, not
+        an exception. On a real close, clears the durable Case affiliation of every
+        session linked to the Case (A36 item 4), best-effort/isolated.
+        """
+        from src.control.db import get_db, CaseCloseBlocked
+        db = get_db()
+        if db is None:
+            return {"ok": False, "closed": False, "reason": "db_unavailable"}
+        try:
+            closed = db.close_case(
+                flow_run_id, outcome=outcome, actor=actor,
+                criteria_reconciliation=criteria_reconciliation,
+            )
+        except CaseCloseBlocked as e:
+            return {"ok": False, "closed": False, "reason": e.reason}
+        except ValueError as e:
+            return {"ok": False, "closed": False, "reason": str(e)}
+        if closed:
+            try:
+                for link in db.list_flow_links(
+                    flow_run_id=flow_run_id, entity_type="session",
+                ):
+                    self._clear_session_case_affiliation(
+                        str(link.get("entity_id") or ""), flow_run_id,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "event=case_affiliation_clear_failed flow_run_id=%s err=%s",
+                    flow_run_id, e,
+                )
+        return {"ok": True, "closed": bool(closed), "reason": None}
+
+    def _clear_session_case_affiliation(self, session_id: str, case_id: str) -> None:
+        """[A37] Clear a session's durable Case affiliation on Case close.
+
+        Only clears when the session still points at THIS Case — a session that has
+        already moved to another Case is left untouched. Best-effort; never raises.
+        """
+        try:
+            sid = (session_id or "").strip()
+            if not sid:
+                return
+            store = getattr(self, "session_store", None)
+            if store is None:
+                return
+            session = store.get(sid)
+            if session is None:
+                return
+            if getattr(session, "current_case_id", None) != case_id:
+                return  # already moved on / not affiliated — leave it
+            session.current_case_id = None
+            session.case_role = None
+            store.save(session)
+        except Exception as e:
+            logger.warning(
+                "event=session_case_clear_failed session_id=%s err=%s",
+                session_id, e,
+            )
+
     def _record_flow_stage(self, flow_run_id: Optional[str], stage: str) -> None:
         """Best-effort FlowRun stage-transition update (A19). Swallows failures.
 
@@ -2159,55 +2230,39 @@ class TaskOrchestrator(ITaskOrchestrator):
     def _flow_terminal_outcome(
         self, task: "Task", *, success: bool, error_class: str = "",
     ) -> None:
-        """[A29] Record the authoritative terminal OUTCOME of a case's root task.
+        """[A37] Record a task's terminal outcome as a `task.finished` case event.
 
-        Flag-guarded (no-op when HARNESS_FLOW_DRIVE is OFF ⇒ byte-identical) and
-        best-effort/isolated (a write failure logs and returns; it can NEVER raise
-        into task execution). SUMMARY: sets flow_runs.status ('closed' on success,
-        'blocked' on failure) so the read model's attention bucket leaves 'active'.
-        AUDIT: appends the matching terminal flow_event ('flow.closed' / a
-        'flow.status_changed' to 'blocked'). Both are SHADOW records — nothing
-        reads them to drive execution.
+        **Task-only** (the A37 correction of A29): a task ending updates TASK state
+        only — it does NOT write ``flow_runs.status``. ``Task finished != Case
+        completed``: a completed or failed task leaves its Case OPEN; a Case's
+        status changes solely via an authoritative ``close_case`` (or a real
+        reviewer at M3.2), never as a task-end side effect.
 
-        NOTE: review.accepted / review.rework_requested / review.waived are NOT
-        emitted here — there is no reviewer role or review gate in the harness yet
-        (that arrives with M3). Emitting them now would fabricate an outcome the
-        substrate cannot observe, so they stay deferred (honesty-first).
+        Emits one append-only ``task.finished`` event (compact outcome reference)
+        onto the task's owning Case — resolving the Case id from either the birth
+        key (``_FLOW_RUN_META_KEY``, a dispatched/managed root) or the attach key
+        (``_CASE_ID_META_KEY``, an ordinary turn on a shared Case) so both the
+        first and Nth turn of a Case leave an honest audit trail. Flag-guarded
+        (no-op when OFF ⇒ byte-identical) and best-effort/isolated — a write
+        failure logs and returns; it can NEVER raise into task execution.
         """
         try:
             if not self._harness_flow_drive_enabled():
                 return
             meta = getattr(task, "metadata", None) or {}
-            flow_run_id = meta.get(self._FLOW_RUN_META_KEY)
+            # Birth case (owns a flow_run) OR the shared Case an ordinary turn
+            # attached to — either way the task ran under this Case.
+            flow_run_id = meta.get(self._FLOW_RUN_META_KEY) or meta.get(self._CASE_ID_META_KEY)
             if not flow_run_id:
                 return
-            from src.control.db import get_db
-            db = get_db()
-            if db is None:
-                return
-            new_status = "closed" if success else "blocked"
-            # SUMMARY (flow_runs.status). Isolated: a summary write failure must
-            # not stop the audit event below.
-            try:
-                db.update_flow_run(flow_run_id, status=new_status)
-            except Exception as e:
-                logger.warning(
-                    "event=flow_terminal_status_failed flow_run_id=%s err=%s",
-                    flow_run_id, e,
-                )
-            # AUDIT trail (append-only). Payload stays a compact reference.
-            if success:
-                self._record_flow_event(
-                    flow_run_id, "flow.closed", "system", to_state="closed",
-                    entity_type="task", entity_id=getattr(task, "id", None),
-                    payload={"outcome": "success"},
-                )
-            else:
-                self._record_flow_event(
-                    flow_run_id, "flow.status_changed", "system", to_state="blocked",
-                    entity_type="task", entity_id=getattr(task, "id", None),
-                    payload={"outcome": "failed", "error_class": error_class or None},
-                )
+            self._record_flow_event(
+                flow_run_id, "task.finished", "system",
+                entity_type="task", entity_id=getattr(task, "id", None),
+                payload={
+                    "outcome": "success" if success else "failed",
+                    "error_class": (error_class or None) if not success else None,
+                },
+            )
         except Exception as e:
             logger.warning(
                 "event=flow_terminal_outcome_failed task_id=%s err=%s",
@@ -2653,9 +2708,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                     invocation_id=getattr(result, "telemetry_invocation_id", None),
                     backend=finish_backend,
                 )
-                # [FlowRun A22] Harness transition → `impl_review` (result produced,
-                # under review). Flag-guarded, best-effort SHADOW write.
-                self._flow_stage_transition(task, "impl_review")
+                # [A37] No auto `impl_review`/`closure` stage stamp. Those stages
+                # were fabricated on EVERY task even though no reviewer/closer ran
+                # (Task finished != Case completed). A task-end writes ONLY the task
+                # outcome now; a Case's stage/status changes only via a real
+                # reviewer (M3.2) or an authoritative close_case.
                 self._emit_turn_telemetry(
                     "turn.completed",
                     task,
@@ -2670,14 +2727,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                     backend=finish_backend,
                     flush=True,
                 )
-                # [FlowRun A22] Harness transition → `closure` (turn complete). The
-                # final §11 stage; flag-guarded, best-effort SHADOW write.
-                self._flow_stage_transition(task, "closure")
-                # [A29] Terminal OUTCOME (deferred A26 seam). `closure` is only a
-                # STAGE; this records the authoritative case OUTCOME — success
-                # closes the case, a failure blocks it (needs attention) — so the
-                # inbox bucket and the audit trail reflect the real result of the
-                # task (mesh terminal state), not just "reached closure".
+                # [A37] Terminal OUTCOME — task-only. Records the task's result as a
+                # `task.finished` case audit event WITHOUT touching flow_runs.status.
+                # A completed/failed task leaves its Case OPEN; closure is a separate
+                # authoritative decision (close_case), never a task-end side effect.
                 self._flow_terminal_outcome(
                     task,
                     success=bool(result.success),

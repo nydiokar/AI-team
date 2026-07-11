@@ -185,6 +185,44 @@ def test_wait_returns_on_attention(monkeypatch):
     assert "Needs attention" in out
 
 
+def test_wait_returns_on_task_finished_event(monkeypatch):
+    """[A37] Honest closure: the worker flow's status never flips on task-end, so
+    wait_for_worker must terminate on the authoritative `task.finished` event."""
+    def fake_request(method, path, payload=None, timeout=20.0):
+        if path.startswith("/api/flows/"):
+            return {"flow": {"status": None, "current_stage": "execution"}}
+        if path.startswith("/api/work/") and path.endswith("/timeline"):
+            return {"events": [
+                {"event_type": "task.attached", "entity_id": "task_abc"},
+                {"event_type": "task.finished", "entity_id": "task_abc",
+                 "payload_json": '{"outcome": "success"}'},
+            ]}
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._wait_for_worker(
+        {"flow_run_id": "flow_1", "task_id": "task_abc", "timeout": 5})
+    assert "DONE (task.finished)" in out
+    assert "remains OPEN" in out
+
+
+def test_wait_task_finished_failure_is_attention(monkeypatch):
+    def fake_request(method, path, payload=None, timeout=20.0):
+        if path.startswith("/api/flows/"):
+            return {"flow": {"status": None, "current_stage": "execution"}}
+        if path.endswith("/timeline"):
+            return {"events": [
+                {"event_type": "task.finished", "entity_id": "task_z",
+                 "payload_json": '{"outcome": "failed", "error_class": "timeout"}'},
+            ]}
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._wait_for_worker({"flow_run_id": "flow_1", "timeout": 5})
+    assert "ATTENTION (task.finished)" in out
+    assert "FAILED" in out
+
+
 def test_wait_times_out_without_busy_loop(monkeypatch):
     """Active-forever flow must hit the timeout branch and must sleep between
     polls (no CPU-pegging busy loop)."""

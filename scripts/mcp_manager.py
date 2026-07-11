@@ -273,6 +273,39 @@ def _resolve_flow_run_id(task_id: str) -> Optional[str]:
     return None
 
 
+def _terminal_task_event(
+    flow_run_id: str, task_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """[A37] Detect a dispatched worker's completion from the `task.finished` event.
+
+    Post-A37, a task ending records an authoritative ``task.finished`` case event
+    but NO LONGER writes ``flow_runs.status`` (a Case closes only via close_case).
+    So a plain worker dispatch signals "the turn finished" via this event, not via
+    status — poll the case timeline for it. Returns ``{"kind","outcome"}`` (kind:
+    done|attention) for the matching event, or None if the turn has not finished.
+    Read-only; a transport failure propagates as RuntimeError so the poll loop's
+    blip tolerance handles it uniformly."""
+    detail = _api_request(
+        "GET", f"/api/work/{urllib.parse.quote(flow_run_id)}/timeline",
+    )
+    events = detail.get("events") or []
+    matches = [
+        e for e in events
+        if e.get("event_type") == "task.finished"
+        and (not task_id or e.get("entity_id") == task_id)
+    ]
+    if not matches:
+        return None
+    payload = matches[-1].get("payload_json")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = None
+    outcome = str(payload.get("outcome")) if isinstance(payload, dict) and payload.get("outcome") else "success"
+    return {"kind": "done" if outcome == "success" else "attention", "outcome": outcome}
+
+
 def _wait_for_worker(args: Dict[str, Any]) -> str:
     task_id = _bounded_text(args.get("task_id"), "task_id", _MAX_ID_CHARS, required=False)
     flow_run_id = _bounded_text(args.get("flow_run_id"), "flow_run_id", _MAX_ID_CHARS, required=False)
@@ -314,6 +347,26 @@ def _wait_for_worker(args: Dict[str, Any]) -> str:
                            if kind == "attention" else
                            "\nTerminal. Review the worker's committed diff in git before closing "
                            "the case (do NOT trust a self-reported summary).")
+                    )
+                # [A37] Honest closure: task-end no longer flips flow_runs.status
+                # (a Case closes only via close_case). A plain worker dispatch
+                # signals its turn finished via the `task.finished` event — poll for
+                # it so wait_for_worker still terminates on real completion.
+                tev = _terminal_task_event(resolved_id, task_id)
+                if tev is not None:
+                    stage = flow.get("current_stage")
+                    ekind = tev["kind"]
+                    return (
+                        f"Worker flow {resolved_id} reached: {ekind.upper()} (task.finished)\n"
+                        f"task_outcome={tev['outcome']!r} current_stage={stage!r}\n"
+                        f"task_id={task_id or '(unknown)'} polls={polls}\n"
+                        + ("\nWorker turn finished cleanly; the Case remains OPEN "
+                           "(Task finished != Case completed). Review the committed diff "
+                           "in git, then close the Case authoritatively via close_case "
+                           "once the objective is truly met."
+                           if ekind == "done" else
+                           "\nWorker turn FAILED; the Case remains open for the Manager to "
+                           "inspect and decide (rework / close).")
                     )
             consecutive_errors = 0  # a clean poll resets the streak
         except RuntimeError as exc:
