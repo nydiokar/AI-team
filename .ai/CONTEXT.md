@@ -1,7 +1,7 @@
 # AI-Team Gateway — Hot Context
 
 **Last Updated:** 2026-07-10
-**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. **M3 Phase 3.0 CODE-COMPLETE** (branch `feat/m3-phase30-mcp-manager`, NOT merged; stack A31→A34): A31 `scripts/mcp_manager.py` tool surface; **A32** optional `parent_flow_run_id` on `POST /api/instructions` → child `flow_runs` lineage edge (flag-gated); **A33** `dispatch_worker` sends it + `wait_for_worker` retry tolerance; **A34** `claude_driver` grants the manager tools to a session, **double-gated** (`MANAGER_TOOLS_ENABLED` env + `manager` in `~/.claude.json`; `setup_mcp.py --with-manager`) ⇒ byte-identical until the operator opts in. **97 M3 tests green; zero live-gateway blast (not restarted).** **Remaining = the paid live proof only:** 🟡 **A35** (operator-gated runbook, `dispatch/AGENT_35_LIVE_F4_SPIKE.md`) — register server + flag + restart + spawn a manager session + verify parent→child lineage in `/api/flows` with no slot starvation (live box has `MAX_CONCURRENT_TASKS=4` + `Horse`/`kanebra-worker` online ⇒ low starvation risk). NOT run autonomously (cost scar #1 + PM2 restart + global-config edit). See `dispatch/AGENT_31_*`…`AGENT_35_*`.
+**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. **M3 Phase 3.0 CODE-COMPLETE & on `main`** (stack A31→A34, carried in via the M2.5 merge `33b3f76`/PR #9; branch `feat/m3-phase30-mcp-manager`): A31 `scripts/mcp_manager.py` tool surface; **A32** optional `parent_flow_run_id` on `POST /api/instructions` → child `flow_runs` lineage edge (flag-gated); **A33** `dispatch_worker` sends it + `wait_for_worker` retry tolerance; **A34** `claude_driver` grants the manager tools to a session, **double-gated** (`MANAGER_TOOLS_ENABLED` env + `manager` in `~/.claude.json`; `setup_mcp.py --with-manager`) ⇒ byte-identical until the operator opts in. **97 M3 tests green; zero live-gateway blast (not restarted).** **Remaining = the paid live proof only:** 🟡 **A35** (operator-gated runbook, `dispatch/AGENT_35_LIVE_F4_SPIKE.md`) — register server + flag + restart + spawn a manager session + verify parent→child lineage in `/api/flows` with no slot starvation (live box has `MAX_CONCURRENT_TASKS=4` + `Horse`/`kanebra-worker` online ⇒ low starvation risk). NOT run autonomously (cost scar #1 + PM2 restart + global-config edit). See `dispatch/AGENT_31_*`…`AGENT_35_*`.
 
 > This is the **fast-orientation** doc: what the project is, how it's wired *right
 > now*, the current priorities, and the constraints. It is intentionally short.
@@ -34,7 +34,7 @@
 > `open_case`/dispatch) + **A37** (task-end is task-only, no auto stage-stamps or auto-close;
 > authoritative `close_case` with open-child/approval/`completion_criteria` guards). It was a
 > **writer-policy bug over a sound substrate** — M1/M2 stayed valid, nothing rolled back. Flag OFF
-> ⇒ byte-identical. **Status: built on the branch (not yet merged — open PR).** Full audit:
+> ⇒ byte-identical. **Status: MERGED to `main` (`33b3f76`, PR #9, 2026-07-11).** Full audit:
 > [`.ai/workflow_architecture_audit.md`](workflow_architecture_audit.md); v0.7 spec
 > `docs/Task_Harness_v0.7_AUTOMATION.md`. **M3.1 is now unblocked** (its `wait_for_worker` already
 > adapted to honest closure via the `task.finished` event).
