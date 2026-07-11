@@ -12,6 +12,18 @@ for mobile work control. It does **not** build autonomous manager behavior. It d
 build a desktop workflow editor. It creates the durable relationships and read model needed
 before those things can be safe or useful.
 
+> **⚠️ FOLLOW-UP 2026-07-11 (architecture audit) — the SCHEMA is correct; the WRITE POLICY is not.**
+> The audit ([`.ai/workflow_architecture_audit.md`](../.ai/workflow_architecture_audit.md))
+> confirms this milestone's **schema** is right: `flow_links`'s unique key
+> `(flow_run_id, entity_type, entity_id, role)` (`db.py:2551`) already supports **one Case ↔
+> many Tasks/Sessions**. **This milestone is NOT failed — its scope shipped correctly.** But
+> the A26 *write path* over-creates Cases: `_enqueue_task` mints one `flow_run` + one
+> `session→worker` link **per turn**, so a reused session shatters into one fake Case per
+> message. **A30's "resolve session to most-recent case"** (`db.py:1650-1653`) is a **cosmetic
+> mask** over that shattering, not a fix. The correction lives in the new **M2.5 milestone**
+> (`docs/Task_Harness_v0.7_AUTOMATION.md` §3; packets `AGENT_36`/`AGENT_37`): attach turns to an
+> open Case, run standalone turns Case-less, retire the most-recent-link mask.
+
 ## Decision
 
 Use the hybrid product model:

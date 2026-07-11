@@ -918,6 +918,21 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         with self._lock:
             self._sessions.pop(session_id, None)
 
+    def live_session_count(self) -> int:
+        """Number of pooled live SDK sessions (each owns one claude process).
+
+        Reported in worker live_state so the mesh can reconcile pooled backend
+        processes against the gateway's session view — the delta is orphans.
+
+        Deliberately LOCKLESS: this is called from the worker heartbeat on the
+        asyncio event-loop thread, and ``_get_or_create`` holds ``self._lock``
+        across ``start()`` (up to a 90s connect). Taking the lock here would
+        freeze the event loop for that whole window. ``len()`` on a dict is
+        atomic under the GIL; a momentary off-by-one during a concurrent
+        insert/pop is irrelevant for a heartbeat gauge.
+        """
+        return len(self._sessions)
+
     def driver_type(self) -> str:
         return "sdk"
 
