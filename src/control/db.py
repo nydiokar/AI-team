@@ -2815,13 +2815,22 @@ def _parse_completion_criteria(raw: Optional[str]) -> List[str]:
 def _criterion_resolved(entry: Any) -> bool:
     """[A37] A reconciliation entry resolves its criterion iff it is recorded
     ``met``, or explicitly ``waived`` with a non-empty reason (mirrors the
-    ``waived_findings`` honesty contract). Anything else is unresolved."""
+    ``waived_findings`` honesty contract). Anything else is unresolved.
+
+    [A39] Liberal-in-what-we-accept on the Decision surface: the canonical shape is
+    ``{"status": "met"}`` / ``{"status": "waived", "reason": ...}``, but a Manager
+    (or its LLM) commonly emits the boolean shorthand ``{"met": true}`` /
+    ``{"waived": true, "reason": ...}``. Both are honored so a slightly-off format
+    guess cannot produce a perpetually-unclosable Case. Safety is preserved:
+    ``met`` must be exactly ``True`` (``{"met": false}`` does NOT resolve) and a
+    waiver still requires a non-empty reason."""
     if not isinstance(entry, dict):
         return False
     status = str(entry.get("status") or "").strip().lower()
-    if status == "met":
+    if status == "met" or entry.get("met") is True:
         return True
-    if status == "waived" and str(entry.get("reason") or "").strip():
+    waived = status == "waived" or entry.get("waived") is True
+    if waived and str(entry.get("reason") or "").strip():
         return True
     return False
 
