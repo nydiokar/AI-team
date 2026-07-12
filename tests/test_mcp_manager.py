@@ -288,7 +288,7 @@ def test_dispatch_tools_list(monkeypatch):
     mcp_manager._dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = sent[0]["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {"dispatch_worker", "wait_for_worker", "get_case", "close_case"}
+    assert names == {"dispatch_worker", "wait_for_worker", "get_case", "close_case", "record_review"}
 
 
 def test_dispatch_tool_call_success(monkeypatch):

@@ -129,6 +129,13 @@ class CaseCloseBody(BaseModel):
     criteria_reconciliation: Optional[List[Dict[str, Any]]] = None
 
 
+class CaseReviewBody(BaseModel):
+    """[M3.2] Record a Manager review verdict on a Case. ``verdict`` must be one of
+    accepted|rework_requested|waived; ``reason`` is an optional short note."""
+    verdict: str
+    reason: Optional[str] = None
+
+
 class BindBody(BaseModel):
     chat_id: Optional[int] = None
 
@@ -1044,6 +1051,25 @@ def build_control_api(orchestrator) -> FastAPI:
             outcome=body.outcome,
             actor="manager",
             criteria_reconciliation=body.criteria_reconciliation,
+        )
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/review", dependencies=[Depends(_require_auth)])
+    def api_record_review(case_id: str, body: CaseReviewBody) -> JSONResponse:
+        """[M3.2] Record a Manager review verdict (accepted|rework_requested|waived)
+        as the canonical ``review.*`` flow_event on the Case audit trail. Gated by
+        ``REVIEW_EMITTER_ENABLED``: when OFF this route returns 404 (disabled) so
+        flag-OFF is byte-identical to pre-M3.2. Mirrors ``api_close_case``."""
+        from src.control.db import review_emitter_enabled, REVIEW_VERDICT_EVENT_TYPES
+        if not review_emitter_enabled():
+            raise HTTPException(status_code=404, detail="not_found")
+        if body.verdict not in REVIEW_VERDICT_EVENT_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail={"ok": False, "reason": "invalid_verdict"},
+            )
+        result = orchestrator.record_review(
+            case_id, verdict=body.verdict, reason=body.reason, actor="manager",
         )
         return JSONResponse(result)
 

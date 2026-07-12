@@ -1994,6 +1994,36 @@ class TaskOrchestrator(ITaskOrchestrator):
                 )
         return {"ok": True, "closed": bool(closed), "reason": None}
 
+    def record_review(
+        self,
+        flow_run_id: str,
+        *,
+        verdict: str,
+        reason: Optional[str] = None,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[M3.2] Orchestrator seam — record a Manager review verdict as a review.*
+        flow_event on the Case audit trail.
+
+        Mirrors the ``close_case`` seam: gets the db via ``get_db()``, maps the
+        verdict to its canonical ``review.*`` event_type, appends the append-only
+        event, and returns ``{"ok", ...}``. Returns ``{"ok": False,
+        "reason": "db_unavailable"}`` when the db is unavailable and
+        ``{"ok": False, "reason": "invalid_verdict"}`` for an unknown verdict.
+        """
+        from src.control.db import get_db, REVIEW_VERDICT_EVENT_TYPES
+        event_type = REVIEW_VERDICT_EVENT_TYPES.get(verdict)
+        if event_type is None:
+            return {"ok": False, "reason": "invalid_verdict"}
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        event_id = db.append_flow_event(
+            flow_run_id, event_type, actor,
+            payload={"verdict": verdict, "reason": reason},
+        )
+        return {"ok": True, "event_type": event_type, "event_id": event_id}
+
     def _clear_session_case_affiliation(self, session_id: str, case_id: str) -> None:
         """[A37] Clear a session's durable Case affiliation on Case close.
 
