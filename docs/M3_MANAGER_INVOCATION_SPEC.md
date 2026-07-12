@@ -214,9 +214,15 @@ The roadmap deliberately left these blank until the F4 audit; filling them now.
 - **Phase 3.1 — Manager role wiring.** Promote `manager_invocation.md` to a spawnable manager
   session type booting with the role prompt + `mcp_manager` + grounding. One intent → one
   scoped dispatch → one review → close, all durable.
-- **Phase 3.2 — Review-from-above + `review.*` emitter.** Wire the Manager's verdict into
-  `flow_events` (`review.accepted` / `review.rework_requested` / `review.waived`) — the vocab
-  A29 deferred "until a reviewer role exists" now has its reviewer. Distinct plan-reviewer seat.
+- **Phase 3.2 — `review.*` verdict emitter (NOT a new role).** The reviewer **is the Manager** —
+  reviewing worker deliverables is a core Manager duty already shipped in Phase 3.1 (§4;
+  `roles/manager.md`). 3.2 is pure plumbing: record the verdict the Manager *already makes* as
+  durable `flow_events` (`review.accepted` / `review.rework_requested` / `review.waived`) via a
+  `record_review` tool — the vocab A29 reserved (`db.py` ALLOWED set) but couldn't emit because no
+  reviewer existed yet. Gate: a Case cannot close with an unresolved `review.rework_requested`.
+  The one genuinely *separate* reviewer is the **plan-reviewer seat** — a cheap/cross-model pass so
+  the Manager does not grade its own *plan* (adversarial separation, v0.6 §5.1); it reviews the
+  plan-before-dispatch, not worker output.
 - **Phase 3.3 — Guardrails.** Round/turn caps, kill path + `flow.interrupted`, crash-recovery
   proof, cost observability (O3).
 - **(Optional, parallel) M4 generators.** Spec-draft + scored-review *prompts* are docs; can

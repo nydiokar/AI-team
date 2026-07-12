@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 BUCKETS = ("needs_decision", "blocked", "review", "active", "closed", "unknown")
 
 # Terminal / special case-status values (authoritative flow_runs.status).
-_CLOSED_STATUSES = {"closed", "superseded", "done", "complete", "completed"}
+_CLOSED_STATUSES = {"closed", "cancelled", "superseded", "done", "complete", "completed"}
 _BLOCKED_STATUSES = {"blocked", "rework", "rework_requested"}
 _REVIEW_STATUSES = {"review", "in_review", "review_requested"}
 _DECISION_STATUSES = {"needs_decision", "awaiting_operator", "awaiting_approval"}

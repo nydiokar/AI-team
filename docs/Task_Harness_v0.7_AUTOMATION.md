@@ -178,10 +178,14 @@ Two sub-phases (per `M3_MANAGER_INVOCATION_SPEC.md`):
 > lineage pointer. Under the corrected model a worker joins the **parent's Case** (shared
 > membership) rather than spawning its own Case — reconcile at M3.1 against M2.5.
 
-### M3.2 — Review-from-above + `review.*` emitter (audit Job 6) — **after M3.1**
-Real reviewer role emits `review_requested/passed/failed/rework_requested`; the vocabulary A29
-deferred "until a reviewer role exists" gets its reviewer. Case cannot close with unresolved
-review. Distinct plan-reviewer seat.
+### M3.2 — `review.*` verdict emitter (audit Job 6) — **after M3.1**
+**Not a new role — the reviewer IS the Manager** (reviewing worker deliverables is a core Manager
+duty already shipped in M3.1). This job is plumbing: emit the Manager's verdict as durable
+`flow_events` (`review.accepted` / `review.rework_requested` / `review.waived`) via `record_review`
+— the vocab A29 reserved (`db.py` ALLOWED set) but couldn't emit because no reviewer existed yet.
+A Case cannot close with an unresolved `review.rework_requested`. The one genuinely separate
+reviewer is the **plan-reviewer seat** (a cheap/cross-model pass so the Manager doesn't grade its
+own *plan* — reviews plan-before-dispatch, not worker output).
 
 ### M3.3 — Guardrails, kill path & durable relay (audit Jobs 4, 7) — **after M3.1**
 Round/turn/cost caps; kill path → `flow.interrupted` (→ `status=blocked`/resumable); crash

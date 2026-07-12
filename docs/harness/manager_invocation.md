@@ -1,5 +1,14 @@
 # Manager Invocation — the driver (paste this to cold-boot a Manager and run a loop)
 
+> **⚠️ COMPATIBILITY WRAPPER (2026-07-12, M3 Phase 3.1 / A38).** The Manager's **stable
+> identity** now lives in the canonical, provider-neutral role profile
+> [`docs/harness/roles/manager.md`](roles/manager.md), loaded automatically when a Manager
+> session boots (`AgentRoleDefinition` + the Claude adapter, behind `MANAGER_ROLE_ENABLED`).
+> This file survives as the **manual paste-driver** — use it only to cold-boot a Manager by
+> hand (it additionally carries the reading list, the per-session `{{...}}` slots, and the full
+> LOOP-0→CLOSE→REPORT procedure, which are intentionally NOT in the canonical role). When the
+> automated path is proven, this driver is retired.
+
 **What this is:** the harness's **driver**. Not code, not a stage machine — a
 **role-prompt** that boots a fresh senior agent into the Manager seat and starts the
 loop. It is the "boot sector" that was previously living in the operator's session-start

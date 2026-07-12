@@ -46,6 +46,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.interfaces import ExecutionResult, Session
 from src.core.process_utils import terminate_many_popen
+from src.core.roles import MANAGER_ROLE_ID, load_manager_role
+from src.backends.claude_role_adapter import claude_system_prompt, manager_tool_names
 
 logger = logging.getLogger(__name__)
 
@@ -338,15 +340,38 @@ def _manager_tools_enabled() -> bool:
     return os.environ.get("MANAGER_TOOLS_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _session_allowed_tools() -> List[str]:
+def _manager_role_enabled() -> bool:
+    """[M3 A38] Master gate for the Phase 3.1 Manager-role path.
+
+    Default OFF ⇒ byte-identical: no role prompt is loaded, no ``system_prompt``
+    is set, and tool scoping falls back to the legacy A34 process-wide grant.
+    When ON, the manager grant is SCOPED per-session (only a ``case_role=="manager"``
+    session gets the manager_v1 tools), superseding the A34 process-wide grant.
+    """
+    return os.environ.get("MANAGER_ROLE_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _session_allowed_tools(role: Optional[str] = None) -> List[str]:
     """Assemble a Claude session's allowed-tool list: the defaults plus any
     opt-in MCP tool grants. Pure + gated so the grant logic is unit-testable
     without booting the SDK. Byte-identical to the prior inline logic for the
-    jobs path; the manager grant is double-gated (env flag AND ~/.claude.json)."""
+    jobs path.
+
+    Manager grant has two modes:
+      - MANAGER_ROLE_ENABLED OFF (default): legacy A34 process-wide grant —
+        double-gated (MANAGER_TOOLS_ENABLED env AND ~/.claude.json). ``role`` is
+        ignored ⇒ byte-identical to before A38.
+      - MANAGER_ROLE_ENABLED ON: per-session scoping — only a ``role=="manager"``
+        session gets the manager_v1 tools (still requires the 'manager' server in
+        ~/.claude.json). This SUPERSEDES the process-wide grant for every session.
+    """
     tools = list(_DEFAULT_TOOLS)
     if _mcp_jobs_configured():
         tools.append("mcp__jobs__watch_job")
-    if _manager_tools_enabled() and _mcp_manager_configured():
+    if _manager_role_enabled():
+        if role == MANAGER_ROLE_ID and _mcp_manager_configured():
+            tools.extend(manager_tool_names())
+    elif _manager_tools_enabled() and _mcp_manager_configured():
         tools.extend(["mcp__manager__dispatch_worker", "mcp__manager__wait_for_worker"])
     return tools
 
@@ -367,11 +392,25 @@ class _SDKSession:
     # while the gateway reports "failed to connect", orphaning the live task.
     _CONNECT_TIMEOUT_SEC = 90
 
-    def __init__(self, session_key: str, cwd: str, model: Optional[str], proc_env: Dict[str, str]):
+    def __init__(
+        self,
+        session_key: str,
+        cwd: str,
+        model: Optional[str],
+        proc_env: Dict[str, str],
+        *,
+        system_prompt: Optional[Dict[str, object]] = None,
+        allowed_tools: Optional[List[str]] = None,
+    ):
         self.session_key = session_key
         self.cwd = cwd
         self.model = model
         self.proc_env = proc_env
+        # [A38] Role-boot injection: when set (manager session, flag ON), the
+        # options build appends the role's system_prompt and uses the pre-scoped
+        # tool list. Both None ⇒ the default path (byte-identical to pre-A38).
+        self.system_prompt = system_prompt
+        self.allowed_tools = allowed_tools
         self.backend_session_id: str = ""
         self._lock = threading.Lock()  # serialises concurrent send_turn calls
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -424,7 +463,7 @@ class _SDKSession:
             self._ready.set()
             return
 
-        tools = _session_allowed_tools()
+        tools = self.allowed_tools if self.allowed_tools is not None else _session_allowed_tools()
 
         options = ClaudeAgentOptions(
             cwd=self.cwd,
@@ -432,6 +471,7 @@ class _SDKSession:
             permission_mode="bypassPermissions",
             env={k: v for k, v in self.proc_env.items() if k not in os.environ},
             **({"model": self.model} if self.model else {}),
+            **({"system_prompt": self.system_prompt} if self.system_prompt else {}),
         )
 
         self._client = ClaudeSDKClient(options=options)
@@ -799,6 +839,32 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             for sess in self._sessions.values():
                 sess._on_proactive = sink
 
+    def _role_boot(self, session: Session) -> Tuple[Optional[Dict[str, object]], Optional[List[str]]]:
+        """[A38] Resolve (system_prompt, allowed_tools) for a role-bound session.
+
+        Returns ``(None, None)`` — the default path — unless MANAGER_ROLE_ENABLED
+        is ON and this session's ``case_role`` is 'manager'. In that case it loads
+        the canonical Manager role, builds the Claude ``system_prompt`` (preset +
+        appended instructions) and the per-session manager tool grant. Isolated:
+        any failure logs and falls back to the default path so a role-load problem
+        never blocks a session from booting.
+        """
+        try:
+            if not _manager_role_enabled():
+                return None, None
+            if getattr(session, "case_role", None) != MANAGER_ROLE_ID:
+                return None, None
+            role = load_manager_role()
+            system_prompt = claude_system_prompt(role)
+            allowed_tools = _session_allowed_tools(role=MANAGER_ROLE_ID)
+            return system_prompt, allowed_tools
+        except Exception as e:
+            logger.warning(
+                "event=manager_role_boot_failed session_id=%s err=%s",
+                getattr(session, "session_id", "?"), e,
+            )
+            return None, None
+
     def _get_or_create(
         self,
         session: Session,
@@ -818,7 +884,11 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 self._sessions.pop(key, None)
                 existing = None
             if existing is None:
-                sdk_sess = _SDKSession(key, session.repo_path, model, proc_env)
+                system_prompt, allowed_tools = self._role_boot(session)
+                sdk_sess = _SDKSession(
+                    key, session.repo_path, model, proc_env,
+                    system_prompt=system_prompt, allowed_tools=allowed_tools,
+                )
                 sdk_sess._on_proactive = self._on_proactive
                 sdk_sess.start()
                 self._sessions[key] = sdk_sess
