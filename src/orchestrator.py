@@ -1731,6 +1731,32 @@ class TaskOrchestrator(ITaskOrchestrator):
             parent_fid = lineage.get("parent_flow_run_id")
             session_id = str((task.metadata or {}).get("session_id") or "").strip()
             managed = bool((task.metadata or {}).get(self._MANAGED_CASE_META_KEY))
+            join_case_id = str((task.metadata or {}).get(self._JOIN_CASE_META_KEY) or "").strip()
+
+            # (J) JOIN — [A38] explicit Manager→worker membership. The worker task
+            # ATTACHES to the named Case (a `task` link + `task.attached` event),
+            # NOT a child Case. Verified open first: a closed/absent target falls
+            # through to normal admission (never silently attach to a dead Case).
+            # Stashed under `_CASE_ID_META_KEY` (not `_FLOW_RUN_META_KEY`) so the
+            # per-turn terminal/stage helpers never fire on the shared Case ⇒ worker
+            # completion leaves the Manager's Case OPEN.
+            if join_case_id:
+                row = db.get_flow_run(join_case_id)
+                if row is not None and (row.get("status") or "") not in db._CLOSED_STATUSES:
+                    self._stash_task_meta(task, self._CASE_ID_META_KEY, join_case_id)
+                    self._record_flow_link(
+                        join_case_id, "task", task.id, "task", created_by="system",
+                    )
+                    self._record_flow_event(
+                        join_case_id, "task.attached", "system",
+                        entity_type="task", entity_id=task.id,
+                        payload={"membership": "worker"},
+                    )
+                    if session_id:
+                        self._set_session_case_affiliation(
+                            session_id, join_case_id, role="worker",
+                        )
+                    return None
 
             # (B) ATTACH — a non-birthing turn on a session that already owns an
             # open Case joins it as a Task: a per-turn `task` link + a
@@ -1995,6 +2021,94 @@ class TaskOrchestrator(ITaskOrchestrator):
                 session_id, e,
             )
 
+    def _manager_role_enabled(self) -> bool:
+        """[A38] Master gate for the Phase 3.1 Manager-role invocation path.
+
+        Default OFF ⇒ ``invoke_manager`` refuses (the new surface is inert), so the
+        gateway is byte-identical to pre-A38. Mirrors the driver's
+        ``_manager_role_enabled`` (same env var) — a Manager booted here only picks
+        up its role prompt + scoped tools when the driver gate is also ON.
+        """
+        return os.environ.get("MANAGER_ROLE_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+    async def invoke_manager(
+        self,
+        objective: str,
+        *,
+        repo_path: str,
+        backend: str = "claude",
+        model: Optional[str] = None,
+        node_id: str = "__local__",
+        completion_criteria: Optional[str] = None,
+        context_refs: Optional[List[str]] = None,
+        branch: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[A38] Boot a Manager session bound to one new Case (M3.1 vertical slice).
+
+        Orchestrates: create a Session → ``open_case`` (stamps ``case_role='manager'``)
+        → deliver the objective as the Manager's first assignment turn. The driver's
+        ``_role_boot`` then loads the stable role prompt + scoped manager tools for
+        that session. Returns ``{ok, session_id, case_id, task_id}``; a structured
+        ``{ok: False, reason}`` when the role path is disabled or a step fails.
+        Raises ``HarnessAdmissionBlocked`` from the first-turn submit (the caller
+        translates it), exactly like the ``/api/instructions`` seam.
+
+        DEFERRED EDGE (A38): if the Level-3 guard blocks the first-turn submit, the
+        already-created session (left IDLE, reusable) and the freshly-opened Case
+        (left OPEN, visible in /api/flows) are NOT rolled back — a clean cancel is
+        blocked by close_case's completion_criteria guard when criteria were set.
+        Low-risk on this OFF-by-default path (a short rendered assignment rarely
+        trips Level-3); revisit with a criteria-waiving cancel if it shows up live.
+        """
+        from src.core.interfaces import SessionOrigin
+        from src.core.roles import ManagerInvocation, render_first_assignment
+
+        if not self._manager_role_enabled():
+            return {"ok": False, "reason": "manager_role_disabled"}
+
+        # The Manager's Case machinery (per-turn attach + worker JOIN + task.finished
+        # timeline) is all guarded by HARNESS_FLOW_DRIVE. With it OFF the Manager still
+        # boots with its role prompt, but workers can't join the Case and wait_for_worker
+        # has no timeline to watch — surface that mismatch instead of failing silently.
+        if not self._harness_flow_drive_enabled():
+            logger.warning(
+                "event=manager_invoke_without_flow_drive session_repo=%s — MANAGER_ROLE_ENABLED "
+                "is ON but HARNESS_FLOW_DRIVE is OFF; Case attach/JOIN/timeline are inert.",
+                repo_path,
+            )
+
+        result = self.session_service.create_session(
+            backend=backend, repo_path=repo_path, model=model, node_id=node_id,
+            origin=SessionOrigin(channel="web", kind="user"), bind_chat=False,
+        )
+        if not getattr(result, "ok", False) or getattr(result, "session", None) is None:
+            return {"ok": False, "reason": getattr(result, "reason", "create_session_failed")}
+        session = result.session
+
+        case_id = self.open_case(
+            objective, session.session_id, role="manager",
+            completion_criteria=completion_criteria,
+        )
+        if not case_id:
+            return {"ok": False, "reason": "open_case_failed"}
+
+        inv = ManagerInvocation(
+            case_id=case_id, objective=objective,
+            context_refs=list(context_refs or []), branch=branch, trigger="operator",
+        )
+        task_id = await self.submit_instruction(
+            description=render_first_assignment(inv),
+            session_id=session.session_id,
+            cwd=session.repo_path,
+            source="manager_invoke",
+        )
+        return {
+            "ok": True,
+            "session_id": session.session_id,
+            "case_id": case_id,
+            "task_id": task_id,
+        }
+
     def _record_flow_stage(self, flow_run_id: Optional[str], stage: str) -> None:
         """Best-effort FlowRun stage-transition update (A19). Swallows failures.
 
@@ -2093,6 +2207,11 @@ class TaskOrchestrator(ITaskOrchestrator):
     # producer is the Manager role / open_case dispatch at M3.1); when present,
     # `_record_flow_run_start` BIRTHS a Case for the task rather than attaching.
     _CASE_ID_META_KEY = "__case_id"
+    # [A38] Explicit "join this Case" signal (Manager→worker membership). When a
+    # worker dispatch carries it, `_record_flow_run_start` ATTACHES the task to the
+    # named open Case (a `task` link) instead of birthing a child Case — distinct
+    # from `_PARENT_FLOW_RUN_META_KEY` (which births a child Case with lineage).
+    _JOIN_CASE_META_KEY = "__join_case_id"
     _MANAGED_CASE_META_KEY = "__managed_case"
     _MANAGED_CASE_OBJECTIVE_KEY = "__managed_case_objective"
     _MANAGED_CASE_CRITERIA_KEY = "__managed_case_criteria"
@@ -2282,6 +2401,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         parent_flow_run_id: Optional[str] = None,
         dispatched_by: Optional[str] = None,
         dispatch_file: Optional[str] = None,
+        join_case_id: Optional[str] = None,
     ) -> str:
         """Direct runtime entrypoint for Telegram/CLI instructions.
 
@@ -2314,6 +2434,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                 dispatched_by=dispatched_by,
                 dispatch_file=dispatch_file,
             )
+        # [A38] Manager→worker MEMBERSHIP: stash the Case to JOIN so admission
+        # attaches the task to it instead of birthing a child Case. Distinct from
+        # lineage above; the attach itself is flag-guarded in _record_flow_run_start.
+        if join_case_id:
+            self._stash_task_meta(task, self._JOIN_CASE_META_KEY, join_case_id)
         return await self._enqueue_task(task)
 
     async def compact_session(self, session_id: str):

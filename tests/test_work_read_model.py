@@ -33,6 +33,9 @@ def _flow(fid, **kw):
 def test_case_bucket_from_status_and_stage():
     assert case_bucket(_flow("a", status="closed")) == "closed"
     assert case_bucket(_flow("a", status="superseded")) == "closed"
+    # 'cancelled' is terminal (matches db._CLOSED_STATUSES) even with a stale stage.
+    assert case_bucket(_flow("a", status="cancelled")) == "closed"
+    assert case_bucket(_flow("a", status="cancelled", current_stage="closure")) == "closed"
     assert case_bucket(_flow("a", status="blocked")) == "blocked"
     assert case_bucket(_flow("a", status="needs_decision")) == "needs_decision"
     assert case_bucket(_flow("a", status="review_requested")) == "review"
