@@ -81,6 +81,11 @@ def test_criterion_resolved_rules():
     assert _criterion_resolved({"criterion": "x", "status": "waived"}) is False  # no reason
     assert _criterion_resolved({"criterion": "x", "status": "pending"}) is False
     assert _criterion_resolved("not-a-dict") is False
+    # [A39] boolean shorthand also honored (a Manager must not brick a Case on a format guess).
+    assert _criterion_resolved({"criterion": "x", "met": True}) is True
+    assert _criterion_resolved({"criterion": "x", "met": False}) is False   # explicit not-met
+    assert _criterion_resolved({"criterion": "x", "waived": True, "reason": "oos"}) is True
+    assert _criterion_resolved({"criterion": "x", "waived": True}) is False  # waiver still needs a reason
 
 
 def test_unreconciled_criteria():

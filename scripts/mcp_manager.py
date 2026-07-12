@@ -552,7 +552,7 @@ _TOOLS = [
                 "outcome": {"type": "string", "description": "Terminal status: 'closed' (default) or 'cancelled'."},
                 "criteria_reconciliation": {
                     "type": "array",
-                    "description": "Optional list reconciling each completion criterion, e.g. [{\"criterion\":\"tests green\",\"met\":true}] or waived-with-reason.",
+                    "description": "Optional list reconciling each completion criterion. Each entry needs a \"status\": e.g. [{\"criterion\":\"tests green\",\"status\":\"met\"}] or [{\"criterion\":\"docs updated\",\"status\":\"waived\",\"reason\":\"out of scope\"}]. A boolean \"met\" is NOT accepted — the Case will refuse to close.",
                     "items": {"type": "object"},
                 },
             },
