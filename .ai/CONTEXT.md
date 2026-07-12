@@ -11,18 +11,15 @@
 > Every M3.1 invariant held live. The run's deliverable is real: it **built M3.2 slice-1** (the `review.*`
 > verdict emitter). Full evidence: A41 row in [`DISPATCH_LOG`](dispatch/DISPATCH_LOG.md) + PR #11.
 >
-> **Three PRs open, none merged yet:**
-> - **PR #10** — A38 M3 Phase 3.1 Manager role wiring (`feat/m3-phase31-manager-role`). This IS the code
->   currently deployed on the live gateway (branch deployed to trial; PR #10 need not merge to run).
-> - **PR #11** — A40 M3.2 slice-1 `review.*` emitter (`feat/m3.2-review-emitter`), built by the A41 loop,
->   36 tests. Behind `REVIEW_EMITTER_ENABLED` (default OFF ⇒ byte-identical).
-> - **PR #12** — F2 fix (`fix/gateway-local-node-liveness`): the gateway now keeps its OWN host node
->   `online`+heartbeated so long (>300s) in-process self-claims aren't spuriously reaped as `node_offline`.
->   Found during A41 (a 500s Manager turn tripped it — benign then). Not yet deployed (needs a restart).
+> **All three PRs MERGED to `main` 2026-07-12 (`637c6c1`):**
+> - **PR #10** — A38 M3 Phase 3.1 Manager role wiring (the code already running live).
+> - **PR #11** — A40 M3.2 slice-1 `review.*` emitter, behind `REVIEW_EMITTER_ENABLED` (default OFF ⇒ byte-identical).
+> - **PR #12** — F2 fix: gateway keeps its OWN host node `online`+heartbeated so long (>300s) in-process
+>   self-claims aren't reaped as `node_offline`.
 >
 > **Live gateway flag state right now:** `HARNESS_FLOW_DRIVE` ON, `MANAGER_ROLE_ENABLED` **ON** (left on
-> after A41, operator decision), `REVIEW_EMITTER_ENABLED` **OFF**, `manager` in `~/.claude.json`. Gateway
-> runs the `feat/m3-phase31-manager-role` code, NOT yet carrying PR #11/#12.
+> after A41), `REVIEW_EMITTER_ENABLED` **OFF**, `manager` in `~/.claude.json`. ⚠️ The gateway is still
+> running the PRE-MERGE loaded code — **A40 + F2 are on `main` but NOT live until the next gateway restart.**
 >
 > **Immediate next steps (both cheap, both "routes we'd do anyway"):**
 > 1. **F1 — prove the `review.*` emitter live** as a byproduct of the *next* real Manager run: flip
