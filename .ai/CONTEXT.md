@@ -27,7 +27,8 @@
 >    genuine `review.accepted` on its close. No throwaway spend. (The A41 timeline shows NO `review.*` —
 >    that is BY DESIGN, the flag was OFF; not a bug.)
 > 2. **Deploy F2 (PR #12)** — batch its gateway restart with step 1 so one restart buys both.
-> Then: merge PRs #10/#11/#12; M3.3 guardrails / durable relay (`wait_for_worker` still in-process).
+> Then: **M3.2 remaining** (real reviewer verdict in the loop + rework-cycle proof) → **M3.3** guardrails /
+> durable relay (`wait_for_worker` is still in-process — a Manager crash loses the wait).
 > **Cost reframe (operator, 2026-07-12):** a bounded+supervised live Manager run is NOT "burning tokens" —
 > it proves the machinery AND ships real work. The old scar was UNBOUNDED unsupervised spend, not this.
 >
