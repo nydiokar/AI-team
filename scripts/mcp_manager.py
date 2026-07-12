@@ -493,6 +493,41 @@ def _close_case(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: record_review  (M3.2 — the Manager's review verdict emitter)
+# ---------------------------------------------------------------------------
+
+_REVIEW_VERDICTS = ("accepted", "rework_requested", "waived")
+
+
+def _record_review(args: Dict[str, Any]) -> str:
+    """Record the Manager's review verdict on a Case as a ``review.*`` flow_event.
+
+    ``verdict`` is required and must be one of accepted|rework_requested|waived;
+    ``reason`` is an optional short note. POSTs to /api/cases/{case_id}/review.
+    A 404 means the emitter is disabled on the gateway (REVIEW_EMITTER_ENABLED OFF)."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    verdict = _bounded_text(args.get("verdict"), "verdict", 32, required=True)
+    if verdict not in _REVIEW_VERDICTS:
+        raise ValueError(
+            f"verdict must be one of {', '.join(_REVIEW_VERDICTS)} (got {verdict!r})"
+        )
+    reason = _bounded_text(args.get("reason"), "reason", _MAX_OBJECTIVE_CHARS, required=False)
+
+    body: Dict[str, Any] = {"verdict": verdict, "reason": reason}
+    result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/review", body)
+    ok = bool(result.get("ok"))
+    if ok:
+        return (
+            f"Recorded review verdict {verdict!r} on Case {case_id} "
+            f"(event_type={result.get('event_type')})."
+        )
+    return (
+        f"record_review did NOT record on Case {case_id}: {result.get('reason')}. "
+        f"Resolve and retry."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool catalogue
 # ---------------------------------------------------------------------------
 _TOOLS = [
@@ -560,6 +595,27 @@ _TOOLS = [
         },
     },
     {
+        "name": "record_review",
+        "description": (
+            "Record the Manager's review verdict on a Case as a canonical review.* event on "
+            "the Case audit trail (the M3.2 verdict emitter). verdict must be one of "
+            "accepted | rework_requested | waived; reason is an optional short note. Use this "
+            "AFTER reviewing the worker's committed git diff to make the Decision explicit: "
+            "'accepted' records approval, 'rework_requested' records that changes are needed "
+            "(and blocks close_case until a later accept/waive supersedes it), 'waived' records "
+            "an accepted-as-is with a reason. A 404 means the emitter is disabled on the gateway."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Case (flow_run) id being reviewed — the Manager's own case."},
+                "verdict": {"type": "string", "enum": list(_REVIEW_VERDICTS), "description": "The review verdict: accepted | rework_requested | waived."},
+                "reason": {"type": "string", "description": "Optional short note explaining the verdict (required in spirit for a waive)."},
+            },
+            "required": ["case_id", "verdict"],
+        },
+    },
+    {
         "name": "wait_for_worker",
         "description": (
             "Block (read-only long-poll) until a dispatched worker's flow reaches a terminal "
@@ -588,6 +644,7 @@ _TOOL_IMPLS = {
     "wait_for_worker": _wait_for_worker,
     "get_case": _get_case,
     "close_case": _close_case,
+    "record_review": _record_review,
 }
 
 # ---------------------------------------------------------------------------

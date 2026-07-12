@@ -149,6 +149,31 @@ FLOW_EVENT_TYPES = (
 )
 
 
+# [M3.2] Manager review verdict → canonical review.* flow_event type. The three
+# target types are ALREADY reserved in FLOW_EVENT_TYPES above (no new schema). This
+# single map is the source of truth the orchestrator seam + control API route agree on.
+REVIEW_VERDICT_EVENT_TYPES = {
+    "accepted": "review.accepted",
+    "rework_requested": "review.rework_requested",
+    "waived": "review.waived",
+}
+# The set of review.* event types the close-gate scans for the LATEST verdict.
+_REVIEW_EVENT_TYPES = frozenset(REVIEW_VERDICT_EVENT_TYPES.values())
+
+
+def review_emitter_enabled() -> bool:
+    """[M3.2] Whether the review.* verdict emitter is active (slice 1).
+
+    Canonical read of ``REVIEW_EMITTER_ENABLED`` (truthy: 1/true/yes/on); default
+    OFF. Mirrors ``flow_drive_enabled()``. When OFF: the /api/cases/{id}/review route
+    returns 404 AND ``close_case`` skips the unresolved-rework gate ⇒ byte-identical
+    to pre-M3.2 behavior.
+    """
+    return os.environ.get("REVIEW_EMITTER_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def flow_drive_enabled() -> bool:
     """Whether the Work Control Substrate write path is active (A22/A26/A29).
 
@@ -1854,6 +1879,21 @@ class MeshDB:
             raise CaseCloseBlocked(
                 f"completion_criteria not reconciled: {unresolved}"
             )
+
+        # [M3.2] Unresolved-rework gate (flag-gated ⇒ OFF is byte-identical). The
+        # LATEST review.* event is authoritative: if it is 'review.rework_requested'
+        # it has NOT been superseded by a later accept/waive (else that later event
+        # would be the latest), so the Case cannot honestly close.
+        if review_emitter_enabled():
+            review_events = [
+                e for e in self.list_flow_events(flow_run_id)
+                if e.get("event_type") in _REVIEW_EVENT_TYPES
+            ]
+            if review_events and review_events[-1].get("event_type") == "review.rework_requested":
+                raise CaseCloseBlocked(
+                    "case has an unresolved rework request (latest review verdict is "
+                    "rework_requested)"
+                )
 
         self.update_flow_run(flow_run_id, status=outcome)
         self.append_flow_event(
