@@ -1,7 +1,41 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-10
-**Active branch:** `main` — Work Control Substrate (M2, A25–A30) merged (`24dff9b`); `HARNESS_FLOW_DRIVE` **ON** in live env. **M3 Phase 3.0 CODE-COMPLETE** (branch `feat/m3-phase30-mcp-manager`, NOT merged; stack A31→A34): A31 `scripts/mcp_manager.py` tool surface; **A32** optional `parent_flow_run_id` on `POST /api/instructions` → child `flow_runs` lineage edge (flag-gated); **A33** `dispatch_worker` sends it + `wait_for_worker` retry tolerance; **A34** `claude_driver` grants the manager tools to a session, **double-gated** (`MANAGER_TOOLS_ENABLED` env + `manager` in `~/.claude.json`; `setup_mcp.py --with-manager`) ⇒ byte-identical until the operator opts in. **97 M3 tests green; zero live-gateway blast (not restarted).** **Remaining = the paid live proof only:** 🟡 **A35** (operator-gated runbook, `dispatch/AGENT_35_LIVE_F4_SPIKE.md`) — register server + flag + restart + spawn a manager session + verify parent→child lineage in `/api/flows` with no slot starvation (live box has `MAX_CONCURRENT_TASKS=4` + `Horse`/`kanebra-worker` online ⇒ low starvation risk). NOT run autonomously (cost scar #1 + PM2 restart + global-config edit). See `dispatch/AGENT_31_*`…`AGENT_35_*`.
+**Last Updated:** 2026-07-12
+**Active branch:** `main` — M2 Work Control Substrate + M3 Phase 3.0 merged; `HARNESS_FLOW_DRIVE` **ON** live.
+
+> **🟢 STATUS 2026-07-12 — THE INVOKED-MANAGER LOOP RAN LIVE FOR THE FIRST TIME AND PASSED (A41).**
+> A real Claude Manager was invoked via `POST /api/manager` → opened ONE Case (`case_role=manager`) →
+> autonomously `dispatch_worker`ed a worker that **JOINed the Case** (`membership:worker`, **no child
+> Case**) → `wait_for_worker` resolved off the `task.finished` timeline (no slot starvation) → Manager
+> reviewed the **committed git diff** → `close_case` with all criteria `{"status":"met"}` → Case `closed`.
+> Every M3.1 invariant held live. The run's deliverable is real: it **built M3.2 slice-1** (the `review.*`
+> verdict emitter). Full evidence: A41 row in [`DISPATCH_LOG`](dispatch/DISPATCH_LOG.md) + PR #11.
+>
+> **Three PRs open, none merged yet:**
+> - **PR #10** — A38 M3 Phase 3.1 Manager role wiring (`feat/m3-phase31-manager-role`). This IS the code
+>   currently deployed on the live gateway (branch deployed to trial; PR #10 need not merge to run).
+> - **PR #11** — A40 M3.2 slice-1 `review.*` emitter (`feat/m3.2-review-emitter`), built by the A41 loop,
+>   36 tests. Behind `REVIEW_EMITTER_ENABLED` (default OFF ⇒ byte-identical).
+> - **PR #12** — F2 fix (`fix/gateway-local-node-liveness`): the gateway now keeps its OWN host node
+>   `online`+heartbeated so long (>300s) in-process self-claims aren't spuriously reaped as `node_offline`.
+>   Found during A41 (a 500s Manager turn tripped it — benign then). Not yet deployed (needs a restart).
+>
+> **Live gateway flag state right now:** `HARNESS_FLOW_DRIVE` ON, `MANAGER_ROLE_ENABLED` **ON** (left on
+> after A41, operator decision), `REVIEW_EMITTER_ENABLED` **OFF**, `manager` in `~/.claude.json`. Gateway
+> runs the `feat/m3-phase31-manager-role` code, NOT yet carrying PR #11/#12.
+>
+> **Immediate next steps (both cheap, both "routes we'd do anyway"):**
+> 1. **F1 — prove the `review.*` emitter live** as a byproduct of the *next* real Manager run: flip
+>    `REVIEW_EMITTER_ENABLED=1` + restart, then a Manager loop that builds the next slice ALSO emits a
+>    genuine `review.accepted` on its close. No throwaway spend. (The A41 timeline shows NO `review.*` —
+>    that is BY DESIGN, the flag was OFF; not a bug.)
+> 2. **Deploy F2 (PR #12)** — batch its gateway restart with step 1 so one restart buys both.
+> Then: merge PRs #10/#11/#12; M3.3 guardrails / durable relay (`wait_for_worker` still in-process).
+> **Cost reframe (operator, 2026-07-12):** a bounded+supervised live Manager run is NOT "burning tokens" —
+> it proves the machinery AND ships real work. The old scar was UNBOUNDED unsupervised spend, not this.
+>
+> **Superseded:** the old A35 Phase-3.0 manual-pattern live runbook — A41 replaced it with the real
+> `/api/manager` role-boot path. Don't run A35 standalone.
 
 > This is the **fast-orientation** doc: what the project is, how it's wired *right
 > now*, the current priorities, and the constraints. It is intentionally short.
