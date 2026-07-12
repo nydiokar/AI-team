@@ -587,3 +587,73 @@ def test_submit_result_reconciles_failed_telemetry_turn(tmp_path):
         if old is not None:
             old.close()
         db_mod._db_instance = old
+
+
+# ---------------------------------------------------------------------------
+# F2 — the gateway's OWN local node must stay online so its in-process
+# self-claims (the double-execution lock) are not reaped as node_offline.
+# ---------------------------------------------------------------------------
+
+
+def test_local_node_registration_keeps_self_claim_live(tmp_path, monkeypatch):
+    """A locally-run task self-claimed under the gateway host must NOT be released
+    by the reaper while the gateway is alive. ``_register_local_node`` keeps the
+    host node online (no live_state), so ``list_stale_claims`` leaves the self-claim
+    be even past the lease. Regression guard for F2 (spurious node_offline release
+    of a live local task exceeding claim_lease_sec)."""
+    import socket
+    import src.control.db as db_mod
+    import src.control.node_registry as nr_mod
+    import src.control.task_server as ts
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(db_mod, "_db_instance", db)
+    monkeypatch.setattr(nr_mod, "_registry", NodeRegistry(heartbeat_timeout_sec=90))
+
+    host = socket.gethostname()
+    ts._register_local_node()
+    node = db.get_node(host)
+    assert node is not None and node["status"] == "online"
+
+    tid = _task_id()
+    _enqueue_test_task(db, tid, machine_id=host)
+    assert db.claim_task(tid, host) is True
+
+    # lease_sec=0 => stale by time; but the host node is ONLINE without live_state,
+    # so the self-claim must NOT be flagged (the F2 fix).
+    stale = db.list_stale_claims(lease_sec=0)
+    assert all(s["id"] != tid for s in stale), (
+        "live gateway self-claim was reaped — F2 regression"
+    )
+
+
+def test_local_node_reregister_reaps_orphaned_self_claim(tmp_path, monkeypatch):
+    """A gateway RESTART must reap self-claims orphaned by the dead process. Each
+    ``_register_local_node`` mints a fresh incarnation, so ``register()``'s fast
+    path releases the previous process's self-claims (incarnation change) — the
+    double-execution lock is handed off cleanly instead of stranding the row."""
+    import socket
+    import src.control.db as db_mod
+    import src.control.node_registry as nr_mod
+    import src.control.task_server as ts
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(db_mod, "_db_instance", db)
+    monkeypatch.setattr(nr_mod, "_registry", NodeRegistry(heartbeat_timeout_sec=90))
+
+    host = socket.gethostname()
+    ts._register_local_node()
+    inc1 = db.get_node(host)["incarnation_id"]
+
+    tid = _task_id()
+    _enqueue_test_task(db, tid, machine_id=host)
+    assert db.claim_task(tid, host) is True
+
+    # Simulate a gateway restart: a new process re-registers the same host node.
+    ts._register_local_node()
+    inc2 = db.get_node(host)["incarnation_id"]
+    assert inc1 != inc2, "restart must mint a fresh incarnation"
+
+    # register()'s fast path already released the orphaned self-claim to pending.
+    row = db.get_task(tid)
+    assert row["status"] == "pending" and row["claimed_by"] is None

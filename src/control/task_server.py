@@ -71,17 +71,77 @@ def _looks_like_backend_error(output: Optional[str]) -> str:
 
 
 
+def _register_local_node() -> None:
+    """Register the gateway's OWN host as an online node so its in-process
+    self-claims are recognized as LIVE by the stale-claim reaper.
+
+    The orchestrator locks a locally-run task to this process by self-claiming its
+    mesh_tasks row under ``socket.gethostname()`` (so no remote daemon can pick it
+    up — a double-execution guard). But nothing kept that host's node registration
+    alive, so it was perpetually 'offline': any local task running longer than
+    ``claim_lease_sec`` (300s) had its self-claim released as ``node_offline`` by the
+    reaper, re-exposing the row to a remote daemon. Registering here mints a FRESH
+    incarnation per gateway start (``register`` → ``upsert_node``), so self-claims
+    orphaned by a *previous* gateway process are reaped via ``incarnation_mismatch``
+    (register()'s fast path), while the *current* process's live self-claims are
+    kept. Empty ``backends`` ⇒ never a remote-routing target (routing is pin-based
+    and a pin to this host always runs locally), so this changes nothing but
+    liveness truthfulness.
+    """
+    import socket
+    from config import config as _cfg
+    host = socket.gethostname()
+    info = NodeInfo(
+        node_id=host,
+        tailscale_ip="",
+        api_port=int(getattr(_cfg.mesh, "dashboard_port", 9003) or 9003),
+        capabilities=NodeCapabilities(
+            backends=[],
+            max_concurrent=int(getattr(_cfg.system, "max_concurrent_tasks", 3) or 3),
+        ),
+    )
+    get_registry().register(info)
+    logger.info("event=local_node_registered node_id=%s (gateway self-claim liveness)", host)
+
+
+async def _local_node_heartbeat_loop() -> None:
+    """Keep the gateway's own node heartbeat fresh (< node_heartbeat_timeout_sec)
+    so it stays 'online' while the gateway runs. Pure liveness — no live_state is
+    published, so the reaper's online path (``_stale_online_claim_reason``) returns
+    None and leaves local self-claims to the in-process task lifecycle (timeout /
+    cancel), never releasing a live one."""
+    import socket
+    from config import config as _cfg
+    host = socket.gethostname()
+    timeout = int(getattr(_cfg.mesh, "node_heartbeat_timeout_sec", 90) or 90)
+    interval = max(10, timeout // 3)
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                if not get_registry().heartbeat(host):
+                    _register_local_node()  # re-register if the row was dropped
+            except Exception as e:
+                logger.debug("event=local_node_heartbeat_error err=%s", e)
+    except asyncio.CancelledError:
+        pass
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     get_registry().start()
+    _register_local_node()
     logger.info("event=task_server_started")
     reaper_task = asyncio.create_task(_stale_claim_reaper_loop())
+    local_hb_task = asyncio.create_task(_local_node_heartbeat_loop())
     yield
-    reaper_task.cancel()
-    try:
-        await reaper_task
-    except asyncio.CancelledError:
-        pass
+    for _t in (reaper_task, local_hb_task):
+        _t.cancel()
+    for _t in (reaper_task, local_hb_task):
+        try:
+            await _t
+        except asyncio.CancelledError:
+            pass
     get_registry().stop()
 
 
