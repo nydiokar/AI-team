@@ -13,25 +13,13 @@ import json
 import logging
 import socket
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from src.core.interfaces import Session, SessionStatus, SessionOrigin
 
 logger = logging.getLogger(__name__)
-
-
-def _utc_now() -> str:
-    """Timezone-aware UTC ISO string (matches db._now()).
-
-    Naive ``datetime.now().isoformat()`` produced local-time strings with no
-    offset; the browser then parsed them as UTC (or as local, inconsistently
-    with the UTC-aware timestamps every other table writes), causing a clock
-    skew on the Work/session surfaces. Always stamp UTC-aware so downstream
-    conversion is unambiguous.
-    """
-    return datetime.now(tz=timezone.utc).isoformat()
 
 # Anchor to the project root (three levels up from this file: src/core/session_store.py)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -66,8 +54,8 @@ class SessionStore:
             backend=backend,
             repo_path=repo_path,
             status=SessionStatus.IDLE,
-            created_at=_utc_now(),
-            updated_at=_utc_now(),
+            created_at=datetime.now().isoformat(),
+            updated_at=datetime.now().isoformat(),
             machine_id=pinned,
             telegram_chat_id=telegram_chat_id,
             owner_user_id=owner_user_id,
@@ -105,7 +93,7 @@ class SessionStore:
             return None
 
     def save(self, session: Session) -> None:
-        session.updated_at = _utc_now()
+        session.updated_at = datetime.now().isoformat()
         self._write(session)
         self._shadow_write(session)
 
