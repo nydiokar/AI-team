@@ -35,7 +35,11 @@ def _write_claude_json(tmp_path, monkeypatch, servers: dict) -> None:
 
 @pytest.fixture(autouse=True)
 def _clean_flag(monkeypatch):
+    # These tests exercise the LEGACY (A34) grant path — MANAGER_ROLE_ENABLED OFF.
+    # Clear both flags so the file is deterministic regardless of the ambient .env
+    # (which may carry MANAGER_ROLE_ENABLED=1 when the live role path is enabled).
     monkeypatch.delenv("MANAGER_TOOLS_ENABLED", raising=False)
+    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
     yield
 
 
