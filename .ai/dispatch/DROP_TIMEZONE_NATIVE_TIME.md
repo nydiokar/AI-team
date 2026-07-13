@@ -4,6 +4,7 @@
 **Priority:** HIGH — recurring source of false diagnosis and operator distrust
 **Level:** 2 (code fix + data audit; no new architecture)
 **Owner:** unassigned (operator will spawn)
+**Status:** ✅ **FIXED 2026-07-13 — PR #20** (`feat/native-time-one-clock`). See "Resolution" at bottom.
 
 ---
 
@@ -77,3 +78,36 @@ every clock native and consistent so the display is trustworthy while that is ch
 - `src/control/db.py` (already UTC; the convention reference)
 - Web UI time render (`web/` — find the "time ago"/timestamp component)
 - Control API serializers that emit timestamps
+
+---
+
+## Resolution (2026-07-13, PR #20 `feat/native-time-one-clock`)
+
+**Corrected the drop's file pointer:** the naive-local session writers are in
+**`src/services/session_store.py`** (`created_at`/`updated_at`), not
+`session_service.py`. Full audit (`grep -rn "datetime.now()" src/`) found ~46 naive
+writers: `session_store` (3), `task_parser` (1), `observability` (1),
+`orchestrator` (41) — plus latent naive-vs-aware `TypeError`s in the Telegram
+`_relative_age`/`_heartbeat_age`/node-age helpers (swallowed to a raw ISO string).
+
+**Fix — one clock behind one helper:**
+- New `src/core/timeutil.py`: `now_iso()` (the single UTC-aware writer) and
+  `parse_iso()` (returns tz-aware; legacy naive rows read as LOCAL so any
+  subtraction against an aware `now` never raises).
+- Every naive writer routed through `now_iso()` (storage is UTC-aware everywhere).
+- Telegram render/age helpers use `parse_iso` + an aware `now`, and render absolute
+  timestamps in the operator's LOCAL zone (`astimezone`), never bare UTC.
+- `db.py` already used a UTC-aware `_now()` + tz-normalizing `_parse_dt` and
+  intentionally avoids `src.core` imports, so it keeps its own (identical-convention)
+  helper — no naive-local writers remain in the tree.
+
+**Legacy tolerance:** old naive-local session rows stay correct — both JS `new Date()`
+and `parse_iso()` interpret a naive value as local. No path feeds session `created_at`
+into db.py's heartbeat parsers (those touch only always-UTC db-written fields).
+
+### Acceptance criteria status
+- [x] Exactly one clock convention; no naive-local timestamp writers (all behind `now_iso()`).
+- [x] Every operator-facing time renders native-local (Telegram `astimezone`; web already local).
+- [x] `created_at <= updated_at` holds for new session rows (test-locked).
+- [x] `tests/test_timeutil_native_time.py` locks the round-trip against regression.
+- [x] CONTEXT.md note added ("timezone is standardized; do not cite tz as a root cause").
