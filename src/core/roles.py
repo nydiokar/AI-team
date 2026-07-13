@@ -64,6 +64,7 @@ class ManagerInvocation(BaseModel):
 
     case_id: str
     objective: str
+    session_id: Optional[str] = None
     context_refs: List[str] = Field(default_factory=list)
     branch: Optional[str] = None
     trigger: str = "operator"
@@ -113,6 +114,8 @@ def render_first_assignment(inv: ManagerInvocation) -> str:
         f"Case: {inv.case_id}",
         f"Objective: {inv.objective}",
     ]
+    if inv.session_id:
+        lines.append(f"Your session: {inv.session_id}")
     if inv.branch:
         lines.append(f"Working branch context: {inv.branch}")
     if inv.context_refs:
@@ -122,4 +125,11 @@ def render_first_assignment(inv: ManagerInvocation) -> str:
     lines.append(
         "Ground the objective in code and git first, then decide your first move."
     )
+    if inv.session_id:
+        lines.append(
+            "This session is persistent: it stays alive after you close a Case. When this "
+            f"Case is done you can open the next objective in THIS SAME session with "
+            f"open_case(objective=..., session_id='{inv.session_id}', completion_criteria=...) "
+            "— do NOT expect a fresh session per Case."
+        )
     return "\n".join(lines)

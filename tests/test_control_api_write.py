@@ -428,3 +428,47 @@ def test_jobs_rejects_conflicting_session_and_unowned(client):
 
 def test_jobs_requires_auth(client):
     assert client.get("/api/jobs").status_code in (401, 403)
+
+
+# --- [M3.3] POST /api/cases — open a new Case on an existing Manager session ---
+
+def _wire_open_case(orch, *, enabled=True, returns="case-new"):
+    """Give the stub orchestrator the two hooks the /api/cases route calls."""
+    orch._manager_role_enabled = lambda: enabled
+    orch.open_case_calls = []
+
+    def _open_case(objective, session_id, role="manager", completion_criteria=None):
+        orch.open_case_calls.append((objective, session_id, role, completion_criteria))
+        return returns
+
+    orch.open_case = _open_case
+
+
+def test_open_case_opens_on_existing_session(client, orch):
+    _wire_open_case(orch, returns="case-new")
+    sess = orch.session_service.store.create(backend="claude", repo_path="/tmp/repo")
+    r = client.post(
+        "/api/cases",
+        json={"objective": "next objective", "session_id": sess.session_id,
+              "completion_criteria": "tests green"},
+        headers=_auth(),
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "case_id": "case-new"}
+    assert orch.open_case_calls == [("next objective", sess.session_id, "manager", "tests green")]
+
+
+def test_open_case_disabled_returns_409(client, orch):
+    _wire_open_case(orch, enabled=False)
+    r = client.post("/api/cases", json={"objective": "x", "session_id": "s"}, headers=_auth())
+    assert r.status_code == 409
+
+
+def test_open_case_unknown_session_returns_404(client, orch):
+    _wire_open_case(orch)
+    r = client.post("/api/cases", json={"objective": "x", "session_id": "ghost"}, headers=_auth())
+    assert r.status_code == 404
+
+
+def test_open_case_requires_auth(client):
+    assert client.post("/api/cases", json={"objective": "x", "session_id": "s"}).status_code in (401, 403)
