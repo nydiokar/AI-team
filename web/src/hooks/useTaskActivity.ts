@@ -9,13 +9,13 @@
  * same session are automatically ignored once lastTaskId advances.
  */
 import { useMemo } from "react";
-import { useEventStreamContext } from "./eventStreamContext";
+import { useLiveEvents } from "./eventStreamContext";
 
 export function useTaskActivity(
   sessionId: string | undefined,
   taskId: string | undefined,
 ): string | null {
-  const { events } = useEventStreamContext();
+  const events = useLiveEvents();
 
   return useMemo(() => {
     if (!sessionId || !taskId) return null;
