@@ -5,16 +5,17 @@ surface are reviewable in one place. Keep this current when you add/remove a rou
 a process. The end state this describes is the goal of
 `docs/CONTROL_SURFACE_UNIFICATION.md` (U1–U6, done).
 
-Last updated: 2026-06-24
+Last updated: 2026-07-13 (added §2b Manager/Case surface — M2/M3, flag-gated)
 
 ---
 
 ## 1. Process & network topology
 
-There is **one** long-running process on the gateway box: `python main.py`. Telegram,
-the Control API (which also serves the Web UI), and the mesh task server are all
-coroutines **inside** it, sharing the same live `TaskOrchestrator` — so every interface
-sees the same sessions, the same registry, the same event stream. Workers are separate
+There is **one** long-running process on the gateway box: `python main.py`. The
+Control API (which serves the Web UI — our own primary UI), the mesh task server,
+and Telegram (a secondary, optional interface) are all coroutines **inside** it,
+sharing the same live `TaskOrchestrator` — so every interface sees the same
+sessions, the same registry, the same event stream. Workers are separate
 processes on **other** machines that dial in over the mesh.
 
 ```
@@ -27,15 +28,15 @@ processes on **other** machines that dial in over the mesh.
    │   │     • submit_instruction (dispatch) • notifier (outbound fan-out)           │
    │   │                                                                             │
    │   │   ── interfaces, all holding the SAME orchestrator references ──            │
-   │   ├─ TelegramInterface  (in-process)   ── only if GATEWAY_TELEGRAM_BOT_TOKEN set │
    │   ├─ Control API        (in-process, U1)  ── only if CONTROL_API_ENABLED=true    │
    │   │     • read:  /api/sessions|tasks|nodes|jobs|events                          │
    │   │     • write: /api/instructions|sessions/*|git/*                             │
    │   │     • push:  /api/events/stream (SSE)                                       │
-   │   │     • serves web/dist (the React UI) at /                                   │
+   │   │     • serves web/dist (the React UI — our own UI) at /                      │
    │   │     • binds CONTROL_API_HOST → tailscale_ip → 127.0.0.1 · port 9003         │
-   │   └─ Mesh Task Server   (in-process)   ── only if MESH_ENABLED=true              │
-   │         • workers claim/run tasks here · port 9002                              │
+   │   ├─ Mesh Task Server   (in-process)   ── only if MESH_ENABLED=true              │
+   │   │     • workers claim/run tasks here · port 9002                              │
+   │   └─ TelegramInterface  (in-process, secondary) ── only if GATEWAY_TELEGRAM_BOT_TOKEN set │
    └───────────────────┬───────────────────────────────────┬─────────────────────────┘
                        │ HTTP (browser can't import Python) │ HTTP (mesh protocol)
               ┌────────┴─────────┐                 ┌────────┴──────────────┐
@@ -51,8 +52,8 @@ processes on **other** machines that dial in over the mesh.
 | Component | Is a… | Talks to | On |
 |---|---|---|---|
 | Gateway (`main.py`) | single process | — (hosts everything) | — |
-| Telegram | in-process interface | Telegram servers (long-poll) | — |
-| Web UI (`web/dist`) | static files in your **browser** | the gateway's Control API | `9003` |
+| Web UI (`web/dist`) | static files in your **browser** — our own primary UI | the gateway's Control API | `9003` |
+| Telegram | in-process interface, secondary/optional | Telegram servers (long-poll) | — |
 | Worker | separate process, other machine | the gateway's **mesh** server | `9002` (`CONTROLLER_URL`) |
 
 The Web UI and a worker sit at opposite ends: the Web UI is a **client** that controls
@@ -76,9 +77,9 @@ Each interface is independently gated — all four combinations are valid:
 
 | Want | Set |
 |---|---|
-| Web UI only (no Telegram) | `GATEWAY_TELEGRAM_BOT_TOKEN=""` |
+| Web UI only (no Telegram) — the default posture | `GATEWAY_TELEGRAM_BOT_TOKEN=""` |
 | Telegram only (no web)    | `CONTROL_API_ENABLED=false` |
-| Both (default)            | bot token set + `CONTROL_API_ENABLED=true` |
+| Both surfaces at once     | bot token set + `CONTROL_API_ENABLED=true` |
 | Mesh / remote workers     | `MESH_ENABLED=true` (+ workers point `CONTROLLER_URL` here) |
 
 ---
@@ -134,6 +135,40 @@ file resolver is confined to `web/dist` (no `..`/`%2e%2e` traversal — see the
 path-traversal fix). The interactive docs (`/docs`, `/redoc`, `/openapi.json`) are
 **disabled by default** (they'd leak the API shape); set `CONTROL_API_DOCS=true` to
 re-enable them for local development.
+
+---
+
+## 2b. Manager / Case surface (M2/M3, flag-gated)
+
+On top of the plain task/session surface above, the gateway can run a **Manager**:
+a Claude session bound to one durable **Case**, which can dispatch **worker**
+sessions into the same Case and authoritatively close it. This is invoked, not
+autonomous-by-default — nothing here runs unless something calls `/api/manager`.
+
+Gated behind `MANAGER_ROLE_ENABLED` (see `docs/ENV_FEATURE_FLAGS.md`); OFF ⇒ these
+routes 409. Current live status (which flags are ON right now) is `.ai/CONTEXT.md`'s
+job, not this file's — this table only describes what the surface *is*.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/manager` | Boot a Manager: opens one Case, delivers the objective as its first assignment turn. |
+| POST | `/api/cases/{id}/close` | Authoritative Case close — refuses on unmet criteria / open child work / pending approval (never a bare error, a structured `{ok:false, reason}`). |
+| POST | `/api/cases/{id}/review` | Record a Manager review verdict (`accepted`\|`rework_requested`\|`waived`) on a Case. |
+| GET | `/api/flows`, `/api/flows/{id}` | Read-only `flow_runs` records — the low-level per-turn ledger. |
+| GET | `/api/work`, `/api/work/{id}`, `/api/work/{id}/timeline`, `/api/work/{id}/graph` | Read-only Case-level projections over `flow_runs`+`flow_links`+`flow_events` — the Work surface the Web UI's Case view reads. |
+
+The Manager's stable identity (role prompt, allowed decisions, tool profile
+`manager_v1`) is `docs/harness/roles/manager.md`, loaded via
+`src/core/roles.py::load_manager_role()`; the per-invocation objective/Case/branch
+is delivered as a first user turn, never folded into the system prompt (kept
+provider-neutral — `src/core/roles.py` imports no Claude SDK types; the Claude
+adapter lives in `src/backends/claude_role_adapter.py`). A worker dispatched by a
+Manager **joins** the Manager's Case (`membership:worker`) rather than opening a
+child Case — see `docs/dictionary/words_&_relations.md` for the Case/Task/Session
+vocabulary this table assumes.
+
+For the loop this surface drives (dispatch → worker joins → review → close) see
+`docs/harness/dispatch_pipeline.md` and `docs/Task_Harness_v0.7_AUTOMATION.md`.
 
 ---
 

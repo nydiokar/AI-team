@@ -1,6 +1,10 @@
 /**
- * Server-state hooks for the read-only A27 Work / Case API. Mirrors the
- * useLiveData polling discipline (TanStack Query) and translates raw payloads
+ * Server-state hooks for the read-only A27 Work / Case API. Same tooling as
+ * useLiveData (TanStack Query, token-gated, retry-on-non-auth-error) but its
+ * OWN polling tiers, not a mirror of useLiveData's POLL_MS/SLOW_POLL_MS: the
+ * inbox list polls at POLL_MS (3s) like the rest of the live surface, but case
+ * detail/lineage/timeline/affiliations poll at the slower DETAIL_POLL_MS (15s,
+ * see below) since they change far less often. Raw payloads are translated
  * through ../transport/workAdapter so components only see ../domain/work types.
  *
  * Everything here is READ-ONLY: no mutations, no optimistic writes. The Work

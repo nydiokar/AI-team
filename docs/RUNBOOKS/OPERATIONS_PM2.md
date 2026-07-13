@@ -1,6 +1,6 @@
 # PM2 Operations
 
-Use PM2 as the process supervisor for the Telegram Coding Gateway.
+Use PM2 as the process supervisor for the AI-Team Gateway (Web UI + Telegram).
 
 This is the supported way to keep the gateway alive across crashes, machine reboots,
 and code updates without asking the Python app to restart itself.
@@ -85,7 +85,7 @@ if needed.
 2. `pm2 restart ai-team-gateway --update-env`
 3. `python main.py health`
 4. `pm2 logs ai-team-gateway`
-5. verify Telegram responds
+5. verify the Web UI loads (`curl http://127.0.0.1:9003/health`) and, if configured, Telegram responds
 
 ## Auto-Deploy (T1 — gateway host only)
 

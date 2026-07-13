@@ -1,15 +1,15 @@
-# Telegram Coding Gateway — Desired State, Required Changes, and LLM Implementation Prompt
+# User Coding Gateway — Desired State, Required Changes, and LLM Implementation Prompt
 
 ## 1. What this project is actually aiming at
 
 This project is **not** trying to become a general autonomous agent framework.
 
-It is trying to become a **safe, lightweight, session-aware remote gateway** that lets Telegram control a local coding agent running on any machine.
+It is trying to become a **safe, lightweight, session-aware remote gateway** that lets UI control a local coding agent running on any machine.
 
 The intended use is:
 
 - A machine runs this gateway locally
-- Telegram acts as the remote control interface
+- UI acts as the remote control interface
 - The gateway can start or continue work through a local coding agent such as Claude Code or Codex
 - The gateway keeps enough explicit state to let work continue across turns
 - The gateway remains constrained, inspectable, file-backed, and operator-controlled
@@ -17,7 +17,7 @@ The intended use is:
 
 In one sentence:
 
-**This system should become a Telegram-controlled remote shell for local coding agents, with persistent session routing, safe execution boundaries, and resumable work.**
+**This system should become a UI-controlled remote shell for local coding agents, with persistent session routing, safe execution boundaries, and resumable work.**
 
 ---
 
@@ -27,8 +27,8 @@ The correct way to maintain continuity is:
 
 - use the coding agent's **native resume/continue/session mechanism**
 - store a lightweight gateway-level session record in this repo
-- map Telegram conversations to those session records
-- resume the agent session on demand when the next Telegram instruction arrives
+- map UI conversations to those session records
+- resume the agent session on demand when the next UI instruction arrives
 
 The system should **not** be built primarily around:
 
@@ -40,11 +40,11 @@ Live terminal attachment may exist later as an optional mode for streaming or ac
 
 ### Correct session model
 
-**Telegram session -> local gateway session record -> native Claude/Codex session ID -> resume on demand**
+**UI session -> local gateway session record -> native Claude/Codex session ID -> resume on demand**
 
 ### Wrong backbone
 
-**Telegram session -> permanently alive terminal process -> keep writing messages into stdin**
+**UI session -> permanently alive terminal process -> keep writing messages into stdin**
 
 ---
 
@@ -55,7 +55,7 @@ The current repo already has the right foundation.
 It already contains:
 
 - a task orchestrator
-- a Telegram interface
+- a UI interface
 - a Claude bridge
 - persistence for queue/state/artifacts
 - constrained execution patterns
@@ -85,8 +85,8 @@ The desired end state is a system with the following properties.
 
 ### Core behavior
 
-- A user can open a session from Telegram against a specific machine/repo/path/backend
-- A user can continue that same session later from Telegram
+- A user can open a session from UI against a specific machine/repo/path/backend
+- A user can continue that same session later from UI
 - The gateway knows which coding backend the session uses
 - The gateway stores explicit local metadata for the session
 - The gateway resumes Claude/Codex using the backend's native session/continue mechanism
@@ -157,15 +157,15 @@ It needs to become:
 
 That means:
 
-- creating a Telegram message should not automatically imply a brand-new independent task
-- instead, Telegram input should route to an active session when one exists
+- creating a UI message should not automatically imply a brand-new independent task
+- instead, UI input should route to an active session when one exists
 - ad hoc tasks can still exist, but session-based operation should become the main flow
 
 ---
 
-## C. Add Telegram session routing
+## C. Add UI session routing
 
-The Telegram interface should gain explicit session management.
+The UI interface should gain explicit session management.
 
 Add commands such as:
 
@@ -180,7 +180,7 @@ Add commands such as:
 
 Behavioral requirement:
 
-- each Telegram user/chat/thread should be able to have an active session binding
+- each UI user/chat/thread should be able to have an active session binding
 - plain follow-up messages should go to the active session unless explicitly overridden
 - replies should reference the session they operated on
 
@@ -325,7 +325,7 @@ artifact locations
 last summary
 active/inactive state
 
-Telegram should expose concise status reporting.
+UI should expose concise status reporting.
 
 J. Keep live terminal support optional
 
@@ -371,7 +371,7 @@ Build in this order:
 Phase 1 — Session foundation
 create Session model
 persist sessions to disk
-add active Telegram session binding
+add active UI session binding
 add session CRUD commands
 Phase 2 — Backend session support
 abstract backend interface
@@ -379,7 +379,7 @@ implement Claude backend resume flow
 implement Codex backend resume flow
 store native backend session IDs
 Phase 3 — Session execution flow
-route Telegram messages to active sessions
+route UI messages to active sessions
 execute backend resume for each follow-up message
 capture result
 update summary and artifacts
@@ -398,4 +398,4 @@ machine registry / multi-node awareness
 
 The final product should be:
 
-A safe Telegram-controlled gateway that can open, continue, inspect, and manage persistent coding sessions on any machine by orchestrating local coding agents like Claude Code or Codex, while keeping state explicit, file-backed, resumable, and tightly constrained.
+A safe UI-controlled gateway that can open, continue, inspect, and manage persistent coding sessions on any machine by orchestrating local coding agents like Claude Code or Codex, while keeping state explicit, file-backed, resumable, and tightly constrained.
