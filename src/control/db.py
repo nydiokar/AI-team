@@ -747,9 +747,15 @@ class MeshDB:
                         driver_status                = excluded.driver_status,
                         cache_health                 = excluded.cache_health,
                         cache_unhealthy_count        = excluded.cache_unhealthy_count,
-                        previous_backend_session_ids = excluded.previous_backend_session_ids,
-                        current_case_id              = excluded.current_case_id,
-                        case_role                    = excluded.case_role
+                        previous_backend_session_ids = excluded.previous_backend_session_ids
+                        -- NB: current_case_id / case_role are DELIBERATELY NOT updated
+                        -- here. A generic full-session save (e.g. a Manager's own
+                        -- turn-end persist of a stale in-memory object) must NEVER
+                        -- clobber Case affiliation — that is a read-modify-write race
+                        -- that silently re-attached a session to a closed Case. These
+                        -- two columns are owned exclusively by the authoritative
+                        -- affiliation seam `set_session_case` (open_case sets, close_case
+                        -- clears). The INSERT above still seeds them for a brand-new row.
                     """,
                     {
                         "session_id":          session.session_id,
@@ -783,6 +789,39 @@ class MeshDB:
                 )
         except Exception as e:
             logger.warning("event=db_upsert_session_failed session_id=%s err=%s", session.session_id, e)
+
+    def set_session_case(
+        self,
+        session_id: str,
+        case_id: Optional[str],
+        role: Optional[str] = None,
+    ) -> None:
+        """Authoritative, targeted write of a session's Case affiliation.
+
+        The ONLY sanctioned path that mutates ``sessions.current_case_id`` /
+        ``case_role`` — a scoped UPDATE of exactly those two columns (plus
+        ``updated_at``), so it cannot be undone by, and cannot disturb, a
+        concurrent full-session ``upsert_session`` (which no longer touches these
+        columns on conflict). ``case_id=None`` clears the affiliation (Case close);
+        a non-empty ``case_id`` sets it (Case open / join). No-op for a blank
+        session_id or an unknown row. Never raises."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        cid = (case_id or None) or None
+        rol = (role or None) if cid else None  # role is meaningless without a Case
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    "UPDATE sessions SET current_case_id = ?, case_role = ?, "
+                    "updated_at = ? WHERE session_id = ?",
+                    (cid, rol, _now(), sid),
+                )
+        except Exception as e:
+            logger.warning(
+                "event=set_session_case_failed session_id=%s case_id=%s err=%s",
+                sid, cid, e,
+            )
 
     def mark_driver_sessions_lost_for_node(self, node_id: str, *, backend: str = "claude") -> int:
         """Mark idle live SDK-backed sessions on a restarted worker as lost."""

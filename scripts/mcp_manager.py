@@ -457,6 +457,40 @@ def _get_case(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: open_case  (M3.3 — let ONE Manager session own many Cases sequentially)
+# ---------------------------------------------------------------------------
+
+def _open_case(args: Dict[str, Any]) -> str:
+    """Open a NEW Case on the Manager's OWN session (POST /api/cases).
+
+    This is what lets a single persistent Manager session run the full loop for
+    several objectives in a row — open → dispatch → review → close → open the next
+    — instead of spawning a fresh session (and re-paying its boot context) per Case.
+    Requires the Manager's own ``session_id`` and a checkable ``completion_criteria``
+    that close_case will later demand. Returns the new case_id to use with
+    dispatch_worker(case_id=...), record_review, get_case, and close_case."""
+    objective = _bounded_text(args.get("objective"), "objective", _MAX_OBJECTIVE_CHARS)
+    session_id = _bounded_text(args.get("session_id"), "session_id", _MAX_ID_CHARS, required=True)
+    completion_criteria = _bounded_text(
+        args.get("completion_criteria"), "completion_criteria", _MAX_OBJECTIVE_CHARS, required=False)
+
+    body: Dict[str, Any] = {"objective": objective, "session_id": session_id}
+    if completion_criteria:
+        body["completion_criteria"] = completion_criteria
+
+    result = _api_request("POST", "/api/cases", body)
+    case_id = result.get("case_id", "?")
+    return (
+        f"Opened Case {case_id} on session {session_id}.\n"
+        f"Objective: {objective}\n"
+        f"completion_criteria: {completion_criteria or '(none — set one so close_case can verify done)'}\n\n"
+        f"This is YOUR Case now. dispatch_worker(case_id='{case_id}') to run a worker into it, "
+        f"record_review after verifying its git diff, and close_case('{case_id}') when the criteria "
+        f"are truly met. When you close it, this session stays alive — open_case again for the next objective."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool: close_case  (the Manager's Decision surface — A37 authoritative close)
 # ---------------------------------------------------------------------------
 
@@ -556,6 +590,26 @@ _TOOLS = [
         },
     },
     {
+        "name": "open_case",
+        "description": (
+            "Open a NEW Case on YOUR OWN Manager session (POST /api/cases). This is how a single "
+            "persistent Manager session takes on another objective without spawning a fresh session "
+            "— open -> dispatch_worker(case_id) -> review -> close_case -> open the next. Provide your "
+            "own session_id and a checkable completion_criteria (close_case will demand it). Returns "
+            "the new case_id. Use when you finish one Case and want to start the next in the same "
+            "conversation, or when the operator hands you a new objective."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "objective": {"type": "string", "description": "The objective for the new Case. Ground it; do not overstate scope."},
+                "session_id": {"type": "string", "description": "YOUR OWN Manager session id (the session this Case is owned by)."},
+                "completion_criteria": {"type": "string", "description": "The checkable done-gate close_case will require (e.g. 'tests green; diff reviewed; PR opened')."},
+            },
+            "required": ["objective", "session_id"],
+        },
+    },
+    {
         "name": "get_case",
         "description": (
             "Read the Manager's Case (read-only over GET /api/flows/{case_id}): status, "
@@ -642,6 +696,7 @@ _TOOLS = [
 _TOOL_IMPLS = {
     "dispatch_worker": _dispatch_worker,
     "wait_for_worker": _wait_for_worker,
+    "open_case": _open_case,
     "get_case": _get_case,
     "close_case": _close_case,
     "record_review": _record_review,
