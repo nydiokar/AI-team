@@ -33,6 +33,8 @@ import re
 import sys
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
+
+from src.core.timeutil import now_iso
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -327,7 +329,7 @@ def emit_event(
     try:
         ctx = _current_context()
         payload: Dict[str, Any] = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_iso(),
             "event": name,
             "node_id": node_id or _NODE_ID or None,
         }
