@@ -13,11 +13,11 @@ import json
 import logging
 import socket
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from src.core.interfaces import Session, SessionStatus, SessionOrigin
+from src.core.timeutil import now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +54,8 @@ class SessionStore:
             backend=backend,
             repo_path=repo_path,
             status=SessionStatus.IDLE,
-            created_at=datetime.now().isoformat(),
-            updated_at=datetime.now().isoformat(),
+            created_at=now_iso(),
+            updated_at=now_iso(),
             machine_id=pinned,
             telegram_chat_id=telegram_chat_id,
             owner_user_id=owner_user_id,
@@ -93,7 +93,7 @@ class SessionStore:
             return None
 
     def save(self, session: Session) -> None:
-        session.updated_at = datetime.now().isoformat()
+        session.updated_at = now_iso()
         self._write(session)
         self._shadow_write(session)
 

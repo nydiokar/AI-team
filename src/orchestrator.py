@@ -16,6 +16,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional, Tuple
 from datetime import datetime
+from src.core.timeutil import now_iso
 import uuid
 import random
 import contextlib
@@ -171,8 +172,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         # never leaks into task.metadata / the remote payload / persisted artifacts.
         self._compact_injected_ids: set[str] = set()
         # Job completion polling (T3)
-        self._last_job_poll = datetime.now().isoformat()
-        self._last_remote_job_poll = datetime.now().isoformat()
+        self._last_job_poll = now_iso()
+        self._last_remote_job_poll = now_iso()
         self._remote_job_poll_started_epoch = time.time()
         self._processed_terminal_jobs: set[str] = set()
         self._watched_jobs_cache_lock = threading.Lock()
@@ -517,7 +518,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 errors=["interrupted by gateway restart"],
                 files_modified=[],
                 execution_time=0.0,
-                timestamp=datetime.now().isoformat(),
+                timestamp=now_iso(),
             )
             setattr(result, "backend_name", session.backend or "claude")
             self._write_session_summary(session, result)
@@ -569,7 +570,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             session.last_artifact_path = artifact_path
         session.task_history.append({
             "task_id": task_row["id"],
-            "timestamp": result_dict.get("timestamp", datetime.now().isoformat()),
+            "timestamp": result_dict.get("timestamp", now_iso()),
             "success": True,
             "execution_time": round(exec_time, 2),
             "user_message": session.last_user_message,
@@ -586,7 +587,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             errors=[],
             files_modified=result_dict.get("files_modified") or [],
             execution_time=exec_time,
-            timestamp=datetime.now().isoformat(),
+            timestamp=now_iso(),
         )
         setattr(result, "backend_name", session.backend or "claude")
         self._write_session_summary(session, result)
@@ -679,7 +680,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 errors=[session.last_result_summary or "stale busy session: no pending or claimed mesh task"],
                 files_modified=[],
                 execution_time=0.0,
-                timestamp=datetime.now().isoformat(),
+                timestamp=now_iso(),
             )
             setattr(result, "backend_name", session.backend or "claude")
             self._append_session_event(session_id, task_id, result)
@@ -754,7 +755,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     errors=result_dict.get("errors") or [error_msg],
                     files_modified=result_dict.get("files_modified") or [],
                     execution_time=result_dict.get("execution_time", 0.0),
-                    timestamp=result_dict.get("timestamp", datetime.now().isoformat()) if result_dict else datetime.now().isoformat(),
+                    timestamp=result_dict.get("timestamp", now_iso()) if result_dict else now_iso(),
                     return_code=result_dict.get("return_code", 1) if result_dict else 1,
                     raw_stdout=result_dict.get("output", "") if result_dict else "",
                     raw_stderr=(result_dict.get("error_detail", "") if result_dict else ""),
@@ -817,14 +818,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # routing those terminal jobs to session-visible notifications.
                 terminal = db.get_terminal_jobs_since(self._last_job_poll)
                 if terminal:
-                    self._last_job_poll = datetime.now().isoformat()
+                    self._last_job_poll = now_iso()
 
                 for job in terminal:
                     await self._process_terminal_job(job)
 
                 remote_terminal = self._remote_terminal_jobs_since(self._last_remote_job_poll)
                 if remote_terminal:
-                    self._last_remote_job_poll = datetime.now().isoformat()
+                    self._last_remote_job_poll = now_iso()
 
                 for job in remote_terminal:
                     await self._process_terminal_job(job)
@@ -1016,7 +1017,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         reply = str(payload["reply"])
         prompt = str(payload["prompt"])
         success = bool(payload["success"])
-        now = datetime.now().isoformat()
+        now = now_iso()
 
         try:
             from src.control.db import get_db
@@ -1137,7 +1138,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 errors=[] if payload["success"] else [str(payload["reply"])],
                 files_modified=[],
                 execution_time=0.0,
-                timestamp=datetime.now().isoformat(),
+                timestamp=now_iso(),
                 return_code=job.get("exit_code") or 0,
             )
             try:
@@ -1547,7 +1548,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             import json
             payload = {
                 "pending_files": sorted(self._pending_files),
-                "updated": datetime.now().isoformat(),
+                "updated": now_iso(),
             }
             self._state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
@@ -1629,7 +1630,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             type=task_type_enum,
             priority=TaskPriority.MEDIUM,
             status=TaskStatus.PENDING,
-            created=datetime.now().isoformat(),
+            created=now_iso(),
             title=parsed.get("title", "Runtime task"),
             target_files=list(parsed.get("target_files", []) or []),
             prompt=parsed.get("prompt", description),
@@ -2522,7 +2523,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 type=TaskType.ANALYZE,
                 priority=TaskPriority.HIGH,
                 status=TaskStatus.PENDING,
-                created=datetime.now().isoformat(),
+                created=now_iso(),
                 title="Compact session context",
                 target_files=[],
                 prompt="/compact",
@@ -3146,7 +3147,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                         ],
                         files_modified=[],
                         execution_time=time.time() - start_time,
-                        timestamp=datetime.now().isoformat(),
+                        timestamp=now_iso(),
                     )
                     setattr(last_result, "backend_name", getattr(session, "backend", None))
                     last_result.error_class = self._classify_error(last_result)
@@ -3317,7 +3318,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 errors=raw.errors,
                                 files_modified=raw.files_modified,
                                 execution_time=raw.execution_time,
-                                timestamp=datetime.now().isoformat(),
+                                timestamp=now_iso(),
                                 file_changes=getattr(raw, "file_changes", []),
                                 raw_stdout=getattr(raw, "raw_stdout", ""),
                                 raw_stderr=getattr(raw, "raw_stderr", ""),
@@ -3374,7 +3375,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                             errors=["interrupted by gateway restart" if interrupted else "cancelled"],
                             files_modified=[],
                             execution_time=execution_time,
-                            timestamp=datetime.now().isoformat(),
+                            timestamp=now_iso(),
                         )
                         setattr(result, "backend_name", backend_name)
                         setattr(result, "telemetry_invocation_id", telemetry_context.invocation_id)
@@ -3435,7 +3436,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                             errors=[timeout_error],
                             files_modified=[],
                             execution_time=execution_time,
-                            timestamp=datetime.now().isoformat(),
+                            timestamp=now_iso(),
                         )
                         setattr(result, "backend_name", backend_name)
                         setattr(result, "telemetry_invocation_id", telemetry_context.invocation_id)
@@ -3592,7 +3593,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 errors=[str(e)],
                 files_modified=[],
                 execution_time=execution_time,
-                timestamp=datetime.now().isoformat()
+                timestamp=now_iso()
             )
 
     async def _process_task_remote(
@@ -3641,7 +3642,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 errors=[msg],
                 files_modified=[],
                 execution_time=time.time() - start_time,
-                timestamp=datetime.now().isoformat(),
+                timestamp=now_iso(),
             )
             setattr(result, "backend_name", backend_name)
             return result
@@ -3757,7 +3758,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     errors=[reason],
                     files_modified=[],
                     execution_time=time.time() - start_time,
-                    timestamp=datetime.now().isoformat(),
+                    timestamp=now_iso(),
                 )
                 setattr(result, "backend_name", backend_name)
                 session.status = (
@@ -4443,7 +4444,7 @@ created: {task.created}
 id: {task_id}
 type: {parsed.get('type', 'analyze')}
 priority: {parsed.get('priority', 'medium')}
-created: {datetime.now().isoformat()}
+created: {now_iso()}
 cwd: {parsed.get('metadata', {}).get('cwd', '')}
 session_id: {session_id or ""}
 ---
@@ -4632,7 +4633,7 @@ Generated from user description: {description}
             log_dir = Path(config.system.logs_dir) / "session_events"
             log_dir.mkdir(parents=True, exist_ok=True)
             entry = _json.dumps({
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now_iso(),
                 "task_id": task_id,
                 "success": result.success,
                 "execution_time": result.execution_time,
@@ -4744,7 +4745,7 @@ Generated from user description: {description}
                     errors=raw.errors,
                     files_modified=raw.files_modified,
                     execution_time=raw.execution_time,
-                    timestamp=datetime.now().isoformat(),
+                    timestamp=now_iso(),
                     file_changes=getattr(raw, "file_changes", []),
                     raw_stdout=getattr(raw, "raw_stdout", ""),
                     raw_stderr=getattr(raw, "raw_stderr", ""),
@@ -4772,7 +4773,7 @@ Generated from user description: {description}
             errors=["cancelled"],
             files_modified=[],
             execution_time=time.time() - start,
-            timestamp=datetime.now().isoformat(),
+            timestamp=now_iso(),
         )
         setattr(result, "backend_name", backend_name)
         return result
@@ -4861,7 +4862,7 @@ Generated from user description: {description}
                 errors=["Mesh DB unavailable; cannot dispatch to remote worker"],
                 files_modified=[],
                 execution_time=0.0,
-                timestamp=datetime.now().isoformat(),
+                timestamp=now_iso(),
             )
             setattr(result, "backend_name", self._resolve_task_backend(task))
             return result
@@ -4886,7 +4887,7 @@ Generated from user description: {description}
                     errors=["Task row missing from DB — enqueue failed before dispatch; check logs for mesh_enqueue_failed"],
                     files_modified=[],
                     execution_time=0.0,
-                    timestamp=datetime.now().isoformat(),
+                    timestamp=now_iso(),
                 )
                 setattr(result, "backend_name", self._resolve_task_backend(task))
                 return result
@@ -4928,7 +4929,7 @@ Generated from user description: {description}
                         errors=r.get("errors") or [],
                         files_modified=r.get("files_modified") or [],
                         execution_time=r.get("execution_time", 0.0),
-                        timestamp=r.get("timestamp", datetime.now().isoformat()),
+                        timestamp=r.get("timestamp", now_iso()),
                         return_code=r.get("return_code", 0),
                         # The worker only ships `output` over the wire; mirror it
                         # into raw_stdout so the artifact JSON (which persists
@@ -4975,7 +4976,7 @@ Generated from user description: {description}
                         errors=r.get("errors") or [error_msg],
                         files_modified=r.get("files_modified") or [],
                         execution_time=r.get("execution_time", 0.0),
-                        timestamp=r.get("timestamp", datetime.now().isoformat()) if r else datetime.now().isoformat(),
+                        timestamp=r.get("timestamp", now_iso()) if r else now_iso(),
                         return_code=r.get("return_code", 1) if r else 1,
                         raw_stdout=r.get("output", "") if r else "",
                         raw_stderr=error_detail,
@@ -4999,7 +5000,7 @@ Generated from user description: {description}
                         errors=[f"Dispatch timeout: no worker picked up the task within {pickup_timeout_sec}s"],
                         files_modified=[],
                         execution_time=pickup_timeout_sec,
-                        timestamp=datetime.now().isoformat(),
+                        timestamp=now_iso(),
                     )
                     setattr(result, "backend_name", self._resolve_task_backend(task))
                     return result
@@ -5015,7 +5016,7 @@ Generated from user description: {description}
                     errors=["Task row disappeared from DB while waiting for worker pickup"],
                     files_modified=[],
                     execution_time=pickup_timeout_sec,
-                    timestamp=datetime.now().isoformat(),
+                    timestamp=now_iso(),
                 )
                 setattr(result, "backend_name", self._resolve_task_backend(task))
                 return result
@@ -5042,7 +5043,7 @@ Generated from user description: {description}
                     errors=["interrupted by gateway restart" if interrupted else "cancelled"],
                     files_modified=[],
                     execution_time=0.0,
-                    timestamp=datetime.now().isoformat(),
+                    timestamp=now_iso(),
                 )
                 setattr(result, "backend_name", self._resolve_task_backend(task))
                 setattr(result, "detached", interrupted)
@@ -5150,7 +5151,7 @@ Generated from user description: {description}
                 errors=[msg],
                 files_modified=[],
                 execution_time=0.0,
-                timestamp=datetime.now().isoformat(),
+                timestamp=now_iso(),
             )
             setattr(result, "backend_name", backend_name)
             return result
@@ -5321,7 +5322,7 @@ Generated from user description: {description}
                 },
                 "artifact_path": artifact_path or "",
                 "reason": reason,
-                "created_at": datetime.now().isoformat(),
+                "created_at": now_iso(),
                 "reconciled": False,
             }
             (spool_dir / f"{task.id}.json").write_text(
@@ -5359,7 +5360,7 @@ Generated from user description: {description}
             type=task_type,
             priority=priority,
             status=status,
-            created=str(data.get("created") or datetime.now().isoformat()),
+            created=str(data.get("created") or now_iso()),
             title=str(data.get("title") or data.get("id") or "reconciled task"),
             target_files=list(data.get("target_files") or []),
             prompt=str(data.get("prompt") or ""),
@@ -5377,7 +5378,7 @@ Generated from user description: {description}
             errors=list(data.get("errors") or []),
             files_modified=list(data.get("files_modified") or []),
             execution_time=float(data.get("execution_time") or 0.0),
-            timestamp=str(data.get("timestamp") or datetime.now().isoformat()),
+            timestamp=str(data.get("timestamp") or now_iso()),
             file_changes=list(data.get("file_changes") or []),
             raw_stdout=str(data.get("raw_stdout") or ""),
             raw_stderr=str(data.get("raw_stderr") or ""),
@@ -5459,7 +5460,7 @@ Generated from user description: {description}
                     row = db.get_task(task.id)
                     if row and row.get("status") in {"completed", "failed", "failed_node_offline"}:
                         payload["reconciled"] = True
-                        payload["reconciled_at"] = datetime.now().isoformat()
+                        payload["reconciled_at"] = now_iso()
                         path.write_text(
                             json.dumps(payload, ensure_ascii=False, indent=2),
                             encoding="utf-8",
@@ -5580,7 +5581,7 @@ Generated from user description: {description}
             try:
                 session.task_history.append({
                     "task_id": task_id,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": now_iso(),
                     "success": True,
                     "execution_time": 0.0,
                     "user_message": "",
@@ -5606,7 +5607,7 @@ Generated from user description: {description}
                 execution_time=0.0,
                 error_class="",
                 return_code=0,
-                timestamp=datetime.now().isoformat(),
+                timestamp=now_iso(),
             )
             chat_id = getattr(session, "telegram_chat_id", None)
             await self.notifier.notify_task_outcome(

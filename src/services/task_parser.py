@@ -3,11 +3,11 @@ Task file parser implementation
 """
 import re
 import yaml
-from datetime import datetime
 from typing import List, Dict, Any
 from pathlib import Path
 
 from src.core.interfaces import ITaskParser, Task, TaskType, TaskPriority, TaskStatus
+from src.core.timeutil import now_iso
 
 class TaskParser(ITaskParser):
     """Parse `.task.md` files into `Task` objects.
@@ -48,7 +48,7 @@ class TaskParser(ITaskParser):
         
         task_type = self._parse_task_type(frontmatter.get('type'))
         priority = self._parse_priority(frontmatter.get('priority', 'medium'))
-        created = frontmatter.get('created', datetime.now().isoformat())
+        created = frontmatter.get('created', now_iso())
         
         # Extract sections from markdown body
         sections = self._parse_markdown_sections(body)
