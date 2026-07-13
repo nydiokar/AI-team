@@ -459,8 +459,11 @@ def _make_session_from_payload(payload: Dict[str, Any]) -> Any:
         backend_session_id=session_dict.get("backend_session_id", ""),
         model=session_dict.get("model") or None,
     )
-    # Copy optional fields if present
-    for attr in ("telegram_chat_id", "telegram_thread_id", "owner_user_id", "last_user_message", "driver_type", "driver_status", "cache_health", "cache_unhealthy_count", "previous_backend_session_ids"):
+    # Copy optional fields if present. `case_role` is load-bearing: the claude
+    # driver's `_role_boot` reads it to apply the Manager role prompt + scoped
+    # manager tools on THIS node — dropping it made a node-pinned Manager boot as
+    # a bare, role-less session (the A43 carrier-coupling defect).
+    for attr in ("telegram_chat_id", "telegram_thread_id", "owner_user_id", "last_user_message", "driver_type", "driver_status", "cache_health", "cache_unhealthy_count", "previous_backend_session_ids", "case_role", "current_case_id"):
         if attr in session_dict:
             setattr(session, attr, session_dict[attr])
     return session
