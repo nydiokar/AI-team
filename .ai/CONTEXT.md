@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-12
+**Last Updated:** 2026-07-13
 **Active branch:** `main` — M2 Work Control Substrate + M3 Phase 3.0 merged; `HARNESS_FLOW_DRIVE` **ON** live.
 
 > **🟢 STATUS 2026-07-12 — THE INVOKED-MANAGER LOOP RAN LIVE FOR THE FIRST TIME AND PASSED (A41).**
@@ -23,22 +23,41 @@
 > with an invalid verdict returns **422 invalid_verdict**, i.e. it passed the emitter flag-gate; the
 > unresolved-rework close-gate is active). F2's own-node liveness fix is running post-merge.
 >
-> **⚠️ 2026-07-13 finding — F1 was BLOCKED by a verdict-in-loop gap (now fixed in PR #13, unmerged).**
-> PR #11 added `record_review` to the MCP server + the close-gate, **but never granted the tool to a
-> Manager session** (`manager_v1` profile listed only 4 tools) **nor told the role to use it**
-> (`manager.md`). So a live Manager would `close_case` emitting **no `review.*` verdict** — F1 as
-> written could not succeed. **PR #13** (`feat/m3.2-review-verdict-in-loop`) fixes both: grants
-> `mcp__manager__record_review` in the profile + instructs the verdict in the Decision vocabulary.
-> Flag-OFF byte-identical; 71 targeted tests pass.
+> **✅ 2026-07-13 — F1 PASSED (A42) and the REWORK CYCLE is now PROVEN LIVE (A43). PRs #13/#16/#17 MERGED.**
+> PR #13 closed the verdict-in-loop gap (granted `record_review` + instructed the verdict); F1/A42
+> then ran the first review-gated Manager loop (two clean `review.accepted`, feature #41 gauge, PR #16).
+> **A43 (this run) closed the last unproven gap — the rework cycle:** an operator-driven in-gateway
+> Manager (`/api/manager`, Case `e8bb1b92…`) ran a sequential 2-task loop and issued the **first-ever
+> live `review.rework_requested`** → re-dispatched → **`review.accepted`** → 2nd task → `review.accepted`
+> → `close_case`. Deliverable is real and merged: **PR #17** (`feat/manager-restart-resilience`) hardens
+> the gateway against the very restart incident debugged today (dead-subprocess retry-eligibility +
+> honest `driver_lost` state), 3 commits + tests. **PR #16 (#41 gauge) and PR #17 both MERGED to `main`.**
 >
-> **Immediate next steps:**
-> 1. **Merge PR #13 + restart gateway** — makes the Manager actually able/instructed to emit the verdict.
-> 2. **F1 — prove the `review.*` emitter live** as a byproduct of the *next* real Manager run (no
->    throwaway spend): a Manager loop that builds the next slice now ALSO emits a genuine
->    `review.accepted` on close, and the rework-cycle (`rework_requested` → close blocked → accept →
->    close) becomes drivable. **This is a paid, operator-gated live run** — bounded+supervised per A41.
-> Then: **M3.2 remaining** (rework-cycle live proof) → **M3.3** guardrails / durable relay
-> (`wait_for_worker` is still in-process — a Manager crash loses the wait).
+> **🔴 2026-07-13 CRITICAL FINDING (A43) — the Manager role is COUPLED TO THE IN-GATEWAY DRIVER.**
+> Ran the same invoke with `node_id="kanebra-worker"` (a node agent-worker process). The session pinned
+> to the node correctly, but the boot turn came up as a **bare, role-less, tool-less Claude session**
+> ("I'm ready to help. What would you like me to work on?") — **no manager role prompt, no manager MCP
+> tools, no assignment delivery.** The role boot (`_role_boot`) + `render_first_assignment` +
+> scoped-tools wiring exist ONLY on the in-gateway SDK driver path, NOT on the node-worker execution
+> path. **Consequence: the Manager cannot run on ANY node (Horse included) — only on the gateway host,
+> where a gateway restart kills it.** This is the single most important thing learned today and the
+> **next build.** Full write-up + the two other drops:
+> - [`dispatch/DROP_MANAGER_ROLE_CARRIER_INDEPENDENT.md`](dispatch/DROP_MANAGER_ROLE_CARRIER_INDEPENDENT.md) — **the fix**: role/driver boots on any carrier (gateway embedded OR node agent worker), one-time global machine setup (MCP in `~/.claude.json`) is acceptable.
+> - [`dispatch/DROP_DISPATCH_WORKER_REAL_SESSION.md`](dispatch/DROP_DISPATCH_WORKER_REAL_SESSION.md) — workers are sessionless `run_oneoff` tasks (50 to date, 0 worker sessions ever) → make `dispatch_worker` open a real, openable worker session; run automation on a node so it survives gateway restarts.
+> - [`dispatch/DROP_TIMEZONE_NATIVE_TIME.md`](dispatch/DROP_TIMEZONE_NATIVE_TIME.md) — one clock, native local time everywhere; `session_service.py` writes naive-local, `db.py` writes UTC. **Timezone is a data-hygiene defect to eliminate, NOT a root-cause to hand-wave.**
+>
+> **⚠️ UNREVIEWED LOCAL WORK preserved on `feat/manager-multicase-session` (pushed, NO PR, NOT merged).**
+> Commit `31f648a` "persistent multi-Case session + fix affiliation clobber race" (M3.3-ish: `open_case`
+> tool/route + fix for `close_case` clobbering `current_case_id` via `upsert_session` ON CONFLICT). Real
+> work authored 11:25Z, orphaned by the 11:26Z restart. **Needs a review pass before merge.**
+>
+> **Immediate next steps (operator will spawn a session to work these one by one):**
+> 1. **Carrier-independent Manager role** (`DROP_MANAGER_ROLE_CARRIER_INDEPENDENT.md`) — THE blocker;
+>    without it the Manager only runs on the fragile gateway host.
+> 2. **Observable worker sessions + node survivability** (`DROP_DISPATCH_WORKER_REAL_SESSION.md`).
+> 3. **Timezone standardization** (`DROP_TIMEZONE_NATIVE_TIME.md`).
+> 4. **Review + merge `feat/manager-multicase-session`** (`31f648a`).
+> 5. **M3.3 durable relay** — `wait_for_worker` is still in-process (a Manager crash loses the wait).
 > **Cost reframe (operator, 2026-07-12):** a bounded+supervised live Manager run is NOT "burning tokens" —
 > it proves the machinery AND ships real work. The old scar was UNBOUNDED unsupervised spend, not this.
 >
@@ -236,8 +255,12 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
-| **1** | **M2.5 Case Admission (A36)** — stop minting a Case per turn | Foundation defect from the 2026-07-11 audit; **blocks M3.1**. `flow_run` born per turn ⇒ session shatters into fake Cases; `Task finished == Case completed`. Writer-policy fix over the sound substrate. | **built** — `feat/m2.5-case-admission`. Admission policy (attach-to-open-Case / standalone / birth-only-on-`open_case`-or-dispatch) + migration 24 + durable affiliation. Flag OFF ⇒ byte-identical. 884 tests pass; review clean. **A37 in progress on same branch.** |
-| **2** | **M2.5 Case Continuity & Closure (A37)** — honest stages + authoritative + checkable close | Removes auto `impl_review`/`closure` stamps + task-end auto-close; `close_case` demands `completion_criteria` (MAX salvage). | **built** — `feat/m2.5-case-admission`. Task-end is task-only (`task.finished`, no status write); authoritative `close_case` with open-child/pending-approval/criteria guards; `wait_for_worker` updated to detect `task.finished` (preserves the live manager path). Flag OFF ⇒ byte-identical. 905 tests pass; review clean. **M2.5 complete — M3.1 unblocked.** |
+| **1** | **Carrier-independent Manager role** — `DROP_MANAGER_ROLE_CARRIER_INDEPENDENT.md` | 🔴 A43 proved the Manager role boots ONLY on the in-gateway driver path; on a node agent-worker it's a bare, role-less, tool-less session. So the Manager can't run on any node → stuck on the fragile gateway host (dies on restart). **Blocks survivable automation.** | **drop written** (2026-07-13). Needs: port `_role_boot` + `render_first_assignment` + scoped manager tools onto the node-worker execution path; one-time global MCP setup in `~/.claude.json` acceptable. |
+| **2** | **Observable worker sessions + node survivability** — `DROP_DISPATCH_WORKER_REAL_SESSION.md` | Automation invariant: must be able to open any worker session and read the manager↔worker exchange. Today workers are sessionless `run_oneoff` tasks (50 to date, 0 worker sessions). Also: run automation on a node so a gateway restart can't kill it. | **drop written** (2026-07-13, Level-3, needs plan). |
+| **3** | **Timezone → native local everywhere** — `DROP_TIMEZONE_NATIVE_TIME.md` | Mixed clocks (`session_service.py` naive-local vs `db.py` UTC) corrupt "time ago" and erode trust. Standardize + render native local. **Ban tz as a hand-wave root cause.** | **drop written** (2026-07-13, Level-2). Operator will spawn a fixer. |
+| **4** | **Review + merge `feat/manager-multicase-session` (`31f648a`)** | Persistent multi-Case Manager session + fix for the `close_case` affiliation-clobber race (real live F1 bug). Orphaned by the 11:26Z restart. | **built, unreviewed** — pushed, NO PR. Needs a review pass before merge. |
+| — | ~~M2.5 Case Admission (A36) + Continuity/Closure (A37)~~ | Per-turn Case shatter + task-end auto-close defect. | **merged** (PR #9, `main`). |
+| — | ~~A43 live rework-cycle proof + restart hardening~~ | Prove `rework_requested→re-dispatch→accept` live; ship the restart-incident fix. | **done + merged** (PR #17, `main`, 2026-07-13). First live rework cycle. |
 | — | ~~Build Task Harness Workflow Kernel (v1)~~ | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). | **merged** (A9H, PR #8) on `main` — see Shipped Ledger + `docs/harness/` |
 | — | ~~WebUI-first surfacing of the Level-3 admission block~~ (A9H "Next") | A blocked Level-3 submit must read as "needs approval," not an opaque 500 / stuck session. | **built** (A16) on `feat/harness-block-surface` — awaiting operator merge |
 
