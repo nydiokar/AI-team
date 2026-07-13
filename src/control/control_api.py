@@ -246,6 +246,7 @@ async def event_stream_frames(
     is_disconnected=None,
     sleep=None,
     max_iterations: Optional[int] = None,
+    keepalive_every: int = 20,
 ):
     """Async generator of SSE frame strings tailing events.ndjson (U4).
 
@@ -271,6 +272,16 @@ async def event_stream_frames(
     else:
         yield ": connected\n\n"
 
+    # Idle keep-alive cadence is decoupled from the event-poll cadence. We still
+    # read the log AND check for client hangup every cycle (~1s), so event-delivery
+    # latency and disconnect detection are UNCHANGED; we only withhold the idle
+    # ": keep-alive" filler until `keepalive_every` consecutive idle cycles pass
+    # (~20s at the 1s default). An every-second keep-alive frame keeps each client's
+    # mobile radio awake for nothing. A longer idle gap is safe: EventSource has no
+    # client idle timeout, X-Accel-Buffering:no already defeats proxy buffering, and
+    # any intermediary that idle-closes just triggers the client's existing
+    # reconnect + tail-replay (no lost events).
+    idle_cycles = 0
     iterations = 0
     while True:
         if max_iterations is not None and iterations >= max_iterations:
@@ -282,8 +293,12 @@ async def event_stream_frames(
         if data.get("events"):
             yield f"data: {json.dumps(data)}\n\n"
             offset = data.get("offset", offset)
+            idle_cycles = 0
         else:
-            yield ": keep-alive\n\n"
+            idle_cycles += 1
+            if idle_cycles >= keepalive_every:
+                yield ": keep-alive\n\n"
+                idle_cycles = 0
         await sleep()
 
 
