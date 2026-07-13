@@ -199,11 +199,20 @@ export interface SessionActivityItem {
   rawRefs: Record<string, string | number | boolean | null>;
 }
 
+export interface ContextFill {
+  contextUsedRatio: number | null;
+  contextWindowTokens: number | null;
+  contextRemainingTokens: number | null;
+  contextWindowSource: "known" | "unknown";
+  reason?: string;
+}
+
 export interface SessionActivityTimeline {
   items: SessionActivityItem[];
   nextCursor: string | null;
   generatedAt: string;
   coverage: Record<string, string>;
+  contextFill: ContextFill;
 }
 
 /**
