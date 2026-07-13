@@ -17,6 +17,11 @@ import { toSessionActivityTimeline } from "../transport/sessionTimelineAdapter";
 import { useAuthStore } from "../stores/authStore";
 
 const POLL_MS = 3000;
+// Slow tier for infra status that changes far slower than it's polled: node
+// liveness is heartbeat-derived on a ~90s timeout, and mesh-health is a trend
+// sample series. Polling these every 3s just keeps the mobile radio warm for no
+// fresher data — 20s is still multiples finer than the underlying signal.
+const SLOW_POLL_MS = 20000;
 
 export function useSessions() {
   const token = useAuthStore((s) => s.token);
@@ -37,7 +42,7 @@ export function useTargets() {
     queryKey: ["nodes"],
     queryFn: async () => toTargets(await api.nodes(token)),
     enabled: Boolean(token),
-    refetchInterval: POLL_MS,
+    refetchInterval: SLOW_POLL_MS,
     retry: (count, err) =>
       !(err instanceof ApiError && [401, 500].includes(err.status)) && count < 3,
   });
@@ -235,6 +240,6 @@ export function useMeshHealth(limit = 24) {
     queryKey: ["mesh-health", limit],
     queryFn: () => api.meshHealth(token, limit),
     enabled: Boolean(token),
-    refetchInterval: POLL_MS,
+    refetchInterval: SLOW_POLL_MS,
   });
 }

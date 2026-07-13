@@ -27,6 +27,26 @@ export default defineConfig({
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },
   },
+  build: {
+    // This UI runs only as an installed PWA / modern-browser tab on the operator's
+    // own device — no legacy targets to support, so skip the old-syntax transpile.
+    target: "es2022",
+    rollupOptions: {
+      output: {
+        // Split the rarely-changing framework deps into their own chunks. The app
+        // chunk is cache-busted on every deploy (buildVersion), but these vendor
+        // chunks keep their hash across deploys → returning visitors re-download
+        // only the app code, not React/Query.
+        manualChunks: (id: string) => {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("@tanstack")) return "query-vendor";
+          if (/[\\/](react|react-dom|react-router|react-router-dom|scheduler)[\\/]/.test(id))
+            return "react-vendor";
+          return undefined;
+        },
+      },
+    },
+  },
   server: {
     port: 5180,
     proxy: {

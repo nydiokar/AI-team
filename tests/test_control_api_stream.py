@@ -92,6 +92,7 @@ async def test_stream_pushes_new_event_then_keepalive(events_file):
 
     gen = event_stream_frames(
         is_disconnected=never_disconnect, sleep=noop_sleep, max_iterations=2,
+        keepalive_every=1,
     )
     # frame 0 = connect comment (empty tail)
     it = gen.__aiter__()
@@ -106,3 +107,22 @@ async def test_stream_pushes_new_event_then_keepalive(events_file):
     # Third iteration: nothing new → keep-alive comment.
     third = await it.__anext__()
     assert third == ": keep-alive\n\n"
+
+
+@pytest.mark.asyncio
+async def test_stream_withholds_keepalive_until_interval(events_file):
+    # With keepalive_every=3, two idle cycles yield nothing (radio stays quiet) and
+    # only the third idle cycle emits the keep-alive comment.
+    async def never_disconnect():
+        return False
+
+    async def noop_sleep():
+        return None
+
+    gen = event_stream_frames(
+        is_disconnected=never_disconnect, sleep=noop_sleep, max_iterations=3,
+        keepalive_every=3,
+    )
+    frames = [frame async for frame in gen]
+    # priming ": connected" + exactly one keep-alive after 3 idle cycles.
+    assert frames == [": connected\n\n", ": keep-alive\n\n"]
