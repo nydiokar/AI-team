@@ -6,6 +6,10 @@ which was never actually built. It undermines trust in the whole automation surf
 **Level:** 3 (architectural; touches session lifecycle, mcp_manager, mesh routing, Web UI) —
 needs a scoped plan + operator approval before implementation.
 **Owner:** unassigned
+**Status:** 🟡 **CORE SLICE BUILT 2026-07-13 — PR (feat/observable-worker-sessions).** Finding-1
+(workers = real observable sessions) implemented + tested; Finding-2 role-boot half already
+fixed by PR #18 (DROP-1). Node-default routing, worker-session close-on-Case-close, and the Web
+UI Case→worker linkage are DEFERRED with written traces (see "Resolution" at bottom).
 
 ---
 
@@ -108,3 +112,53 @@ the automation. `node_id="Horse"` is already wired through `/api/manager` →
 - `src/control/control_api.py` `ManagerInvokeBody` (exposes `node_id`)
 - `docs/M3_MANAGER_INVOCATION_SPEC.md` (scope this against it)
 - CONTEXT.md M3.3 "durable relay" note (`wait_for_worker` is in-process — related fragility)
+
+---
+
+## Resolution (2026-07-13) — core slice + scoped plan
+
+### What was built (PR `feat/observable-worker-sessions`)
+**Finding 1 fixed at the smallest correct seam.** `dispatch_worker` (`scripts/mcp_manager.py`)
+no longer defaults to a sessionless `run_oneoff`: when it is called without a `session_id` but
+with a `cwd`, it first opens a **real worker session** via the existing, tested
+`POST /api/sessions` (rooted at `cwd`, optionally pinned to a `node_id`), then submits the
+objective INTO that session joined to the Manager's Case (`case_id`). The join stamps
+`case_role="worker"` and the session is openable/resumable exactly like an operator's own session.
+- Reused the PROVEN join/wait seams — `case_id` → `case_role=worker` membership (no child Case) and
+  `wait_for_worker(task_id, flow_run_id=case_id)` off `task.finished` are unchanged (already
+  covered by `test_session_based_worker_joins_case_as_worker`). No change to the hot
+  `/api/instructions` endpoint or the proven loop's control flow.
+- Honest fallback: no `cwd` and no `session_id` ⇒ legacy one-off, and the reply says so (never a
+  silent regression). Added `node_id` arg so a worker session can be pinned to a node worker
+  (survivability); combined with PR #18 (DROP-1) a node-carried worker now also boots correctly.
+- Tests: `tests/test_mcp_manager.py` +4 (opens session when cwd/no-session; reuses given session
+  without creating; one-off fallback without cwd; existing payload/lineage tests unchanged). 27 pass.
+
+### Acceptance criteria status
+- [x] A manager run produces a `sessions` row per worker (`case_role=worker`, case-joined) — when
+      the Manager passes `cwd` (the tool description now instructs it to; falls back honestly otherwise).
+- [x] Each worker session is openable/resumable via the existing `/api/sessions/{id}` +
+      `/timeline` endpoints (they are ordinary sessions). *A dedicated Case→worker Web UI linkage
+      is deferred — see below.*
+- [~] Automation sessions survive a gateway restart: role-boot on a node is fixed (PR #18) and
+      `node_id` is now dispatchable; making a node the DEFAULT carrier for `invoke_manager`/workers
+      is deferred (item below).
+- [x] No sessionless `run_oneoff` worker on the manager path — provided `cwd` is supplied.
+
+### Deferred with written trace (Level-3, operator-gated)
+1. **Worker-session lifecycle / close (§7 resource boundary — MUST do next).** A worker session now
+   PERSISTS (`awaiting_input`, a live pooled SDK process) after its turn, so the operator can read
+   it. Nothing closes it yet. In the proven loop workers are sequential (1–2 per Case) so live-session
+   count is bounded in practice, but over a long/large Case this accumulates live Claude processes.
+   **Follow-up:** `close_case` should dispatch `close_session` to its member worker sessions (reuse
+   the existing `action=close_session` path), and/or an idle-timeout reaper for `case_role=worker`
+   sessions. Until then, worker sessions are closed manually / by the existing session reaper.
+2. **Node-default routing for `invoke_manager` + workers.** `invoke_manager` still defaults
+   `node_id="__local__"` (gateway host). Choosing an online node as the default (so a gateway restart
+   can't kill automation) needs the MCP-reachability-from-node verification (drop item 2) and a
+   routing-policy decision — operator-gated. The plumbing (`node_id` on `/api/manager` and now on
+   `dispatch_worker`) is in place.
+3. **Web UI Case→worker surfacing.** Worker sessions are openable individually today; rendering the
+   manager→worker(s)→verdict relationship in the Work/Case view is a Web-track follow-up.
+4. **Live re-validation (paid, operator-supervised).** The next live manager run will exercise
+   session-based workers instead of run_oneoff. Bounded + supervised per the cost guardrails.
