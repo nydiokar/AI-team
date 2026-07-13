@@ -17,18 +17,28 @@
 > - **PR #12** — F2 fix: gateway keeps its OWN host node `online`+heartbeated so long (>300s) in-process
 >   self-claims aren't reaped as `node_offline`.
 >
-> **Live gateway flag state right now:** `HARNESS_FLOW_DRIVE` ON, `MANAGER_ROLE_ENABLED` **ON** (left on
-> after A41), `REVIEW_EMITTER_ENABLED` **OFF**, `manager` in `~/.claude.json`. ⚠️ The gateway is still
-> running the PRE-MERGE loaded code — **A40 + F2 are on `main` but NOT live until the next gateway restart.**
+> **Live gateway flag state right now (2026-07-13, gateway restarted on merged code):**
+> `HARNESS_FLOW_DRIVE` ON, `MANAGER_ROLE_ENABLED` **ON**, `REVIEW_EMITTER_ENABLED` **ON**,
+> `manager` in `~/.claude.json`. **A40 emitter + F2 are LIVE** (verified: `POST /api/cases/_/review`
+> with an invalid verdict returns **422 invalid_verdict**, i.e. it passed the emitter flag-gate; the
+> unresolved-rework close-gate is active). F2's own-node liveness fix is running post-merge.
 >
-> **Immediate next steps (both cheap, both "routes we'd do anyway"):**
-> 1. **F1 — prove the `review.*` emitter live** as a byproduct of the *next* real Manager run: flip
->    `REVIEW_EMITTER_ENABLED=1` + restart, then a Manager loop that builds the next slice ALSO emits a
->    genuine `review.accepted` on its close. No throwaway spend. (The A41 timeline shows NO `review.*` —
->    that is BY DESIGN, the flag was OFF; not a bug.)
-> 2. **Deploy F2 (PR #12)** — batch its gateway restart with step 1 so one restart buys both.
-> Then: **M3.2 remaining** (real reviewer verdict in the loop + rework-cycle proof) → **M3.3** guardrails /
-> durable relay (`wait_for_worker` is still in-process — a Manager crash loses the wait).
+> **⚠️ 2026-07-13 finding — F1 was BLOCKED by a verdict-in-loop gap (now fixed in PR #13, unmerged).**
+> PR #11 added `record_review` to the MCP server + the close-gate, **but never granted the tool to a
+> Manager session** (`manager_v1` profile listed only 4 tools) **nor told the role to use it**
+> (`manager.md`). So a live Manager would `close_case` emitting **no `review.*` verdict** — F1 as
+> written could not succeed. **PR #13** (`feat/m3.2-review-verdict-in-loop`) fixes both: grants
+> `mcp__manager__record_review` in the profile + instructs the verdict in the Decision vocabulary.
+> Flag-OFF byte-identical; 71 targeted tests pass.
+>
+> **Immediate next steps:**
+> 1. **Merge PR #13 + restart gateway** — makes the Manager actually able/instructed to emit the verdict.
+> 2. **F1 — prove the `review.*` emitter live** as a byproduct of the *next* real Manager run (no
+>    throwaway spend): a Manager loop that builds the next slice now ALSO emits a genuine
+>    `review.accepted` on close, and the rework-cycle (`rework_requested` → close blocked → accept →
+>    close) becomes drivable. **This is a paid, operator-gated live run** — bounded+supervised per A41.
+> Then: **M3.2 remaining** (rework-cycle live proof) → **M3.3** guardrails / durable relay
+> (`wait_for_worker` is still in-process — a Manager crash loses the wait).
 > **Cost reframe (operator, 2026-07-12):** a bounded+supervised live Manager run is NOT "burning tokens" —
 > it proves the machinery AND ships real work. The old scar was UNBOUNDED unsupervised spend, not this.
 >

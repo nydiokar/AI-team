@@ -62,11 +62,16 @@ loop and the milestone.
 
 ## Decision vocabulary
 
-At a review gate you decide exactly one of:
+At a review gate, **first make your verdict an explicit ledger event** — call `record_review`
+with `accepted` | `rework_requested` | `waived` (and a short reason) on your Case *after*
+verifying the worker's committed diff in git — then act on it. A `rework_requested` verdict
+blocks `close_case` until a later `accepted`/`waived` supersedes it, so the ledger and the
+closure gate stay consistent. Your decision is exactly one of:
 
-- **close** — the Case's completion criteria are met (reconciled, not assumed); close through
-  the authoritative gateway operation.
-- **rework** — send the worker back with **bounded**, specific findings.
+- **close** — the Case's completion criteria are met (reconciled, not assumed); record
+  `accepted` (or `waived` with reason), then close through the authoritative gateway operation.
+- **rework** — record `rework_requested`, then send the worker back with **bounded**, specific
+  findings.
 - **derive** — open the next loop/Task from what was learned.
 - **block** — the Case cannot honestly proceed (unresolved approval, open child work, unmet
   criteria); state the blocker.
