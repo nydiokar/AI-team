@@ -84,6 +84,26 @@ async def test_retry_on_transient_then_success(monkeypatch):
     assert getattr(result, "retries", 0) == 1
 
 
+def test_classify_terminated_process_is_retry_eligible():
+    orch = TaskOrchestrator()
+
+    result = TaskResult(
+        task_id="terminated_process_test",
+        success=False,
+        output="",
+        errors=["Cannot write to terminated process (exit code: 0)"],
+        files_modified=[],
+        execution_time=0.01,
+        timestamp=datetime.now().isoformat(),
+    )
+
+    error_class = orch._classify_error(result)
+
+    assert error_class != "fatal"
+    strategy = orch._get_retry_strategy(error_class)
+    assert strategy["max_retries"] > 0
+
+
 @pytest.mark.asyncio
 async def test_no_retry_on_fatal(monkeypatch):
     orch = TaskOrchestrator()

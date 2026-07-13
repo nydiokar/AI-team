@@ -473,6 +473,33 @@ class TestSDKClientDriver:
         assert not result.success
         assert "SDK connection lost" in result.errors[0]
 
+    def test_terminated_process_write_is_transient_and_tears_down_session(self):
+        # A gateway restart kills the CLI subprocess out from under a pooled
+        # _SDKSession. The next turn's write raises CLIConnectionError with
+        # this specific message. That must NOT be classified "fatal" (which
+        # has zero retries) and must NOT leak the raw SDK string into
+        # result.output (the user-facing chat bubble) — and the dead session
+        # must be evicted from the pool so a retry respawns a fresh process.
+        from claude_agent_sdk import CLIConnectionError
+
+        drv = ClaudeSDKClientDriver()
+        session = _make_session()
+
+        def bad_send(self_inner, message, **_kw):
+            raise CLIConnectionError(
+                "Cannot write to terminated process (exit code: 0)"
+            )
+
+        with patch.object(_SDKSession, "send", bad_send):
+            with patch.object(_SDKSession, "start", lambda self_inner: None):
+                result = drv.start_session(session, "msg")
+
+        assert not result.success
+        assert result.error_class == "transient"
+        assert "Cannot write to terminated process" not in (result.output or "")
+        assert "Cannot write to terminated process" in result.errors[0]
+        assert session.session_id not in drv._sessions
+
     def test_mark_lost_clears_sessions(self):
         drv = ClaudeSDKClientDriver()
         session = _make_session()
