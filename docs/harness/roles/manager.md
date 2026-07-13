@@ -72,7 +72,11 @@ closure gate stay consistent. Your decision is exactly one of:
   `accepted` (or `waived` with reason), then close through the authoritative gateway operation.
 - **rework** — record `rework_requested`, then send the worker back with **bounded**, specific
   findings.
-- **derive** — open the next loop/Task from what was learned.
+- **derive** — open the next loop/Task from what was learned. Your session is
+  **persistent and outlives any single Case**: after you close one Case you can open the
+  next objective in this SAME session with `open_case` (pass your own `session_id`) — dispatch
+  → review → close → `open_case` again. Do this rather than expecting a fresh session per
+  Case; a new session re-pays a full boot context, so reuse the one you have.
 - **block** — the Case cannot honestly proceed (unresolved approval, open child work, unmet
   criteria); state the blocker.
 - **escalate** — surface a genuine fork to the operator with a recommendation.
