@@ -211,19 +211,21 @@
 
 ## What this project is
 
-A Telegram-controlled gateway for local coding agents (Claude Code, Codex,
-OpenCode CLI, OpenCode server). You open a session from Telegram (or the Web UI),
-follow-up messages route to that session, and each turn resumes the native backend
-session. State is DB-canonical with a file-backed fallback. It is **not** a generic
-autonomous-agent framework — see `production_vision.md` for the strategic frame and
-the anti-goals (no opaque memory, no broad self-directed execution, no PTY-persistence
-backbone).
+A gateway for local coding agents (Claude Code, Codex, OpenCode CLI, OpenCode
+server), controlled from its own Web UI (or Telegram). You open a session from
+either surface, follow-up messages route to that session, and each turn resumes
+the native backend session. State is DB-canonical with a file-backed fallback. It
+is **not** a generic autonomous-agent framework — see `production_vision.md` for
+the strategic frame and the anti-goals (no opaque memory, no broad self-directed
+execution, no PTY-persistence backbone).
 
 Two surfaces over one gateway process:
-1. **Telegram** — the original command surface.
-2. **Web UI** (`web/`, React 19 + Vite + Tailwind v4) — a mobile web app served
-   in-process by `python main.py` at `/` + `/api/*` on one tailnet-bound port. It
-   consumes the M1 control contract; no separate core refactor.
+1. **Web UI** (`web/`, React 19 + Vite + Tailwind v4) — our own primary UI, a
+   mobile web app served in-process by `python main.py` at `/` + `/api/*` on one
+   tailnet-bound port. It consumes the M1 control contract; no separate core
+   refactor.
+2. **Telegram** — the original command surface, kept as a secondary interface
+   over the same backend.
 
 ---
 
@@ -327,8 +329,8 @@ files. This is the "don't rebuild it, it's done" list.
 the task server embedded on its own event loop.
 
 ```
-[Telegram] / [Web UI] → [Gateway process]
-  ├── src/telegram/interface.py     command surface (/status, /nodes, pickers…)
+[Web UI] / [Telegram] → [Gateway process]
+  ├── src/telegram/interface.py     secondary command surface (/status, /nodes, pickers…)
   ├── src/orchestrator.py           task queue, in-process workers, routing, recovery
   ├── src/core/session_service.py   transport-neutral session lifecycle — M1 inbound seam
   ├── src/services/session_store.py DB-first reads, dual-write to JSON + DB

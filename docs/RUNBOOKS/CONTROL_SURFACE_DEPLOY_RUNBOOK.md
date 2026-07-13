@@ -1,9 +1,10 @@
 # Control Surface Deploy Runbook
 
-How to deploy the unified gateway (Telegram + Web on one process) from
+How to deploy the unified gateway (Web UI + Telegram on one process) from
 `docs/CONTROL_SURFACE_UNIFICATION.md` (U1–U6). After this, `python main.py` is the
-**only** long-running process: it serves Telegram **and** the Web UI + Control API on
-one tailnet-bound port. There is no `dashboard_main.py` anymore.
+**only** long-running process: it serves the Web UI + Control API **and**, if
+configured, Telegram, on one tailnet-bound port. There is no `dashboard_main.py`
+anymore.
 
 Owner: Nyd · Last updated: 2026-06-23
 

@@ -1,9 +1,10 @@
-# Telegram Coding Gateway
+# AI-Team Gateway
 
-A Telegram-controlled gateway for local coding agents.
+A gateway for local coding agents, controlled from its own Web UI (and, as a
+secondary surface, Telegram).
 
 Current intended product:
-- open a persistent session from Telegram
+- open a persistent session from the Web UI (or Telegram)
 - continue that session through native Claude Code or Codex resume
 - keep state file-backed and inspectable
 - constrain execution by explicit workspace scope
@@ -12,13 +13,14 @@ This repository is no longer positioned as a generic AI task orchestrator or a l
 
 ## What Is Active
 
-- Telegram session control
+- Web UI session control (`web/` — React, served by the gateway itself)
+- Telegram session control (secondary surface, same backend)
 - native backend resume for Claude Code and Codex
 - file-backed session state
 - per-session summaries and event logs
 - one-off task fallback
 - path validation and path suggestions for session creation
-- git helper commands from Telegram
+- git helper commands
 
 ## What Is Not The Main Runtime Path
 
@@ -31,16 +33,22 @@ Those components may remain in the repo as dormant future-facing code, but they 
 ## Architecture
 
 ```text
-Telegram -> active chat binding -> gateway session -> Claude Code / Codex native session
+Web UI / Telegram -> gateway session -> Claude Code / Codex native session
          -> state/sessions/*.json
          -> state/summaries/*.md
          -> logs/session_events/*.log
          -> results/*.json
 ```
 
+See [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for the full process/HTTP map.
+
 ## Key Commands
 
-### Telegram
+### Web UI
+
+Open `http://<gateway-host>:9003/` (Tailscale-bound; see `docs/frontend/`).
+
+### Telegram (secondary surface)
 
 - `/session_new <backend> <path>`
 - `/session_list`
@@ -111,7 +119,7 @@ operational event tail. Failed remote uploads spool under
 The session-first architecture is implemented.
 
 The main production gate that still matters is a live end-to-end validation:
-1. create a session from Telegram
+1. create a session from the Web UI (or Telegram)
 2. send a first message
 3. verify `backend_session_id` is stored
 4. send a second message
@@ -124,11 +132,6 @@ The main production gate that still matters is a live end-to-end validation:
 - [.ai/dispatch/DISPATCH_LOG.md](../.ai/dispatch/DISPATCH_LOG.md) — state of every dispatched job
 - [.ai/context/production_vision.md](../.ai/context/production_vision.md) — strategic intent + anti-goals
 
-**Supporting reference:**
-- [OVERVIEW.md](OVERVIEW.md) — newcomer front door / router to owning docs
-- [QUICK_START.md](QUICK_START.md)
-- [RUNBOOKS/OPERATIONS_PM2.md](RUNBOOKS/OPERATIONS_PM2.md)
-- [ROADMAP.md](ROADMAP.md) — pointer to `.ai/`
-- [TBD/CLAUDE_HOOK_IDEAS.md](TBD/CLAUDE_HOOK_IDEAS.md)
-- [LLM_TURN_OBSERVABILITY_SPEC.md](LLM_TURN_OBSERVABILITY_SPEC.md)
-- [archive/progress/_archive_PROGRESS_LOG.md](archive/progress/_archive_PROGRESS_LOG.md) — completed-work history
+**Everything else in `docs/`:**
+- [OVERVIEW.md](OVERVIEW.md) — newcomer front door, routes by topic
+- [INDEX.md](INDEX.md) — full categorized catalog of every doc in `docs/`, with current/superseded/archived status
