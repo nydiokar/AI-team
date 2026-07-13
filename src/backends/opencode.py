@@ -394,10 +394,12 @@ class OpenCodeBackend(CodingBackend):
                             break
 
             # Flush remaining output
-            for q_ref, lines_ref, wait in (
-                (stdout_q, stdout_lines, False),
-                (stderr_q, stderr_lines, True),
+            for q_ref, lines_ref, already_done, wait in (
+                (stdout_q, stdout_lines, stdout_done, False),
+                (stderr_q, stderr_lines, stderr_done, True),
             ):
+                if already_done:
+                    continue
                 if not wait:
                     while True:
                         try:
