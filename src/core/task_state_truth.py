@@ -24,6 +24,7 @@ TaskTruthState = Literal[
     "stale_claim",
     "worker_unknown",
     "recovered",
+    "driver_lost",
 ]
 
 TruthConfidence = Literal["high", "medium", "low"]
@@ -120,6 +121,18 @@ def derive_task_execution_state(
             reason="cancellation has been requested but no terminal cancellation exists",
             authoritative_source="mesh_task_status",
             observed_at=_first_text(task_row, "updated_at", "created_at"),
+            raw_refs=raw_refs,
+        )
+    if session_row is not None and _text(session_row.get("driver_status")) == "lost":
+        return DerivedExecutionState(
+            state="driver_lost",
+            confidence="high",
+            reason=(
+                "owning session's continuous driver was lost (e.g. after a restart) "
+                "and is not resumable as-is; needs re-invoke"
+            ),
+            authoritative_source="mesh_task_status",
+            observed_at=_first_text(session_row, "updated_at", "created_at"),
             raw_refs=raw_refs,
         )
     if approval_pending:
