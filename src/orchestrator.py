@@ -41,6 +41,36 @@ from src.validation.engine import ValidationEngine
 logger = logging.getLogger(__name__)
 
 
+def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
+    """Serialize a Session into the ``payload["session"]`` dict a worker node
+    reconstructs via ``_make_session_from_payload``.
+
+    ``case_role`` MUST travel here: the node's driver applies the Manager
+    role boot (``_role_boot`` — role prompt + scoped manager tools) off
+    ``session.case_role``. Omitting it made a Manager pinned to a node boot as
+    a bare, role-less session (the A43 finding) — the whole point of this fix.
+    """
+    return {
+        "session_id": session.session_id,
+        "backend": session.backend,
+        "repo_path": session.repo_path,
+        "backend_session_id": session.backend_session_id,
+        "model": session.model,
+        "machine_id": session.machine_id,
+        "telegram_chat_id": session.telegram_chat_id,
+        "telegram_thread_id": session.telegram_thread_id,
+        "owner_user_id": session.owner_user_id,
+        "last_user_message": session.last_user_message,
+        "driver_type": session.driver_type,
+        "driver_status": session.driver_status,
+        "cache_health": session.cache_health,
+        "cache_unhealthy_count": session.cache_unhealthy_count,
+        "previous_backend_session_ids": session.previous_backend_session_ids or [],
+        "case_role": getattr(session, "case_role", None) or None,
+        "current_case_id": getattr(session, "current_case_id", None) or None,
+    }
+
+
 class HarnessAdmissionBlocked(Exception):
     """Raised by `_enqueue_task` when the task-harness Level-3 admission gate
     refuses a task at the queue choke point (flag on + `harness_level: 3` +
@@ -5206,23 +5236,7 @@ Generated from user description: {description}
                 },
             }
             if session:
-                payload["session"] = {
-                    "session_id": session.session_id,
-                    "backend": session.backend,
-                    "repo_path": session.repo_path,
-                    "backend_session_id": session.backend_session_id,
-                    "model": session.model,
-                    "machine_id": session.machine_id,
-                    "telegram_chat_id": session.telegram_chat_id,
-                    "telegram_thread_id": session.telegram_thread_id,
-                    "owner_user_id": session.owner_user_id,
-                    "last_user_message": session.last_user_message,
-                    "driver_type": session.driver_type,
-                    "driver_status": session.driver_status,
-                    "cache_health": session.cache_health,
-                    "cache_unhealthy_count": session.cache_unhealthy_count,
-                    "previous_backend_session_ids": session.previous_backend_session_ids or [],
-                }
+                payload["session"] = _session_dispatch_payload(session)
             # Runs on THIS host ⟺ no pin, or the pin names this host. Only a pin
             # to a DIFFERENT host is a true remote dispatch. This MUST mirror
             # process_task's `_pinned_elsewhere` test, or a host-pinned task both
