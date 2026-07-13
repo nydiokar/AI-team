@@ -1,8 +1,10 @@
 import type {
+  ContextFill,
   SessionActivityItem,
   SessionActivityTimeline,
 } from "../domain/models";
 import type {
+  RawContextFill,
   RawSessionTimelineItem,
   RawSessionTimelineResponse,
 } from "./rawApi";
@@ -31,6 +33,25 @@ export function toSessionActivityItem(
   };
 }
 
+const UNKNOWN_CONTEXT_FILL: ContextFill = {
+  contextUsedRatio: null,
+  contextWindowTokens: null,
+  contextRemainingTokens: null,
+  contextWindowSource: "unknown",
+  reason: "no_turns_observed",
+};
+
+export function toContextFill(raw: RawContextFill | null | undefined): ContextFill {
+  if (!raw) return UNKNOWN_CONTEXT_FILL;
+  return {
+    contextUsedRatio: raw.context_used_ratio,
+    contextWindowTokens: raw.context_window_tokens,
+    contextRemainingTokens: raw.context_remaining_tokens,
+    contextWindowSource: raw.context_window_source,
+    reason: raw.reason,
+  };
+}
+
 export function toSessionActivityTimeline(
   raw: RawSessionTimelineResponse,
 ): SessionActivityTimeline {
@@ -39,5 +60,6 @@ export function toSessionActivityTimeline(
     nextCursor: raw.next_cursor,
     generatedAt: raw.generated_at,
     coverage: raw.coverage ?? {},
+    contextFill: toContextFill(raw.context_fill),
   };
 }
