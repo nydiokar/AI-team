@@ -572,7 +572,10 @@ class TelegramInterface:
         if not value:
             return "unknown"
         try:
-            return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M")
+            from src.core.timeutil import parse_iso
+            # Render in the operator's LOCAL zone (astimezone with no arg), never
+            # bare UTC — one clock, native time at the display boundary.
+            return parse_iso(value).astimezone().strftime("%Y-%m-%d %H:%M")
         except ValueError:
             return value[:16]
 
@@ -737,8 +740,13 @@ class TelegramInterface:
         if not value:
             return "unknown"
         try:
-            dt = datetime.fromisoformat(value)
-            secs = (datetime.now() - dt).total_seconds()
+            from datetime import timezone
+            from src.core.timeutil import parse_iso
+            # One clock: parse_iso returns a tz-AWARE datetime (naive legacy rows
+            # are read as local), so subtracting from an aware `now` never raises a
+            # naive-vs-aware TypeError.
+            dt = parse_iso(value)
+            secs = (datetime.now(timezone.utc) - dt).total_seconds()
             if secs < 0:
                 secs = 0
             if secs < 10:
@@ -1473,9 +1481,10 @@ class TelegramInterface:
         if not last_heartbeat:
             return "never"
         try:
-            from datetime import datetime
-            dt = datetime.fromisoformat(last_heartbeat)
-            secs = (datetime.utcnow() - dt).total_seconds()
+            from datetime import datetime, timezone
+            from src.core.timeutil import parse_iso
+            dt = parse_iso(last_heartbeat)
+            secs = (datetime.now(timezone.utc) - dt).total_seconds()
             if secs < 0:
                 secs = 0
             if secs < 90:
@@ -1517,10 +1526,9 @@ class TelegramInterface:
         updated = row.get("live_state_updated_at")
         if live and updated:
             try:
-                parsed_ts = _dt.fromisoformat(str(updated))
-                if parsed_ts.tzinfo is not None:
-                    parsed_ts = parsed_ts.replace(tzinfo=None)
-                age_s = (_dt.utcnow() - parsed_ts).total_seconds()
+                from datetime import timezone
+                from src.core.timeutil import parse_iso
+                age_s = (_dt.now(timezone.utc) - parse_iso(str(updated))).total_seconds()
                 stale = age_s > 120
             except Exception:
                 stale = True
@@ -1570,8 +1578,9 @@ class TelegramInterface:
             for r in offline:
                 hb = r.get("last_heartbeat", "")
                 try:
-                    from datetime import datetime as _dt
-                    age_s = (_dt.utcnow() - _dt.fromisoformat(str(hb))).total_seconds()
+                    from datetime import datetime as _dt, timezone
+                    from src.core.timeutil import parse_iso
+                    age_s = (_dt.now(timezone.utc) - parse_iso(str(hb))).total_seconds()
                     (recent_offline if age_s < 86400 else ancient_offline).append(r)
                 except Exception:
                     recent_offline.append(r)
