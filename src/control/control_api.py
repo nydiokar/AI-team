@@ -1624,6 +1624,13 @@ def _live_nodes() -> List[Dict[str, Any]]:
     needed. Registry empty (standalone-mesh / fallback): read the shared DB and
     annotate, exactly as the old dashboard did, so behavior is preserved.
     """
+    # The gateway's own hostname self-node (empty backends, no tailscale IP) is a
+    # liveness-only stub for local self-claims — not a selectable worker. Hide it
+    # from operator-facing listings (System tab cards + New Session machine
+    # picker, which both consume this). Presentation-only: task_server still
+    # registers/heartbeats/reaps it via the registry and DB.
+    from src.control.db import _is_gateway_self_node
+
     try:
         from src.control.node_registry import get_registry
         reg = get_registry()
@@ -1631,6 +1638,8 @@ def _live_nodes() -> List[Dict[str, Any]]:
             out: List[Dict[str, Any]] = []
             for info in reg.list_all():
                 d = info.to_dict()
+                if _is_gateway_self_node(d):
+                    continue
                 d["live"] = d.get("status") == "online"
                 age = get_registry()._live_state_age_sec(info)
                 d["heartbeat_age_sec"] = round(age, 1) if age is not None else None
@@ -1641,6 +1650,7 @@ def _live_nodes() -> List[Dict[str, Any]]:
 
     db = _db()
     nodes = db.list_nodes() if db is not None else []
+    nodes = [n for n in nodes if not _is_gateway_self_node(n)]
     for n in nodes:
         _annotate_node_liveness(n)
     return nodes
