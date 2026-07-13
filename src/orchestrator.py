@@ -4248,7 +4248,7 @@ created: {task.created}
             return "rate_limit"
         if any(s in text_lower for s in ("timeout", "timed out", "inactivity")):
             return "timeout"
-        if any(s in text_lower for s in ("connection reset", "connection aborted", "network error", "503", "504", "temporarily unavailable")):
+        if any(s in text_lower for s in ("connection reset", "connection aborted", "network error", "503", "504", "temporarily unavailable", "terminated process", "cannot write to")):
             return "network"
         if any(s in text_lower for s in ("prompt is too long", "blocking_limit", "context_window", "context window")):
             return "context_overflow"

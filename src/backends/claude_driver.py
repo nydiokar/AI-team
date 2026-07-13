@@ -49,6 +49,11 @@ from src.core.process_utils import terminate_many_popen
 from src.core.roles import MANAGER_ROLE_ID, load_manager_role
 from src.backends.claude_role_adapter import claude_system_prompt, manager_tool_names
 
+try:
+    from claude_agent_sdk import CLIConnectionError as _CLIConnectionError
+except Exception:  # pragma: no cover - SDK may not be importable in all envs
+    _CLIConnectionError = None
+
 logger = logging.getLogger(__name__)
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -956,6 +961,34 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                     err_str = f"SDK turn timed out after {elapsed:.0f}s — claude produced no response"
                 else:
                     err_str = f"{type(e).__name__} after {elapsed:.0f}s"
+            if (
+                _CLIConnectionError is not None
+                and isinstance(e, _CLIConnectionError)
+                and ("terminated process" in err_str or "Cannot write to" in err_str)
+            ):
+                # The subprocess backing this session was killed out from under
+                # us (e.g. a gateway restart) — the write to its stdin fails
+                # with this specific SDK error. Handing the dead client to the
+                # next turn would just fail the same way again, so tear the
+                # session down here and classify as transient so the retry
+                # path (Orchestrator._get_retry_strategy) respawns a fresh
+                # process instead of surfacing this as a fatal, no-retry error.
+                dead_sess = self._remove(session.session_id)
+                if dead_sess is not None:
+                    try:
+                        dead_sess.close()
+                    except Exception:
+                        logger.warning(
+                            "event=dead_session_close_failed session_id=%s",
+                            session.session_id, exc_info=True,
+                        )
+                return ExecutionResult(
+                    success=False,
+                    output="",
+                    errors=[err_str],
+                    error_class="transient",
+                    execution_time=elapsed,
+                )
             return ExecutionResult(
                 success=False,
                 output="",
