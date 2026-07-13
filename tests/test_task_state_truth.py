@@ -283,6 +283,49 @@ def test_state_derivation_distinguishes_non_terminal_authority_states() -> None:
         assert derived.state == expected, label
 
 
+def test_claimed_task_with_lost_driver_session_derives_driver_lost() -> None:
+    task_row = {
+        "id": "task_driver_lost",
+        "status": "claimed",
+        "created_at": NOW.isoformat(),
+        "updated_at": NOW.isoformat(),
+        "claimed_at": NOW.isoformat(),
+    }
+    session_row = {
+        "session_id": "sess_driver_lost",
+        "status": "awaiting_input",
+        "driver_status": "lost",
+        "updated_at": NOW.isoformat(),
+    }
+
+    derived = derive_task_execution_state(task_row, session_row=session_row, now=NOW)
+
+    assert derived.state == "driver_lost"
+    assert derived.confidence == "high"
+    assert derived.authoritative_source == "mesh_task_status"
+
+
+def test_completed_task_with_lost_driver_session_still_derives_completed() -> None:
+    task_row = {
+        "id": "task_completed_lost_driver",
+        "status": "completed",
+        "created_at": NOW.isoformat(),
+        "updated_at": NOW.isoformat(),
+        "completed_at": NOW.isoformat(),
+    }
+    session_row = {
+        "session_id": "sess_completed_lost_driver",
+        "status": "awaiting_input",
+        "driver_status": "lost",
+        "updated_at": NOW.isoformat(),
+    }
+
+    derived = derive_task_execution_state(task_row, session_row=session_row, now=NOW)
+
+    assert derived.state == "completed"
+    assert derived.authoritative_source == "mesh_task_terminal"
+
+
 def test_watched_job_states_preserve_session_ownership_when_present(tmp_path) -> None:
     db = _db(tmp_path)
     cases = [
