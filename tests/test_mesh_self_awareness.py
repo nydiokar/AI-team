@@ -98,6 +98,51 @@ def test_mesh_load_stats_aggregates_live_state_and_stale_busy(tmp_path):
     assert stats["stale_busy_sessions"] == 1
 
 
+def test_gateway_self_node_excluded_from_stats_and_live_nodes(tmp_path):
+    """The gateway's hostname self-node (empty backends, no tailscale IP) is a
+    liveness-only stub — it must not count as fleet capacity, must not trip the
+    'not reporting live state' warning, and must not appear in /api/nodes (which
+    feeds the System tab + the machine picker). Real workers are untouched."""
+    import socket
+
+    from src.control.db import _is_gateway_self_node
+    from src.control import control_api
+
+    host = socket.gethostname()
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    # Gateway self-node: hostname, empty backends, no tailscale IP, dashboard port.
+    db.upsert_node(host, "", 9003, [], 4)
+    # A real worker on a distinct node_id.
+    db.upsert_node("worker-a", "100.64.0.1", 9001, ["claude"], 4)
+    db.heartbeat_node(
+        "worker-a",
+        live_state='{"v":1,"slots_used":1,"slots_total":4,"active_tasks":["t1"]}',
+    )
+
+    # Predicate: matches only the self-node.
+    assert _is_gateway_self_node(db.get_node(host)) is True
+    assert _is_gateway_self_node(db.get_node("worker-a")) is False
+
+    # stats(): self-node excluded from every operator-facing counter.
+    stats = db.stats()
+    assert stats["nodes_online"] == 1
+    assert stats["nodes_total"] == 1
+    assert stats["mesh_load"]["nodes_without_live_state"] == 0
+    assert host not in stats["mesh_load"]["stale_live_state_nodes"]
+
+    # _live_nodes() (DB-fallback path — registry empty in-process): self-node gone.
+    monkeypatch_db = lambda: db  # noqa: E731 - local shim for _db()
+    import src.control.control_api as _ca
+    _orig_db = _ca._db
+    _ca._db = monkeypatch_db
+    try:
+        ids = {n["node_id"] for n in control_api._live_nodes()}
+    finally:
+        _ca._db = _orig_db
+    assert host not in ids
+    assert "worker-a" in ids
+
+
 def test_metrics_includes_mesh_load(monkeypatch, tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     db.upsert_node("worker-a", "100.64.0.1", 9001, ["claude"], 4)

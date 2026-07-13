@@ -92,8 +92,32 @@ export function useEventStream(): StreamState {
     }
     let closed = false;
 
+    // The backend streams a frame every ~1s (events OR a keep-alive comment), so
+    // an open EventSource pokes the radio every second — a real mobile-battery
+    // cost. The poll layer already pauses when the tab is hidden
+    // (refetchIntervalInBackground defaults false) and the authoritative read
+    // models refetch on focus (refetchOnWindowFocus), while THIS log is a rolling
+    // display feed, not state authority. So we drop the socket while hidden and
+    // reopen on return — a fresh connect replays the recent tail (since=0) and the
+    // dedupe set drops what we already have, so no visible event is lost.
+    const isHidden = () =>
+      typeof document !== "undefined" && document.visibilityState === "hidden";
+
+    const clearTimer = () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+
+    const teardown = () => {
+      clearTimer();
+      esRef.current?.close();
+      esRef.current = null;
+    };
+
     const connect = () => {
-      if (closed) return;
+      if (closed || isHidden() || esRef.current) return;
       const url = `/api/events/stream?token=${encodeURIComponent(token)}`;
       const es = new EventSource(url);
       esRef.current = es;
@@ -114,7 +138,7 @@ export function useEventStream(): StreamState {
         // EventSource auto-retries, but we want explicit backoff + banner state.
         es.close();
         esRef.current = null;
-        if (closed) return;
+        if (closed || isHidden()) return;
         setConnection("reconnecting");
         const delay = Math.min(1000 * 2 ** retryRef.current, 15000);
         retryRef.current += 1;
@@ -122,13 +146,27 @@ export function useEventStream(): StreamState {
       };
     };
 
+    const onVisibility = () => {
+      if (closed) return;
+      if (isHidden()) {
+        // Going background: release the socket entirely.
+        teardown();
+        setConnection("offline");
+      } else {
+        // Returning to foreground: reconnect immediately (retry from zero).
+        clearTimer();
+        retryRef.current = 0;
+        connect();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
     connect();
 
     return () => {
       closed = true;
-      if (timerRef.current) clearTimeout(timerRef.current);
-      esRef.current?.close();
-      esRef.current = null;
+      document.removeEventListener("visibilitychange", onVisibility);
+      teardown();
     };
   }, [token, ingest]);
 

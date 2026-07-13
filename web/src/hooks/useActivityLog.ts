@@ -7,7 +7,7 @@
  * Sessions/nodes still poll; this is the operational event feed only.
  */
 import { useMemo } from "react";
-import { useEventStreamContext } from "./eventStreamContext";
+import { useLiveEvents, useConnectionState } from "./eventStreamContext";
 import { toLogLines, type LogLine, type LogSeverity } from "../transport/eventLog";
 import type { ConnectionState } from "../domain/status";
 
@@ -27,7 +27,8 @@ export interface ActivityLog {
 }
 
 export function useActivityLog(filter: ActivityFilter = {}): ActivityLog {
-  const { events, connection } = useEventStreamContext();
+  const events = useLiveEvents();
+  const connection = useConnectionState();
   const { sessionId, attentionOnly, includeSessionActivity } = filter;
 
   const lines = useMemo(() => {

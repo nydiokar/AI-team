@@ -37,6 +37,7 @@ agent_runs         — fine-grained per-tool-call log (dashboard/audit)
 import json
 import logging
 import os
+import socket
 import sqlite3
 import threading
 import time
@@ -2626,7 +2627,11 @@ class MeshDB:
     def stats(self) -> Dict[str, Any]:
         """Quick health snapshot — useful for /status Telegram command."""
         conn = self._conn()
-        nodes = self.list_nodes()
+        # Exclude the gateway's own liveness-only self-node (empty backends, no
+        # tailscale IP) from every operator-facing counter derived here — it is
+        # infra plumbing, not fleet capacity. Registration/reaping still see it
+        # via list_nodes(); this filter is presentation-only.
+        nodes = [n for n in self.list_nodes() if not _is_gateway_self_node(n)]
         mesh_load = _mesh_load_stats(nodes, self.list_stale_busy_sessions(limit=10000))
         return {
             "sessions_total":   conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
@@ -2917,6 +2922,40 @@ def _origin_json(origin: Any) -> str:
 # test/canary rows never pruned), not part of the current fleet. Excluding it
 # keeps "nodes online N/M" honest instead of counting long-dead ghosts.
 _NODE_FLEET_RETENTION_SEC = 2 * 86400
+
+
+def _is_gateway_self_node(row: Dict[str, Any]) -> bool:
+    """True for the gateway's OWN hostname self-registration.
+
+    ``task_server._register_local_node()`` registers the gateway host under
+    ``socket.gethostname()`` with *empty backends* and *no tailscale IP* (api_port
+    = dashboard_port) purely so the gateway's in-process self-claims stay 'live'
+    and aren't reaped as ``node_offline``. It is infrastructure plumbing, not a
+    selectable worker, so it must not appear in operator-facing node listings, the
+    session machine picker, or mesh-health counters. This predicate is
+    presentation-only: the self-claim mechanism still sees the row via
+    ``list_nodes()`` (registration/heartbeat/reaping are untouched).
+
+    Identified precisely (never a real worker): node_id == this host's name AND
+    empty backends AND empty tailscale_ip. A real worker always advertises at
+    least one backend and a tailscale IP; dead canary/test rows carry a different
+    node_id, so they are never matched here. Handles both the raw-DB shape
+    (backends as a JSON string) and the registry shape (backends as a list).
+    """
+    try:
+        if (row.get("node_id") or "") != socket.gethostname():
+            return False
+    except Exception:
+        return False
+    backends = row.get("backends")
+    backends_empty = (
+        backends is None
+        or (isinstance(backends, str) and backends.strip() in ("", "[]"))
+        or (isinstance(backends, (list, tuple)) and len(backends) == 0)
+    )
+    ip = row.get("tailscale_ip") or ""
+    ip_empty = not (ip.strip() if isinstance(ip, str) else ip)
+    return backends_empty and ip_empty
 
 
 def _count_fleet_nodes(nodes: List[Dict[str, Any]]) -> int:
