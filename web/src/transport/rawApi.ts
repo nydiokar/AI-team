@@ -434,11 +434,24 @@ export interface RawSessionTimelineItem {
   raw_refs: Record<string, string | number | boolean | null>;
 }
 
+// Session-level context-fill summary (Feature #41), derived from the latest
+// turn's context-window metrics. Honesty-first: when the backend model has no
+// known context window, context_used_ratio/context_window_tokens are null and
+// context_window_source is "unknown" (never a fabricated percentage).
+export interface RawContextFill {
+  context_used_ratio: number | null;
+  context_window_tokens: number | null;
+  context_remaining_tokens: number | null;
+  context_window_source: "known" | "unknown";
+  reason?: string;
+}
+
 export interface RawSessionTimelineResponse {
   items: RawSessionTimelineItem[];
   next_cursor: string | null;
   generated_at: string;
   coverage: Record<string, string>;
+  context_fill: RawContextFill;
 }
 
 // ── Work / Case read model (A27) ───────────────────────────────────────────

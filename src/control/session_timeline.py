@@ -59,6 +59,7 @@ class SessionTimelineResponse(BaseModel):
     next_cursor: str | None
     generated_at: str
     coverage: dict[str, str]
+    context_fill: dict[str, Any]
 
 
 def build_session_timeline(
@@ -276,6 +277,7 @@ def build_session_timeline(
         next_cursor=str(next_offset) if next_offset < len(items) else None,
         generated_at=generated_at,
         coverage=coverage,
+        context_fill=_context_fill_summary(turns[0] if turns else None),
     )
 
 
@@ -380,5 +382,35 @@ def _compact_metrics(raw: object) -> dict[str, Any]:
         "subagent_count",
         "wall_time_ms",
         "metric_quality",
+        "context_window_tokens",
+        "context_used_ratio",
+        "context_remaining_tokens",
     )
     return {key: raw.get(key) for key in keys if key in raw}
+
+
+def _context_fill_summary(latest_turn: dict[str, object] | None) -> dict[str, Any]:
+    if latest_turn is None:
+        return {
+            "context_used_ratio": None,
+            "context_window_tokens": None,
+            "context_remaining_tokens": None,
+            "context_window_source": "unknown",
+            "reason": "no_turns_observed",
+        }
+    metrics = latest_turn.get("metrics")
+    window = metrics.get("context_window_tokens") if isinstance(metrics, dict) else None
+    if window is None:
+        return {
+            "context_used_ratio": None,
+            "context_window_tokens": None,
+            "context_remaining_tokens": None,
+            "context_window_source": "unknown",
+            "reason": "context_window_unknown_for_backend_model",
+        }
+    return {
+        "context_used_ratio": metrics.get("context_used_ratio"),
+        "context_window_tokens": window,
+        "context_remaining_tokens": metrics.get("context_remaining_tokens"),
+        "context_window_source": "known",
+    }

@@ -27,6 +27,7 @@ import { SessionStatusChip } from "../components/ui/StatusChip";
 import { SessionAffiliationLink } from "../components/work/SessionAffiliationLabel";
 import { SessionTimeline, userAnchorId } from "../components/timeline/SessionTimeline";
 import { SessionTurns } from "../components/timeline/SessionTurns";
+import { ContextFillGauge } from "../components/timeline/ContextFillGauge";
 import { Composer } from "../components/timeline/Composer";
 import { JobRow } from "../components/system/JobsPanel";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
@@ -456,6 +457,7 @@ export function SessionDetailScreen() {
     fetchStatus: messagesFetchStatus,
   } = useSessionMessages(id);
   const { data: approvals } = useApprovals();
+  const { data: activity } = useSessionActivity(id, 30);
   const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? []);
   const liveActivity = useTaskActivity(id, session?.lastTaskId ?? undefined);
   const running = session?.opState === "running";
@@ -925,7 +927,14 @@ export function SessionDetailScreen() {
 
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}
         {id && !closed ? (
-          <Composer sessionId={id} running={running} />
+          <>
+            {activity && (
+              <div className="border-t border-hairline bg-surface-1/95 px-3 pt-1.5 backdrop-blur-xl">
+                <ContextFillGauge contextFill={activity.contextFill} />
+              </div>
+            )}
+            <Composer sessionId={id} running={running} />
+          </>
         ) : id ? (
           // Closed sessions (e.g. a completed one-off opened from a push
           // notification) used to be a dead read-only view. Offer resume inline
