@@ -24,11 +24,12 @@ def _home(tmp_path, monkeypatch):
 
 def test_register_manager_adds_entry(tmp_path, monkeypatch):
     _home(tmp_path, monkeypatch)
-    setup_mcp._register_claude_manager(Path("/x/scripts/mcp_manager.py"))
+    script = Path("/x/scripts/mcp_manager.py")
+    setup_mcp._register_claude_manager(script)
 
     cfg = json.loads((tmp_path / ".claude.json").read_text())
     assert "manager" in cfg["mcpServers"]
-    assert cfg["mcpServers"]["manager"]["args"] == ["/x/scripts/mcp_manager.py"]
+    assert cfg["mcpServers"]["manager"]["args"] == [str(script)]
 
 
 def test_register_manager_preserves_jobs(tmp_path, monkeypatch):
