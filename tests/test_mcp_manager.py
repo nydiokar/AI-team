@@ -148,6 +148,70 @@ def test_dispatch_worker_requires_objective(monkeypatch):
         mcp_manager._dispatch_worker({})
 
 
+def test_dispatch_worker_opens_observable_session_when_cwd_and_no_session(monkeypatch):
+    """[DROP-2] No session_id + a cwd ⇒ open a REAL worker session first
+    (POST /api/sessions), then submit the objective INTO it joined to the Case.
+    Proves the worker is observable (a session row), not a sessionless one-off."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        if path == "/api/sessions":
+            return {"ok": True, "session": {"session_id": "worker_sess_9"}}
+        return {"ok": True, "task_id": "task_w", "session": {"session_id": "worker_sess_9"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._dispatch_worker({
+        "objective": "Implement T1",
+        "cwd": "/repo",
+        "case_id": "case_1",
+        "node_id": "kanebra-worker",
+    })
+
+    # First call opens the session (rooted at the repo, pinned to the node).
+    assert calls[0][0] == "POST" and calls[0][1] == "/api/sessions"
+    assert calls[0][2] == {"repo_path": "/repo", "node_id": "kanebra-worker"}
+    # Second call submits INTO that session, joined to the Manager's Case.
+    assert calls[1][1] == "/api/instructions"
+    assert calls[1][2]["session_id"] == "worker_sess_9"
+    assert calls[1][2]["case_id"] == "case_1"
+    assert "observable worker session" in out
+    assert "worker_sess_9" in out
+
+
+def test_dispatch_worker_reuses_given_session_without_creating(monkeypatch):
+    """A supplied session_id ⇒ NO session is created; single submit call
+    (byte-identical to the reuse path)."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "task_id": "t", "session": {"session_id": "sess_existing"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._dispatch_worker({
+        "objective": "reuse me", "session_id": "sess_existing", "cwd": "/repo",
+    })
+    assert [c[1] for c in calls] == ["/api/instructions"]
+    assert "reused existing session" in out
+
+
+def test_dispatch_worker_falls_back_to_oneoff_without_cwd(monkeypatch):
+    """No session_id AND no cwd ⇒ cannot root a session; honest fallback to the
+    legacy one-off (single /api/instructions call, no session_id). The reply says so."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "task_id": "t", "session": None}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._dispatch_worker({"objective": "no repo"})
+    assert [c[1] for c in calls] == ["/api/instructions"]
+    assert "session_id" not in calls[0][2]
+    assert "one-off" in out
+
+
 # --------------------------------------------------------------------------
 # wait_for_worker
 # --------------------------------------------------------------------------

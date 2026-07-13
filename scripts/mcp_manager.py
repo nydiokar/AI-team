@@ -221,6 +221,27 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     parent_flow_run_id = _bounded_text(
         args.get("parent_flow_run_id"), "parent_flow_run_id", _MAX_ID_CHARS, required=False)
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=False)
+    node_id = _bounded_text(args.get("node_id"), "node_id", _MAX_ID_CHARS, required=False)
+
+    # [DROP-2] Observable worker sessions. A worker must be a REAL, openable session
+    # (case_role=worker, joined to the Manager's Case) — not a sessionless run_oneoff
+    # whose whole transcript is one prompt+reply blob invisible at the session level.
+    # When no existing session is reused AND we have a repo (cwd) to root one in, open a
+    # real worker session first via the existing POST /api/sessions, then submit the
+    # objective INTO it below (the `case_id` join stamps case_role=worker). Fall back to
+    # the legacy one-off only when there is no repo to open a session in — surfaced in the
+    # reply so it is never a silent regression.
+    opened_session = False
+    if not session_id and cwd:
+        sess_body: Dict[str, Any] = {"repo_path": cwd}
+        if node_id:
+            sess_body["node_id"] = node_id
+        sess_result = _api_request("POST", "/api/sessions", sess_body)
+        new_sess = sess_result.get("session") if isinstance(sess_result, dict) else None
+        new_sid = new_sess.get("session_id") if isinstance(new_sess, dict) else None
+        if new_sid:
+            session_id = new_sid
+            opened_session = True
 
     body: Dict[str, Any] = {"description": objective}
     if session_id:
@@ -247,10 +268,17 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     session = result.get("session") or {}
     sess_id = session.get("session_id") if isinstance(session, dict) else None
 
+    resolved_sid = sess_id or session_id
+    if opened_session:
+        session_line = f"{resolved_sid} (NEW observable worker session — openable/resumable in the UI)"
+    elif resolved_sid:
+        session_line = f"{resolved_sid} (reused existing session)"
+    else:
+        session_line = "(one-off, no session — pass cwd to open an observable worker session)"
     lines = [
         f"Dispatched worker task: {task_id}",
         f"Objective: {objective}",
-        f"Session:   {sess_id or session_id or '(one-off, no session)'}",
+        f"Session:   {session_line}",
         f"CWD:       {cwd or '(session/default)'}",
         f"Files:     {', '.join(files) if files else '(none)'}",
     ]
@@ -538,18 +566,21 @@ _TOOLS = [
             "Manager's own session — never a sub-agent). Thin wrapper over the existing, "
             "auth-guarded, Level-3-gated POST /api/instructions. Returns the worker's task_id; "
             "track it with wait_for_worker. Provide a professional, not-overstated objective. "
-            "If session_id is given the work runs in that existing worker session (cheaper — "
-            "reuses orientation); omit it for a one-off. Pass your own flow_run id as "
-            "parent_flow_run_id to record the Manager→worker lineage edge (visible in /api/flows)."
+            "If session_id is given the work runs in that existing worker session; otherwise, when "
+            "you pass cwd, a NEW observable worker session is opened (case_role=worker, joined to "
+            "your Case) that you and the operator can open, read, and resume — always prefer this "
+            "over a blind one-off. Pass your own flow_run id as parent_flow_run_id to record the "
+            "Manager→worker lineage edge (visible in /api/flows)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "objective": {"type": "string", "description": "The bounded task for the worker (becomes the instruction description). Ground it; do not overstate scope."},
-                "session_id": {"type": "string", "description": "Existing worker session to run in. Omit for a one-off dispatch."},
-                "cwd": {"type": "string", "description": "Working directory / repo path. Defaults to the session's repo or the request default."},
+                "session_id": {"type": "string", "description": "Existing worker session to run in. Omit to open a NEW observable worker session (when cwd is given)."},
+                "cwd": {"type": "string", "description": "Working directory / repo path. Pass it (typically your Case's repo) so a real, openable worker session can be opened; without it the dispatch falls back to a sessionless one-off."},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Target files to focus the worker on (optional)."},
                 "case_id": {"type": "string", "description": "The Manager's OWN Case id. Pass it to make the worker JOIN this Case (member task, shared membership) instead of spawning a child Case — the M3.1 default. Worker completion leaves the Case OPEN."},
+                "node_id": {"type": "string", "description": "Optional node to pin the new worker session to (e.g. a node worker so it survives a gateway restart). Omit for the local host."},
                 "parent_flow_run_id": {"type": "string", "description": "Use ONLY for a genuine child-CASE lineage edge (child→parent in /api/flows). To keep the worker inside the Manager's Case, use case_id instead."},
             },
             "required": ["objective"],
