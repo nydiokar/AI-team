@@ -5,6 +5,7 @@
 gateway host, where a gateway restart kills it (exactly today's incident).
 **Level:** 3 (architectural; execution-path parity between in-gateway SDK driver and node worker)
 **Owner:** unassigned (operator will spawn)
+**Status:** ✅ **FIX BUILT 2026-07-13 — PR #18** (`feat/manager-carrier-role`). See "Resolution" at bottom.
 
 ---
 
@@ -79,3 +80,48 @@ nothing on the node path **applies the role** or **hands the session those tools
 - `docs/harness/roles/manager.md`, `manager_v1` tool profile
 - Related: `DROP_DISPATCH_WORKER_REAL_SESSION.md` (node survivability + observable workers)
 - `docs/M3_MANAGER_INVOCATION_SPEC.md` (scope against it)
+
+---
+
+## Resolution (2026-07-13, PR #18 `feat/manager-carrier-role`)
+
+**The drop's root-cause hypothesis was CORRECTED during the build.** The role-boot
+machinery is NOT missing from the node path — it was starved of one field.
+
+Verified: the node worker uses the **same** `build_backends()` → `ClaudeCodeBackend`
+→ `ClaudeSDKClientDriver`. Its `_get_or_create` → `_role_boot(session)` already
+applies the role (system_prompt preset+append + scoped `manager_v1` tools) off
+`session.case_role`. The first assignment is rendered on the gateway by
+`invoke_manager` and dispatched as the turn via `session.last_user_message` (already
+copied to the node). Both gateway + worker load the same `.env` (`MANAGER_ROLE_ENABLED`)
+and share `~/.claude.json` (manager MCP). So role code, tools, assignment delivery,
+and flags were ALL present on the node.
+
+**Actual root cause:** a single dropped field across the dispatch seam. The task
+dispatch payload (`orchestrator._mesh_enqueue_task`) and `_make_session_from_payload`
+(`src/worker/agent.py`) both omitted `case_role`, so the node reconstructed a
+`Session` with `case_role=None` → `_role_boot` returned `(None, None)` → bare session.
+
+**Fix:** extract the dispatch session-dict into a pure `_session_dispatch_payload()`
+(`src/orchestrator.py`) that includes `case_role` (+ `current_case_id`); restore both
+in `_make_session_from_payload`. One shared role-boot path now serves both carriers;
+the node Manager survives a gateway restart (child of the node worker process).
+
+**Tests:** `tests/test_manager_carrier_role.py` (5) pin the seam producer + consumer +
+round-trip + role-less default (byte-identical regression). 34 existing manager/
+case-admission tests green.
+
+### Acceptance criteria status
+- [x] A single shared role-boot code path serves both carriers (no in-gateway-only branch).
+- [x] Automation survives a gateway restart (runs as the node process's child).
+- [ ] **Operator-gated (paid):** `POST /api/manager` with a node `node_id` boots the
+      role prompt + scoped tools + assignment identical to in-gateway, and drives a full
+      review-gated loop. `POST /api/manager` is a real paid boot — left for a **bounded,
+      supervised** operator re-run of the A43 loop with `node_id="kanebra-worker"`.
+
+### Documented deferral (drop item #3 — remote-node MCP reachability)
+On-box `kanebra-worker` shares `~/.claude.json` + loopback control API, so MCP tools
+are reachable. A **truly remote** node (Horse) additionally needs its own
+`~/.claude.json` manager server + tailnet reach to the loopback control API. That is a
+deployment concern orthogonal to this code fix; scope the Manager to on-box nodes until
+remote MCP reachability is solved.
