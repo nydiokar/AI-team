@@ -352,7 +352,7 @@ def test_dispatch_tools_list(monkeypatch):
     mcp_manager._dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = sent[0]["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {"dispatch_worker", "wait_for_worker", "get_case", "close_case", "record_review"}
+    assert names == {"dispatch_worker", "wait_for_worker", "open_case", "get_case", "close_case", "record_review"}
 
 
 def test_dispatch_tool_call_success(monkeypatch):
@@ -368,6 +368,32 @@ def test_dispatch_tool_call_success(monkeypatch):
     assert result["content"][0]["type"] == "text"
     assert "t9" in result["content"][0]["text"]
     assert not result.get("isError")
+
+
+def test_open_case_tool_posts_to_cases(monkeypatch):
+    """[M3.3] open_case posts objective+session_id to POST /api/cases and surfaces
+    the new case_id — the seam that lets one session own many Cases."""
+    calls = []
+
+    def _fake_api(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "case_id": "case-777"}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
+    out = mcp_manager._open_case(
+        {"objective": "ship the next thing", "session_id": "sess-1",
+         "completion_criteria": "tests green"}
+    )
+    assert calls == [("POST", "/api/cases",
+                      {"objective": "ship the next thing", "session_id": "sess-1",
+                       "completion_criteria": "tests green"})]
+    assert "case-777" in out
+
+
+def test_open_case_tool_requires_session_id(monkeypatch):
+    monkeypatch.setattr(mcp_manager, "_api_request", lambda *a, **k: {"case_id": "x"})
+    with pytest.raises(ValueError):
+        mcp_manager._open_case({"objective": "no session"})
 
 
 def test_dispatch_tool_call_error_is_soft(monkeypatch):

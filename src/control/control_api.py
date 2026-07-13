@@ -136,6 +136,18 @@ class CaseReviewBody(BaseModel):
     reason: Optional[str] = None
 
 
+class CaseOpenBody(BaseModel):
+    """[M3.3] Open a NEW Case on an EXISTING Manager session — so one long-lived
+    Manager session can own many Cases sequentially instead of spawning a fresh
+    session per Case (the token-inflation the operator flagged). ``session_id`` is
+    the Manager's own session; ``completion_criteria`` is the checkable done-gate
+    that ``close_case`` later demands."""
+    objective: str
+    session_id: str
+    completion_criteria: Optional[str] = None
+    role: str = "manager"
+
+
 class BindBody(BaseModel):
     chat_id: Optional[int] = None
 
@@ -1053,6 +1065,28 @@ def build_control_api(orchestrator) -> FastAPI:
 
             _idem_put("manager", idempotency_key, result)
             return JSONResponse(result)
+
+    @app.post("/api/cases", dependencies=[Depends(_require_auth)])
+    def api_open_case(body: CaseOpenBody) -> JSONResponse:
+        """[M3.3] Open a NEW Case on an existing Manager session — the seam that lets
+        a single persistent Manager session run many Cases (open → dispatch → review →
+        close → open the next) without spawning a fresh session each time. Gated by
+        ``MANAGER_ROLE_ENABLED`` (409 when OFF ⇒ surface inert). Returns
+        ``{ok, case_id}``; 404 for an unknown session, 400 on a Case-birth failure."""
+        if not orchestrator._manager_role_enabled():
+            raise HTTPException(status_code=409, detail={"ok": False, "reason": "manager_role_disabled"})
+        session = orchestrator.session_service.store.get(body.session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "session_not_found"})
+        case_id = orchestrator.open_case(
+            body.objective,
+            body.session_id,
+            role=body.role or "manager",
+            completion_criteria=body.completion_criteria,
+        )
+        if not case_id:
+            raise HTTPException(status_code=400, detail={"ok": False, "reason": "open_case_failed"})
+        return JSONResponse({"ok": True, "case_id": case_id})
 
     @app.post("/api/cases/{case_id}/close", dependencies=[Depends(_require_auth)])
     def api_close_case(case_id: str, body: CaseCloseBody) -> JSONResponse:

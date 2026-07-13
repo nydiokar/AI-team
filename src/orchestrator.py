@@ -1912,7 +1912,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 return
             # Steady-state fast path: already affiliated to this Case and no
             # explicit role override ⇒ nothing to change. Return BEFORE resolving
-            # the role, so a long-lived attachment costs zero extra DB reads per
+            # the role, so a long-lived attachment costs zero extra writes per
             # turn (the role lookup only runs on a genuine first attach / switch).
             already_here = getattr(session, "current_case_id", None) == case_id
             if role is None:
@@ -1924,9 +1924,34 @@ class TaskOrchestrator(ITaskOrchestrator):
             session.current_case_id = case_id
             session.case_role = role
             store.save(session)
+            # Authoritative, targeted column write — the source of truth. A generic
+            # full-session save (e.g. a stale turn-end persist) can no longer clobber
+            # these columns, so this write is the one that sticks.
+            self._persist_session_case(sid, case_id, role)
         except Exception as e:
             logger.warning(
                 "event=session_case_affiliation_failed session_id=%s err=%s",
+                session_id, e,
+            )
+
+    def _persist_session_case(
+        self, session_id: str, case_id: Optional[str], role: Optional[str],
+    ) -> None:
+        """Authoritative DB write of a session's Case affiliation (best-effort).
+
+        Targets ONLY ``current_case_id`` / ``case_role`` via ``db.set_session_case``
+        — the single column-owner path. Because the generic ``upsert_session`` no
+        longer writes these columns on conflict, this write cannot be undone by a
+        concurrent full-session save. Never raises."""
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return
+            db.set_session_case(session_id, case_id, role)
+        except Exception as e:
+            logger.warning(
+                "event=persist_session_case_failed session_id=%s err=%s",
                 session_id, e,
             )
 
@@ -2076,6 +2101,9 @@ class TaskOrchestrator(ITaskOrchestrator):
             session.current_case_id = None
             session.case_role = None
             store.save(session)
+            # Authoritative, targeted clear — a stale full-session save can no
+            # longer re-attach this session to the (now closed) Case.
+            self._persist_session_case(sid, None, None)
         except Exception as e:
             logger.warning(
                 "event=session_case_clear_failed session_id=%s err=%s",
@@ -2154,7 +2182,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"ok": False, "reason": "open_case_failed"}
 
         inv = ManagerInvocation(
-            case_id=case_id, objective=objective,
+            case_id=case_id, objective=objective, session_id=session.session_id,
             context_refs=list(context_refs or []), branch=branch, trigger="operator",
         )
         task_id = await self.submit_instruction(
