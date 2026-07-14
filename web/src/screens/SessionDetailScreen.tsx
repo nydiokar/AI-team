@@ -486,7 +486,7 @@ export function SessionDetailScreen() {
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
   const [compactConfirm, setCompactConfirm] = useState(false);
-  const [compactBanner, setCompactBanner] = useState<string | null>(null);
+  const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -576,10 +576,10 @@ export function SessionDetailScreen() {
   const compact = useCompactSession();
 
   useEffect(() => {
-    if (!compactBanner) return;
-    const t = setTimeout(() => setCompactBanner(null), 4000);
+    if (!statusBanner) return;
+    const t = setTimeout(() => setStatusBanner(null), 4000);
     return () => clearTimeout(t);
-  }, [compactBanner]);
+  }, [statusBanner]);
 
   const act = (fn: () => void) => { setMenuOpen(false); fn(); };
 
@@ -682,7 +682,10 @@ export function SessionDetailScreen() {
                           <div className="my-1 border-t border-hairline" />
                           {!closed ? (
                             <button
-                              onClick={() => act(() => id && close.mutate(id))}
+                              onClick={() => act(() => id && close.mutate(id, {
+                                onSuccess: () => setStatusBanner("Session closed."),
+                                onError: (e) => setStatusBanner(`Close failed: ${String((e as Error)?.message ?? "unknown")}`),
+                              }))}
                               className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
                             >
                               <Archive className="size-4" /> Close session
@@ -814,7 +817,10 @@ export function SessionDetailScreen() {
                             <div className="my-1 border-t border-hairline" />
                             {!closed ? (
                               <button
-                                onClick={() => act(() => id && close.mutate(id))}
+                                onClick={() => act(() => id && close.mutate(id, {
+                                  onSuccess: () => setStatusBanner("Session closed."),
+                                  onError: (e) => setStatusBanner(`Close failed: ${String((e as Error)?.message ?? "unknown")}`),
+                                }))}
                                 className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-muted hover:bg-surface-2"
                               >
                                 <Archive className="size-4" /> Close session
@@ -846,9 +852,9 @@ export function SessionDetailScreen() {
             </div>
           )}
 
-          {compactBanner && (
+          {statusBanner && (
             <div className="border-b border-hairline bg-surface-1 px-4 py-2 text-[12px] text-ink-soft">
-              {compactBanner}
+              {statusBanner}
             </div>
           )}
 
@@ -1011,9 +1017,9 @@ export function SessionDetailScreen() {
                   id &&
                     compact.mutate(id, {
                       onSuccess: (r) =>
-                        setCompactBanner(r.ok ? "Context compacted." : `Compaction failed: ${r.errors?.[0] ?? "unknown"}`),
+                        setStatusBanner(r.ok ? "Context compacted." : `Compaction failed: ${r.errors?.[0] ?? "unknown"}`),
                       onError: (e) =>
-                        setCompactBanner(`Compaction failed: ${String(e.message)}`),
+                        setStatusBanner(`Compaction failed: ${String(e.message)}`),
                     });
                 }}
                 className="flex-1 rounded-xl bg-warn py-3 text-[14px] font-medium text-white hover:brightness-110"

@@ -92,8 +92,19 @@ class SessionStore:
             logger.warning(f"session_load_failed id={session_id} error={e}")
             return None
 
-    def save(self, session: Session) -> None:
-        session.updated_at = now_iso()
+    def save(self, session: Session, *, touch: bool = True) -> None:
+        """Persist a session.
+
+        `touch=True` (default) stamps `updated_at = now` — the session's
+        last-ACTIVITY time (new message, turn outcome, status change, close).
+        `touch=False` persists an internal/bookkeeping change (e.g. a restart
+        marking a pooled SDK client `driver_status='lost'`) WITHOUT rewriting
+        `updated_at`, so gateway restarts never float idle conversations to the
+        top or lie about when the operator last acted. Empty `updated_at` is
+        still initialized once so the field is never blank.
+        """
+        if touch or not session.updated_at:
+            session.updated_at = now_iso()
         self._write(session)
         self._shadow_write(session)
 
