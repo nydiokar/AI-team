@@ -44,8 +44,11 @@ class SessionView:
     def from_session(cls, s: Session) -> "SessionView":
         origin = s.origin
         try:
-            from config.models import default_model as _default_model
-            resolved_default = _default_model(s.backend)
+            # The default the DRIVER will actually run (config default → catalog
+            # default), not a static catalog guess — so the UI's "(default)"
+            # label matches what really executes. Mirrors resolve_model().
+            from config.models import resolved_default_model as _resolved_default_model
+            resolved_default = _resolved_default_model(s.backend)
         except Exception:
             resolved_default = None
         return cls(

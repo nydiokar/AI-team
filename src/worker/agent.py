@@ -623,7 +623,16 @@ async def _execute_task(
     telemetry_meta = payload.get("telemetry") or {}
     turn_id = str(telemetry_meta.get("turn_id") or task_row.get("id") or "")
     session_id = str(telemetry_meta.get("session_id") or task_row.get("session_id") or "") or None
-    model = session_payload.get("model") or None
+    # Record the RESOLVED model actually launched (default → catalog), not the raw
+    # stored NULL — otherwise default-model turns emit no model on their events and
+    # the turn ledger / UI report the bare backend name. Mirrors resolve_model().
+    _raw_model = session_payload.get("model") or None
+    try:
+        from types import SimpleNamespace
+        from config.models import resolve_model
+        model = resolve_model(SimpleNamespace(backend=backend_name, model=_raw_model)) or _raw_model
+    except Exception:
+        model = _raw_model
     context = (
         TelemetryContext.create(
             turn_id=turn_id,
