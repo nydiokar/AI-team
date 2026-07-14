@@ -222,6 +222,7 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         args.get("parent_flow_run_id"), "parent_flow_run_id", _MAX_ID_CHARS, required=False)
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=False)
     node_id = _bounded_text(args.get("node_id"), "node_id", _MAX_ID_CHARS, required=False)
+    backend = _bounded_text(args.get("backend"), "backend", _MAX_ID_CHARS, required=False) or "claude"
 
     # [DROP-2] Observable worker sessions. A worker must be a REAL, openable session
     # (case_role=worker, joined to the Manager's Case) — not a sessionless run_oneoff
@@ -233,7 +234,9 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # reply so it is never a silent regression.
     opened_session = False
     if not session_id and cwd:
-        sess_body: Dict[str, Any] = {"repo_path": cwd}
+        # CreateSessionBody.backend is REQUIRED (no default) — omitting it 422s and
+        # silently drops the observable-session path back to a legacy one-off.
+        sess_body: Dict[str, Any] = {"repo_path": cwd, "backend": backend}
         if node_id:
             sess_body["node_id"] = node_id
         sess_result = _api_request("POST", "/api/sessions", sess_body)
