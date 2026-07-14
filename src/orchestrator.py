@@ -414,7 +414,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             if session.status not in (SessionStatus.IDLE, SessionStatus.AWAITING_INPUT):
                 continue
             session.driver_status = "lost"
-            self.session_store.save(session)
+            # touch=False: marking a pooled SDK client lost after a restart is
+            # internal plumbing, NOT operator activity — it must not rewrite
+            # updated_at (that's what floated every open conversation to "now"
+            # on restart).
+            self.session_store.save(session, touch=False)
             marked += 1
         if marked:
             logger.warning("event=local_driver_sessions_marked_lost host=%s count=%d", host, marked)
