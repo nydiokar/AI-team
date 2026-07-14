@@ -2040,9 +2040,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                 for link in db.list_flow_links(
                     flow_run_id=flow_run_id, entity_type="session",
                 ):
-                    self._clear_session_case_affiliation(
-                        str(link.get("entity_id") or ""), flow_run_id,
-                    )
+                    entity_id = str(link.get("entity_id") or "")
+                    self._close_worker_session_on_case_close(entity_id, flow_run_id)
+                    self._clear_session_case_affiliation(entity_id, flow_run_id)
             except Exception as e:
                 logger.warning(
                     "event=case_affiliation_clear_failed flow_run_id=%s err=%s",
@@ -2107,6 +2107,39 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception as e:
             logger.warning(
                 "event=session_case_clear_failed session_id=%s err=%s",
+                session_id, e,
+            )
+
+    def _close_worker_session_on_case_close(self, session_id: str, case_id: str) -> None:
+        """[§7] Close a joined WORKER session when its Case closes.
+
+        Only a session still affiliated to THIS Case (``current_case_id ==
+        case_id``) with ``case_role == 'worker'`` is closed — the Manager
+        session and any session that has already moved to another Case are
+        left untouched. Must be called BEFORE ``_clear_session_case_affiliation``,
+        which NULLs ``case_role``. Best-effort/isolated; never raises so one
+        session's failure cannot abort the close loop.
+        """
+        try:
+            sid = (session_id or "").strip()
+            if not sid:
+                return
+            store = getattr(self, "session_store", None)
+            if store is None:
+                return
+            session = store.get(sid)
+            if session is None:
+                return
+            if getattr(session, "current_case_id", None) != case_id:
+                return  # already moved on / not affiliated — leave it
+            if getattr(session, "case_role", None) != "worker":
+                return  # only worker sessions are closed here
+            self.session_service.close_session(
+                sid, backends=getattr(self, "_backends", {}),
+            )
+        except Exception as e:
+            logger.warning(
+                "event=worker_session_close_on_case_close_failed session_id=%s err=%s",
                 session_id, e,
             )
 
