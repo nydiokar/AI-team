@@ -1,8 +1,24 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-13
+**Last Updated:** 2026-07-14
 **Active branch:** `main` — M2 Work Control Substrate + M3 Phase 3.0 merged; `HARNESS_FLOW_DRIVE` **ON** live.
 
+> **🟢 STATUS 2026-07-14 — THE FOUR SURVIVABILITY PRs ARE MERGED + PROVEN LIVE (A44).**
+> **PRs #18 (carrier role), #19 (observable workers), #20 (native time), #21 (multi-case session)
+> ALL MERGED to `main`** (`cd7f358`, in dependency order #18→#19→#20→#21; dry-run merge was
+> conflict-free — the flagged #21 conflict didn't materialize; 93 targeted tests green on the merged
+> tree). **Gateway RESTARTED on the merged code (PM2 restart #17); all flags verified LIVE via API
+> probe** (review emitter → 422 `invalid_verdict`; manager role → 400 `invalid_repo_path`, NOT 409
+> disabled). **A44 live Manager run (in-gateway `__local__` path) PASSED end-to-end on the merged
+> code:** `/api/manager` → Case `7616715e…` (session `db911753d4ce`) → dispatched worker
+> `task_bfbd354` (real observable worker session, PR #19 live) → worker did TDD (RED test → GREEN fix,
+> 2 commits) → **`review.accepted`** → **`flow.closed`**. Deliverable is real + independently verified
+> (23/23 closure tests green, diff inspected): **PR #22** — `close_case` now also closes joined WORKER
+> sessions (`case_role='worker'`) on real close, best-effort/isolated, ordered before the
+> affiliation-clear; Manager/non-worker sessions untouched. **This closes PR #19's deferred §7
+> lifecycle gap.** PR #22 OPEN, NOT merged (operator decision). **Node re-run of A43 (#18 acceptance)
+> remains operator-gated — A44 proved the merged code on the in-gateway path only.**
+>
 > **🟢 STATUS 2026-07-12 — THE INVOKED-MANAGER LOOP RAN LIVE FOR THE FIRST TIME AND PASSED (A41).**
 > A real Claude Manager was invoked via `POST /api/manager` → opened ONE Case (`case_role=manager`) →
 > autonomously `dispatch_worker`ed a worker that **JOINed the Case** (`membership:worker`, **no child
@@ -255,10 +271,13 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
-| **1** | **Carrier-independent Manager role** — `DROP_MANAGER_ROLE_CARRIER_INDEPENDENT.md` | 🔴 A43 proved the Manager role boots ONLY on the in-gateway driver path; on a node agent-worker it's a bare, role-less, tool-less session. So the Manager can't run on any node → stuck on the fragile gateway host (dies on restart). **Blocks survivable automation.** | ✅ **FIXED — PR #18** (`feat/manager-carrier-role`). Root cause was NOT missing machinery (the node uses the same `_role_boot`) but a dropped `case_role` field across the dispatch seam. Fix carries `case_role`(+`current_case_id`) in the dispatch payload + restores it on the worker; 5 seam tests + 34 regression green. **Live paid node re-run of A43 = operator-gated acceptance;** remote-node MCP reachability deferred (on-box only). |
-| **2** | **Observable worker sessions + node survivability** — `DROP_DISPATCH_WORKER_REAL_SESSION.md` | Automation invariant: must be able to open any worker session and read the manager↔worker exchange. Today workers are sessionless `run_oneoff` tasks (50 to date, 0 worker sessions). Also: run automation on a node so a gateway restart can't kill it. | 🟡 **CORE FIXED — PR #19** (`feat/observable-worker-sessions`). `dispatch_worker` opens a real, openable worker session (case-joined, `case_role=worker`) when given `cwd`; reuses proven join/wait seams; +4 tests. Role-boot-on-node half done by PR #18. **Deferred:** worker-session close-on-Case-close (§7), node-default routing, Web UI linkage, live paid re-validation. |
-| **3** | **Timezone → native local everywhere** — `DROP_TIMEZONE_NATIVE_TIME.md` | Mixed clocks (`session_service.py` naive-local vs `db.py` UTC) corrupt "time ago" and erode trust. Standardize + render native local. **Ban tz as a hand-wave root cause.** | ✅ **FIXED — PR #20** (`feat/native-time-one-clock`). One clock via `src/core/timeutil.py` `now_iso()`/`parse_iso()`; ~46 naive writers routed to UTC-aware; Telegram helpers de-bugged + render native-local. +6 tests. **⛔ TIMEZONE IS STANDARDIZED — do NOT cite tz as a root cause; a wrong time is a writer/render defect to fix, not a UTC-offset to explain away.** |
-| **4** | **Review + merge `feat/manager-multicase-session` (`31f648a`)** | Persistent multi-Case Manager session + fix for the `close_case` affiliation-clobber race (real live F1 bug). Orphaned by the 11:26Z restart. | ✅ **REVIEWED — APPROVE, PR #21 open.** Single-writer clobber fix verified complete + non-vacuous race tests + 113 green. **Awaiting operator merge** (base behind main + overlaps PRs #18/#19/#20 → merge second, trivial textual conflicts). |
+| **1** | **Node re-run of A43 — carrier-independent Manager acceptance** (#18) | The one unproven gap: A44 proved the merged code on the in-gateway `__local__` path only. Booting a role-full, tool-full Manager on a real node (`Horse`/`kanebra-worker`) is the acceptance test that survivable automation actually works off the fragile gateway host. | 🟡 **OPERATOR-GATED (paid).** Code merged (#18). Remote-node MCP reachability still deferred (on-box only). This is the highest-signal next validation. |
+| **2** | **M3.3 durable relay** — `wait_for_worker` is in-process | Last structural fragility: even a carrier-independent Manager loses its wait if the session/gateway crashes mid-wait. Persist the wait off the `task.finished` timeline so it's recoverable. | 🔲 **UNBUILT** — the only genuinely-new build left in the M3 survivability arc. |
+| — | ~~Carrier-independent Manager role (#18)~~ | Manager booted only on in-gateway driver. | **MERGED** (PR #18, `main`, 2026-07-14). Dropped `case_role` restored across the dispatch seam. |
+| — | ~~Observable worker sessions + node survivability (#19)~~ | Workers were sessionless `run_oneoff`. | **MERGED** (PR #19, `main`). `dispatch_worker` opens a real openable worker session — **proven live in A44**. Its deferred §7 close-on-Case-close gap is now also fixed (**PR #22**, open). Deferred still: node-default routing, Web UI linkage. |
+| — | ~~Timezone → native local everywhere (#20)~~ | Mixed naive/UTC clocks. | **MERGED** (PR #20, `main`). **⛔ TIMEZONE IS STANDARDIZED — do NOT cite tz as a root cause; a wrong time is a writer/render defect, not a UTC-offset to explain away.** |
+| — | ~~Persistent multi-Case Manager session (#21)~~ | `close_case` affiliation-clobber race. | **MERGED** (PR #21, `main`). Single-writer clobber fix. |
+| — | ~~PR #19 §7 gap: close worker sessions on Case-close~~ | Joined worker sessions lingered open after Case-close, holding a backend slot. | **BUILT live by A44 Manager loop → PR #22 open** (not merged). `close_case` closes `case_role='worker'` sessions best-effort/isolated. |
 | — | ~~M2.5 Case Admission (A36) + Continuity/Closure (A37)~~ | Per-turn Case shatter + task-end auto-close defect. | **merged** (PR #9, `main`). |
 | — | ~~A43 live rework-cycle proof + restart hardening~~ | Prove `rework_requested→re-dispatch→accept` live; ship the restart-incident fix. | **done + merged** (PR #17, `main`, 2026-07-13). First live rework cycle. |
 | — | ~~Build Task Harness Workflow Kernel (v1)~~ | Prompt+artifact task-quality loop; addresses the #1 scar (false-success / burned tokens from ungrounded execution). | **merged** (A9H, PR #8) on `main` — see Shipped Ledger + `docs/harness/` |
