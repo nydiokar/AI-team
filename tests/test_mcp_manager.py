@@ -169,8 +169,10 @@ def test_dispatch_worker_opens_observable_session_when_cwd_and_no_session(monkey
     })
 
     # First call opens the session (rooted at the repo, pinned to the node).
+    # backend is MANDATORY — CreateSessionBody.backend has no default, so omitting
+    # it 422s and silently drops back to a legacy one-off (the A44 live defect).
     assert calls[0][0] == "POST" and calls[0][1] == "/api/sessions"
-    assert calls[0][2] == {"repo_path": "/repo", "node_id": "kanebra-worker"}
+    assert calls[0][2] == {"repo_path": "/repo", "backend": "claude", "node_id": "kanebra-worker"}
     # Second call submits INTO that session, joined to the Manager's Case.
     assert calls[1][1] == "/api/instructions"
     assert calls[1][2]["session_id"] == "worker_sess_9"
