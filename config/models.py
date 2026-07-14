@@ -135,6 +135,21 @@ def _config_default(backend: str) -> Optional[str]:
     return None
 
 
+def resolved_default_model(backend: str) -> Optional[str]:
+    """The model a model-LESS session actually resolves to for this backend.
+
+    Precedence: config default → catalog default. This is exactly the default
+    half of `resolve_model()` (i.e. what runs when `session.model is None`), so
+    a read surface can render the *honest* default the driver will really use
+    instead of a static catalog guess. The config value is passed through
+    `validate()` so a stale/garbage default can't be shown/used.
+    """
+    cfg_default = validate(backend, _config_default(backend))
+    if cfg_default:
+        return cfg_default
+    return default_model(backend)
+
+
 def resolve_model(session: Any) -> Optional[str]:
     """Resolve the model a backend should actually use for this session.
 
@@ -150,7 +165,4 @@ def resolve_model(session: Any) -> Optional[str]:
     picked = validate(backend, getattr(session, "model", None))
     if picked:
         return picked
-    cfg_default = validate(backend, _config_default(backend))
-    if cfg_default:
-        return cfg_default
-    return default_model(backend)
+    return resolved_default_model(backend)

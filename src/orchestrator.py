@@ -3202,6 +3202,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             while not route_remote:
                 attempt += 1
                 from src.core.telemetry import TelemetryContext
+                from config.models import resolve_model
                 local_action = (
                     "resume_session"
                     if session and session.backend_session_id
@@ -3214,7 +3215,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                     node_id=socket.gethostname(),
                     session_id=session_id or None,
                     backend=session.backend if session else self._resolve_task_backend(task),
-                    model=session.model if session else None,
+                    # Record the RESOLVED model actually launched (default → catalog),
+                    # not the raw stored NULL — otherwise the turn ledger reports no
+                    # model for every default session. Mirrors the driver's resolve_model.
+                    model=resolve_model(session) if session else None,
                     source="gateway",
                     attempt=attempt,
                     spawn_reason=next_spawn_reason,

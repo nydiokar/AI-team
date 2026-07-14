@@ -204,6 +204,14 @@ def project_turn(events: Iterable[TelemetryEvent | Dict[str, Any]]) -> Dict[str,
             )
             if event.get("model"):
                 invocation["observed_model"] = event.get("model")
+                # The model carried on our own launch events is the model we
+                # REQUESTED for this invocation (resolve_model output). Record it
+                # so a turn with no provider-reported model is still honest about
+                # what was asked, instead of leaving the field dead-None.
+                if name in ("invocation.created", "invocation.started"):
+                    invocation["requested_model"] = event.get("model")
+                    if turn["requested_model"] is None:
+                        turn["requested_model"] = event.get("model")
 
             if name == "invocation.created":
                 invocation.update(
