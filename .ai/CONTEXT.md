@@ -11,13 +11,19 @@
 > probe** (review emitter → 422 `invalid_verdict`; manager role → 400 `invalid_repo_path`, NOT 409
 > disabled). **A44 live Manager run (in-gateway `__local__` path) PASSED end-to-end on the merged
 > code:** `/api/manager` → Case `7616715e…` (session `db911753d4ce`) → dispatched worker
-> `task_bfbd354` (real observable worker session, PR #19 live) → worker did TDD (RED test → GREEN fix,
-> 2 commits) → **`review.accepted`** → **`flow.closed`**. Deliverable is real + independently verified
-> (23/23 closure tests green, diff inspected): **PR #22** — `close_case` now also closes joined WORKER
-> sessions (`case_role='worker'`) on real close, best-effort/isolated, ordered before the
-> affiliation-clear; Manager/non-worker sessions untouched. **This closes PR #19's deferred §7
-> lifecycle gap.** PR #22 OPEN, NOT merged (operator decision). **Node re-run of A43 (#18 acceptance)
-> remains operator-gated — A44 proved the merged code on the in-gateway path only.**
+> `task_bfbd354a` → worker did TDD (RED test → GREEN fix, 2 commits) → **`review.accepted`** →
+> **`flow.closed`**. Deliverable is real + independently verified (23/23 closure tests green, diff
+> inspected): **PR #22** — `close_case` now also closes joined WORKER sessions (`case_role='worker'`)
+> on real close, best-effort/isolated, ordered before the affiliation-clear; Manager/non-worker
+> sessions untouched. **This closes PR #19's deferred §7 lifecycle gap.** PR #22 OPEN, NOT merged.
+> **⚠️ A44 did NOT prove PR #19's observable worker session:** the Manager's `dispatch_worker(cwd=…)`
+> hit a **422** (`scripts/mcp_manager.py` opens the worker session via `POST /api/sessions` with
+> `{repo_path}` but NO `backend` — and `SessionCreateBody.backend` is required, no default) → it fell
+> back to a **legacy one-off task joined to the Case** (Case evidence shows the worker as a `task`
+> link, not a `session`). So the review-gated loop + §7 deliverable are proven, but the
+> observable-session mechanism from PR #19 is still UNPROVEN live and has a one-line latent bug (add
+> `"backend": "claude"` to the `sess_body` in `_dispatch_worker`). **Node re-run of A43 (#18
+> acceptance) also remains operator-gated.**
 >
 > **🟢 STATUS 2026-07-12 — THE INVOKED-MANAGER LOOP RAN LIVE FOR THE FIRST TIME AND PASSED (A41).**
 > A real Claude Manager was invoked via `POST /api/manager` → opened ONE Case (`case_role=manager`) →
@@ -274,7 +280,7 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 | **1** | **Node re-run of A43 — carrier-independent Manager acceptance** (#18) | The one unproven gap: A44 proved the merged code on the in-gateway `__local__` path only. Booting a role-full, tool-full Manager on a real node (`Horse`/`kanebra-worker`) is the acceptance test that survivable automation actually works off the fragile gateway host. | 🟡 **OPERATOR-GATED (paid).** Code merged (#18). Remote-node MCP reachability still deferred (on-box only). This is the highest-signal next validation. |
 | **2** | **M3.3 durable relay** — `wait_for_worker` is in-process | Last structural fragility: even a carrier-independent Manager loses its wait if the session/gateway crashes mid-wait. Persist the wait off the `task.finished` timeline so it's recoverable. | 🔲 **UNBUILT** — the only genuinely-new build left in the M3 survivability arc. |
 | — | ~~Carrier-independent Manager role (#18)~~ | Manager booted only on in-gateway driver. | **MERGED** (PR #18, `main`, 2026-07-14). Dropped `case_role` restored across the dispatch seam. |
-| — | ~~Observable worker sessions + node survivability (#19)~~ | Workers were sessionless `run_oneoff`. | **MERGED** (PR #19, `main`). `dispatch_worker` opens a real openable worker session — **proven live in A44**. Its deferred §7 close-on-Case-close gap is now also fixed (**PR #22**, open). Deferred still: node-default routing, Web UI linkage. |
+| — | ~~Observable worker sessions + node survivability (#19)~~ | Workers were sessionless `run_oneoff`. | **MERGED** (PR #19, `main`) but **NOT yet proven live** — A44's `dispatch_worker(cwd)` 422'd (missing `backend` in `mcp_manager.py` `POST /api/sessions`) and fell back to a one-off. Its deferred §7 close-on-Case-close gap IS fixed (**PR #22**, open). Deferred still: the 422 one-liner, live proof, node-default routing, Web UI linkage. |
 | — | ~~Timezone → native local everywhere (#20)~~ | Mixed naive/UTC clocks. | **MERGED** (PR #20, `main`). **⛔ TIMEZONE IS STANDARDIZED — do NOT cite tz as a root cause; a wrong time is a writer/render defect, not a UTC-offset to explain away.** |
 | — | ~~Persistent multi-Case Manager session (#21)~~ | `close_case` affiliation-clobber race. | **MERGED** (PR #21, `main`). Single-writer clobber fix. |
 | — | ~~PR #19 §7 gap: close worker sessions on Case-close~~ | Joined worker sessions lingered open after Case-close, holding a backend slot. | **BUILT live by A44 Manager loop → PR #22 open** (not merged). `close_case` closes `case_role='worker'` sessions best-effort/isolated. |
