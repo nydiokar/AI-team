@@ -48,6 +48,15 @@ def _resolve_model(session: Session) -> Optional[str]:
         return None
 
 
+def _resolve_effort(session: Session) -> Optional[str]:
+    """Resolve the optional per-session Codex reasoning effort."""
+    try:
+        from config.models import validate_effort
+        return validate_effort("codex", getattr(session, "effort", None))
+    except Exception:
+        return None
+
+
 def _mcp_jobs_configured() -> bool:
     """True if setup_mcp.py has registered the jobs server in Codex's config."""
     try:
@@ -67,10 +76,10 @@ class CodexBackend(CodingBackend):
         self._proc_lock = threading.Lock()
 
     def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_key=session.session_id, model=_resolve_model(session), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
+        return self._run(session.repo_path, session.last_user_message, resume_id=None, session_key=session.session_id, model=_resolve_model(session), effort=_resolve_effort(session), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
     def resume_session(self, session: Session, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
-        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_key=session.session_id, model=_resolve_model(session), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
+        return self._run(session.repo_path, message, resume_id=session.backend_session_id or None, session_key=session.session_id, model=_resolve_model(session), effort=_resolve_effort(session), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
 
     def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         return self._run(cwd, message, resume_id=None, session_key=None, model=None, telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
@@ -96,6 +105,7 @@ class CodexBackend(CodingBackend):
         resume_id: Optional[str],
         session_key: Optional[str],
         model: Optional[str] = None,
+        effort: Optional[str] = None,
         telemetry_context: Optional[TelemetryContext] = None,
         telemetry_sink=None,
     ) -> ExecutionResult:
@@ -116,7 +126,7 @@ class CodexBackend(CodingBackend):
             proc_env["SESSION_ID"] = session_key
         proc_env.update(telemetry_subprocess_env(telemetry_context))
 
-        cmd = self._build_cmd(resume_id, cwd, model)
+        cmd = self._build_cmd(resume_id, cwd, model, effort)
         cmd[0] = self._resolve_exe(proc_env)
 
         if sys.platform == "win32":
@@ -435,12 +445,14 @@ class CodexBackend(CodingBackend):
             path_value = env.get("Path") or env.get("PATH") or ""
         return shutil.which("codex", path=path_value or None) or shutil.which("codex") or "codex"
 
-    def _build_cmd(self, resume_id: Optional[str], cwd: Optional[str], model: Optional[str] = None) -> List[str]:
+    def _build_cmd(self, resume_id: Optional[str], cwd: Optional[str], model: Optional[str] = None, effort: Optional[str] = None) -> List[str]:
         # -m is valid on both `exec` and `exec resume` (verified via --help).
         if resume_id:
             cmd = [self._exe, "exec", "resume", resume_id]
             if model:
                 cmd += ["-m", model]
+            if effort:
+                cmd += ["-c", f'model_reasoning_effort="{effort}"']
             cmd += [
                 "--json",
                 "--dangerously-bypass-approvals-and-sandbox",
@@ -450,6 +462,8 @@ class CodexBackend(CodingBackend):
         cmd = [self._exe, "exec"]
         if model:
             cmd += ["-m", model]
+        if effort:
+            cmd += ["-c", f'model_reasoning_effort="{effort}"']
         cmd += [
             "--json",
             "--dangerously-bypass-approvals-and-sandbox",

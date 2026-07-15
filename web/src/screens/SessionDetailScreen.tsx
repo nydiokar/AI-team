@@ -31,6 +31,7 @@ import { ContextFillGauge } from "../components/timeline/ContextFillGauge";
 import { Composer } from "../components/timeline/Composer";
 import { JobRow } from "../components/system/JobsPanel";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
+import { EffortPickerSheet } from "../components/sessions/EffortPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
 import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionActivity, useJobs } from "../hooks/useLiveData";
 import { useSessionAffiliations } from "../hooks/useWork";
@@ -484,6 +485,7 @@ export function SessionDetailScreen() {
   const [tab, setTab] = useState<SessionTab>(initialTab);
   const [menuOpen, setMenuOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [effortPickerOpen, setEffortPickerOpen] = useState(false);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
   const [compactConfirm, setCompactConfirm] = useState(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
@@ -602,6 +604,7 @@ export function SessionDetailScreen() {
               session ? (
                 <span className="font-mono text-[11px] text-ink-muted">
                   {session.backend} · {modelLabel(session.model, session.defaultModel)}
+                  {session.effort && <span className="text-ink-muted"> · think:{session.effort}</span>}
                 </span>
               ) : loading ? (
                 <span className="text-[11px] text-ink-muted">loading…</span>
@@ -737,6 +740,7 @@ export function SessionDetailScreen() {
                 session ? (
                   <span className="font-mono text-[11px] text-ink-muted">
                     {session.backend} · {modelLabel(session.model, session.defaultModel)}
+                    {session.effort && <span className="text-ink-muted"> · think:{session.effort}</span>}
                   </span>
                 ) : loading ? (
                   <span className="text-[11px] text-ink-muted">loading…</span>
@@ -804,6 +808,14 @@ export function SessionDetailScreen() {
                                 className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
                               >
                                 <Sliders className="size-4" /> Change model
+                              </button>
+                            )}
+                            {!closed && (
+                              <button
+                                onClick={() => act(() => setEffortPickerOpen(true))}
+                                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                              >
+                                <Sliders className="size-4" /> Thinking effort
                               </button>
                             )}
                             {!closed && (
@@ -984,6 +996,15 @@ export function SessionDetailScreen() {
           currentModel={session.model}
           backend={session.backend}
           onClose={() => setModelPickerOpen(false)}
+        />
+      )}
+      {effortPickerOpen && session && id && (
+        <EffortPickerSheet
+          sessionId={id}
+          backend={session.backend}
+          currentEffort={session.effort}
+          currentModel={session.model ?? session.defaultModel}
+          onClose={() => setEffortPickerOpen(false)}
         />
       )}
       {gitPanelOpen && id && (

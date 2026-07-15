@@ -11,8 +11,10 @@ Covers (MODEL_PICKER_PLAN.md):
 import json
 import pytest
 
+from config import models as models_module
 from config.models import (
-    BACKEND_MODELS, options, default_model, is_known, is_advisory, validate, resolve_model,
+    BACKEND_MODELS, options, available_options, default_model, is_known, is_advisory,
+    validate, resolve_model, effort_options, validate_effort,
 )
 from src.core.interfaces import Session, SessionStatus
 
@@ -37,10 +39,11 @@ def test_opencode_cli_and_server_share_one_list():
 
 
 def test_validation_policy_strict_vs_advisory():
-    # strict backends reject unknown → None (caller falls back to default)
+    # Claude rejects unknown names; Codex accepts newly published local models.
     assert validate("claude", "bogus") is None
-    assert validate("codex", "bogus") is None
+    assert validate("codex", "gpt-5.6-luna") == "gpt-5.6-luna"
     assert not is_advisory("claude")
+    assert is_advisory("codex")
     # advisory backend passes unknown through unchanged
     assert validate("opencode", "some/custom-model") == "some/custom-model"
     assert is_advisory("opencode")
@@ -50,6 +53,32 @@ def test_validation_policy_strict_vs_advisory():
     # empty/None → None
     assert validate("claude", None) is None
     assert validate("claude", "   ") is None
+
+
+def test_codex_picker_merges_machine_catalog_with_legacy_aliases(monkeypatch):
+    monkeypatch.setattr(
+        models_module,
+        "_read_codex_model_list",
+        lambda: [
+            models_module.ModelOption("gpt-5.6-sol", is_default=True),
+            models_module.ModelOption("gpt-5.6-terra"),
+            models_module.ModelOption("gpt-5.6-luna"),
+        ],
+    )
+    monkeypatch.setattr(models_module, "_CODEX_MODEL_CACHE", (0.0, []))
+
+    names = [item.name for item in available_options("codex")]
+    assert names[:3] == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    assert "gpt-5.5" in names
+    assert "gpt-5.2-codex" in names
+
+
+def test_effort_catalog_is_backend_specific_and_optional():
+    assert effort_options("claude") == ["low", "medium", "high", "xhigh", "max"]
+    assert "ultra" in effort_options("codex")
+    assert validate_effort("codex", "HIGH") == "high"
+    assert validate_effort("claude", "bogus") is None
+    assert validate_effort("codex", None) is None
 
 
 # --------------------------------------------------------------------------- resolve
@@ -94,14 +123,24 @@ def test_codex_build_cmd_model_placement():
     assert resume[2] == "resume" and resume[3] == "thread1"
     assert resume[resume.index("-m") + 1] == "gpt-5.2-codex"
     assert "-m" not in b._build_cmd(None, "/repo", None)
+    assert "model_reasoning_effort=\"high\"" in b._build_cmd(None, "/repo", None, "high")
+
+
+def test_claude_build_cmd_effort_placement():
+    from src.backends.claude_driver import ClaudePrintResumeDriver
+    b = ClaudePrintResumeDriver()
+    cmd = b._build_cmd(None, "sid", "opus", "high")
+    assert cmd[cmd.index("--effort") + 1] == "high"
 
 
 # --------------------------------------------------------------------------- persistence
 def test_store_dict_round_trip_preserves_model():
     from src.services.session_store import SessionStore
     s = _mk("codex", "gpt-5.5")
+    s.effort = "high"
     restored = SessionStore._from_dict(SessionStore._to_dict(s))
     assert restored.model == "gpt-5.5"
+    assert restored.effort == "high"
     # None survives too
     assert SessionStore._from_dict(SessionStore._to_dict(_mk("claude"))).model is None
 
@@ -110,9 +149,11 @@ def test_db_round_trip_preserves_model(tmp_path):
     import src.control.db as dbmod
     db = dbmod.MeshDB(str(tmp_path / "mesh.db"))
     s = _mk("opencode", "opencode/mimo-v2.5-free")
+    s.effort = "high"
     db.upsert_session(s)
     row = db.get_session(s.session_id)
     assert row["model"] == "opencode/mimo-v2.5-free"
+    assert row["effort"] == "high"
 
 
 # --------------------------------------------------------------------------- mesh payload (R1)
@@ -164,5 +205,3 @@ def test_effective_model_label_strips_backticks():
     label = TelegramInterface._effective_model_label(s)
     # exactly two backticks (the wrapping code span), none from the name
     assert label.count("`") == 2
-
-

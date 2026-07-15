@@ -920,15 +920,16 @@ class TelegramInterface:
         """
         if not TELEGRAM_AVAILABLE:
             return None
-        from config.models import options, default_model
+        from config.models import available_options
         backend = session.backend
         sid = session.session_id
-        default = default_model(backend)
+        model_options = available_options(backend)
+        default = next((opt.name for opt in model_options if opt.is_default), None)
         rows = [[InlineKeyboardButton(
             text=f"⚡ Default ({default or 'CLI default'})",
             callback_data=f"model_set:{sid}:__default__",
         )]]
-        for idx, opt in enumerate(options(backend)):
+        for idx, opt in enumerate(model_options):
             if opt.is_default:
                 continue
             rows.append([InlineKeyboardButton(
@@ -2709,8 +2710,8 @@ class TelegramInterface:
             # picker below instead of resetting. set_model (P3) enforces this.
             result = self.orchestrator.session_service.set_model(session.session_id, requested)
             if not result.ok and result.reason == "unknown_model":
-                from config.models import options
-                names = ", ".join(o.name for o in options(session.backend)) or "(none)"
+                from config.models import available_options
+                names = ", ".join(o.name for o in available_options(session.backend)) or "(none)"
                 safe_requested = requested.replace("`", "")
                 await update.message.reply_text(
                     f"❌ Unknown {session.backend} model `{safe_requested}`.\nKnown: {names}",
@@ -2754,9 +2755,9 @@ class TelegramInterface:
         if choice == "__default__":
             chosen = None
         else:
-            from config.models import options
+            from config.models import available_options
             try:
-                chosen = options(session.backend)[int(choice)].name
+                chosen = available_options(session.backend)[int(choice)].name
             except (ValueError, IndexError):
                 await query.edit_message_text("❌ Invalid model selection.")
                 return

@@ -65,6 +65,7 @@ export function toSession(raw: RawSessionView): Session {
     opState,
     needsAttention: lifecycle === "open" && deriveNeedsAttention(opState),
     model: raw.model ?? null,
+    effort: raw.effort ?? null,
     defaultModel: raw.default_model ?? null,
     lastTaskId: raw.last_task_id || null,
     lastSummary: raw.last_summary ?? "",

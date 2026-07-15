@@ -458,6 +458,7 @@ def _make_session_from_payload(payload: Dict[str, Any]) -> Any:
         machine_id=session_dict.get("machine_id", ""),
         backend_session_id=session_dict.get("backend_session_id", ""),
         model=session_dict.get("model") or None,
+        effort=session_dict.get("effort") or None,
     )
     # Copy optional fields if present. `case_role` is load-bearing: the claude
     # driver's `_role_boot` reads it to apply the Manager role prompt + scoped

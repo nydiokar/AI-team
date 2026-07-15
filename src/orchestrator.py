@@ -57,6 +57,7 @@ def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
         "repo_path": session.repo_path,
         "backend_session_id": session.backend_session_id,
         "model": session.model,
+        "effort": getattr(session, "effort", None),
         "machine_id": session.machine_id,
         "telegram_chat_id": session.telegram_chat_id,
         "telegram_thread_id": session.telegram_thread_id,
