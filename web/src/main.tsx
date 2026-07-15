@@ -11,16 +11,13 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js", { scope: "/" });
 }
 
-// Prefer portrait, but respect the system. The manifest declares
-// `orientation: portrait` for the installed PWA; here we additionally ask the
-// Screen Orientation API to lock portrait where it's permitted (installed /
-// fullscreen contexts). It rejects harmlessly in a normal browser tab — we
-// never fight the OS, we just express the preference.
+// Freeze installed/fullscreen contexts to the primary portrait orientation.
+// Generic `portrait` can still allow portrait-family rotation on Android PWAs.
 type OrientationLock = ScreenOrientation & {
-  lock?: (orientation: "portrait") => Promise<void>;
+  lock?: (orientation: "portrait-primary") => Promise<void>;
 };
 const orientation = screen?.orientation as OrientationLock | undefined;
-orientation?.lock?.("portrait").catch(() => {
+orientation?.lock?.("portrait-primary").catch(() => {
   /* not permitted here (browser tab) — the manifest still governs the PWA */
 });
 
