@@ -16,6 +16,7 @@ const session: Session = {
   opState: "running",
   needsAttention: false,
   model: null,
+  effort: null,
   defaultModel: null,
   lastTaskId: "task_1",
   lastSummary: "",
