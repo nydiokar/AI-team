@@ -30,6 +30,7 @@ class SessionView:
     machine_id: str
     backend_session_id: str     # native session ID the backend returned (resume key)
     model: Optional[str]
+    effort: Optional[str]
     default_model: Optional[str]  # the backend's default model (shown when model is None)
     last_task_id: str
     last_summary: str
@@ -59,6 +60,7 @@ class SessionView:
             machine_id=s.machine_id,
             backend_session_id=s.backend_session_id or "",
             model=s.model,
+            effort=getattr(s, "effort", None),
             default_model=resolved_default,
             last_task_id=s.last_task_id,
             last_summary=s.last_result_summary or s.last_summary,

@@ -116,6 +116,15 @@ def test_set_model_advisory_passes_through(svc):
     assert svc.store.get(s.session_id).model == "some/custom-model"
 
 
+def test_set_effort_persists_and_rejects_unknown(svc):
+    s = _make(svc, backend="codex")
+    res = svc.set_effort(s.session_id, "HIGH")
+    assert res.ok
+    assert svc.store.get(s.session_id).effort == "high"
+    bad = svc.set_effort(s.session_id, "not-an-effort")
+    assert not bad.ok and bad.reason == "unknown_effort"
+
+
 def test_set_model_clear_to_default(svc):
     s = _make(svc, backend="claude")
     svc.set_model(s.session_id, "opus")

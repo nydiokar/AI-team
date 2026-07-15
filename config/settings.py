@@ -402,10 +402,9 @@ class Config:
     def _validated_default_model(backend: str, value: str) -> Optional[str]:
         """Validate a *_DEFAULT_MODEL env value through the model catalog.
 
-        Strict backends (claude/codex) reject unknown names → None (the catalog
-        default applies downstream) so one .env typo can't break every session.
-        Advisory backends (opencode) pass unknown names through (provider set is
-        environment-specific). See config/models.py.
+        Claude rejects unknown names; Codex and OpenCode pass through because
+        their installed model catalogs are environment-specific. See
+        config/models.py.
         """
         try:
             from config.models import validate as _validate_model

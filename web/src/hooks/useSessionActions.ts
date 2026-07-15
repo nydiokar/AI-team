@@ -168,6 +168,18 @@ export function useSetModel() {
   });
 }
 
+/** Set the persistent thinking effort for a session. */
+export function useSetEffort() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { sessionId: string; effort: string | null }) =>
+      api.setEffort(token, vars.sessionId, vars.effort),
+    retry: false,
+    onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+}
+
 /** Run a repo inspection op on a session (git_status, list_dirs, commit, commit_all). */
 export function useInspectSession() {
   const token = useAuthStore((s) => s.token);

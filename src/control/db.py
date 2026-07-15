@@ -56,7 +56,7 @@ _mesh_health_last_sample: Dict[str, float] = {}
 # Schema version — bump when adding migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION = 24
+_CURRENT_VERSION = 25
 
 
 class CaseCloseBlocked(Exception):
@@ -706,6 +706,7 @@ class MeshDB:
                     INSERT INTO sessions (
                         session_id, backend, repo_path, status,
                         created_at, updated_at, machine_id, backend_session_id, model,
+                        effort,
                         last_task_id, last_artifact_path, last_summary,
                         last_user_message, last_result_summary, last_files_modified,
                         telegram_chat_id, telegram_thread_id, owner_user_id, task_history,
@@ -716,6 +717,7 @@ class MeshDB:
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
                         :created_at, :updated_at, :machine_id, :backend_session_id, :model,
+                        :effort,
                         :last_task_id, :last_artifact_path, :last_summary,
                         :last_user_message, :last_result_summary, :last_files_modified,
                         :telegram_chat_id, :telegram_thread_id, :owner_user_id, :task_history,
@@ -732,6 +734,7 @@ class MeshDB:
                         machine_id          = excluded.machine_id,
                         backend_session_id  = excluded.backend_session_id,
                         model               = excluded.model,
+                        effort              = excluded.effort,
                         last_task_id        = excluded.last_task_id,
                         last_artifact_path  = excluded.last_artifact_path,
                         last_summary        = excluded.last_summary,
@@ -767,6 +770,7 @@ class MeshDB:
                         "machine_id":          session.machine_id or "",
                         "backend_session_id":  session.backend_session_id or "",
                         "model":               getattr(session, "model", None),
+                        "effort":              getattr(session, "effort", None),
                         "last_task_id":        session.last_task_id or "",
                         "last_artifact_path":  session.last_artifact_path or "",
                         "last_summary":        session.last_summary or "",
@@ -2869,6 +2873,7 @@ def _get_migrations() -> List[tuple]:
                # affiliation that survives across turns (set on attach/open, cleared
                # on close in A37) — replacing the per-read most-recent-link derive.
                # All ADDITIVE + NULLable ⇒ existing rows/writers untouched.
+        (25, "ALTER TABLE sessions ADD COLUMN effort TEXT"),  # per-session thinking effort; NULL = backend default
     ]
 
 

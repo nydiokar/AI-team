@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Security, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.core import observability
 
@@ -42,6 +42,7 @@ from src.core import observability
 _REASON_STATUS = {
     "unknown_backend": 400,
     "unknown_model": 400,
+    "unknown_effort": 400,
     "invalid_repo_path": 400,
     "session_not_found": 404,
     "not_closed": 409,
@@ -154,6 +155,10 @@ class BindBody(BaseModel):
 
 class ModelBody(BaseModel):
     model: Optional[str] = None
+
+
+class EffortBody(BaseModel):
+    effort: Optional[str] = Field(default=None, max_length=16)
 
 
 class ApprovalRequestBody(BaseModel):
@@ -1191,6 +1196,29 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
 
+    @app.post("/api/sessions/{session_id}/effort", dependencies=[Depends(_require_auth)])
+    async def api_set_effort(session_id: str, request: Request) -> JSONResponse:
+        max_bytes = 256
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > max_bytes:
+                    raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
+            except ValueError:
+                raise HTTPException(status_code=400, detail={"ok": False, "reason": "bad_content_length"})
+        raw = await request.body()
+        if len(raw) > max_bytes:
+            raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
+        try:
+            body = EffortBody.model_validate_json(raw)
+        except Exception:
+            raise HTTPException(status_code=422, detail={"ok": False, "reason": "invalid_effort"})
+        result = orchestrator.session_service.set_effort(session_id, body.effort)
+        env = _command_envelope(result)
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
+        return JSONResponse(env)
+
     # --- approvals (Move H) — durable approval gate -----------------------
 
     def _approval_service():
@@ -1373,17 +1401,18 @@ def build_control_api(orchestrator) -> FastAPI:
         backend: Optional[str] = Query(default=None),
     ) -> JSONResponse:
         """Model catalog for a backend (or all backends). Drives the web model picker
-        (parity with Telegram /model). Static catalog from config/models.py."""
-        from config.models import BACKEND_MODELS, options as _options
+        (parity with Telegram /model). Codex is discovered from its local CLI."""
+        from config.models import BACKEND_MODELS, available_options as _options
         if backend:
             opts = _options(backend)
             return JSONResponse({
                 "backend": backend,
-                "models": [{"name": o.name, "is_default": o.is_default} for o in opts],
+                "models": [{"name": o.name, "is_default": o.is_default, "efforts": list(o.supported_efforts or [])} for o in opts],
             })
         result = {}
-        for be, opts_list in BACKEND_MODELS.items():
-            result[be] = [{"name": o.name, "is_default": o.is_default} for o in opts_list]
+        for be in BACKEND_MODELS:
+            opts_list = _options(be)
+            result[be] = [{"name": o.name, "is_default": o.is_default, "efforts": list(o.supported_efforts or [])} for o in opts_list]
         return JSONResponse({"models": result})
 
     @app.post("/api/sessions/{session_id}/upload", dependencies=[Depends(_require_auth)])

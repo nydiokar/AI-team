@@ -188,6 +188,7 @@ class Session:
     machine_id: str = ""
     backend_session_id: str = ""        # native session ID returned by the backend
     model: Optional[str] = None         # picked model name; None = use backend default
+    effort: Optional[str] = None        # thinking/reasoning effort; None = backend default
     last_task_id: str = ""
     last_artifact_path: str = ""
     last_summary: str = ""

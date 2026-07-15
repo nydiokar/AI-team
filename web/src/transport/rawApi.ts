@@ -20,6 +20,7 @@ export interface RawSessionView {
   /** Native session id the backend returned (resume key) — "" when not captured. */
   backend_session_id: string;
   model: string | null;
+  effort: string | null;
   /** The backend's default model — shown when `model` is null. */
   default_model: string | null;
   last_task_id: string;
@@ -242,6 +243,7 @@ export interface RawProject {
 export interface RawModelOption {
   name: string;
   is_default: boolean;
+  efforts?: string[];
 }
 
 // POST /api/sessions/{id}/upload (multipart) → RawUploadResult

@@ -243,8 +243,8 @@ class SessionService:
         """Pin (or clear) a session's model — extraction of the Telegram /model set path.
 
         Resolves ``model`` via ``config.models.validate(backend, model)``. For
-        non-advisory backends an unresolved name is rejected (``unknown_model``);
-        advisory backends pass the value through. A falsy ``model`` clears to default
+        Claude rejects unresolved names (``unknown_model``); Codex and OpenCode
+        pass the value through. A falsy ``model`` clears to default
         (None). Applies on the next turn. Picker UI / labels stay in the transport.
         """
         s = self.store.get(session_id)
@@ -259,6 +259,19 @@ class SessionService:
         if resolved is None and not is_advisory(s.backend):
             return CommandResult(False, reason="unknown_model", session=s)
         s.model = resolved
+        self.store.save(s)
+        return CommandResult(True, session=s)
+
+    def set_effort(self, session_id: str, effort: Optional[str]) -> CommandResult:
+        """Pin or clear the backend thinking/reasoning effort for a session."""
+        s = self.store.get(session_id)
+        if not s:
+            return CommandResult(False, reason="session_not_found")
+        from config.models import validate_effort
+        resolved = validate_effort(s.backend, effort)
+        if effort and resolved is None:
+            return CommandResult(False, reason="unknown_effort", session=s)
+        s.effort = resolved
         self.store.save(s)
         return CommandResult(True, session=s)
 

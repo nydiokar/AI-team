@@ -394,6 +394,16 @@ export const api = {
     );
   },
 
+  /** POST /api/sessions/{id}/effort — set persistent thinking effort. */
+  async setEffort(token: string, sessionId: string, effort: string | null): Promise<CommandEnvelope> {
+    return post<CommandEnvelope>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/effort`,
+      token,
+      { effort },
+      newIdempotencyKey(),
+    );
+  },
+
   /** POST /api/sessions/{id}/inspect — run a repo inspection op routed to the owning node. */
   async inspectSession(
     token: string,

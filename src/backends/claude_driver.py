@@ -404,12 +404,16 @@ class _SDKSession:
         model: Optional[str],
         proc_env: Dict[str, str],
         *,
+        effort: Optional[str] = None,
+        resume: Optional[str] = None,
         system_prompt: Optional[Dict[str, object]] = None,
         allowed_tools: Optional[List[str]] = None,
     ):
         self.session_key = session_key
         self.cwd = cwd
         self.model = model
+        self.effort = effort
+        self.resume = resume
         self.proc_env = proc_env
         # [A38] Role-boot injection: when set (manager session, flag ON), the
         # options build appends the role's system_prompt and uses the pre-scoped
@@ -476,6 +480,8 @@ class _SDKSession:
             permission_mode="bypassPermissions",
             env={k: v for k, v in self.proc_env.items() if k not in os.environ},
             **({"model": self.model} if self.model else {}),
+            **({"effort": self.effort} if self.effort else {}),
+            **({"resume": self.resume} if self.resume else {}),
             **({"system_prompt": self.system_prompt} if self.system_prompt else {}),
         )
 
@@ -874,11 +880,18 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         self,
         session: Session,
         model: Optional[str],
+        effort: Optional[str],
         proc_env: Dict[str, str],
     ) -> _SDKSession:
         key = session.session_id
+        resume_id: Optional[str] = None
         with self._lock:
             existing = self._sessions.get(key)
+            if existing is not None and existing.effort != effort:
+                resume_id = existing.backend_session_id or getattr(session, "backend_session_id", "") or None
+                existing.close()
+                self._sessions.pop(key, None)
+                existing = None
             if existing is not None and existing._closed:
                 # A prior turn force-closed this session (its interrupt never
                 # landed — see _SDKSession.cancel_inflight). Handing it to the
@@ -892,6 +905,8 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 system_prompt, allowed_tools = self._role_boot(session)
                 sdk_sess = _SDKSession(
                     key, session.repo_path, model, proc_env,
+                    effort=effort,
+                    resume=resume_id,
                     system_prompt=system_prompt, allowed_tools=allowed_tools,
                 )
                 sdk_sess._on_proactive = self._on_proactive
@@ -904,15 +919,15 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             return self._sessions.pop(session_key, None)
 
     def start_session(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._run_turn(session, message, model=model, proc_env=proc_env or {}, telemetry_context=telemetry_context)
+        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
 
     def send_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
-        return self._run_turn(session, message, model=model, proc_env=proc_env or {}, telemetry_context=telemetry_context)
+        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
 
-    def _run_turn(self, session: Session, message: str, *, model: Optional[str], proc_env: Dict[str, str], telemetry_context=None) -> ExecutionResult:
+    def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None) -> ExecutionResult:
         start = time.time()
         try:
-            sdk_sess = self._get_or_create(session, model, proc_env)
+            sdk_sess = self._get_or_create(session, model, effort, proc_env)
             session.driver_type = "sdk"
             # Build a lightweight progress callback so the SDK message loop can
             # emit task_activity events in real time. IDs are passed explicitly
@@ -1068,6 +1083,7 @@ class ClaudePrintResumeDriver(ClaudeDriver):
             session_id=session.backend_session_id or str(uuid.uuid4()),
             session_key=session.session_id,
             model=model,
+            effort=getattr(session, "effort", None),
             proc_env=proc_env or {},
         )
 
@@ -1082,6 +1098,7 @@ class ClaudePrintResumeDriver(ClaudeDriver):
             session_id=None,
             session_key=session.session_id,
             model=model,
+            effort=getattr(session, "effort", None),
             proc_env=proc_env or {},
         )
 
@@ -1115,13 +1132,14 @@ class ClaudePrintResumeDriver(ClaudeDriver):
             session_id=None,
             session_key=None,
             model=model,
+            effort=None,
             proc_env=proc_env or {},
         )
 
     def driver_type(self) -> str:
         return "print_resume"
 
-    def _build_cmd(self, resume_id: Optional[str], session_id: Optional[str], model: Optional[str] = None) -> List[str]:
+    def _build_cmd(self, resume_id: Optional[str], session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None) -> List[str]:
         tools = _session_allowed_tools()
 
         if resume_id:
@@ -1147,6 +1165,8 @@ class ClaudePrintResumeDriver(ClaudeDriver):
 
         if model:
             cmd.extend(["--model", model])
+        if effort:
+            cmd.extend(["--effort", effort])
 
         cmd.extend(["--allowedTools", ",".join(tools)])
         return cmd
@@ -1179,6 +1199,7 @@ class ClaudePrintResumeDriver(ClaudeDriver):
         session_id: Optional[str],
         session_key: Optional[str],
         model: Optional[str],
+        effort: Optional[str],
         proc_env: Dict[str, str],
     ) -> ExecutionResult:
         start = time.time()
@@ -1204,7 +1225,7 @@ class ClaudePrintResumeDriver(ClaudeDriver):
                 hard_cap_sec = inactivity_sec * 4
             deadline = start + hard_cap_sec
 
-            cmd = self._build_cmd(resume_id, session_id, model)
+            cmd = self._build_cmd(resume_id, session_id, model, effort)
             proc: Optional[subprocess.Popen] = None
             try:
                 proc = subprocess.Popen(
@@ -1539,4 +1560,3 @@ def build_driver(driver_type: str = "auto") -> ClaudeDriver:
     # driver_type == "print_resume" (explicit legacy request)
     logger.info("event=driver_selected driver=print_resume (explicit)")
     return ClaudePrintResumeDriver()
-

@@ -77,6 +77,7 @@ export interface Session {
   /** True when opState needs a human (waiting_for_input/approval, failed). */
   needsAttention: boolean;
   model: string | null;
+  effort: string | null;
   /** The backend's default model — shown when `model` is null. */
   defaultModel: string | null;
   lastTaskId: string | null;
