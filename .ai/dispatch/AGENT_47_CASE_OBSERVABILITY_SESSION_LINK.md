@@ -46,4 +46,10 @@ working, per turn.
 A worker session joining a Case writes a durable flow_links(entity_type='session', role='worker') row (idempotent) so the Case graph shows the worker session and its tasks distinct from the manager's own turns; the Work read-model / Case view surfaces manager session + worker session(s) + their turns as one navigable unit; plain-pytest tests cover the session-link write, the read-model surfacing, and idempotency and pass; one feat branch + PR opened (NOT merged).
 
 ## Live log
-- *(unbuilt)*
+- **2026-07-17 — BUILT via live Manager loop → PR #25 (OPEN, not merged).** Case `62bb3a…`, worker
+  rework cycle: first A47 attempt → **`review.rework_requested`** → fix → `review.accepted`.
+  `src/orchestrator.py` (+25) writes the `flow_links(session, role='worker')` row on join; **also
+  fixed Finding A** — `src/worker/agent.py` adds `role_boot` to the `_make_session_from_payload`
+  allowlist (the node round-trip drop) with a dedicated `tests/test_session_payload_roundtrip.py`
+  regression. 178+59 lines of tests. **NOTE: not deployed** — this run's own graph still shows workers
+  only as `sessions` rows (fix lands for future cases after #25 merges + gateway restart).
