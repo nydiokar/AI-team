@@ -88,6 +88,7 @@ def test_claude_adapter_appends_to_preset():
         "mcp__manager__get_case",
         "mcp__manager__close_case",
         "mcp__manager__record_review",
+        "mcp__manager__release_worker",
     ]
 
 

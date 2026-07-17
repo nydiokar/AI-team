@@ -25,6 +25,7 @@ _PROFILE_TOOLS: Dict[str, List[str]] = {
         "mcp__manager__get_case",
         "mcp__manager__close_case",
         "mcp__manager__record_review",
+        "mcp__manager__release_worker",
     ],
 }
 

@@ -298,7 +298,14 @@ def test_resume_reuses_same_case(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# close_case also closes joined WORKER sessions (§7 lifecycle gap, PR #19 deferred)
+# [A48] Worker-session closure is a Manager DECISION, not a Case-close side-effect.
+#
+# Default policy (keep-warm): close_case CLEARS a joined worker's Case affiliation
+# but does NOT close its session process — the worker stays warm/reusable so a
+# follow-up dispatch is a cheap resume, not a cold token-burn. The legacy PR #22
+# auto-close is retained ONLY behind the explicit off-by-default
+# ``close_worker_sessions=True`` opt-in (its guard semantics are covered below via
+# that opt-in so the retained method keeps real coverage).
 # ---------------------------------------------------------------------------
 
 class _FakeSessionService:
@@ -315,7 +322,44 @@ class _FakeSessionService:
         self.closed.append(session_id)
 
 
-def test_orch_close_case_closes_joined_worker_session(tmp_path, monkeypatch):
+def test_orch_close_case_keeps_worker_session_warm_by_default(tmp_path, monkeypatch):
+    """[A48] The keep-warm contract: on Case close a joined worker session loses its
+    Case affiliation (current_case_id/case_role → None) but its PROCESS stays alive —
+    ``_close_worker_session_on_case_close`` is NOT invoked on the automatic path."""
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    store = _StubStore()
+    orch.session_store = store
+    fake_svc = _FakeSessionService()
+    orch.session_service = fake_svc
+    orch._backends = {}
+
+    # Spy: assert the close helper is never reached on the default path.
+    close_calls = []
+    monkeypatch.setattr(
+        orch, "_close_worker_session_on_case_close",
+        lambda sid, cid: close_calls.append(sid),
+    )
+
+    fid = db.open_case("obj", "sess-manager", role="manager")
+    store.save(_session("sess-manager", case_id=fid, role="manager"))
+    db.create_flow_link(fid, "session", "sess-worker", "worker", created_by="manager")
+    store.save(_session("sess-worker", case_id=fid, role="worker"))
+
+    res = orch.close_case(fid, actor="operator")
+    assert res == {"ok": True, "closed": True, "reason": None}
+    # Auto-close path is NOT taken — the worker stays warm.
+    assert close_calls == []
+    assert fake_svc.closed == []
+    # …but its Case affiliation IS cleared so it is not dangling on the closed Case.
+    worker = store.get("sess-worker")
+    assert worker.current_case_id is None and worker.case_role is None
+
+
+def test_orch_close_case_opt_in_closes_joined_worker_session(tmp_path, monkeypatch):
+    """[A48] The retained legacy auto-close still works when explicitly opted into via
+    ``close_worker_sessions=True`` — it closes the joined worker and clears affiliation."""
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -330,7 +374,7 @@ def test_orch_close_case_closes_joined_worker_session(tmp_path, monkeypatch):
     db.create_flow_link(fid, "session", "sess-worker", "worker", created_by="manager")
     store.save(_session("sess-worker", case_id=fid, role="worker"))
 
-    res = orch.close_case(fid, actor="operator")
+    res = orch.close_case(fid, actor="operator", close_worker_sessions=True)
     assert res == {"ok": True, "closed": True, "reason": None}
     assert fake_svc.closed == ["sess-worker"]
     # Affiliation is still cleared afterward.
@@ -338,7 +382,8 @@ def test_orch_close_case_closes_joined_worker_session(tmp_path, monkeypatch):
     assert worker.current_case_id is None and worker.case_role is None
 
 
-def test_orch_close_case_does_not_close_manager_session(tmp_path, monkeypatch):
+def test_orch_close_case_opt_in_does_not_close_manager_session(tmp_path, monkeypatch):
+    """Even under the opt-in, only worker-role sessions are closed — never the Manager's."""
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -351,11 +396,11 @@ def test_orch_close_case_does_not_close_manager_session(tmp_path, monkeypatch):
     fid = db.open_case("obj", "sess-manager", role="manager")
     store.save(_session("sess-manager", case_id=fid, role="manager"))
 
-    orch.close_case(fid, actor="operator")
+    orch.close_case(fid, actor="operator", close_worker_sessions=True)
     assert "sess-manager" not in fake_svc.closed
 
 
-def test_orch_close_case_worker_close_isolated_from_failures(tmp_path, monkeypatch):
+def test_orch_close_case_opt_in_worker_close_isolated_from_failures(tmp_path, monkeypatch):
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -372,14 +417,14 @@ def test_orch_close_case_worker_close_isolated_from_failures(tmp_path, monkeypat
     db.create_flow_link(fid, "session", "sess-worker-2", "worker", created_by="manager")
     store.save(_session("sess-worker-2", case_id=fid, role="worker"))
 
-    res = orch.close_case(fid, actor="operator")
+    res = orch.close_case(fid, actor="operator", close_worker_sessions=True)
     # The first worker's close_session raised — the second must STILL be
     # closed, and close_case must not raise or abort.
     assert fake_svc.closed == ["sess-worker-2"]
     assert res == {"ok": True, "closed": True, "reason": None}
 
 
-def test_orch_close_case_does_not_close_worker_moved_to_another_case(tmp_path, monkeypatch):
+def test_orch_close_case_opt_in_does_not_close_worker_moved_to_another_case(tmp_path, monkeypatch):
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
     orch = _orch()
@@ -395,5 +440,5 @@ def test_orch_close_case_does_not_close_worker_moved_to_another_case(tmp_path, m
     # Worker session already re-affiliated to a different Case.
     store.save(_session("sess-worker", case_id="other-case", role="worker"))
 
-    orch.close_case(fid, actor="operator")
+    orch.close_case(fid, actor="operator", close_worker_sessions=True)
     assert fake_svc.closed == []
