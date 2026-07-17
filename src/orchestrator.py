@@ -1780,8 +1780,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                 row = db.get_flow_run(join_case_id)
                 if row is not None and (row.get("status") or "") not in db._CLOSED_STATUSES:
                     self._stash_task_meta(task, self._CASE_ID_META_KEY, join_case_id)
+                    # [A47] Mark the worker's task link `created_by="manager"` so the
+                    # Case graph tells a dispatched WORKER's task apart from the
+                    # Manager's own-turn attach (branch B, created_by="system") — the
+                    # two were previously indistinguishable role="task" links. Role
+                    # stays "task" (consumers/queries unchanged); created_by carries
+                    # the honest provenance the read-model already surfaces.
                     self._record_flow_link(
-                        join_case_id, "task", task.id, "task", created_by="system",
+                        join_case_id, "task", task.id, "task", created_by="manager",
                     )
                     self._record_flow_event(
                         join_case_id, "task.attached", "system",
@@ -1791,6 +1797,17 @@ class TaskOrchestrator(ITaskOrchestrator):
                     if session_id:
                         self._set_session_case_affiliation(
                             session_id, join_case_id, role="worker",
+                        )
+                        # [A47] Durable session→Case link so the worker SESSION is a
+                        # first-class node in the Case graph (mirrors the manager
+                        # session link `open_case` writes). Idempotent on the unique
+                        # key (flow_run_id, entity_type, entity_id, role) ⇒ a repeat
+                        # join of the same worker session does NOT duplicate the row.
+                        # Best-effort (via _record_flow_link) so a link-write failure
+                        # never aborts the join.
+                        self._record_flow_link(
+                            join_case_id, "session", session_id, "worker",
+                            created_by="manager",
                         )
                     return None
 
