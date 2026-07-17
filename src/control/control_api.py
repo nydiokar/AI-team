@@ -108,6 +108,10 @@ class CreateSessionBody(BaseModel):
     repo_path: str
     model: Optional[str] = None
     node_id: Optional[str] = None
+    # [Worker role] Explicit opt-in role-boot signal ('worker'). Absent ⇒ tier-0
+    # (byte-identical). dispatch_worker(role='worker') threads it to here so the
+    # created worker session boots role-ful; nothing else sets it.
+    role_boot: Optional[str] = None
 
 
 class ManagerInvokeBody(BaseModel):
@@ -1026,6 +1030,7 @@ def build_control_api(orchestrator) -> FastAPI:
                 model=body.model,
                 node_id=body.node_id or "__local__",
                 origin=SessionOrigin(channel="web", kind="user"),
+                role_boot=body.role_boot,
                 bind_chat=False,
             )
             env = _command_envelope(result)

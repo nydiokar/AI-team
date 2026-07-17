@@ -46,8 +46,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.interfaces import ExecutionResult, Session
 from src.core.process_utils import terminate_many_popen
-from src.core.roles import MANAGER_ROLE_ID, load_manager_role
-from src.backends.claude_role_adapter import claude_system_prompt, manager_tool_names
+from src.core.roles import MANAGER_ROLE_ID, WORKER_ROLE_ID, load_manager_role, load_worker_role
+from src.backends.claude_role_adapter import claude_system_prompt, manager_tool_names, worker_tool_names
 
 try:
     from claude_agent_sdk import CLIConnectionError as _CLIConnectionError
@@ -376,6 +376,11 @@ def _session_allowed_tools(role: Optional[str] = None) -> List[str]:
     if _manager_role_enabled():
         if role == MANAGER_ROLE_ID and _mcp_manager_configured():
             tools.extend(manager_tool_names())
+        elif role == WORKER_ROLE_ID:
+            # A worker's grant is the DEFAULTS only — worker_tool_names() is
+            # honestly empty and requires no manager server. Extending with it
+            # is a no-op today; it keeps the worker on the same seam as manager.
+            tools.extend(worker_tool_names())
     elif _manager_tools_enabled() and _mcp_manager_configured():
         tools.extend(["mcp__manager__dispatch_worker", "mcp__manager__wait_for_worker"])
     return tools
@@ -863,15 +868,24 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         try:
             if not _manager_role_enabled():
                 return None, None
-            if getattr(session, "case_role", None) != MANAGER_ROLE_ID:
-                return None, None
-            role = load_manager_role()
-            system_prompt = claude_system_prompt(role)
-            allowed_tools = _session_allowed_tools(role=MANAGER_ROLE_ID)
-            return system_prompt, allowed_tools
+            # Manager: role-ful when the session's Case role is 'manager'.
+            if getattr(session, "case_role", None) == MANAGER_ROLE_ID:
+                role = load_manager_role()
+                return claude_system_prompt(role), _session_allowed_tools(role=MANAGER_ROLE_ID)
+            # Worker: EXPLICIT opt-in ONLY, via the session's `role_boot` signal.
+            # `case_role == 'worker'` is deliberately NOT sufficient — EVERY
+            # Case-joined worker carries that today and must stay tier-0
+            # (byte-identical role-less boot). Promoting on `case_role` would
+            # auto-promote every joined worker; the separate `role_boot` field is
+            # the opt-in threaded from dispatch_worker(role='worker'). Absent ⇒
+            # default path below.
+            if getattr(session, "role_boot", None) == WORKER_ROLE_ID:
+                role = load_worker_role()
+                return claude_system_prompt(role), _session_allowed_tools(role=WORKER_ROLE_ID)
+            return None, None
         except Exception as e:
             logger.warning(
-                "event=manager_role_boot_failed session_id=%s err=%s",
+                "event=role_boot_failed session_id=%s err=%s",
                 getattr(session, "session_id", "?"), e,
             )
             return None, None

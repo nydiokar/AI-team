@@ -13,10 +13,14 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from src.core.roles import AgentRoleDefinition, MANAGER_TOOL_PROFILE
+from src.core.roles import AgentRoleDefinition, MANAGER_TOOL_PROFILE, WORKER_TOOL_PROFILE
 
 # Concrete Claude Code MCP tool names granted by each declared tool profile.
 # `manager_v1` = the minimum Case-aware surface the M3.1 vertical slice drives.
+# `worker_v1` = EMPTY on purpose: a Worker gets NO extra MCP grant beyond the
+# driver defaults. It must NOT hold the manager surface (no dispatch_worker /
+# open_case / close_case / record_review). An empty list is the honest grant —
+# a worker needs Read/Edit/Bash/etc. (the defaults), nothing more.
 _PROFILE_TOOLS: Dict[str, List[str]] = {
     MANAGER_TOOL_PROFILE: [
         "mcp__manager__dispatch_worker",
@@ -26,6 +30,7 @@ _PROFILE_TOOLS: Dict[str, List[str]] = {
         "mcp__manager__close_case",
         "mcp__manager__record_review",
     ],
+    WORKER_TOOL_PROFILE: [],
 }
 
 
@@ -46,3 +51,13 @@ def manager_tool_names() -> List[str]:
     not depend on loading the role artifact.
     """
     return list(_PROFILE_TOOLS[MANAGER_TOOL_PROFILE])
+
+
+def worker_tool_names() -> List[str]:
+    """Static ``worker_v1`` tool names — mirrors :func:`manager_tool_names`.
+
+    Honestly EMPTY: a Worker gets no extra MCP tools beyond the driver defaults.
+    Kept as an explicit resolver (not an inline ``[]``) so the worker grant has
+    the same seam as the manager grant and can grow if a real need appears.
+    """
+    return list(_PROFILE_TOOLS[WORKER_TOOL_PROFILE])
