@@ -416,3 +416,6 @@ C:\\*
 *.tsbuildinfo
 
 tests/fixtures/telemetry/
+# crash coredumps (e.g. codex app-server SIGSEGV)
+core
+core.*
