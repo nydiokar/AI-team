@@ -3,6 +3,24 @@
 **Last Updated:** 2026-07-14
 **Active branch:** `main` — M2 Work Control Substrate + M3 Phase 3.0 merged; `HARNESS_FLOW_DRIVE` **ON** live.
 
+> **🟢 STATUS 2026-07-17 — LOOP QUALITY VERIFIED LIVE (one Manager, many workers, real rework, manager-decided closure).**
+> Cleanup: `core` coredump removed+gitignored; **PRs #22/#23 merged** (gateway restarted, flags
+> re-probed live). Then a live Manager (`df8b7e024864`) ran TWO Cases across THREE operator turns:
+> Case `9f3d34…` shipped the Worker role layer (**PR #24**, A45); Case `62bb3a…` shipped Case
+> observability (**PR #25**, A47 — incl. the Finding-A `role_boot` node round-trip fix + regression
+> test) and Manager-decided worker closure (**PR #26**, A48). **Proven live:** continuity across
+> operator turns (warm resume, same `backend_session_id`); ONE Manager driving 3 worker tasks; a
+> genuine `review.rework_requested`→fix→`review.accepted`; sequential gating; **manager-decided
+> `flow.closed`**; worker sessions left WARM (not auto-closed). PRs #24/#25/#26 OPEN (op-merge).
+> **⚠️ OPERATIONAL FINDING — quota economics:** the loop hit the Claude account **session/quota limit
+> mid-run** ("resets 4:10pm") — Manager+workers share ONE account, so run length × worker count is
+> gated by the quota window, not just prompt quality. Resumed cleanly after reset. This is the M3-spec
+> "session-cost economics" question, now observed. **⚠️ Also: workers used `cwd=repo` (the live
+> checkout) as their tree — future runs should use a separate git worktree, not the gateway's own dir.**
+> **⚠️ Not yet observable in THIS run's graph:** A47's fix isn't deployed, so the just-run workers show
+> only as `sessions` rows, and the two warm workers (`157c1d0eac95`,`8033ec60ecb3`) carry dangling
+> `current_case_id=62bb3a`; both resolve for future cases once #25/#26 merge + gateway restarts.
+>
 > **🟢 STATUS 2026-07-14 — THE FOUR SURVIVABILITY PRs ARE MERGED + PROVEN LIVE (A44).**
 > **PRs #18 (carrier role), #19 (observable workers), #20 (native time), #21 (multi-case session)
 > ALL MERGED to `main`** (`cd7f358`, in dependency order #18→#19→#20→#21; dry-run merge was

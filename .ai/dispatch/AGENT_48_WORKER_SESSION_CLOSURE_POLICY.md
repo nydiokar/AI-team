@@ -41,4 +41,10 @@ Closure of a worker session becomes an explicit Manager decision; the default is
 close_case clears a worker session's Case affiliation but no longer closes the session process by default (auto-close neutralized/gated); a Manager-driven close tool/decision closes exactly the named worker session on explicit request; a warm (post-Case) worker session can accept a follow-up turn without a cold re-open; manager.md instructs keep-warm + close-only-by-decision; plain-pytest tests cover default-no-close, explicit-close, and warm-reuse and pass; one feat branch + PR opened (NOT merged).
 
 ## Live log
-- *(unbuilt)*
+- **2026-07-17 — BUILT via live Manager loop → PR #26 (OPEN, not merged).** Case `62bb3a…`, dispatched
+  after A47 accepted; `review.accepted`. `scripts/mcp_manager.py` (+47) adds a `release_worker`
+  Manager-driven close tool; `src/orchestrator.py` (+17) neutralizes the auto-close (clear affiliation,
+  leave warm); `docs/harness/roles/manager.md` (+9) keep-warm-until-decided instruction; tests in
+  `test_case_closure.py`/`test_mcp_manager.py`. **NOT deployed** — the two warm worker sessions from
+  this run (`157c1d0eac95`, `8033ec60ecb3`) still carry `current_case_id=62bb3a` (closed) as dangling
+  affiliation; #26's clear-on-close lands for future cases after merge + restart.
