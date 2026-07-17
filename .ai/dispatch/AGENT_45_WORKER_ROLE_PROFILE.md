@@ -72,4 +72,34 @@ the worker's summary), `record_review` accepted|rework_requested with bounded fi
 until the profile is real quality — not accept the first draft reflexively.
 
 ## Live log
-- *(to be filled by the Manager loop)*
+- **2026-07-17 — RAN & PASSED (deploy proof of PRs #22/#23 + real deliverable).** Live Manager
+  invoked via `/api/manager` (in-gateway `__local__`), Case `9f3d34c69c454653b3bc264ca3e833b5`,
+  Manager session `df8b7e024864`. Timeline: `flow.created`→worker dispatched (`task_05bf908a`)→
+  `task.finished` (11:15:58)→`review.accepted` (11:17:51)→`flow.closed` (11:18:50). **One worker,
+  one review round (clean accept).** Deliverable is real: **PR #24** (`feat/worker-role-profile`,
+  11 files +397/−12) — `worker.md`, `load_worker_role()`, adapter wiring, opt-in tier selector
+  threaded through interfaces/control_api/session_service/session_store/db(mig-26 `role_boot`)/
+  claude_driver; `tests/test_worker_role.py` 12/12 green. **PR #24 OPEN, NOT merged** (merge-to-main
+  escalated to operator).
+- **Second-pair-of-eyes review (independent, post-close) — SHIP-WITH-NITS.** Verified: byte-identical
+  -when-off HOLDS (default tier-0 path returns `(None,None)`; worker branch double-gated on
+  `_manager_role_enabled()` AND `role_boot=='worker'`); mig-26 additive/safe (INSERT-seeded, excluded
+  from ON CONFLICT upsert); scope creep justified (the 6 extra files are the minimal `role_boot`
+  thread); `worker.md` mirrors `manager.md` rigor incl. the A43 cross-layer clause; tests non-vacuous.
+- **🔴 FINDING A (in PR #24, latent) — node-pinned role-ful worker boots role-less.**
+  `src/worker/agent.py:467` `_make_session_from_payload` copies an explicit attr allowlist that omits
+  `role_boot` → `dispatch_worker(role='worker', node_id=X)` drops the role on the node (same class as
+  the A43 carrier-coupling defect for `case_role`). Only affects the opt-in `role='worker'`+`node_id`
+  combo (not default; degrades safely to role-less; `__local__` path works). The single-pass Manager
+  review missed it — fix `agent.py:467` + add a node-payload round-trip test before relying on it.
+- **🔴 FINDING B (live-surfaced integration defect in MERGED #22/#23, NOT in PR #24) — §7 worker-session
+  close is INERT for the real observable-session path.** The worker session `717441320dcc`
+  (`case_role='worker'`, `current_case_id=<case>`) opened correctly (#23 works — no one-off fallback),
+  but joined the Case only as a **task** flow_link, never as `flow_links(entity_type='session',
+  role='worker')`. PR #22's `_close_worker_session_on_case_close` scans *session*-type links → never
+  saw it → **the worker session is still `awaiting_input` with `current_case_id` pointing at the
+  CLOSED Case.** Unit tests missed this because #22's tests hand-create session links and #23's tests
+  only assert session creation — nothing covers the seam. **This is a real follow-up job:** either
+  `dispatch_worker`/admission must write the session flow_link, or `close_case` must also close
+  worker sessions via `sessions.current_case_id == case AND case_role='worker'` (not only via
+  session flow_links). Stray session `717441320dcc` remains open as the live reproduction.
