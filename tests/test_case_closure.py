@@ -295,3 +295,105 @@ def test_resume_reuses_same_case(tmp_path, monkeypatch):
 
     assert len(db.list_flow_runs()) == 1  # no replacement Case
     assert len(db.list_flow_links(flow_run_id=fid, entity_type="task", role="task")) == 2
+
+
+# ---------------------------------------------------------------------------
+# close_case also closes joined WORKER sessions (§7 lifecycle gap, PR #19 deferred)
+# ---------------------------------------------------------------------------
+
+class _FakeSessionService:
+    """Records which session_ids close_session() was called with; can be told
+    to raise for specific ids to prove per-session isolation."""
+
+    def __init__(self, raise_for=None):
+        self.closed = []
+        self._raise_for = set(raise_for or ())
+
+    def close_session(self, session_id, *, backends=None):
+        if session_id in self._raise_for:
+            raise RuntimeError("boom")
+        self.closed.append(session_id)
+
+
+def test_orch_close_case_closes_joined_worker_session(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    store = _StubStore()
+    orch.session_store = store
+    fake_svc = _FakeSessionService()
+    orch.session_service = fake_svc
+    orch._backends = {}
+
+    fid = db.open_case("obj", "sess-manager", role="manager")
+    store.save(_session("sess-manager", case_id=fid, role="manager"))
+    db.create_flow_link(fid, "session", "sess-worker", "worker", created_by="manager")
+    store.save(_session("sess-worker", case_id=fid, role="worker"))
+
+    res = orch.close_case(fid, actor="operator")
+    assert res == {"ok": True, "closed": True, "reason": None}
+    assert fake_svc.closed == ["sess-worker"]
+    # Affiliation is still cleared afterward.
+    worker = store.get("sess-worker")
+    assert worker.current_case_id is None and worker.case_role is None
+
+
+def test_orch_close_case_does_not_close_manager_session(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    store = _StubStore()
+    orch.session_store = store
+    fake_svc = _FakeSessionService()
+    orch.session_service = fake_svc
+    orch._backends = {}
+
+    fid = db.open_case("obj", "sess-manager", role="manager")
+    store.save(_session("sess-manager", case_id=fid, role="manager"))
+
+    orch.close_case(fid, actor="operator")
+    assert "sess-manager" not in fake_svc.closed
+
+
+def test_orch_close_case_worker_close_isolated_from_failures(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    store = _StubStore()
+    orch.session_store = store
+    fake_svc = _FakeSessionService(raise_for={"sess-worker-1"})
+    orch.session_service = fake_svc
+    orch._backends = {}
+
+    fid = db.open_case("obj", "sess-manager", role="manager")
+    store.save(_session("sess-manager", case_id=fid, role="manager"))
+    db.create_flow_link(fid, "session", "sess-worker-1", "worker", created_by="manager")
+    store.save(_session("sess-worker-1", case_id=fid, role="worker"))
+    db.create_flow_link(fid, "session", "sess-worker-2", "worker", created_by="manager")
+    store.save(_session("sess-worker-2", case_id=fid, role="worker"))
+
+    res = orch.close_case(fid, actor="operator")
+    # The first worker's close_session raised — the second must STILL be
+    # closed, and close_case must not raise or abort.
+    assert fake_svc.closed == ["sess-worker-2"]
+    assert res == {"ok": True, "closed": True, "reason": None}
+
+
+def test_orch_close_case_does_not_close_worker_moved_to_another_case(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    store = _StubStore()
+    orch.session_store = store
+    fake_svc = _FakeSessionService()
+    orch.session_service = fake_svc
+    orch._backends = {}
+
+    fid = db.open_case("obj", "sess-manager", role="manager")
+    store.save(_session("sess-manager", case_id=fid, role="manager"))
+    db.create_flow_link(fid, "session", "sess-worker", "worker", created_by="manager")
+    # Worker session already re-affiliated to a different Case.
+    store.save(_session("sess-worker", case_id="other-case", role="worker"))
+
+    orch.close_case(fid, actor="operator")
+    assert fake_svc.closed == []
