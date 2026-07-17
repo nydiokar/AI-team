@@ -50,6 +50,11 @@ def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
     role boot (``_role_boot`` — role prompt + scoped manager tools) off
     ``session.case_role``. Omitting it made a Manager pinned to a node boot as
     a bare, role-less session (the A43 finding) — the whole point of this fix.
+
+    ``role_boot`` MUST travel for the identical reason: it is the Worker-role
+    tier opt-in the driver's ``_role_boot`` reads to apply the Worker role prompt
+    + tools. Dropping it makes a node-pinned role-ful worker boot role-less
+    (same carrier-coupling class as ``case_role``).
     """
     return {
         "session_id": session.session_id,
@@ -70,6 +75,7 @@ def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
         "previous_backend_session_ids": session.previous_backend_session_ids or [],
         "case_role": getattr(session, "case_role", None) or None,
         "current_case_id": getattr(session, "current_case_id", None) or None,
+        "role_boot": getattr(session, "role_boot", None) or None,
     }
 
 
