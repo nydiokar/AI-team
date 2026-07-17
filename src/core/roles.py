@@ -44,6 +44,21 @@ _MANAGER_ROLE_DOC: Path = (
     Path(__file__).resolve().parents[2] / "docs" / "harness" / "roles" / "manager.md"
 )
 
+# --- Worker role constants -------------------------------------------------
+
+WORKER_ROLE_ID: str = "worker"
+WORKER_TOOL_PROFILE: str = "worker_v1"
+
+# A Worker declares NO harness skills yet — its one-task procedure is inlined in
+# the role prompt (worker.md), exactly like the Manager's first loop. This list
+# is intentionally EMPTY rather than aspirational: no `docs/harness/skills/*`
+# package exists for a worker, so none is claimed here.
+WORKER_SKILLS: List[str] = []
+
+_WORKER_ROLE_DOC: Path = (
+    Path(__file__).resolve().parents[2] / "docs" / "harness" / "roles" / "worker.md"
+)
+
 
 class AgentRoleDefinition(BaseModel):
     """A provider-neutral role: stable identity + what it declares it needs.
@@ -100,6 +115,33 @@ def load_manager_role() -> AgentRoleDefinition:
         declared_skills=list(MANAGER_SKILLS),
         tool_profile=MANAGER_TOOL_PROFILE,
         output_contract="ManagerDecision",
+    )
+
+
+def load_worker_role() -> AgentRoleDefinition:
+    """Load the canonical Worker role from ``docs/harness/roles/worker.md``.
+
+    Mirrors :func:`load_manager_role` exactly (same two-branch guard). Raises
+    :class:`FileNotFoundError` with a clear message if the artifact is missing OR
+    empty — a Worker must never boot with an empty identity.
+    """
+    if not _WORKER_ROLE_DOC.is_file():
+        raise FileNotFoundError(
+            f"Worker role profile not found at {_WORKER_ROLE_DOC}; cannot boot a Worker session."
+        )
+    instructions: str = _WORKER_ROLE_DOC.read_text(encoding="utf-8").strip()
+    if not instructions:
+        raise FileNotFoundError(
+            f"Worker role profile at {_WORKER_ROLE_DOC} is empty; cannot boot a Worker session."
+        )
+    return AgentRoleDefinition(
+        role_id=WORKER_ROLE_ID,
+        system_instructions=instructions,
+        declared_skills=list(WORKER_SKILLS),
+        tool_profile=WORKER_TOOL_PROFILE,
+        # Honest description, not a Pydantic model name: no WorkerReport type
+        # exists. See the OUTPUT CONTRACT section of worker.md.
+        output_contract="worker-report: what was done / skipped / failed, with commit SHAs",
     )
 
 

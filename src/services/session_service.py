@@ -61,6 +61,7 @@ class SessionService:
                         node_id: str = "__local__",
                         model: Optional[str] = None,
                         origin: Optional[SessionOrigin] = None,
+                        role_boot: Optional[str] = None,
                         bind_chat: bool = True) -> CommandResult:
         """Faithful extraction of TelegramInterface._create_and_bind_session.
 
@@ -94,6 +95,10 @@ class SessionService:
             s.model = model
         if pin:
             s.machine_id = pin
+        # [Worker role] Stamp the explicit opt-in role-boot signal at create time.
+        # Absent ⇒ None ⇒ tier-0 default (byte-identical). Distinct from case_role.
+        if role_boot:
+            s.role_boot = role_boot
         self.store.save(s)
         if bind_chat and chat_id is not None:
             self.store.bind(chat_id, s.session_id)
