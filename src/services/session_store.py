@@ -288,4 +288,5 @@ class SessionStore:
             previous_backend_session_ids=_parse_list(d.get("previous_backend_session_ids", [])),
             current_case_id=d.get("current_case_id") or None,
             case_role=d.get("case_role") or None,
+            role_boot=d.get("role_boot") or None,
         )

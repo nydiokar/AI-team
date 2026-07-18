@@ -713,7 +713,7 @@ class MeshDB:
                         origin,
                         driver_type, driver_status, cache_health, cache_unhealthy_count,
                         previous_backend_session_ids,
-                        current_case_id, case_role
+                        current_case_id, case_role, role_boot
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
                         :created_at, :updated_at, :machine_id, :backend_session_id, :model,
@@ -724,7 +724,7 @@ class MeshDB:
                         :origin,
                         :driver_type, :driver_status, :cache_health, :cache_unhealthy_count,
                         :previous_backend_session_ids,
-                        :current_case_id, :case_role
+                        :current_case_id, :case_role, :role_boot
                     )
                     ON CONFLICT(session_id) DO UPDATE SET
                         backend             = excluded.backend,
@@ -759,6 +759,10 @@ class MeshDB:
                         -- two columns are owned exclusively by the authoritative
                         -- affiliation seam `set_session_case` (open_case sets, close_case
                         -- clears). The INSERT above still seeds them for a brand-new row.
+                        -- role_boot is likewise INSERT-seeded ONLY: it is a fixed boot
+                        -- decision stamped at session-create time and read-only after, so
+                        -- a later full-upsert of a stale object cannot flip a session's
+                        -- tier. Absent ⇒ NULL ⇒ tier-0 default (byte-identical).
                     """,
                     {
                         "session_id":          session.session_id,
@@ -789,6 +793,7 @@ class MeshDB:
                         "previous_backend_session_ids": json.dumps(getattr(session, "previous_backend_session_ids", None) or []),
                         "current_case_id":       getattr(session, "current_case_id", None) or None,
                         "case_role":             getattr(session, "case_role", None) or None,
+                        "role_boot":             getattr(session, "role_boot", None) or None,
                     },
                 )
         except Exception as e:
@@ -2874,6 +2879,7 @@ def _get_migrations() -> List[tuple]:
                # on close in A37) — replacing the per-read most-recent-link derive.
                # All ADDITIVE + NULLable ⇒ existing rows/writers untouched.
         (25, "ALTER TABLE sessions ADD COLUMN effort TEXT"),  # per-session thinking effort; NULL = backend default
+        (26, "ALTER TABLE sessions ADD COLUMN role_boot TEXT"),  # [Worker role] explicit opt-in role-boot signal; NULL = tier-0 default
     ]
 
 
