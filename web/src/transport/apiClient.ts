@@ -316,10 +316,12 @@ export const api = {
     );
   },
 
-  /** Create a web-origin session (control_api.api_create_session). */
+  /** Create a web-origin session (control_api.api_create_session).
+   *  `roleBoot: "worker"` boots the session with the canonical Worker role
+   *  profile; omit it for a bare (tier-0) session. */
   async createSession(
     token: string,
-    args: { backend: string; repoPath: string; model?: string; nodeId?: string },
+    args: { backend: string; repoPath: string; model?: string; nodeId?: string; roleBoot?: string },
     idempotencyKey: string,
   ): Promise<CommandEnvelope> {
     return post<CommandEnvelope>(
@@ -329,6 +331,38 @@ export const api = {
         backend: args.backend,
         repo_path: args.repoPath,
         model: args.model ?? null,
+        node_id: args.nodeId ?? null,
+        role_boot: args.roleBoot ?? null,
+      },
+      idempotencyKey,
+    );
+  },
+
+  /** Invoke the autonomous Manager loop (control_api.api_manager → POST /api/manager).
+   *  Boots a Case-owning Manager session with the Manager role profile and delivers
+   *  `objective` as its first assignment; the Manager then self-orients from the
+   *  project CLAUDE.md and drives workers. Returns {ok, session_id, case_id, task_id}. */
+  async invokeManager(
+    token: string,
+    args: {
+      objective: string;
+      repoPath: string;
+      backend?: string;
+      model?: string;
+      completionCriteria?: string;
+      nodeId?: string;
+    },
+    idempotencyKey: string,
+  ): Promise<{ ok: boolean; reason?: string; session_id?: string; case_id?: string; task_id?: string }> {
+    return post(
+      `/api/manager`,
+      token,
+      {
+        objective: args.objective,
+        repo_path: args.repoPath,
+        backend: args.backend ?? "claude",
+        model: args.model ?? null,
+        completion_criteria: args.completionCriteria ?? null,
         node_id: args.nodeId ?? null,
       },
       idempotencyKey,

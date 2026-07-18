@@ -8,10 +8,11 @@
  */
 import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Inbox, ChevronDown } from "lucide-react";
+import { Inbox, ChevronDown, Zap } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { WorkCaseRow } from "../components/work/WorkCaseRow";
+import { InvokeManagerSheet } from "../components/work/InvokeManagerSheet";
 import { useWorkList } from "../hooks/useWork";
 import { BUCKET_ORDER, bucketMeta } from "../lib/workPresentation";
 import type { CaseSummary, WorkBucket } from "../domain/work";
@@ -53,6 +54,7 @@ function CaseList({ cases }: { cases: CaseSummary[] }) {
 export function WorkScreen() {
   const { data, isLoading, error } = useWorkList();
   const [closedExpanded, setClosedExpanded] = useState(false);
+  const [invokeOpen, setInvokeOpen] = useState(false);
 
   const grouped = useMemo(() => {
     const groups: Record<WorkBucket, CaseSummary[]> = {
@@ -71,7 +73,20 @@ export function WorkScreen() {
 
   return (
     <div className="pb-8">
-      <CompactTopBar title="Work" subtitle="Cases · read-only operations inbox" />
+      <CompactTopBar
+        title="Work"
+        subtitle="Cases · invoke the Manager to drive work"
+        right={
+          <button
+            onClick={() => setInvokeOpen(true)}
+            className="flex size-9 items-center justify-center rounded-full bg-accent-dim/60 text-accent ring-1 ring-accent/30 hover:bg-accent-dim"
+            aria-label="Invoke Manager"
+          >
+            <Zap className="size-5" />
+          </button>
+        }
+      />
+      {invokeOpen && <InvokeManagerSheet onClose={() => setInvokeOpen(false)} />}
 
       {isLoading && (
         <div className="space-y-3 px-4 pt-4">
