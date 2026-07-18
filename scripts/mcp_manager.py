@@ -223,6 +223,12 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=False)
     node_id = _bounded_text(args.get("node_id"), "node_id", _MAX_ID_CHARS, required=False)
     backend = _bounded_text(args.get("backend"), "backend", _MAX_ID_CHARS, required=False) or "claude"
+    # [Worker role] Explicit, opt-in role signal. When 'worker', the NEW observable
+    # worker session below is stamped with role_boot='worker' so its driver boots
+    # the Worker role (worker.md + worker tools). ABSENT ⇒ a legacy tier-0 worker
+    # (byte-identical). This is DISTINCT from the case_id JOIN, which only sets the
+    # membership marker case_role='worker' — that alone never promotes a worker.
+    role = _bounded_text(args.get("role"), "role", _MAX_ID_CHARS, required=False)
 
     # [DROP-2] Observable worker sessions. A worker must be a REAL, openable session
     # (case_role=worker, joined to the Manager's Case) — not a sessionless run_oneoff
@@ -239,6 +245,11 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         sess_body: Dict[str, Any] = {"repo_path": cwd, "backend": backend}
         if node_id:
             sess_body["node_id"] = node_id
+        if role == "worker":
+            # Opt the NEW worker session into a role-ful boot. role_boot is a
+            # create-time signal, so it only applies when we open a session here;
+            # reusing an existing session_id cannot retro-stamp it.
+            sess_body["role_boot"] = "worker"
         sess_result = _api_request("POST", "/api/sessions", sess_body)
         new_sess = sess_result.get("session") if isinstance(sess_result, dict) else None
         new_sid = new_sess.get("session_id") if isinstance(new_sess, dict) else None
@@ -618,6 +629,7 @@ _TOOLS = [
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Target files to focus the worker on (optional)."},
                 "case_id": {"type": "string", "description": "The Manager's OWN Case id. Pass it to make the worker JOIN this Case (member task, shared membership) instead of spawning a child Case — the M3.1 default. Worker completion leaves the Case OPEN."},
                 "node_id": {"type": "string", "description": "Optional node to pin the new worker session to (e.g. a node worker so it survives a gateway restart). Omit for the local host."},
+                "role": {"type": "string", "description": "Set to 'worker' to boot the NEW worker session with the canonical Worker role (worker.md identity + worker tools), gated by MANAGER_ROLE_ENABLED. Omit for a legacy tier-0 worker. Only applies when a new session is opened (with cwd); it cannot retro-stamp a reused session_id."},
                 "parent_flow_run_id": {"type": "string", "description": "Use ONLY for a genuine child-CASE lineage edge (child→parent in /api/flows). To keep the worker inside the Manager's Case, use case_id instead."},
             },
             "required": ["objective"],

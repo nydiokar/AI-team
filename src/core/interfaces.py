@@ -215,6 +215,14 @@ class Session:
     current_case_id: Optional[str] = None
     case_role: Optional[str] = None     # "manager" | "worker" | "reviewer"
 
+    # [Worker role] EXPLICIT, opt-in role-boot signal — distinct from `case_role`.
+    # Set at session-create time by dispatch_worker(role='worker'); read by the
+    # driver's _role_boot to load worker.md + worker tools. It is SEPARATE from
+    # `case_role` on purpose: every Case-joined worker already carries
+    # case_role='worker' and must stay tier-0 (role-less). Only this field opts a
+    # worker into a role-ful boot. None ⇒ byte-identical legacy default.
+    role_boot: Optional[str] = None     # "worker" | None
+
     def __post_init__(self):
         if self.last_files_modified is None:
             self.last_files_modified = []
