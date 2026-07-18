@@ -100,16 +100,64 @@ export function useCreateSession() {
       repoPath: string;
       nodeId?: string;
       model?: string;
+      roleBoot?: string;
       idempotencyKey?: string;
     }) =>
       api.createSession(
         token,
-        { backend: vars.backend, repoPath: vars.repoPath, model: vars.model, nodeId: vars.nodeId },
+        {
+          backend: vars.backend,
+          repoPath: vars.repoPath,
+          model: vars.model,
+          nodeId: vars.nodeId,
+          roleBoot: vars.roleBoot,
+        },
         vars.idempotencyKey ?? newIdempotencyKey(),
       ),
     retry: (count, err) =>
       !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 2,
     onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+}
+
+/**
+ * Invoke the autonomous Manager loop (control_api.api_manager). Boots a Manager
+ * session that self-orients from the project CLAUDE.md and drives workers to
+ * satisfy `objective`. Idempotency-keyed so a double-tap can't open two Cases.
+ * Invalidates the work list + sessions so the new Case/session appears.
+ */
+export function useInvokeManager() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: (vars: {
+      objective: string;
+      repoPath: string;
+      backend?: string;
+      model?: string;
+      completionCriteria?: string;
+      nodeId?: string;
+      idempotencyKey?: string;
+    }) =>
+      api.invokeManager(
+        token,
+        {
+          objective: vars.objective,
+          repoPath: vars.repoPath,
+          backend: vars.backend,
+          model: vars.model,
+          completionCriteria: vars.completionCriteria,
+          nodeId: vars.nodeId,
+        },
+        vars.idempotencyKey ?? newIdempotencyKey(),
+      ),
+    retry: (count, err) =>
+      !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 2,
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["work-list"] });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
   });
 }
 
