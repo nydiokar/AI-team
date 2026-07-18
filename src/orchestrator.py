@@ -50,6 +50,11 @@ def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
     role boot (``_role_boot`` — role prompt + scoped manager tools) off
     ``session.case_role``. Omitting it made a Manager pinned to a node boot as
     a bare, role-less session (the A43 finding) — the whole point of this fix.
+
+    ``role_boot`` MUST travel for the identical reason: it is the Worker-role
+    tier opt-in the driver's ``_role_boot`` reads to apply the Worker role prompt
+    + tools. Dropping it makes a node-pinned role-ful worker boot role-less
+    (same carrier-coupling class as ``case_role``).
     """
     return {
         "session_id": session.session_id,
@@ -70,6 +75,7 @@ def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
         "previous_backend_session_ids": session.previous_backend_session_ids or [],
         "case_role": getattr(session, "case_role", None) or None,
         "current_case_id": getattr(session, "current_case_id", None) or None,
+        "role_boot": getattr(session, "role_boot", None) or None,
     }
 
 
@@ -1780,8 +1786,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                 row = db.get_flow_run(join_case_id)
                 if row is not None and (row.get("status") or "") not in db._CLOSED_STATUSES:
                     self._stash_task_meta(task, self._CASE_ID_META_KEY, join_case_id)
+                    # [A47] Mark the worker's task link `created_by="manager"` so the
+                    # Case graph tells a dispatched WORKER's task apart from the
+                    # Manager's own-turn attach (branch B, created_by="system") — the
+                    # two were previously indistinguishable role="task" links. Role
+                    # stays "task" (consumers/queries unchanged); created_by carries
+                    # the honest provenance the read-model already surfaces.
                     self._record_flow_link(
-                        join_case_id, "task", task.id, "task", created_by="system",
+                        join_case_id, "task", task.id, "task", created_by="manager",
                     )
                     self._record_flow_event(
                         join_case_id, "task.attached", "system",
@@ -1791,6 +1803,17 @@ class TaskOrchestrator(ITaskOrchestrator):
                     if session_id:
                         self._set_session_case_affiliation(
                             session_id, join_case_id, role="worker",
+                        )
+                        # [A47] Durable session→Case link so the worker SESSION is a
+                        # first-class node in the Case graph (mirrors the manager
+                        # session link `open_case` writes). Idempotent on the unique
+                        # key (flow_run_id, entity_type, entity_id, role) ⇒ a repeat
+                        # join of the same worker session does NOT duplicate the row.
+                        # Best-effort (via _record_flow_link) so a link-write failure
+                        # never aborts the join.
+                        self._record_flow_link(
+                            join_case_id, "session", session_id, "worker",
+                            created_by="manager",
                         )
                     return None
 
