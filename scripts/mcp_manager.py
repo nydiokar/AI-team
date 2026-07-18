@@ -613,20 +613,56 @@ def _release_worker(args: Dict[str, Any]) -> str:
     Worker sessions are kept WARM by default (closing a Case no longer tears them
     down) so a follow-up dispatch is a cheap resume. This tool is the ONLY path that
     ends a worker's process — call it deliberately, per worker, never reflexively.
-    Thin wrapper over the existing POST /api/sessions/{session_id}/close. A refusal
-    (e.g. unknown session) comes back as a structured message, not an exception."""
+    Ownership guard: before closing, verify the target session against the
+    authoritative session→case affiliation index (GET /api/work/affiliations/sessions).
+    The target must (a) exist as an affiliated session, (b) carry role 'worker', and
+    (c) belong to THIS Manager's Case (``case_id``). Any failure is returned as a
+    structured refusal (not an exception), so a Manager can never close an arbitrary
+    session, a non-worker, or a worker of a different Case. Only a verified worker of
+    the caller's own Case reaches the POST /api/sessions/{session_id}/close."""
     session_id = _bounded_text(args.get("session_id"), "session_id", _MAX_ID_CHARS, required=True)
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
 
-    result = _api_request("POST", f"/api/sessions/{urllib.parse.quote(session_id)}/close")
-    if bool(result.get("ok")):
+    # Ownership guard over the authoritative session→case index. SessionView.to_dict()
+    # does NOT expose case_role/current_case_id, so the /api/sessions list is unusable
+    # here — the affiliations endpoint is the one authoritative source.
+    index = _api_request("GET", "/api/work/affiliations/sessions")
+    affiliations = index.get("affiliations") or []
+    row = next((a for a in affiliations if a.get("session_id") == session_id), None)
+    if row is None:
         return (
-            f"Released worker session {session_id} — its backend process is now CLOSED. "
-            f"A later follow-up would be a COLD re-open (fresh boot), so only release a "
-            f"worker you have decided is truly done."
+            f"release_worker REFUSED: session {session_id} is not an affiliated session "
+            f"(unknown or standalone — not a member of any Case). Nothing closed."
+        )
+    role = row.get("role")
+    if role != "worker":
+        return (
+            f"release_worker REFUSED: session {session_id} has role {role!r}, not 'worker' "
+            f"— release_worker only closes worker sessions. Nothing closed."
+        )
+    owner_case = row.get("flow_run_id")
+    if owner_case != case_id:
+        return (
+            f"release_worker REFUSED: session {session_id} belongs to Case {owner_case!r}, "
+            f"not your Case {case_id!r} — you may only release a worker of your own Case. "
+            f"Nothing closed."
+        )
+
+    # Verified worker of the caller's Case — a 200 from /close is always ok. A 404
+    # (already-closed / unknown session) surfaces as RuntimeError from _api_request;
+    # return the same structured-refusal shape rather than leak an exception.
+    try:
+        _api_request("POST", f"/api/sessions/{urllib.parse.quote(session_id)}/close")
+    except RuntimeError as exc:
+        return (
+            f"release_worker did NOT close session {session_id}: {exc}. "
+            f"The session may already be closed or the backend rejected the close; "
+            f"resolve and retry."
         )
     return (
-        f"release_worker did NOT close session {session_id}: {result.get('reason')}. "
-        f"The session stays as-is; resolve and retry."
+        f"Released worker session {session_id} (Case {case_id}) — its backend process is "
+        f"now CLOSED. A later follow-up would be a COLD re-open (fresh boot), so only "
+        f"release a worker you have decided is truly done."
     )
 
 
@@ -772,15 +808,18 @@ _TOOLS = [
             "(closing a Case no longer closes them), so a follow-up dispatch is a cheap resume; "
             "releasing one ENDS its backend process, and any later question to it becomes a COLD "
             "re-open. Never release reflexively and never as a side-effect of closing the Case — "
-            "release only the specific worker you have judged finished. Thin wrapper over the "
-            "existing POST /api/sessions/{session_id}/close; closes exactly the named session."
+            "release only the specific worker you have judged finished. Pass your OWN case_id: the "
+            "target is verified against the authoritative session→case index and REFUSED unless it "
+            "is a worker session that is a member of your Case (ownership check). Closes exactly "
+            "the named session via POST /api/sessions/{session_id}/close."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "session_id": {"type": "string", "description": "The worker session id to close (from dispatch_worker). Exactly this session is closed — nothing else."},
+                "case_id": {"type": "string", "description": "The Manager's OWN Case id. Used to verify the target is a worker session joined to YOUR Case before closing — a session that is unknown, not a worker, or a member of a different Case is refused."},
             },
-            "required": ["session_id"],
+            "required": ["session_id", "case_id"],
         },
     },
 ]

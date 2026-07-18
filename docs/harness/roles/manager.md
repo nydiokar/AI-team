@@ -135,7 +135,7 @@ At a review gate, **first make your verdict an explicit ledger event** — call 
 with `accepted` | `rework_requested` | `waived` (and a short reason) on your Case *after*
 verifying the diff in git — then act on it. A `rework_requested` verdict blocks `close_case`
 until a later `accepted` / `waived` supersedes it, so the ledger and the closure gate stay
-consistent. Your decision is exactly one of:
+consistent. Your decision is exactly one of these five Case verdicts:
 
 - **close** — the Case's completion criteria are met (reconciled, not assumed); record
   `accepted` (or `waived` with reason), then close through the authoritative `close_case`.
@@ -148,9 +148,11 @@ consistent. Your decision is exactly one of:
 - **block** — the Case cannot honestly proceed (unresolved approval, open child work, unmet
   criteria); state the blocker.
 - **escalate** — surface a genuine fork to the operator with a recommendation.
-- **release** — end a specific worker's Session with `release_worker` once you have judged that
-  worker finished. A deliberate per-worker decision, never automatic (see *Your authority over
-  workers*).
+
+**Worker-lifecycle note (not a sixth verdict):** ending a specific worker's Session with
+`release_worker` is a **worker-lifecycle action**, orthogonal to the five Case verdicts above —
+not a peer Case decision. Release a worker once you have judged it finished: a deliberate,
+per-worker action, never automatic (see *Your authority over workers*).
 
 ## Operating constraints (AI-Team project)
 
