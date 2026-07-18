@@ -239,17 +239,30 @@ def test_dispatch_worker_warm_reuse_after_case_close(monkeypatch):
 # release_worker  (A48 — the Manager's explicit worker-close decision)
 # --------------------------------------------------------------------------
 
-def test_release_worker_closes_exactly_the_named_session(monkeypatch):
+def _affil(session_id="w1", role="worker", case_id="case_1"):
+    """One affiliation index response with a single row for the target session."""
+    return {"affiliations": [
+        {"session_id": session_id, "flow_run_id": case_id, "role": role,
+         "objective_lock": "obj", "case_status": None},
+    ], "total": 1}
+
+
+def test_release_worker_closes_verified_worker_of_own_case(monkeypatch):
     calls = []
 
     def fake_request(method, path, payload=None, timeout=20.0):
         calls.append((method, path, payload))
+        if path == "/api/work/affiliations/sessions":
+            return _affil(session_id="w1", role="worker", case_id="case_1")
         return {"ok": True, "reason": None, "session": {"session_id": "w1"}}
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
-    out = mcp_manager._release_worker({"session_id": "w1"})
-    # Exactly one call — the close of exactly the named session.
-    assert calls == [("POST", "/api/sessions/w1/close", None)]
+    out = mcp_manager._release_worker({"session_id": "w1", "case_id": "case_1"})
+    # First the ownership guard reads the affiliation index, THEN the close.
+    assert calls == [
+        ("GET", "/api/work/affiliations/sessions", None),
+        ("POST", "/api/sessions/w1/close", None),
+    ]
     assert "Released worker session w1" in out
     assert "CLOSED" in out
 
@@ -258,17 +271,81 @@ def test_release_worker_requires_session_id(monkeypatch):
     monkeypatch.setattr(mcp_manager, "_api_request",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
     with pytest.raises(ValueError):
-        mcp_manager._release_worker({})
+        mcp_manager._release_worker({"case_id": "case_1"})
 
 
-def test_release_worker_reports_refusal(monkeypatch):
+def test_release_worker_requires_case_id(monkeypatch):
+    monkeypatch.setattr(mcp_manager, "_api_request",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
+    with pytest.raises(ValueError):
+        mcp_manager._release_worker({"session_id": "w1"})
+
+
+def test_release_worker_refuses_unknown_session(monkeypatch):
+    """No affiliation row for the target ⇒ structured refusal, NO close attempted."""
+    calls = []
+
     def fake_request(method, path, payload=None, timeout=20.0):
-        return {"ok": False, "reason": "session_not_found"}
+        calls.append(path)
+        if path == "/api/work/affiliations/sessions":
+            return _affil(session_id="other", role="worker", case_id="case_1")
+        raise AssertionError(f"must not call {path}")
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
-    out = mcp_manager._release_worker({"session_id": "ghost"})
+    out = mcp_manager._release_worker({"session_id": "ghost", "case_id": "case_1"})
+    assert calls == ["/api/work/affiliations/sessions"]
+    assert "REFUSED" in out
+    assert "not an affiliated session" in out
+
+
+def test_release_worker_refuses_non_worker_role(monkeypatch):
+    """The target is affiliated but not a worker (e.g. a manager) ⇒ refusal, no close."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append(path)
+        if path == "/api/work/affiliations/sessions":
+            return _affil(session_id="m1", role="manager", case_id="case_1")
+        raise AssertionError(f"must not call {path}")
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._release_worker({"session_id": "m1", "case_id": "case_1"})
+    assert calls == ["/api/work/affiliations/sessions"]
+    assert "REFUSED" in out
+    assert "'manager'" in out
+    assert "not 'worker'" in out
+
+
+def test_release_worker_refuses_worker_of_other_case(monkeypatch):
+    """The target is a worker but joined to a DIFFERENT Case ⇒ refusal, no close."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append(path)
+        if path == "/api/work/affiliations/sessions":
+            return _affil(session_id="w1", role="worker", case_id="case_OTHER")
+        raise AssertionError(f"must not call {path}")
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._release_worker({"session_id": "w1", "case_id": "case_1"})
+    assert calls == ["/api/work/affiliations/sessions"]
+    assert "REFUSED" in out
+    assert "case_OTHER" in out
+
+
+def test_release_worker_reports_refusal_on_close_404(monkeypatch):
+    """[Defect 3] The backend /close raises HTTPError 404 → _api_request raises
+    RuntimeError for an already-closed/unknown session. That must return the SAME
+    structured-refusal shape, not leak an exception (the old else-branch was dead)."""
+    def fake_request(method, path, payload=None, timeout=20.0):
+        if path == "/api/work/affiliations/sessions":
+            return _affil(session_id="w1", role="worker", case_id="case_1")
+        raise RuntimeError("HTTP 404 on POST /api/sessions/w1/close: session_not_found")
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._release_worker({"session_id": "w1", "case_id": "case_1"})
     assert "did NOT close" in out
-    assert "session_not_found" in out
+    assert "404" in out
 
 
 # --------------------------------------------------------------------------
