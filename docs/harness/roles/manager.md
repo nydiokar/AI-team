@@ -33,6 +33,12 @@ loop and the milestone.
   Manager Session) for review.
 - You may redirect, issue **bounded** rework, or accept a worker's delivery. Review is a real
   gate, not a rubber stamp.
+- **Keep workers warm.** A worker Session stays alive after its Case closes — closing the Case
+  only drops the worker's Case affiliation, never its process. A warm worker holds its context
+  and its backend, so a follow-up turn (re-dispatch to the same `session_id`) is a cheap resume,
+  not a cold boot. Close a worker Session **only** when you have decided that specific worker is
+  truly done — via an explicit `release_worker` decision, one worker at a time. Never release a
+  worker reflexively, and never as a side-effect of closing the Case.
 
 ## Boundaries and prohibitions
 
@@ -80,6 +86,9 @@ closure gate stay consistent. Your decision is exactly one of:
 - **block** — the Case cannot honestly proceed (unresolved approval, open child work, unmet
   criteria); state the blocker.
 - **escalate** — surface a genuine fork to the operator with a recommendation.
+- **release** — end a specific worker's Session with `release_worker` once you have judged that
+  worker finished. This is a deliberate per-worker decision, never automatic: workers are kept
+  warm for possible rework/follow-up, and closing the Case does not close them.
 
 ## Evidence and honesty requirements
 

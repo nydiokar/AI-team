@@ -214,6 +214,63 @@ def test_dispatch_worker_falls_back_to_oneoff_without_cwd(monkeypatch):
     assert "one-off" in out
 
 
+def test_dispatch_worker_warm_reuse_after_case_close(monkeypatch):
+    """[A48] A worker whose Case has closed stays WARM (its affiliation is cleared,
+    not its process). A follow-up dispatch by session_id reuses it — NO new session
+    is opened (a single /api/instructions call). This proves warm re-dialogue is
+    still available after Case close."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "task_id": "t2", "session": {"session_id": "warm_worker"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._dispatch_worker({
+        "objective": "follow-up turn", "session_id": "warm_worker", "cwd": "/repo",
+    })
+    # No POST /api/sessions — the warm session is reused, no cold re-open.
+    assert [c[1] for c in calls] == ["/api/instructions"]
+    assert calls[0][2]["session_id"] == "warm_worker"
+    assert "reused existing session" in out
+
+
+# --------------------------------------------------------------------------
+# release_worker  (A48 — the Manager's explicit worker-close decision)
+# --------------------------------------------------------------------------
+
+def test_release_worker_closes_exactly_the_named_session(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "reason": None, "session": {"session_id": "w1"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._release_worker({"session_id": "w1"})
+    # Exactly one call — the close of exactly the named session.
+    assert calls == [("POST", "/api/sessions/w1/close", None)]
+    assert "Released worker session w1" in out
+    assert "CLOSED" in out
+
+
+def test_release_worker_requires_session_id(monkeypatch):
+    monkeypatch.setattr(mcp_manager, "_api_request",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
+    with pytest.raises(ValueError):
+        mcp_manager._release_worker({})
+
+
+def test_release_worker_reports_refusal(monkeypatch):
+    def fake_request(method, path, payload=None, timeout=20.0):
+        return {"ok": False, "reason": "session_not_found"}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._release_worker({"session_id": "ghost"})
+    assert "did NOT close" in out
+    assert "session_not_found" in out
+
+
 # --------------------------------------------------------------------------
 # wait_for_worker
 # --------------------------------------------------------------------------
@@ -354,7 +411,8 @@ def test_dispatch_tools_list(monkeypatch):
     mcp_manager._dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = sent[0]["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {"dispatch_worker", "wait_for_worker", "open_case", "get_case", "close_case", "record_review"}
+    assert names == {"dispatch_worker", "wait_for_worker", "open_case", "get_case",
+                     "close_case", "record_review", "release_worker"}
 
 
 def test_dispatch_tool_call_success(monkeypatch):

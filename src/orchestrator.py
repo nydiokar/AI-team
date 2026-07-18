@@ -2041,6 +2041,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         outcome: str = "closed",
         actor: str = "operator",
         criteria_reconciliation: Optional[List[Dict[str, Any]]] = None,
+        close_worker_sessions: bool = False,
     ) -> Dict[str, Any]:
         """[A37] Orchestrator seam over ``db.close_case`` — authoritative closure.
 
@@ -2049,6 +2050,15 @@ class TaskOrchestrator(ITaskOrchestrator):
         unmet completion_criteria) or the id is unknown — a structured refusal, not
         an exception. On a real close, clears the durable Case affiliation of every
         session linked to the Case (A36 item 4), best-effort/isolated.
+
+        [A48] Closing a joined worker's SESSION is NOT an automatic side-effect of
+        closing the Case — the default is to leave workers WARM and reusable (their
+        backend process + cache stay alive so a follow-up dispatch is a cheap resume,
+        not a cold token-burn). A worker session only loses its Case *affiliation*
+        (``current_case_id``→NULL) here; its process is closed only when the Manager
+        explicitly decides so (via the ``release_worker`` tool → ``close_session``).
+        ``close_worker_sessions=True`` opts back into the legacy PR #22 auto-close for
+        callers that genuinely want it; it stays OFF by default.
         """
         from src.control.db import get_db, CaseCloseBlocked
         db = get_db()
@@ -2069,7 +2079,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                     flow_run_id=flow_run_id, entity_type="session",
                 ):
                     entity_id = str(link.get("entity_id") or "")
-                    self._close_worker_session_on_case_close(entity_id, flow_run_id)
+                    # [A48] Keep workers WARM by default: do NOT close the session
+                    # process on Case close. Only the explicit opt-in re-enables the
+                    # legacy auto-close. Must run BEFORE the affiliation clear below,
+                    # which NULLs case_role (the guard the close path reads).
+                    if close_worker_sessions:
+                        self._close_worker_session_on_case_close(entity_id, flow_run_id)
                     self._clear_session_case_affiliation(entity_id, flow_run_id)
             except Exception as e:
                 logger.warning(

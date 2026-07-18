@@ -604,6 +604,33 @@ def _record_review(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: release_worker  (A48 — the Manager's explicit worker-close decision)
+# ---------------------------------------------------------------------------
+
+def _release_worker(args: Dict[str, Any]) -> str:
+    """Close exactly ONE named worker session when the Manager decides it is done.
+
+    Worker sessions are kept WARM by default (closing a Case no longer tears them
+    down) so a follow-up dispatch is a cheap resume. This tool is the ONLY path that
+    ends a worker's process — call it deliberately, per worker, never reflexively.
+    Thin wrapper over the existing POST /api/sessions/{session_id}/close. A refusal
+    (e.g. unknown session) comes back as a structured message, not an exception."""
+    session_id = _bounded_text(args.get("session_id"), "session_id", _MAX_ID_CHARS, required=True)
+
+    result = _api_request("POST", f"/api/sessions/{urllib.parse.quote(session_id)}/close")
+    if bool(result.get("ok")):
+        return (
+            f"Released worker session {session_id} — its backend process is now CLOSED. "
+            f"A later follow-up would be a COLD re-open (fresh boot), so only release a "
+            f"worker you have decided is truly done."
+        )
+    return (
+        f"release_worker did NOT close session {session_id}: {result.get('reason')}. "
+        f"The session stays as-is; resolve and retry."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool catalogue
 # ---------------------------------------------------------------------------
 _TOOLS = [
@@ -737,6 +764,25 @@ _TOOLS = [
             },
         },
     },
+    {
+        "name": "release_worker",
+        "description": (
+            "Close ONE worker session when YOU have decided that worker is truly done — the "
+            "Manager's explicit worker-close decision. Worker sessions are kept WARM by default "
+            "(closing a Case no longer closes them), so a follow-up dispatch is a cheap resume; "
+            "releasing one ENDS its backend process, and any later question to it becomes a COLD "
+            "re-open. Never release reflexively and never as a side-effect of closing the Case — "
+            "release only the specific worker you have judged finished. Thin wrapper over the "
+            "existing POST /api/sessions/{session_id}/close; closes exactly the named session."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "The worker session id to close (from dispatch_worker). Exactly this session is closed — nothing else."},
+            },
+            "required": ["session_id"],
+        },
+    },
 ]
 
 _TOOL_IMPLS = {
@@ -746,6 +792,7 @@ _TOOL_IMPLS = {
     "get_case": _get_case,
     "close_case": _close_case,
     "record_review": _record_review,
+    "release_worker": _release_worker,
 }
 
 # ---------------------------------------------------------------------------
