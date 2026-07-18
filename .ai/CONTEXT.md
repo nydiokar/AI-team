@@ -14,18 +14,22 @@
 > envelope is per-task and is NOT baked into the worker profile. Roles load OK (import smoke + 31 role tests
 > + 94 targeted tests green). Gateway restarted on merged code + new profiles.
 >
-> **⚠️ DEFERRED (§7 trace) — two adversarial-review findings on #26 `release_worker`, NOT yet fixed:**
-> 1. **No ownership/role guard.** `_release_worker` (scripts/mcp_manager.py) calls `POST
->    /api/sessions/{id}/close` for any `session_id` with no check that the target is a worker or is joined to
->    THIS Manager's Case — a wrong/hallucinated id can close another Case's worker, an operator session, or
->    another Manager. It is strictly *less* guarded than the auto-close it replaced
->    (`_close_worker_session_on_case_close` checks `case_role=='worker'` + `current_case_id==case_id`).
->    **Fix:** validate `case_role=='worker'` + Case ownership before `/close`.
-> 2. **Dead refusal branch.** The `if result.get("ok")` else-branch never fires: the real backend returns
->    404→RuntimeError for an unknown/closed session, so `test_release_worker_reports_refusal` proves a shape
->    the system can't produce. **Fix:** catch the 404 and return the structured refusal, or drop the branch.
-> 3. **By-design:** warm workers hold a backend slot with no idle-reaper — unbounded accumulation gated only
->    on Manager discipline (`release_worker`). Acceptable now; size a bound/idle-reaper if live load shows it.
+> **🟢 §7 trace RESOLVED 2026-07-18 — findings 1 & 2 FIXED in PR #27 (`feat/release-worker-guard`, OPEN, pending operator merge; Case `dfabf68a`):**
+> 1. **~~No ownership/role guard.~~ FIXED.** `_release_worker` now takes a REQUIRED `case_id` (the Manager's
+>    own Case) and verifies the target against the authoritative session→case index
+>    (`GET /api/work/affiliations/sessions`) before `/close`: refuses (structured message, not an exception)
+>    unless the target exists, has role `worker`, AND `flow_run_id==case_id`. (`SessionView.to_dict()` does
+>    not expose `case_role`/`current_case_id`, so the affiliations endpoint is the one authoritative source.)
+> 2. **~~Dead refusal branch.~~ FIXED.** The unreachable `if result.get("ok")` else-branch is gone; the real
+>    404→RuntimeError from `/close` is now caught and returned as a structured refusal.
+>    `tests/test_mcp_manager.py` = 37 passed (guard happy-path + 3 refusal modes + requires-case_id + 404).
+>    **Reconciled alongside:** DEFECT 2 (decision vocab) — `manager.md` now enumerates exactly the FIVE Case
+>    verdicts and frames `release` as a worker-lifecycle action; `MANAGER_ALLOWED_DECISIONS` unchanged (five).
+> 3. **By-design (STILL DEFERRED):** warm workers hold a backend slot with no idle-reaper — unbounded
+>    accumulation gated only on Manager discipline (`release_worker`). Acceptable now; size a bound/idle-reaper
+>    if live load shows it.
+> **⚠️ Live proof pending:** the running gateway still has the OLD unguarded `release_worker` loaded — proving
+> the new guard live needs a gateway restart (operator-gated, post-merge), same as prior PRs.
 
 > **🟢 STATUS 2026-07-17 — LOOP QUALITY VERIFIED LIVE (one Manager, many workers, real rework, manager-decided closure).**
 > Cleanup: `core` coredump removed+gitignored; **PRs #22/#23 merged** (gateway restarted, flags

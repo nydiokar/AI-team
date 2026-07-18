@@ -454,7 +454,7 @@ class TestSDKClientDriver:
         dead._closed = True
 
         with patch.object(_SDKSession, "start", lambda self_inner: None):
-            fresh = drv._get_or_create(session, None, {})
+            fresh = drv._get_or_create(session, None, None, {})
 
         assert fresh is not dead
         assert drv._sessions[session.session_id] is fresh
@@ -885,3 +885,47 @@ class TestSDKUsageSerialization:
             "output_tokens": 4,
         }
 
+
+
+# ---------------------------------------------------------------------------
+# [autonomy] Role-bound sessions load project filesystem settings so the repo
+# CLAUDE.md (project orientation) reaches the agent; non-role sessions stay
+# byte-identical (setting_sources None ⇒ SDK emits no --setting-sources flag).
+# ---------------------------------------------------------------------------
+class _CapturingSDKSession:
+    """Stand-in for _SDKSession that records ctor kwargs and never boots the SDK."""
+
+    def __init__(self, key, cwd, model, proc_env, **kwargs):
+        self.key = key
+        self.effort = kwargs.get("effort")
+        self.setting_sources = kwargs.get("setting_sources")
+        self.system_prompt = kwargs.get("system_prompt")
+        self._closed = False
+        self._on_proactive = None
+
+    def start(self):  # no live SDK connect
+        pass
+
+
+def _drive_and_capture(monkeypatch, role_boot_return):
+    import src.backends.claude_driver as cd
+
+    monkeypatch.setattr(cd, "_SDKSession", _CapturingSDKSession)
+    driver = cd.ClaudeSDKClientDriver()
+    monkeypatch.setattr(driver, "_role_boot", lambda session: role_boot_return)
+    session = _make_session(repo_path="/repo")
+    return driver._get_or_create(session, model=None, effort=None, proc_env={})
+
+
+def test_role_bound_session_loads_project_setting_sources(monkeypatch):
+    # A role boot returns a system_prompt ⇒ setting_sources must be ["project"].
+    sess = _drive_and_capture(
+        monkeypatch, ({"type": "preset", "preset": "claude_code", "append": "BEHAVIOR"}, ["tool"])
+    )
+    assert sess.setting_sources == ["project"]
+
+
+def test_non_role_session_leaves_setting_sources_none(monkeypatch):
+    # No role (default path) ⇒ setting_sources stays None (byte-identical boot).
+    sess = _drive_and_capture(monkeypatch, (None, None))
+    assert sess.setting_sources is None

@@ -413,6 +413,7 @@ class _SDKSession:
         resume: Optional[str] = None,
         system_prompt: Optional[Dict[str, object]] = None,
         allowed_tools: Optional[List[str]] = None,
+        setting_sources: Optional[List[str]] = None,
     ):
         self.session_key = session_key
         self.cwd = cwd
@@ -425,6 +426,14 @@ class _SDKSession:
         # tool list. Both None ⇒ the default path (byte-identical to pre-A38).
         self.system_prompt = system_prompt
         self.allowed_tools = allowed_tools
+        # [autonomy] Filesystem settings to load. The SDK leaves this None by
+        # default, which does NOT load project CLAUDE.md — a role-bound session
+        # would boot with its behavior system-prompt but ZERO project orientation.
+        # We set ["project"] for role sessions so the repo CLAUDE.md (the project
+        # layer: canonical docs + how to find open work) reaches the agent. The
+        # SDK only emits --setting-sources when this is non-None; None ⇒
+        # byte-identical legacy boot.
+        self.setting_sources = setting_sources
         self.backend_session_id: str = ""
         self._lock = threading.Lock()  # serialises concurrent send_turn calls
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -488,6 +497,7 @@ class _SDKSession:
             **({"effort": self.effort} if self.effort else {}),
             **({"resume": self.resume} if self.resume else {}),
             **({"system_prompt": self.system_prompt} if self.system_prompt else {}),
+            **({"setting_sources": self.setting_sources} if self.setting_sources else {}),
         )
 
         self._client = ClaudeSDKClient(options=options)
@@ -917,11 +927,19 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 existing = None
             if existing is None:
                 system_prompt, allowed_tools = self._role_boot(session)
+                # [autonomy] A role-bound session (system_prompt set) also loads
+                # project filesystem settings so the repo CLAUDE.md — the project
+                # orientation layer (canonical docs + how to find open work) —
+                # reaches the agent. Behavior lives in system_prompt; project
+                # context lives in CLAUDE.md; the two stay cleanly separate.
+                # None for non-role sessions ⇒ byte-identical legacy boot.
+                setting_sources = ["project"] if system_prompt is not None else None
                 sdk_sess = _SDKSession(
                     key, session.repo_path, model, proc_env,
                     effort=effort,
                     resume=resume_id,
                     system_prompt=system_prompt, allowed_tools=allowed_tools,
+                    setting_sources=setting_sources,
                 )
                 sdk_sess._on_proactive = self._on_proactive
                 sdk_sess.start()
