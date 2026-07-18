@@ -29,6 +29,7 @@ export function NewSessionSheet({ onClose }: { onClose: () => void }) {
   const [backend, setBackend] = useState<string>("claude");
   const [nodeId, setNodeId] = useState<string>("__local__");
   const [repoPath, setRepoPath] = useState<string>("");
+  const [role, setRole] = useState<"bare" | "worker">("bare");
   const [manualMode, setManualMode] = useState(false);
   const manualRef = useRef<HTMLInputElement>(null);
 
@@ -64,7 +65,7 @@ export function NewSessionSheet({ onClose }: { onClose: () => void }) {
     const p = path.trim();
     if (!p) return;
     create.mutate(
-      { backend, repoPath: p, nodeId },
+      { backend, repoPath: p, nodeId, roleBoot: role === "worker" ? "worker" : undefined },
       {
         onSuccess: (env) => {
           const id = env.session?.session_id;
@@ -175,6 +176,32 @@ export function NewSessionSheet({ onClose }: { onClose: () => void }) {
         {/* Step 3: Repo */}
         {step === "repo" && (
           <>
+            {/* Role: a bare session (default) or a Worker booted with the Worker
+                role profile. Managers are fired from the Work screen, not here. */}
+            <div className="mb-3 mt-1">
+              <p className="mb-1.5 text-xs text-ink-muted">Session role</p>
+              <div className="flex gap-2">
+                {([
+                  { id: "bare", label: "Bare", hint: "plain session" },
+                  { id: "worker", label: "Worker", hint: "worker profile" },
+                ] as const).map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => setRole(r.id)}
+                    className={cn(
+                      "flex-1 rounded-xl border px-3 py-2 text-left text-[13px] transition",
+                      role === r.id
+                        ? "border-accent/40 bg-accent-dim/40 text-ink ring-1 ring-accent/30"
+                        : "border-hairline bg-surface-1 text-ink hover:bg-surface-2",
+                    )}
+                  >
+                    <span className="font-medium">{r.label}</span>
+                    <span className="ml-1 text-[10px] text-ink-muted">{r.hint}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <p className="mt-1 mb-3 text-xs text-ink-muted">
               {nodeId === "__local__" ? "Repos found in your workspace:" : `Repos on ${nodeId}:`}
             </p>
