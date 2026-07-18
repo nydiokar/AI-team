@@ -1,7 +1,31 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-14
+**Last Updated:** 2026-07-18
 **Active branch:** `main` — M2 Work Control Substrate + M3 Phase 3.0 merged; `HARNESS_FLOW_DRIVE` **ON** live.
+
+> **🟢 STATUS 2026-07-18 — PRs #24/#25/#26 MERGED to `main` (in order #24→#25→#26, textually clean) +
+> Manager/Worker role PROFILES REWRITTEN to the operator's behavioral profiles.** `docs/harness/roles/manager.md`
+> + `worker.md` now carry the operator-authored behavioral identity (autonomous evidence-loop worker;
+> case-level adversarial manager) with the repo mechanics preserved as an *Operating constraints* appendix.
+> The Manager profile also embeds the **dispatch-envelope template** (TASK/TYPE/CONTEXT/ACCEPTANCE/REALITY
+> CONSTRAINTS/AUTHORITY/RESERVED DECISIONS/SCOPE OUT/TRAIL — the manager composes one per worker objective)
+> and the **behavioral-evaluation rubric** (6 dims ×0–2, pass ≥10/12, critical-failure list) as the review
+> gate. Three-layer model: worker profile + manager profile are persistent role behavior; the dispatch
+> envelope is per-task and is NOT baked into the worker profile. Roles load OK (import smoke + 31 role tests
+> + 94 targeted tests green). Gateway restarted on merged code + new profiles.
+>
+> **⚠️ DEFERRED (§7 trace) — two adversarial-review findings on #26 `release_worker`, NOT yet fixed:**
+> 1. **No ownership/role guard.** `_release_worker` (scripts/mcp_manager.py) calls `POST
+>    /api/sessions/{id}/close` for any `session_id` with no check that the target is a worker or is joined to
+>    THIS Manager's Case — a wrong/hallucinated id can close another Case's worker, an operator session, or
+>    another Manager. It is strictly *less* guarded than the auto-close it replaced
+>    (`_close_worker_session_on_case_close` checks `case_role=='worker'` + `current_case_id==case_id`).
+>    **Fix:** validate `case_role=='worker'` + Case ownership before `/close`.
+> 2. **Dead refusal branch.** The `if result.get("ok")` else-branch never fires: the real backend returns
+>    404→RuntimeError for an unknown/closed session, so `test_release_worker_reports_refusal` proves a shape
+>    the system can't produce. **Fix:** catch the 404 and return the structured refusal, or drop the branch.
+> 3. **By-design:** warm workers hold a backend slot with no idle-reaper — unbounded accumulation gated only
+>    on Manager discipline (`release_worker`). Acceptable now; size a bound/idle-reaper if live load shows it.
 
 > **🟢 STATUS 2026-07-17 — LOOP QUALITY VERIFIED LIVE (one Manager, many workers, real rework, manager-decided closure).**
 > Cleanup: `core` coredump removed+gitignored; **PRs #22/#23 merged** (gateway restarted, flags
