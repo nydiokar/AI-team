@@ -2034,6 +2034,93 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
             return None
 
+    def fork_session(
+        self,
+        source_session_id: str,
+        *,
+        backend: str,
+        repo_path: str,
+        model: Optional[str] = None,
+        node_id: str = "__local__",
+        title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[Session-fork] Continue a stalled session as a FRESH native session under
+        one Case — the "continue this thread cheaply" seam.
+
+        Creates a brand-new session (fresh backend_session_id ⇒ fresh cache, no
+        transcript reprocessing after a cache-TTL / quota reset) pre-shaped from the
+        source (backend / repo / model / node the client passes, defaulting to the
+        source's), then binds BOTH sessions to a Case so the multi-session
+        conversation is one reviewable arc. The verbatim digest of the marked
+        messages is client-held and rides in on the new session's FIRST instruction
+        as ``continue_inline`` — it is NOT pasted as a first message here.
+
+        Returns ``{"ok", "new_session_id", "case_id"}`` (``case_id`` may be None if
+        the Case write failed — the session is still usable; the carry-over still
+        works, only the affiliation link is missing). ``{"ok": False, "reason": ...}``
+        when the source is unknown or the create is rejected."""
+        source = self.session_service.store.get(source_session_id)
+        if source is None:
+            return {"ok": False, "reason": "session_not_found"}
+        from src.core.interfaces import SessionOrigin
+        result = self.session_service.create_session(
+            backend=backend,
+            repo_path=repo_path,
+            model=model,
+            node_id=node_id or "__local__",
+            origin=SessionOrigin(channel="web", kind="user"),
+            bind_chat=False,
+        )
+        if not result.ok or result.session is None:
+            return {"ok": False, "reason": result.reason or "create_failed",
+                    "detail": result.detail}
+        new_session_id = result.session.session_id
+        case_id = self._ensure_fork_case(source_session_id, new_session_id, title)
+        return {"ok": True, "new_session_id": new_session_id, "case_id": case_id}
+
+    def _ensure_fork_case(
+        self,
+        source_session_id: str,
+        new_session_id: str,
+        title: Optional[str] = None,
+    ) -> Optional[str]:
+        """[Session-fork] Bind the source + forked sessions to ONE carrier Case
+        (best-effort). Reuses the source's newest OPEN Case when it has one (so a
+        fork inside an existing arc stays in that arc); otherwise births a fresh
+        carrier Case with the source linked as a plain ``session`` member. Links the
+        new session as a ``session`` successor and stamps durable affiliation on
+        both. Isolated: any DB failure logs and returns None — a Case-write glitch
+        must never break the (already-created) forked session."""
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return None
+            case_id = db.find_open_case_for_session(source_session_id)
+            if not case_id:
+                objective = (title or "").strip() or f"Continuation of session {source_session_id}"
+                case_id = db.open_case(objective, source_session_id, role="session")
+                self._set_session_case_affiliation(source_session_id, case_id, role="session")
+            if not case_id:
+                return None
+            db.create_flow_link(
+                case_id, "session", new_session_id, "session", created_by="operator",
+                metadata={"continuation": "successor", "continued_from": source_session_id},
+            )
+            db.append_flow_event(
+                case_id, "session.forked", "operator",
+                entity_type="session", entity_id=new_session_id,
+                payload={"continued_from": source_session_id},
+            )
+            self._set_session_case_affiliation(new_session_id, case_id, role="session")
+            return case_id
+        except Exception as e:
+            logger.warning(
+                "event=fork_case_failed source=%s new=%s err=%s",
+                source_session_id, new_session_id, e,
+            )
+            return None
+
     def close_case(
         self,
         flow_run_id: str,
@@ -2676,6 +2763,26 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         try:
             meta = task.metadata or {}
+            # [Session-fork] Inline carry-over path: a fork stashes a verbatim digest
+            # of the marked messages under `continue_inline` (client-held, attached on
+            # the new session's FIRST instruction). Takes precedence over `continues:`
+            # (a prior task_id) — a fork never also references a parent task. Same
+            # once-guard, same fence-defused reference block, same hard char cap.
+            inline_raw = meta.get("continue_inline", "")
+            if isinstance(inline_raw, str) and inline_raw.strip():
+                if task.id in self._compact_injected_ids:
+                    return
+                prefix = self._build_inline_compact_prefix(inline_raw.strip())
+                if not prefix:
+                    return
+                original = task.prompt or ""
+                task.prompt = f"{prefix}\n\n<current_instruction>\n{original}\n</current_instruction>"
+                self._compact_injected_ids.add(task.id)
+                logger.info(
+                    f"event=compact_context_injected task_id={task.id} source=inline "
+                    f"prefix_chars={len(prefix)}"
+                )
+                return
             raw = meta.get("continues", "")
             # [F6] Coerce/validate cheaply; reject non-str (e.g. a YAML list) and blanks.
             if not isinstance(raw, str):
@@ -2748,6 +2855,30 @@ class TaskOrchestrator(ITaskOrchestrator):
         lines.append("</prior_context>")
         block = "\n".join(lines)
         # [F3] Hard total cap regardless of field caps.
+        if len(block) > self._COMPACT_PREFIX_MAX_CHARS:
+            block = block[: self._COMPACT_PREFIX_MAX_CHARS - len("\n…(truncated)\n</prior_context>")]
+            block = block.rstrip() + "\n…(truncated)\n</prior_context>"
+        return block
+
+    def _build_inline_compact_prefix(self, text: str) -> str:
+        """[Session-fork] Bounded, fence-defused prior-context block from a verbatim
+        digest of marked messages (the fork carry-over).
+
+        Unlike ``_build_compact_prefix`` (which reads a prior task's stored fields),
+        the source here is a client-supplied digest of hand-picked messages. It is
+        untrusted structure, so it is fence-defused exactly like prior-task content
+        and clamped to the SAME hard char cap — a fork can never let the reference
+        block dominate or escape into a live instruction.
+        """
+        digest = self._defuse_fence(str(text)).strip()
+        if not digest:
+            return ""
+        block = (
+            '<prior_context source="marked messages">\n'
+            f"{digest}\n"
+            "(Reference only. Your actual instruction follows.)\n"
+            "</prior_context>"
+        )
         if len(block) > self._COMPACT_PREFIX_MAX_CHARS:
             block = block[: self._COMPACT_PREFIX_MAX_CHARS - len("\n…(truncated)\n</prior_context>")]
             block = block.rstrip() + "\n…(truncated)\n</prior_context>"

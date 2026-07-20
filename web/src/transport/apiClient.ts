@@ -250,6 +250,12 @@ export const api = {
       sessionId?: string;
       cwd?: string;
       targetFiles?: string[];
+      /** [Session-fork] Verbatim digest of the marked messages carried over from a
+       *  forked source session — injected once as reference-only prior context on
+       *  this (the new session's first) turn. Omit on every normal turn. */
+      continueInline?: string;
+      /** [Session-fork] Case the forked session belongs to; joins this turn to it. */
+      caseId?: string;
     },
     idempotencyKey: string,
   ): Promise<InstructionResponse> {
@@ -261,6 +267,33 @@ export const api = {
         session_id: args.sessionId ?? null,
         cwd: args.cwd ?? null,
         target_files: args.targetFiles ?? null,
+        continue_inline: args.continueInline ?? null,
+        case_id: args.caseId ?? null,
+      },
+      idempotencyKey,
+    );
+  },
+
+  /** [Session-fork] Continue a stalled session as a FRESH session under one Case
+   *  (POST /api/sessions/{id}/fork). Creates a new session shaped from `args` and
+   *  binds both the source and the new session to a carrier Case. Returns
+   *  {ok, new_session_id, case_id}. The marked-message digest is NOT sent here — it
+   *  is delivered on the new session's first instruction via `continueInline`. */
+  async forkSession(
+    token: string,
+    sessionId: string,
+    args: { backend: string; repoPath: string; model?: string; nodeId?: string; title?: string },
+    idempotencyKey: string,
+  ): Promise<{ ok: boolean; reason?: string; new_session_id?: string; case_id?: string }> {
+    return post(
+      `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+      token,
+      {
+        backend: args.backend,
+        repo_path: args.repoPath,
+        model: args.model ?? null,
+        node_id: args.nodeId ?? null,
+        title: args.title ?? null,
       },
       idempotencyKey,
     );

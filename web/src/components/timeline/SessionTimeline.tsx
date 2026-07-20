@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import {
   CircleDot,
+  Circle,
   ShieldQuestion,
   FileCode2,
   CheckCircle2,
@@ -23,6 +24,16 @@ import { RichText } from "./RichText";
  *  "jump to message" controls can scroll straight to it. */
 export function userAnchorId(messageId: string): string {
   return `user-msg-${messageId}`;
+}
+
+/** [Session-fork] Message multi-select wiring. When `active`, bubbles show a
+ *  leading checkbox and a tap toggles selection; a long-press on any bubble enters
+ *  select mode via `onLongPress`. Absent ⇒ the timeline is read-only as before. */
+export interface MessageSelection {
+  active: boolean;
+  selectedIds: Set<string>;
+  onLongPress: (messageId: string) => void;
+  onToggle: (messageId: string) => void;
 }
 
 function timeLabel(at: string): string {
@@ -203,29 +214,81 @@ function ExpandableRichText({ text }: { text: string }) {
  */
 function MessageBubble({
   id,
+  messageId,
   role,
   text,
   at,
   isFirst,
   isLast,
   usage,
+  selection,
 }: {
   id?: string;
+  messageId: string;
   role: "user" | "assistant";
   text: string;
   at: string;
   isFirst: boolean;
   isLast: boolean;
   usage?: TokenUsage | null;
+  selection?: MessageSelection;
 }) {
   const mine = role === "user";
   const [copied, setCopied] = useState(false);
+  const longPressTimer = useRef<number | null>(null);
+  // True from the moment a long-press fires until the synthetic click it produces
+  // is swallowed — so the press that ENTERS select mode doesn't immediately toggle
+  // the same message back off.
+  const didLongPress = useRef(false);
+  // Pointer origin, to cancel the press once the finger/mouse drags past a small
+  // threshold (a scroll or a desktop text-selection drag must never select).
+  const pressOrigin = useRef<{ x: number; y: number } | null>(null);
 
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
     copyToClipboard(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+  };
+
+  const selectMode = selection?.active ?? false;
+  const isSelected = selection?.selectedIds.has(messageId) ?? false;
+
+  // Long-press (touch or mouse) enters select mode and marks this message. In
+  // select mode a plain tap toggles it. A drag/scroll cancels the press so
+  // scrolling the thread never accidentally starts a selection.
+  const cancelLongPress = () => {
+    if (longPressTimer.current != null) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+    pressOrigin.current = null;
+  };
+  const startLongPress = (e: React.PointerEvent) => {
+    if (!selection) return;
+    cancelLongPress();
+    didLongPress.current = false;
+    pressOrigin.current = { x: e.clientX, y: e.clientY };
+    longPressTimer.current = window.setTimeout(() => {
+      didLongPress.current = true;
+      selection.onLongPress(messageId);
+      longPressTimer.current = null;
+    }, 450);
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (longPressTimer.current == null || !pressOrigin.current) return;
+    const dx = e.clientX - pressOrigin.current.x;
+    const dy = e.clientY - pressOrigin.current.y;
+    if (dx * dx + dy * dy > 100) cancelLongPress(); // moved > 10px ⇒ it's a drag
+  };
+  const onBubbleClick = () => {
+    // Swallow the click synthesized right after a long-press so it doesn't undo
+    // the selection the press just made.
+    if (didLongPress.current) {
+      didLongPress.current = false;
+      return;
+    }
+    if (selectMode) selection?.onToggle(messageId);
   };
 
   return (
@@ -250,29 +313,56 @@ function MessageBubble({
         </span>
       )}
 
-      {/* Bubble — no absolute children, so text selection is completely
+      {/* Bubble row — a leading select indicator appears in select mode. No
+          absolute children inside the bubble, so text selection stays
           unobstructed from the first character to the last. */}
       <div
         className={cn(
-          "max-w-[90%] px-4 py-3 text-[15px] leading-relaxed select-text",
-          mine
-            ? cn(
-                "bg-user-bubble text-user-text border-r-[3px] border-r-user-border",
-                isFirst ? "rounded-2xl rounded-tr-md" : "rounded-2xl",
-              )
-            : cn(
-                "bg-surface-2 text-ink border-l-[3px] border-l-accent/50",
-                isFirst ? "rounded-2xl rounded-tl-md" : "rounded-2xl",
-              ),
+          "flex max-w-[90%] items-center gap-2",
+          mine && "flex-row-reverse",
+          selectMode && "cursor-pointer",
         )}
+        onPointerDown={startLongPress}
+        onPointerMove={onPointerMove}
+        onPointerUp={cancelLongPress}
+        onPointerLeave={cancelLongPress}
+        onPointerCancel={cancelLongPress}
+        onClick={onBubbleClick}
+        onContextMenu={(e) => selection && e.preventDefault()}
       >
-        {/* Agent output gets rich formatting; user message echoed verbatim.
-            Long agent replies collapse to a preview with an inline toggle. */}
-        {mine ? (
-          <p className="whitespace-pre-wrap break-words">{text}</p>
-        ) : (
-          <ExpandableRichText text={text} />
+        {selectMode && (
+          <span className="shrink-0" aria-hidden>
+            {isSelected ? (
+              <CheckCircle2 className="size-5 text-accent" />
+            ) : (
+              <Circle className="size-5 text-ink-muted" />
+            )}
+          </span>
         )}
+        <div
+          className={cn(
+            "px-4 py-3 text-[15px] leading-relaxed",
+            selectMode ? "select-none" : "select-text",
+            isSelected && "ring-2 ring-accent/60",
+            mine
+              ? cn(
+                  "bg-user-bubble text-user-text border-r-[3px] border-r-user-border",
+                  isFirst ? "rounded-2xl rounded-tr-md" : "rounded-2xl",
+                )
+              : cn(
+                  "bg-surface-2 text-ink border-l-[3px] border-l-accent/50",
+                  isFirst ? "rounded-2xl rounded-tl-md" : "rounded-2xl",
+                ),
+          )}
+        >
+          {/* Agent output gets rich formatting; user message echoed verbatim.
+              Long agent replies collapse to a preview with an inline toggle. */}
+          {mine ? (
+            <p className="whitespace-pre-wrap break-words">{text}</p>
+          ) : (
+            <ExpandableRichText text={text} />
+          )}
+        </div>
       </div>
 
       {/* Meta row — timestamp, token badge, and copy-all button live here,
@@ -350,11 +440,14 @@ function keyFor(item: TimelineItem, i: number): string {
 export function SessionTimeline({
   items,
   liveActivity,
+  selection,
 }: {
   items: TimelineItem[];
   /** Real-time agent activity label from the SDK stream (e.g. "Using Bash").
    *  When provided, replaces the static "Working…" on the running pill. */
   liveActivity?: string | null;
+  /** [Session-fork] Optional message multi-select wiring for the fork gesture. */
+  selection?: MessageSelection;
 }) {
   return (
     <div role="feed" aria-label="Session timeline" className="pb-4 pt-2">
@@ -379,12 +472,14 @@ export function SessionTimeline({
             <MessageBubble
               key={key}
               id={item.message.role === "user" ? userAnchorId(item.message.id) : undefined}
+              messageId={item.message.id}
               role={item.message.role}
               text={item.message.text}
               at={item.at}
               isFirst={!sameGroup(prev)}
               isLast={!sameGroup(next)}
               usage={item.usage}
+              selection={selection}
             />
           );
         }

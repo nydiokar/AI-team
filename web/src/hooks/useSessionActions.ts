@@ -13,6 +13,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, newIdempotencyKey } from "../transport/apiClient";
 import { useAuthStore } from "../stores/authStore";
+import { useForkStore } from "../stores/forkStore";
 
 /** What the UI shows about an in-flight command (spec §9.2). */
 export type DeliveryState = "idle" | "sending" | "acknowledged" | "rejected";
@@ -31,10 +32,18 @@ export function useSubmitInstruction() {
       description: string;
       sessionId?: string;
       idempotencyKey?: string;
+      /** [Session-fork] Carry-over attached on the forked session's FIRST turn. */
+      continueInline?: string;
+      caseId?: string;
     }) =>
       api.submitInstruction(
         token,
-        { description: vars.description, sessionId: vars.sessionId },
+        {
+          description: vars.description,
+          sessionId: vars.sessionId,
+          continueInline: vars.continueInline,
+          caseId: vars.caseId,
+        },
         vars.idempotencyKey ?? newIdempotencyKey(),
       ),
     // Bad token / malformed request won't fix itself; only retry transient faults.
@@ -161,6 +170,46 @@ export function useInvokeManager() {
   });
 }
 
+/**
+ * Fork a session into a fresh session under one Case (control_api.api_fork_session).
+ * Web-origin. Idempotency-keyed so a double-tap can't create two forks. Invalidates
+ * the sessions list + affiliations so the new session and its Case link appear.
+ */
+export function useForkSession() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: (vars: {
+      sourceSessionId: string;
+      backend: string;
+      repoPath: string;
+      nodeId?: string;
+      model?: string;
+      title?: string;
+      idempotencyKey?: string;
+    }) =>
+      api.forkSession(
+        token,
+        vars.sourceSessionId,
+        {
+          backend: vars.backend,
+          repoPath: vars.repoPath,
+          nodeId: vars.nodeId,
+          model: vars.model,
+          title: vars.title,
+        },
+        vars.idempotencyKey ?? newIdempotencyKey(),
+      ),
+    retry: (count, err) =>
+      !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 2,
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      qc.invalidateQueries({ queryKey: ["work-affiliations"] });
+    },
+  });
+}
+
 /** Close a session (control_api.api_close_session). */
 export function useCloseSession() {
   const token = useAuthStore((s) => s.token);
@@ -168,7 +217,12 @@ export function useCloseSession() {
   return useMutation({
     mutationFn: (sessionId: string) => api.closeSession(token, sessionId),
     retry: false,
-    onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
+    onSettled: (_data, _err, sessionId) => {
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      // [Session-fork] Drop any unconsumed fork carry-over for a closed session so
+      // it can't leak in localStorage (a fork abandoned before its first send).
+      if (sessionId) useForkStore.getState().clearCarry(sessionId);
+    },
   });
 }
 

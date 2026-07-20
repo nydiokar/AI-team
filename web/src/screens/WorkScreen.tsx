@@ -12,7 +12,7 @@ import { Inbox, ChevronDown, Zap } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { WorkCaseRow } from "../components/work/WorkCaseRow";
-import { InvokeManagerSheet } from "../components/work/InvokeManagerSheet";
+import { NewSessionSheet } from "../components/sessions/NewSessionSheet";
 import { useWorkList } from "../hooks/useWork";
 import { BUCKET_ORDER, bucketMeta } from "../lib/workPresentation";
 import type { CaseSummary, WorkBucket } from "../domain/work";
@@ -86,7 +86,9 @@ export function WorkScreen() {
           </button>
         }
       />
-      {invokeOpen && <InvokeManagerSheet onClose={() => setInvokeOpen(false)} />}
+      {invokeOpen && (
+        <NewSessionSheet initialRole="manager" onClose={() => setInvokeOpen(false)} />
+      )}
 
       {isLoading && (
         <div className="space-y-3 px-4 pt-4">
