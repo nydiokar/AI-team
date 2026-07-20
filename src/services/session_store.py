@@ -14,7 +14,7 @@ import logging
 import socket
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from src.core.interfaces import Session, SessionStatus, SessionOrigin
 from src.core.timeutil import now_iso
@@ -153,6 +153,44 @@ class SessionStore:
         path = _SESSIONS_DIR / f"{session_id}.json"
         if path.exists():
             path.unlink()
+
+    def prune_empty_closed_sessions(self, limit: int = 100, *, dry_run: bool = True) -> Dict[str, Any]:
+        """Prune closed sessions that have no durable conversation/evidence.
+
+        DB rows are canonical for this operation. The DB layer owns the strict
+        eligibility predicate and rechecks it at delete time; this store removes
+        the JSON mirrors and stale Telegram bindings for rows actually deleted.
+        """
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"matched": 0, "deleted": 0, "session_ids": [], "dry_run": dry_run}
+
+        bounded_limit: int = max(1, int(limit))
+        rows = db.list_empty_closed_sessions(limit=bounded_limit)
+        session_ids: list[str] = [str(row["session_id"]) for row in rows]
+        if dry_run or not session_ids:
+            return {
+                "matched": len(session_ids),
+                "deleted": 0,
+                "session_ids": session_ids,
+                "dry_run": dry_run,
+            }
+
+        deleted_ids = db.delete_empty_closed_sessions(session_ids)
+        for sid in deleted_ids:
+            self.delete(sid)
+        if deleted_ids:
+            bindings = self._load_bindings()
+            keep = {chat_id: sid for chat_id, sid in bindings.items() if sid not in set(deleted_ids)}
+            if keep != bindings:
+                self._save_bindings(keep)
+        return {
+            "matched": len(session_ids),
+            "deleted": len(deleted_ids),
+            "session_ids": deleted_ids,
+            "dry_run": dry_run,
+        }
 
     # ------------------------------------------------------------------
     # Telegram active binding  (chat_id -> session_id)

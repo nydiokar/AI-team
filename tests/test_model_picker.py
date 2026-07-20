@@ -73,6 +73,28 @@ def test_codex_picker_merges_machine_catalog_with_legacy_aliases(monkeypatch):
     assert "gpt-5.2-codex" in names
 
 
+def test_codex_picker_keeps_last_good_catalog_on_refresh_failure(monkeypatch):
+    """A transient Codex app-server/auth failure must not make newer picker
+    models disappear after the cache TTL expires."""
+    reads = iter([
+        [
+            models_module.ModelOption("gpt-5.6-sol", is_default=True),
+            models_module.ModelOption("gpt-5.6-terra"),
+        ],
+        [],
+    ])
+    monkeypatch.setattr(models_module, "_read_codex_model_list", lambda: next(reads))
+    monkeypatch.setattr(models_module, "_CODEX_MODEL_CACHE", (0.0, []))
+
+    first = [item.name for item in available_options("codex")]
+    assert first[:2] == ["gpt-5.6-sol", "gpt-5.6-terra"]
+
+    monkeypatch.setattr(models_module, "_CODEX_MODEL_CACHE", (0.0, list(models_module._CODEX_MODEL_CACHE[1])))
+    second = [item.name for item in available_options("codex")]
+    assert second[:2] == ["gpt-5.6-sol", "gpt-5.6-terra"]
+    assert "gpt-5.5" in second
+
+
 def test_effort_catalog_is_backend_specific_and_optional():
     assert effort_options("claude") == ["low", "medium", "high", "xhigh", "max"]
     assert "ultra" in effort_options("codex")

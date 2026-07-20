@@ -191,6 +191,19 @@ _CODEX_MODEL_CACHE: tuple[float, List[ModelOption]] = (0.0, [])
 _CODEX_MODEL_CACHE_LOCK = threading.Lock()
 
 
+def _merge_codex_options(discovered: List[ModelOption]) -> List[ModelOption]:
+    merged: list[ModelOption] = list(discovered)
+    known: set[str] = {item.name for item in merged}
+    for item in options("codex"):
+        if item.name not in known:
+            merged.append(item)
+    return merged
+
+
+def _is_static_codex_fallback(items: List[ModelOption]) -> bool:
+    return list(items) == list(options("codex"))
+
+
 def available_options(backend: str) -> List[ModelOption]:
     """Return picker options, discovering Codex models from the local CLI.
 
@@ -207,12 +220,15 @@ def available_options(backend: str) -> List[ModelOption]:
             now = time.monotonic()
             if now - _CODEX_MODEL_CACHE[0] >= 300:
                 discovered = _read_codex_model_list()
-                merged: list[ModelOption] = list(discovered)
-                known: set[str] = {item.name for item in merged}
-                for item in options(backend):
-                    if item.name not in known:
-                        merged.append(item)
-                _CODEX_MODEL_CACHE = (now, merged or list(options(backend)))
+                previous: list[ModelOption] = list(_CODEX_MODEL_CACHE[1])
+                if discovered:
+                    merged = _merge_codex_options(discovered)
+                elif previous and not _is_static_codex_fallback(previous):
+                    merged = previous
+                    logger.warning("event=codex_model_discovery_empty keeping_last_good_catalog=true")
+                else:
+                    merged = list(options(backend))
+                _CODEX_MODEL_CACHE = (now, merged)
     return _CODEX_MODEL_CACHE[1]
 
 

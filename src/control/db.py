@@ -884,6 +884,78 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    _EMPTY_CLOSED_SESSION_PREDICATE = """
+        s.status = 'closed'
+        AND COALESCE(s.backend_session_id, '') = ''
+        AND COALESCE(s.last_task_id, '') = ''
+        AND COALESCE(s.last_artifact_path, '') = ''
+        AND COALESCE(s.last_summary, '') = ''
+        AND COALESCE(s.last_user_message, '') = ''
+        AND COALESCE(s.last_result_summary, '') = ''
+        AND COALESCE(s.last_files_modified, '[]') IN ('', '[]')
+        AND COALESCE(s.task_history, '[]') IN ('', '[]')
+        AND COALESCE(s.current_case_id, '') = ''
+        AND NOT EXISTS (SELECT 1 FROM mesh_tasks t WHERE t.session_id = s.session_id)
+        AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.session_id = s.session_id)
+        AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.session_id = s.session_id)
+        AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.session_id = s.session_id)
+        AND NOT EXISTS (SELECT 1 FROM llm_turns lt WHERE lt.session_id = s.session_id)
+        AND NOT EXISTS (SELECT 1 FROM llm_events le WHERE le.session_id = s.session_id)
+        AND NOT EXISTS (
+            SELECT 1 FROM flow_links fl
+            WHERE fl.entity_type = 'session' AND fl.entity_id = s.session_id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM flow_events fe
+            WHERE fe.entity_type = 'session' AND fe.entity_id = s.session_id
+        )
+    """
+
+    def list_empty_closed_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Closed sessions that have no conversation/evidence rows anywhere.
+
+        This is intentionally stricter than "closed with no task_id": any
+        historical reference in the task/event/job/approval/telemetry/Case ledgers
+        makes the session ineligible for pruning.
+        """
+        rows = self._conn().execute(
+            f"""
+            SELECT s.*
+            FROM sessions s
+            WHERE {self._EMPTY_CLOSED_SESSION_PREDICATE}
+            ORDER BY s.updated_at ASC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_empty_closed_sessions(self, session_ids: List[str]) -> List[str]:
+        """Delete still-empty closed session rows, rechecking eligibility."""
+        ids: list[str] = [sid.strip() for sid in session_ids if sid and sid.strip()]
+        if not ids:
+            return []
+        placeholders = ", ".join("?" for _ in ids)
+        with self._write() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT s.session_id
+                FROM sessions s
+                WHERE s.session_id IN ({placeholders})
+                  AND {self._EMPTY_CLOSED_SESSION_PREDICATE}
+                """,
+                ids,
+            ).fetchall()
+            eligible: list[str] = [str(r["session_id"]) for r in rows]
+            if not eligible:
+                return []
+            delete_placeholders = ", ".join("?" for _ in eligible)
+            conn.execute(
+                f"DELETE FROM sessions WHERE session_id IN ({delete_placeholders})",
+                eligible,
+            )
+            return eligible
+
     def list_stale_busy_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Return BUSY sessions with no pending or claimed mesh task.
 
