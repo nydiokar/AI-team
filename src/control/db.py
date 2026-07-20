@@ -713,7 +713,7 @@ class MeshDB:
                         origin,
                         driver_type, driver_status, cache_health, cache_unhealthy_count,
                         previous_backend_session_ids,
-                        current_case_id, case_role, role_boot
+                        current_case_id, case_role, role_boot, continued_from
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
                         :created_at, :updated_at, :machine_id, :backend_session_id, :model,
@@ -724,7 +724,7 @@ class MeshDB:
                         :origin,
                         :driver_type, :driver_status, :cache_health, :cache_unhealthy_count,
                         :previous_backend_session_ids,
-                        :current_case_id, :case_role, :role_boot
+                        :current_case_id, :case_role, :role_boot, :continued_from
                     )
                     ON CONFLICT(session_id) DO UPDATE SET
                         backend             = excluded.backend,
@@ -763,6 +763,8 @@ class MeshDB:
                         -- decision stamped at session-create time and read-only after, so
                         -- a later full-upsert of a stale object cannot flip a session's
                         -- tier. Absent ⇒ NULL ⇒ tier-0 default (byte-identical).
+                        -- continued_from is the same: session lineage is fixed at fork
+                        -- time, so it is INSERT-seeded ONLY and never updated here.
                     """,
                     {
                         "session_id":          session.session_id,
@@ -794,6 +796,7 @@ class MeshDB:
                         "current_case_id":       getattr(session, "current_case_id", None) or None,
                         "case_role":             getattr(session, "case_role", None) or None,
                         "role_boot":             getattr(session, "role_boot", None) or None,
+                        "continued_from":        getattr(session, "continued_from", None) or None,
                     },
                 )
         except Exception as e:
@@ -2952,6 +2955,7 @@ def _get_migrations() -> List[tuple]:
                # All ADDITIVE + NULLable ⇒ existing rows/writers untouched.
         (25, "ALTER TABLE sessions ADD COLUMN effort TEXT"),  # per-session thinking effort; NULL = backend default
         (26, "ALTER TABLE sessions ADD COLUMN role_boot TEXT"),  # [Worker role] explicit opt-in role-boot signal; NULL = tier-0 default
+        (27, "ALTER TABLE sessions ADD COLUMN continued_from TEXT"),  # [Session-fork] session→session lineage; NULL = not a continuation
     ]
 
 

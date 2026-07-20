@@ -269,6 +269,7 @@ class SessionStore:
             "cache_health": s.cache_health,
             "cache_unhealthy_count": s.cache_unhealthy_count,
             "previous_backend_session_ids": s.previous_backend_session_ids or [],
+            "continued_from": s.continued_from,
         }
 
     @staticmethod
@@ -327,4 +328,5 @@ class SessionStore:
             current_case_id=d.get("current_case_id") or None,
             case_role=d.get("case_role") or None,
             role_boot=d.get("role_boot") or None,
+            continued_from=d.get("continued_from") or None,
         )

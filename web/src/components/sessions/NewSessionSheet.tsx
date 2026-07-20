@@ -10,9 +10,12 @@
  *                     + optional done-gate (POST /api/manager). This replaces the
  *                     bespoke, hard-to-find InvokeManagerSheet — a Manager is now
  *                     just a role you pick, exactly like a Worker.
- *   • Fork          — continue a stalled session as a fresh session bound to one
- *                     Case, pre-filled from the source (POST /api/sessions/{id}/fork),
- *                     carrying the marked-message digest onto its first instruction.
+ *   • Fork          — continue a stalled session as a fresh session. This is the
+ *                     ORDINARY create flow (same backend→node→repo pick, same mesh
+ *                     support), just pre-filled from the source, that records a
+ *                     session→session lineage (`continued_from`) and carries the
+ *                     marked-message digest onto its first instruction. It is a pure
+ *                     SESSION action — it never touches Case membership or role.
  */
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
@@ -20,7 +23,6 @@ import { X, ChevronRight, FolderOpen } from "lucide-react";
 import { Button } from "../ui/Button";
 import {
   useCreateSession,
-  useForkSession,
   useInvokeManager,
 } from "../../hooks/useSessionActions";
 import { useProjects, useTargets } from "../../hooks/useLiveData";
@@ -63,20 +65,19 @@ export function NewSessionSheet({
   const navigate = useNavigate();
   const create = useCreateSession();
   const invoke = useInvokeManager();
-  const forkSession = useForkSession();
   const setCarry = useForkStore((s) => s.setCarry);
 
   const isFork = !!fork;
-  // A fork always produces a plain continuation session; role selection is only
-  // meaningful for a fresh create.
-  const [step, setStep] = useState<Step>(isFork ? "repo" : "backend");
+  // A fork is the ordinary create flow, pre-filled from the source — the FULL
+  // wizard (backend → node → repo), so it works on the mesh exactly like "+".
+  const [step, setStep] = useState<Step>("backend");
   const [backend, setBackend] = useState<string>(fork?.backend ?? "claude");
   const [nodeId, setNodeId] = useState<string>(fork?.nodeId ?? "__local__");
   const [repoPath, setRepoPath] = useState<string>(fork?.repoPath ?? "");
+  // A fork is always a plain continuation session (role selection is hidden for it).
   const [role, setRole] = useState<SessionRole>(isFork ? "bare" : initialRole ?? "bare");
   const [objective, setObjective] = useState("");
   const [criteria, setCriteria] = useState("");
-  const [title, setTitle] = useState("");
   const [manualMode, setManualMode] = useState(false);
   const manualRef = useRef<HTMLInputElement>(null);
 
@@ -89,15 +90,14 @@ export function NewSessionSheet({
   const { data: projects, isLoading: projectsLoading } = useProjects(nodeId);
 
   const isManager = role === "manager";
-  const pending = create.isPending || invoke.isPending || forkSession.isPending;
-  const anyError = create.isError || invoke.isError || forkSession.isError;
-  const errorMsg =
-    create.error?.message ?? invoke.error?.message ?? forkSession.error?.message;
+  const pending = create.isPending || invoke.isPending;
+  const anyError = create.isError || invoke.isError;
+  const errorMsg = create.error?.message ?? invoke.error?.message;
 
-  // Manager & Fork need an explicit confirm step (a Manager also needs an intent;
-  // a Fork lets you review/edit the pre-fill), so tapping a repo only SELECTS it
-  // there. Bare/Worker keep the one-tap "pick repo = create" flow.
-  const needsExplicitSubmit = isManager || isFork || manualMode;
+  // Only a Manager needs an explicit confirm (it also needs an intent), so tapping a
+  // repo only SELECTS it there. Bare / Worker / Fork keep the one-tap "pick repo =
+  // go" flow — a fork carries its context automatically, so no extra input.
+  const needsExplicitSubmit = isManager || manualMode;
 
   const chooseBackend = (b: string) => {
     setBackend(b);
@@ -123,25 +123,6 @@ export function NewSessionSheet({
     const p = path.trim();
     if (!p || pending) return;
 
-    if (isFork && fork) {
-      forkSession.mutate(
-        { sourceSessionId: fork.sourceSessionId, backend, repoPath: p, nodeId, model: fork.model ?? undefined, title: title.trim() || undefined },
-        {
-          onSuccess: (res) => {
-            const id = res?.new_session_id;
-            if (id) {
-              // Stash the carry-over so the new session's first instruction picks
-              // it up (continue_inline + case_id).
-              setCarry(id, { continueInline: fork.digest, caseId: res.case_id ?? "" });
-            }
-            onClose();
-            if (id) navigate(`/sessions/${id}`);
-          },
-        },
-      );
-      return;
-    }
-
     if (isManager) {
       const obj = objective.trim();
       if (!obj) return;
@@ -158,11 +139,22 @@ export function NewSessionSheet({
       return;
     }
 
+    // Bare / Worker / Fork all go through the ordinary create pipeline (mesh-capable).
+    // A fork just adds `continuedFrom` (session lineage) and stashes the marked-message
+    // digest so the new session's FIRST instruction carries it in.
     create.mutate(
-      { backend, repoPath: p, nodeId, roleBoot: role === "worker" ? "worker" : undefined },
+      {
+        backend,
+        repoPath: p,
+        nodeId,
+        model: isFork ? fork!.model ?? undefined : undefined,
+        roleBoot: role === "worker" ? "worker" : undefined,
+        continuedFrom: isFork ? fork!.sourceSessionId : undefined,
+      },
       {
         onSuccess: (env) => {
           const id = env.session?.session_id;
+          if (id && isFork && fork) setCarry(id, { continueInline: fork.digest });
           onClose();
           if (id) navigate(`/sessions/${id}`);
         },
@@ -180,11 +172,9 @@ export function NewSessionSheet({
     : isManager
       ? "Invoke Manager"
       : "New session";
-  const submitLabel = isFork
-    ? forkSession.isPending ? "Forking…" : "Fork → new session"
-    : isManager
-      ? invoke.isPending ? "Invoking…" : "Invoke Manager"
-      : create.isPending ? "Creating…" : "Create session";
+  const submitLabel = isManager
+    ? invoke.isPending ? "Invoking…" : "Invoke Manager"
+    : create.isPending ? "Creating…" : "Create session";
 
   return (
     <div
@@ -198,7 +188,7 @@ export function NewSessionSheet({
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            {step !== "backend" && !isFork && (
+            {step !== "backend" && (
               <button
                 onClick={() => setStep(step === "repo" && hasRemoteNodes ? "node" : "backend")}
                 className="flex size-7 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
@@ -224,8 +214,9 @@ export function NewSessionSheet({
 
         {isFork && (
           <p className="mt-1 mb-3 text-xs text-ink-muted">
-            A fresh session (fresh cache) that continues this thread. Your marked
-            messages ride in on the first instruction; both sessions share one Case.
+            A fresh session (fresh cache) that continues this thread — pick backend,
+            machine and repo like any new session. Your marked messages ride in on the
+            first instruction, and it's linked back to the session you continued.
           </p>
         )}
 
@@ -338,21 +329,6 @@ export function NewSessionSheet({
                   value={criteria}
                   onChange={(e) => setCriteria(e.target.value)}
                   placeholder="what 'done' means — demanded at close"
-                  className="w-full rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[13px] text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
-                />
-              </div>
-            )}
-
-            {/* Fork continuation title (optional Case name). */}
-            {isFork && (
-              <div className="mb-3">
-                <label className="mb-1 block text-xs text-ink-muted">
-                  Continuation title <span className="text-ink-muted/70">(optional)</span>
-                </label>
-                <input
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="names the Case both sessions share"
                   className="w-full rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[13px] text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
                 />
               </div>

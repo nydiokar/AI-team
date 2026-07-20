@@ -274,31 +274,6 @@ export const api = {
     );
   },
 
-  /** [Session-fork] Continue a stalled session as a FRESH session under one Case
-   *  (POST /api/sessions/{id}/fork). Creates a new session shaped from `args` and
-   *  binds both the source and the new session to a carrier Case. Returns
-   *  {ok, new_session_id, case_id}. The marked-message digest is NOT sent here — it
-   *  is delivered on the new session's first instruction via `continueInline`. */
-  async forkSession(
-    token: string,
-    sessionId: string,
-    args: { backend: string; repoPath: string; model?: string; nodeId?: string; title?: string },
-    idempotencyKey: string,
-  ): Promise<{ ok: boolean; reason?: string; new_session_id?: string; case_id?: string }> {
-    return post(
-      `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
-      token,
-      {
-        backend: args.backend,
-        repo_path: args.repoPath,
-        model: args.model ?? null,
-        node_id: args.nodeId ?? null,
-        title: args.title ?? null,
-      },
-      idempotencyKey,
-    );
-  },
-
   /** Stop the session's in-flight task (control_api.api_stop_session). */
   async stopSession(
     token: string,
@@ -354,7 +329,16 @@ export const api = {
    *  profile; omit it for a bare (tier-0) session. */
   async createSession(
     token: string,
-    args: { backend: string; repoPath: string; model?: string; nodeId?: string; roleBoot?: string },
+    args: {
+      backend: string;
+      repoPath: string;
+      model?: string;
+      nodeId?: string;
+      roleBoot?: string;
+      /** [Session-fork] Source session id when this create is a fork — stamps
+       *  session→session lineage. A fork is just an ordinary create with this set. */
+      continuedFrom?: string;
+    },
     idempotencyKey: string,
   ): Promise<CommandEnvelope> {
     return post<CommandEnvelope>(
@@ -366,6 +350,7 @@ export const api = {
         model: args.model ?? null,
         node_id: args.nodeId ?? null,
         role_boot: args.roleBoot ?? null,
+        continued_from: args.continuedFrom ?? null,
       },
       idempotencyKey,
     );

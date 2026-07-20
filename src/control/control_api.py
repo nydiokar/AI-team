@@ -118,22 +118,11 @@ class CreateSessionBody(BaseModel):
     # (byte-identical). dispatch_worker(role='worker') threads it to here so the
     # created worker session boots role-ful; nothing else sets it.
     role_boot: Optional[str] = None
-
-
-class SessionForkBody(BaseModel):
-    """[Session-fork] Continue a stalled session as a fresh session under one Case.
-
-    ``backend``/``repo_path``/``node_id``/``model`` shape the NEW session (the client
-    pre-fills them from the source but may change any before confirming — the same
-    backend→node→repo pick as a normal create). ``title`` is the optional Case
-    objective when a carrier Case must be born (pre-filled with a derived default on
-    the client). The marked-message digest is NOT sent here — it is client-held and
-    attached on the new session's first instruction as ``continue_inline``."""
-    backend: str
-    repo_path: str
-    model: Optional[str] = None
-    node_id: Optional[str] = None
-    title: Optional[str] = Field(default=None, max_length=200)
+    # [Session-fork] Session→session lineage. When this create is a FORK (continue a
+    # stalled session as a fresh one), the source session id is passed here and
+    # stamped on the new session for a navigable thread. Purely session-axis — it
+    # does NOT touch Case membership or role. Absent on a normal create.
+    continued_from: Optional[str] = None
 
 
 class ManagerInvokeBody(BaseModel):
@@ -1066,6 +1055,7 @@ def build_control_api(orchestrator) -> FastAPI:
                 node_id=body.node_id or "__local__",
                 origin=SessionOrigin(channel="web", kind="user"),
                 role_boot=body.role_boot,
+                continued_from=body.continued_from,
                 bind_chat=False,
             )
             env = _command_envelope(result)
@@ -1073,39 +1063,6 @@ def build_control_api(orchestrator) -> FastAPI:
                 raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
             _idem_put("create_session", idempotency_key, env)
             return JSONResponse(env)
-
-    @app.post("/api/sessions/{session_id}/fork", dependencies=[Depends(_require_auth)])
-    def api_fork_session(
-        session_id: str,
-        body: SessionForkBody,
-        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    ) -> JSONResponse:
-        """[Session-fork] Continue ``session_id`` as a FRESH session bound to one Case.
-
-        Creates a new session (fresh backend session ⇒ fresh cache) shaped from the
-        body, and binds both the source and the new session to a carrier Case (reusing
-        the source's open Case when it has one). Returns ``{ok, new_session_id,
-        case_id}``. The marked-message digest is delivered later, on the new session's
-        first instruction (``continue_inline``); nothing is pasted as a first message.
-        404 for an unknown source session; 4xx when the create is rejected."""
-        with _idem_guard("fork_session", idempotency_key) as cached:
-            if cached is not None:
-                return JSONResponse(cached)
-            result = orchestrator.fork_session(
-                session_id,
-                backend=body.backend,
-                repo_path=body.repo_path,
-                model=body.model,
-                node_id=body.node_id or "__local__",
-                title=body.title,
-            )
-            if not result.get("ok"):
-                reason = result.get("reason") or "fork_failed"
-                status = 404 if reason == "session_not_found" else _REASON_STATUS.get(reason, 400)
-                raise HTTPException(status_code=status, detail={"ok": False, "reason": reason,
-                                                                "detail": result.get("detail", "")})
-            _idem_put("fork_session", idempotency_key, result)
-            return JSONResponse(result)
 
     @app.post("/api/manager", dependencies=[Depends(_require_auth)])
     async def api_manager(

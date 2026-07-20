@@ -73,6 +73,7 @@ export function toSession(raw: RawSessionView): Session {
     originChannel: raw.origin_channel,
     originKind: raw.origin_kind,
     updatedAt: raw.updated_at,
+    continuedFrom: raw.continued_from ?? null,
   };
 }
 

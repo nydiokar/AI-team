@@ -110,6 +110,8 @@ export function useCreateSession() {
       nodeId?: string;
       model?: string;
       roleBoot?: string;
+      /** [Session-fork] Source session id when this create is a fork. */
+      continuedFrom?: string;
       idempotencyKey?: string;
     }) =>
       api.createSession(
@@ -120,6 +122,7 @@ export function useCreateSession() {
           model: vars.model,
           nodeId: vars.nodeId,
           roleBoot: vars.roleBoot,
+          continuedFrom: vars.continuedFrom,
         },
         vars.idempotencyKey ?? newIdempotencyKey(),
       ),
@@ -166,46 +169,6 @@ export function useInvokeManager() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["work-list"] });
       qc.invalidateQueries({ queryKey: ["sessions"] });
-    },
-  });
-}
-
-/**
- * Fork a session into a fresh session under one Case (control_api.api_fork_session).
- * Web-origin. Idempotency-keyed so a double-tap can't create two forks. Invalidates
- * the sessions list + affiliations so the new session and its Case link appear.
- */
-export function useForkSession() {
-  const token = useAuthStore((s) => s.token);
-  const qc = useQueryClient();
-
-  return useMutation({
-    mutationFn: (vars: {
-      sourceSessionId: string;
-      backend: string;
-      repoPath: string;
-      nodeId?: string;
-      model?: string;
-      title?: string;
-      idempotencyKey?: string;
-    }) =>
-      api.forkSession(
-        token,
-        vars.sourceSessionId,
-        {
-          backend: vars.backend,
-          repoPath: vars.repoPath,
-          nodeId: vars.nodeId,
-          model: vars.model,
-          title: vars.title,
-        },
-        vars.idempotencyKey ?? newIdempotencyKey(),
-      ),
-    retry: (count, err) =>
-      !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 2,
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: ["sessions"] });
-      qc.invalidateQueries({ queryKey: ["work-affiliations"] });
     },
   });
 }

@@ -918,6 +918,20 @@ export function SessionDetailScreen() {
             </div>
           )}
 
+          {/* [Session-fork] Lineage: this session was forked from another one. A
+              pure session→session link (navigable thread), independent of Cases. */}
+          {session?.continuedFrom && (
+            <button
+              onClick={() => navigate(`/sessions/${session.continuedFrom}`)}
+              className="flex w-full items-center gap-1.5 border-b border-hairline bg-base/40 px-4 py-2 text-left text-[11px] text-ink-muted hover:bg-surface-2"
+              title="Open the session this one continues"
+            >
+              <GitFork className="size-3.5 text-ink-soft" />
+              <span>Continued from</span>
+              <span className="font-mono text-ink-soft">{session.continuedFrom}</span>
+            </button>
+          )}
+
           {statusBanner && (
             <div className="border-b border-hairline bg-surface-1 px-4 py-2 text-[12px] text-ink-soft">
               {statusBanner}

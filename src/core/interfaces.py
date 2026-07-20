@@ -223,6 +223,14 @@ class Session:
     # worker into a role-ful boot. None ⇒ byte-identical legacy default.
     role_boot: Optional[str] = None     # "worker" | None
 
+    # [Session-fork] Session→session lineage. When a session is forked (continue a
+    # stalled thread as a fresh session), the new session records the id of the one
+    # it continues here. Purely a SESSION-axis pointer for a navigable thread — it
+    # is INDEPENDENT of Case membership (current_case_id/case_role) and behavioral
+    # role (role_boot), so a fork never collides with Manager/Worker semantics.
+    # INSERT-seeded at create time, read-only after. None ⇒ not a continuation.
+    continued_from: Optional[str] = None
+
     def __post_init__(self):
         if self.last_files_modified is None:
             self.last_files_modified = []
