@@ -21,11 +21,16 @@ import {
   ChevronUp,
   MessagesSquare,
   FolderOpen,
+  GitFork,
+  X,
 } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
 import { SessionAffiliationLink } from "../components/work/SessionAffiliationLabel";
 import { SessionTimeline, userAnchorId } from "../components/timeline/SessionTimeline";
+import type { MessageSelection } from "../components/timeline/SessionTimeline";
+import { NewSessionSheet, type ForkContext } from "../components/sessions/NewSessionSheet";
+import { buildForkDigest, type MarkedMessage } from "../lib/forkDigest";
 import { SessionTurns } from "../components/timeline/SessionTurns";
 import { ContextFillGauge } from "../components/timeline/ContextFillGauge";
 import { Composer } from "../components/timeline/Composer";
@@ -490,6 +495,35 @@ export function SessionDetailScreen() {
   const [compactConfirm, setCompactConfirm] = useState(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
+  // [Session-fork] Message multi-select → fork. A long-press on any bubble enters
+  // select mode; the action bar then forks the marked messages into a fresh session.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [forkOpen, setForkOpen] = useState(false);
+
+  const exitSelect = useCallback(() => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }, []);
+  const toggleSelect = useCallback((mid: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(mid)) next.delete(mid);
+      else next.add(mid);
+      return next;
+    });
+  }, []);
+  const enterSelect = useCallback((mid: string) => {
+    setSelectMode(true);
+    setSelectedIds((prev) => new Set(prev).add(mid));
+  }, []);
+  const selection: MessageSelection = {
+    active: selectMode,
+    selectedIds,
+    onLongPress: enterSelect,
+    onToggle: toggleSelect,
+  };
+
   const timelineRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -586,6 +620,26 @@ export function SessionDetailScreen() {
   const act = (fn: () => void) => { setMenuOpen(false); fn(); };
 
   const proj = session ? projectName(session.workspace.path) : null;
+
+  // [Session-fork] The marked messages, in timeline order, and the fork pre-fill
+  // shaped from THIS session (backend / node / repo / model) — the user confirms or
+  // changes any of it in the sheet.
+  const markedMessages: MarkedMessage[] = timeline
+    .filter(
+      (it): it is Extract<typeof it, { kind: "message" }> =>
+        it.kind === "message" && selectedIds.has(it.message.id),
+    )
+    .map((it) => ({ id: it.message.id, role: it.message.role, text: it.message.text }));
+  const forkContext: ForkContext | null = session
+    ? {
+        sourceSessionId: session.id,
+        digest: buildForkDigest(markedMessages),
+        backend: session.backend,
+        nodeId: session.workspace.targetId || "__local__",
+        repoPath: session.workspace.path,
+        model: session.model,
+      }
+    : null;
 
   const TABS: { key: SessionTab; label: string; Icon: React.ElementType }[] = [
     { key: "chat", label: "Chat", Icon: MessagesSquare },
@@ -884,7 +938,7 @@ export function SessionDetailScreen() {
               </div>
             ) : timeline.length > 0 ? (
               <>
-                <SessionTimeline items={timeline} liveActivity={liveActivity} />
+                <SessionTimeline items={timeline} liveActivity={liveActivity} selection={selection} />
                 <div ref={bottomRef} className="h-px" />
               </>
             ) : (
@@ -942,6 +996,34 @@ export function SessionDetailScreen() {
           )}
         </div>
         </div>
+
+        {/* [Session-fork] Selection action bar — appears while marking messages.
+            Fork carries the marked messages into a fresh session under one Case. */}
+        {selectMode && (
+          <div className="flex items-center gap-2 border-t border-hairline bg-surface-1/95 px-3 py-2.5 backdrop-blur-xl">
+            <button
+              onClick={exitSelect}
+              className="flex size-9 shrink-0 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2"
+              aria-label="Cancel selection"
+            >
+              <X className="size-5" />
+            </button>
+            <span className="text-[13px] text-ink-soft">
+              {selectedIds.size} selected
+            </span>
+            <span className="ml-1 hidden text-[11px] text-ink-muted sm:inline">
+              Marked messages ride in as context
+            </span>
+            <button
+              onClick={() => setForkOpen(true)}
+              disabled={selectedIds.size === 0}
+              className="ml-auto flex items-center gap-1.5 rounded-full bg-accent-dim/60 px-4 py-2 text-[13px] font-medium text-accent ring-1 ring-inset ring-accent/30 transition-colors hover:bg-accent-dim disabled:opacity-50"
+            >
+              <GitFork className="size-4" />
+              Fork → new session
+            </button>
+          </div>
+        )}
 
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}
         {id && !closed ? (
@@ -1009,6 +1091,16 @@ export function SessionDetailScreen() {
       )}
       {gitPanelOpen && id && (
         <GitPanelSheet sessionId={id} onClose={() => setGitPanelOpen(false)} />
+      )}
+
+      {forkOpen && forkContext && (
+        <NewSessionSheet
+          fork={forkContext}
+          onClose={() => {
+            setForkOpen(false);
+            exitSelect();
+          }}
+        />
       )}
 
       {compactConfirm && (

@@ -9,6 +9,7 @@ import {
 } from "../../hooks/useSessionActions";
 import { useSentStore } from "../../stores/sentStore";
 import { useDraftStore } from "../../stores/draftStore";
+import { useForkStore } from "../../stores/forkStore";
 
 export function Composer({
   sessionId,
@@ -59,11 +60,16 @@ export function Composer({
   const upload = useUploadFile();
   const addSent = useSentStore((s) => s.add);
   const updateSent = useSentStore((s) => s.update);
+  // [Session-fork] Any carry-over stashed for THIS (forked) session rides in on the
+  // first send only. Read on demand at send time so a stale render never re-attaches
+  // it, and clear on success so subsequent turns are normal.
+  const clearCarry = useForkStore((s) => s.clearCarry);
 
   const send = (overrideText?: string) => {
     const body = (overrideText ?? text).trim();
     if (!body || submit.isPending) return;
     const id = newIdempotencyKey();
+    const carry = useForkStore.getState().bySession[sessionId];
     addSent({
       id,
       sessionId,
@@ -77,10 +83,19 @@ export function Composer({
     setText("");
     clearDraft(sessionId);
     submit.mutate(
-      { description: body, sessionId, idempotencyKey: id },
       {
-        onSuccess: (res) =>
-          updateSent(id, { delivery: "acknowledged", taskId: res.task_id }),
+        description: body,
+        sessionId,
+        idempotencyKey: id,
+        continueInline: carry?.continueInline,
+        caseId: carry?.caseId || undefined,
+      },
+      {
+        onSuccess: (res) => {
+          updateSent(id, { delivery: "acknowledged", taskId: res.task_id });
+          // The fork context has been delivered — never attach it again.
+          if (carry) clearCarry(sessionId);
+        },
         onError: () => {
           updateSent(id, { delivery: "rejected" });
           updateText(body);
