@@ -40,6 +40,7 @@ class SessionView:
     origin_channel: str         # where the session came from (SessionOrigin.channel)
     origin_kind: str            # SessionOrigin.kind
     updated_at: str
+    continued_from: Optional[str]  # [Session-fork] session this one continues, or None
 
     @classmethod
     def from_session(cls, s: Session) -> "SessionView":
@@ -78,6 +79,7 @@ class SessionView:
             origin_channel=origin.channel if origin else "telegram",
             origin_kind=origin.kind if origin else "user",
             updated_at=s.updated_at,
+            continued_from=getattr(s, "continued_from", None),
         )
 
     def to_dict(self) -> Dict[str, Any]:

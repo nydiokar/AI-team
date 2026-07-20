@@ -62,6 +62,7 @@ class SessionService:
                         model: Optional[str] = None,
                         origin: Optional[SessionOrigin] = None,
                         role_boot: Optional[str] = None,
+                        continued_from: Optional[str] = None,
                         bind_chat: bool = True) -> CommandResult:
         """Faithful extraction of TelegramInterface._create_and_bind_session.
 
@@ -99,6 +100,10 @@ class SessionService:
         # Absent ⇒ None ⇒ tier-0 default (byte-identical). Distinct from case_role.
         if role_boot:
             s.role_boot = role_boot
+        # [Session-fork] Stamp session→session lineage at create time (a fork). Pure
+        # session-axis pointer; independent of Case/role. Absent ⇒ None.
+        if continued_from:
+            s.continued_from = continued_from
         self.store.save(s)
         if bind_chat and chat_id is not None:
             self.store.bind(chat_id, s.session_id)

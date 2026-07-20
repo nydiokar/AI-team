@@ -31,6 +31,10 @@ export interface RawSessionView {
   origin_channel: string;
   origin_kind: string;
   updated_at: string;
+  /** [Session-fork] Session this one continues (fork lineage), or null. Optional so
+   *  an older cached payload without the field still parses; the adapter normalizes
+   *  a missing value to null. */
+  continued_from?: string | null;
 }
 
 // GET /api/nodes → { nodes: RawNode[] }

@@ -87,6 +87,8 @@ export interface Session {
   originChannel: string;
   originKind: string;
   updatedAt: string;
+  /** [Session-fork] The session this one continues (fork lineage), or null. */
+  continuedFrom: string | null;
 }
 
 // ── Task ─ 🟡 PARTIAL / ❌ MISSING lifecycle (gap-doc §4) ───────────────────

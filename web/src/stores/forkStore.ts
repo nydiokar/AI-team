@@ -3,8 +3,8 @@
  *
  * When a session is forked, the verbatim digest of the marked messages is held
  * CLIENT-side (never pasted as a first message) and attached to the NEW session's
- * FIRST instruction as `continue_inline` (+ the Case id as `case_id`). This store
- * stashes that pending carry-over, keyed by the NEW session id, so it survives the
+ * FIRST instruction as `continue_inline`. This store stashes that pending
+ * carry-over, keyed by the NEW session id, so it survives the
  * navigation from the fork sheet to the new session detail — and a reload / PWA
  * restart before the first send (localStorage).
  *
@@ -17,8 +17,6 @@ import { persist } from "zustand/middleware";
 export interface ForkCarry {
   /** Verbatim digest of the marked messages (bounded). */
   continueInline: string;
-  /** Case the forked session belongs to (may be empty if the Case write failed). */
-  caseId: string;
 }
 
 interface ForkState {

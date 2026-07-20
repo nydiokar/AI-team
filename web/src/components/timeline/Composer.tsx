@@ -87,10 +87,10 @@ export function Composer({
         description: body,
         sessionId,
         idempotencyKey: id,
-        // Only the marked-message digest rides in. We deliberately do NOT pass the
-        // Case id as a join here: the fork endpoint already linked this session to
-        // the Case as role="session"; joining again would relabel it "worker" (the
-        // A38 Manager→worker membership semantics), which is wrong for a manual fork.
+        // A fork carries ONLY the marked-message digest onto its first turn. Fork is
+        // a pure session action (session→session lineage via `continued_from`), so it
+        // never joins a Case here — Case membership is the Manager/Worker axis, kept
+        // entirely separate.
         continueInline: carry?.continueInline,
       },
       {
