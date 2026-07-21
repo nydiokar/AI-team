@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import {
   CircleDot,
   Circle,
@@ -27,12 +27,13 @@ export function userAnchorId(messageId: string): string {
 }
 
 /** [Session-fork] Message multi-select wiring. When `active`, bubbles show a
- *  leading checkbox and a tap toggles selection; a long-press on any bubble enters
- *  select mode via `onLongPress`. Absent ⇒ the timeline is read-only as before. */
+ *  leading checkbox and a tap toggles selection. Select mode is entered
+ *  DELIBERATELY from the session ⋮ menu ("Fork from messages"), never from a
+ *  long-press — so the native OS text-selection gesture is never intercepted.
+ *  Absent ⇒ the timeline is read-only as before. */
 export interface MessageSelection {
   active: boolean;
   selectedIds: Set<string>;
-  onLongPress: (messageId: string) => void;
   onToggle: (messageId: string) => void;
 }
 
@@ -235,14 +236,6 @@ function MessageBubble({
 }) {
   const mine = role === "user";
   const [copied, setCopied] = useState(false);
-  const longPressTimer = useRef<number | null>(null);
-  // True from the moment a long-press fires until the synthetic click it produces
-  // is swallowed — so the press that ENTERS select mode doesn't immediately toggle
-  // the same message back off.
-  const didLongPress = useRef(false);
-  // Pointer origin, to cancel the press once the finger/mouse drags past a small
-  // threshold (a scroll or a desktop text-selection drag must never select).
-  const pressOrigin = useRef<{ x: number; y: number } | null>(null);
 
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -254,40 +247,10 @@ function MessageBubble({
   const selectMode = selection?.active ?? false;
   const isSelected = selection?.selectedIds.has(messageId) ?? false;
 
-  // Long-press (touch or mouse) enters select mode and marks this message. In
-  // select mode a plain tap toggles it. A drag/scroll cancels the press so
-  // scrolling the thread never accidentally starts a selection.
-  const cancelLongPress = () => {
-    if (longPressTimer.current != null) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
-    }
-    pressOrigin.current = null;
-  };
-  const startLongPress = (e: React.PointerEvent) => {
-    if (!selection) return;
-    cancelLongPress();
-    didLongPress.current = false;
-    pressOrigin.current = { x: e.clientX, y: e.clientY };
-    longPressTimer.current = window.setTimeout(() => {
-      didLongPress.current = true;
-      selection.onLongPress(messageId);
-      longPressTimer.current = null;
-    }, 450);
-  };
-  const onPointerMove = (e: React.PointerEvent) => {
-    if (longPressTimer.current == null || !pressOrigin.current) return;
-    const dx = e.clientX - pressOrigin.current.x;
-    const dy = e.clientY - pressOrigin.current.y;
-    if (dx * dx + dy * dy > 100) cancelLongPress(); // moved > 10px ⇒ it's a drag
-  };
+  // Select mode is entered deliberately from the ⋮ menu, so a bubble intercepts NO
+  // press/long-press gesture — native OS text selection works untouched. In select
+  // mode a plain tap toggles this message; outside it the bubble is inert.
   const onBubbleClick = () => {
-    // Swallow the click synthesized right after a long-press so it doesn't undo
-    // the selection the press just made.
-    if (didLongPress.current) {
-      didLongPress.current = false;
-      return;
-    }
     if (selectMode) selection?.onToggle(messageId);
   };
 
@@ -322,13 +285,7 @@ function MessageBubble({
           mine && "flex-row-reverse",
           selectMode && "cursor-pointer",
         )}
-        onPointerDown={startLongPress}
-        onPointerMove={onPointerMove}
-        onPointerUp={cancelLongPress}
-        onPointerLeave={cancelLongPress}
-        onPointerCancel={cancelLongPress}
         onClick={onBubbleClick}
-        onContextMenu={(e) => selection && e.preventDefault()}
       >
         {selectMode && (
           <span className="shrink-0" aria-hidden>
@@ -341,7 +298,11 @@ function MessageBubble({
         )}
         <div
           className={cn(
-            "px-4 py-3 text-[15px] leading-relaxed",
+            // min-w-0 lets this flex child shrink below its intrinsic content width
+            // so long unbreakable runs (URLs, file paths, code lines) WRAP inside the
+            // bubble instead of forcing it past max-w-[90%] and off-screen; overflow
+            // clips any residual so a bubble can never exceed the viewport.
+            "min-w-0 overflow-hidden px-4 py-3 text-[15px] leading-relaxed",
             selectMode ? "select-none" : "select-text",
             isSelected && "ring-2 ring-accent/60",
             mine

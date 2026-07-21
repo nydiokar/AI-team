@@ -84,6 +84,30 @@ Manager.
   the `.task.md` / `submit_instruction` callers; this diff adds one operator-authenticated caller.
   Worth a follow-up sanitize; not a blocker for this change.
 
+## Frontend composition (completes the operator-visible feature)
+The backend threaded the fork seed through `/api/manager`, but the **Web UI still could
+not spawn manager + fork** — the parallel routes lived in the frontend: `apiClient.invokeManager`
+silently dropped `continued_from`/`continue_inline`/`continues`, and `NewSessionSheet` hid the
+role picker on a fork (role forced `bare`). That is why a forked session woke context-less: the
+seed was discarded client-side before it ever reached the (working) backend injector.
+
+Fix — make role ORTHOGONAL to fork in the one wizard (no new routes):
+- `apiClient.invokeManager` + `useInvokeManager` — accept and send `continuedFrom` /
+  `continueInline` / `continues` (backend already accepts them).
+- `NewSessionSheet` — show the role picker on a fork too (Bare / Worker / Manager). A
+  **manager fork** routes through `invoke.mutate` WITH `continuedFrom` + the marked digest as
+  `continueInline` + objective; context is delivered server-side on the first assignment turn
+  (no `setCarry`/Composer deferral). Bare/worker forks keep the create + Composer-carry path.
+- Two orthogonal UX flaws surfaced alongside and fixed in the same wizard/timeline:
+  **(1) bubble overflow** — bubble content div was a flex child with `min-width:auto`, so a long
+  unbreakable run forced it past `max-w-[90%]` off-screen; add `min-w-0 overflow-hidden` → wraps.
+  **(2) lost text selection** — fork "mark" had hijacked the long-press (the OS text-selection
+  gesture); decoupled it — select mode is entered from the ⋮ menu ("Fork from messages"), so
+  native selection works everywhere. Plus a visible "context will attach" banner so a bare/worker
+  fork's carry is never silent.
+- Verified: `tsc -b` clean; 98 vitest green; production build OK; backend targeted suites
+  (`test_manager_role` + `test_fork_inline_context` + `test_control_api_fork`) 41 green.
+
 ## Live log
 - **2026-07-21 — BUILT + adversarially reviewed + fixed on `feat/manager-fork-from-conversation`.**
   Diff: `control_api.py` (+13), `orchestrator.py` (+~35 incl. the reorder), `test_manager_role.py`
