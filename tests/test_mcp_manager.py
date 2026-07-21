@@ -489,7 +489,7 @@ def test_dispatch_tools_list(monkeypatch):
     tools = sent[0]["result"]["tools"]
     names = {t["name"] for t in tools}
     assert names == {"dispatch_worker", "wait_for_worker", "open_case", "get_case",
-                     "close_case", "record_review", "release_worker"}
+                     "read_session_history", "close_case", "record_review", "release_worker"}
 
 
 def test_dispatch_tool_call_success(monkeypatch):
@@ -565,3 +565,44 @@ def test_dispatch_initialize():
     finally:
         mcp_manager._send = orig
     assert sent[0]["result"]["serverInfo"]["name"] == "manager"
+
+
+def test_read_session_history_formats_turns(monkeypatch):
+    calls = {}
+
+    def fake_request(method, path, *a, **k):
+        calls["method"] = method
+        calls["path"] = path
+        return {"messages": [
+            {"timestamp": "2026-07-21T10:00:00Z", "instruction": "fix the loader",
+             "result": "it double-frees on retry"},
+            {"timestamp": "2026-07-21T10:05:00Z", "instruction": "ship the fix",
+             "result": "done, tests green"},
+        ]}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._read_session_history({"session_id": "sess-abc", "limit": 5})
+    assert calls["method"] == "GET"
+    assert "/api/sessions/sess-abc/messages?limit=5" in calls["path"]
+    assert "You: fix the loader" in out
+    assert "Agent: it double-frees on retry" in out
+    assert "You: ship the fix" in out and "Agent: done, tests green" in out
+
+
+def test_read_session_history_empty(monkeypatch):
+    monkeypatch.setattr(mcp_manager, "_api_request", lambda *a, **k: {"messages": []})
+    out = mcp_manager._read_session_history({"session_id": "sess-x"})
+    assert "no conversation turns" in out
+
+
+def test_read_session_history_clamps_limit(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(mcp_manager, "_api_request",
+                        lambda m, p, *a, **k: seen.update(path=p) or {"messages": []})
+    mcp_manager._read_session_history({"session_id": "s", "limit": 99999})
+    assert f"limit={mcp_manager._HISTORY_TURNS_MAX}" in seen["path"]
+
+
+def test_read_session_history_registered():
+    assert "read_session_history" in mcp_manager._TOOL_IMPLS
+    assert any(t["name"] == "read_session_history" for t in mcp_manager._TOOLS)

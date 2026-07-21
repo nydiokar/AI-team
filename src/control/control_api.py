@@ -86,6 +86,14 @@ def _harness_blocked_http(blocked: Exception) -> HTTPException:
     )
 
 
+# [Session-fork] Max chars for a `continue_inline` fork digest across the API. A
+# generous working budget (~12k tokens) — a real forked conversation carries in
+# full — while still bounding the field so an oversized payload can't be a DoS
+# vector (§7). Mirrors web `FORK_DIGEST_MAX_CHARS` + the orchestrator prior-context
+# clamp; override the clamp at runtime via AI_TEAM_COMPACT_PREFIX_MAX_CHARS.
+_CONTINUE_INLINE_MAX = 48000
+
+
 class InstructionBody(BaseModel):
     description: str
     session_id: Optional[str] = None
@@ -102,11 +110,12 @@ class InstructionBody(BaseModel):
     # HARNESS_FLOW_DRIVE is ON; absent/None on every normal request ⇒ byte-identical.
     case_id: Optional[str] = None
     # [Session-fork] Verbatim digest of the marked messages carried over from a
-    # forked session. When present it is injected ONCE, fence-defused and hard-capped
-    # (4KB) as a reference-only `<prior_context>` block on THIS turn's prompt (see
-    # orchestrator._maybe_inject_compact_context). Bounded here (§7) so an oversized
-    # payload cannot be a DoS vector. Absent on every normal turn ⇒ byte-identical.
-    continue_inline: Optional[str] = Field(default=None, max_length=8000)
+    # forked session. When present it is injected ONCE, fence-defused and re-clamped
+    # (keeping the most recent tail) as a reference-only `<prior_context>` block on
+    # THIS turn's prompt (see orchestrator._maybe_inject_compact_context). Bounded
+    # here (§7) so an oversized payload cannot be a DoS vector — but generously, so a
+    # real fork carries in full. Absent on every normal turn ⇒ byte-identical.
+    continue_inline: Optional[str] = Field(default=None, max_length=_CONTINUE_INLINE_MAX)
 
 
 class CreateSessionBody(BaseModel):
@@ -143,7 +152,7 @@ class ManagerInvokeBody(BaseModel):
     #   continues — a prior task_id; the gateway builds the bounded prior-context server-side.
     # continue_inline / continues reuse the proven compact-context injector verbatim.
     continued_from: Optional[str] = None
-    continue_inline: Optional[str] = Field(default=None, max_length=8000)
+    continue_inline: Optional[str] = Field(default=None, max_length=_CONTINUE_INLINE_MAX)
     continues: Optional[str] = None
 
 

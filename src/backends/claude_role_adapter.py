@@ -27,6 +27,7 @@ _PROFILE_TOOLS: Dict[str, List[str]] = {
         "mcp__manager__wait_for_worker",
         "mcp__manager__open_case",
         "mcp__manager__get_case",
+        "mcp__manager__read_session_history",
         "mcp__manager__close_case",
         "mcp__manager__record_review",
         "mcp__manager__release_worker",

@@ -107,6 +107,6 @@ def test_blank_continue_inline_is_none(client, orch, tmp_path):
 def test_oversized_continue_inline_is_422(client, tmp_path):
     sid = _make_session(client, tmp_path)["session_id"]
     r = client.post("/api/instructions", headers=_auth(), json={
-        "description": "x", "session_id": sid, "continue_inline": "y" * 8001,
+        "description": "x", "session_id": sid, "continue_inline": "y" * 48001,
     })
     assert r.status_code == 422

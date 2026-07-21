@@ -86,6 +86,7 @@ def test_claude_adapter_appends_to_preset():
         "mcp__manager__wait_for_worker",
         "mcp__manager__open_case",
         "mcp__manager__get_case",
+        "mcp__manager__read_session_history",
         "mcp__manager__close_case",
         "mcp__manager__record_review",
         "mcp__manager__release_worker",
@@ -493,7 +494,7 @@ def test_api_manager_rejects_oversize_inline(monkeypatch):
     client = TestClient(control_api.build_control_api(orch))
     r = client.post(
         "/api/manager", headers={"Authorization": "Bearer tok"},
-        json={"objective": "x", "repo_path": "/x", "continue_inline": "z" * 8001},
+        json={"objective": "x", "repo_path": "/x", "continue_inline": "z" * 48001},
     )
     assert r.status_code == 422
 
@@ -590,3 +591,25 @@ async def test_remote_create_session_first_message_carries_prompt(monkeypatch):
     assert sess_payload["last_user_message"] == objective
     # (payload['prompt'] also carries it, but the create_session path ignores that.)
     assert captured["payload"]["prompt"] == objective
+
+
+@pytest.mark.asyncio
+async def test_invoke_manager_forked_assignment_points_at_source_session(monkeypatch):
+    """A forked Manager's first assignment must name the source session and the
+    read_session_history tool, so it can pull the FULL prior conversation beyond
+    the bounded boot excerpt."""
+    orch, cap = _wire_manager_orch(monkeypatch)
+    await orch.invoke_manager(
+        "ship X", repo_path="/x",
+        continued_from="src-sess-9", continue_inline="You: hi\n\nAgent: done",
+    )
+    desc = cap["submit_kw"]["description"]
+    assert "src-sess-9" in desc
+    assert "read_session_history(session_id='src-sess-9')" in desc
+
+
+@pytest.mark.asyncio
+async def test_invoke_manager_no_fork_has_no_history_pointer(monkeypatch):
+    orch, cap = _wire_manager_orch(monkeypatch)
+    await orch.invoke_manager("ship X", repo_path="/x")
+    assert "read_session_history" not in cap["submit_kw"]["description"]

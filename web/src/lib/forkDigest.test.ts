@@ -20,10 +20,15 @@ describe("buildForkDigest", () => {
     expect(buildForkDigest([])).toBe("");
   });
 
-  it("clamps to the client cap and marks truncation", () => {
-    const huge = "z".repeat(FORK_DIGEST_MAX_CHARS + 500);
+  it("clamps to the client cap keeping the most recent tail", () => {
+    // The tail (recent) must survive; the front is dropped and marked.
+    const head = "OLD".repeat(1000);
+    const tail = "RECENT-TAIL";
+    const huge = head + "z".repeat(FORK_DIGEST_MAX_CHARS) + tail;
     const digest = buildForkDigest([{ id: "x", role: "user", text: huge }]);
-    expect(digest.length).toBeLessThanOrEqual(FORK_DIGEST_MAX_CHARS + "\n…(truncated)".length);
-    expect(digest.endsWith("…(truncated)")).toBe(true);
+    expect(digest.length).toBeLessThanOrEqual(FORK_DIGEST_MAX_CHARS);
+    expect(digest.startsWith("…(earlier context truncated)…")).toBe(true);
+    expect(digest.endsWith(tail)).toBe(true); // most recent content preserved
+    expect(digest.includes("OLD")).toBe(false); // stale head dropped
   });
 });

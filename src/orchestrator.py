@@ -2283,8 +2283,19 @@ class TaskOrchestrator(ITaskOrchestrator):
             fork_meta = {"continue_inline": continue_inline}
         elif isinstance(continues, str) and continues.strip():
             fork_meta = {"continues": continues.strip()}
+        assignment = render_first_assignment(inv)
+        # [Manager-fork] Point the Manager at the source session so it can pull the FULL
+        # prior conversation on demand (read_session_history) — the boot excerpt is a
+        # bounded snapshot, not the whole thing. Only when we actually forked one.
+        if isinstance(continued_from, str) and continued_from.strip():
+            assignment += (
+                f"\n\nYou were forked from session {continued_from.strip()}. The prior-context "
+                f"excerpt above is a bounded snapshot; to familiarize yourself with the FULL prior "
+                f"line of work, call read_session_history(session_id='{continued_from.strip()}') "
+                f"(page with `limit` if it is long)."
+            )
         task_id = await self.submit_instruction(
-            description=render_first_assignment(inv),
+            description=assignment,
             session_id=session.session_id,
             cwd=session.repo_path,
             source="manager_invoke",
@@ -2683,10 +2694,28 @@ class TaskOrchestrator(ITaskOrchestrator):
         return self._context_loader.load(task_id)
 
     # Hard cap on the assembled prior-context prefix, independent of the loader's
-    # own per-field caps. Keeps the injected reference block from dominating the
-    # prompt even if a future loader returns larger fields.
-    _COMPACT_PREFIX_MAX_CHARS = 4000
+    # own per-field caps. A bound MUST exist — an unbounded paste overflows the
+    # window and re-costs tokens every turn — but the old 4000 (~700 words) was
+    # far too small to actually "carry the work over". Default is a generous
+    # working budget (~12k tokens) and env-tunable; when a selection still exceeds
+    # it we keep the MOST RECENT tail (see `_clamp_keep_tail`), never the stale head.
+    _COMPACT_PREFIX_MAX_CHARS = int(os.getenv("AI_TEAM_COMPACT_PREFIX_MAX_CHARS", "48000"))
     _COMPACT_MAX_FILES = 20
+
+    def _clamp_keep_tail(self, text: str, budget: int) -> str:
+        """Clamp `text` to `budget` chars keeping the TAIL (most recent) content.
+
+        For "continue the work" the latest turns — current state, last decisions —
+        are what matter; the head is throat-clearing. So when we must drop, we drop
+        from the FRONT and mark it, rather than chopping off the end (the old bug).
+        """
+        if budget <= 0 or len(text) <= budget:
+            return text
+        marker = "…(earlier context truncated)…\n"
+        keep = budget - len(marker)
+        if keep <= 0:
+            return text[-budget:]
+        return marker + text[-keep:]
 
     async def _maybe_inject_compact_context(self, task: "Task") -> None:
         """Opt-in: prepend bounded prior context when a task declares `continues:`.
@@ -2790,10 +2819,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         lines.append("(Reference only. Your actual instruction follows.)")
         lines.append("</prior_context>")
         block = "\n".join(lines)
-        # [F3] Hard total cap regardless of field caps.
+        # [F3] Hard total cap regardless of field caps. Keep the most recent tail
+        # (drop from the front) so the latest state survives, not the stale head.
         if len(block) > self._COMPACT_PREFIX_MAX_CHARS:
-            block = block[: self._COMPACT_PREFIX_MAX_CHARS - len("\n…(truncated)\n</prior_context>")]
-            block = block.rstrip() + "\n…(truncated)\n</prior_context>"
+            inner = "\n".join(lines[1:-2])  # between the open fence and the trailer
+            budget = self._COMPACT_PREFIX_MAX_CHARS - len(lines[0]) - len(lines[-2]) - len(lines[-1]) - 3
+            inner = self._clamp_keep_tail(inner, max(0, budget))
+            block = "\n".join([lines[0], inner, lines[-2], lines[-1]])
         return block
 
     def _build_inline_compact_prefix(self, text: str) -> str:
@@ -2809,15 +2841,20 @@ class TaskOrchestrator(ITaskOrchestrator):
         digest = self._defuse_fence(str(text)).strip()
         if not digest:
             return ""
+        # Clamp the INNER digest (keeping the most recent tail) against a budget that
+        # leaves room for the fence wrapper — so a long fork keeps its latest turns
+        # instead of chopping them off, and can never blow the total cap.
+        wrapper_overhead = len(
+            '<prior_context source="marked messages">\n\n'
+            "(Reference only. Your actual instruction follows.)\n</prior_context>"
+        )
+        digest = self._clamp_keep_tail(digest, self._COMPACT_PREFIX_MAX_CHARS - wrapper_overhead)
         block = (
             '<prior_context source="marked messages">\n'
             f"{digest}\n"
             "(Reference only. Your actual instruction follows.)\n"
             "</prior_context>"
         )
-        if len(block) > self._COMPACT_PREFIX_MAX_CHARS:
-            block = block[: self._COMPACT_PREFIX_MAX_CHARS - len("\n…(truncated)\n</prior_context>")]
-            block = block.rstrip() + "\n…(truncated)\n</prior_context>"
         return block
 
     async def _handle_new_task_file(self, file_path: str):

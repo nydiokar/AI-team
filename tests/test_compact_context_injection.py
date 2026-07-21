@@ -187,7 +187,8 @@ def test_fence_escape_in_prior_content_is_defused():
 
 
 def test_oversized_prefix_respects_hard_cap():
-    huge_summary = "X" * 10000
+    # Exceed the (now generous) hard cap so truncation actually triggers.
+    huge_summary = "X" * 200000
     huge_files = [f"file_{i}.py" for i in range(500)]
     loader = MagicMock(return_value={
         "source": "db", "summary": huge_summary, "files_modified": huge_files, "errors": [],
@@ -202,6 +203,7 @@ def test_oversized_prefix_respects_hard_cap():
     end = task.prompt.index("</prior_context>") + len("</prior_context>")
     block = task.prompt[start:end]
     assert len(block) <= orch._COMPACT_PREFIX_MAX_CHARS
-    assert "…(truncated)" in block
+    # Truncation now keeps the most recent TAIL and marks the dropped front.
+    assert "…(earlier context truncated)…" in block
     # the live instruction is still present and verbatim
     assert "<current_instruction>\norig\n</current_instruction>" in task.prompt
