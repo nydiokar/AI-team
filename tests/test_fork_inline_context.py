@@ -145,7 +145,7 @@ def test_inline_fence_escape_is_defused():
 
 def test_inline_oversized_respects_hard_cap():
     orch = _orch_with_loader(MagicMock())
-    huge = "You: " + ("x" * 20000)
+    huge = "You: " + ("x" * 200000)  # exceed the (now generous) hard cap
     task = _task(prompt="go", metadata={"continue_inline": huge})
 
     _run(orch._maybe_inject_compact_context(task))
@@ -154,5 +154,6 @@ def test_inline_oversized_respects_hard_cap():
     # instruction still rides after it.
     head = task.prompt.split("<current_instruction>")[0]
     assert len(head) <= orch._COMPACT_PREFIX_MAX_CHARS + len("\n\n")
-    assert "…(truncated)" in task.prompt
+    # Truncation keeps the most recent TAIL and marks the dropped front.
+    assert "…(earlier context truncated)…" in task.prompt
     assert task.prompt.endswith("<current_instruction>\ngo\n</current_instruction>")

@@ -499,6 +499,58 @@ def _get_case(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: read_session_history  (pull a prior session's real conversation on demand)
+# ---------------------------------------------------------------------------
+
+_HISTORY_TURNS_DEFAULT = 30
+_HISTORY_TURNS_MAX = 200
+_HISTORY_OUTPUT_MAX_CHARS = 60000
+
+
+def _read_session_history(args: Dict[str, Any]) -> str:
+    """Read a specific session's real conversation (read-only over
+    GET /api/sessions/{session_id}/messages).
+
+    This is how a Manager familiarizes itself with a prior line of work BEYOND the
+    bounded excerpt it may have been seeded with at boot — e.g. the session it was
+    forked from (its `continued_from`), or any session the operator names. Returns
+    the per-turn You:/Agent: transcript oldest→newest, bounded so the read cannot
+    itself blow the context window. Use `limit` to take the most recent N turns."""
+    session_id = _bounded_text(args.get("session_id"), "session_id", _MAX_ID_CHARS, required=True)
+    raw_limit = args.get("limit")
+    try:
+        limit = int(raw_limit) if raw_limit is not None else _HISTORY_TURNS_DEFAULT
+    except (TypeError, ValueError):
+        limit = _HISTORY_TURNS_DEFAULT
+    limit = max(1, min(limit, _HISTORY_TURNS_MAX))
+    data = _api_request(
+        "GET",
+        f"/api/sessions/{urllib.parse.quote(session_id)}/messages?limit={limit}",
+    )
+    messages = data.get("messages") or []
+    if not messages:
+        return f"Session {session_id}: no conversation turns found (empty or unknown session)."
+    lines = [
+        f"Conversation history for session {session_id} — "
+        f"{len(messages)} most-recent turn(s), oldest→newest:"
+    ]
+    for i, m in enumerate(messages, 1):
+        ts = (m.get("timestamp") or m.get("completed_at") or "").strip()
+        instr = (m.get("instruction") or "").strip()
+        reply = (m.get("result") or "").strip()
+        if instr:
+            lines.append(f"\n[{i}] {ts}\nYou: {instr}")
+        if reply:
+            lines.append(f"Agent: {reply}")
+    out = "\n".join(lines)
+    if len(out) > _HISTORY_OUTPUT_MAX_CHARS:
+        # Keep the most recent tail; tell the Manager to page with a smaller limit.
+        marker = "…(older turns omitted to fit — request fewer turns via `limit`)…\n"
+        out = marker + out[-(_HISTORY_OUTPUT_MAX_CHARS - len(marker)):]
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Tool: open_case  (M3.3 — let ONE Manager session own many Cases sequentially)
 # ---------------------------------------------------------------------------
 
@@ -735,6 +787,25 @@ _TOOLS = [
         },
     },
     {
+        "name": "read_session_history",
+        "description": (
+            "Read a specific session's REAL conversation, oldest→newest (read-only over "
+            "GET /api/sessions/{session_id}/messages). This is how you familiarize yourself "
+            "with a prior line of work BEYOND the bounded excerpt seeded at boot — pass the "
+            "session you were forked from (your continued_from), or any session the operator "
+            "names, to pull its actual turns. Output is bounded; use `limit` to take the most "
+            "recent N turns and page if a session is long. Reference only — verify against git."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "The session whose conversation to read (e.g. the session you were forked from)."},
+                "limit": {"type": "number", "description": f"Most recent N turns to return (default {_HISTORY_TURNS_DEFAULT}, max {_HISTORY_TURNS_MAX})."},
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
         "name": "close_case",
         "description": (
             "Authoritatively close the Manager's Case (A37 close_case) — the Decision surface. "
@@ -829,6 +900,7 @@ _TOOL_IMPLS = {
     "wait_for_worker": _wait_for_worker,
     "open_case": _open_case,
     "get_case": _get_case,
+    "read_session_history": _read_session_history,
     "close_case": _close_case,
     "record_review": _record_review,
     "release_worker": _release_worker,
