@@ -5423,6 +5423,17 @@ Generated from user description: {description}
             }
             if session:
                 payload["session"] = _session_dispatch_payload(session)
+                # [Remote first-turn] The node worker's create_session path seeds the
+                # FIRST user message from session.last_user_message
+                # (claude_code.create_session → start_session(session.last_user_message)),
+                # NOT from payload["prompt"]. The gateway only sets last_user_message
+                # LATER, inside process_task (after this snapshot) — so a node-pinned
+                # create_session (every Manager's first turn) would ship an EMPTY first
+                # message and the objective/injected prior-context would be dropped
+                # (the Manager boots and reports "your message is empty"). Snapshot THIS
+                # turn's prompt (already compact-context-injected above) as the first
+                # message so a remote create_session carries the objective + prior context.
+                payload["session"]["last_user_message"] = task.prompt
             # Runs on THIS host ⟺ no pin, or the pin names this host. Only a pin
             # to a DIFFERENT host is a true remote dispatch. This MUST mirror
             # process_task's `_pinned_elsewhere` test, or a host-pinned task both

@@ -544,3 +544,49 @@ async def test_remote_manager_payload_carries_injected_prior_context(monkeypatch
     assert "<prior_context" in captured["payload"]["prompt"]
     assert "edited ContextFillGauge.tsx" in captured["payload"]["prompt"]
     assert "<current_instruction>\nContinue the work.\n</current_instruction>" in captured["payload"]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_remote_create_session_first_message_carries_prompt(monkeypatch):
+    """Regression for the live 'empty message' Manager boot (session dc4d164339a3, Horse):
+    a node-pinned create_session seeds its FIRST user message from
+    session.last_user_message (claude_code.create_session), NOT payload['prompt'].
+    The gateway sets last_user_message only later in process_task, so the mesh
+    snapshot must carry THIS turn's prompt as last_user_message or the remote
+    Manager boots with an empty first turn and drops the objective."""
+    import socket
+    orch = _orch()
+    orch._compact_injected_ids = set()
+    remote = "Horse"
+    assert remote != socket.gethostname()
+    session = types.SimpleNamespace(
+        session_id="mgr-remote", machine_id=remote, backend_session_id=None, repo_path="/x",
+        backend="claude", model=None, telegram_chat_id=None, telegram_thread_id=None,
+        owner_user_id=None, last_user_message="", driver_type=None, driver_status=None,
+        cache_health=None, cache_unhealthy_count=0, previous_backend_session_ids=[],
+        case_role="manager", current_case_id="case-1", role_boot=None,
+    )
+    orch.session_store = types.SimpleNamespace(get=lambda sid: session)
+
+    captured = {}
+
+    class _FakeDB:
+        def enqueue_task(self, *, task_id, session_id, machine_id, backend, action, payload):
+            captured["payload"] = payload
+
+        def claim_task(self, *a, **k):
+            return True
+
+    import src.control.db as db_mod
+    monkeypatch.setattr(db_mod, "get_db", lambda: _FakeDB())
+
+    objective = "You are being invoked as the Manager for a new objective. Objective: ship the thing."
+    task = types.SimpleNamespace(id="task-boot", prompt=objective,
+                                 metadata={"session_id": "mgr-remote"})
+    orch._mesh_enqueue_task(task, "claude")
+
+    sess_payload = captured["payload"]["session"]
+    # The remote create_session reads THIS field as its first message — must be the objective.
+    assert sess_payload["last_user_message"] == objective
+    # (payload['prompt'] also carries it, but the create_session path ignores that.)
+    assert captured["payload"]["prompt"] == objective
