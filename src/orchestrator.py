@@ -2207,6 +2207,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         completion_criteria: Optional[str] = None,
         context_refs: Optional[List[str]] = None,
         branch: Optional[str] = None,
+        continued_from: Optional[str] = None,
+        continue_inline: Optional[str] = None,
+        continues: Optional[str] = None,
     ) -> Dict[str, Any]:
         """[A38] Boot a Manager session bound to one new Case (M3.1 vertical slice).
 
@@ -2217,6 +2220,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         ``{ok: False, reason}`` when the role path is disabled or a step fails.
         Raises ``HarnessAdmissionBlocked`` from the first-turn submit (the caller
         translates it), exactly like the ``/api/instructions`` seam.
+
+        [Manager-fork] Optionally seed the boot from a prior conversation:
+        ``continued_from`` stamps session→session lineage; ``continue_inline`` (a
+        marked-message digest) or ``continues`` (a prior task_id) inject a bounded,
+        fenced ``<prior_context>`` block onto the Manager's first assignment turn via
+        the existing compact-context path — so a forked Manager wakes with the prior
+        line of work AND its role prompt AND its worker-dispatch tools. All three are
+        optional; absent all three the boot is byte-identical to the legacy path.
 
         DEFERRED EDGE (A38): if the Level-3 guard blocks the first-turn submit, the
         already-created session (left IDLE, reusable) and the freshly-opened Case
@@ -2245,6 +2256,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         result = self.session_service.create_session(
             backend=backend, repo_path=repo_path, model=model, node_id=node_id,
             origin=SessionOrigin(channel="web", kind="user"), bind_chat=False,
+            continued_from=continued_from,
         )
         if not getattr(result, "ok", False) or getattr(result, "session", None) is None:
             return {"ok": False, "reason": getattr(result, "reason", "create_session_failed")}
@@ -2261,11 +2273,22 @@ class TaskOrchestrator(ITaskOrchestrator):
             case_id=case_id, objective=objective, session_id=session.session_id,
             context_refs=list(context_refs or []), branch=branch, trigger="operator",
         )
+        # [Manager-fork] Seed the FIRST assignment turn with a prior conversation via the
+        # proven compact-context injector. `continue_inline` (a marked-message digest)
+        # takes precedence over `continues` (a prior task_id) — the injector enforces the
+        # same precedence, once-guard, fence-defusing, and hard char cap. Absent both ⇒
+        # extra_metadata is None ⇒ byte-identical legacy boot turn.
+        fork_meta: Optional[Dict[str, str]] = None
+        if isinstance(continue_inline, str) and continue_inline.strip():
+            fork_meta = {"continue_inline": continue_inline}
+        elif isinstance(continues, str) and continues.strip():
+            fork_meta = {"continues": continues.strip()}
         task_id = await self.submit_instruction(
             description=render_first_assignment(inv),
             session_id=session.session_id,
             cwd=session.repo_path,
             source="manager_invoke",
+            extra_metadata=fork_meta,
         )
         return {
             "ok": True,
@@ -2973,6 +2996,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 logger.info(f"event={start_event} worker={worker_name} task_id={task.id}")
                 self._emit_event(start_event, task, {"worker": worker_name, "backend": backend_name})
                 self._emit_turn_telemetry("turn.started", task, backend=backend_name)
+                # [Manager-fork / compact-context] Inject bounded prior context BEFORE the
+                # mesh snapshot. `_mesh_enqueue_task` freezes `task.prompt` into the remote
+                # payload (see `payload["prompt"]`), so a node worker executes exactly this
+                # string — but the worker never runs the injector itself. Injecting here (vs
+                # only inside `process_task`, which runs AFTER the snapshot) is what makes a
+                # `continues:`/`continue_inline` turn — including a node-pinned forked Manager
+                # — actually carry its prior line of work to the remote carrier. Idempotent
+                # (once-guard on task.id), so the later call in `process_task` is a no-op;
+                # a no-seed task is untouched ⇒ byte-identical.
+                await self._maybe_inject_compact_context(task)
                 self._mesh_enqueue_task(task, backend_name)
 
                 # [FlowRun A22] Harness transition → `execution`. Flag-guarded,

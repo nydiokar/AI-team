@@ -363,3 +363,184 @@ def test_api_close_case_returns_result_dict(monkeypatch):
     assert r.status_code == 200
     assert r.json()["reason"] == "case has 1 open child flow(s)"
     assert calls["case_id"] == "c1" and calls["actor"] == "manager"
+
+
+# ---------------------------------------------------------------------------
+# [Manager-fork] Seed the Manager boot from a prior conversation
+#   invoke_manager: continued_from -> create_session; continue_inline/continues
+#   -> first-turn extra_metadata (consumed by the proven compact-context injector).
+# ---------------------------------------------------------------------------
+
+def _wire_manager_orch(monkeypatch, session_id="mgr-1"):
+    """Bare orchestrator with create_session/open_case/submit_instruction stubbed,
+    capturing the kwargs invoke_manager forwards to each seam."""
+    from src.services.session_service import CommandResult
+    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
+    orch = _orch()
+    session = types.SimpleNamespace(session_id=session_id, repo_path="/x")
+    cap = {"create_kw": None, "submit_kw": None}
+
+    def _create(**kw):
+        cap["create_kw"] = kw
+        return CommandResult(True, session=session)
+
+    orch.session_service = types.SimpleNamespace(create_session=_create)
+    orch.open_case = lambda objective, sid, role="manager", completion_criteria=None: "case-1"
+
+    async def _submit(description, session_id=None, cwd=None, source="runtime",
+                      extra_metadata=None, **_):
+        cap["submit_kw"] = {"session_id": session_id, "extra_metadata": extra_metadata,
+                            "description": description}
+        return "task-1"
+
+    orch.submit_instruction = _submit
+    return orch, cap
+
+
+@pytest.mark.asyncio
+async def test_invoke_manager_threads_continued_from_and_inline(monkeypatch):
+    orch, cap = _wire_manager_orch(monkeypatch)
+    res = await orch.invoke_manager(
+        "ship X", repo_path="/x",
+        continued_from="prior-sess", continue_inline="You: hi\n\nAgent: done",
+    )
+    assert res["ok"] is True
+    # Lineage pointer reaches create_session.
+    assert cap["create_kw"]["continued_from"] == "prior-sess"
+    # Prior-conversation digest reaches the FIRST assignment turn's metadata.
+    assert cap["submit_kw"]["extra_metadata"] == {"continue_inline": "You: hi\n\nAgent: done"}
+
+
+@pytest.mark.asyncio
+async def test_invoke_manager_continues_used_when_no_inline(monkeypatch):
+    orch, cap = _wire_manager_orch(monkeypatch)
+    await orch.invoke_manager("ship X", repo_path="/x", continues="  task-42  ")
+    # Server-side compact-context path; id is stripped.
+    assert cap["submit_kw"]["extra_metadata"] == {"continues": "task-42"}
+
+
+@pytest.mark.asyncio
+async def test_invoke_manager_inline_precedes_continues(monkeypatch):
+    orch, cap = _wire_manager_orch(monkeypatch)
+    await orch.invoke_manager(
+        "ship X", repo_path="/x", continue_inline="digest", continues="task-42",
+    )
+    # Inline wins (a fork never also references a parent task) — matches the injector's
+    # own precedence in _maybe_inject_compact_context.
+    assert cap["submit_kw"]["extra_metadata"] == {"continue_inline": "digest"}
+
+
+@pytest.mark.asyncio
+async def test_invoke_manager_no_fork_seed_is_byte_identical(monkeypatch):
+    orch, cap = _wire_manager_orch(monkeypatch)
+    await orch.invoke_manager("ship X", repo_path="/x")
+    assert cap["create_kw"]["continued_from"] is None
+    assert cap["submit_kw"]["extra_metadata"] is None
+    # Blank / whitespace-only seeds are treated as absent (no metadata added).
+    await orch.invoke_manager("ship X", repo_path="/x", continue_inline="   ", continues="")
+    assert cap["submit_kw"]["extra_metadata"] is None
+
+
+@pytest.mark.asyncio
+async def test_manager_fork_meta_injects_prior_context_end_to_end(monkeypatch):
+    """End-to-end seam: the exact extra_metadata invoke_manager emits for a fork,
+    when it lands on a task, drives the REAL compact-context injector to rewrite the
+    Manager's first-turn prompt with a fenced <prior_context> block — proving a forked
+    Manager wakes carrying the prior line of work."""
+    orch = _orch()
+    orch._compact_injected_ids = set()
+    fork_meta = {"continue_inline": "You: fix the gauge\n\nAgent: I edited ContextFillGauge.tsx"}
+    task = types.SimpleNamespace(id="task-boot", prompt="Continue the work.", metadata=fork_meta)
+    await orch._maybe_inject_compact_context(task)
+    assert "<prior_context" in task.prompt
+    assert "<current_instruction>\nContinue the work.\n</current_instruction>" in task.prompt
+    assert "I edited ContextFillGauge.tsx" in task.prompt
+
+
+def test_api_manager_forwards_fork_fields(monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.control import control_api
+
+    captured = {}
+
+    async def _invoke(**kw):
+        captured.update(kw)
+        return {"ok": True, "session_id": "s1", "case_id": "c1", "task_id": "t1"}
+
+    orch = types.SimpleNamespace(invoke_manager=_invoke)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
+    client = TestClient(control_api.build_control_api(orch))
+    r = client.post(
+        "/api/manager", headers={"Authorization": "Bearer tok"},
+        json={"objective": "x", "repo_path": "/x", "continued_from": "sess-9",
+              "continue_inline": "You: a\n\nAgent: b", "continues": "task-7"},
+    )
+    assert r.status_code == 200
+    assert captured["continued_from"] == "sess-9"
+    assert captured["continue_inline"] == "You: a\n\nAgent: b"
+    assert captured["continues"] == "task-7"
+
+
+def test_api_manager_rejects_oversize_inline(monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.control import control_api
+
+    async def _invoke(**kw):
+        return {"ok": True, "session_id": "s1", "case_id": "c1", "task_id": "t1"}
+
+    orch = types.SimpleNamespace(invoke_manager=_invoke)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
+    client = TestClient(control_api.build_control_api(orch))
+    r = client.post(
+        "/api/manager", headers={"Authorization": "Bearer tok"},
+        json={"objective": "x", "repo_path": "/x", "continue_inline": "z" * 8001},
+    )
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_remote_manager_payload_carries_injected_prior_context(monkeypatch):
+    """Regression for the cross-layer inertness gap the adversarial review found:
+    a NODE-PINNED forked Manager's mesh payload must snapshot the INJECTED prompt
+    (prior context), not the bare one. The injector must run BEFORE _mesh_enqueue_task
+    freezes payload['prompt'] — otherwise the node worker (which never runs the
+    injector itself) executes the first turn with no prior line of work."""
+    import socket
+    orch = _orch()
+    orch._compact_injected_ids = set()
+    remote = "some-remote-node"
+    assert remote != socket.gethostname()  # a true remote pin
+    session = types.SimpleNamespace(
+        session_id="mgr-1", machine_id=remote, backend_session_id=None, repo_path="/x",
+        backend="claude", model=None, telegram_chat_id=None, telegram_thread_id=None,
+        owner_user_id=None, last_user_message=None, driver_type=None, driver_status=None,
+        cache_health=None, cache_unhealthy_count=0, previous_backend_session_ids=[],
+        case_role="manager", current_case_id="case-1", role_boot=None,
+    )
+    orch.session_store = types.SimpleNamespace(get=lambda sid: session)
+
+    captured = {}
+
+    class _FakeDB:
+        def enqueue_task(self, *, task_id, session_id, machine_id, backend, action, payload):
+            captured["payload"] = payload
+
+        def claim_task(self, *a, **k):
+            return True
+
+    import src.control.db as db_mod
+    monkeypatch.setattr(db_mod, "get_db", lambda: _FakeDB())
+
+    task = types.SimpleNamespace(
+        id="task-boot", prompt="Continue the work.",
+        metadata={"session_id": "mgr-1",
+                  "continue_inline": "You: fix gauge\n\nAgent: edited ContextFillGauge.tsx"},
+    )
+    # Mirror _task_worker's order: inject, THEN enqueue the mesh row.
+    await orch._maybe_inject_compact_context(task)
+    orch._mesh_enqueue_task(task, "claude")
+
+    assert "payload" in captured, "remote row must be enqueued"
+    assert "<prior_context" in captured["payload"]["prompt"]
+    assert "edited ContextFillGauge.tsx" in captured["payload"]["prompt"]
+    assert "<current_instruction>\nContinue the work.\n</current_instruction>" in captured["payload"]["prompt"]

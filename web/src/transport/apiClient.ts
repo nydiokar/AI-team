@@ -369,6 +369,15 @@ export const api = {
       model?: string;
       completionCriteria?: string;
       nodeId?: string;
+      /** [Manager-fork] Source session id — stamps session→session lineage on the
+       *  Manager session (orthogonal to its role; no context carry by itself). */
+      continuedFrom?: string;
+      /** [Manager-fork] Marked-message digest injected once as a fenced,
+       *  reference-only <prior_context> block on the Manager's FIRST assignment turn
+       *  (delivered server-side by invoke_manager — not deferred to a Composer send). */
+      continueInline?: string;
+      /** [Manager-fork] Prior task_id; gateway builds the prior-context server-side. */
+      continues?: string;
     },
     idempotencyKey: string,
   ): Promise<{ ok: boolean; reason?: string; session_id?: string; case_id?: string; task_id?: string }> {
@@ -382,6 +391,9 @@ export const api = {
         model: args.model ?? null,
         completion_criteria: args.completionCriteria ?? null,
         node_id: args.nodeId ?? null,
+        continued_from: args.continuedFrom ?? null,
+        continue_inline: args.continueInline ?? null,
+        continues: args.continues ?? null,
       },
       idempotencyKey,
     );

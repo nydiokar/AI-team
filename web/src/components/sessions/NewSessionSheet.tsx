@@ -74,8 +74,11 @@ export function NewSessionSheet({
   const [backend, setBackend] = useState<string>(fork?.backend ?? "claude");
   const [nodeId, setNodeId] = useState<string>(fork?.nodeId ?? "__local__");
   const [repoPath, setRepoPath] = useState<string>(fork?.repoPath ?? "");
-  // A fork is always a plain continuation session (role selection is hidden for it).
-  const [role, setRole] = useState<SessionRole>(isFork ? "bare" : initialRole ?? "bare");
+  // Role is ORTHOGONAL to fork. A fork carries prior context (lineage + marked
+  // digest); the role (bare / worker / manager) is a separate behavioral+tools axis.
+  // Any role can be forked — bare/worker via the create pipeline, manager via
+  // /api/manager (which now accepts the same fork seed). Default bare.
+  const [role, setRole] = useState<SessionRole>(initialRole ?? "bare");
   const [objective, setObjective] = useState("");
   const [criteria, setCriteria] = useState("");
   const [manualMode, setManualMode] = useState(false);
@@ -126,8 +129,20 @@ export function NewSessionSheet({
     if (isManager) {
       const obj = objective.trim();
       if (!obj) return;
+      // [Manager-fork] A forked Manager carries the SAME seed as a bare/worker fork —
+      // lineage + the marked digest — but the context rides in server-side on the
+      // Manager's first assignment turn (invoke_manager), NOT deferred to a Composer
+      // send. So there is no setCarry here: the seed is delivered at boot.
       invoke.mutate(
-        { objective: obj, repoPath: p, backend, nodeId, completionCriteria: criteria.trim() || undefined },
+        {
+          objective: obj,
+          repoPath: p,
+          backend,
+          nodeId,
+          completionCriteria: criteria.trim() || undefined,
+          continuedFrom: isFork ? fork!.sourceSessionId : undefined,
+          continueInline: isFork ? fork!.digest : undefined,
+        },
         {
           onSuccess: (res) => {
             onClose();
@@ -168,7 +183,9 @@ export function NewSessionSheet({
 
   const backendLabel = BACKENDS.find((b) => b.id === backend)?.label ?? backend;
   const headerTitle = isFork
-    ? "Continue in a new session"
+    ? isManager
+      ? "Continue as Manager"
+      : "Continue in a new session"
     : isManager
       ? "Invoke Manager"
       : "New session";
@@ -280,35 +297,37 @@ export function NewSessionSheet({
         {/* Step 3: Repo */}
         {step === "repo" && (
           <>
-            {/* Role: a bare session (default), a Worker booted with the Worker role
-                profile, or a Manager firing the autonomous loop. Hidden on a fork
-                (a fork is always a plain continuation). */}
-            {!isFork && (
-              <div className="mb-3 mt-1">
-                <p className="mb-1.5 text-xs text-ink-muted">Session role</p>
-                <div className="flex gap-2">
-                  {([
-                    { id: "bare", label: "Bare", hint: "plain session" },
-                    { id: "worker", label: "Worker", hint: "worker profile" },
-                    { id: "manager", label: "Manager", hint: "drives workers" },
-                  ] as const).map((r) => (
-                    <button
-                      key={r.id}
-                      onClick={() => setRole(r.id)}
-                      className={cn(
-                        "flex-1 rounded-xl border px-2.5 py-2 text-left text-[13px] transition",
-                        role === r.id
-                          ? "border-accent/40 bg-accent-dim/40 text-ink ring-1 ring-accent/30"
-                          : "border-hairline bg-surface-1 text-ink hover:bg-surface-2",
-                      )}
-                    >
-                      <span className="font-medium">{r.label}</span>
-                      <span className="ml-1 text-[10px] text-ink-muted">{r.hint}</span>
-                    </button>
-                  ))}
-                </div>
+            {/* Role — orthogonal to fork. Bare (plain), Worker (worker profile), or
+                Manager (drives workers). Shown for BOTH a fresh session and a fork:
+                a fork can wake in any role and still carry its prior context (lineage
+                + marked digest). Manager forks route through /api/manager, which now
+                accepts the same fork seed and delivers it on the first assignment. */}
+            <div className="mb-3 mt-1">
+              <p className="mb-1.5 text-xs text-ink-muted">
+                {isFork ? "Continue as" : "Session role"}
+              </p>
+              <div className="flex gap-2">
+                {([
+                  { id: "bare", label: "Bare", hint: "plain session" },
+                  { id: "worker", label: "Worker", hint: "worker profile" },
+                  { id: "manager", label: "Manager", hint: "drives workers" },
+                ] as const).map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => setRole(r.id)}
+                    className={cn(
+                      "flex-1 rounded-xl border px-2.5 py-2 text-left text-[13px] transition",
+                      role === r.id
+                        ? "border-accent/40 bg-accent-dim/40 text-ink ring-1 ring-accent/30"
+                        : "border-hairline bg-surface-1 text-ink hover:bg-surface-2",
+                    )}
+                  >
+                    <span className="font-medium">{r.label}</span>
+                    <span className="ml-1 text-[10px] text-ink-muted">{r.hint}</span>
+                  </button>
+                ))}
               </div>
-            )}
+            </div>
 
             {/* Manager intent + done-gate — the same fields the old sheet had, now
                 native to the create flow. */}
