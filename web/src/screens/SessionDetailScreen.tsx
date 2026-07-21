@@ -31,6 +31,7 @@ import { SessionTimeline, userAnchorId } from "../components/timeline/SessionTim
 import type { MessageSelection } from "../components/timeline/SessionTimeline";
 import { NewSessionSheet, type ForkContext } from "../components/sessions/NewSessionSheet";
 import { buildForkDigest, type MarkedMessage } from "../lib/forkDigest";
+import { useForkStore } from "../stores/forkStore";
 import { SessionTurns } from "../components/timeline/SessionTurns";
 import { ContextFillGauge } from "../components/timeline/ContextFillGauge";
 import { Composer } from "../components/timeline/Composer";
@@ -495,8 +496,10 @@ export function SessionDetailScreen() {
   const [compactConfirm, setCompactConfirm] = useState(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
-  // [Session-fork] Message multi-select → fork. A long-press on any bubble enters
-  // select mode; the action bar then forks the marked messages into a fresh session.
+  // [Session-fork] Message multi-select → fork. Select mode is entered DELIBERATELY
+  // from the ⋮ menu ("Fork from messages"), NOT a long-press, so native text
+  // selection in bubbles is never hijacked. The action bar then forks the marked
+  // messages into a fresh session.
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [forkOpen, setForkOpen] = useState(false);
@@ -513,16 +516,17 @@ export function SessionDetailScreen() {
       return next;
     });
   }, []);
-  const enterSelect = useCallback((mid: string) => {
-    setSelectMode(true);
-    setSelectedIds((prev) => new Set(prev).add(mid));
-  }, []);
+  const startSelectMode = useCallback(() => setSelectMode(true), []);
   const selection: MessageSelection = {
     active: selectMode,
     selectedIds,
-    onLongPress: enterSelect,
     onToggle: toggleSelect,
   };
+
+  // [Session-fork] Pending carry-over stashed for THIS session by a fork (consumed by
+  // the Composer on the first send). Surfaced as a visible banner so the operator can
+  // SEE that the marked context will ride in — the carry-over is never silent.
+  const pendingCarry = useForkStore((s) => (id ? s.bySession[id] : undefined));
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -880,6 +884,14 @@ export function SessionDetailScreen() {
                                 <GitBranch className="size-4" /> Git
                               </button>
                             )}
+                            {!closed && timeline.length > 0 && (
+                              <button
+                                onClick={() => act(startSelectMode)}
+                                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                              >
+                                <GitFork className="size-4" /> Fork from messages
+                              </button>
+                            )}
                             <div className="my-1 border-t border-hairline" />
                             {!closed ? (
                               <button
@@ -930,6 +942,15 @@ export function SessionDetailScreen() {
               <span>Continued from</span>
               <span className="font-mono text-ink-soft">{session.continuedFrom}</span>
             </button>
+          )}
+
+          {/* [Session-fork] Visible proof the marked context will ride in — it
+              attaches to your NEXT message, then clears. Never a silent mechanism. */}
+          {pendingCarry && (
+            <div className="flex items-center gap-1.5 border-b border-hairline bg-accent-dim/25 px-4 py-2 text-[11px] text-accent">
+              <GitFork className="size-3.5 shrink-0" />
+              <span>Marked context from the forked session will attach to your next message.</span>
+            </div>
           )}
 
           {statusBanner && (

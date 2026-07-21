@@ -74,8 +74,12 @@ export function NewSessionSheet({
   const [backend, setBackend] = useState<string>(fork?.backend ?? "claude");
   const [nodeId, setNodeId] = useState<string>(fork?.nodeId ?? "__local__");
   const [repoPath, setRepoPath] = useState<string>(fork?.repoPath ?? "");
-  // A fork is always a plain continuation session (role selection is hidden for it).
-  const [role, setRole] = useState<SessionRole>(isFork ? "bare" : initialRole ?? "bare");
+  // Role defaults to bare (or the caller's initialRole). A fork may be Bare or
+  // Worker — both go through the ordinary create pipeline and carry lineage +
+  // marked context. Manager is NOT a fork target (see the role-picker note below).
+  const [role, setRole] = useState<SessionRole>(
+    isFork && (!initialRole || initialRole === "manager") ? "bare" : initialRole ?? "bare",
+  );
   const [objective, setObjective] = useState("");
   const [criteria, setCriteria] = useState("");
   const [manualMode, setManualMode] = useState(false);
@@ -89,7 +93,10 @@ export function NewSessionSheet({
 
   const { data: projects, isLoading: projectsLoading } = useProjects(nodeId);
 
-  const isManager = role === "manager";
+  // A fork is never a Manager invoke (Manager carries no marked-message context and
+  // uses a distinct /api/manager entry) — guard so the fork carry/lineage can't be
+  // silently dropped even if a manager role somehow leaks onto a fork.
+  const isManager = role === "manager" && !isFork;
   const pending = create.isPending || invoke.isPending;
   const anyError = create.isError || invoke.isError;
   const errorMsg = create.error?.message ?? invoke.error?.message;
@@ -280,35 +287,42 @@ export function NewSessionSheet({
         {/* Step 3: Repo */}
         {step === "repo" && (
           <>
-            {/* Role: a bare session (default), a Worker booted with the Worker role
-                profile, or a Manager firing the autonomous loop. Hidden on a fork
-                (a fork is always a plain continuation). */}
-            {!isFork && (
-              <div className="mb-3 mt-1">
-                <p className="mb-1.5 text-xs text-ink-muted">Session role</p>
-                <div className="flex gap-2">
-                  {([
-                    { id: "bare", label: "Bare", hint: "plain session" },
-                    { id: "worker", label: "Worker", hint: "worker profile" },
-                    { id: "manager", label: "Manager", hint: "drives workers" },
-                  ] as const).map((r) => (
-                    <button
-                      key={r.id}
-                      onClick={() => setRole(r.id)}
-                      className={cn(
-                        "flex-1 rounded-xl border px-2.5 py-2 text-left text-[13px] transition",
-                        role === r.id
-                          ? "border-accent/40 bg-accent-dim/40 text-ink ring-1 ring-accent/30"
-                          : "border-hairline bg-surface-1 text-ink hover:bg-surface-2",
-                      )}
-                    >
-                      <span className="font-medium">{r.label}</span>
-                      <span className="ml-1 text-[10px] text-ink-muted">{r.hint}</span>
-                    </button>
-                  ))}
-                </div>
+            {/* Role: a bare session (default) or a Worker booted with the Worker
+                role profile — a fork can be EITHER (both carry lineage + marked
+                context through the same create pipeline). Manager is offered only
+                for a fresh session: it is a distinct autonomous entry (/api/manager)
+                that self-orients and carries no marked-message context, so it is not
+                a fork target. */}
+            <div className="mb-3 mt-1">
+              <p className="mb-1.5 text-xs text-ink-muted">Session role</p>
+              <div className="flex gap-2">
+                {(isFork
+                  ? ([
+                      { id: "bare", label: "Bare", hint: "plain session" },
+                      { id: "worker", label: "Worker", hint: "worker profile" },
+                    ] as const)
+                  : ([
+                      { id: "bare", label: "Bare", hint: "plain session" },
+                      { id: "worker", label: "Worker", hint: "worker profile" },
+                      { id: "manager", label: "Manager", hint: "drives workers" },
+                    ] as const)
+                ).map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => setRole(r.id)}
+                    className={cn(
+                      "flex-1 rounded-xl border px-2.5 py-2 text-left text-[13px] transition",
+                      role === r.id
+                        ? "border-accent/40 bg-accent-dim/40 text-ink ring-1 ring-accent/30"
+                        : "border-hairline bg-surface-1 text-ink hover:bg-surface-2",
+                    )}
+                  >
+                    <span className="font-medium">{r.label}</span>
+                    <span className="ml-1 text-[10px] text-ink-muted">{r.hint}</span>
+                  </button>
+                ))}
               </div>
-            )}
+            </div>
 
             {/* Manager intent + done-gate — the same fields the old sheet had, now
                 native to the create flow. */}
