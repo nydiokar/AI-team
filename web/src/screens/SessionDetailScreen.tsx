@@ -653,7 +653,7 @@ export function SessionDetailScreen() {
   ];
 
   return (
-    <div className="mx-auto flex h-full max-w-[480px] flex-col bg-base">
+    <div className="desktop-detail mx-auto flex h-full max-w-[480px] flex-col bg-base">
       {/* ── On non-chat tabs, header is outside scroll ── */}
       {tab !== "chat" && (
         <>
