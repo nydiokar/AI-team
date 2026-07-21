@@ -36,7 +36,7 @@ function SkeletonCard() {
 
 function CaseList({ cases }: { cases: CaseSummary[] }) {
   return (
-    <div className="space-y-3 px-4">
+    <div className="desktop-card-list px-4">
       {cases.map((c, i) => (
         <motion.div
           key={c.flowRunId}
