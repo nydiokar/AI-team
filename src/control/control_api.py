@@ -135,6 +135,16 @@ class ManagerInvokeBody(BaseModel):
     completion_criteria: Optional[str] = None
     context_refs: Optional[List[str]] = None
     branch: Optional[str] = None
+    # [Manager-fork] Seed the Manager boot turn with a prior conversation. All three
+    # default None ⇒ byte-identical legacy boot (no lineage, no prior-context block).
+    #   continued_from — session→session lineage pointer (navigable thread; no context carry).
+    #   continue_inline — a client-held, marked-message digest injected once as a fenced,
+    #     reference-only <prior_context> block on the Manager's first assignment turn.
+    #   continues — a prior task_id; the gateway builds the bounded prior-context server-side.
+    # continue_inline / continues reuse the proven compact-context injector verbatim.
+    continued_from: Optional[str] = None
+    continue_inline: Optional[str] = Field(default=None, max_length=8000)
+    continues: Optional[str] = None
 
 
 class CaseCloseBody(BaseModel):
@@ -1089,6 +1099,9 @@ def build_control_api(orchestrator) -> FastAPI:
                     completion_criteria=body.completion_criteria,
                     context_refs=body.context_refs,
                     branch=body.branch,
+                    continued_from=body.continued_from,
+                    continue_inline=body.continue_inline,
+                    continues=body.continues,
                 )
             except HarnessAdmissionBlocked as blocked:
                 raise _harness_blocked_http(blocked)

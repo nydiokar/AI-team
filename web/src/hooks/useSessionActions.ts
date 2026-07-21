@@ -150,6 +150,11 @@ export function useInvokeManager() {
       model?: string;
       completionCriteria?: string;
       nodeId?: string;
+      /** [Manager-fork] Fork seed — orthogonal to the Manager role. Lineage +
+       *  marked-message context ride into the Manager's first assignment turn. */
+      continuedFrom?: string;
+      continueInline?: string;
+      continues?: string;
       idempotencyKey?: string;
     }) =>
       api.invokeManager(
@@ -161,6 +166,9 @@ export function useInvokeManager() {
           model: vars.model,
           completionCriteria: vars.completionCriteria,
           nodeId: vars.nodeId,
+          continuedFrom: vars.continuedFrom,
+          continueInline: vars.continueInline,
+          continues: vars.continues,
         },
         vars.idempotencyKey ?? newIdempotencyKey(),
       ),
