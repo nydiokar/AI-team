@@ -31,8 +31,8 @@ When the objective is open-ended ("continue the project", "advance the work", "d
   previously burned millions of tokens. Run **plain `pytest`** on the touched modules only. **NEVER**
   run the full or e2e suite "to verify" (real e2e is opt-in only: `AI_TEAM_ALLOW_OPENCODE_E2E=1
   pytest --run-e2e` — do not run it).
-- **NEVER run `python main.py status`** — it takes the gateway lock and **kills the live gateway**.
-  Check the running gateway with `curl http://127.0.0.1:9003/health`, nothing heavier.
+- **Checking the running gateway.** Use `curl http://127.0.0.1:9003/health` — a read-only
+  liveness/status probe that reflects the actual running gateway.
 - **Branch policy.** Docs-only work commits straight to `main`. Any `src/` / config / migration
   change cuts one `feat/<slug>` branch and opens a PR at close — never dangle a local branch, never
   carry another loop's edits. **Merging to `main`, deploys, and gateway restarts are the operator's
