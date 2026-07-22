@@ -22,6 +22,7 @@ import type { TimelineItem } from "../fixtures/timeline";
 import type { Session, ApprovalRequest } from "../domain/models";
 import type { RawTranscriptTurn } from "../transport/rawApi";
 import { useSentStore } from "../stores/sentStore";
+import { useManagerBootStore } from "../stores/managerBootStore";
 
 export function useSessionTimeline(
   sessionId: string | undefined,
@@ -32,10 +33,39 @@ export function useSessionTimeline(
   const sent = useSentStore((s) =>
     sessionId ? s.bySession[sessionId] : undefined,
   );
+  // [Manager-fork] Optimistic boot assignment (goal + any forked prior context),
+  // rendered only until the real boot turn lands in the transcript.
+  const boot = useManagerBootStore((s) =>
+    sessionId ? s.bySession[sessionId] : undefined,
+  );
 
   return useMemo(() => {
     if (!sessionId) return [];
     const items: TimelineItem[] = [];
+
+    // 0 — optimistic Manager boot bubble. A forked/invoked Manager's assignment is
+    //     delivered server-side and only appears in the transcript once the (long)
+    //     boot turn completes. Until the transcript has a real turn, show the goal
+    //     the operator gave — and note that the prior conversation is attached — so
+    //     they aren't blind while it works. As soon as ANY real turn lands we stop
+    //     rendering this, letting the full server-rendered assignment take over
+    //     (the detail screen also clears the stash then), so there is no duplicate.
+    if (boot && turns.length === 0) {
+      const note = boot.hasPriorContext
+        ? "\n\n(Forked from a prior conversation — that context is attached to the Manager's first turn.)"
+        : "";
+      items.push({
+        kind: "message",
+        at: boot.createdAt,
+        message: {
+          id: `${sessionId}-manager-boot`,
+          sessionId,
+          role: "user",
+          text: `Manager objective: ${boot.objective}${note}`,
+          createdAt: boot.createdAt,
+        },
+      });
+    }
 
     // 1 — real conversation turns. Each task is one exchange.
     const seenInstructions = new Set<string>();
@@ -145,5 +175,5 @@ export function useSessionTimeline(
     }
 
     return items;
-  }, [sessionId, session, turns, sent, approvals]);
+  }, [sessionId, session, turns, sent, approvals, boot]);
 }

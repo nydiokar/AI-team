@@ -27,6 +27,7 @@ import {
 } from "../../hooks/useSessionActions";
 import { useProjects, useTargets } from "../../hooks/useLiveData";
 import { useForkStore } from "../../stores/forkStore";
+import { useManagerBootStore } from "../../stores/managerBootStore";
 import { cn } from "../../lib/cn";
 
 const BACKENDS = [
@@ -66,6 +67,7 @@ export function NewSessionSheet({
   const create = useCreateSession();
   const invoke = useInvokeManager();
   const setCarry = useForkStore((s) => s.setCarry);
+  const setBoot = useManagerBootStore((s) => s.setBoot);
 
   const isFork = !!fork;
   // A fork is the ordinary create flow, pre-filled from the source — the FULL
@@ -145,6 +147,17 @@ export function NewSessionSheet({
         },
         {
           onSuccess: (res) => {
+            // Stash an optimistic boot record so the session timeline shows the
+            // assignment (goal + any forked prior context) IMMEDIATELY — the real
+            // turn is delivered server-side and only lands in the transcript once
+            // the boot turn completes, otherwise the operator is blind meanwhile.
+            if (res?.session_id) {
+              setBoot(res.session_id, {
+                objective: obj,
+                hasPriorContext: isFork,
+                createdAt: new Date().toISOString(),
+              });
+            }
             onClose();
             if (res?.case_id) navigate(`/work/${res.case_id}`);
             else if (res?.session_id) navigate(`/sessions/${res.session_id}`);
