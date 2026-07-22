@@ -962,6 +962,36 @@ def build_control_api(orchestrator) -> FastAPI:
         children = db.list_child_flow_runs(flow_run_id)
         return JSONResponse(_wrm.build_case_graph(flow_run_id, flow, parent, children))
 
+    @app.get("/api/work/{flow_run_id}/roster", dependencies=[Depends(_require_auth)])
+    def api_work_roster(flow_run_id: str) -> JSONResponse:
+        """[Cockpit] The live operational roster for a Case — the "who is doing what
+        right now" head of the Case, complementing the flow_events timeline (spine).
+
+        Per Case: its sessions (manager + workers) with role, model, status, token
+        totals, and turn count; and the running/finished SCRIPTS (watch_job rows)
+        owned by those sessions, with orphaned/failed/agent-spawn flags. The join is
+        case → flow_links(session) → those sessions' jobs. All reads are batched
+        (no N+1); job liveness comes from worker-maintained status, never a probe.
+        404 on unknown case."""
+        from src.control import work_read_model as _wrm
+        db = _db()
+        flow = db.get_flow_run(flow_run_id) if db is not None else None
+        if flow is None:
+            raise HTTPException(status_code=404, detail="case_not_found")
+        session_links = db.list_flow_links(flow_run_id=flow_run_id, entity_type="session")
+        session_ids = [l.get("entity_id") for l in session_links if l.get("entity_id")]
+        session_rows_by_id = {
+            sid: row for sid in session_ids
+            if (row := db.get_session(sid)) is not None
+        }
+        token_totals = db.get_session_token_totals(session_ids)
+        turn_counts = db.get_session_turn_counts(session_ids)
+        jobs = db.list_jobs_for_sessions(session_ids)
+        return JSONResponse(_wrm.build_case_roster(
+            flow_run_id, session_links, session_rows_by_id,
+            token_totals, turn_counts, jobs,
+        ))
+
     @app.get("/api/events/stream")
     async def api_events_stream(
         request: Request,

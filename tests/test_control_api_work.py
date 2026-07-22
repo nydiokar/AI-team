@@ -150,3 +150,48 @@ def test_work_graph_lineage(client, db):
 
 def test_work_graph_unknown_is_404(client):
     assert client.get("/api/work/nope/graph", headers=_auth()).status_code == 404
+
+
+# --- [Cockpit] roster endpoint ---------------------------------------------
+
+def test_work_roster_requires_token(client):
+    assert client.get("/api/work/x/roster").status_code in (401, 403)
+
+
+def test_work_roster_unknown_is_404(client):
+    assert client.get("/api/work/nope/roster", headers=_auth()).status_code == 404
+
+
+def test_work_roster_joins_sessions_and_jobs(client, db):
+    # A case with a manager session link and a claude -p job owned by that session.
+    case = db.create_flow_run("t-roster", "execution")
+    db.create_flow_link(case, "session", "mgr_sess", "manager")
+    # A non-session link must NOT leak into the roster's session join.
+    db.create_flow_link(case, "task", "task_1", "root_task")
+    db.register_job("job_x", "kanebra", "IGNITION_1", session_id="mgr_sess",
+                    command="claude -p --model opus 'do x'")
+
+    r = client.get(f"/api/work/{case}/roster", headers=_auth())
+    assert r.status_code == 200
+    roster = r.json()
+    assert roster["flow_run_id"] == case
+    # Exactly the session link (not the task link) is in the roster.
+    assert [s["session_id"] for s in roster["sessions"]] == ["mgr_sess"]
+    assert roster["sessions"][0]["role"] == "manager"
+    # No session row exists ⇒ honest present=false + zero tokens (not dropped).
+    assert roster["sessions"][0]["present"] is False
+    assert roster["sessions"][0]["tokens"]["total"] == 0
+    # The claude -p job surfaces, flagged as an agent-spawn and running.
+    assert roster["counts"]["jobs"] == 1 and roster["counts"]["running_jobs"] == 1
+    job = roster["jobs"][0]
+    assert job["job_id"] == "job_x" and job["is_agent_spawn"] is True
+    assert job["status"] == "running" and job["session_id"] == "mgr_sess"
+
+
+def test_work_roster_empty_case_is_clean(client, db):
+    case = db.create_flow_run("t-empty", "intent")
+    r = client.get(f"/api/work/{case}/roster", headers=_auth())
+    assert r.status_code == 200
+    roster = r.json()
+    assert roster["counts"] == {"sessions": 0, "jobs": 0, "running_jobs": 0}
+    assert roster["token_totals"]["total"] == 0

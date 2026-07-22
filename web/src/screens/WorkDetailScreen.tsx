@@ -15,7 +15,8 @@ import { ToneBadge } from "../components/work/ToneBadge";
 import { CaseLineage } from "../components/work/CaseLineage";
 import { CaseLedgerView } from "../components/work/CaseLedgerView";
 import { CaseTimelineView } from "../components/work/CaseTimelineView";
-import { useWorkDetail, useWorkGraph, useWorkTimeline } from "../hooks/useWork";
+import { CaseRosterView } from "../components/work/CaseRosterView";
+import { useWorkDetail, useWorkGraph, useWorkTimeline, useWorkRoster } from "../hooks/useWork";
 import { bucketMeta } from "../lib/workPresentation";
 import { ApiError } from "../transport/apiClient";
 
@@ -45,6 +46,7 @@ export function WorkDetailScreen() {
   const detail = useWorkDetail(id);
   const graph = useWorkGraph(id);
   const timeline = useWorkTimeline(id);
+  const roster = useWorkRoster(id);
 
   const notFound = detail.error instanceof ApiError && detail.error.status === 404;
 
@@ -133,6 +135,20 @@ export function WorkDetailScreen() {
                 </dl>
               </div>
             </div>
+
+            {/* Live roster — the operational head: who is working now + running
+                scripts. Placed first because "what's happening right now" is the
+                operator's primary question; lineage/ledger/timeline follow. */}
+            <Section
+              title="Live"
+              count={roster.data ? roster.data.counts.sessions + roster.data.counts.jobs : undefined}
+            >
+              {roster.data ? (
+                <CaseRosterView roster={roster.data} />
+              ) : (
+                <p className="text-[12px] text-ink-muted">Loading roster…</p>
+              )}
+            </Section>
 
             {/* Lineage */}
             <Section title="Lineage">
