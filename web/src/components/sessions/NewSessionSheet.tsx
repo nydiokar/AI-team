@@ -17,7 +17,7 @@
  *                     marked-message digest onto its first instruction. It is a pure
  *                     SESSION action — it never touches Case membership or role.
  */
-import { useState, useRef } from "react";
+import { useState, useRef, useLayoutEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { X, ChevronRight, FolderOpen } from "lucide-react";
 import { Button } from "../ui/Button";
@@ -50,6 +50,42 @@ export interface ForkContext {
   nodeId: string;
   repoPath: string;
   model?: string | null;
+}
+
+/** Auto-growing textarea: expands with its content from a comfortable minimum,
+ *  then caps (max-height in `className`) and scrolls — so the intent/done-gate
+ *  fields never feel cramped and never blow the sheet open. Pure/controlled:
+ *  height is derived from `value`, no hidden state. */
+function GrowTextarea({
+  value,
+  onChange,
+  minRows = 2,
+  className,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  minRows?: number;
+  className?: string;
+  placeholder?: string;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      rows={minRows}
+      placeholder={placeholder}
+      className={className}
+    />
+  );
 }
 
 export function NewSessionSheet({
@@ -212,11 +248,11 @@ export function NewSessionSheet({
       onClick={onClose}
     >
       <div
-        className="card-elev w-full max-w-[480px] rounded-t-2xl p-5 pb-8"
+        className="card-elev flex max-h-[90dvh] w-full max-w-[480px] flex-col rounded-t-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between">
+        {/* Header — pinned, never scrolls under the keyboard */}
+        <div className="flex shrink-0 items-center justify-between px-5 pb-2 pt-5">
           <div className="flex items-center gap-2">
             {step !== "backend" && (
               <button
@@ -242,6 +278,9 @@ export function NewSessionSheet({
           </button>
         </div>
 
+        {/* Scrollable body — the focused input auto-scrolls into view here, so the
+            on-screen keyboard can never crush or hide the fields / submit button. */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-1">
         {isFork && (
           <p className="mt-1 mb-3 text-xs text-ink-muted">
             A fresh session (fresh cache) that continues this thread — pick backend,
@@ -347,21 +386,22 @@ export function NewSessionSheet({
             {isManager && (
               <div className="mb-3">
                 <label className="mb-1 block text-xs text-ink-muted">Intent</label>
-                <textarea
+                <GrowTextarea
                   value={objective}
-                  onChange={(e) => setObjective(e.target.value)}
-                  rows={2}
+                  onChange={setObjective}
+                  minRows={3}
                   placeholder="continue the work on this project"
-                  className="mb-2 w-full resize-none rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[14px] text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
+                  className="mb-2 block max-h-52 w-full resize-none overflow-y-auto rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[14px] leading-relaxed text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
                 />
                 <label className="mb-1 block text-xs text-ink-muted">
                   Done gate <span className="text-ink-muted/70">(optional)</span>
                 </label>
-                <input
+                <GrowTextarea
                   value={criteria}
-                  onChange={(e) => setCriteria(e.target.value)}
+                  onChange={setCriteria}
+                  minRows={2}
                   placeholder="what 'done' means — demanded at close"
-                  className="w-full rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[13px] text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
+                  className="block max-h-40 w-full resize-none overflow-y-auto rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[13px] leading-relaxed text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
                 />
               </div>
             )}
@@ -459,6 +499,7 @@ export function NewSessionSheet({
             )}
           </>
         )}
+        </div>
       </div>
     </div>
   );
