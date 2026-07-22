@@ -53,9 +53,9 @@ export interface ForkContext {
 }
 
 /** Auto-growing textarea: expands with its content from a comfortable minimum,
- *  then caps (max-height in `className`) and scrolls — so the intent/done-gate
- *  fields never feel cramped and never blow the sheet open. Pure/controlled:
- *  height is derived from `value`, no hidden state. */
+ *  then caps (via max-height in `className`) and scrolls — the intent / done-gate
+ *  fields never feel cramped and never blow the sheet open. Pure & controlled:
+ *  the height is derived from `value`, there is no hidden state. */
 function GrowTextarea({
   value,
   onChange,
@@ -139,6 +139,13 @@ export function NewSessionSheet({
   // repo only SELECTS it there. Bare / Worker / Fork keep the one-tap "pick repo =
   // go" flow — a fork carries its context automatically, so no extra input.
   const needsExplicitSubmit = isManager || manualMode;
+
+  // Progressive disclosure: for a Manager the big repo list is only useful UNTIL a
+  // repo is picked. Once one is chosen from the list, collapse it to a one-line chip
+  // and give the whole sheet to the Intent — so the picker stops hogging the screen.
+  const repoChosen = !!repoPath.trim();
+  const managerFormOpen = isManager && repoChosen && !manualMode;
+  const repoName = repoPath.split(/[\\/]/).filter(Boolean).pop() ?? repoPath;
 
   const chooseBackend = (b: string) => {
     setBackend(b);
@@ -242,6 +249,31 @@ export function NewSessionSheet({
     ? invoke.isPending ? "Invoking…" : "Invoke Manager"
     : create.isPending ? "Creating…" : "Create session";
 
+  // Intent + Done-gate, shared between the collapsed-picker view and manual-path
+  // view so there is exactly one copy of the composer.
+  const managerFields = (
+    <>
+      <label className="mb-1 block text-xs text-ink-muted">Intent</label>
+      <GrowTextarea
+        value={objective}
+        onChange={setObjective}
+        minRows={4}
+        placeholder="continue the work on this project"
+        className="mb-3 block max-h-60 w-full resize-none overflow-y-auto rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[14px] leading-relaxed text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
+      />
+      <label className="mb-1 block text-xs text-ink-muted">
+        Done gate <span className="text-ink-muted/70">(optional)</span>
+      </label>
+      <GrowTextarea
+        value={criteria}
+        onChange={setCriteria}
+        minRows={2}
+        placeholder="what 'done' means — demanded at close"
+        className="block max-h-40 w-full resize-none overflow-y-auto rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[13px] leading-relaxed text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
+      />
+    </>
+  );
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-black/50"
@@ -251,7 +283,7 @@ export function NewSessionSheet({
         className="card-elev flex max-h-[90dvh] w-full max-w-[480px] flex-col rounded-t-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header — pinned, never scrolls under the keyboard */}
+        {/* Header — pinned; never scrolls under the on-screen keyboard */}
         <div className="flex shrink-0 items-center justify-between px-5 pb-2 pt-5">
           <div className="flex items-center gap-2">
             {step !== "backend" && (
@@ -278,8 +310,8 @@ export function NewSessionSheet({
           </button>
         </div>
 
-        {/* Scrollable body — the focused input auto-scrolls into view here, so the
-            on-screen keyboard can never crush or hide the fields / submit button. */}
+        {/* Scrollable body — the focused field auto-scrolls into view here, so the
+            keyboard can never crush or hide the inputs / submit button. */}
         <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-1">
         {isFork && (
           <p className="mt-1 mb-3 text-xs text-ink-muted">
@@ -381,103 +413,109 @@ export function NewSessionSheet({
               </div>
             </div>
 
-            {/* Manager intent + done-gate — the same fields the old sheet had, now
-                native to the create flow. */}
-            {isManager && (
+            {/* Manager composer — appears once a repo is picked from the list. The
+                repo collapses to a one-line chip so the intent gets the whole sheet. */}
+            {managerFormOpen && (
               <div className="mb-3">
-                <label className="mb-1 block text-xs text-ink-muted">Intent</label>
-                <GrowTextarea
-                  value={objective}
-                  onChange={setObjective}
-                  minRows={3}
-                  placeholder="continue the work on this project"
-                  className="mb-2 block max-h-52 w-full resize-none overflow-y-auto rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[14px] leading-relaxed text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
-                />
-                <label className="mb-1 block text-xs text-ink-muted">
-                  Done gate <span className="text-ink-muted/70">(optional)</span>
-                </label>
-                <GrowTextarea
-                  value={criteria}
-                  onChange={setCriteria}
-                  minRows={2}
-                  placeholder="what 'done' means — demanded at close"
-                  className="block max-h-40 w-full resize-none overflow-y-auto rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 text-[13px] leading-relaxed text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
-                />
+                <p className="mb-1 text-xs text-ink-muted">Repo</p>
+                <div className="mb-3 flex items-center gap-2.5 rounded-lg border border-hairline bg-surface-1 px-3 py-2">
+                  <FolderOpen className="size-4 shrink-0 text-ink-muted" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[13px] font-medium text-ink">{repoName}</p>
+                    <p className="truncate font-mono text-[10px] text-ink-muted">{repoPath}</p>
+                  </div>
+                  <button
+                    onClick={() => { setRepoPath(""); setManualMode(false); }}
+                    className="shrink-0 rounded-md px-2 py-1 text-xs text-accent hover:bg-surface-2"
+                  >
+                    Change
+                  </button>
+                </div>
+                {managerFields}
               </div>
             )}
 
-            <p className="mt-1 mb-3 text-xs text-ink-muted">
-              {nodeId === "__local__" ? "Repos found in your workspace:" : `Repos on ${nodeId}:`}
-            </p>
-
-            {/* Auto-discovered list */}
-            {!manualMode && (
+            {/* Repo picker — the big discovery list. Hidden once a Manager has picked
+                a repo (it lives in the chip above), so it never hogs the screen. */}
+            {!managerFormOpen && (
               <>
-                {projectsLoading && (
-                  <p className="py-4 text-center text-sm text-ink-muted">Scanning repos…</p>
-                )}
-                {!projectsLoading && (projects ?? []).length === 0 && (
-                  <p className="py-2 text-center text-sm text-ink-muted">
-                    No repos found.{" "}
-                    <button
-                      className="text-accent underline"
-                      onClick={() => { setManualMode(true); setTimeout(() => manualRef.current?.focus(), 50); }}
-                    >
-                      Type a path
-                    </button>
-                  </p>
-                )}
-                <div className="mb-3 max-h-52 overflow-y-auto space-y-1.5">
-                  {(projects ?? []).map((p) => (
-                    <button
-                      key={p.path}
-                      onClick={() => chooseRepo(p.path)}
-                      disabled={pending}
-                      className={cn(
-                        "flex w-full items-center gap-3 rounded-xl border px-4 py-2.5 text-left text-[13px] transition disabled:opacity-50",
-                        repoPath === p.path
-                          ? "border-accent/40 bg-accent-dim/40 text-ink ring-1 ring-accent/30"
-                          : "border-hairline bg-surface-1 text-ink hover:bg-surface-2",
-                      )}
-                    >
-                      <FolderOpen className="size-4 shrink-0 text-ink-muted" />
-                      <div className="min-w-0">
-                        <p className="font-medium truncate">{p.name}</p>
-                        <p className="truncate font-mono text-[10px] text-ink-muted">{p.path}</p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
+                <p className="mt-1 mb-3 text-xs text-ink-muted">
+                  {nodeId === "__local__" ? "Repos found in your workspace:" : `Repos on ${nodeId}:`}
+                </p>
 
-                {(projects ?? []).length > 0 && (
-                  <button
-                    className="mb-3 text-xs text-accent hover:underline"
-                    onClick={() => { setManualMode(true); setTimeout(() => manualRef.current?.focus(), 50); }}
-                  >
-                    Or type a path manually
-                  </button>
-                )}
-              </>
-            )}
+                {/* Auto-discovered list */}
+                {!manualMode && (
+                  <>
+                    {projectsLoading && (
+                      <p className="py-4 text-center text-sm text-ink-muted">Scanning repos…</p>
+                    )}
+                    {!projectsLoading && (projects ?? []).length === 0 && (
+                      <p className="py-2 text-center text-sm text-ink-muted">
+                        No repos found.{" "}
+                        <button
+                          className="text-accent underline"
+                          onClick={() => { setManualMode(true); setTimeout(() => manualRef.current?.focus(), 50); }}
+                        >
+                          Type a path
+                        </button>
+                      </p>
+                    )}
+                    <div className="mb-3 max-h-52 overflow-y-auto space-y-1.5">
+                      {(projects ?? []).map((p) => (
+                        <button
+                          key={p.path}
+                          onClick={() => chooseRepo(p.path)}
+                          disabled={pending}
+                          className={cn(
+                            "flex w-full items-center gap-3 rounded-xl border px-4 py-2.5 text-left text-[13px] transition disabled:opacity-50",
+                            repoPath === p.path
+                              ? "border-accent/40 bg-accent-dim/40 text-ink ring-1 ring-accent/30"
+                              : "border-hairline bg-surface-1 text-ink hover:bg-surface-2",
+                          )}
+                        >
+                          <FolderOpen className="size-4 shrink-0 text-ink-muted" />
+                          <div className="min-w-0">
+                            <p className="font-medium truncate">{p.name}</p>
+                            <p className="truncate font-mono text-[10px] text-ink-muted">{p.path}</p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
 
-            {/* Manual path input */}
-            {manualMode && (
-              <>
-                <input
-                  ref={manualRef}
-                  value={repoPath}
-                  onChange={(e) => setRepoPath(e.target.value)}
-                  placeholder="C:/Users/you/Projects/your-repo"
-                  className="mb-2 w-full rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 font-mono text-[13px] text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
-                  onKeyDown={(e) => e.key === "Enter" && submit()}
-                />
-                {(projects ?? []).length > 0 && (
-                  <button
-                    className="mb-3 text-xs text-accent hover:underline"
-                    onClick={() => setManualMode(false)}
-                  >
-                    ← Back to list
-                  </button>
+                    {(projects ?? []).length > 0 && (
+                      <button
+                        className="mb-3 text-xs text-accent hover:underline"
+                        onClick={() => { setManualMode(true); setTimeout(() => manualRef.current?.focus(), 50); }}
+                      >
+                        Or type a path manually
+                      </button>
+                    )}
+                  </>
+                )}
+
+                {/* Manual path input */}
+                {manualMode && (
+                  <>
+                    <input
+                      ref={manualRef}
+                      value={repoPath}
+                      onChange={(e) => setRepoPath(e.target.value)}
+                      placeholder="C:/Users/you/Projects/your-repo"
+                      className="mb-2 w-full rounded-lg border border-hairline bg-surface-1 px-3 py-2.5 font-mono text-[13px] text-ink placeholder:text-ink-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40"
+                      onKeyDown={(e) => e.key === "Enter" && submit()}
+                    />
+                    {(projects ?? []).length > 0 && (
+                      <button
+                        className="mb-3 text-xs text-accent hover:underline"
+                        onClick={() => setManualMode(false)}
+                      >
+                        ← Back to list
+                      </button>
+                    )}
+                    {/* A Manager typing a path still gets the composer, right below the
+                        compact input — no big list competing for space. */}
+                    {isManager && managerFields}
+                  </>
                 )}
               </>
             )}
