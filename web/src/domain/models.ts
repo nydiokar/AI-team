@@ -71,6 +71,8 @@ export interface Session {
   workspace: Workspace;
   /** Native backend session id (resume key); null when not yet captured. */
   backendSessionId: string | null;
+  /** backendSessionId, or the last-known native id after close (survives close). */
+  lastBackendSessionId: string | null;
   /** lifecycle ≠ operational state (spec §3.3 / acceptance #4). */
   lifecycle: SessionLifecycle;
   opState: SessionOpState;

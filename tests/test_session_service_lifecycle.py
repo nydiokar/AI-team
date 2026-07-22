@@ -52,6 +52,11 @@ def test_close_local_calls_backend_and_clears(svc):
     reloaded = svc.store.get(s.session_id)
     assert reloaded.status == SessionStatus.CLOSED
     assert reloaded.backend_session_id == ""        # cleared
+    # ...but the native id is preserved for the Info panel / audit, and the read
+    # model surfaces it as last_backend_session_id.
+    assert "bsid-123" in reloaded.previous_backend_session_ids
+    from src.core.view_models import SessionView
+    assert SessionView.from_session(reloaded).last_backend_session_id == "bsid-123"
 
 
 def test_close_remote_skips_backend(svc):

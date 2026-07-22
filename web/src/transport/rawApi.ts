@@ -19,6 +19,10 @@ export interface RawSessionView {
   machine_id: string;
   /** Native session id the backend returned (resume key) — "" when not captured. */
   backend_session_id: string;
+  /** backend_session_id, or the last-known native id after the session is closed
+   *  (survives close via previous_backend_session_ids). Optional so older cached
+   *  payloads without the field still parse. */
+  last_backend_session_id?: string;
   model: string | null;
   effort: string | null;
   /** The backend's default model — shown when `model` is null. */
@@ -35,6 +39,30 @@ export interface RawSessionView {
    *  an older cached payload without the field still parses; the adapter normalizes
    *  a missing value to null. */
   continued_from?: string | null;
+}
+
+// GET /api/sessions/{id}/usage → per-session token totals + approx USD cost.
+export interface RawSessionUsage {
+  session_id: string;
+  model: string | null;
+  tokens: {
+    input: number;
+    output: number;
+    cache_read: number;
+    cache_creation: number;
+    total: number;
+  };
+  cost: {
+    known: boolean;
+    model_priced: string | null;
+    reason: string | null;
+    currency: string;
+    usd_total: number | null;
+    usd_input: number | null;
+    usd_output: number | null;
+    usd_cache_write: number | null;
+    usd_cache_read: number | null;
+  };
 }
 
 // GET /api/nodes → { nodes: RawNode[] }

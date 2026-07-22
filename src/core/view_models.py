@@ -29,6 +29,7 @@ class SessionView:
     status: str                 # SessionStatus value
     machine_id: str
     backend_session_id: str     # native session ID the backend returned (resume key)
+    last_backend_session_id: str  # backend_session_id, or the last known one after close
     model: Optional[str]
     effort: Optional[str]
     default_model: Optional[str]  # the backend's default model (shown when model is None)
@@ -60,6 +61,17 @@ class SessionView:
             status=s.status.value,
             machine_id=s.machine_id,
             backend_session_id=s.backend_session_id or "",
+            # After close, the active id is cleared but the last-known native
+            # session id survives in previous_backend_session_ids — expose it so
+            # the Info panel still shows the Claude Code session id.
+            last_backend_session_id=(
+                s.backend_session_id
+                or (
+                    s.previous_backend_session_ids[-1]
+                    if s.previous_backend_session_ids
+                    else ""
+                )
+            ),
             model=s.model,
             effort=getattr(s, "effort", None),
             default_model=resolved_default,

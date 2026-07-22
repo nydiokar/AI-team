@@ -40,7 +40,8 @@ import { JobRow } from "../components/system/JobsPanel";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { EffortPickerSheet } from "../components/sessions/EffortPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
-import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionActivity, useJobs } from "../hooks/useLiveData";
+import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionUsage, useSessionActivity, useJobs } from "../hooks/useLiveData";
+import { compactTokens } from "../components/timeline/SessionTurns";
 import { useSessionAffiliations } from "../hooks/useWork";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
 import { useTaskActivity } from "../hooks/useTaskActivity";
@@ -346,6 +347,82 @@ function SessionJobsSection({ sessionId }: { sessionId: string }) {
   );
 }
 
+function formatUsd(n: number | null | undefined): string {
+  if (n == null) return "—";
+  if (n === 0) return "$0";
+  // Sub-cent spend is common early in a session — keep enough precision to be
+  // meaningful without pretending false accuracy.
+  const decimals = n < 1 ? 4 : 2;
+  return `$${n.toFixed(decimals)}`;
+}
+
+function CostRow({
+  label,
+  value,
+  strong,
+}: {
+  label: string;
+  value: string;
+  strong?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 px-4 py-1.5">
+      <span className={cn("text-[11px]", strong ? "text-ink-soft" : "text-ink-muted")}>
+        {label}
+      </span>
+      <span
+        className={cn(
+          "font-mono text-[12px]",
+          strong ? "text-ink font-semibold" : "text-ink",
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Session-total token spend + approximate USD cost. Sums authoritative
+ * per-request token buckets (input / output / cache write / cache read) across
+ * the whole session — not just the latest turn — and prices them per the
+ * session's model. Cost is honest: an un-priceable model shows the tokens and a
+ * muted "cost unavailable" note rather than a fabricated number.
+ */
+function SessionCostPanel({ sessionId }: { sessionId: string }) {
+  const { data: usage } = useSessionUsage(sessionId);
+  if (!usage) return null;
+  const t = usage.tokens;
+  if (t.total === 0) return null; // nothing spent yet — no panel noise
+  const cost = usage.cost;
+
+  return (
+    <div>
+      <div className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">
+        Session usage &amp; cost
+      </div>
+      <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
+        <CostRow label="Total tokens" value={compactTokens(t.total)} strong />
+        <CostRow label="Input" value={compactTokens(t.input)} />
+        <CostRow label="Output" value={compactTokens(t.output)} />
+        <CostRow label="Cache write" value={compactTokens(t.cache_creation)} />
+        <CostRow label="Cache read" value={compactTokens(t.cache_read)} />
+        {cost.known ? (
+          <CostRow
+            label={`Est. cost${cost.model_priced ? ` (${cost.model_priced})` : ""}`}
+            value={formatUsd(cost.usd_total)}
+            strong
+          />
+        ) : (
+          <div className="px-4 py-1.5 text-[11px] text-ink-muted">
+            Cost unavailable{cost.reason ? ` — ${cost.reason.replace(/_/g, " ")}` : ""}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SessionInfoTab({
   sessionId,
   onOpenFiles,
@@ -384,7 +461,13 @@ function SessionInfoTab({
 
   const rows = [
     { label: "Session ID", value: session.id },
-    { label: "Backend session", value: session.backendSessionId ?? "(not yet captured)" },
+    {
+      label: "Backend session",
+      value:
+        session.backendSessionId ??
+        session.lastBackendSessionId ??
+        "(not yet captured)",
+    },
     { label: "Backend", value: session.backend },
     { label: "Model", value: modelLabel(session.model, session.defaultModel) },
     { label: "Machine", value: session.workspace.targetId },
@@ -402,6 +485,8 @@ function SessionInfoTab({
           </div>
         ))}
       </div>
+
+      <SessionCostPanel sessionId={sessionId} />
 
       <SessionTurns turns={turns ?? []} loading={turnsLoading} />
 

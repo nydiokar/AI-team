@@ -12,6 +12,7 @@ const session: Session = {
   backend: "codex",
   workspace: { path: "C:\\repo", targetId: "node_a" },
   backendSessionId: null,
+  lastBackendSessionId: null,
   lifecycle: "open",
   opState: "running",
   needsAttention: false,
