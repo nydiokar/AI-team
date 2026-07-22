@@ -23,6 +23,18 @@ def _job_id() -> str:
     return f"job_{uuid.uuid4().hex[:12]}"
 
 
+def _mk_session(db: MeshDB, session_id: str) -> None:
+    """Insert a minimal real session row so a job referencing it is genuinely
+    'owned' (not orphaned) under the session-existence check in list_jobs."""
+    with db._write() as conn:
+        conn.execute(
+            "INSERT INTO sessions (session_id, backend, repo_path, status, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, "claude", "/repo", "idle",
+             "2026-07-01T00:00:00Z", "2026-07-01T00:00:00Z"),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Schema & DB layer
 # ---------------------------------------------------------------------------
@@ -135,6 +147,7 @@ def test_list_jobs_filters(tmp_path):
 
 def test_list_jobs_filters_unowned_before_limit(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
+    _mk_session(db, "sess_1")  # genuinely-owned: the session exists
     for i in range(3):
         db.register_job(
             job_id=f"job_owned_{i}",
@@ -152,6 +165,28 @@ def test_list_jobs_filters_unowned_before_limit(tmp_path):
     jobs = db.list_jobs(ownership="unowned", limit=1)
 
     assert [job["id"] for job in jobs] == ["job_unowned"]
+
+
+def test_list_jobs_surfaces_orphaned_as_unowned(tmp_path):
+    """A job whose session_id matches NO known session (e.g. registered against a
+    native/backend UUID) must surface in the unowned System view — flagged
+    orphaned — rather than vanish. A genuinely-owned job stays out."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _mk_session(db, "sess_real")
+    db.register_job(job_id="job_owned", node_id="n", label="owned",
+                    session_id="sess_real")
+    db.register_job(job_id="job_orphan", node_id="n", label="orphan",
+                    session_id="native-uuid-does-not-exist")
+    db.register_job(job_id="job_null", node_id="n", label="null", session_id=None)
+
+    unowned_ids = {j["id"] for j in db.list_jobs(ownership="unowned", limit=20)}
+    assert unowned_ids == {"job_orphan", "job_null"}
+    assert "job_owned" not in unowned_ids
+
+    by_id = {j["id"]: j for j in db.list_jobs(limit=20)}
+    assert by_id["job_orphan"]["orphaned"] == 1
+    assert by_id["job_owned"]["orphaned"] == 0
+    assert by_id["job_null"]["orphaned"] == 0
 
 
 def test_get_terminal_jobs_since(tmp_path):

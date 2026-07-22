@@ -36,7 +36,9 @@ def test_watch_job_defaults_to_agent_followup(monkeypatch, tmp_path):
 def test_windows_sleep_command_is_normalized(monkeypatch):
     from scripts import mcp_jobs
 
-    monkeypatch.setattr(mcp_jobs.os, "name", "nt")
+    # Patch the module's own platform check — NOT the global os.name, which would
+    # make pathlib build WindowsPath everywhere and crash on non-Windows CI.
+    monkeypatch.setattr(mcp_jobs, "_is_windows", lambda: True)
 
     command = mcp_jobs._normalize_worker_command(
         "echo Test job started && sleep 10 && echo done"

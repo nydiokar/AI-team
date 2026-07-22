@@ -38,7 +38,10 @@ const STATUS_VISUAL: Record<
 export function JobRow({ job, running }: { job: RawJob; running?: boolean }) {
   const v = STATUS_VISUAL[running ? "running" : job.status] ?? STATUS_VISUAL.lost;
   const { Icon, tint, spin } = v;
-  const sessionHref = job.session_id ? `/sessions/${job.session_id}` : null;
+  // An orphaned job's session_id points at no reachable session — never link to a
+  // dead page; surface it honestly instead so the job is visible, not hidden.
+  const orphaned = Boolean(job.orphaned);
+  const sessionHref = job.session_id && !orphaned ? `/sessions/${job.session_id}` : null;
 
   const inner = (
     <>
@@ -46,6 +49,14 @@ export function JobRow({ job, running }: { job: RawJob; running?: boolean }) {
       <div className="min-w-0 flex-1">
         <p className="truncate font-medium text-ink">{job.label ?? job.id}</p>
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-ink-muted">
+          {orphaned && (
+            <span
+              className="max-w-full truncate text-warn"
+              title={`Registered against session ${job.session_id}, which matches no known session.`}
+            >
+              orphaned · {job.node_id} · sess {job.session_id?.slice(0, 12)}
+            </span>
+          )}
           {running ? (
             <>
               {job.pid && <span className="font-mono">PID {job.pid}</span>}

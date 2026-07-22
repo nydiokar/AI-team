@@ -31,8 +31,9 @@ def test_migration_version_and_table(tmp_path):
     conn = db._conn()
 
     max_version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-    assert max_version == 24  # A36 M2.5 Case admission added migration 24
-    assert _CURRENT_VERSION == 24
+    # A fresh DB converges at the highest migration; _CURRENT_VERSION is derived
+    # from the migration list, so this stays correct as migrations are added.
+    assert max_version == _CURRENT_VERSION
 
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='flow_runs'"

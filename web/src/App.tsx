@@ -43,7 +43,7 @@ export function App() {
 
   if (!hasToken) {
     return (
-      <div className="mx-auto h-full max-w-[480px]">
+      <div className="desktop-frame mx-auto h-full max-w-[480px]">
         <TokenGate />
       </div>
     );
