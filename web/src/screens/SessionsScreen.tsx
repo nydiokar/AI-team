@@ -35,7 +35,7 @@ function CardList({
   affiliations: Map<string, SessionAffiliation>;
 }) {
   return (
-    <div className="space-y-3 px-4">
+    <div className="desktop-card-list px-4">
       {sessions.map((s, i) => (
         <motion.div
           key={s.id}

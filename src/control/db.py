@@ -53,10 +53,10 @@ _mesh_health_sample_lock = threading.Lock()
 _mesh_health_last_sample: Dict[str, float] = {}
 
 # ---------------------------------------------------------------------------
-# Schema version — bump when adding migrations
+# Schema version — DERIVED from the migration list (see _get_migrations()).
+# Defined immediately after that function so it can never drift out of sync
+# with the highest migration. Do NOT hand-maintain a literal here.
 # ---------------------------------------------------------------------------
-
-_CURRENT_VERSION = 25
 
 
 class CaseCloseBlocked(Exception):
@@ -2501,11 +2501,35 @@ class MeshDB:
             clauses.append("session_id = ?")
             params.append(session_id)
         elif ownership == "unowned":
-            clauses.append("session_id IS NULL")
+            # "Unowned" from the UI's perspective = not attached to a session the UI
+            # can actually show. That is a genuinely NULL session_id OR an ORPHANED
+            # one: set, but matching no known session (e.g. a job registered with a
+            # backend/native UUID instead of the gateway session id). Both would
+            # otherwise be invisible in EVERY session view and the old null-only
+            # System panel — so a registered job could silently vanish. Surface both.
+            clauses.append(
+                "(jobs.session_id IS NULL OR NOT EXISTS "
+                "(SELECT 1 FROM sessions WHERE sessions.session_id = jobs.session_id))"
+            )
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
+        # Authoritatively flag orphaned jobs (session_id set but no matching session)
+        # so the UI can render them honestly — with an "orphaned" marker instead of a
+        # dead session link — no matter which view surfaces them. Correlated subquery,
+        # no extra round-trip; the flag is additive so other callers ignore it.
         rows = self._conn().execute(
-            f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ?",
+            f"""
+            SELECT jobs.*,
+                   CASE
+                     WHEN jobs.session_id IS NOT NULL
+                          AND NOT EXISTS (
+                            SELECT 1 FROM sessions
+                            WHERE sessions.session_id = jobs.session_id
+                          )
+                     THEN 1 ELSE 0
+                   END AS orphaned
+            FROM jobs {where} ORDER BY created_at DESC LIMIT ?
+            """,
             params,
         ).fetchall()
         return [dict(r) for r in rows]
@@ -2786,7 +2810,8 @@ def _get_migrations() -> List[tuple]:
 
     To add a migration:
         1. Append (N, "ALTER TABLE ...") to this list.
-        2. Bump _CURRENT_VERSION to N.
+    _CURRENT_VERSION is derived from this list automatically (below) — there is
+    no separate constant to bump.
     """
     return [
         (1, ""),  # baseline marker — DDL already applied above
@@ -2957,6 +2982,10 @@ def _get_migrations() -> List[tuple]:
         (26, "ALTER TABLE sessions ADD COLUMN role_boot TEXT"),  # [Worker role] explicit opt-in role-boot signal; NULL = tier-0 default
         (27, "ALTER TABLE sessions ADD COLUMN continued_from TEXT"),  # [Session-fork] session→session lineage; NULL = not a continuation
     ]
+
+
+# Single source of truth for the current schema version: the highest migration.
+_CURRENT_VERSION = max(v for v, _ in _get_migrations())
 
 
 # ---------------------------------------------------------------------------

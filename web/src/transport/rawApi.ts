@@ -273,6 +273,11 @@ export interface RawJob {
   exit_code: number | null;
   notify: number | null;
   notify_agent: number | null;
+  // 1 when session_id is set but matches no known session (registered against a
+  // native/backend UUID instead of the gateway session id). Such a job has no
+  // reachable session page, so it is surfaced in System > Jobs and labelled
+  // honestly rather than silently dropped. Computed server-side (db.list_jobs).
+  orphaned?: number | null;
   created_at: string;
   updated_at: string;
 }

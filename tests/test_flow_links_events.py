@@ -17,6 +17,7 @@ import pytest
 
 from src.control.db import (
     MeshDB,
+    _CURRENT_VERSION,
     FLOW_LINK_ENTITY_TYPES,
     FLOW_LINK_ROLES,
     FLOW_EVENT_TYPES,
@@ -48,7 +49,7 @@ def test_fresh_db_has_substrate_schema(tmp_path):
     # Optional convenience columns on hot tables.
     assert "flow_run_id" in _columns(db, "mesh_tasks")
     assert "flow_run_id" in _columns(db, "approvals")
-    assert _schema_version(db) == 24
+    assert _schema_version(db) == _CURRENT_VERSION
 
 
 def test_reopen_is_idempotent(tmp_path):
@@ -57,7 +58,7 @@ def test_reopen_is_idempotent(tmp_path):
     v1 = _schema_version(db1)
     # Re-open the same file → migrations must be a no-op, not re-applied/erroring.
     db2 = MeshDB(str(p))
-    assert _schema_version(db2) == v1 == 24
+    assert _schema_version(db2) == v1 == _CURRENT_VERSION
     assert "id" in _columns(db2, "flow_links")
 
 

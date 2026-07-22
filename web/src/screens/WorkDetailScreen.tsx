@@ -60,7 +60,7 @@ export function WorkDetailScreen() {
 
   if (notFound) {
     return (
-      <div className="mx-auto flex h-full max-w-[480px] flex-col bg-base">
+      <div className="desktop-detail mx-auto flex h-full max-w-[480px] flex-col bg-base">
         <CompactTopBar title="Case" left={back} />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
           <AlertCircle className="size-8 text-ink-muted" />
@@ -77,7 +77,7 @@ export function WorkDetailScreen() {
   const meta = summary ? bucketMeta(summary.bucket) : null;
 
   return (
-    <div className="mx-auto flex h-full max-w-[480px] flex-col bg-base">
+    <div className="desktop-detail mx-auto flex h-full max-w-[480px] flex-col bg-base">
       <CompactTopBar
         title={summary?.title ?? "Case"}
         subtitle={summary?.currentStage ?? (detail.isLoading ? "Loading…" : "no stage")}
