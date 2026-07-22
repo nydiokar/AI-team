@@ -120,7 +120,10 @@ def test_dispatch_worker_sends_parent_lineage(monkeypatch):
         return {"task_id": "t1", "session": None}
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
-    out = mcp_manager._dispatch_worker({"objective": "do x", "parent_flow_run_id": "flow_parent"})
+    # session_id supplied ⇒ sessionful (SDK) dispatch; also satisfies the ADR-0001 guard.
+    out = mcp_manager._dispatch_worker(
+        {"objective": "do x", "session_id": "s1", "parent_flow_run_id": "flow_parent"}
+    )
     assert seen["payload"]["parent_flow_run_id"] == "flow_parent"
     # Surfaced in the reply as a lineage edge (SHADOW record — not the old "not persisted" note).
     assert "flow_parent" in out
@@ -138,8 +141,23 @@ def test_dispatch_worker_omits_parent_lineage_when_absent(monkeypatch):
         return {"task_id": "t1", "session": None}
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
-    mcp_manager._dispatch_worker({"objective": "do x"})
+    mcp_manager._dispatch_worker({"objective": "do x", "session_id": "s1"})
     assert "parent_flow_run_id" not in seen["payload"]
+
+
+def test_dispatch_worker_refuses_sessionless_dispatch(monkeypatch):
+    """[ADR-0001] Neither session_id nor cwd ⇒ REFUSE, because a sessionless task
+    runs on the legacy `claude -p` CLI driver (run_oneoff → ClaudePrintResumeDriver),
+    bypassing the persistent SDK client and its prompt cache. The guard fires before
+    any API call, so no dispatch is emitted."""
+    calls = []
+    monkeypatch.setattr(
+        mcp_manager, "_api_request",
+        lambda *a, **k: calls.append(a) or {"task_id": "x"},
+    )
+    with pytest.raises(ValueError, match="sessionless"):
+        mcp_manager._dispatch_worker({"objective": "do x"})
+    assert calls == []  # refused before touching the control API
 
 
 def test_dispatch_worker_requires_objective(monkeypatch):
@@ -240,9 +258,11 @@ def test_dispatch_worker_model_ignored_on_reused_session(monkeypatch):
     assert "NOT applied" in out
 
 
-def test_dispatch_worker_falls_back_to_oneoff_without_cwd(monkeypatch):
-    """No session_id AND no cwd ⇒ cannot root a session; honest fallback to the
-    legacy one-off (single /api/instructions call, no session_id). The reply says so."""
+def test_dispatch_worker_refuses_oneoff_without_cwd(monkeypatch):
+    """[ADR-0001] No session_id AND no cwd ⇒ REFUSE. Previously this fell back to a
+    legacy sessionless one-off, which the orchestrator runs on the `claude -p` CLI
+    driver (run_oneoff → ClaudePrintResumeDriver), off the persistent SDK client and
+    its prompt cache. The refusal fires before any API call is made."""
     calls = []
 
     def fake_request(method, path, payload=None, timeout=20.0):
@@ -250,10 +270,9 @@ def test_dispatch_worker_falls_back_to_oneoff_without_cwd(monkeypatch):
         return {"ok": True, "task_id": "t", "session": None}
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
-    out = mcp_manager._dispatch_worker({"objective": "no repo"})
-    assert [c[1] for c in calls] == ["/api/instructions"]
-    assert "session_id" not in calls[0][2]
-    assert "one-off" in out
+    with pytest.raises(ValueError, match="sessionless"):
+        mcp_manager._dispatch_worker({"objective": "no repo"})
+    assert calls == []  # nothing dispatched — no CLI one-off emitted
 
 
 def test_dispatch_worker_warm_reuse_after_case_close(monkeypatch):
@@ -541,7 +560,8 @@ def test_dispatch_tool_call_success(monkeypatch):
                         lambda *a, **k: {"task_id": "t9", "session": {"session_id": "s"}})
     mcp_manager._dispatch({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "dispatch_worker", "arguments": {"objective": "go"}},
+        "params": {"name": "dispatch_worker",
+                   "arguments": {"objective": "go", "cwd": "/repo"}},
     })
     result = sent[0]["result"]
     assert result["content"][0]["type"] == "text"
