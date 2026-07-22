@@ -198,6 +198,48 @@ def test_dispatch_worker_reuses_given_session_without_creating(monkeypatch):
     assert "reused existing session" in out
 
 
+def test_dispatch_worker_tiers_model_on_new_session(monkeypatch):
+    """[Cockpit] model reaches the NEW worker session via CreateSessionBody.model
+    (the create seam), NOT /api/instructions — the supported per-job tiering path
+    that replaces `claude -p --model` via watch_job."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        if path == "/api/sessions":
+            return {"ok": True, "session": {"session_id": "w_opus"}}
+        return {"ok": True, "task_id": "t", "session": {"session_id": "w_opus"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._dispatch_worker({
+        "objective": "hard design", "cwd": "/repo", "case_id": "c1", "model": "opus",
+    })
+    # model lands in the session-create body...
+    assert calls[0][1] == "/api/sessions"
+    assert calls[0][2]["model"] == "opus"
+    # ...and NOT in the instruction body (that field would be dropped).
+    assert "model" not in calls[1][2]
+    assert "opus" in out and "boots on it" in out
+
+
+def test_dispatch_worker_model_ignored_on_reused_session(monkeypatch):
+    """A reused session_id keeps its boot model — model is NOT applied and the reply
+    says so honestly (no silent no-op)."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "task_id": "t", "session": {"session_id": "sess_existing"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._dispatch_worker({
+        "objective": "reuse", "session_id": "sess_existing", "model": "opus",
+    })
+    # No session created, so no model plumbing happened.
+    assert [c[1] for c in calls] == ["/api/instructions"]
+    assert "NOT applied" in out
+
+
 def test_dispatch_worker_falls_back_to_oneoff_without_cwd(monkeypatch):
     """No session_id AND no cwd ⇒ cannot root a session; honest fallback to the
     legacy one-off (single /api/instructions call, no session_id). The reply says so."""
