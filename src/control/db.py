@@ -2534,6 +2534,91 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_jobs_for_sessions(
+        self, session_ids: List[str], limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """[Cockpit] All jobs owned by ANY of `session_ids` in one query (no N+1).
+
+        Used by the Case roster: a Case's sessions (manager + workers) are the join
+        key, since a `watch_job` job carries the SESSION_ID of the process that
+        registered it. Carries the same `orphaned` flag as list_jobs so a job whose
+        session vanished is still rendered honestly."""
+        if not session_ids:
+            return []
+        placeholders = ",".join("?" for _ in session_ids)
+        rows = self._conn().execute(
+            f"""
+            SELECT jobs.*,
+                   CASE
+                     WHEN jobs.session_id IS NOT NULL
+                          AND NOT EXISTS (
+                            SELECT 1 FROM sessions
+                            WHERE sessions.session_id = jobs.session_id
+                          )
+                     THEN 1 ELSE 0
+                   END AS orphaned
+            FROM jobs
+            WHERE jobs.session_id IN ({placeholders})
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            [*session_ids, limit],
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_session_token_totals(
+        self, session_ids: List[str]
+    ) -> Dict[str, Dict[str, int]]:
+        """[Cockpit] Batched per-session token totals (no N+1, no double-count).
+
+        Authoritative per-request token columns live in llm_model_requests (one
+        table deeper than llm_turns, which has no session_id); we join on turn_id
+        and MUST filter is_duplicate=0 or retried/duplicated requests double-count.
+        Returns {session_id: {input, output, cache_read, cache_creation, total}}.
+        Sessions with no recorded requests are simply absent (caller renders 0)."""
+        if not session_ids:
+            return {}
+        placeholders = ",".join("?" for _ in session_ids)
+        rows = self._conn().execute(
+            f"""
+            SELECT t.session_id AS session_id,
+                   COALESCE(SUM(r.input_tokens), 0)          AS input,
+                   COALESCE(SUM(r.output_tokens), 0)         AS output,
+                   COALESCE(SUM(r.cache_read_tokens), 0)     AS cache_read,
+                   COALESCE(SUM(r.cache_creation_tokens), 0) AS cache_creation
+            FROM llm_turns t
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            WHERE t.session_id IN ({placeholders}) AND r.is_duplicate = 0
+            GROUP BY t.session_id
+            """,
+            list(session_ids),
+        ).fetchall()
+        out: Dict[str, Dict[str, int]] = {}
+        for r in rows:
+            d = dict(r)
+            d["total"] = (d.get("input") or 0) + (d.get("output") or 0)
+            out[d["session_id"]] = d
+        return out
+
+    def get_session_turn_counts(
+        self, session_ids: List[str]
+    ) -> Dict[str, int]:
+        """[Cockpit] Batched turn count per session (no N+1). Counts ALL turns
+        (including ones with no model-request row yet, e.g. an in-flight turn), so
+        it is an honest activity depth — the operator's "was the manager shallow?"
+        signal — not just turns that produced billed requests."""
+        if not session_ids:
+            return {}
+        placeholders = ",".join("?" for _ in session_ids)
+        rows = self._conn().execute(
+            f"""
+            SELECT session_id, COUNT(*) AS turn_count
+            FROM llm_turns WHERE session_id IN ({placeholders})
+            GROUP BY session_id
+            """,
+            list(session_ids),
+        ).fetchall()
+        return {r["session_id"]: r["turn_count"] for r in rows}
+
     def get_terminal_jobs_since(self, since: str) -> List[Dict[str, Any]]:
         """Return jobs that reached a terminal state after `since`."""
         rows = self._conn().execute(
