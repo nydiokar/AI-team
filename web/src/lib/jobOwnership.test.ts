@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { filterJobsByOwnership } from "./jobOwnership";
 import type { RawJob } from "../transport/rawApi";
 
-function job(id: string, sessionId: string | null): RawJob {
+function job(id: string, sessionId: string | null, orphaned = 0): RawJob {
   return {
     id,
     session_id: sessionId,
@@ -15,6 +15,7 @@ function job(id: string, sessionId: string | null): RawJob {
     exit_code: null,
     notify: null,
     notify_agent: null,
+    orphaned,
     created_at: "2026-07-01T10:00:00Z",
     updated_at: "2026-07-01T10:00:00Z",
   };
@@ -26,6 +27,21 @@ describe("jobOwnership", () => {
 
     expect(filterJobsByOwnership(jobs, "unowned").map((j) => j.id)).toEqual([
       "unowned",
+    ]);
+  });
+
+  it("keeps orphaned jobs (session set but unresolved) in the unowned list", () => {
+    // An orphaned job's session_id has no reachable session page, so it must
+    // surface in System > Jobs rather than vanish. A genuinely-owned job stays out.
+    const jobs = [
+      job("owned", "sess_1"),
+      job("orphaned", "native-uuid-xyz", 1),
+      job("null", null),
+    ];
+
+    expect(filterJobsByOwnership(jobs, "unowned").map((j) => j.id)).toEqual([
+      "orphaned",
+      "null",
     ]);
   });
 
