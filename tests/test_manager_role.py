@@ -278,7 +278,9 @@ def test_api_manager_ok(monkeypatch):
 def test_dispatch_worker_join_hint_points_wait_at_case(monkeypatch):
     import scripts.mcp_manager as m
     monkeypatch.setattr(m, "_api_request", lambda *a, **k: {"task_id": "wt-9", "session": {}})
-    out = m._dispatch_worker({"objective": "do a bounded thing", "case_id": "case-7"})
+    out = m._dispatch_worker(
+        {"objective": "do a bounded thing", "case_id": "case-7", "session_id": "warm-w"}
+    )
     # A joined worker has no own flow_run — the wait hint MUST carry the Case id.
     assert "wait_for_worker(task_id='wt-9', flow_run_id='case-7')" in out
     assert "JOINS" in out

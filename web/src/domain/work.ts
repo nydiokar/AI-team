@@ -150,3 +150,61 @@ export interface SessionAffiliation {
    *  if it were on active work. `null` when the case has no status yet. */
   caseStatus: string | null;
 }
+
+// ── Case roster (Cockpit) ──────────────────────────────────────────────────
+// The live operational view of a case: who is working (sessions) and what
+// scripts are running (jobs). Answers the operator's "how many workers, on what,
+// for how many tokens, and are any scripts stuck/orphaned?" — the thing the
+// static ledger never surfaced.
+export interface RosterTokens {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  total: number;
+}
+
+export interface RosterSession {
+  sessionId: string;
+  role: CaseSessionRole;
+  /** False ⇒ the case links this session but its row is gone (rendered honestly,
+   *  not dropped). */
+  present: boolean;
+  backend: string | null;
+  status: string | null;
+  model: string | null;
+  node: string | null;
+  lastActivity: string | null;
+  lastReport: string | null;
+  turnCount: number;
+  tokens: RosterTokens;
+}
+
+export interface RosterJob {
+  jobId: string;
+  label: string | null;
+  commandSummary: string | null;
+  sessionId: string | null;
+  node: string | null;
+  /** running | done | failed | lost | unknown (worker-maintained; never probed). */
+  status: string;
+  startedAt: string | null;
+  /** Epoch seconds — the client derives a live duration from this (read model is
+   *  clock-free/tz-safe). */
+  startedEpoch: number | null;
+  finishedAt: string | null;
+  exitCode: number | null;
+  tail: string | null;
+  orphaned: boolean;
+  /** Heuristic: this watched job invokes an agent CLI (`claude -p …`) — the exact
+   *  off-substrate spawn the cockpit exists to make visible. */
+  isAgentSpawn: boolean;
+}
+
+export interface CaseRoster {
+  flowRunId: string;
+  sessions: RosterSession[];
+  jobs: RosterJob[];
+  counts: { sessions: number; jobs: number; runningJobs: number };
+  tokenTotals: RosterTokens;
+}

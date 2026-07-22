@@ -401,6 +401,26 @@ class TestSDKClientDriver:
         assert s1.session_id in drv._sessions
         assert s2.session_id in drv._sessions
 
+    def test_run_oneoff_uses_transient_sdk_session_and_closes(self, monkeypatch):
+        """[ADR-0001 Phase 2] run_oneoff runs on the SDK client via a transient
+        session that is torn down after the turn — never `claude -p`."""
+        monkeypatch.setattr(
+            "src.core.test_guard.assert_live_calls_allowed", lambda *a, **k: None
+        )
+        drv = ClaudeSDKClientDriver()
+
+        def fake_send(self_inner, message, **_kw):
+            return _ok("oneoff reply", "sid-oneoff")
+
+        with patch.object(_SDKSession, "send", fake_send):
+            with patch.object(_SDKSession, "start", lambda self_inner: None):
+                result = drv.run_oneoff("/repo", "do it once")
+
+        assert result.success
+        assert result.output == "oneoff reply"
+        # Transient session fully torn down — no leaked pooled session.
+        assert drv._sessions == {}
+
     def test_cancel_interrupts_but_keeps_session_pooled(self):
         # Cancel is "stop this turn", not "close the session" — the process
         # stays pooled so the next turn resumes it instead of paying to spin
@@ -917,12 +937,15 @@ def _drive_and_capture(monkeypatch, role_boot_return):
     return driver._get_or_create(session, model=None, effort=None, proc_env={})
 
 
-def test_role_bound_session_loads_project_setting_sources(monkeypatch):
-    # A role boot returns a system_prompt ⇒ setting_sources must be ["project"].
+def test_role_bound_session_loads_user_and_project_setting_sources(monkeypatch):
+    # A role boot returns a system_prompt ⇒ setting_sources must be
+    # ["user", "project"] — user scope is REQUIRED so the ~/.claude.json MCP
+    # servers (manager/jobs) backing the scoped tool grant actually connect.
+    # (Regression 703faf5 pinned this to ["project"] and silently dropped them.)
     sess = _drive_and_capture(
         monkeypatch, ({"type": "preset", "preset": "claude_code", "append": "BEHAVIOR"}, ["tool"])
     )
-    assert sess.setting_sources == ["project"]
+    assert sess.setting_sources == ["user", "project"]
 
 
 def test_non_role_session_leaves_setting_sources_none(monkeypatch):
