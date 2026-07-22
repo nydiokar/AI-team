@@ -238,6 +238,22 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # objective INTO it below (the `case_id` join stamps case_role=worker). Fall back to
     # the legacy one-off only when there is no repo to open a session in — surfaced in the
     # reply so it is never a silent regression.
+    # [ADR-0001] Canonical rule: an AGENT (worker) is always spawned as a persistent SDK
+    # session — never a sessionless one-off. A dispatch with neither a reused session_id
+    # NOR a cwd would POST /api/instructions with no session, and the orchestrator runs a
+    # sessionless task through run_oneoff → ClaudePrintResumeDriver: the legacy `claude -p`
+    # CLI driver (no persistent client, no prompt cache, full context rebuilt every turn).
+    # Refuse it here instead of silently burning quota — the Manager must pass `cwd` (opens
+    # a real, observable SDK worker session) or `session_id` (reuse a warm worker). See
+    # docs/adr/0001-canonical-sdk-driver-for-agent-spawn.md.
+    if not session_id and not cwd:
+        raise ValueError(
+            "dispatch_worker refuses a sessionless dispatch: pass `cwd` (the Case repo, so a "
+            "real observable SDK worker session is opened) or `session_id` (to reuse a warm "
+            "worker). Without either, the worker would run on the legacy `claude -p` CLI "
+            "driver — no persistent client, no prompt cache. See ADR-0001."
+        )
+
     opened_session = False
     if not session_id and cwd:
         # CreateSessionBody.backend is REQUIRED (no default) — omitting it 422s and
