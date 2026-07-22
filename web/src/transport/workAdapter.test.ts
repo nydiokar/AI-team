@@ -9,6 +9,7 @@ import {
   toCaseGraph,
   normalizeSessionRole,
   toSessionAffiliationIndex,
+  toCaseRoster,
 } from "./workAdapter";
 import type {
   RawCaseSummary,
@@ -291,5 +292,58 @@ describe("toSessionAffiliationIndex — whole-substrate, never fabricated", () =
 
   it("empty index for an empty/absent substrate", () => {
     expect(toSessionAffiliationIndex({ affiliations: [], total: 0 }).size).toBe(0);
+  });
+});
+
+describe("toCaseRoster", () => {
+  it("maps sessions, jobs, snake→camel tokens, and counts", () => {
+    const raw = {
+      flow_run_id: "flow_x",
+      sessions: [
+        {
+          session_id: "mgr1", role: "manager", present: true, backend: "claude",
+          status: "busy", model: "sonnet", node: "__local__",
+          last_activity: "2026-07-22T10:00:00Z", last_report: "reviewing T1",
+          turn_count: 4,
+          tokens: { input: 100, output: 20, cache_read: 5, cache_creation: 0, total: 120 },
+        },
+      ],
+      jobs: [
+        {
+          job_id: "job_a", label: "IGNITION_1", command_summary: "claude -p --model opus",
+          session_id: "mgr1", node: "kanebra", status: "running",
+          started_at: "t1", started_epoch: 1000, finished_at: null,
+          exit_code: null, tail: null, orphaned: false, is_agent_spawn: true,
+        },
+      ],
+      counts: { sessions: 1, jobs: 1, running_jobs: 1 },
+      token_totals: { input: 100, output: 20, cache_read: 5, cache_creation: 0, total: 120 },
+    };
+    const roster = toCaseRoster(raw);
+    expect(roster.flowRunId).toBe("flow_x");
+    expect(roster.sessions[0].role).toBe("manager");
+    expect(roster.sessions[0].tokens.cacheRead).toBe(5);
+    expect(roster.sessions[0].turnCount).toBe(4);
+    expect(roster.jobs[0].isAgentSpawn).toBe(true);
+    expect(roster.jobs[0].startedEpoch).toBe(1000);
+    expect(roster.counts.runningJobs).toBe(1);
+    expect(roster.tokenTotals.total).toBe(120);
+  });
+
+  it("defaults missing fields honestly (unknown role → session, tokens → 0)", () => {
+    const roster = toCaseRoster({
+      flow_run_id: "f",
+      sessions: [{
+        session_id: "s", role: null, present: false, backend: null, status: null,
+        model: null, node: null, last_activity: null, last_report: null,
+        turn_count: 0, tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0 },
+      }],
+      jobs: [],
+      counts: { sessions: 1, jobs: 0, running_jobs: 0 },
+      token_totals: { input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0 },
+    });
+    expect(roster.sessions[0].role).toBe("session");
+    expect(roster.sessions[0].present).toBe(false);
+    expect(roster.tokenTotals.total).toBe(0);
   });
 });

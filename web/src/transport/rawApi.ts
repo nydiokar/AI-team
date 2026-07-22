@@ -607,3 +607,53 @@ export interface RawSessionAffiliationsResponse {
   affiliations: RawSessionAffiliation[];
   total: number;
 }
+
+// ── Case roster (Cockpit) — work_read_model.build_case_roster ──────────────
+// The live "who is doing what right now" head of a Case: its sessions (manager +
+// workers) with tokens/turns, and the watch_job scripts those sessions own.
+export interface RawRosterTokens {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_creation: number;
+  total: number;
+}
+
+export interface RawRosterSession {
+  session_id: string | null;
+  role: string | null;
+  present: boolean;
+  backend: string | null;
+  status: string | null;
+  model: string | null;
+  node: string | null;
+  last_activity: string | null;
+  last_report: string | null;
+  turn_count: number;
+  tokens: RawRosterTokens;
+}
+
+export interface RawRosterJob {
+  job_id: string | null;
+  label: string | null;
+  command_summary: string | null;
+  session_id: string | null;
+  node: string | null;
+  status: string;
+  started_at: string | null;
+  started_epoch: number | null;
+  finished_at: string | null;
+  exit_code: number | null;
+  tail: string | null;
+  orphaned: boolean;
+  is_agent_spawn: boolean;
+}
+
+// GET /api/work/{id}/roster → work_read_model.build_case_roster
+export interface RawCaseRosterResponse {
+  flow_run_id: string;
+  sessions: RawRosterSession[];
+  jobs: RawRosterJob[];
+  counts: { sessions: number; jobs: number; running_jobs: number };
+  token_totals: RawRosterTokens;
+}

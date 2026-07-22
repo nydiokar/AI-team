@@ -31,6 +31,7 @@ import type {
   RawCaseDetailResponse,
   RawCaseTimelineResponse,
   RawCaseGraphResponse,
+  RawCaseRosterResponse,
   RawSessionAffiliationsResponse,
   RawWorkBucket,
 } from "./rawApi";
@@ -535,6 +536,15 @@ export const api = {
   async workGraph(token: string, flowRunId: string): Promise<RawCaseGraphResponse> {
     return get<RawCaseGraphResponse>(
       `/api/work/${encodeURIComponent(flowRunId)}/graph`,
+      token,
+    );
+  },
+
+  /** GET /api/work/{id}/roster — the live roster: sessions (manager/workers) with
+   *  tokens/turns + the watch_job scripts they own (running/orphaned/agent-spawn). */
+  async workRoster(token: string, flowRunId: string): Promise<RawCaseRosterResponse> {
+    return get<RawCaseRosterResponse>(
+      `/api/work/${encodeURIComponent(flowRunId)}/roster`,
       token,
     );
   },
