@@ -32,6 +32,7 @@ import type { MessageSelection } from "../components/timeline/SessionTimeline";
 import { NewSessionSheet, type ForkContext } from "../components/sessions/NewSessionSheet";
 import { buildForkDigest, type MarkedMessage } from "../lib/forkDigest";
 import { useForkStore } from "../stores/forkStore";
+import { useManagerBootStore } from "../stores/managerBootStore";
 import { SessionTurns } from "../components/timeline/SessionTurns";
 import { ContextFillGauge } from "../components/timeline/ContextFillGauge";
 import { Composer } from "../components/timeline/Composer";
@@ -528,6 +529,14 @@ export function SessionDetailScreen() {
   // marked context is never a silent mechanism. (Manager forks deliver context at
   // boot via /api/manager, so they never stash a pending carry here.)
   const pendingCarry = useForkStore((s) => (id ? s.bySession[id] : undefined));
+
+  // [Manager-fork] The optimistic boot bubble is a stand-in shown only until the
+  // Manager's real first turn lands in the transcript. Once any real turn exists,
+  // clear the stash so the full server-rendered assignment is the single source.
+  const clearBoot = useManagerBootStore((s) => s.clearBoot);
+  useEffect(() => {
+    if (id && (turns?.length ?? 0) > 0) clearBoot(id);
+  }, [id, turns, clearBoot]);
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
