@@ -215,10 +215,16 @@ def available_options(backend: str) -> List[ModelOption]:
         return options(backend)
     global _CODEX_MODEL_CACHE
     now: float = time.monotonic()
-    if now - _CODEX_MODEL_CACHE[0] >= 300:
+    # ts == 0.0 is the "never fetched" sentinel → always refresh, independent of
+    # the monotonic clock's magnitude. On a freshly-booted host time.monotonic()
+    # can be below the 300s TTL, so `now - 0.0 >= 300` would stay False and pin
+    # the empty seed cache (an empty Codex picker on Linux).
+    last: float = _CODEX_MODEL_CACHE[0]
+    if last == 0.0 or now - last >= 300:
         with _CODEX_MODEL_CACHE_LOCK:
             now = time.monotonic()
-            if now - _CODEX_MODEL_CACHE[0] >= 300:
+            last = _CODEX_MODEL_CACHE[0]
+            if last == 0.0 or now - last >= 300:
                 discovered = _read_codex_model_list()
                 previous: list[ModelOption] = list(_CODEX_MODEL_CACHE[1])
                 if discovered:

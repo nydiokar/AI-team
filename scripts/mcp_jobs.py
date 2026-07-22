@@ -168,8 +168,12 @@ def _bounded_text(value: Any, name: str, max_chars: int, *, required: bool = Tru
     return text or None
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def _normalize_worker_command(command: str) -> str:
-    if os.name != "nt":
+    if not _is_windows():
         return command
 
     def _replace_sleep(match: re.Match[str]) -> str:
