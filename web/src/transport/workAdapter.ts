@@ -17,6 +17,8 @@ import type {
   RawGraphNode,
   RawCaseGraphResponse,
   RawSessionAffiliationsResponse,
+  RawCaseRosterResponse,
+  RawRosterTokens,
   RawWorkBucket,
 } from "./rawApi";
 import type {
@@ -32,6 +34,8 @@ import type {
   WorkBucket,
   CaseSessionRole,
   SessionAffiliation,
+  CaseRoster,
+  RosterTokens,
 } from "../domain/work";
 
 const BUCKETS: WorkBucket[] = [
@@ -237,6 +241,57 @@ export function normalizeSessionRole(role: string | null): CaseSessionRole {
  * case to link to is not renderable) — never fabricated. The server already
  * deduplicates by session, but we keep the first defensively.
  */
+function toRosterTokens(t: RawRosterTokens | undefined | null): RosterTokens {
+  return {
+    input: t?.input ?? 0,
+    output: t?.output ?? 0,
+    cacheRead: t?.cache_read ?? 0,
+    cacheCreation: t?.cache_creation ?? 0,
+    total: t?.total ?? 0,
+  };
+}
+
+/** Translate the raw case-roster payload into the frontend CaseRoster shape. */
+export function toCaseRoster(raw: RawCaseRosterResponse): CaseRoster {
+  return {
+    flowRunId: raw.flow_run_id,
+    sessions: (raw.sessions ?? []).map((s) => ({
+      sessionId: s.session_id ?? "",
+      role: normalizeSessionRole(s.role),
+      present: Boolean(s.present),
+      backend: s.backend ?? null,
+      status: s.status ?? null,
+      model: s.model ?? null,
+      node: s.node ?? null,
+      lastActivity: s.last_activity ?? null,
+      lastReport: s.last_report ?? null,
+      turnCount: s.turn_count ?? 0,
+      tokens: toRosterTokens(s.tokens),
+    })),
+    jobs: (raw.jobs ?? []).map((j) => ({
+      jobId: j.job_id ?? "",
+      label: j.label ?? null,
+      commandSummary: j.command_summary ?? null,
+      sessionId: j.session_id ?? null,
+      node: j.node ?? null,
+      status: j.status ?? "unknown",
+      startedAt: j.started_at ?? null,
+      startedEpoch: j.started_epoch ?? null,
+      finishedAt: j.finished_at ?? null,
+      exitCode: j.exit_code ?? null,
+      tail: j.tail ?? null,
+      orphaned: Boolean(j.orphaned),
+      isAgentSpawn: Boolean(j.is_agent_spawn),
+    })),
+    counts: {
+      sessions: raw.counts?.sessions ?? 0,
+      jobs: raw.counts?.jobs ?? 0,
+      runningJobs: raw.counts?.running_jobs ?? 0,
+    },
+    tokenTotals: toRosterTokens(raw.token_totals),
+  };
+}
+
 export function toSessionAffiliationIndex(
   raw: RawSessionAffiliationsResponse,
 ): Map<string, SessionAffiliation> {
