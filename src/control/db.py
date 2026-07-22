@@ -53,10 +53,10 @@ _mesh_health_sample_lock = threading.Lock()
 _mesh_health_last_sample: Dict[str, float] = {}
 
 # ---------------------------------------------------------------------------
-# Schema version — bump when adding migrations
+# Schema version — DERIVED from the migration list (see _get_migrations()).
+# Defined immediately after that function so it can never drift out of sync
+# with the highest migration. Do NOT hand-maintain a literal here.
 # ---------------------------------------------------------------------------
-
-_CURRENT_VERSION = 25
 
 
 class CaseCloseBlocked(Exception):
@@ -2810,7 +2810,8 @@ def _get_migrations() -> List[tuple]:
 
     To add a migration:
         1. Append (N, "ALTER TABLE ...") to this list.
-        2. Bump _CURRENT_VERSION to N.
+    _CURRENT_VERSION is derived from this list automatically (below) — there is
+    no separate constant to bump.
     """
     return [
         (1, ""),  # baseline marker — DDL already applied above
@@ -2981,6 +2982,10 @@ def _get_migrations() -> List[tuple]:
         (26, "ALTER TABLE sessions ADD COLUMN role_boot TEXT"),  # [Worker role] explicit opt-in role-boot signal; NULL = tier-0 default
         (27, "ALTER TABLE sessions ADD COLUMN continued_from TEXT"),  # [Session-fork] session→session lineage; NULL = not a continuation
     ]
+
+
+# Single source of truth for the current schema version: the highest migration.
+_CURRENT_VERSION = max(v for v, _ in _get_migrations())
 
 
 # ---------------------------------------------------------------------------
