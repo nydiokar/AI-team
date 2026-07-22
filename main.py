@@ -107,6 +107,42 @@ class _GatewayInstanceLock:
         except Exception:
             return None
 
+def _render_status(status) -> None:
+    """Pure formatter for a status dict — no side effects, no locks.
+
+    Kept module-level so read-only callers (e.g. `main.py status`) can print
+    status WITHOUT constructing an OrchestratorCLI, whose __init__ acquires the
+    single-instance takeover lock and would terminate the running gateway.
+    """
+    print("Component Status:")
+    components = status["components"]
+
+    print(f"  Claude Code CLI: {'[OK] Available' if components['claude_available'] else '[--] Not available'}")
+
+    llama_status = status["llama_status"]
+    if llama_status.get("helpers_enabled"):
+        print(f"  Ollama helpers: [OK] Available ({llama_status['model']})")
+    else:
+        print("  Ollama helpers: [--] Optional helper disabled")
+
+    print(f"  External task watcher: {'[OK] Running' if components['file_watcher_running'] else '[--] Stopped'}")
+
+    telegram_status = status.get("telegram", {})
+    if telegram_status.get("configured"):
+        label = "[OK] Running" if telegram_status.get("running") else "[--] Configured but stopped"
+        print(f"  Telegram Bot: {label}")
+    else:
+        print(f"  Telegram Bot: [--] Not configured (set GATEWAY_TELEGRAM_BOT_TOKEN)")
+
+    print()
+    print("Task Status:")
+    tasks = status["tasks"]
+    print(f"  Active: {tasks['active']}")
+    print(f"  Queued: {tasks['queued']}")
+    print(f"  Completed: {tasks['completed']}")
+    print(f"  Workers: {tasks['workers']}")
+
+
 class OrchestratorCLI:
     """Command-line interface for the orchestrator"""
     
@@ -168,34 +204,8 @@ class OrchestratorCLI:
         self.shutdown_event.set()
     
     def _print_status(self, status):
-        """Print formatted status"""
-        print("Component Status:")
-        components = status["components"]
-        
-        print(f"  Claude Code CLI: {'[OK] Available' if components['claude_available'] else '[--] Not available'}")
-        
-        llama_status = status["llama_status"]
-        if llama_status.get("helpers_enabled"):
-            print(f"  Ollama helpers: [OK] Available ({llama_status['model']})")
-        else:
-            print("  Ollama helpers: [--] Optional helper disabled")
-        
-        print(f"  External task watcher: {'[OK] Running' if components['file_watcher_running'] else '[--] Stopped'}")
-        
-        telegram_status = status.get("telegram", {})
-        if telegram_status.get("configured"):
-            label = "[OK] Running" if telegram_status.get("running") else "[--] Configured but stopped"
-            print(f"  Telegram Bot: {label}")
-        else:
-            print(f"  Telegram Bot: [--] Not configured (set GATEWAY_TELEGRAM_BOT_TOKEN)")
-        
-        print()
-        print("Task Status:")
-        tasks = status["tasks"]
-        print(f"  Active: {tasks['active']}")
-        print(f"  Queued: {tasks['queued']}")
-        print(f"  Completed: {tasks['completed']}")
-        print(f"  Workers: {tasks['workers']}")
+        """Print formatted status (delegates to the module-level formatter)."""
+        _render_status(status)
 
 async def create_sample_task():
     """Create a sample task for testing"""
@@ -221,13 +231,15 @@ async def show_status():
     await orchestrator._check_component_status()
     
     status = orchestrator.get_status()
-    
+
     print("Telegram Coding Gateway Status")
     print("==============================")
     print()
-    
-    cli = OrchestratorCLI()
-    cli._print_status(status)
+
+    # Read-only: format directly. Do NOT construct OrchestratorCLI here — its
+    # __init__ acquires the single-instance takeover lock and would terminate
+    # the running gateway. `status` must never touch that lock.
+    _render_status(status)
 
 async def test_telegram_interface():
     """Test Telegram interface functionality"""
