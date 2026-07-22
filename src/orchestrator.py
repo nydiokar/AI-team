@@ -2123,6 +2123,51 @@ class TaskOrchestrator(ITaskOrchestrator):
         )
         return {"ok": True, "event_type": event_type, "event_id": event_id}
 
+    def record_worker_wait(
+        self,
+        flow_run_id: str,
+        task_id: str,
+        *,
+        timeout: Optional[float] = None,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[A46/M3.3] Orchestrator seam — record a durable pending-wait marker for a
+        dispatched worker so a resumed Manager can reconcile its outstanding waits.
+
+        Mirrors the ``record_review`` seam: gets the db via ``get_db()`` and appends
+        the append-only ``worker.wait_pending`` marker (flag-gated in the db layer).
+        Returns ``{"ok": True, "event_id"}`` (event_id may be None when
+        ``DURABLE_RELAY_ENABLED`` is OFF ⇒ no marker written), or
+        ``{"ok": False, "reason": "db_unavailable"}``.
+        """
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        event_id = db.record_worker_wait(
+            flow_run_id, task_id, timeout=timeout, actor=actor,
+        )
+        return {"ok": True, "event_id": event_id}
+
+    def reconcile_worker_waits(
+        self,
+        flow_run_id: str,
+        *,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[A46/M3.3] Orchestrator seam — reconcile a Case's outstanding worker waits
+        against the durable ``task.finished`` events (resolve finished, report open).
+
+        Mirrors the ``record_review`` seam. Returns the db layer's structured
+        ``{"ok", "resolved", "pending"}`` (or ``{"ok": False, ...}`` when the flag is
+        OFF / the db is unavailable).
+        """
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        return db.reconcile_worker_waits(flow_run_id, actor=actor)
+
     def _clear_session_case_affiliation(self, session_id: str, case_id: str) -> None:
         """[A37] Clear a session's durable Case affiliation on Case close.
 

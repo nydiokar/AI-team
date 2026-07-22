@@ -65,4 +65,48 @@ they touch different seams (A45: role/adapter/dispatch-tier; A46: wait/reconcile
 is the packet that makes the loop *durable ground*.
 
 ## Live log
-- *(unbuilt — dispatched packet only)*
+- **2026-07-23 — BUILT** on `feat/m33-durable-relay` (self-driven by the fired Manager,
+  Case `1b59822e…`, since the gateway restart to re-connect `dispatch_worker` is
+  operator-deferred — so the Manager built the work directly instead of dispatching it).
+
+## Closure
+
+**Shape shipped (minimal, byte-identical OFF).** The completion *signal* was already
+durable (a worker turn records an authoritative `task.finished` event); only the *waiter*
+was not. A46 makes the wait recoverable from that same durable ledger — no new schema, no
+new long-lived process. New flag `DURABLE_RELAY_ENABLED` (default OFF).
+
+- **`src/control/db.py`** — `durable_relay_enabled()` (mirrors `review_emitter_enabled()`);
+  two new `FLOW_EVENT_TYPES` (`worker.wait_pending` / `worker.wait_resolved`; `event_type`
+  has no CHECK constraint, so no migration); `record_worker_wait()` (flag-gated, idempotent
+  per unresolved wait) + `reconcile_worker_waits()` (resolve finished ⇒ append
+  `worker.wait_resolved`; still-open ⇒ report PENDING; idempotent across re-runs); pure
+  `_event_payload`/`_event_outcome` helpers.
+- **`src/orchestrator.py`** — thin `record_worker_wait` / `reconcile_worker_waits` seams
+  mirroring `record_review` (get_db → db, `{ok,…}`).
+- **`src/control/control_api.py`** — `CaseWaitBody` + `POST /api/cases/{id}/waits` and
+  `POST /api/cases/{id}/waits/reconcile`, both 404 when the flag is OFF (mirrors the
+  `review` route's disabled-gate).
+- **`scripts/mcp_manager.py`** — `dispatch_worker` records the durable wait best-effort
+  after a Case-joined dispatch (a relay failure/404 never breaks dispatch); new
+  `reconcile_waits(case_id)` recovery tool that lists resolved vs. still-open waits and
+  tells the Manager to re-arm `wait_for_worker` for each open one. Registered in the catalogue.
+- **Tests (plain pytest, 213 green on touched modules):** `tests/test_durable_relay.py`
+  (flag-OFF byte-identity, pending-marker write, idempotent record, reconcile resolve+keep-open,
+  idempotent re-run, failed-outcome carry, fresh-wait-after-resolve) + 6 client tests in
+  `tests/test_mcp_manager.py` (records wait on Case dispatch, non-fatal relay failure, no
+  `/waits` without a Case, reconcile formatting, disabled surfaced, tool registered).
+  Regression: `test_case_admission/closure`, `test_flow_links_events`, `test_flow_runs`,
+  all `test_control_api*` — green.
+
+**Completion criteria:** MET. Durable append-only marker keyed to (case,task) via the
+existing substrate; reconcile resolves against `task.finished` (resolved ⇒ cleared,
+open ⇒ re-arm); idempotent; behind a default-OFF flag, byte-identical OFF; plain-pytest
+tests cover all four required cases and pass; one `feat/m33-durable-relay` branch + PR.
+
+**Honest seam note (cross-layer).** The mcp→control-API HTTP seam is proven at the unit
+level (monkeypatched `_api_request`); the db/orchestrator/control-API seams are proven
+against a real temp `MeshDB`. A **live** end-to-end proof (a real Manager dispatch that
+writes the marker through the running gateway, a simulated crash, then `reconcile_waits`)
+needs `DURABLE_RELAY_ENABLED=1` + a gateway restart — **operator-gated**, same as every
+prior M3 PR. Not merged; escalated per branch policy.

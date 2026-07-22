@@ -171,6 +171,15 @@ class CaseReviewBody(BaseModel):
     reason: Optional[str] = None
 
 
+class CaseWaitBody(BaseModel):
+    """[A46/M3.3] Record a durable pending-wait marker for a dispatched worker so a
+    resumed Manager can reconcile its outstanding waits from the ledger. ``task_id``
+    is the dispatched worker's task; ``timeout`` is the optional wait bound (seconds),
+    carried so a re-armed wait keeps the original deadline shape."""
+    task_id: str
+    timeout: Optional[float] = None
+
+
 class CaseOpenBody(BaseModel):
     """[M3.3] Open a NEW Case on an EXISTING Manager session — so one long-lived
     Manager session can own many Cases sequentially instead of spawning a fresh
@@ -1257,6 +1266,32 @@ def build_control_api(orchestrator) -> FastAPI:
         result = orchestrator.record_review(
             case_id, verdict=body.verdict, reason=body.reason, actor="manager",
         )
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/waits", dependencies=[Depends(_require_auth)])
+    def api_record_worker_wait(case_id: str, body: CaseWaitBody) -> JSONResponse:
+        """[A46/M3.3] Record a durable pending-wait marker for a dispatched worker
+        (``worker.wait_pending`` flow_event). Gated by ``DURABLE_RELAY_ENABLED``:
+        when OFF this route returns 404 (disabled) so flag-OFF is byte-identical.
+        The write itself is also flag-gated in the db layer (defence in depth)."""
+        from src.control.db import durable_relay_enabled
+        if not durable_relay_enabled():
+            raise HTTPException(status_code=404, detail="not_found")
+        result = orchestrator.record_worker_wait(
+            case_id, body.task_id, timeout=body.timeout, actor="manager",
+        )
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/waits/reconcile", dependencies=[Depends(_require_auth)])
+    def api_reconcile_worker_waits(case_id: str) -> JSONResponse:
+        """[A46/M3.3] Reconcile a Case's outstanding worker waits against the durable
+        ``task.finished`` events — resolve finished ones (append ``worker.wait_resolved``)
+        and report still-open ones for the Manager to re-arm. Gated by
+        ``DURABLE_RELAY_ENABLED`` (404 when OFF ⇒ byte-identical). Idempotent."""
+        from src.control.db import durable_relay_enabled
+        if not durable_relay_enabled():
+            raise HTTPException(status_code=404, detail="not_found")
+        result = orchestrator.reconcile_worker_waits(case_id, actor="manager")
         return JSONResponse(result)
 
     @app.post("/api/sessions/{session_id}/bind", dependencies=[Depends(_require_auth)])
