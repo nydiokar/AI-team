@@ -14,6 +14,8 @@ from src.control.work_read_model import (
     build_case_detail,
     build_case_timeline,
     build_case_graph,
+    build_case_roster,
+    _is_agent_spawn,
 )
 
 
@@ -192,3 +194,90 @@ def test_build_case_graph_nodes_and_edges():
     # Bucket surfaces on graph nodes too (blocked child visible at a glance).
     kid2 = next(n for n in g["nodes"] if n["flow_run_id"] == "kid2")
     assert kid2["bucket"] == "blocked"
+
+
+# --- [Cockpit] roster projection ------------------------------------------
+
+def _slink(sid, role):
+    return {"entity_type": "session", "entity_id": sid, "role": role}
+
+
+def test_is_agent_spawn_flags_claude_cli_only():
+    assert _is_agent_spawn("claude -p --model opus 'do x'") is True
+    assert _is_agent_spawn("/usr/bin/claude --print hi") is True
+    assert _is_agent_spawn("python train.py --epochs 50") is False
+    assert _is_agent_spawn("npm run build") is False
+    # 'claude' as a bare word without a CLI flag is not enough to call it a spawn.
+    assert _is_agent_spawn("echo claude") is False
+    assert _is_agent_spawn(None) is False
+
+
+def test_build_case_roster_sessions_tokens_and_totals():
+    links = [_slink("mgr1", "manager"), _slink("wk1", "worker")]
+    session_rows = {
+        "mgr1": {"backend": "claude", "status": "idle", "model": "sonnet",
+                 "machine_id": "", "updated_at": "t9",
+                 "last_result_summary": "reviewed T1"},
+        "wk1": {"backend": "claude", "status": "busy", "model": "opus",
+                "machine_id": "Horse", "updated_at": "t8", "last_summary": "building"},
+    }
+    tokens = {
+        "mgr1": {"input": 100, "output": 20, "cache_read": 5, "cache_creation": 0, "total": 120},
+        "wk1": {"input": 400, "output": 60, "cache_read": 10, "cache_creation": 1, "total": 460},
+    }
+    turns = {"mgr1": 3, "wk1": 7}
+    roster = build_case_roster("case1", links, session_rows, tokens, turns, [])
+
+    assert roster["flow_run_id"] == "case1"
+    assert roster["counts"] == {"sessions": 2, "jobs": 0, "running_jobs": 0}
+    mgr = next(s for s in roster["sessions"] if s["session_id"] == "mgr1")
+    wk = next(s for s in roster["sessions"] if s["session_id"] == "wk1")
+    assert mgr["role"] == "manager" and mgr["model"] == "sonnet" and mgr["turn_count"] == 3
+    assert mgr["node"] == "__local__" and mgr["last_report"] == "reviewed T1"
+    assert wk["role"] == "worker" and wk["node"] == "Horse" and wk["tokens"]["total"] == 460
+    # Case token total is the sum across sessions (manager + worker).
+    assert roster["token_totals"]["total"] == 580
+    assert roster["token_totals"]["input"] == 500
+
+
+def test_build_case_roster_dedupes_dual_role_session():
+    # flow_links unique key includes role, so one session can appear twice on a
+    # case (manager + worker). It must render ONCE and its tokens count ONCE.
+    links = [_slink("s1", "manager"), _slink("s1", "worker")]
+    tokens = {"s1": {"input": 100, "output": 100, "cache_read": 0, "cache_creation": 0, "total": 200}}
+    roster = build_case_roster("c", links, {}, tokens, {"s1": 2}, [])
+    assert roster["counts"]["sessions"] == 1
+    assert [s["session_id"] for s in roster["sessions"]] == ["s1"]
+    assert roster["token_totals"]["total"] == 200  # not 400
+
+
+def test_build_case_roster_missing_session_row_is_honest():
+    # A linked session whose row is gone renders present=false, not dropped.
+    links = [_slink("ghost", "worker")]
+    roster = build_case_roster("c", links, {}, {}, {}, [])
+    assert roster["sessions"][0]["present"] is False
+    assert roster["sessions"][0]["tokens"]["total"] == 0
+    assert roster["sessions"][0]["turn_count"] == 0
+
+
+def test_build_case_roster_jobs_flags_and_running_count():
+    jobs = [
+        {"id": "job_a", "label": "IGNITION_1", "command": "claude -p --model opus 'x'",
+         "session_id": "mgr1", "node_id": "kanebra", "status": "running",
+         "started_at": "t1", "started_epoch": 1000.0, "finished_at": None,
+         "exit_code": None, "tail": None, "orphaned": 0},
+        {"id": "job_b", "label": "train", "command": "python train.py",
+         "session_id": "mgr1", "node_id": "kanebra", "status": "lost",
+         "started_at": "t0", "started_epoch": 900.0, "finished_at": None,
+         "exit_code": None, "tail": "killed", "orphaned": 1},
+    ]
+    roster = build_case_roster("c", [], {}, {}, {}, jobs)
+    assert roster["counts"] == {"sessions": 0, "jobs": 2, "running_jobs": 1}
+    ja = next(j for j in roster["jobs"] if j["job_id"] == "job_a")
+    jb = next(j for j in roster["jobs"] if j["job_id"] == "job_b")
+    # The claude -p job is flagged as an agent-spawn (the exact misuse to surface).
+    assert ja["is_agent_spawn"] is True and ja["status"] == "running"
+    # The lost/orphaned training job is surfaced honestly, not an agent-spawn.
+    assert jb["is_agent_spawn"] is False and jb["orphaned"] is True and jb["status"] == "lost"
+    # Duration is left to the client (epoch passed through, no clock in the pure fn).
+    assert ja["started_epoch"] == 1000.0

@@ -928,12 +928,23 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             if existing is None:
                 system_prompt, allowed_tools = self._role_boot(session)
                 # [autonomy] A role-bound session (system_prompt set) also loads
-                # project filesystem settings so the repo CLAUDE.md — the project
+                # filesystem settings so the repo CLAUDE.md — the project
                 # orientation layer (canonical docs + how to find open work) —
                 # reaches the agent. Behavior lives in system_prompt; project
                 # context lives in CLAUDE.md; the two stay cleanly separate.
                 # None for non-role sessions ⇒ byte-identical legacy boot.
-                setting_sources = ["project"] if system_prompt is not None else None
+                #
+                # ["user", "project"] — NOT ["project"]. The scoped MCP tool grant
+                # (manager_tool_names / mcp__manager__dispatch_worker) only NAMES the
+                # tools in allowed_tools; the `manager` (and `jobs`) MCP *servers* that
+                # actually back them live in USER scope (~/.claude.json). The SDK loads
+                # user-scope MCP servers only when "user" is in setting_sources (it
+                # defaults to ["user","project"] when this is None). Pinning to
+                # ["project"] alone (703faf5 / PR #28) dropped user scope, so a Manager
+                # booted with its role prompt + tool NAMES but the servers never
+                # connected — dispatch_worker silently absent. Keeping "user" restores
+                # the MCP wiring while still loading the project CLAUDE.md.
+                setting_sources = ["user", "project"] if system_prompt is not None else None
                 sdk_sess = _SDKSession(
                     key, session.repo_path, model, proc_env,
                     effort=effort,
@@ -1062,6 +1073,44 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         sdk_sess = self._remove(session.session_id)
         if sdk_sess is not None:
             sdk_sess.close()
+
+    def run_oneoff(
+        self,
+        cwd: str,
+        message: str,
+        *,
+        model: Optional[str] = None,
+        proc_env: Optional[Dict[str, str]] = None,
+    ) -> ExecutionResult:
+        """One-shot (stateless) call rooted on the SDK client, NOT `claude -p`.
+
+        [ADR-0001] The legacy sessionless path used to shell out through
+        ``ClaudePrintResumeDriver`` (the CLI driver). This keeps a genuine one-off on
+        the canonical SDK driver by running it in a TRANSIENT session — open → one turn
+        → close — so no work ever silently lands on the CLI path when the SDK is
+        available. The ephemeral session is role-less (case_role/role_boot default None
+        ⇒ plain boot) and is ALWAYS torn down in ``finally`` (no leaked SDK client /
+        event-loop thread). A unique key guarantees it never collides with a pooled
+        session. Signature mirrors ``ClaudePrintResumeDriver.run_oneoff``."""
+        from src.core.test_guard import assert_live_calls_allowed
+        from src.core.interfaces import SessionStatus
+        from src.core.timeutil import now_iso
+        assert_live_calls_allowed("claude")
+        _ts = now_iso()
+        ephemeral = Session(
+            session_id=f"oneoff-{uuid.uuid4().hex[:12]}",
+            backend="claude",
+            repo_path=cwd,
+            status=SessionStatus.BUSY,
+            created_at=_ts,
+            updated_at=_ts,
+        )
+        try:
+            return self._run_turn(
+                ephemeral, message, model=model, effort=None, proc_env=proc_env or {}
+            )
+        finally:
+            self.close(ephemeral)
 
     def mark_lost(self, session_id: str) -> None:
         """Called on worker restart: mark session as detached without closing."""

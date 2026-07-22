@@ -236,6 +236,139 @@ def build_session_affiliations(
     return {"affiliations": affiliations, "total": len(affiliations)}
 
 
+def _truncate(text: Optional[str], limit: int) -> Optional[str]:
+    if not text:
+        return None
+    t = str(text).strip()
+    return t if len(t) <= limit else t[: limit - 1].rstrip() + "…"
+
+
+def _is_agent_spawn(command: Optional[str]) -> bool:
+    """Heuristic: does this watched-job command invoke an agent CLI (the exact
+    misuse we want visible — a Manager shelling out `claude -p …` as a worker)?
+    Flags the `claude` binary invoked with a print/model flag. Best-effort only,
+    labeled as such in the UI; never authoritative."""
+    if not command:
+        return False
+    c = command.lower()
+    if "claude" not in c:
+        return False
+    return any(tok in c for tok in (" -p", "--print", "--model", "claude -", "/claude "))
+
+
+def _roster_session(
+    link_row: Dict[str, Any],
+    session_row: Optional[Dict[str, Any]],
+    tokens: Optional[Dict[str, int]],
+    turn_count: int,
+) -> Dict[str, Any]:
+    s = session_row or {}
+    tok = tokens or {}
+    return {
+        "session_id": link_row.get("entity_id"),
+        "role": _session_role(link_row.get("role")),
+        "present": session_row is not None,  # False ⇒ linked session row is gone
+        "backend": s.get("backend"),
+        "status": s.get("status"),
+        "model": s.get("model"),
+        "node": s.get("machine_id") or "__local__",
+        "last_activity": s.get("updated_at"),
+        "last_report": _truncate(
+            s.get("last_result_summary") or s.get("last_summary"), 200
+        ),
+        "turn_count": turn_count,
+        "tokens": {
+            "input": tok.get("input", 0),
+            "output": tok.get("output", 0),
+            "cache_read": tok.get("cache_read", 0),
+            "cache_creation": tok.get("cache_creation", 0),
+            "total": tok.get("total", 0),
+        },
+    }
+
+
+def _roster_job(job_row: Dict[str, Any]) -> Dict[str, Any]:
+    command = job_row.get("command")
+    status = (job_row.get("status") or "").strip().lower()
+    return {
+        "job_id": job_row.get("id"),
+        "label": job_row.get("label"),
+        "command_summary": _truncate(command, 140),
+        "session_id": job_row.get("session_id"),
+        "node": job_row.get("node_id"),
+        "status": status or "unknown",
+        # Duration is derived on the client from started_epoch vs. now — the read
+        # model stays pure (no clock) and tz-safe (epoch, not a string timestamp).
+        "started_at": job_row.get("started_at"),
+        "started_epoch": job_row.get("started_epoch"),
+        "finished_at": job_row.get("finished_at"),
+        "exit_code": job_row.get("exit_code"),
+        "tail": _truncate(job_row.get("tail"), 200),
+        "orphaned": bool(job_row.get("orphaned")),
+        # A running job flagged lost/failed by the worker daemon, or orphaned, is
+        # the honest "is a script stuck / did a worker die (e.g. quota)?" signal —
+        # read from worker-maintained state, never probed from this read path.
+        "is_agent_spawn": _is_agent_spawn(command),
+    }
+
+
+def build_case_roster(
+    flow_run_id: str,
+    session_link_rows: List[Dict[str, Any]],
+    session_rows_by_id: Dict[str, Dict[str, Any]],
+    token_totals: Dict[str, Dict[str, int]],
+    turn_counts: Dict[str, int],
+    job_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """[Cockpit] The operational "who is doing what right now" projection for a Case.
+
+    PURE — the control API fetches the session links, the session rows, the batched
+    token/turn aggregates, and the jobs-for-those-sessions, then passes them in. The
+    roster is the live HEAD of the Case; the flow_events timeline remains the spine.
+
+    Honesty-first: a linked session whose row is gone renders present=false rather
+    than being dropped; token/turn totals default to 0 when unrecorded; job
+    orphaned/lost states come from worker-maintained job status, never a live probe.
+    """
+    sessions: List[Dict[str, Any]] = []
+    seen_sids: set = set()
+    for link in session_link_rows or []:
+        sid = link.get("entity_id")
+        # The flow_links unique key is (case, entity_type, entity_id, ROLE), so the
+        # same session CAN appear twice on a case under two roles. Dedupe by
+        # session id (keep first) so a session is one roster row and its tokens are
+        # summed into the case total once, not doubled.
+        if sid is not None and sid in seen_sids:
+            continue
+        if sid is not None:
+            seen_sids.add(sid)
+        sessions.append(
+            _roster_session(
+                link,
+                session_rows_by_id.get(sid),
+                token_totals.get(sid),
+                turn_counts.get(sid, 0),
+            )
+        )
+    jobs = [_roster_job(j) for j in (job_rows or [])]
+    running_jobs = sum(1 for j in jobs if j["status"] == "running")
+    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0, "total": 0}
+    for s in sessions:
+        for k in totals:
+            totals[k] += s["tokens"].get(k, 0)
+    return {
+        "flow_run_id": flow_run_id,
+        "sessions": sessions,
+        "jobs": jobs,
+        "counts": {
+            "sessions": len(sessions),
+            "jobs": len(jobs),
+            "running_jobs": running_jobs,
+        },
+        "token_totals": totals,
+    }
+
+
 def build_case_graph(
     flow_run_id: str,
     flow_row: Dict[str, Any],

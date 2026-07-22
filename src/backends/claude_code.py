@@ -362,7 +362,18 @@ class ClaudeCodeBackend(CodingBackend):
     def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         proc_env = self._build_proc_env(None, telemetry_context)
         before_snapshot = _snapshot_worktree(cwd) if cwd else {}
-        result = self._fallback.run_oneoff(cwd, message, model=None, proc_env=proc_env)
+        # [ADR-0001] Root the one-off on the canonical SDK driver when it is active —
+        # a transient SDK session, not `claude -p`. Only when the primary driver is
+        # itself the legacy CLI (SDK unavailable) do we go through the print/resume
+        # fallback. Both expose the same run_oneoff(cwd, message, *, model, proc_env).
+        driver = self._driver if self._driver.driver_type() == "sdk" else self._fallback
+        if driver is not self._driver:
+            logger.warning(
+                "event=oneoff_on_legacy_driver — run_oneoff falling back to `claude -p` "
+                "because the SDK driver is unavailable. Install claude_agent_sdk / set "
+                "CLAUDE_DRIVER_TYPE=sdk to keep one-offs on the SDK client."
+            )
+        result = driver.run_oneoff(cwd, message, model=None, proc_env=proc_env)
         if cwd:
             after_snapshot = _snapshot_worktree(cwd)
             result.file_changes = _compute_turn_changes(cwd, before_snapshot, after_snapshot)

@@ -18,6 +18,7 @@ import {
   toCaseDetail,
   toCaseTimeline,
   toCaseGraph,
+  toCaseRoster,
   toSessionAffiliationIndex,
 } from "../transport/workAdapter";
 import type { SessionAffiliation, WorkBucket } from "../domain/work";
@@ -30,6 +31,9 @@ const POLL_MS = 3000;
 // we poll them gently. (The affiliation index is one whole-substrate query since
 // A29 — no per-case fanout.)
 const DETAIL_POLL_MS = 15000;
+// The roster is the LIVE head of the case — who is working right now and which
+// scripts are running — so it polls on the fast tier, not the gentle detail tier.
+const LIVE_POLL_MS = 5000;
 
 const retry = (count: number, err: unknown) =>
   !(err instanceof ApiError && [401, 500].includes(err.status)) && count < 3;
@@ -80,6 +84,21 @@ export function useWorkGraph(flowRunId: string | undefined) {
     queryFn: async () => toCaseGraph(await api.workGraph(token, flowRunId!)),
     enabled: Boolean(token) && Boolean(flowRunId),
     refetchInterval: DETAIL_POLL_MS,
+    placeholderData: (prev) => prev,
+    retry,
+  });
+}
+
+/** One case's LIVE roster: sessions (manager/workers) with tokens/turns + the
+ *  watch_job scripts they own. The operational "who is doing what right now" head
+ *  of the case; polls on the fast (5s) tier. */
+export function useWorkRoster(flowRunId: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["work-roster", flowRunId],
+    queryFn: async () => toCaseRoster(await api.workRoster(token, flowRunId!)),
+    enabled: Boolean(token) && Boolean(flowRunId),
+    refetchInterval: LIVE_POLL_MS,
     placeholderData: (prev) => prev,
     retry,
   });
