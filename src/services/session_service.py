@@ -189,6 +189,15 @@ class SessionService:
                         "event=session_backend_close_remote_skipped session_id=%s backend=%s node=%s",
                         s.session_id, s.backend, s.machine_id,
                     )
+            # Preserve the native (Claude Code) session id for the Info panel /
+            # audit before clearing the *active* field. Clearing stays (so no
+            # resume path picks up a closed backend session), but the value is
+            # no longer lost from the UI — SessionView.last_backend_session_id
+            # falls back to this history list.
+            prev = list(s.previous_backend_session_ids or [])
+            if s.backend_session_id and s.backend_session_id not in prev:
+                prev.append(s.backend_session_id)
+                s.previous_backend_session_ids = prev
             s.backend_session_id = ""
         s.status = SessionStatus.CLOSED
         self.store.save(s)

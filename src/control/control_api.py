@@ -765,6 +765,56 @@ def build_control_api(orchestrator) -> FastAPI:
         )
         return JSONResponse(response.model_dump(mode="json"))
 
+    @app.get("/api/sessions/{session_id}/usage", dependencies=[Depends(_require_auth)])
+    def api_session_usage(session_id: str) -> JSONResponse:
+        """Per-session token totals + approximate USD cost.
+
+        Aggregates authoritative per-request token columns (llm_model_requests,
+        de-duplicated) via the existing batched query — so it is inherently
+        backfilled for any session with recorded telemetry (no N+1). Cost is
+        estimated honestly: an un-priceable model yields ``cost.known=false`` +
+        a reason, never a fabricated number.
+
+        Service boundary checklist: read-only, single bounded DB aggregate keyed
+        on one path id; no scarce resource held; DB-unavailable degrades to zero
+        totals with an unknown-cost estimate, not a fabricated one.
+        """
+        from src.services.pricing import TokenTotals, estimate_cost
+
+        db = _db()
+        session = orchestrator.session_service.store.get(session_id)
+        view = _session_payload(session) if session is not None else None
+        model: Optional[str] = None
+        if view is not None:
+            model = view.get("model") or view.get("default_model")
+
+        raw: Dict[str, int] = {}
+        if db is not None:
+            try:
+                raw = db.get_session_token_totals([session_id]).get(session_id, {})
+            except Exception as e:
+                logger.warning("session_usage_totals_failed session_id=%s err=%s", session_id, e)
+                raw = {}
+
+        totals = TokenTotals(
+            input=int(raw.get("input", 0) or 0),
+            output=int(raw.get("output", 0) or 0),
+            cache_read=int(raw.get("cache_read", 0) or 0),
+            cache_creation=int(raw.get("cache_creation", 0) or 0),
+        )
+        totals.total = (
+            totals.input + totals.output + totals.cache_read + totals.cache_creation
+        )
+        cost = estimate_cost(model, totals)
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "model": model,
+                "tokens": totals.model_dump(),
+                "cost": cost.model_dump(),
+            }
+        )
+
     @app.get("/api/events", dependencies=[Depends(_require_auth)])
     def api_events(
         since: int = Query(0, ge=0),

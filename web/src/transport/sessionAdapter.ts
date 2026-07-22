@@ -61,6 +61,7 @@ export function toSession(raw: RawSessionView): Session {
     backend: raw.backend,
     workspace: { path: raw.repo_path, targetId: raw.machine_id },
     backendSessionId: raw.backend_session_id || null,
+    lastBackendSessionId: raw.last_backend_session_id || raw.backend_session_id || null,
     lifecycle,
     opState,
     needsAttention: lifecycle === "open" && deriveNeedsAttention(opState),

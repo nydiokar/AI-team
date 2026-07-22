@@ -150,6 +150,24 @@ export function useSessionTurns(sessionId: string | undefined) {
 }
 
 /**
+ * Per-session token totals + approximate USD cost (Info tab cost panel). Polls
+ * so an in-flight turn's spend updates while you watch; keeps previous data to
+ * avoid a spinner flash. The backend returns honest zero totals + unknown cost
+ * when telemetry or pricing is unavailable, so this never fabricates a number.
+ */
+export function useSessionUsage(sessionId: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["session-usage", sessionId],
+    queryFn: async () => api.sessionUsage(token, sessionId!),
+    enabled: Boolean(token) && Boolean(sessionId),
+    refetchInterval: POLL_MS,
+    refetchOnReconnect: true,
+    placeholderData: (prev) => prev,
+  });
+}
+
+/**
  * One artifact's changed files (UI-4) — fetched on demand when a card expands.
  * Artifacts are immutable once written, so this does NOT poll.
  */

@@ -25,6 +25,7 @@ import type {
   RawUploadResult,
   RawJob,
   RawTurn,
+  RawSessionUsage,
   RawMeshHealthResponse,
   RawSessionTimelineResponse,
   RawWorkListResponse,
@@ -202,6 +203,14 @@ export const api = {
       token,
     );
     return data.turns ?? [];
+  },
+
+  /** Per-session token totals + approximate USD cost (GET /api/sessions/{id}/usage). */
+  async sessionUsage(token: string, sessionId: string): Promise<RawSessionUsage> {
+    return get<RawSessionUsage>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/usage`,
+      token,
+    );
   },
 
   /** Durable session-owned execution timeline, distinct from live events. */
