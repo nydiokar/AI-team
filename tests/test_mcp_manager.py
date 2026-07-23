@@ -550,7 +550,8 @@ def test_dispatch_tools_list(monkeypatch):
     tools = sent[0]["result"]["tools"]
     names = {t["name"] for t in tools}
     assert names == {"dispatch_worker", "wait_for_worker", "open_case", "get_case",
-                     "read_session_history", "close_case", "record_review", "release_worker"}
+                     "read_session_history", "close_case", "record_review",
+                     "reconcile_waits", "release_worker"}
 
 
 def test_dispatch_tool_call_success(monkeypatch):
@@ -668,3 +669,94 @@ def test_read_session_history_clamps_limit(monkeypatch):
 def test_read_session_history_registered():
     assert "read_session_history" in mcp_manager._TOOL_IMPLS
     assert any(t["name"] == "read_session_history" for t in mcp_manager._TOOLS)
+
+
+# ---------------------------------------------------------------------------
+# [A46 / M3.3] durable worker-wait relay — client side
+# ---------------------------------------------------------------------------
+
+def test_dispatch_worker_records_durable_wait_when_case(monkeypatch):
+    """A worker dispatched INTO a Case also records a durable pending-wait marker
+    (POST /api/cases/{case}/waits) so a restart can reconcile it."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        if path == "/api/sessions":
+            return {"session": {"session_id": "ws1"}}
+        if path.endswith("/waits"):
+            return {"ok": True, "event_id": 5}
+        return {"task_id": "task_w", "session": {"session_id": "ws1"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._dispatch_worker(
+        {"objective": "do x", "cwd": "/repo", "case_id": "case_1"}
+    )
+    waits = [c for c in calls if c[1] == "/api/cases/case_1/waits"]
+    assert waits and waits[0][0] == "POST"
+    assert waits[0][2] == {"task_id": "task_w"}
+    assert "durable wait recorded" in out
+
+
+def test_dispatch_worker_wait_relay_failure_is_nonfatal(monkeypatch):
+    """A relay failure (e.g. the 404 when DURABLE_RELAY_ENABLED is OFF) must NOT
+    break the dispatch — the worker is still dispatched, just without the note."""
+    def fake_request(method, path, payload=None, timeout=20.0):
+        if path.endswith("/waits"):
+            raise RuntimeError("HTTP 404 on POST /api/cases/case_1/waits: not_found")
+        if path == "/api/sessions":
+            return {"session": {"session_id": "ws1"}}
+        return {"task_id": "task_w", "session": {"session_id": "ws1"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._dispatch_worker(
+        {"objective": "do x", "cwd": "/repo", "case_id": "case_1"}
+    )
+    assert "task_w" in out                    # dispatch itself succeeded
+    assert "durable wait recorded" not in out  # note suppressed on relay failure
+
+
+def test_dispatch_worker_no_wait_relay_without_case(monkeypatch):
+    """No case_id ⇒ no /waits call at all (a worker not joined to a Case has no
+    Case ledger to record the wait on)."""
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append(path)
+        return {"task_id": "t", "session": {"session_id": "s1"}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    mcp_manager._dispatch_worker({"objective": "do x", "session_id": "s1"})
+    assert not any(p.endswith("/waits") for p in calls)
+
+
+def test_reconcile_waits_formats_resolved_and_pending(monkeypatch):
+    """reconcile_waits summarizes resolved + still-open waits and tells the Manager
+    to re-arm wait_for_worker for the open ones."""
+    def fake_request(method, path, payload=None, timeout=20.0):
+        assert method == "POST" and path == "/api/cases/case_1/waits/reconcile"
+        return {
+            "ok": True,
+            "resolved": [{"task_id": "t_done", "outcome": "success"}],
+            "pending": [{"task_id": "t_open", "timeout": 90.0}],
+        }
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._reconcile_waits({"case_id": "case_1"})
+    assert "t_done" in out and "success" in out
+    assert "t_open" in out and "wait_for_worker(task_id='t_open'" in out
+
+
+def test_reconcile_waits_reports_disabled(monkeypatch):
+    """A disabled relay (ok:false) is surfaced, not silently swallowed."""
+    monkeypatch.setattr(
+        mcp_manager, "_api_request",
+        lambda *a, **k: {"ok": False, "reason": "durable_relay_disabled"},
+    )
+    out = mcp_manager._reconcile_waits({"case_id": "case_1"})
+    assert "durable_relay_disabled" in out
+
+
+def test_reconcile_waits_registered():
+    assert "reconcile_waits" in mcp_manager._TOOL_IMPLS
+    assert any(t["name"] == "reconcile_waits" for t in mcp_manager._TOOLS)
