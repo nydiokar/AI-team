@@ -2793,7 +2793,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         """Prepend recent completed turns when a session's driver was lost on restart.
 
         No-op unless:
-        - RESTART_CONTEXT_RESTORE_ENABLED is on
+        - RESTART_CONTEXT_RESTORE_DISABLED is not set (feature is ON by default)
         - session.driver_status == 'lost' (set by node re-registration on incarnation change)
         - session.backend_session_id is non-empty (session was previously live)
         - the session has ≥1 completed turn in mesh_tasks within the age window
@@ -3216,7 +3216,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # [Restart-recovery context] When a session's driver was lost on worker
                 # restart, auto-inject the last N completed turns as <prior_context> so
                 # the new Claude Code process isn't blind. No-op when
-                # RESTART_CONTEXT_RESTORE_ENABLED is OFF (default) or the session is
+                # RESTART_CONTEXT_RESTORE_DISABLED is set or the session is
                 # healthy — byte-identical to the prior behaviour in all normal paths.
                 await self._maybe_inject_restart_recovery_context(task)
                 # [Manager-fork / compact-context] Inject bounded prior context BEFORE the
