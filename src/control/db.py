@@ -1572,6 +1572,34 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_session_turns_tail(self, session_id: str, limit: int = 3) -> List[Dict[str, Any]]:
+        """Return the session's most-recent ``limit`` *completed* turns, oldest→newest.
+
+        Used by the restart-recovery context injector: when a session's driver was
+        lost on a worker restart and the next task starts a fresh SDK session, the
+        injector calls this to build a bounded ``<prior_context>`` block so the new
+        agent knows where it left off.
+
+        Only returns rows where ``reply_text IS NOT NULL AND status = 'completed'``
+        — incomplete or failed turns are excluded so the injector never injects a
+        broken half-turn. Fetches DESC then reverses so the slice is oldest→newest
+        (the existing ``get_session_turns`` orders ASC from the front and would
+        return the *oldest* N rows, not the most recent).
+        """
+        rows = self._conn().execute(
+            """
+            SELECT id AS task_id, prompt, reply_text, created_at
+            FROM mesh_tasks
+            WHERE session_id = ?
+              AND reply_text IS NOT NULL
+              AND status = 'completed'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (session_id, limit),
+        ).fetchall()
+        return list(reversed([dict(r) for r in rows]))
+
     def list_tasks(
         self,
         status: Optional[str] = None,

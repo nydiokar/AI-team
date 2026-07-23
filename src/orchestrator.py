@@ -2762,6 +2762,140 @@ class TaskOrchestrator(ITaskOrchestrator):
             return text[-budget:]
         return marker + text[-keep:]
 
+    # ── Restart-recovery context injection ─────────────────────────────────────
+    # When a worker restarts (deliberate or crash) its SDK sessions get
+    # driver_status='lost'. The next task for those sessions starts a fresh Claude
+    # Code subprocess via create_session — it has no memory of prior turns even
+    # though the conversation history is DB-canonical in mesh_tasks. This injector
+    # prepends a bounded <prior_context> block of recent completed turns so the
+    # new agent knows where it left off and can continue without operator nudging.
+    #
+    # TODO(A50-tier2): desired future state — instead of raw turn injection, spawn
+    # a Haiku-class agent to summarise the session history (last ~10 turns → ≤500
+    # word prose) and inject the summary. More token-efficient for long sessions;
+    # same prior_context wrapper. Fallback to raw turns on Haiku call failure.
+    # Not built now: adds a paid sub-call + async complexity; defer until the
+    # restart path is proven stable with the simpler approach.
+
+    _RESTART_CTX_TURN_LIMIT: int = 3          # max turn pairs to include
+    _RESTART_CTX_PER_TURN_CHARS: int = 1_500  # truncate each assistant reply here
+    _RESTART_CTX_TOTAL_CHARS: int = 4_000     # hard cap on the entire block
+    _RESTART_CTX_MAX_AGE_HOURS: int = 24      # skip if most-recent turn is older
+
+    @staticmethod
+    def _restart_ctx_enabled() -> bool:
+        return os.environ.get("RESTART_CONTEXT_RESTORE_ENABLED", "").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+
+    async def _maybe_inject_restart_recovery_context(self, task: "Task") -> None:
+        """Prepend recent completed turns when a session's driver was lost on restart.
+
+        No-op unless:
+        - RESTART_CONTEXT_RESTORE_ENABLED is on
+        - session.driver_status == 'lost' (set by node re-registration on incarnation change)
+        - session.backend_session_id is non-empty (session was previously live)
+        - the session has ≥1 completed turn in mesh_tasks within the age window
+
+        Idempotent — shares the _compact_injected_ids once-guard with
+        _maybe_inject_compact_context so neither can double-inject the same task.
+        Any failure is swallowed and the original prompt is left intact.
+        """
+        try:
+            if not self._restart_ctx_enabled():
+                return
+
+            session_id = (task.metadata or {}).get("session_id", "").strip() or None
+            if not session_id:
+                return
+
+            session = self.session_store.get(session_id)
+            if not session:
+                return
+            if session.driver_status != "lost" or not session.backend_session_id:
+                return
+
+            # Once-guard: shared with compact-context so both injectors can't
+            # both fire on the same task.id.
+            if task.id in self._compact_injected_ids:
+                return
+
+            turns = await asyncio.to_thread(
+                self._db_get_session_turns_tail, session_id
+            )
+            if not turns:
+                return
+
+            # Age gate — skip stale dormant sessions (e.g. a session from weeks
+            # ago that was left open and got a new task for an unrelated reason).
+            most_recent_ts = turns[-1].get("created_at", "")
+            if most_recent_ts:
+                try:
+                    from src.core.timeutil import parse_iso
+                    import datetime as _dt
+                    age_h = (
+                        _dt.datetime.now(_dt.timezone.utc) - parse_iso(most_recent_ts)
+                    ).total_seconds() / 3600
+                    if age_h > self._RESTART_CTX_MAX_AGE_HOURS:
+                        logger.info(
+                            "event=restart_context_skipped reason=stale_session "
+                            "task_id=%s session_id=%s age_hours=%.1f",
+                            task.id, session_id, age_h,
+                        )
+                        return
+                except Exception:
+                    pass  # can't parse age → proceed anyway
+
+            lines: list[str] = [
+                '<prior_context source="restart-recovery">',
+                "Your Claude Code session was interrupted by a worker restart.",
+                "The following are the most recent completed turns for continuity.",
+                "Check git status and recent commits before continuing any task.",
+                "",
+            ]
+            total_chars = 0
+            turns_included = 0
+            for turn in turns:
+                prompt_text = (turn.get("prompt") or "").strip()
+                reply_text  = (turn.get("reply_text") or "").strip()
+                if len(reply_text) > self._RESTART_CTX_PER_TURN_CHARS:
+                    reply_text = reply_text[:self._RESTART_CTX_PER_TURN_CHARS] + "\n… [truncated]"
+                block = f"User:\n{self._defuse_fence(prompt_text)}\n\nAssistant:\n{self._defuse_fence(reply_text)}"
+                if total_chars + len(block) > self._RESTART_CTX_TOTAL_CHARS:
+                    lines.append("… [earlier turns omitted — total context cap reached]")
+                    break
+                lines.append(block)
+                lines.append("---")
+                total_chars += len(block)
+                turns_included += 1
+
+            lines.append("</prior_context>")
+            ctx_block = "\n".join(lines)
+            task.prompt = ctx_block + "\n\n" + (task.prompt or "")
+            self._compact_injected_ids.add(task.id)
+            logger.info(
+                "event=restart_context_injected task_id=%s session_id=%s "
+                "turns=%d chars=%d",
+                task.id, session_id, turns_included, total_chars,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=restart_context_error task_id=%s error=%s",
+                getattr(task, "id", "?"), e,
+            )
+
+    def _db_get_session_turns_tail(self, session_id: str) -> list:
+        """Sync wrapper — calls db.get_session_turns_tail off the event loop."""
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return []
+            return db.get_session_turns_tail(session_id, self._RESTART_CTX_TURN_LIMIT)
+        except Exception as e:
+            logger.warning("event=restart_context_db_error session_id=%s error=%s", session_id, e)
+            return []
+
     async def _maybe_inject_compact_context(self, task: "Task") -> None:
         """Opt-in: prepend bounded prior context when a task declares `continues:`.
 
@@ -3078,6 +3212,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                 logger.info(f"event={start_event} worker={worker_name} task_id={task.id}")
                 self._emit_event(start_event, task, {"worker": worker_name, "backend": backend_name})
                 self._emit_turn_telemetry("turn.started", task, backend=backend_name)
+                # [Restart-recovery context] When a session's driver was lost on worker
+                # restart, auto-inject the last N completed turns as <prior_context> so
+                # the new Claude Code process isn't blind. No-op when
+                # RESTART_CONTEXT_RESTORE_ENABLED is OFF (default) or the session is
+                # healthy — byte-identical to the prior behaviour in all normal paths.
+                await self._maybe_inject_restart_recovery_context(task)
                 # [Manager-fork / compact-context] Inject bounded prior context BEFORE the
                 # mesh snapshot. `_mesh_enqueue_task` freezes `task.prompt` into the remote
                 # payload (see `payload["prompt"]`), so a node worker executes exactly this
