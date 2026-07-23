@@ -2784,7 +2784,8 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     @staticmethod
     def _restart_ctx_enabled() -> bool:
-        return os.environ.get("RESTART_CONTEXT_RESTORE_ENABLED", "").strip().lower() in (
+        # ON by default. Set RESTART_CONTEXT_RESTORE_DISABLED=true to opt out.
+        return os.environ.get("RESTART_CONTEXT_RESTORE_DISABLED", "").strip().lower() not in (
             "1", "true", "yes", "on"
         )
 
