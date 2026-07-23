@@ -111,18 +111,18 @@ def _orch(session: Session | None = None, turns: list[dict] | None = None) -> Ta
 
 
 # ---------------------------------------------------------------------------
-# Flag OFF (default) — byte-identical
+# Feature disabled via opt-out flag — byte-identical
 # ---------------------------------------------------------------------------
 
-def test_flag_off_is_noop():
+def test_disabled_flag_is_noop():
+    """Set RESTART_CONTEXT_RESTORE_DISABLED=true → no injection even on a lost session."""
     sess = _session(driver_status="lost", backend_session_id="bsid")
     turns = _turns(2)
     orch = _orch(session=sess, turns=turns)
     task = _task()
     original_prompt = task.prompt
 
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("RESTART_CONTEXT_RESTORE_ENABLED", None)
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": "true"}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert task.prompt == original_prompt
@@ -140,7 +140,7 @@ def test_live_session_not_injected():
     task = _task()
     original = task.prompt
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert task.prompt == original
@@ -154,7 +154,7 @@ def test_lost_but_no_backend_session_id_not_injected():
     task = _task()
     original = task.prompt
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert task.prompt == original
@@ -167,7 +167,7 @@ def test_no_session_not_injected():
     task = _task()
     original = task.prompt
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert task.prompt == original
@@ -180,7 +180,7 @@ def test_no_session_id_in_metadata_not_injected():
     task.metadata = {}
     original = task.prompt
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert task.prompt == original
@@ -193,7 +193,7 @@ def test_no_prior_turns_not_injected():
     task = _task()
     original = task.prompt
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert task.prompt == original
@@ -209,7 +209,7 @@ def test_injection_fires_on_lost_session_with_turns():
     orch = _orch(session=sess, turns=_turns(1))
     task = _task(prompt="do the next step")
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert '<prior_context source="restart-recovery">' in task.prompt
@@ -224,7 +224,7 @@ def test_original_prompt_preserved_after_injection():
     orch = _orch(session=sess, turns=_turns(1))
     task = _task(prompt="ORIGINAL INSTRUCTION HERE")
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert "ORIGINAL INSTRUCTION HERE" in task.prompt
@@ -242,7 +242,7 @@ def test_turn_limit_respected():
     orch = _orch(session=sess, turns=all_turns)
     task = _task()
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     # Turn limit is enforced by the DB helper (mocked to return all_turns here),
@@ -272,7 +272,7 @@ def test_per_turn_char_cap():
     orch = _orch(session=sess, turns=turns)
     task = _task()
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     limit = TaskOrchestrator._RESTART_CTX_PER_TURN_CHARS
@@ -301,7 +301,7 @@ def test_total_chars_cap_adds_omission_marker():
     orch = _orch(session=sess, turns=turns)
     task = _task()
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert "omitted" in task.prompt or '<prior_context source="restart-recovery">' in task.prompt
@@ -327,7 +327,7 @@ def test_stale_session_not_injected():
     task = _task()
     original = task.prompt
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
 
     assert task.prompt == original
@@ -343,7 +343,7 @@ def test_double_call_does_not_double_inject():
     orch = _orch(session=sess, turns=_turns(1))
     task = _task()
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))
         prompt_after_first = task.prompt
         _run(orch._maybe_inject_restart_recovery_context(task))
@@ -363,7 +363,7 @@ def test_db_error_is_swallowed():
     orch._db_get_session_turns_tail = MagicMock(side_effect=RuntimeError("db gone"))
     task = _task(prompt="safe prompt")
 
-    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_ENABLED": "true"}):
+    with patch.dict(os.environ, {"RESTART_CONTEXT_RESTORE_DISABLED": ""}):
         _run(orch._maybe_inject_restart_recovery_context(task))  # must not raise
 
     assert task.prompt == "safe prompt"
