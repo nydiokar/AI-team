@@ -135,6 +135,8 @@ FLOW_EVENT_TYPES = (
     "flow.linked",
     "flow.unlinked",
     "task.dispatched",
+    "worker.wait_pending",
+    "worker.wait_resolved",
     "session.attached",
     "approval.requested",
     "approval.resolved",
@@ -171,6 +173,20 @@ def review_emitter_enabled() -> bool:
     to pre-M3.2 behavior.
     """
     return os.environ.get("REVIEW_EMITTER_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def durable_relay_enabled() -> bool:
+    """[A46/M3.3] Whether the durable worker-wait relay is active.
+
+    Canonical read of ``DURABLE_RELAY_ENABLED`` (truthy: 1/true/yes/on); default
+    OFF. Mirrors ``review_emitter_enabled()``. When OFF: ``record_worker_wait``
+    writes no pending marker and ``reconcile_worker_waits`` no-ops ⇒ byte-identical
+    to pre-A46 behavior (no ``worker.wait_*`` events are ever written, and the two
+    /api/cases/{id}/waits routes return 404).
+    """
+    return os.environ.get("DURABLE_RELAY_ENABLED", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
 
@@ -2075,6 +2091,119 @@ class MeshDB:
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # [A46 / M3.3] Durable worker-wait relay. A Manager's ``wait_for_worker``
+    # is a pure in-process long-poll: its whole state lives in the mcp_manager
+    # subprocess and is LOST if the Manager/gateway crashes mid-wait. The
+    # completion SIGNAL is already durable (a worker turn records an
+    # authoritative ``task.finished`` event); only the WAITER is not. These two
+    # methods close that asymmetry by recording the wait intent as an
+    # append-only ``worker.wait_pending`` marker at dispatch and letting a
+    # resumed Manager reconcile its outstanding waits against ``task.finished``
+    # — reusing the existing flow_events substrate, no new schema.
+    # ------------------------------------------------------------------
+
+    def record_worker_wait(
+        self,
+        flow_run_id: str,
+        task_id: str,
+        *,
+        timeout: Optional[float] = None,
+        actor: str = "manager",
+    ) -> Optional[int]:
+        """[A46] Record a durable pending-wait marker for a dispatched worker.
+
+        Appends an append-only ``worker.wait_pending`` flow_event keyed to
+        (flow_run_id, task_id) so a Manager that crashes/restarts mid-wait can
+        RECONCILE which workers it was still waiting on from the ledger, not from
+        lost in-process ``wait_for_worker`` memory.
+
+        Flag-gated by ``durable_relay_enabled()`` (default OFF ⇒ returns None,
+        writes nothing — byte-identical). Idempotent: if an unresolved pending
+        marker already exists for this (case, task) it is NOT duplicated and the
+        existing event id is returned. Returns the (new or existing) event id, or
+        None when the flag is OFF.
+        """
+        if not durable_relay_enabled():
+            return None
+        # Idempotent: a pending marker is "live" only until a later resolve for
+        # the same task clears it — so scan in order and keep the last relevant one.
+        existing: Optional[Dict[str, Any]] = None
+        for e in self.list_flow_events(flow_run_id):
+            if e.get("entity_id") != task_id:
+                continue
+            if e.get("event_type") == "worker.wait_pending":
+                existing = e
+            elif e.get("event_type") == "worker.wait_resolved":
+                existing = None
+        if existing is not None:
+            return int(existing["id"])
+        return self.append_flow_event(
+            flow_run_id, "worker.wait_pending", actor,
+            entity_type="task", entity_id=task_id,
+            payload={"task_id": task_id, "timeout": timeout},
+        )
+
+    def reconcile_worker_waits(
+        self,
+        flow_run_id: str,
+        *,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[A46] Reconcile a Case's outstanding worker waits after a restart.
+
+        Reads the durable ledger and, for each ``worker.wait_pending`` marker not
+        yet matched by a ``worker.wait_resolved``, checks whether the worker's turn
+        has finished (a durable ``task.finished`` event for the same task):
+          * finished  ⇒ append a ``worker.wait_resolved`` marker (RESOLVED) so the
+            wait is cleared from the ledger;
+          * still open ⇒ report it as PENDING (the Manager re-arms a fresh bounded
+            ``wait_for_worker`` for it).
+
+        Idempotent: a wait already resolved is skipped, so a crash DURING reconcile
+        + a re-run is a no-op on already-resolved waits (no duplicate markers).
+        Flag-gated by ``durable_relay_enabled()`` (OFF ⇒ ``{"ok": False,
+        "reason": "durable_relay_disabled"}``, no write). Returns ``{"ok",
+        "resolved": [{task_id, outcome}], "pending": [{task_id, timeout}]}``.
+        """
+        if not durable_relay_enabled():
+            return {"ok": False, "reason": "durable_relay_disabled"}
+
+        pending_markers: Dict[str, Dict[str, Any]] = {}
+        resolved_tasks: set = set()
+        finished: Dict[str, str] = {}
+        for e in self.list_flow_events(flow_run_id):
+            et = e.get("event_type")
+            tid = e.get("entity_id")
+            if not tid:
+                continue
+            if et == "worker.wait_pending":
+                pending_markers[tid] = e
+            elif et == "worker.wait_resolved":
+                resolved_tasks.add(tid)
+            elif et == "task.finished":
+                finished[tid] = str(_event_outcome(e) or "success")
+
+        resolved_out: List[Dict[str, Any]] = []
+        pending_out: List[Dict[str, Any]] = []
+        for tid, marker in pending_markers.items():
+            if tid in resolved_tasks:
+                continue  # already reconciled — idempotent skip
+            if tid in finished:
+                self.append_flow_event(
+                    flow_run_id, "worker.wait_resolved", actor,
+                    entity_type="task", entity_id=tid,
+                    payload={"task_id": tid, "outcome": finished[tid]},
+                )
+                resolved_out.append({"task_id": tid, "outcome": finished[tid]})
+            else:
+                pl = _event_payload(marker)
+                pending_out.append({
+                    "task_id": tid,
+                    "timeout": pl.get("timeout") if isinstance(pl, dict) else None,
+                })
+        return {"ok": True, "resolved": resolved_out, "pending": pending_out}
+
+    # ------------------------------------------------------------------
     # Approvals (Move H) — durable approval gate. A pending approval is a
     # promise of a NOT-yet-dispatched action; resolving it is what triggers
     # dispatch. Persisting it here is what lets it survive a gateway restart
@@ -3137,6 +3266,27 @@ def _unreconciled_criteria(
         if _criterion_resolved(e)
     }
     return [c for c in criteria if c not in resolved]
+
+
+def _event_payload(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """[A46] Decode a flow_event's ``payload_json`` to a dict (or None). Pure; the
+    row stores JSON as text, so a str is parsed and anything unparseable ⇒ None."""
+    payload = event.get("payload_json")
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _event_outcome(event: Dict[str, Any]) -> Optional[str]:
+    """[A46] The ``outcome`` recorded in a flow_event's payload, or None."""
+    pl = _event_payload(event)
+    return str(pl["outcome"]) if isinstance(pl, dict) and pl.get("outcome") else None
 
 
 def _now() -> str:

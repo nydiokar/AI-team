@@ -311,6 +311,26 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     session = result.get("session") or {}
     sess_id = session.get("session_id") if isinstance(session, dict) else None
 
+    # [A46] Durable wait relay. If the worker JOINED a Case, record a durable
+    # pending-wait marker so a Manager that crashes/restarts mid-wait can
+    # RECONCILE which workers it was still waiting on (the completion signal —
+    # task.finished — is already durable; this makes the WAIT durable too).
+    # Best-effort: a relay failure (incl. the 404 when DURABLE_RELAY_ENABLED is
+    # OFF, or an unavailable gateway) must NEVER break the dispatch itself.
+    wait_relay_note: Optional[str] = None
+    if case_id and task_id and task_id != "?":
+        try:
+            _api_request(
+                "POST", f"/api/cases/{urllib.parse.quote(case_id)}/waits",
+                {"task_id": task_id},
+            )
+            wait_relay_note = (
+                "durable wait recorded — recoverable after a restart via "
+                "reconcile_waits(case_id)."
+            )
+        except RuntimeError:
+            wait_relay_note = None  # relay disabled/unavailable — silent, non-fatal
+
     resolved_sid = sess_id or session_id
     if opened_session:
         session_line = f"{resolved_sid} (NEW observable worker session — openable/resumable in the UI)"
@@ -339,6 +359,8 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
             f"task; it does NOT spawn a child Case. Worker completion leaves the Case OPEN "
             f"(Task finished != Case completed)."
         )
+        if wait_relay_note:
+            lines.append(f"relay: {wait_relay_note}")
     if parent_flow_run_id:
         lines.append(
             f"parent_flow_run_id: {parent_flow_run_id} — sent as the Manager→worker "
@@ -502,6 +524,44 @@ def _wait_for_worker(args: Dict[str, Any]) -> str:
         if remaining <= 0:
             continue
         time.sleep(min(poll_interval, remaining))
+
+
+# ---------------------------------------------------------------------------
+# Tool: reconcile_waits  (A46 — recover outstanding worker waits after a restart)
+# ---------------------------------------------------------------------------
+
+def _reconcile_waits(args: Dict[str, Any]) -> str:
+    """[A46/M3.3] Recover the Manager's outstanding worker waits from the durable
+    ledger after a crash/restart.
+
+    ``wait_for_worker`` is an in-process poll — if the Manager/gateway crashes
+    mid-wait, that wait is lost. This tool asks the gateway to reconcile the Case's
+    durable ``worker.wait_pending`` markers against the already-durable
+    ``task.finished`` events: finished workers are RESOLVED (cleared), still-open
+    ones are returned as PENDING so the Manager can re-arm a fresh
+    ``wait_for_worker`` for each. Idempotent — safe to call repeatedly. A 404 means
+    the durable relay is disabled on the gateway (DURABLE_RELAY_ENABLED OFF)."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/waits/reconcile")
+    if not result.get("ok"):
+        return (
+            f"reconcile_waits did NOT run on Case {case_id}: {result.get('reason')}. "
+            f"(A 'durable_relay_disabled' reason means DURABLE_RELAY_ENABLED is OFF.)"
+        )
+    resolved = result.get("resolved") or []
+    pending = result.get("pending") or []
+    lines = [
+        f"Reconciled outstanding worker waits for Case {case_id}:",
+        f"  resolved (worker turn finished): {len(resolved)}",
+        f"  pending  (still running):        {len(pending)}",
+    ]
+    for r in resolved:
+        lines.append(f"    ✓ {r.get('task_id')} → outcome={r.get('outcome')!r} (wait cleared)")
+    for p in pending:
+        lines.append(f"    … {p.get('task_id')} still open — re-arm with wait_for_worker(task_id='{p.get('task_id')}', flow_run_id='{case_id}')")
+    if not resolved and not pending:
+        lines.append("  (no outstanding waits — nothing to recover.)")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -915,6 +975,26 @@ _TOOLS = [
         },
     },
     {
+        "name": "reconcile_waits",
+        "description": (
+            "Recover your OUTSTANDING worker waits after a crash/restart (M3.3 durable "
+            "relay). wait_for_worker is an in-process poll, so a Manager/gateway crash "
+            "mid-wait loses it. This asks the gateway to reconcile your Case's durable "
+            "worker.wait_pending markers against the already-durable task.finished events: "
+            "finished workers are RESOLVED (cleared) and still-open ones are returned as "
+            "PENDING so you can re-arm a fresh wait_for_worker for each. Idempotent — safe "
+            "to call repeatedly. Call it when you resume a Case and are unsure which workers "
+            "you were still waiting on. A 404/disabled reason means DURABLE_RELAY_ENABLED is OFF."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Manager's OWN Case id whose outstanding worker waits to reconcile."},
+            },
+            "required": ["case_id"],
+        },
+    },
+    {
         "name": "release_worker",
         "description": (
             "Close ONE worker session when YOU have decided that worker is truly done — the "
@@ -946,6 +1026,7 @@ _TOOL_IMPLS = {
     "read_session_history": _read_session_history,
     "close_case": _close_case,
     "record_review": _record_review,
+    "reconcile_waits": _reconcile_waits,
     "release_worker": _release_worker,
 }
 
