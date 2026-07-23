@@ -72,6 +72,20 @@ semantically dense. Not built now; comment in the code keeps it discoverable.
 
 ---
 
-## Resolution (2026-07-23, branch `feat/restart-context-restore`)
+## Resolution (2026-07-23, branch `feat/restart-context-restore`, PR #39)
 
-<!-- filled in after build -->
+**Built and tested 2026-07-23.**
+
+- `src/control/db.py` — `get_session_turns_tail(session_id, limit)`: DESC + reverse, filters
+  `status='completed' AND reply_text IS NOT NULL`; excludes the interrupted partial turn.
+- `src/orchestrator.py` — `_maybe_inject_restart_recovery_context(task)` + `_db_get_session_turns_tail`
+  sync wrapper; call site added before `_maybe_inject_compact_context` in `_task_worker`. Class
+  constants `_RESTART_CTX_TURN_LIMIT=3`, `_RESTART_CTX_PER_TURN_CHARS=1_500`,
+  `_RESTART_CTX_TOTAL_CHARS=4_000`, `_RESTART_CTX_MAX_AGE_HOURS=24`. `TODO(A50-tier2)` comment
+  documents the Haiku-summariser upgrade path in place.
+- `docs/ENV_FEATURE_FLAGS.md` — flag entry added.
+- `tests/test_restart_context_restore.py` — 16 hermetic tests: all passing.
+- Compact-context + driver regression suites: 74/74 clean.
+
+**Live activation:** set `RESTART_CONTEXT_RESTORE_ENABLED=true` in `.env` + gateway/worker restart.
+Operator merge + restart gated per branch policy.
