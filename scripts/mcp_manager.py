@@ -81,11 +81,25 @@ _bootstrap()
 # ---------------------------------------------------------------------------
 
 def _base_url() -> str:
-    """Control API base URL. DASHBOARD_URL wins; else 127.0.0.1:DASHBOARD_PORT."""
+    """Control API base URL.
+
+    Resolution order (no per-node secrets, no hand-pasted host):
+      1. DASHBOARD_URL — explicit override, wins outright.
+      2. CONTROLLER_URL host + DASHBOARD_PORT — reuse the mesh host this node
+         already reaches (the same tailnet controller mcp_jobs.py talks to). The
+         control API rides on the same gateway host as the task server, just on a
+         different port, so a node already in the mesh needs zero extra config.
+      3. 127.0.0.1:DASHBOARD_PORT — local gateway fallback.
+    """
     explicit = os.environ.get("DASHBOARD_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
     port = os.environ.get("DASHBOARD_PORT", "9003").strip() or "9003"
+    controller = os.environ.get("CONTROLLER_URL", "").strip()
+    if controller:
+        host = urllib.parse.urlsplit(controller).hostname
+        if host:
+            return f"http://{host}:{port}"
     return f"http://127.0.0.1:{port}"
 
 
