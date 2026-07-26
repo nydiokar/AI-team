@@ -79,6 +79,32 @@ def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
     }
 
 
+def resolve_control_api_hosts(control_api_host: str, tailscale_ip: str) -> list[str]:
+    """Bind hosts for the embedded Control API (UI + read/control surface).
+
+    Fail-closed, and NEVER the LAN/public interface by default — the UI serves the
+    dashboard token in-page (``control_api._mount_web_ui``), so any bound-but-
+    untrusted interface hands that token to whoever can reach it.
+
+      - An explicit ``CONTROL_API_HOST`` is honored verbatim (single bind). This is
+        the operator override; ``0.0.0.0`` here is a deliberate LAN-exposure choice.
+      - Otherwise bind BOTH ``127.0.0.1`` (local clients — the in-gateway Manager
+        MCP, health probes, an SSH tunnel) AND this node's Tailscale IP (a remote
+        mesh Manager, reachable only by tailnet peers). The LAN interface stays
+        unbound, keeping the in-page token inside the two trusted zones.
+
+    Returns the ordered, de-duplicated list of hosts to bind.
+    """
+    explicit: str = (control_api_host or "").strip()
+    if explicit:
+        return [explicit]
+    hosts: list[str] = ["127.0.0.1"]
+    ts: str = (tailscale_ip or "").strip()
+    if ts and ts not in hosts:
+        hosts.append(ts)
+    return hosts
+
+
 class HarnessAdmissionBlocked(Exception):
     """Raised by `_enqueue_task` when the task-harness Level-3 admission gate
     refuses a task at the queue choke point (flag on + `harness_level: 3` +
@@ -148,7 +174,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._embedded_task_server = None
         # Embedded control API (read surface for the Web UI) — shares the gateway
         # event loop so it reads the live SessionService / NodeRegistry. U1.
-        self._embedded_control_api = None
+        # A list: the API may bind more than one interface (loopback + Tailscale IP)
+        # so local clients and a remote mesh Manager reach it without exposing the LAN.
+        self._embedded_control_apis: list = []
         
         # Component status
         self.component_status = {
@@ -1433,32 +1461,35 @@ class TaskOrchestrator(ITaskOrchestrator):
         if not config.mesh.control_api_enabled:
             logger.info("event=control_api_skipped reason=disabled (CONTROL_API_ENABLED=false)")
             return
-        if self._embedded_control_api is not None:
+        if self._embedded_control_apis:
             return
-        # Bind host: CONTROL_API_HOST wins; else the Tailscale IP (reachable only by
-        # tailnet devices — the private-network auth layer); else localhost. Never
-        # default to 0.0.0.0 (that would expose the UI+API on every interface).
-        host = config.mesh.control_api_host or config.mesh.tailscale_ip or "127.0.0.1"
+        hosts: list[str] = resolve_control_api_hosts(
+            config.mesh.control_api_host, config.mesh.tailscale_ip
+        )
         port = config.mesh.dashboard_port
-        try:
-            from src.control.embedded_server import EmbeddedControlServer
-            server = EmbeddedControlServer(orchestrator=self, host=host, port=port)
-            await server.start()
-            self._embedded_control_api = server
-            logger.info(f"event=control_api_up host={host} port={port}")
-        except Exception as e:
-            logger.error(f"event=control_api_start_failed err={e}")
-            self._embedded_control_api = None
+        from src.control.embedded_server import EmbeddedControlServer
+        started: list = []
+        for host in hosts:
+            try:
+                server = EmbeddedControlServer(orchestrator=self, host=host, port=port)
+                await server.start()
+                started.append(server)
+                logger.info(f"event=control_api_up host={host} port={port}")
+            except Exception as e:
+                # One interface failing (e.g. Tailscale not up yet) must not deny
+                # the others — bind what we can, log the rest.
+                logger.error(f"event=control_api_start_failed host={host} err={e}")
+        self._embedded_control_apis = started
 
     async def _stop_embedded_control_api(self) -> None:
-        if self._embedded_control_api is None:
+        if not self._embedded_control_apis:
             return
-        try:
-            await self._embedded_control_api.stop()
-        except Exception as e:
-            logger.warning(f"event=control_api_stop_failed err={e}")
-        finally:
-            self._embedded_control_api = None
+        for server in self._embedded_control_apis:
+            try:
+                await server.stop()
+            except Exception as e:
+                logger.warning(f"event=control_api_stop_failed host={server.host} err={e}")
+        self._embedded_control_apis = []
 
     async def reload_worker_pool(self):
         """Reload worker pool size from environment configuration at runtime"""
