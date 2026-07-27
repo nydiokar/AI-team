@@ -109,6 +109,22 @@ def _token() -> str:
     return os.environ.get("DASHBOARD_TOKEN", "") or os.environ.get("WORKER_TOKEN", "")
 
 
+def _token_candidates() -> List[str]:
+    """Ordered, de-duplicated bearer credentials to try against the control API.
+
+    A Manager on a mesh node may hold EITHER the gateway-local DASHBOARD_TOKEN or
+    only the shared mesh WORKER_TOKEN. We can't know which one the gateway will
+    accept from here, so we try DASHBOARD_TOKEN first (the local/gateway happy path)
+    and fall back to WORKER_TOKEN on a 401. The control API accepts both mesh-internal
+    secrets, so whichever this node actually shares with the gateway authenticates —
+    no token ever has to be copied between nodes."""
+    out: List[str] = []
+    for tok in (os.environ.get("DASHBOARD_TOKEN", ""), os.environ.get("WORKER_TOKEN", "")):
+        if tok and tok not in out:
+            out.append(tok)
+    return out
+
+
 # Terminal vocab mirrors src/control/work_read_model.py so we agree with the
 # server on what "done" / "needs attention" means (kept in sync deliberately).
 _DONE_STATUSES = {"closed", "superseded", "done", "complete", "completed",
@@ -142,27 +158,39 @@ def _api_request(method: str, path: str, payload: Optional[Dict[str, Any]] = Non
     """One bearer-authenticated JSON request to the control API.
 
     Raises RuntimeError with a clean message on any failure (never leaks a bare
-    urllib traceback into the MCP reply)."""
-    token = _token()
-    if not token:
+    urllib traceback into the MCP reply).
+
+    On a 401 (Invalid token) it retries once with the alternate configured token, so
+    a node that holds only the shared mesh WORKER_TOKEN (and not the gateway-local
+    DASHBOARD_TOKEN) still authenticates. See _token_candidates()."""
+    tokens = _token_candidates()
+    if not tokens:
         raise RuntimeError("DASHBOARD_TOKEN/WORKER_TOKEN not set — cannot reach control API")
     url = f"{_base_url()}{path}"
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method=method,
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read()
-            return json.loads(body) if body else {}
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode(errors="replace")
-        raise RuntimeError(f"HTTP {e.code} on {method} {path}: {detail}") from e
-    except Exception as e:
-        raise RuntimeError(f"Could not reach control API at {url}: {e}") from e
+    last_auth_error: Optional[str] = None
+    for token in tokens:
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read()
+                return json.loads(body) if body else {}
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            if e.code == 401 and token is not tokens[-1]:
+                # Try the next candidate credential before giving up.
+                last_auth_error = f"HTTP {e.code} on {method} {path}: {detail}"
+                continue
+            raise RuntimeError(f"HTTP {e.code} on {method} {path}: {detail}") from e
+        except Exception as e:
+            raise RuntimeError(f"Could not reach control API at {url}: {e}") from e
+    # All candidates returned 401.
+    raise RuntimeError(last_auth_error or f"HTTP 401 on {method} {path}")
 
 
 # ---------------------------------------------------------------------------

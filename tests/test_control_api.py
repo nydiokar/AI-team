@@ -56,8 +56,35 @@ def test_api_rejects_bad_token(client):
 
 def test_missing_server_token_is_500(monkeypatch, orch):
     monkeypatch.setattr(control_api, "_dashboard_token", lambda: "")
+    monkeypatch.setattr(control_api, "_worker_token", lambda: "")
     c = TestClient(control_api.build_control_api(orch))
     assert c.get("/api/sessions", headers=_auth("anything")).status_code == 500
+
+
+def test_mesh_worker_token_is_accepted_as_alternate(monkeypatch, orch):
+    """A node-spawned Manager holds the shared mesh WORKER_TOKEN (not the
+    gateway-local dashboard token). The control API must accept it so the Manager
+    can reach the control API without the operator distributing the dashboard token
+    to each node."""
+    worker_token = "mesh-worker-secret"
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    monkeypatch.setattr(control_api, "_worker_token", lambda: worker_token)
+    c = TestClient(control_api.build_control_api(orch))
+    # Both mesh-internal secrets authenticate.
+    assert c.get("/api/sessions", headers=_auth(TOKEN)).status_code == 200
+    assert c.get("/api/sessions", headers=_auth(worker_token)).status_code == 200
+    # A non-matching token is still rejected.
+    assert c.get("/api/sessions", headers=_auth("neither")).status_code == 401
+
+
+def test_no_worker_token_only_dashboard_accepted(monkeypatch, orch):
+    """When no mesh WORKER_TOKEN is configured, only the dashboard token is
+    accepted — the fallback never opens access to an empty value."""
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    monkeypatch.setattr(control_api, "_worker_token", lambda: "")
+    c = TestClient(control_api.build_control_api(orch))
+    assert c.get("/api/sessions", headers=_auth(TOKEN)).status_code == 200
+    assert c.get("/api/sessions", headers=_auth("wrong")).status_code == 401
 
 
 # --- read-model endpoints (fed by the live SessionService) ------------------

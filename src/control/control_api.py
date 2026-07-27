@@ -293,12 +293,47 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _dashboard_token() -> str:
+    """The web-UI credential — injected into the served HTML so the browser can
+    authenticate. This is the dashboard token when set, else the mesh secret."""
     try:
         from config import config as _cfg
         return _cfg.mesh.dashboard_token or _cfg.mesh.worker_token
     except Exception:
         import os
         return os.getenv("DASHBOARD_TOKEN", "") or os.getenv("WORKER_TOKEN", "")
+
+
+def _worker_token() -> str:
+    """The shared mesh secret (WORKER_TOKEN), accepted as an ALTERNATE control-API
+    credential alongside the dashboard token.
+
+    The mesh WORKER_TOKEN is already provisioned on EVERY mesh node at setup (it is
+    how a node's worker authenticates to the task server on :9002). Honoring it here
+    lets a Manager/worker session running on ANY mesh node (e.g. Horse) reach the
+    control API with a credential it already holds — the operator never has to copy
+    the gateway-local dashboard token to each node, nor expose it anywhere. Both are
+    trusted mesh-internal secrets and the control API binds loopback + tailnet only
+    (never the public/LAN interface), so the trust boundary is unchanged. Empty when
+    unconfigured, in which case only the dashboard token is accepted."""
+    try:
+        from config import config as _cfg
+        return _cfg.mesh.worker_token or ""
+    except Exception:
+        import os
+        return os.getenv("WORKER_TOKEN", "")
+
+
+def _token_accepted(supplied: Optional[str]) -> bool:
+    """True iff ``supplied`` matches either accepted mesh-internal credential:
+    the dashboard token (web-UI / gateway-local) or the shared mesh WORKER_TOKEN.
+    Callers must first confirm a token is configured (``_dashboard_token()``);
+    an empty ``supplied`` never matches an empty accepted value."""
+    if not supplied:
+        return False
+    if supplied == _dashboard_token():
+        return True
+    worker = _worker_token()
+    return bool(worker) and supplied == worker
 
 
 def _control_api_docs_enabled() -> bool:
@@ -526,10 +561,9 @@ def build_control_api(orchestrator) -> FastAPI:
     _bearer = HTTPBearer(auto_error=True)
 
     def _require_auth(creds: HTTPAuthorizationCredentials = Security(_bearer)) -> None:
-        token = _dashboard_token()
-        if not token:
+        if not _dashboard_token():
             raise HTTPException(status_code=500, detail="DASHBOARD_TOKEN not configured")
-        if creds.credentials != token:
+        if not _token_accepted(creds.credentials):
             raise HTTPException(status_code=401, detail="Invalid token")
 
     # Bounded in-process idempotency cache {(<route>, <key>) -> response dict}.
@@ -1066,11 +1100,10 @@ def build_control_api(orchestrator) -> FastAPI:
         param because the browser ``EventSource`` API cannot set an Authorization
         header. Each frame: ``data: {"events": [...], "offset": N}``.
         """
-        expected = _dashboard_token()
-        if not expected:
+        if not _dashboard_token():
             raise HTTPException(status_code=500, detail="DASHBOARD_TOKEN not configured")
         supplied = token or _bearer_from_header(request)
-        if supplied != expected:
+        if not _token_accepted(supplied):
             raise HTTPException(status_code=401, detail="Invalid token")
 
         return StreamingResponse(
