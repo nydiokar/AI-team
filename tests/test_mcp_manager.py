@@ -760,3 +760,79 @@ def test_reconcile_waits_reports_disabled(monkeypatch):
 def test_reconcile_waits_registered():
     assert "reconcile_waits" in mcp_manager._TOOL_IMPLS
     assert any(t["name"] == "reconcile_waits" for t in mcp_manager._TOOLS)
+
+
+# --------------------------------------------------------------------------
+# Auth: token candidates + 401 retry with the alternate mesh secret
+# --------------------------------------------------------------------------
+
+def test_token_candidates_order_and_dedup(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_TOKEN", "dash")
+    monkeypatch.setenv("WORKER_TOKEN", "work")
+    assert mcp_manager._token_candidates() == ["dash", "work"]
+    # Identical values de-duplicate to one candidate.
+    monkeypatch.setenv("WORKER_TOKEN", "dash")
+    assert mcp_manager._token_candidates() == ["dash"]
+    # Only the worker secret present (the node case).
+    monkeypatch.delenv("DASHBOARD_TOKEN", raising=False)
+    monkeypatch.setenv("WORKER_TOKEN", "work")
+    assert mcp_manager._token_candidates() == ["work"]
+
+
+class _FakeHTTPError(Exception):
+    """Stand-in for urllib.error.HTTPError with the bits _api_request reads."""
+    def __init__(self, code):
+        self.code = code
+    def read(self):
+        return b'{"detail":"Invalid token"}'
+
+
+class _FakeResp:
+    def __init__(self, body):
+        self._body = body
+    def read(self):
+        return self._body
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+def test_api_request_retries_401_with_alternate_token(monkeypatch):
+    """A node whose DASHBOARD_TOKEN is stale/wrong but which holds the shared mesh
+    WORKER_TOKEN must still authenticate: a 401 on the first token retries with the
+    next candidate."""
+    monkeypatch.setenv("DASHBOARD_TOKEN", "stale-dashboard")
+    monkeypatch.setenv("WORKER_TOKEN", "good-mesh-secret")
+    monkeypatch.setattr(mcp_manager, "_base_url", lambda: "http://gw:9003")
+    # Make HTTPError identity match what _api_request catches.
+    monkeypatch.setattr(mcp_manager.urllib.error, "HTTPError", _FakeHTTPError)
+
+    seen = []
+
+    def fake_urlopen(req, timeout=0):
+        bearer = req.headers.get("Authorization")
+        seen.append(bearer)
+        if bearer == "Bearer good-mesh-secret":
+            return _FakeResp(b'{"ok": true}')
+        raise _FakeHTTPError(401)
+
+    monkeypatch.setattr(mcp_manager.urllib.request, "urlopen", fake_urlopen)
+    out = mcp_manager._api_request("GET", "/api/flows?limit=1")
+    assert out == {"ok": True}
+    # Tried the stale dashboard token first, then the good mesh secret.
+    assert seen == ["Bearer stale-dashboard", "Bearer good-mesh-secret"]
+
+
+def test_api_request_raises_when_all_tokens_401(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_TOKEN", "a")
+    monkeypatch.setenv("WORKER_TOKEN", "b")
+    monkeypatch.setattr(mcp_manager, "_base_url", lambda: "http://gw:9003")
+    monkeypatch.setattr(mcp_manager.urllib.error, "HTTPError", _FakeHTTPError)
+    monkeypatch.setattr(
+        mcp_manager.urllib.request, "urlopen",
+        lambda req, timeout=0: (_ for _ in ()).throw(_FakeHTTPError(401)),
+    )
+    with pytest.raises(RuntimeError) as ei:
+        mcp_manager._api_request("GET", "/api/flows")
+    assert "401" in str(ei.value)
