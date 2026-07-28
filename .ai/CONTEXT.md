@@ -3,6 +3,34 @@
 **Last Updated:** 2026-07-28
 **Active branch:** `main` — M2 Work Control Substrate + full M3 survivability arc merged; `HARNESS_FLOW_DRIVE` **ON** live.
 
+> **🟢 STATUS 2026-07-28 (later) — TURN-SURFACING + WORKER-WAIT RESILIENCE (`feat/manager-turn-resilience`).**
+> Root-caused from a live Manager incident (Case `a3f8ce35…`, session `35f4f1b95cf9`) where a
+> completed, high-quality turn was delivered to the operator as a **truncated "backend error /
+> failed"** while the Manager sat blocked on `wait_for_worker` polls for workers that had already
+> finished. Three distinct defects, three fixes (branch `feat/manager-turn-resilience`):
+> 1. **A usage-cap turn read as a generic hard failure.** The Claude subscription limit surfaces as
+>    an `is_error` terminal ResultMessage ("You've hit your **session** limit · resets 4:40pm"). That
+>    phrase matched **none** of the orchestrator's rate-limit markers (only "hit your *limit*"), so —
+>    absent a `rate_limit_event` stream line — it classified as **`fatal` (0 retries, no auto-resume)**
+>    and got the generic "backend error before a final summary" banner. Fix: new `usage_limit`
+>    class in `claude_driver.classify_error_text` + an honest banner ("NOT a task failure … resumes
+>    automatically once the limit resets", with parsed reset time); `orchestrator._classify_error`
+>    /`_short_failure_reason` now match "session limit"/"usage limit" → retry-eligible `rate_limit`.
+> 2. **Truncated response.** The salvaged reply was capped at 4 000 chars, hiding the real answer.
+>    Fix: deliver the FULL agent response inline for `usage_limit`/`backend_error`; only a genuine
+>    context-overflow keeps a (raised, 24 k) safety cap. (Full text was always in the DB; the bubble
+>    was the only thing truncated — the web-UI/Telegram/node paths re-bound independently.)
+> 3. **`wait_for_worker` hangs the whole session.** It is an in-turn BLOCKING poll; a Manager set
+>    3600 s and sat blocked an hour on an already-finished worker, unable to review others or answer
+>    the operator. Fix: `_WAIT_TIMEOUT_MAX` 3600→600, default 300→180 (a timeout now HANDS CONTROL
+>    BACK); tool description + `docs/harness/roles/manager.md` steer away from serial long-polling
+>    toward `task.finished`/git signals. **This is a BOUND, not the cure** — the durable, event-driven
+>    wake-on-completion replacement is **M3.4** (`docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md`), still
+>    the tracked root-cause fix for the blocking-poll model; it is a milestone, not merged/deployed here.
+> Targeted pytest green (+12 new: classify/salvage/session-limit; `test_claude_driver` 68,
+> `test_mcp_manager` 58). Adversarial review: no blockers/majors (one documented cosmetic precedence
+> note). Flag-free, minimal-diff. **PR opened + merged to `main`; gateway restarted to deploy.**
+>
 > **🟢 STATUS 2026-07-28 — Manager worker model-selection contract SHIPPED + DEPLOYED.**
 > Commit `63e1447` on `main` makes `dispatch_worker` refuse a new worker (`cwd`, no
 > `session_id`) unless the Manager explicitly supplies `model`; omission can no longer silently
