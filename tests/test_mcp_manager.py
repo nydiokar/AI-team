@@ -166,6 +166,50 @@ def test_dispatch_worker_requires_objective(monkeypatch):
         mcp_manager._dispatch_worker({})
 
 
+def test_dispatch_worker_refuses_new_session_without_model_decision(monkeypatch):
+    """A new worker must declare its boot model before any control API call."""
+    calls = []
+    monkeypatch.setattr(
+        mcp_manager, "_api_request",
+        lambda *a, **k: calls.append(a) or {"task_id": "x"},
+    )
+
+    with pytest.raises(ValueError, match="model selection"):
+        mcp_manager._dispatch_worker({"objective": "Implement T1", "cwd": "/repo"})
+
+    assert calls == []
+
+
+def test_dispatch_worker_refuses_unknown_claude_model_before_api_call(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        mcp_manager, "_api_request",
+        lambda *a, **k: calls.append(a) or {"task_id": "x"},
+    )
+
+    with pytest.raises(ValueError, match="unknown model"):
+        mcp_manager._dispatch_worker({
+            "objective": "Implement T1", "cwd": "/repo", "model": "not-a-claude-model",
+        })
+
+    assert calls == []
+
+
+def test_dispatch_worker_refuses_malformed_session_create_response(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "session": {}}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+
+    with pytest.raises(RuntimeError, match="session_id"):
+        mcp_manager._dispatch_worker({"objective": "Implement T1", "cwd": "/repo", "model": "sonnet"})
+
+    assert [call[1] for call in calls] == ["/api/sessions"]
+
+
 def test_dispatch_worker_opens_observable_session_when_cwd_and_no_session(monkeypatch):
     """[DROP-2] No session_id + a cwd ⇒ open a REAL worker session first
     (POST /api/sessions), then submit the objective INTO it joined to the Case.
@@ -184,13 +228,19 @@ def test_dispatch_worker_opens_observable_session_when_cwd_and_no_session(monkey
         "cwd": "/repo",
         "case_id": "case_1",
         "node_id": "kanebra-worker",
+        "model": "sonnet",
     })
 
     # First call opens the session (rooted at the repo, pinned to the node).
     # backend is MANDATORY — CreateSessionBody.backend has no default, so omitting
     # it 422s and silently drops back to a legacy one-off (the A44 live defect).
     assert calls[0][0] == "POST" and calls[0][1] == "/api/sessions"
-    assert calls[0][2] == {"repo_path": "/repo", "backend": "claude", "node_id": "kanebra-worker"}
+    assert calls[0][2] == {
+        "repo_path": "/repo",
+        "backend": "claude",
+        "node_id": "kanebra-worker",
+        "model": "sonnet",
+    }
     # Second call submits INTO that session, joined to the Manager's Case.
     assert calls[1][1] == "/api/instructions"
     assert calls[1][2]["session_id"] == "worker_sess_9"
@@ -256,6 +306,16 @@ def test_dispatch_worker_model_ignored_on_reused_session(monkeypatch):
     # No session created, so no model plumbing happened.
     assert [c[1] for c in calls] == ["/api/instructions"]
     assert "NOT applied" in out
+
+
+def test_dispatch_worker_schema_requires_model_for_new_sessions():
+    tool = next(tool for tool in mcp_manager._TOOLS if tool["name"] == "dispatch_worker")
+    model = tool["inputSchema"]["properties"]["model"]
+
+    assert "REQUIRED when opening a NEW worker session" in model["description"]
+    assert "haiku" in model["description"]
+    assert "sonnet" in model["description"]
+    assert "opus" in model["description"]
 
 
 def test_dispatch_worker_refuses_oneoff_without_cwd(monkeypatch):
@@ -562,12 +622,29 @@ def test_dispatch_tool_call_success(monkeypatch):
     mcp_manager._dispatch({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {"name": "dispatch_worker",
-                   "arguments": {"objective": "go", "cwd": "/repo"}},
+                   "arguments": {"objective": "go", "cwd": "/repo", "model": "sonnet"}},
     })
     result = sent[0]["result"]
     assert result["content"][0]["type"] == "text"
     assert "t9" in result["content"][0]["text"]
     assert not result.get("isError")
+
+
+def test_dispatch_tool_call_missing_new_worker_model_is_structured_error(monkeypatch):
+    sent = []
+    calls = []
+    monkeypatch.setattr(mcp_manager, "_send", lambda obj: sent.append(obj))
+    monkeypatch.setattr(mcp_manager, "_api_request", lambda *args, **kwargs: calls.append(args))
+
+    mcp_manager._dispatch({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "dispatch_worker", "arguments": {"objective": "go", "cwd": "/repo"}},
+    })
+
+    result = sent[0]["result"]
+    assert result["isError"] is True
+    assert "model selection" in result["content"][0]["text"]
+    assert calls == []
 
 
 def test_open_case_tool_posts_to_cases(monkeypatch):
@@ -690,7 +767,7 @@ def test_dispatch_worker_records_durable_wait_when_case(monkeypatch):
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
     out = mcp_manager._dispatch_worker(
-        {"objective": "do x", "cwd": "/repo", "case_id": "case_1"}
+        {"objective": "do x", "cwd": "/repo", "case_id": "case_1", "model": "sonnet"}
     )
     waits = [c for c in calls if c[1] == "/api/cases/case_1/waits"]
     assert waits and waits[0][0] == "POST"
@@ -710,7 +787,7 @@ def test_dispatch_worker_wait_relay_failure_is_nonfatal(monkeypatch):
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
     out = mcp_manager._dispatch_worker(
-        {"objective": "do x", "cwd": "/repo", "case_id": "case_1"}
+        {"objective": "do x", "cwd": "/repo", "case_id": "case_1", "model": "sonnet"}
     )
     assert "task_w" in out                    # dispatch itself succeeded
     assert "durable wait recorded" not in out  # note suppressed on relay failure

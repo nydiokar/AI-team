@@ -73,6 +73,10 @@ def test_load_manager_role_is_neutral_and_stable():
     # Stable identity ONLY — no per-invocation slots leak into the system role.
     for token in ("{{SPEC_OR_INTENT}}", "{{BRANCH}}", "{{DATE}}"):
         assert token not in role.system_instructions
+    assert "MODEL SELECTION:" in role.system_instructions
+    assert "haiku" in role.system_instructions
+    assert "sonnet" in role.system_instructions
+    assert "opus" in role.system_instructions
 
 
 def test_claude_adapter_appends_to_preset():
@@ -269,6 +273,13 @@ def test_api_manager_ok(monkeypatch):
                     json={"objective": "x", "repo_path": "/x"})
     assert r.status_code == 200
     assert r.json() == {"ok": True, "session_id": "s1", "case_id": "c1", "task_id": "t1"}
+
+
+def test_manager_invoke_body_keeps_its_unpinned_model_default():
+    from src.control.control_api import ManagerInvokeBody
+
+    body = ManagerInvokeBody(objective="x", repo_path="/x")
+    assert body.model is None
 
 
 # ---------------------------------------------------------------------------
