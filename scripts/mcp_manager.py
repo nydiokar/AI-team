@@ -139,8 +139,16 @@ _MAX_ID_CHARS = 128
 _MAX_FILES = 100
 _MAX_FILE_CHARS = 1000
 
-_WAIT_TIMEOUT_DEFAULT = 300.0
-_WAIT_TIMEOUT_MAX = 3600.0
+# wait_for_worker is an IN-TURN BLOCKING poll: while it runs the Manager session is
+# BUSY and can neither react to other finished workers nor talk to the operator. So
+# the ceiling is deliberately short — a wait that reaches it RETURNS CONTROL (with a
+# "re-call or inspect the timeline" note) instead of hanging the whole session. A
+# 3600s ceiling once left a Manager blocked for an hour on a worker that had already
+# finished; 600s converts that into "block ≤10min, then hand control back". The
+# durable, event-driven replacement (wake-on-completion, no blocking) is M3.4 — see
+# docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md.
+_WAIT_TIMEOUT_DEFAULT = 180.0
+_WAIT_TIMEOUT_MAX = 600.0
 _POLL_INTERVAL_DEFAULT = 3.0
 _POLL_INTERVAL_MIN = 1.0
 
@@ -1024,7 +1032,12 @@ _TOOLS = [
             "case_id>** — a joined worker has no flow_run of its own, so task_id alone cannot resolve "
             "it; the poll then watches your Case timeline for that task's task.finished. This poll "
             "does NOT hold a worker task slot, so waiting here cannot starve the slot the worker "
-            "needs. On return, verify the worker's committed diff in git — never trust a self-reported summary."
+            "needs. On return, verify the worker's committed diff in git — never trust a self-reported summary. "
+            "\n\n**Do NOT serially long-poll a whole batch.** While this call runs your session is BUSY — you "
+            "cannot review other finished workers or answer the operator. After dispatching several workers, "
+            "prefer ONE short wait (or check get_case / the Case timeline for task.finished events) and process "
+            "whichever worker is already done, rather than blocking the full timeout on one worker while the "
+            "others sit finished. The ceiling is intentionally short; on TIMEOUT you get control back to re-check."
         ),
         "inputSchema": {
             "type": "object",

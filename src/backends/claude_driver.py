@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -124,36 +125,73 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "too many tokens",
 )
 
+# Phrases that mean "the Claude account hit its subscription/usage cap". This is a
+# TRANSIENT, self-healing condition (it resets at a known time) — NOT a hard backend
+# failure — so it earns its own class and an honest, non-alarming banner. Keep in
+# sync with the rate-limit markers in src/orchestrator.py (_classify_error /
+# _short_failure_reason), which map this class to the retry-eligible "rate_limit".
+_USAGE_LIMIT_MARKERS = (
+    "usage limit",
+    "session limit",
+    "hit your limit",
+    "hit your session limit",
+    "you've hit your limit",
+    "rate limit",
+    "rate-limit",
+    "too many requests",
+)
+
 
 def classify_error_text(text: str) -> str:
     """Map a backend error string to an ExecutionResult.error_class.
 
-    Returns ``"context_overflow"`` for context-window errors (the case worth
-    special recovery), else ``"backend_error"``.
+    Returns ``"context_overflow"`` for context-window errors, ``"usage_limit"`` for
+    a Claude subscription/usage cap (transient, resumes after reset), else
+    ``"backend_error"``.
     """
     low = (text or "").lower()
     if any(m in low for m in _CONTEXT_OVERFLOW_MARKERS):
         return "context_overflow"
+    if any(m in low for m in _USAGE_LIMIT_MARKERS):
+        return "usage_limit"
     return "backend_error"
 
 
-# Max chars of salvaged progress we inline into the chat reply. The FULL text is
-# always stored untruncated in the DB (reply_text) and reachable via the artifact
-# / "show full" path — this only bounds what lands in the bubble so a context
-# overflow never becomes a 100k-token unreadable dump.
-_SALVAGE_INLINE_CAP = 4000
+# Safety cap for the ONE pathological case — a genuine context overflow can leave a
+# very large trailing assistant dump. Every other error turn (usage limit, plain
+# backend error) delivers the agent's FULL response inline: truncating a real,
+# complete answer down to a 4k preview was the defect that made a finished turn read
+# as a broken one. The full text is also stored untruncated in the DB (reply_text).
+_SALVAGE_INLINE_CAP = 24000
 
 
-def _build_salvaged_reply(error_class: str, salvaged: str) -> str:
-    """Compose the user-facing reply for an error turn: a short actionable banner
-    followed by the salvaged progress (bounded). Never returns the raw error
-    string alone — that was the original bug.
+def _reset_hint(error_text: str) -> str:
+    """Extract a human 'resets <when>' hint from a usage-limit error string, if any.
+    e.g. "You've hit your session limit · resets 4:40pm (Europe/Kiev)" -> "4:40pm (Europe/Kiev)".
+    """
+    m = re.search(r"resets?\s+([^\n\"\}·]{1,50})", error_text or "", flags=re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _build_salvaged_reply(error_class: str, salvaged: str, error_text: str = "") -> str:
+    """Compose the user-facing reply for an error turn: a short honest banner
+    followed by the agent's salvaged work. Never returns the raw error string alone
+    (the original bug), and never truncates a real answer (usage_limit /
+    backend_error deliver the FULL response — only a context overflow is capped).
     """
     salvaged = (salvaged or "").strip()
     if error_class == "context_overflow":
         banner = (
             "⚠️ Context window full — the agent did the work but ran out of room to "
             "write its final summary. Use /compact or start a new session to continue."
+        )
+    elif error_class == "usage_limit":
+        reset = _reset_hint(error_text)
+        when = f" — resets {reset}" if reset else ""
+        banner = (
+            f"⏳ Claude usage limit reached{when}. This is NOT a task failure — the "
+            f"agent's full response so far is below, and the turn resumes automatically "
+            f"once the limit resets."
         )
     else:
         banner = (
@@ -163,7 +201,8 @@ def _build_salvaged_reply(error_class: str, salvaged: str) -> str:
     if not salvaged:
         return banner
     body = salvaged
-    if len(body) > _SALVAGE_INLINE_CAP:
+    # Only the giant context-overflow dump is capped; a real answer is delivered whole.
+    if error_class == "context_overflow" and len(body) > _SALVAGE_INLINE_CAP:
         head = body[:_SALVAGE_INLINE_CAP].rstrip()
         omitted = len(body) - len(head)
         body = (
@@ -988,7 +1027,9 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 # window). Fail honestly so retry/compact policy engages, but
                 # DELIVER the salvaged progress + an actionable banner instead of
                 # discarding 4 minutes of work or dumping a bare error string.
-                reply = _build_salvaged_reply(outcome.error_class, outcome.salvaged_output)
+                reply = _build_salvaged_reply(
+                    outcome.error_class, outcome.salvaged_output, outcome.error_text
+                )
                 return ExecutionResult(
                     success=False,
                     output=reply,

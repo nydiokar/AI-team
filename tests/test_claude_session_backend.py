@@ -195,6 +195,49 @@ def test_classify_error_detects_rate_limit_event_from_stream_json():
     assert orch._classify_error(result) == "rate_limit"
 
 
+def test_classify_error_detects_session_limit_without_rate_limit_event():
+    # The live-incident shape: the subscription cap surfaces ONLY as the result
+    # text "hit your session limit" — no rate_limit_event stream line. This must
+    # still classify as rate_limit (retry-eligible / auto-resume), NOT fatal.
+    orch = TaskOrchestrator()
+    result = TaskResult(
+        task_id="task_session_limit",
+        success=False,
+        output="⏳ Claude usage limit reached — resets 4:40pm (Europe/Kiev).",
+        errors=["You've hit your session limit · resets 4:40pm (Europe/Kiev)"],
+        files_modified=[],
+        execution_time=0.01,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","is_error":true,"result":"You\\u0027ve hit your session limit · resets 4:40pm (Europe/Kiev)"}',
+        raw_stderr="",
+        parsed_output=None,
+        return_code=1,
+    )
+
+    assert orch._classify_error(result) == "rate_limit"
+
+
+def test_short_failure_reason_handles_session_limit_phrasing():
+    result = TaskResult(
+        task_id="task_session_limit_reason",
+        success=False,
+        output="",
+        errors=["You've hit your session limit · resets 4:40pm (Europe/Kiev)"],
+        files_modified=[],
+        execution_time=0.01,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout="",
+        raw_stderr="",
+        parsed_output=None,
+        return_code=1,
+    )
+
+    assert (
+        TaskOrchestrator._short_failure_reason(result)
+        == "Claude usage limit reached — resets 4:40pm (Europe/Kiev)"
+    )
+
+
 def test_recover_stale_busy_session_marks_error_and_notifies(monkeypatch):
     root = Path.cwd() / ".test_session_artifacts" / uuid.uuid4().hex[:8]
     from config import config
