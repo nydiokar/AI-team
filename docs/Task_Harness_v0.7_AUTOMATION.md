@@ -194,6 +194,27 @@ the owning Case reaching a live *or resumed* Manager, exactly once — today `wa
 an in-process poller that dies with the Manager. Case blocks (not closes) on unmet
 approval/input/child work.
 
+### M3.4 — Autonomous Case Continuation (bounded; within the §0.2 invocation bound) — **after M3.3**
+Full design detail: [`docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md`](AUTONOMOUS_CASE_CONTINUATION_DESIGN.md).
+Contract: one operator invocation starts one bounded Case; the harness then continues that Case
+autonomously across worker completions, Manager turns, context resets and process restarts until
+verified closure (`close_case`), explicit escalation (`flow.blocked`) or a configured limit
+(`flow.interrupted`). It never invents or starts an unrelated Case (§0.2 anti-goal preserved).
+- The Manager owns a durable WAIT CONDITION per dispatch group (ANY | ALL | named), recorded in
+  the `worker.wait_pending` payload. No new table, no new columns.
+- A background Wake-Dispatcher re-enters the Manager only when a condition is SATISFIED, delivering
+  ONE Case-level, COALESCED wake presenting all newly-relevant completions.
+- The continuation is a deterministic `mesh_tasks` row (`cont:{case}:{gen}`, sentinel `machine_id`,
+  `action=manager_continuation`), atomically claimed via `claim_task` — that claim IS the lease.
+- Delivery is AT-LEAST-ONCE; at most ONE active Manager invocation per Case; the **harness**
+  records consumption on turn return (transport ack, not `worker.wait_resolved`); duplicate /
+  post-crash delivery is safe (idempotent Manager effects).
+- Rounds = highest continuation generation vs. a cap in `completion_criteria`; exhaustion →
+  `flow.interrupted` + operator escalation. Reuse `flow_events` + wait markers + `mesh_tasks`
+  claim/incarnation; no parallel state model.
+- Order: live-session re-entry (Job 1) → durable reconstruction `get_case_brief` (Job 2) →
+  crash-respawn (Job 3, depends on Job 2). M4 task-graph parked as a hybrid spike (see design §7).
+
 ### M4 — Feature-spec authoring + scored review (audit Job 8) · generators early → wiring after M3
 Manager authors a specification + rubric-scored adversarial review before decomposing
 (`spec_authoring` stage before LOOP 0). `publish_artifact` → `artifact` links+events. Generators
@@ -228,7 +249,7 @@ adds two:
   that never ran. **Resolution:** M2.5 Job 2 removes auto-stamp/auto-close; closure becomes an
   authoritative-actor decision (M3.1/M3.2). *Contained.*
 
-**Verdict:** order becomes **M0 → M1 → M2 → M2.5 → M3.1 → {M3.2, M3.3} → M4**. The two new
+**Verdict:** order becomes **M0 → M1 → M2 → M2.5 → M3.1 → {M3.2, M3.3} → M3.4 → M4**. The two new
 P0/P1 (case-per-turn, false-closure) are structurally contained by M2.5.
 
 ---
