@@ -135,6 +135,19 @@ catch yourself reaching for `watch_job` to run an agent, that is the signal to u
 with the model you selected. (Model tiering applies to a newly opened worker session; a reused
 `session_id` keeps its boot model.)
 
+**Waiting on a batch — do NOT serially long-poll.** `wait_for_worker` is an in-turn BLOCKING poll:
+while it runs your session is BUSY, so you can neither review a different worker that already
+finished nor answer the operator. After dispatching several workers, do not call `wait_for_worker`
+on each one back-to-back with a long timeout — that leaves you blocked on worker A for its full
+timeout while B, C and D sit finished. Instead: keep a mental list of the task_ids you dispatched,
+then either use ONE short wait or read the Case timeline (`get_case` / `task.finished` events) to
+find whichever worker is already done, review that one, and move on. The wait ceiling is
+intentionally short (≤10 min); a `TIMEOUT` return is not an error — it hands control back so you can
+re-check the timeline or respond to the operator. Trust the durable signals (git commits +
+`task.finished` on the Case timeline), not a single blocking poll. (The durable, event-driven
+replacement that wakes you on each completion instead of blocking is M3.4 — see
+`docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md`.)
+
 ## Reviewing a worker's delivery — adversarial review gate
 
 Review is a real gate, not a rubber stamp. **Verify the worker's committed diff in git**
