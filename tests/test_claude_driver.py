@@ -31,6 +31,7 @@ from src.backends.claude_driver import (
     parse_cache_stats_from_ndjson,
     TurnOutcome,
     classify_error_text,
+    _build_salvaged_reply,
 )
 
 
@@ -555,6 +556,64 @@ class TestClassifyErrorText:
     def test_other_errors_are_backend_error(self):
         assert classify_error_text("some random failure") == "backend_error"
         assert classify_error_text("") == "backend_error"
+
+    def test_session_limit_is_usage_limit(self):
+        # The exact phrasing from the live incident.
+        assert (
+            classify_error_text("You've hit your session limit · resets 4:40pm (Europe/Kiev)")
+            == "usage_limit"
+        )
+
+    def test_usage_and_rate_limit_variants_are_usage_limit(self):
+        assert classify_error_text("Claude usage limit reached") == "usage_limit"
+        assert classify_error_text("429 too many requests") == "usage_limit"
+
+    def test_context_overflow_wins_over_usage_limit(self):
+        # A context-window error is the recoverable-by-compaction case; it must not
+        # be misread as a usage cap even if both markers were present.
+        assert classify_error_text("prompt is too long") == "context_overflow"
+
+
+class TestSalvagedReply:
+    """The user-facing reply for an error turn must be honest and COMPLETE:
+    a usage limit reads as a pause (not a failure), and a real answer is never
+    truncated to a preview."""
+
+    def test_usage_limit_banner_is_not_a_failure_and_shows_reset(self):
+        reply = _build_salvaged_reply(
+            "usage_limit",
+            "Here is the full report.",
+            "You've hit your session limit · resets 4:40pm (Europe/Kiev)",
+        )
+        assert "usage limit" in reply.lower()
+        assert "NOT a task failure" in reply
+        assert "4:40pm (Europe/Kiev)" in reply
+        assert "backend error before a final summary" not in reply
+        assert "Here is the full report." in reply
+
+    def test_usage_limit_delivers_full_answer_untruncated(self):
+        big = "X" * 50_000
+        reply = _build_salvaged_reply("usage_limit", big, "session limit")
+        assert big in reply
+        assert "more chars — open the full reply" not in reply
+
+    def test_backend_error_delivers_full_answer_untruncated(self):
+        big = "Y" * 50_000
+        reply = _build_salvaged_reply("backend_error", big, "some failure")
+        assert big in reply
+        assert "more chars — open the full reply" not in reply
+
+    def test_context_overflow_is_still_capped(self):
+        big = "Z" * 50_000
+        reply = _build_salvaged_reply("context_overflow", big, "prompt is too long")
+        assert big not in reply
+        assert "more chars — open the full reply" in reply
+        assert "Context window full" in reply
+
+    def test_no_salvage_returns_bare_banner(self):
+        reply = _build_salvaged_reply("usage_limit", "", "session limit")
+        assert "usage limit" in reply.lower()
+        assert "---" not in reply
 
 
 class TestErrorResultTurn:

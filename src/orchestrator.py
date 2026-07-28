@@ -357,7 +357,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             return "Task cancelled"
         if cls._is_missing_backend_conversation(result):
             return "Claude session expired"
-        if any(s in haystack_lower for s in ("rate_limit_event", "rate limit", "rate-limit", "too many requests", "hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
+        if any(s in haystack_lower for s in ("rate_limit_event", "rate limit", "rate-limit", "too many requests", "hit your limit", "hit your session limit", "session limit", "usage limit", "\"error\":\"rate_limit\"", "overagestatus")):
             info = cls._extract_rate_limit_info(result)
             if info:
                 limit_type = info.get("rateLimitType", "")
@@ -4714,7 +4714,7 @@ created: {task.created}
             return "rate_limit"
         text = self._failure_text(result)
         text_lower = text.lower()
-        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "hit your limit", "you've hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
+        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "hit your limit", "hit your session limit", "session limit", "usage limit", "you've hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
             return "rate_limit"
         if any(s in text_lower for s in ("timeout", "timed out", "inactivity")):
             return "timeout"
