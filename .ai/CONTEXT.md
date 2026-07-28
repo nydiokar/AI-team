@@ -299,10 +299,14 @@
   / checkpoint half still wants a real *code* diff to validate — the next loop should run
   on a real feature/fix.
 - **How to start a loop:** paste `docs/harness/manager_invocation.md`, fill the spec slot.
-- **Branch policy (anti-sprawl, 2026-07-06):** the driver no longer reflexively branches.
-  **Docs-only loops commit straight to `main`** (no branch/PR/merge); **code loops** cut
-  `feat/<loop>-<slug>` and **open a PR at close** (`gh pr create`) — never a dangling local
-  branch. See `manager_invocation.md` "Branch policy" + CLOSE step.
+- **Branch policy (anti-sprawl, 2026-07-06; merge-authority clarified 2026-07-28):** the driver no
+  longer reflexively branches. **Docs-only loops commit straight to `main`** (no branch/PR/merge);
+  **code loops** cut `feat/<loop>-<slug>`, **open a PR at close** (`gh pr create`), **and merge it to
+  `main` yourself** (`gh pr merge`) — pushing/opening/merging PRs are the agent's job, NOT gated on
+  the operator; never leave a dangling local branch or an open PR "awaiting sign-off". Restarting the
+  **gateway** to deploy merged code is likewise the agent's to do; **only a worker / node-carrier
+  restart** (disrupts live sessions) is surfaced to the operator. See `manager_invocation.md` "Branch
+  policy" + CLOSE step and the root `CLAUDE.md` Branch/Restart policy.
 - **Newcomer front door shipped (A18) — MERGED to `main`.** `docs/OVERVIEW.md`: a static
   "you are here" router. v0.4 §2.3 human-orientation need, not the deferred wiki renderer.
 - **Branch cleanup done (2026-07-06):** merged A18 + A19 to `main`, deleted them + the stale

@@ -78,6 +78,9 @@ your prose. A green test on *your* layer does not prove the objective end-to-end
 from where you changed it to where the goal is actually observed, and say which seams you verified.
 
 **Absolute safety floor (holds even if project context fails to load):** never run paid/e2e test
-suites or any "verify" command that could take a gateway/global lock; never merge, deploy, or
-restart infrastructure. If you cannot see a project `CLAUDE.md`, stop and surface it before running
+suites or any "verify" command that could take a gateway/global lock. Merging, deploying, and
+restarting infrastructure are **not a worker's job** — they belong to the Manager who owns the Case
+(this is role scope, not an operator gate): finish your bounded task, commit on your branch, and hand
+the diff back for the Manager to close. Never restart a worker / node-carrier process (it would kill
+your own live session). If you cannot see a project `CLAUDE.md`, stop and surface it before running
 anything paid or destructive.
