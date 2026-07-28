@@ -307,3 +307,49 @@ SCOPE OUT   No get_case_brief, no dead-session respawn, no reconstruction (Jobs 
   `src/orchestrator.py:620`.
 
 > **Code anchors are file:line as of 2026-07-25 — verify before citing; line numbers drift.**
+
+---
+
+## 10. Adjacent plane: the git dispatch registry (synergy verdict, 2026-07-28)
+
+A separate instrument — the portable **`dispatch-state-kit`** (`/home/cifran/dev/dispatch-state-kit/`,
+being ported into this repo as **A51**) — makes dispatch **drops** machine-tracked: each
+`.ai/dispatch/<job>.md` carries a ` ```yaml ` state block (`status`, canonical `created_at`,
+`depends_on`, `evidence`, `results_ref`), rendered to generated views, gap/proof-audited, and kept
+in **git**. Because it lives in git, it is also how the *same project on other machines* stays in
+parity — GitHub mediates the drop set. The question this section settles: does that plane help,
+obstruct, or need folding into the M3.4 continuation substrate designed above?
+
+**Verdict: two distinct planes, complementary, kept separate — do NOT fold, do NOT DB-back.**
+
+| | Dispatch registry (kit) | Case-continuation substrate (this doc) |
+|---|---|---|
+| **Plane** | Plan / authoring / audit | Runtime execution |
+| **Truth** | `.ai/dispatch/*.md` yaml blocks — **git-canonical**, human/agent-authored | `flow_runs`/`flow_links`/`flow_events` + `mesh_tasks` — **DB-canonical**, gateway-written |
+| **Tempo** | Authoring-time & audit-time; diffable, offline, durable across repos | Event-driven, in-process, per-tick |
+| **Cross-machine parity** | GitHub (pull/merge the drop set) | Mesh dispatch (machine-to-machine); SQLite is single-writer-authoritative |
+| **Lifecycle vocab** | `ready→active→blocked→done→dead` | `open → … → closed / blocked / interrupted` |
+| **Answers** | "what work exists, its state, is 'done' proven" | "drive THIS bounded Case to closure now" |
+
+**Why NOT port dispatch rows into the DB / into the continuation scheduler:**
+1. **It would breach the frozen §0 contract.** A git-synced registry that the gateway *reads and
+   auto-starts* becomes a standing work-puller that "independently invents or starts Cases" — the
+   exact `production_vision.md` §6 / v0.7 §0.2 anti-goal. The kit must stay **authoring/audit only**;
+   it must never be an ignition source.
+2. **Two parity mechanisms fighting over one truth = the duplicate-ledger failure mode** the M2
+   milestone already warned against (F4). Git-parity for *plans* and mesh/DB-authority for
+   *execution* are orthogonal; unifying them recreates the drift, not less of it.
+3. **The kit's whole value is its git-mediation** — durable, diffable, offline, cross-repo-portable
+   (it was built to be injected into ANY project). DB-backing it throws that away for nothing M3.4
+   needs.
+
+**The seam (soft, one-directional):** a drop's `evidence:` / `results_ref:` **may point at** the
+runtime artifact it produced (a Case id, a `flow_events` timeline, a merged PR/commit). That is a
+reference, not a shared state machine. The registry records *that a drop was executed and proven*;
+the substrate records *how a Case ran*. Neither reads the other's status to make a decision.
+
+**Net effect on the M3.4 plan: none — it neither advances nor blocks it.** It is pure upside on its
+own plane: it replaces the rotting prose `DISPATCH_LOG` (which had drifted ~16 PRs behind git) with
+an honest, proof-gated board. A *reliable* dispatch board is, longer-term, a legitimate **input** to
+a Manager choosing the next unblocked drop — but that selection stays an operator-invoked, bounded
+act, never an autonomous pull. Keep the two planes separate; let them meet only at the evidence seam.

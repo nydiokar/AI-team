@@ -3,6 +3,26 @@
 **Last Updated:** 2026-07-28
 **Active branch:** `main` — M2 Work Control Substrate + full M3 survivability arc merged; `HARNESS_FLOW_DRIVE` **ON** live.
 
+> **🟢 STATUS 2026-07-28 (latest) — MERGE-STATE RECONCILED + TWO NEW TRACKS QUEUED.**
+> Verified against git (`gh pr list --state all`): **every PR #5–#44 is MERGED except #30 (CLOSED)
+> — there are ZERO open PRs.** So the "OPEN / op-merge / built — op-merge" language scattered in the
+> older STATUS blocks and the Priorities rows below is **stale prose, not reality** — those items
+> (#22–#28, #38, #39, the whole survivability arc) are on `main`, and the gateway has been restarted
+> multiple times since (last for PR #44 turn-resilience). Priorities table corrected accordingly.
+> **Two new tracks are now queued (both authored today, neither started):**
+> 1. **M3.4 Autonomous Case Continuation — DESIGN IS IMPLEMENTATION-READY.**
+>    `docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md` §8 carries a ready-to-dispatch **Job 1** (live+idle
+>    Case re-entry: condition-gated, coalesced, at-least-once `mesh_tasks`-leased wake; flag
+>    `CASE_CONTINUATION_ENABLED` default OFF; single cheap e2e, no paid CLI). This is the durable
+>    root-cause fix for the blocking-poll model that M3.3 only bounded.
+> 2. **A51 — port the legacy prose dispatch system onto the portable `dispatch-state-kit`**
+>    (`.ai/dispatch/AGENT_51_DISPATCH_STATE_KIT_MIGRATION.md`): machine-tracked job state (yaml
+>    blocks + generated views + git pre-commit audit) replacing the rotting `DISPATCH_LOG` prose.
+>    **Boundary decision recorded** (`AUTONOMOUS_CASE_CONTINUATION_DESIGN.md` §10): the kit is the
+>    **plan/audit plane** (git-mediated), kept SEPARATE from the runtime Case substrate (DB-canonical);
+>    it is NOT DB-backed and NOT an auto-ignition source — that would breach the §0 anti-goal. The two
+>    planes meet only at a soft evidence seam. Net effect on M3.4: neither advances nor blocks it.
+>
 > **🟢 STATUS 2026-07-28 (later) — TURN-SURFACING + WORKER-WAIT RESILIENCE (`feat/manager-turn-resilience`).**
 > Root-caused from a live Manager incident (Case `a3f8ce35…`, session `35f4f1b95cf9`) where a
 > completed, high-quality turn was delivered to the operator as a **truncated "backend error /
@@ -407,9 +427,11 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
-| **0** | **Gateway restart on `aaf1cb2` (PR #37)** | The `setting_sources=["user","project"]` fix that re-connects the Manager MCP tools is merged but INERT until a restart — a fired Manager currently boots tool-less and cannot dispatch. Unblocks ALL Manager dispatch. | 🟡 **OPERATOR-GATED.** Merged; needs the operator's gateway (+ node-worker) restart. |
-| **1** | **Node re-run of A43 — carrier-independent Manager acceptance** (#18) | The one unproven gap: A44 proved the merged code on the in-gateway `__local__` path only. Booting a role-full, tool-full Manager on a real node (`Horse`/`kanebra-worker`) is the acceptance test that survivable automation actually works off the fragile gateway host. | 🟡 **OPERATOR-GATED (paid).** Code merged (#18). Remote-node MCP reachability still deferred (on-box only). This is the highest-signal next validation. |
-| **2** | **M3.3 durable relay** — `wait_for_worker` is in-process | Last structural fragility: even a carrier-independent Manager loses its wait if the session/gateway crashes mid-wait. Persist the wait off the `task.finished` timeline so it's recoverable. | ✅ **BUILT 2026-07-23 (PR #38, op-merge).** Flag `DURABLE_RELAY_ENABLED` (default OFF); `worker.wait_pending`/`worker.wait_resolved` on the Case ledger + `reconcile_waits`; 213 pytest green. Live e2e + merge operator-gated. |
+| **1** | **M3.4 Autonomous Case Continuation — build Job 1** | The durable root-cause fix for the blocking-poll model (M3.3 only *bounded* `wait_for_worker`). Live+idle Case re-entry: condition-gated, coalesced, at-least-once `mesh_tasks`-leased wake; harness-recorded consumption; round cap. Keeps the harness driving one bounded Case autonomously across worker completions without a human poke. | 🟢 **DESIGN IMPLEMENTATION-READY, NOT STARTED.** `docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md` §8 = ready-to-dispatch packet; flag `CASE_CONTINUATION_ENABLED` default OFF ⇒ byte-identical; single cheap e2e (fake backend, no paid CLI). Milestone contract: `Task_Harness_v0.7_AUTOMATION.md` §M3.4. |
+| **2** | **A51 — dispatch-state-kit migration** | Replace the rotting prose `DISPATCH_LOG` (drifted ~16 PRs behind git — the reason THIS reconcile was needed) with machine-tracked, proof-gated job state. Vigilant migration: **zero lost jobs** across all 59 dispatch files. | 🟡 **AUTHORED, NOT STARTED.** Packet `.ai/dispatch/AGENT_51_DISPATCH_STATE_KIT_MIGRATION.md`. Reserved decisions: R1 pandas/pyarrow dep (absent from `.venv`), R2 dogfood-track. Plan/audit plane only — see design doc §10 boundary. |
+| **3** | **Node re-run of A43 — carrier-independent Manager acceptance** (#18) | The one unproven gap: A44 proved the merged code on the in-gateway `__local__` path only. Booting a role-full, tool-full Manager on a real node (`Horse`/`kanebra-worker`) is the acceptance test that survivable automation actually works off the fragile gateway host. | 🟡 **OPERATOR-GATED (paid).** Code merged (#18). Remote-node MCP reachability still deferred (on-box only). Highest-signal *validation* (vs. the build items above). |
+| — | ~~Gateway restart on `aaf1cb2` (PR #37)~~ | Re-connect the Manager MCP tools (`setting_sources`). | **DONE.** #37 merged 2026-07-22; gateway restarted since (last for #44). A fired Manager boots with tools. |
+| — | ~~M3.3 durable relay (PR #38)~~ | `wait_for_worker` in-process → crash loses the wait. | **MERGED** (PR #38, `main` 2026-07-22). Flag `DURABLE_RELAY_ENABLED` (default OFF); `worker.wait_pending`/`worker.wait_resolved` + `reconcile_waits`; 213 pytest green. Live e2e (flag-on marker→crash→reconcile) still un-run. M3.4 (Rank 1) is the layer that *consumes* this relay. |
 | — | ~~Carrier-independent Manager role (#18)~~ | Manager booted only on in-gateway driver. | **MERGED** (PR #18, `main`, 2026-07-14). Dropped `case_role` restored across the dispatch seam. |
 | — | ~~Observable worker sessions + node survivability (#19)~~ | Workers were sessionless `run_oneoff`. | **MERGED** (PR #19 + **#23** the 422 `backend` fix, `main` 2026-07-17). §7 close-on-Case-close also MERGED (**PR #22**). **Still NOT proven live** — needs one paid Manager dispatch that actually opens a worker session row (now unblocked). Deferred: live proof, node-default routing, Web UI linkage. |
 | — | ~~Timezone → native local everywhere (#20)~~ | Mixed naive/UTC clocks. | **MERGED** (PR #20, `main`). **⛔ TIMEZONE IS STANDARDIZED — do NOT cite tz as a root cause; a wrong time is a writer/render defect, not a UTC-offset to explain away.** |
