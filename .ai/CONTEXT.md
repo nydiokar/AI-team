@@ -1,7 +1,19 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-23
+**Last Updated:** 2026-07-28
 **Active branch:** `main` — M2 Work Control Substrate + full M3 survivability arc merged; `HARNESS_FLOW_DRIVE` **ON** live.
+
+> **🟢 STATUS 2026-07-28 — Manager worker model-selection contract SHIPPED + DEPLOYED.**
+> Commit `63e1447` on `main` makes `dispatch_worker` refuse a new worker (`cwd`, no
+> `session_id`) unless the Manager explicitly supplies `model`; omission can no longer silently
+> resolve to the expensive Claude default. Strict Claude aliases are validated before the control
+> API call, malformed session-create responses fail closed rather than falling back to a one-off,
+> and warm-worker reuse remains unretiered. The Manager dispatch envelope now requires a short
+> `MODEL SELECTION:` rationale and carries the haiku/sonnet/opus task-fit rubric. The existing
+> create-session seam and Case roster model field remain the authoritative persistence/visibility
+> path; `/api/manager` model behavior is unchanged. Adversarial regression suite: 110 targeted
+> tests green. Gateway `ai-team-gateway` restarted through PM2 (restart #36, PID `2582449`) and
+> `GET /health` returned `{"status":"ok"}`. Newly booted Manager MCP subprocesses receive the contract.
 
 > **🟢 STATUS 2026-07-23 — RECONCILED AGAINST GIT (the doc had drifted ~5 days / 16 PRs behind).**
 > Everything the 2026-07-18 block below lists as "OPEN / op-merge" is now **MERGED to `main`**

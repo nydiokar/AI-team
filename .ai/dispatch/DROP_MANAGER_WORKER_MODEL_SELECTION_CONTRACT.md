@@ -1,7 +1,7 @@
 # DROP - Manager worker model selection contract
 
 **Date:** 2026-07-28
-**Status:** proposed / ready for autonomous build
+**Status:** merged + deployed on `main` (`63e1447`, 2026-07-28)
 **Suggested branch:** `feat/manager-worker-model-selection-contract`
 
 ## Why this exists
@@ -215,3 +215,24 @@ Findings:
 Recommended verdict: build this as a narrow MCP/role/tests slice. Do not add UI or broad policy
 machinery unless implementation evidence shows the existing roster/transcript cannot expose the
 decision.
+
+## Closure — 2026-07-28
+
+Implemented and adversarially reviewed on `main` (`63e1447`). The contract uses the existing flat
+`model` field rather than a nested decision object: this MCP server publishes raw JSON Schema and
+performs server-side validation, while the existing scalar model seam is already proven end-to-end.
+
+- New worker dispatches require a non-empty `model` before any control API call. Strict Claude
+  aliases are validated locally; advisory backend models preserve their existing pass-through policy.
+- A malformed `POST /api/sessions` response without a valid `session_id` is now refused rather than
+  falling through to a sessionless dispatch.
+- Reused `session_id` dispatches keep their boot model and retain the existing explicit non-retiering
+  response.
+- `docs/harness/roles/manager.md` now requires a `MODEL SELECTION:` rationale and gives the
+  haiku/sonnet/opus task-fit rubric. Case roster/telemetry already surfaces `session.model`; no UI
+  or new persistence was added.
+- `/api/manager` defaults remain unmodified and are regression-covered.
+
+Verification: 110 targeted hermetic tests passed across the MCP tool, Manager role, Case worker
+projection, and model picker. `ai-team-gateway` was restarted by PM2 after the commit; health probe
+returned `{"status":"ok"}`. New Manager sessions now load the refreshed MCP tool contract.
