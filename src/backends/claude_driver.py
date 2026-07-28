@@ -150,6 +150,13 @@ def classify_error_text(text: str) -> str:
     ``"backend_error"``.
     """
     low = (text or "").lower()
+    # Precedence is intentional: context_overflow is checked first because it has a
+    # SPECIFIC recovery (compact / new session), so on the rare string that carries
+    # both markers the actionable "/compact" banner wins. (The orchestrator's own
+    # _classify_error checks rate_limit before context_overflow for retry policy —
+    # that divergence only affects a pathological both-markers is_error result and
+    # is harmless: the worst case is a bounded rate-limit retry of a compact-able
+    # turn. Do not reorder either side to "align" them without weighing that.)
     if any(m in low for m in _CONTEXT_OVERFLOW_MARKERS):
         return "context_overflow"
     if any(m in low for m in _USAGE_LIMIT_MARKERS):
