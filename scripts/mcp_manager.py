@@ -271,13 +271,11 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # (byte-identical). This is DISTINCT from the case_id JOIN, which only sets the
     # membership marker case_role='worker' — that alone never promotes a worker.
     role = _bounded_text(args.get("role"), "role", _MAX_ID_CHARS, required=False)
-    # [Cockpit] Per-worker model tiering. The operator wants heavy jobs on a strong
-    # model and cheap plumbing on a light one — WITHOUT the Manager shelling out to
-    # `claude -p --model X` via watch_job (an off-substrate, untelemetered process).
-    # `model` reaches the NEW worker session through CreateSessionBody.model at the
-    # create seam below; it CANNOT retro-set the model of a reused session_id (the
-    # SDK client is cached at boot and not rebooted on a model change), so it applies
-    # to freshly-opened worker sessions only.
+    # [Cockpit] Per-worker model tiering. The Manager must deliberately choose the
+    # boot model for every NEW worker; omission would silently resolve to the costly
+    # Claude default. `model` reaches the new worker session through
+    # CreateSessionBody.model at the create seam below. It CANNOT retro-set the
+    # model of a reused session_id because the SDK client is cached at boot.
     model = _bounded_text(args.get("model"), "model", _MAX_ID_CHARS, required=False)
 
     # [DROP-2] Observable worker sessions. A worker must be a REAL, openable session
@@ -303,6 +301,22 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
             "worker). Without either, the worker would run on the legacy `claude -p` CLI "
             "driver — no persistent client, no prompt cache. See ADR-0001."
         )
+    if not session_id and not model:
+        raise ValueError(
+            "dispatch_worker requires an explicit model selection when opening a NEW worker "
+            "session. Classify the task and retry with model='haiku', 'sonnet', 'opus', or "
+            "another configured worker model; do not rely on the Claude default."
+        )
+    if not session_id:
+        from config.models import is_advisory, validate
+
+        validated_model = validate(backend, model)
+        if validated_model is None and not is_advisory(backend):
+            raise ValueError(
+                f"dispatch_worker refuses unknown model {model!r} for backend {backend!r}; "
+                "choose a configured worker model."
+            )
+        model = validated_model
 
     opened_session = False
     if not session_id and cwd:
@@ -324,9 +338,13 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         sess_result = _api_request("POST", "/api/sessions", sess_body)
         new_sess = sess_result.get("session") if isinstance(sess_result, dict) else None
         new_sid = new_sess.get("session_id") if isinstance(new_sess, dict) else None
-        if new_sid:
-            session_id = new_sid
-            opened_session = True
+        if not isinstance(new_sid, str) or not new_sid.strip() or len(new_sid) > _MAX_ID_CHARS:
+            raise RuntimeError(
+                "dispatch_worker could not open a worker session: /api/sessions returned no valid "
+                "session_id. Refusing to fall back to a sessionless worker dispatch."
+            )
+        session_id = new_sid
+        opened_session = True
 
     body: Dict[str, Any] = {"description": objective}
     if session_id:
@@ -872,9 +890,11 @@ _TOOLS = [
             "you pass cwd, a NEW observable worker session is opened (case_role=worker, joined to "
             "your Case) that you and the operator can open, read, and resume — always prefer this "
             "over a blind one-off. Pass your own flow_run id as parent_flow_run_id to record the "
-            "Manager→worker lineage edge (visible in /api/flows). Set `model` to run this worker on "
-            "a specific tier (e.g. a strong model for hard design, a light one for plumbing) — this "
-            "is the supported way to tier per job; do NOT shell out to `claude -p --model` via "
+            "Manager→worker lineage edge (visible in /api/flows). When opening a NEW worker session "
+            "(`cwd`, no `session_id`), you MUST explicitly set `model` as a task-fit decision: haiku "
+            "for narrow, easily verified work; sonnet for most bounded implementation and fixes; "
+            "opus for architecture, high-risk, security-sensitive, or ambiguous work. This is the "
+            "supported way to tier per job; do NOT shell out to `claude -p --model` via "
             "watch_job, which spawns an off-substrate process with no session, no Case link, and no "
             "telemetry. `model` applies only to a NEWLY opened worker session (a reused session_id "
             "keeps its boot model)."
@@ -889,7 +909,7 @@ _TOOLS = [
                 "case_id": {"type": "string", "description": "The Manager's OWN Case id. Pass it to make the worker JOIN this Case (member task, shared membership) instead of spawning a child Case — the M3.1 default. Worker completion leaves the Case OPEN."},
                 "node_id": {"type": "string", "description": "Node to pin the NEW worker session to: the worker boots on THIS node and cwd is resolved on ITS filesystem, so pin the node that actually holds the repo (e.g. a node worker so the session survives a gateway restart). Pass the node's EXACT node_id as shown by /api/nodes — it is matched exactly, NOT a fuzzy display-name lookup. OMIT ONLY if the repo lives on the gateway host itself: omitting routes the worker to the gateway host (__local__ — NOT the Manager's own node), where the gateway validates cwd against its own allowed_root and rejects a missing/outside path up front with invalid_repo_path. (A pinned remote node skips that up-front check — a bad cwd there surfaces at the worker's first turn instead.)"},
                 "role": {"type": "string", "description": "Set to 'worker' to boot the NEW worker session with the canonical Worker role (worker.md identity + worker tools), gated by MANAGER_ROLE_ENABLED. Omit for a legacy tier-0 worker. Only applies when a new session is opened (with cwd); it cannot retro-stamp a reused session_id."},
-                "model": {"type": "string", "description": "Per-worker model tier for a NEWLY opened worker session (e.g. 'opus' for hard design, 'sonnet' for plumbing). The supported alternative to shelling out `claude -p --model` via watch_job. Ignored when a session_id is reused (that session keeps its boot model)."},
+                "model": {"type": "string", "description": "REQUIRED when opening a NEW worker session (cwd with no session_id): explicitly choose the task-fit boot model. Use 'haiku' for narrow/easy-to-verify work, 'sonnet' for most bounded implementation and fixes, and 'opus' for architecture, high-risk, security-sensitive, or ambiguous work. The choice is sent only to session creation. Ignored when a session_id is reused because that worker keeps its boot model."},
                 "parent_flow_run_id": {"type": "string", "description": "Use ONLY for a genuine child-CASE lineage edge (child→parent in /api/flows). To keep the worker inside the Manager's Case, use case_id instead."},
             },
             "required": ["objective"],

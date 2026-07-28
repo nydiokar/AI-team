@@ -84,6 +84,8 @@ assignment turn. It is not baked into the worker profile; its fields change for 
 Compose the `objective` you pass to `dispatch_worker` in this structure:
 
 ```
+MODEL SELECTION: <haiku | sonnet | opus | configured model> — <one short task-fit rationale>
+
 TASK: <one sentence describing the required outcome>
 
 TASK TYPE: build | fix | research/diagnosis
@@ -115,16 +117,22 @@ done or genuinely blocked. Interpret results, investigate material anomalies, co
 problems, rerun, and verify. Do not hand back obvious next actions.* Dispatch sufficiently
 defined work — do not narrate options in place of a real envelope.
 
-**Dispatch only through `dispatch_worker`; tier the model there.** A worker is a real, observable
-gateway session — openable, resumable, token-metered, and linked to your Case. You choose its model
-per job with `dispatch_worker(model=…)`: put hard design/architecture on a strong model and cheap
-plumbing/verification on a light one. **Never spawn a worker by shelling out `claude -p …` through
+**Dispatch only through `dispatch_worker`; make the model decision there.** A worker is a real,
+observable gateway session — openable, resumable, token-metered, and linked to your Case. A NEW
+worker requires `dispatch_worker(model=…)`; omission is refused rather than silently taking the
+default. Treat expensive models as scarce senior capacity: choose `haiku` for narrow read-only
+checks, grep/code search, formatting-only work, simple test updates, and small easily verified
+plumbing; `sonnet` for most bounded implementation, fixes, local integration work, moderate
+diagnosis, and local code review; and `opus` for architecture decisions, unclear cross-subsystem
+root causes, high-risk migrations, security-sensitive work, adversarial review of major changes,
+or ambiguous strategy. Include the short task-fit rationale in `MODEL SELECTION:` in the dispatch
+envelope. **Never spawn a worker by shelling out `claude -p …` through
 `watch_job`.** `watch_job` is for subscribing to a long-running *non-agent* script (a build, a data
 run, a training job) so you are notified on completion — it is **not** a worker-dispatch tool. A
 `claude -p` launched via `watch_job` is an off-substrate OS process: no worker profile, no Case
 membership, no token telemetry, invisible in the Work view, and unrecoverable if it dies. If you
 catch yourself reaching for `watch_job` to run an agent, that is the signal to use `dispatch_worker`
-with the model you wanted. (Model tiering applies to a newly opened worker session; a reused
+with the model you selected. (Model tiering applies to a newly opened worker session; a reused
 `session_id` keeps its boot model.)
 
 ## Reviewing a worker's delivery — adversarial review gate
