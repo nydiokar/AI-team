@@ -96,8 +96,9 @@ driver; it advances the loop by judgment, spawning workers, and updating files.
 > may sit **unmerged** on their own branches, so `main` can be *stale* relative to the docs
 > this driver points at (e.g. `.ai/DOC_MAP.md`, the slimmed `DISPATCH_LOG`). Run
 > `git branch --no-merged main` first: if a predecessor's branch is unmerged and your work
-> depends on its code, either (a) branch off **that** branch, not `main`, or (b) surface a
-> merge-to-main fork to the operator first. **Never** carry another loop's unmerged edits
+> depends on its code, either (a) branch off **that** branch, not `main`, or (b) review and merge
+> that predecessor PR to `main` first (merging is yours to do — see the branch policy). **Never**
+> carry another loop's unmerged edits
 > onto your branch (co-mingles indexes — rule 3). If `DISPATCH_LOG`/structure on `main` looks
 > older than what this driver describes, that is the stale-base signal — resolve it before
 > dispatching. *(Because docs-only loops now land on `main` directly, doc drift between `main`
@@ -128,17 +129,21 @@ driver; it advances the loop by judgment, spawning workers, and updating files.
 >     unmerged diff is docs-only + clean, fast-merge it to `main` and delete the branch as
 >     part of housekeeping.)
 >   - **Code loop:** open a PR — `gh pr create --fill --base main` (or push the branch and
->     `gh pr create`). Put the closure summary in the PR body. **The merge itself is the
->     operator's fork** — but the work must live as a *PR*, never a dangling local branch.
->     Record the PR number in the DISPATCH_LOG row (`reviewed — PR #NN`).
+>     `gh pr create`). Put the closure summary in the PR body, then **merge it to `main` yourself**
+>     (`gh pr merge --merge` / `--squash`) — pushing, opening, and merging the PR are yours, not the
+>     operator's; don't leave the work sitting as an open PR "awaiting sign-off". Restart the
+>     **gateway** (`pm2 restart ai-team-gateway`) if the merged code needs to go live. Record the PR
+>     number in the DISPATCH_LOG row (`merged — PR #NN`).
 > - **REPORT** to the operator at the end: what spec you picked, whether it ran on `main`
 >   (docs) or a PR branch (code) **and why**, what the worker did, your review verdict (git
 >   evidence), the decision, and — for a code loop — the PR link. Update DISPATCH_LOG.
 >
-> **Only interrupt the operator for genuine forks:** a merge-to-main decision, a Level-3
-> approval, a strategic direction change, or a spec conflict you can't resolve.
-> Everything inside one loop — drafting, spawning, reviewing, iterating — you do
-> autonomously. Don't narrate options you won't pursue; when you have enough to act, act.
+> **Only interrupt the operator for genuine forks:** a Level-3 approval, a strategic direction
+> change, a spec conflict you can't resolve, or a **worker / node-carrier restart** (which disrupts
+> live sessions). Merging to `main`, pushing, opening PRs, and restarting the **gateway** are NOT
+> forks — you do them yourself. Everything inside one loop — drafting, spawning, reviewing,
+> iterating, closing — you do autonomously. Don't narrate options you won't pursue; when you have
+> enough to act, act.
 >
 > **Start by reading the docs above, then state your loop-0 pick before spawning anything.**
 

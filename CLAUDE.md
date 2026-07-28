@@ -35,8 +35,18 @@ When the objective is open-ended ("continue the project", "advance the work", "d
   liveness/status probe that reflects the actual running gateway.
 - **Branch policy.** Docs-only work commits straight to `main`. Any `src/` / config / migration
   change cuts one `feat/<slug>` branch and opens a PR at close — never dangle a local branch, never
-  carry another loop's edits. **Merging to `main`, deploys, and gateway restarts are the operator's
-  decision — never merge or restart on your own; open the PR and hand back.**
+  carry another loop's edits. **You own the full close: commit, push, open the PR, AND merge it to
+  `main` yourself. Do NOT sit on an open PR "awaiting operator sign-off" — pushing, opening, and
+  merging PRs are yours, not the operator's. `--force` still stays out (§0 above), and don't carry
+  another loop's unmerged edits into your merge.**
+- **Restart policy (restart the gateway freely; NEVER a worker reflexively).** Restarting the
+  **gateway** (`pm2 restart ai-team-gateway`) to make merged code live is delegated to you — the
+  operator is fine with it; just do it when a deploy needs it. **Do NOT restart a worker / node-carrier
+  process (e.g. the `ai-team-worker` daemon or the worker on `Horse`) on your own** — that disrupts
+  live worker sessions. If a worker restart is genuinely needed, surface it to the operator as a
+  decision instead of doing it silently. (Still never take a gateway/global lock to "verify", e.g.
+  `python main.py status`, which kills the live gateway as a side-effect — that is distinct from a
+  clean, intentional `pm2 restart`.)
 - **Minimal diff / least action.** Change only what the task requires; preserve existing structure
   and formatting; no drive-by refactors.
 - **Ground in git before you change; cross-layer honesty.** A green test on *your* layer does not
