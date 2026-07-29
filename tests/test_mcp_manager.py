@@ -611,7 +611,7 @@ def test_dispatch_tools_list(monkeypatch):
     names = {t["name"] for t in tools}
     assert names == {"dispatch_worker", "wait_for_worker", "open_case", "get_case",
                      "read_session_history", "close_case", "record_review",
-                     "reconcile_waits", "release_worker"}
+                     "reconcile_waits", "arm_wait_group", "release_worker"}
 
 
 def test_dispatch_tool_call_success(monkeypatch):

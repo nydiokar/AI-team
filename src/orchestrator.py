@@ -223,6 +223,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._shutdown_interrupted_tasks: set[str] = set()
         self._stale_busy_reconcile_task: Optional[asyncio.Task] = None
         self._mesh_reconcile_in_progress: bool = False
+        # [M3.4] Wake-Dispatcher loop handle (autonomous Case continuation).
+        self._wake_dispatcher_task: Optional[asyncio.Task] = None
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -644,6 +646,249 @@ class TaskOrchestrator(ITaskOrchestrator):
             chat_id=session.telegram_chat_id,
             prefix="_(recovered after a gateway restart)_\n\n",
         )
+
+    # ------------------------------------------------------------------
+    # [M3.4] Wake-Dispatcher — autonomous Case continuation (Job 1).
+    # A live+idle Manager session that has armed a wait-group is re-entered
+    # automatically when the group is satisfied: schedule ONE deterministic
+    # mesh_tasks continuation row, atomically claim it (single winner), deliver
+    # ONE coalesced proactive turn, and — on turn return — HARNESS-record the
+    # consumed watermark. Bounded by a round cap; on exhaustion escalate. This is
+    # the re-entry engine the SDK cannot provide (no durable server-side session).
+    # Flag-gated by CASE_CONTINUATION_ENABLED (default OFF ⇒ this loop never runs).
+    # ------------------------------------------------------------------
+
+    _CONTINUATION_TERMINAL_STATUSES = ("completed", "failed", "failed_node_offline")
+
+    def _start_wake_dispatcher(self) -> None:
+        """Start the periodic Wake-Dispatcher loop (mirrors the stale-busy
+        reconciler). No-op unless mesh routing is active AND the continuation flag
+        is ON — so with the flag OFF this is byte-identical to no loop at all."""
+        from src.control.db import case_continuation_enabled
+        interval = int(getattr(config.mesh, "case_continuation_tick_interval_sec", 30) or 0)
+        if not config.mesh.enabled or interval <= 0 or not case_continuation_enabled():
+            return
+        if self._wake_dispatcher_task and not self._wake_dispatcher_task.done():
+            return
+        self._wake_dispatcher_task = asyncio.create_task(
+            self._wake_dispatcher_loop(interval)
+        )
+
+    async def _wake_dispatcher_loop(self, interval_sec: int) -> None:
+        logger.info("event=wake_dispatcher_started interval=%ds", interval_sec)
+        try:
+            while self.running:
+                try:
+                    await self._wake_dispatcher_tick_once()
+                except Exception as e:
+                    logger.debug("event=wake_dispatcher_tick_failed err=%s", e)
+                await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            logger.info("event=wake_dispatcher_stopped")
+            raise
+
+    async def _wake_dispatcher_tick_once(self) -> int:
+        """One Wake-Dispatcher pass over every open Case. Returns the number of
+        proactive wake turns delivered this tick. Flag-gated (OFF ⇒ 0)."""
+        from src.control.db import case_continuation_enabled, get_db
+        if not case_continuation_enabled():
+            return 0
+        try:
+            db = get_db()
+        except Exception:
+            db = None
+        if db is None:
+            return 0
+        delivered = 0
+        for case in db.list_open_cases():
+            case_id = str(case.get("flow_run_id") or "")
+            if not case_id:
+                continue
+            try:
+                delivered += await self._continue_case_once(db, case_id)
+            except Exception as e:
+                logger.debug("event=wake_dispatcher_case_failed case=%s err=%s", case_id, e)
+        return delivered
+
+    async def _continue_case_once(self, db, case_id: str) -> int:
+        """Evaluate one Case: if a wait-group is satisfied, schedule + atomically
+        claim the deterministic continuation row and deliver ONE coalesced wake
+        turn to the bound live+idle Manager session. Returns 1 iff a turn was
+        delivered, else 0. Enforces the round cap (escalates on exhaustion)."""
+        from src.control.db import (
+            CONTINUATION_MACHINE_SENTINEL, CONTINUATION_ACTION, continuation_task_id,
+            _event_payload,
+        )
+        tick = db.compute_continuation_tick(case_id)
+        if not tick.get("satisfied"):
+            return 0
+
+        generation = int(tick["generation_next"])
+        cap = db.case_round_cap(case_id)
+        if generation > cap:
+            # Round cap exhausted — escalate ONCE (idempotent: skip if already emitted).
+            already = any(
+                e.get("event_type") == "flow.interrupted"
+                and (_event_payload(e) or {}).get("reason") == "round_cap_exhausted"
+                for e in db.list_flow_events(case_id)
+            )
+            if not already:
+                db.append_flow_event(
+                    case_id, "flow.interrupted", "system",
+                    payload={"reason": "round_cap_exhausted",
+                             "round_cap": cap, "generation": generation},
+                )
+                self._emit_event(
+                    "case_continuation_interrupted", None,
+                    {"case_id": case_id, "round_cap": cap, "generation": generation},
+                )
+                await self._escalate_case_continuation_cap(case_id, cap, generation)
+            return 0
+
+        # The wake target must be a live+idle Manager session. A dead session is
+        # Job-3 territory (crash-respawn) — do nothing here. A BUSY session already
+        # has a turn in flight — the atomic claim below is the real single-flight
+        # gate, but skipping BUSY avoids a needless enqueue.
+        session_id = db.case_manager_session_id(case_id)
+        if not session_id:
+            return 0
+        session = self.session_store.get(session_id)
+        if session is None:
+            return 0
+        if session.status != SessionStatus.IDLE:
+            return 0
+
+        cont_id = continuation_task_id(case_id, generation)
+        presented = list(tick.get("presented_task_ids") or [])
+        # Idempotent enqueue: a racing tick computes the SAME id ⇒ UNIQUE collapses
+        # to one row. The continuation row is pinned to the reserved sentinel so no
+        # worker/embedded claim scan can ever see it.
+        # session_id is NULL on the row: a continuation is a scheduling TOKEN, not a
+        # conversation turn — coupling it to the sessions FK would be wrong. The wake
+        # target rides in the payload instead.
+        db.enqueue_task(
+            cont_id,
+            session_id=None,
+            machine_id=CONTINUATION_MACHINE_SENTINEL,
+            backend=(session.backend or "claude"),
+            action=CONTINUATION_ACTION,
+            payload={"case_id": case_id, "generation": generation,
+                     "session_id": session_id, "presented_task_ids": presented},
+        )
+        # Atomic lease — single winner. A racing dispatcher (or a redelivery while
+        # the claim is still live) gets False and stops. No delivery on a lost claim.
+        if not db.claim_task(cont_id, socket.gethostname()):
+            return 0
+
+        wake = self._render_wake_turn(case_id, presented)
+        retired = [g["wait_group_id"] for g in tick.get("satisfied_groups", []) if g.get("retire")]
+        try:
+            wake_task_id = await self.submit_instruction(
+                description=wake,
+                session_id=session_id,
+                cwd=session.repo_path,
+                source="manager_continuation",
+            )
+        except Exception as e:
+            # Delivery failed after the claim — release the lease so the next tick
+            # can retry cleanly rather than stranding the row 'claimed'.
+            logger.warning("event=wake_deliver_failed case=%s err=%s", case_id, e)
+            db.release_task(cont_id, socket.gethostname())
+            return 0
+
+        # HARNESS-record consumption when the proactive turn returns (State 4).
+        asyncio.create_task(self._finalize_continuation(
+            case_id, cont_id, generation, presented, retired, wake_task_id, session_id,
+        ))
+        self._emit_event(
+            "case_continuation_delivered", None,
+            {"case_id": case_id, "generation": generation,
+             "presented_task_ids": presented, "continuation_id": cont_id},
+        )
+        return 1
+
+    def _render_wake_turn(self, case_id: str, presented: List[str]) -> str:
+        """Compose the ONE coalesced Case-level wake message. Presents ALL
+        newly-finished-unconsumed workers as a single turn (not one per worker)."""
+        ids = ", ".join(presented) if presented else "(none)"
+        return (
+            "[continuation] Worker completion(s) are ready for your review on this "
+            f"Case ({case_id}). Finished since your last turn: {ids}. Review each "
+            "committed diff and record a verdict (record_review), then dispatch the "
+            "next task, wait on remaining workers, or close the Case if its "
+            "completion_criteria are met. This turn was delivered autonomously by the "
+            "harness — treat it exactly like an operator poke to continue the Case."
+        )
+
+    async def _finalize_continuation(
+        self,
+        case_id: str,
+        continuation_id: str,
+        generation: int,
+        presented: List[str],
+        retired_group_ids: List[str],
+        wake_task_id: Optional[str],
+        session_id: str,
+    ) -> None:
+        """Wait for the proactive wake turn to return, then HARNESS-record the
+        consumed watermark (the transport ACK). Because consumption is written
+        ONLY here (never by the LLM), a crash before this point leaves the row
+        'claimed' → reaped → redelivered (at-least-once)."""
+        from src.control.db import get_db
+        try:
+            db = get_db()
+        except Exception:
+            db = None
+        if db is None:
+            return
+        # Bound the wait so a wedged turn never leaks this task forever.
+        deadline = time.time() + float(config.system.task_timeout or 1800)
+        # The IDLE fallback (below) must not fire in the window BEFORE the wake turn
+        # flips the session BUSY, or we would record consumption prematurely. Only
+        # trust "session is IDLE ⇒ turn returned" once we have observed it go BUSY.
+        seen_busy = False
+        while self.running and time.time() < deadline:
+            await asyncio.sleep(2)
+            row = db.get_task(wake_task_id) if wake_task_id else None
+            if row is not None:
+                if row.get("status") in self._CONTINUATION_TERMINAL_STATUSES:
+                    break
+                continue
+            # In-process (non-mesh) turn with no mesh_tasks row: consider it returned
+            # only after we saw the session go BUSY and then return to IDLE with the
+            # wake task no longer active.
+            sess = self.session_store.get(session_id)
+            if sess is None:
+                continue
+            if sess.status == SessionStatus.BUSY:
+                seen_busy = True
+                continue
+            if seen_busy and sess.status == SessionStatus.IDLE and (
+                not wake_task_id or wake_task_id not in self.active_tasks
+            ):
+                break
+        db.record_continuation_consumed(
+            case_id, continuation_id, generation, presented, retired_group_ids,
+        )
+        self._emit_event(
+            "case_continuation_consumed", None,
+            {"case_id": case_id, "generation": generation,
+             "consumed_task_ids": presented, "continuation_id": continuation_id},
+        )
+
+    async def _escalate_case_continuation_cap(
+        self, case_id: str, cap: int, generation: int,
+    ) -> None:
+        """Best-effort operator escalation when a Case exhausts its round cap.
+        Isolated: a notify failure must never crash the tick."""
+        try:
+            await self.notifier.notify_error(
+                f"[continuation] Case {case_id} hit its continuation round cap "
+                f"({cap}); a further satisfied wait (round {generation}) was NOT "
+                "scheduled. Re-enter the Case manually to continue or close it.",
+            )
+        except Exception as e:
+            logger.debug("event=case_continuation_escalate_failed case=%s err=%s", case_id, e)
 
     def _start_stale_busy_reconciler(self) -> None:
         """Start the periodic M3 reconciliation loop when mesh routing is active."""
@@ -1307,6 +1552,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 raise
         await self._recover_stale_busy_sessions()
         self._start_stale_busy_reconciler()
+        self._start_wake_dispatcher()
 
         # Start the job completion poller (T3 — Watched Jobs)
         asyncio.create_task(self._job_completion_poller())
@@ -1379,6 +1625,12 @@ class TaskOrchestrator(ITaskOrchestrator):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._stale_busy_reconcile_task
         self._stale_busy_reconcile_task = None
+
+        if self._wake_dispatcher_task and not self._wake_dispatcher_task.done():
+            self._wake_dispatcher_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._wake_dispatcher_task
+        self._wake_dispatcher_task = None
 
         # Cancel worker tasks
         for worker in self.worker_tasks:
@@ -2177,6 +2429,32 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"ok": False, "reason": "db_unavailable"}
         event_id = db.record_worker_wait(
             flow_run_id, task_id, timeout=timeout, actor=actor,
+        )
+        return {"ok": True, "event_id": event_id}
+
+    def arm_wait_group(
+        self,
+        flow_run_id: str,
+        wait_group_id: str,
+        condition: str,
+        member_task_ids: List[str],
+        *,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[M3.4] Orchestrator seam — arm a Manager wait-group over a dispatch set so
+        the Wake-Dispatcher re-enters the Case when the group is satisfied.
+
+        Mirrors the ``record_worker_wait`` seam. ``condition`` ∈ {ANY, ALL, NAMED};
+        the write is flag-gated in the db layer (``CASE_CONTINUATION_ENABLED`` OFF ⇒
+        ``event_id`` None, nothing written). Returns ``{"ok": True, "event_id"}`` or
+        ``{"ok": False, "reason": "db_unavailable"}``.
+        """
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        event_id = db.arm_wait_group(
+            flow_run_id, wait_group_id, condition, member_task_ids, actor=actor,
         )
         return {"ok": True, "event_id": event_id}
 

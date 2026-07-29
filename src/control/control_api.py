@@ -180,6 +180,16 @@ class CaseWaitBody(BaseModel):
     timeout: Optional[float] = None
 
 
+class CaseWaitGroupBody(BaseModel):
+    """[M3.4] Arm a Manager wait-GROUP over a dispatch set so the Wake-Dispatcher
+    re-enters the Case when it is satisfied. ``wait_group_id`` names the group;
+    ``condition`` ∈ ANY|ALL|NAMED; ``member_task_ids`` are the group's dispatched
+    worker tasks. A single-worker default is ANY over one member."""
+    wait_group_id: str
+    condition: str = "ANY"
+    member_task_ids: List[str]
+
+
 class CaseOpenBody(BaseModel):
     """[M3.3] Open a NEW Case on an EXISTING Manager session — so one long-lived
     Manager session can own many Cases sequentially instead of spawning a fresh
@@ -1325,6 +1335,37 @@ def build_control_api(orchestrator) -> FastAPI:
         if not durable_relay_enabled():
             raise HTTPException(status_code=404, detail="not_found")
         result = orchestrator.reconcile_worker_waits(case_id, actor="manager")
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/wait-group", dependencies=[Depends(_require_auth)])
+    def api_arm_wait_group(case_id: str, body: CaseWaitGroupBody) -> JSONResponse:
+        """[M3.4] Arm a Manager wait-group so the Wake-Dispatcher autonomously
+        re-enters this Case when the group is satisfied. Gated by
+        ``CASE_CONTINUATION_ENABLED`` (404 when OFF ⇒ byte-identical). Rejects a
+        malformed condition (422) and bounds the member list (413) up front — the
+        write itself is also flag-gated in the db layer (defence in depth)."""
+        from src.control.db import case_continuation_enabled
+        if not case_continuation_enabled():
+            raise HTTPException(status_code=404, detail="not_found")
+        cond = (body.condition or "ANY").upper()
+        if cond not in ("ANY", "ALL", "NAMED"):
+            raise HTTPException(
+                status_code=422,
+                detail={"ok": False, "reason": "invalid_condition"},
+            )
+        if not body.member_task_ids:
+            raise HTTPException(
+                status_code=422,
+                detail={"ok": False, "reason": "empty_member_task_ids"},
+            )
+        if len(body.member_task_ids) > 256:
+            raise HTTPException(
+                status_code=413,
+                detail={"ok": False, "reason": "too_many_members"},
+            )
+        result = orchestrator.arm_wait_group(
+            case_id, body.wait_group_id, cond, body.member_task_ids, actor="manager",
+        )
         return JSONResponse(result)
 
     @app.post("/api/sessions/{session_id}/bind", dependencies=[Depends(_require_auth)])
