@@ -633,6 +633,44 @@ def _reconcile_waits(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: arm_wait_group  (M3.4 — autonomous Case continuation)
+# ---------------------------------------------------------------------------
+
+def _arm_wait_group(args: Dict[str, Any]) -> str:
+    """[M3.4] Arm a wait-GROUP over a set of dispatched workers so the harness
+    autonomously RE-ENTERS this Case when the group is satisfied — no manual poke.
+
+    ``condition``: ANY (wake on each new completion, coalescing simultaneous ones,
+    until drained), ALL/NAMED (wake once when every member has finished). When the
+    group is satisfied over the finished-but-unconsumed members, the gateway
+    delivers ONE coalesced review turn to this (live+idle) Manager session. Use this
+    INSTEAD of serially long-polling ``wait_for_worker`` when you want the Case to
+    continue itself across worker completions. A 404/disabled reason means
+    CASE_CONTINUATION_ENABLED is OFF on the gateway."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    group_id = _bounded_text(args.get("wait_group_id"), "wait_group_id", _MAX_ID_CHARS, required=True)
+    condition = (_bounded_text(args.get("condition"), "condition", 16, required=False) or "ANY").upper()
+    if condition not in ("ANY", "ALL", "NAMED"):
+        return f"arm_wait_group: condition must be ANY|ALL|NAMED, got {condition!r}."
+    members = args.get("member_task_ids") or []
+    if not isinstance(members, list) or not members:
+        return "arm_wait_group requires a non-empty member_task_ids list (the dispatched worker task_ids)."
+    members = [str(m) for m in members][:256]
+    body = {"wait_group_id": group_id, "condition": condition, "member_task_ids": members}
+    result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/wait-group", body)
+    if not result.get("ok"):
+        return (
+            f"arm_wait_group did NOT arm on Case {case_id}: {result.get('reason')}. "
+            "(A 404/disabled reason means CASE_CONTINUATION_ENABLED is OFF on the gateway.)"
+        )
+    return (
+        f"Armed wait-group {group_id!r} ({condition}) over {len(members)} worker task(s) on "
+        f"Case {case_id}. When satisfied, the harness autonomously re-enters this Case with ONE "
+        "coalesced review turn — you do not need to serially long-poll wait_for_worker."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool: get_case  (minimal Case-aware read for the M3.1 vertical slice)
 # ---------------------------------------------------------------------------
 
@@ -1070,6 +1108,29 @@ _TOOLS = [
         },
     },
     {
+        "name": "arm_wait_group",
+        "description": (
+            "Arm a wait-GROUP over dispatched workers so the harness AUTONOMOUSLY re-enters "
+            "this Case when the group is satisfied — the M3.4 alternative to serially "
+            "long-polling wait_for_worker. condition ANY = wake on each new completion "
+            "(coalescing simultaneous ones) until drained; ALL/NAMED = wake ONCE when every "
+            "member has finished. On satisfaction the gateway delivers ONE coalesced review "
+            "turn to this live+idle Manager session. Use it when you want the Case to continue "
+            "itself across worker completions instead of blocking. A 404/disabled reason means "
+            "CASE_CONTINUATION_ENABLED is OFF on the gateway."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Manager's OWN Case id the group belongs to."},
+                "wait_group_id": {"type": "string", "description": "A name for this group (e.g. 'batch-1'). Arming the same group id again is idempotent."},
+                "condition": {"type": "string", "description": "ANY | ALL | NAMED. Default ANY (good for a single worker or 'wake me on each completion')."},
+                "member_task_ids": {"type": "array", "items": {"type": "string"}, "description": "The dispatched worker task_ids that make up the group."},
+            },
+            "required": ["case_id", "wait_group_id", "member_task_ids"],
+        },
+    },
+    {
         "name": "release_worker",
         "description": (
             "Close ONE worker session when YOU have decided that worker is truly done — the "
@@ -1102,6 +1163,7 @@ _TOOL_IMPLS = {
     "close_case": _close_case,
     "record_review": _record_review,
     "reconcile_waits": _reconcile_waits,
+    "arm_wait_group": _arm_wait_group,
     "release_worker": _release_worker,
 }
 
