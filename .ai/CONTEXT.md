@@ -1,8 +1,31 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-28
-**Active branch:** `main` — M2 Work Control Substrate + full M3 survivability arc merged; `HARNESS_FLOW_DRIVE` **ON** live.
+**Last Updated:** 2026-07-30
+**Active branch:** `main` — M2 Work Control Substrate + full M3 survivability arc merged; `HARNESS_FLOW_DRIVE` **ON** live; **M3.4 Job 1 (autonomous Case continuation) MERGED, flag OFF.**
 
+> **🟢 STATUS 2026-07-30 — M3.4 JOB 1 (AUTONOMOUS CASE CONTINUATION) BUILT, TESTED, MERGED (PR #45, `2771611`).**
+> The Rank-1 build item is done. The **Wake-Dispatcher** now lets one bounded Case *continue itself*
+> across worker completions without an operator poke: a Manager arms a wait-group (ANY | ALL | named)
+> over a dispatch set (`arm_wait_group` tool / `POST /api/cases/{id}/wait-group`); when satisfied over
+> the finished-but-unconsumed members, the harness schedules ONE deterministic `mesh_tasks`
+> continuation row (`cont:{case}:{gen}`, pinned to the reserved `__manager_continuation__` sentinel so
+> no worker can claim it), **atomically claims** it (single winner), delivers ONE **coalesced**
+> proactive review turn to the live+idle Manager session, and — on turn return — the **HARNESS** (not
+> the LLM) records consumption into the row's `result` (the watermark). Bounded by a **round cap**
+> (from `completion_criteria` JSON `{"round_cap":N}`, default 50); on exhaustion → `flow.interrupted`
+> + operator escalation. Crash between claim and consumption → the existing incarnation/stale-reaper
+> returns the row to `pending` → next tick **redelivers** (at-least-once; safe because Manager effects
+> are idempotent). **Reuse-only: zero new tables, zero new columns** (flow_events wait markers +
+> mesh_tasks claim/reaper + the `result` column + the stale-busy reconciler loop as the dispatcher
+> template). Flag `CASE_CONTINUATION_ENABLED`, **default OFF ⇒ byte-identical** — so this merge is a
+> no-op on live behavior until the flag is set. All six `docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md`
+> §8 acceptance steps are green (`tests/test_case_continuation.py`, fake backend, no paid CLI) + route
+> tests (`tests/test_control_api_wait_group.py`); ~206 targeted substrate tests green, no regressions;
+> CI green. **Live proof is the new Rank 1** (flag-on + gateway restart is a genuine operator call —
+> it switches on a new autonomous behavior, so it was NOT flipped here). **Jobs 2 (durable
+> reconstruction) + 3 (crash-respawn) remain, per design §7.** The A51 dispatch-registry plane stays
+> separate (design §10) — it neither advanced nor blocked this.
+>
 > **🟢 STATUS 2026-07-28 (latest) — MERGE-STATE RECONCILED + TWO NEW TRACKS QUEUED.**
 > Verified against git (`gh pr list --state all`): **every PR #5–#44 is MERGED except #30 (CLOSED)
 > — there are ZERO open PRs.** So the "OPEN / op-merge / built — op-merge" language scattered in the
@@ -427,9 +450,11 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
-| **1** | **M3.4 Autonomous Case Continuation — build Job 1** | The durable root-cause fix for the blocking-poll model (M3.3 only *bounded* `wait_for_worker`). Live+idle Case re-entry: condition-gated, coalesced, at-least-once `mesh_tasks`-leased wake; harness-recorded consumption; round cap. Keeps the harness driving one bounded Case autonomously across worker completions without a human poke. | 🟢 **DESIGN IMPLEMENTATION-READY, NOT STARTED.** `docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md` §8 = ready-to-dispatch packet; flag `CASE_CONTINUATION_ENABLED` default OFF ⇒ byte-identical; single cheap e2e (fake backend, no paid CLI). Milestone contract: `Task_Harness_v0.7_AUTOMATION.md` §M3.4. |
-| **2** | **A51 — dispatch-state-kit migration** | Replace the rotting prose `DISPATCH_LOG` (drifted ~16 PRs behind git — the reason THIS reconcile was needed) with machine-tracked, proof-gated job state. Vigilant migration: **zero lost jobs** across all 59 dispatch files. | 🟡 **AUTHORED, NOT STARTED.** Packet `.ai/dispatch/AGENT_51_DISPATCH_STATE_KIT_MIGRATION.md`. Reserved decisions: R1 pandas/pyarrow dep (absent from `.venv`), R2 dogfood-track. Plan/audit plane only — see design doc §10 boundary. |
-| **3** | **Node re-run of A43 — carrier-independent Manager acceptance** (#18) | The one unproven gap: A44 proved the merged code on the in-gateway `__local__` path only. Booting a role-full, tool-full Manager on a real node (`Horse`/`kanebra-worker`) is the acceptance test that survivable automation actually works off the fragile gateway host. | 🟡 **OPERATOR-GATED (paid).** Code merged (#18). Remote-node MCP reachability still deferred (on-box only). Highest-signal *validation* (vs. the build items above). |
+| **1** | **M3.4 Job 1 live proof — flag-on gateway restart** | Job 1 (Wake-Dispatcher) is MERGED & test-green but has **no live proof**. Flipping `CASE_CONTINUATION_ENABLED=1` turns on a *new autonomous behavior* (the harness re-enters a live Case on its own), so activation is a genuine operator call, not a silent deploy. | 🟡 **OPERATOR-GATED.** Code on `main` (PR #45, `2771611`), flag OFF ⇒ byte-identical. To activate: set `CASE_CONTINUATION_ENABLED=1` (+ the M3.4 sibling flags already ON) and `pm2 restart ai-team-gateway`, then arm a group on a live Case and watch it re-enter. |
+| **2** | **M3.4 Job 2 — durable Case reconstruction** | `get_case_brief` single-call state (objective + criteria + budget/rounds + dispatched workers via `flow_links` + latest verdict per worker + open/ready waits) from the DB alone + auto-`reconcile_waits` at role-boot. The prerequisite that makes crash-respawn (Job 3) *safe*. | 🟢 **DESIGN-READY, NOT STARTED.** `docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md` §7 job 2. Unblocked now that Job 1 landed. |
+| **3** | **A51 — dispatch-state-kit migration** | Replace the rotting prose `DISPATCH_LOG` (drifted ~16 PRs behind git — the reason THIS reconcile was needed) with machine-tracked, proof-gated job state. Vigilant migration: **zero lost jobs** across all 59 dispatch files. | 🟡 **AUTHORED, NOT STARTED.** Packet `.ai/dispatch/AGENT_51_DISPATCH_STATE_KIT_MIGRATION.md`. Reserved decisions: R1 pandas/pyarrow dep (absent from `.venv`), R2 dogfood-track. Plan/audit plane only — see design doc §10 boundary. |
+| **4** | **Node re-run of A43 — carrier-independent Manager acceptance** (#18) | The one unproven gap: A44 proved the merged code on the in-gateway `__local__` path only. Booting a role-full, tool-full Manager on a real node (`Horse`/`kanebra-worker`) is the acceptance test that survivable automation actually works off the fragile gateway host. | 🟡 **OPERATOR-GATED (paid).** Code merged (#18). Remote-node MCP reachability still deferred (on-box only). Highest-signal *validation*. |
+| — | ~~M3.4 Autonomous Case Continuation — build Job 1~~ | Durable root-cause fix for the blocking-poll model. | **✅ BUILT & MERGED 2026-07-30 (PR #45, `2771611`).** Wake-Dispatcher: wait-group (ANY/ALL/named) → deterministic `cont:{case}:{gen}` `mesh_tasks` lease (sentinel machine_id) → atomic claim → ONE coalesced proactive wake → harness-recorded consumption watermark → round cap → `flow.interrupted` on exhaustion. Reuse-only (no schema change). Flag `CASE_CONTINUATION_ENABLED` default OFF. Six §8 acceptance steps green (`tests/test_case_continuation.py`) + route tests. Live proof = Rank 1. |
 | — | ~~Gateway restart on `aaf1cb2` (PR #37)~~ | Re-connect the Manager MCP tools (`setting_sources`). | **DONE.** #37 merged 2026-07-22; gateway restarted since (last for #44). A fired Manager boots with tools. |
 | — | ~~M3.3 durable relay (PR #38)~~ | `wait_for_worker` in-process → crash loses the wait. | **MERGED** (PR #38, `main` 2026-07-22). Flag `DURABLE_RELAY_ENABLED` (default OFF); `worker.wait_pending`/`worker.wait_resolved` + `reconcile_waits`; 213 pytest green. Live e2e (flag-on marker→crash→reconcile) still un-run. M3.4 (Rank 1) is the layer that *consumes* this relay. |
 | — | ~~Carrier-independent Manager role (#18)~~ | Manager booted only on in-gateway driver. | **MERGED** (PR #18, `main`, 2026-07-14). Dropped `case_role` restored across the dispatch seam. |
