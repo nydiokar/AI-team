@@ -45,7 +45,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +189,43 @@ def durable_relay_enabled() -> bool:
     return os.environ.get("DURABLE_RELAY_ENABLED", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
+
+
+def case_continuation_enabled() -> bool:
+    """[M3.4] Whether autonomous Case continuation (the Wake-Dispatcher) is active.
+
+    Canonical read of ``CASE_CONTINUATION_ENABLED`` (truthy: 1/true/yes/on);
+    default OFF. Mirrors ``durable_relay_enabled()``. When OFF: ``arm_wait_group``
+    writes nothing and the orchestrator Wake-Dispatcher tick is a no-op ⇒ no
+    ``cont:*`` rows are enqueued and no proactive wake turns are delivered ⇒
+    byte-identical to pre-M3.4 behavior.
+    """
+    return os.environ.get("CASE_CONTINUATION_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+# [M3.4] The reserved ``machine_id`` sentinel that keeps a continuation row
+# STRUCTURALLY invisible to every worker/embedded claim scan. The worker scan
+# filters ``WHERE status='pending' AND (machine_id IS NULL OR machine_id = ?)``;
+# this sentinel is neither NULL nor any real ``node_id``, so no worker can ever
+# claim it. ``action`` is the Wake-Dispatcher's discriminator for the row.
+CONTINUATION_MACHINE_SENTINEL = "__manager_continuation__"
+CONTINUATION_ACTION = "manager_continuation"
+# Default round cap when a Case's completion_criteria does not carry an explicit
+# ``round_cap`` — a backstop against a runaway continuation loop, not a tuning knob.
+DEFAULT_CONTINUATION_ROUND_CAP = 50
+
+
+def continuation_task_id(case_id: str, generation: int) -> str:
+    """[M3.4] Deterministic id for a Case's generation-N continuation row.
+
+    Deterministic ⇒ two racing Wake-Dispatcher ticks that both see the SAME
+    satisfaction compute the SAME id, so the ``UNIQUE constraint`` on
+    ``mesh_tasks.id`` collapses them to one row and the atomic ``claim_task``
+    elects a single winner. The generation is parsed back off the id suffix.
+    """
+    return f"cont:{case_id}:{int(generation)}"
 
 
 def flow_drive_enabled() -> bool:
@@ -2230,6 +2267,274 @@ class MeshDB:
                     "timeout": pl.get("timeout") if isinstance(pl, dict) else None,
                 })
         return {"ok": True, "resolved": resolved_out, "pending": pending_out}
+
+    # ------------------------------------------------------------------
+    # [M3.4] Autonomous Case continuation. A Manager arms a wait-GROUP over a
+    # dispatch set with a condition (ANY|ALL|named); when the group is satisfied
+    # over the finished-but-unconsumed members, the orchestrator Wake-Dispatcher
+    # schedules ONE deterministic mesh_tasks continuation row, atomically claims
+    # it (single winner), delivers one coalesced proactive turn, and — on turn
+    # return — the HARNESS records consumption into the row's ``result`` (the
+    # watermark). Wait-group state is DERIVED from the append-only flow_events
+    # ledger; the only enriched write is the group-scoped ``worker.wait_pending``
+    # payload. No new table, no new columns. Flag-gated by
+    # ``case_continuation_enabled()`` (default OFF ⇒ nothing is written).
+    # ------------------------------------------------------------------
+
+    def arm_wait_group(
+        self,
+        flow_run_id: str,
+        wait_group_id: str,
+        condition: str,
+        member_task_ids: List[str],
+        *,
+        actor: str = "manager",
+    ) -> Optional[int]:
+        """[M3.4] Arm a Manager wait-group as a durable ``worker.wait_pending`` marker.
+
+        ``condition`` ∈ {ANY, ALL, NAMED} (case-insensitive; anything else ⇒ ANY).
+        The group is a single group-scoped ``worker.wait_pending`` flow_event
+        (``entity_type='wait_group'``, ``entity_id=wait_group_id``) carrying
+        ``{wait_group_id, condition, member_task_ids}`` — the enriched payload the
+        Wake-Dispatcher derives group state from. Distinct from A46's per-task
+        ``worker.wait_pending`` markers (those stay untouched).
+
+        Idempotent per (case, wait_group_id): if an unresolved group marker already
+        exists it is NOT duplicated and its event id is returned. Flag-gated by
+        ``case_continuation_enabled()`` (OFF ⇒ returns None, writes nothing).
+        """
+        if not case_continuation_enabled():
+            return None
+        cond = str(condition or "ANY").upper()
+        if cond not in ("ANY", "ALL", "NAMED"):
+            cond = "ANY"
+        # Idempotency: a group marker is "live" until a later resolve for the same
+        # group clears it — scan in order and keep the last relevant one.
+        existing: Optional[Dict[str, Any]] = None
+        for e in self.list_flow_events(flow_run_id):
+            if e.get("entity_type") != "wait_group" or e.get("entity_id") != wait_group_id:
+                continue
+            if e.get("event_type") == "worker.wait_pending":
+                existing = e
+            elif e.get("event_type") == "worker.wait_resolved":
+                existing = None
+        if existing is not None:
+            return int(existing["id"])
+        return self.append_flow_event(
+            flow_run_id, "worker.wait_pending", actor,
+            entity_type="wait_group", entity_id=wait_group_id,
+            payload={
+                "wait_group_id": wait_group_id,
+                "condition": cond,
+                "member_task_ids": list(member_task_ids or []),
+            },
+        )
+
+    def list_continuation_rows(self, case_id: str) -> List[Dict[str, Any]]:
+        """[M3.4] The continuation ``mesh_tasks`` rows for a Case, oldest generation
+        first. Keyed by the deterministic id prefix ``cont:{case}:`` and the
+        reserved ``manager_continuation`` action. Read-only."""
+        rows = self._conn().execute(
+            "SELECT * FROM mesh_tasks WHERE action = ? AND id LIKE ? ORDER BY id ASC",
+            (CONTINUATION_ACTION, f"cont:{case_id}:%"),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def continuation_watermark(self, case_id: str) -> Tuple[set, int, int]:
+        """[M3.4] The consumed watermark for a Case, from its continuation rows.
+
+        Returns ``(consumed_task_ids, completed_rounds, highest_generation)``:
+          * ``consumed_task_ids`` = ⋃ ``result.consumed_task_ids`` over all
+            **completed** continuation rows — the set a next-satisfaction check
+            subtracts. An in-flight (claimed, not completed) row contributes
+            NOTHING, which is exactly why a crash redelivers rather than drops.
+          * ``completed_rounds`` = number of completed continuation rows = the
+            authoritative round count (the next generation is this + 1).
+          * ``highest_generation`` = max generation present (any status).
+        """
+        consumed: set = set()
+        completed = 0
+        highest = 0
+        for r in self.list_continuation_rows(case_id):
+            try:
+                gen = int(str(r.get("id", "")).rsplit(":", 1)[-1])
+            except Exception:
+                continue
+            highest = max(highest, gen)
+            if r.get("status") == "completed":
+                completed += 1
+                raw = r.get("result")
+                if raw:
+                    try:
+                        res = json.loads(raw)
+                        consumed |= set(res.get("consumed_task_ids") or [])
+                    except Exception:
+                        pass
+        return consumed, completed, highest
+
+    def compute_continuation_tick(self, flow_run_id: str) -> Dict[str, Any]:
+        """[M3.4] Derive, purely from the ledger, whether a Case has a satisfied
+        wait-group this tick and what a wake turn would present.
+
+        Returns ``{satisfied, presented_task_ids, satisfied_groups, generation_next,
+        completed_rounds, watermark}``. ``generation_next`` = completed_rounds + 1
+        (NOT highest+1): an in-flight round keeps the same generation so a racing
+        tick recomputes the SAME continuation id and the atomic claim dedupes it.
+        Each satisfied group carries ``{wait_group_id, condition, presented,
+        retire}`` — ``retire`` marks a one-shot (ALL/NAMED) group, or an ANY group
+        whose every member is now finished, to be discharged on consumption.
+        """
+        groups: Dict[str, Dict[str, Any]] = {}
+        resolved: set = set()
+        finished: Dict[str, str] = {}
+        for e in self.list_flow_events(flow_run_id):
+            et = e.get("event_type")
+            if e.get("entity_type") == "wait_group":
+                gid = e.get("entity_id")
+                if not gid:
+                    continue
+                if et == "worker.wait_pending":
+                    pl = _event_payload(e) or {}
+                    groups[gid] = {
+                        "condition": str(pl.get("condition", "ANY")).upper(),
+                        "members": list(pl.get("member_task_ids") or []),
+                    }
+                elif et == "worker.wait_resolved":
+                    resolved.add(gid)
+            elif et == "task.finished":
+                tid = e.get("entity_id")
+                if tid:
+                    finished[tid] = _event_outcome(e) or "success"
+
+        consumed, completed, _highest = self.continuation_watermark(flow_run_id)
+        presented: List[str] = []
+        sat_groups: List[Dict[str, Any]] = []
+        for gid, g in groups.items():
+            if gid in resolved:
+                continue
+            members = g["members"]
+            cond = g["condition"]
+            if not members:
+                continue
+            finished_unconsumed = [t for t in members if t in finished and t not in consumed]
+            all_finished = all(t in finished for t in members)
+            if cond in ("ALL", "NAMED"):
+                ok = all_finished and len(finished_unconsumed) > 0
+                retire = all_finished  # one-shot: discharged as soon as consumed
+            else:  # ANY — edge-triggered, repeating; retires only when drained
+                ok = len(finished_unconsumed) > 0
+                retire = all_finished
+            if ok:
+                sat_groups.append({
+                    "wait_group_id": gid,
+                    "condition": cond,
+                    "presented": list(finished_unconsumed),
+                    "retire": bool(retire),
+                })
+                for t in finished_unconsumed:
+                    if t not in presented:
+                        presented.append(t)
+        return {
+            "satisfied": len(sat_groups) > 0,
+            "presented_task_ids": presented,
+            "satisfied_groups": sat_groups,
+            "generation_next": completed + 1,
+            "completed_rounds": completed,
+            "watermark": sorted(consumed),
+        }
+
+    def record_continuation_consumed(
+        self,
+        flow_run_id: str,
+        continuation_id: str,
+        generation: int,
+        consumed_task_ids: List[str],
+        retired_group_ids: Optional[List[str]] = None,
+        *,
+        actor: str = "system",
+    ) -> None:
+        """[M3.4] The HARNESS transport ACK: mark a continuation row completed with
+        its consumed watermark, and discharge any one-shot groups it drained.
+
+        This is written by the orchestrator when the proactive wake turn returns —
+        NOT by the LLM. Setting ``status='completed'`` + ``result={generation,
+        consumed_task_ids}`` advances the watermark and counts round ``generation``.
+        For each retired group, a semantic ``worker.wait_resolved`` marker is
+        appended (``worker.wait_resolved`` is NEVER the transport ack — that is this
+        row completion). Idempotent-safe: re-completing an already-completed row is
+        a harmless overwrite of the same terminal state.
+        """
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    UPDATE mesh_tasks
+                    SET status = 'completed', result = ?, completed_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        json.dumps({
+                            "generation": int(generation),
+                            "consumed_task_ids": list(consumed_task_ids or []),
+                        }),
+                        now, now, continuation_id,
+                    ),
+                )
+        except Exception as e:
+            logger.warning(
+                "event=db_continuation_consume_failed id=%s err=%s", continuation_id, e,
+            )
+        for gid in (retired_group_ids or []):
+            self.append_flow_event(
+                flow_run_id, "worker.wait_resolved", actor,
+                entity_type="wait_group", entity_id=gid,
+                payload={"wait_group_id": gid, "outcome": "drained"},
+            )
+
+    def list_open_cases(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """[M3.4] Open (non-terminal) Cases — the Wake-Dispatcher's per-tick scan set.
+
+        A Case is open while its ``status`` is NULL/'' or any non-terminal value
+        (terminal = ``_CLOSED_STATUSES``). Read-only; newest first."""
+        placeholders = ",".join("?" * len(self._CLOSED_STATUSES))
+        rows = self._conn().execute(
+            f"""
+            SELECT * FROM flow_runs
+            WHERE COALESCE(status, '') NOT IN ({placeholders})
+            ORDER BY created_at DESC LIMIT ?
+            """,
+            (*self._CLOSED_STATUSES, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def case_manager_session_id(self, flow_run_id: str) -> Optional[str]:
+        """[M3.4] The session bound to a Case as its Manager (the wake target), or
+        None. Reads the authoritative ``flow_links`` (entity_type='session',
+        role='manager'); the most recent such link wins."""
+        links = self.list_flow_links(
+            flow_run_id=flow_run_id, entity_type="session", role="manager",
+        )
+        if not links:
+            return None
+        return str(links[-1].get("entity_id") or "") or None
+
+    def case_round_cap(self, flow_run_id: str) -> int:
+        """[M3.4] The continuation round cap for a Case. Carried in
+        ``completion_criteria`` as JSON ``{"round_cap": N}`` when present; otherwise
+        ``DEFAULT_CONTINUATION_ROUND_CAP``. A cap is a sibling termination criterion,
+        NOT a new column."""
+        row = self.get_flow_run(flow_run_id)
+        raw = (row or {}).get("completion_criteria")
+        if isinstance(raw, str) and raw.strip().startswith("{"):
+            try:
+                parsed = json.loads(raw)
+                cap = parsed.get("round_cap")
+                if isinstance(cap, int) and cap > 0:
+                    return cap
+            except Exception:
+                pass
+        return DEFAULT_CONTINUATION_ROUND_CAP
 
     # ------------------------------------------------------------------
     # Approvals (Move H) — durable approval gate. A pending approval is a

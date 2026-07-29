@@ -213,10 +213,24 @@ and ANY alike.
 
 ## 7. Implementation order (resolves the live-vs-crash dependency)
 
-1. **Job 1 — Live-session re-entry.** Wait-condition + coalesced Case-level wake + atomic
-   `mesh_tasks` continuation lease + harness-recorded consumption + round cap. Handles what the
-   SDK can't: continuing a Case whose Manager session is **live and idle**. No reconstruction, no
-   respawn. **(Full dispatch below.)**
+1. **Job 1 — Live-session re-entry. ✅ BUILT 2026-07-30** (`feat/m34-case-continuation-job1`).
+   Wait-condition + coalesced Case-level wake + atomic `mesh_tasks` continuation lease +
+   harness-recorded consumption + round cap. Handles what the SDK can't: continuing a Case whose
+   Manager session is **live and idle**. No reconstruction, no respawn. **(Full dispatch below.)**
+   *Delivered:* flag `CASE_CONTINUATION_ENABLED` (default OFF ⇒ byte-identical); db layer
+   `arm_wait_group` / `compute_continuation_tick` / `continuation_watermark` /
+   `record_continuation_consumed` / `list_open_cases` / `case_manager_session_id` /
+   `case_round_cap` + the `cont:{case}:{gen}` deterministic id, `__manager_continuation__` machine
+   sentinel and `manager_continuation` action (no new table, no new columns); orchestrator
+   Wake-Dispatcher loop (`_start_wake_dispatcher`/`_wake_dispatcher_tick_once`/`_continue_case_once`
+   /`_finalize_continuation`) mirroring the stale-busy reconciler; `arm_wait_group` orchestrator
+   seam + `POST /api/cases/{id}/wait-group` route + `arm_wait_group` MCP tool. The full §8
+   acceptance test (`tests/test_case_continuation.py`, all six steps) + route tests
+   (`tests/test_control_api_wait_group.py`) are green (fake backend, no paid CLI). **Live proof
+   (flag-on, real Manager wake) is operator-gated** — needs a gateway restart with the flag ON.
+   *Generation is `completed_rounds + 1`* (not highest+1) so an in-flight round keeps its id and the
+   atomic claim dedupes concurrent ticks. *Round cap* is read from `completion_criteria` JSON
+   `{"round_cap": N}` (default `DEFAULT_CONTINUATION_ROUND_CAP=50`).
 2. **Job 2 — Durable Case reconstruction.** `get_case_brief` single-call state (objective +
    `completion_criteria` + budget/rounds + dispatched workers via `flow_links` + latest verdict
    per worker + open/ready waits) from the DB alone (today `get_case` returns
