@@ -190,6 +190,13 @@ class CaseWaitGroupBody(BaseModel):
     member_task_ids: List[str]
 
 
+class CaseInterruptBody(BaseModel):
+    """[A53] Kill a Case: cancel its in-flight worker task(s), mark it blocked
+    (resumable), record flow.interrupted, escalate once. ``reason`` is an optional
+    short label for the interruption (defaults to 'operator_kill')."""
+    reason: Optional[str] = None
+
+
 class CaseOpenBody(BaseModel):
     """[M3.3] Open a NEW Case on an EXISTING Manager session — so one long-lived
     Manager session can own many Cases sequentially instead of spawning a fresh
@@ -677,8 +684,18 @@ def build_control_api(orchestrator) -> FastAPI:
             yield cached
 
     @app.get("/health")
-    def health() -> Dict[str, str]:
-        return {"status": "ok"}
+    def health() -> Dict[str, Any]:
+        # [A53] Surface the effective SDK-driver governor ceilings so the operator
+        # can verify the turn/cost cap is actually configured (read-only). None ⇒
+        # no cap enforced ⇒ legacy unbounded session.
+        governor: Dict[str, Any] = {"sdk_max_turns": None, "sdk_max_budget_usd": None}
+        try:
+            from config import config as _cfg
+            governor["sdk_max_turns"] = getattr(_cfg.claude, "sdk_max_turns", None)
+            governor["sdk_max_budget_usd"] = getattr(_cfg.claude, "sdk_max_budget_usd", None)
+        except Exception:
+            pass
+        return {"status": "ok", "governor": governor}
 
     @app.get("/api/sessions", dependencies=[Depends(_require_auth)])
     def api_sessions(limit: int = Query(200, ge=1, le=1000)) -> JSONResponse:
@@ -1372,6 +1389,19 @@ def build_control_api(orchestrator) -> FastAPI:
         result = orchestrator.arm_wait_group(
             case_id, body.wait_group_id, cond, body.member_task_ids, actor="manager",
         )
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/interrupt", dependencies=[Depends(_require_auth)])
+    async def api_interrupt_case(case_id: str, body: CaseInterruptBody) -> JSONResponse:
+        """[A53] KILL path: cancel a Case's in-flight worker task(s), mark it
+        blocked (resumable), record flow.interrupted, escalate once. NOT flag-gated
+        — a safety valve must always be reachable. Idempotent. 404 for an unknown
+        or already-terminal Case; 200 with ``{ok, cancelled_tasks, already}``."""
+        reason = (body.reason or "operator_kill").strip()[:64] or "operator_kill"
+        result = await orchestrator.interrupt_case(case_id, actor="operator", reason=reason)
+        if not result.get("ok"):
+            code = 404 if result.get("reason") in ("case_not_found", "case_closed") else 503
+            raise HTTPException(status_code=code, detail=result)
         return JSONResponse(result)
 
     @app.post("/api/sessions/{session_id}/bind", dependencies=[Depends(_require_auth)])
