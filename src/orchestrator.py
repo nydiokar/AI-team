@@ -2308,6 +2308,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         session_id: str,
         role: str = "manager",
         completion_criteria: Optional[str] = None,
+        round_cap: Optional[int] = None,
     ) -> Optional[str]:
         """[A36] Orchestrator seam over ``db.open_case`` — the sanctioned Case birth.
 
@@ -2325,6 +2326,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             flow_run_id = db.open_case(
                 objective, session_id, role=role,
                 completion_criteria=completion_criteria,
+                round_cap=round_cap,
             )
             self._set_session_case_affiliation(session_id, flow_run_id, role=role)
             return flow_run_id

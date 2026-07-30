@@ -135,18 +135,42 @@ catch yourself reaching for `watch_job` to run an agent, that is the signal to u
 with the model you selected. (Model tiering applies to a newly opened worker session; a reused
 `session_id` keeps its boot model.)
 
-**Waiting on a batch — do NOT serially long-poll.** `wait_for_worker` is an in-turn BLOCKING poll:
-while it runs your session is BUSY, so you can neither review a different worker that already
-finished nor answer the operator. After dispatching several workers, do not call `wait_for_worker`
-on each one back-to-back with a long timeout — that leaves you blocked on worker A for its full
-timeout while B, C and D sit finished. Instead: keep a mental list of the task_ids you dispatched,
-then either use ONE short wait or read the Case timeline (`get_case` / `task.finished` events) to
-find whichever worker is already done, review that one, and move on. The wait ceiling is
-intentionally short (≤10 min); a `TIMEOUT` return is not an error — it hands control back so you can
-re-check the timeline or respond to the operator. Trust the durable signals (git commits +
-`task.finished` on the Case timeline), not a single blocking poll. (The durable, event-driven
-replacement that wakes you on each completion instead of blocking is M3.4 — see
-`docs/AUTONOMOUS_CASE_CONTINUATION_DESIGN.md`.)
+**Waiting on a batch — arm a wait-group and RETURN control; do NOT block-poll.** Your default
+posture after fanning out workers is event-driven, not a blocking wait. Call
+`arm_wait_group(case_id, member_task_ids=[…], condition=…)` and then **return control** — end your
+turn. The harness (M3.4 Wake-Dispatcher) re-enters this Case with a coalesced review turn each time
+the group is satisfied, so you review completions as they land instead of sitting blocked. Pick the
+condition by intent:
+- **`ANY`** — wake me on *each* completion (coalescing simultaneous ones) until the batch is drained.
+  This is the default and what you want for a fan-out you review incrementally.
+- **`ALL`** — wake me *once*, when every member has finished (a barrier before a synthesis step).
+- **`NAMED`** — wake me once a specific named subset is done.
+
+Crucially, **a wake never interrupts a live operator turn** — if you are mid-conversation (session
+BUSY) the Wake-Dispatcher skips and coalesces, so you stay free to talk to the operator while
+workers run and are re-entered only when you are idle. This is the whole point: arm-and-return keeps
+you conversational instead of frozen on a poll.
+
+Bound an autonomous run with `open_case(round_cap=N)` (a small N, e.g. 6–10, for a live run): after
+N re-entries the Case escalates instead of looping forever. Trust the durable signals (git commits +
+`task.finished` on the Case timeline) when you review.
+
+`wait_for_worker` is now a **last-resort single synchronous wait** — use it only when you have
+exactly one worker outstanding and nothing else to do meanwhile. It is an in-turn BLOCKING poll:
+while it runs your session is BUSY, so you can neither review another finished worker nor answer the
+operator. Never chain it across a batch. Its ceiling is intentionally short (≤10 min) and a
+`TIMEOUT` return is not an error — it hands control back. If `arm_wait_group` returns a
+`disabled`/404 reason, `CASE_CONTINUATION_ENABLED` is OFF on the gateway (see the activation runbook
+below); until it is on, fall back to a single short `wait_for_worker` plus reading the Case timeline.
+
+### Activation runbook (operator) — turning the Wake-Dispatcher on
+The arm-and-return loop above is live only when the gateway has the continuation engine enabled. To
+activate (operator's call — it switches on new autonomous behavior):
+1. Set `CASE_CONTINUATION_ENABLED=1` in the gateway `.env`.
+2. Confirm the sibling flags are on: `HARNESS_FLOW_DRIVE=1`, `MANAGER_ROLE_ENABLED=1`.
+3. `pm2 restart ai-team-gateway`, then `curl http://127.0.0.1:9003/health` → `{"status":"ok"}`.
+4. Verify inert-when-off is now on: a Manager's `arm_wait_group` should return `ok` (not a
+   `disabled` reason). Flag OFF ⇒ arming is a silent no-op (byte-identical to pre-M3.4).
 
 ## Reviewing a worker's delivery — adversarial review gate
 
