@@ -16,6 +16,8 @@ _MANAGED_ENV_KEYS = {
     "CLAUDE_DEFAULT_MODEL",
     "CLAUDE_DRIVER_TYPE",
     "CLAUDE_MAX_TURNS",
+    "CLAUDE_SDK_MAX_BUDGET_USD",
+    "CLAUDE_SDK_MAX_TURNS",
     "CLAUDE_SKIP_PERMISSIONS",
     "CLAUDE_TIMEOUT_SEC",
     "CODEX_DEFAULT_MODEL",
@@ -101,6 +103,15 @@ class ClaudeConfig:
     skip_permissions: bool = False
     timeout: int = 36000  # 10 hours
     max_turns: int = 0
+    # [A53] Governor for the PERSISTENT SDK driver (Manager/worker role sessions) —
+    # distinct from `max_turns` above, which tunes the legacy one-off/print_resume
+    # path. None ⇒ no ceiling passed to ClaudeAgentOptions ⇒ byte-identical legacy
+    # boot. A positive value is enforced by the SDK (turns) / (USD budget) and, on
+    # breach, surfaces the session honestly instead of a silent stall. A Manager
+    # session legitimately runs many turns, so this MUST be sized independently of
+    # the one-off `max_turns`.
+    sdk_max_turns: Optional[int] = None
+    sdk_max_budget_usd: Optional[float] = None
     # Working directory controls
     base_cwd: Optional[str] = None
     allowed_root: Optional[str] = None
@@ -327,6 +338,7 @@ class Config:
                 self.claude.timeout = max(1, int(to))
         except Exception:
             pass
+        self._apply_sdk_governor_env()
         try:
             dt = os.getenv("CLAUDE_DRIVER_TYPE")
             if dt is not None and dt in ("sdk", "auto", "print_resume"):
@@ -421,6 +433,25 @@ class Config:
             # If the catalog can't be imported for any reason, don't block startup.
             return value
 
+    def _apply_sdk_governor_env(self) -> None:
+        """[A53] Parse the persistent-SDK-driver governor knobs (turns + USD budget).
+        Absent or non-positive ⇒ None ⇒ no ceiling passed to the SDK ⇒ byte-identical
+        legacy boot. Shared by ``__init__`` and ``_apply_env_overrides``."""
+        try:
+            smt = os.getenv("CLAUDE_SDK_MAX_TURNS")
+            if smt is not None:
+                v = int(smt)
+                self.claude.sdk_max_turns = v if v > 0 else None
+        except Exception:
+            pass
+        try:
+            smb = os.getenv("CLAUDE_SDK_MAX_BUDGET_USD")
+            if smb is not None:
+                b = float(smb)
+                self.claude.sdk_max_budget_usd = b if b > 0 else None
+        except Exception:
+            pass
+
     def _apply_env_overrides(self) -> None:
         """Apply environment variable overrides to runtime-tunable settings."""
         try:
@@ -435,6 +466,7 @@ class Config:
                 self.claude.timeout = max(1, int(to))
         except Exception:
             pass
+        self._apply_sdk_governor_env()
         # Optional working directory overrides (Windows-first). If provided, use them.
         try:
             base = os.getenv("CLAUDE_BASE_CWD")

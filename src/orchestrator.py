@@ -731,6 +731,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             CONTINUATION_MACHINE_SENTINEL, CONTINUATION_ACTION, continuation_task_id,
             _event_payload,
         )
+        # [A53] A killed/interrupted Case (status 'blocked', set ONLY by the kill
+        # path) is NOT auto-resumed by the Wake-Dispatcher — it awaits explicit
+        # operator re-entry. Without this, cancelling in-flight workers would be
+        # undone by the next satisfied-wait tick re-driving the very Case the
+        # operator killed. ('blocked' has exactly one writer: interrupt_case.)
+        _row = db.get_flow_run(case_id)
+        if _row is not None and str(_row.get("status") or "").strip().lower() == "blocked":
+            return 0
         tick = db.compute_continuation_tick(case_id)
         if not tick.get("satisfied"):
             return 0
@@ -901,6 +909,90 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
         except Exception as e:
             logger.debug("event=case_continuation_escalate_failed case=%s err=%s", case_id, e)
+
+    async def interrupt_case(
+        self, case_id: str, *, actor: str = "operator", reason: str = "operator_kill",
+    ) -> Dict[str, Any]:
+        """[A53] Programmatic/operator KILL path for a Case.
+
+        Cancels the Case's in-flight worker task(s) (reusing the cooperative
+        ``cancel_task`` plumbing — no second cancel mechanism), records a
+        ``flow.interrupted`` event, and marks the Case ``status='blocked'`` — a
+        RESUMABLE state (per A37, 'blocked' is still OPEN), NEVER a force-close
+        (closure stays the authoritative, criteria-gated ``close_case`` op).
+        Escalates to the operator exactly once. Idempotent: a second call on an
+        already-interrupted Case cancels nothing new, writes no duplicate event,
+        and re-escalates nothing — it just reports the prior interruption.
+
+        Returns ``{ok, reason?, cancelled_tasks, already, status}``.
+        """
+        from src.control.db import get_db, _event_payload
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        row = db.get_flow_run(case_id)
+        if row is None:
+            return {"ok": False, "reason": "case_not_found"}
+        status = str(row.get("status") or "").strip().lower()
+        if status in ("closed", "cancelled"):
+            # A terminal Case cannot be interrupted — it is already done.
+            return {"ok": False, "reason": "case_closed", "status": status}
+
+        # Idempotency: has this Case ALREADY been killed? Any prior operator kill
+        # (a flow.interrupted whose reason is NOT the round-cap escalation) counts —
+        # a second kill, even with a different reason label, must not double-write /
+        # double-escalate. (round_cap_exhausted is the Wake-Dispatcher's own escalation
+        # and is deliberately excluded so a kill after a cap-escalation still fires.)
+        already = any(
+            e.get("event_type") == "flow.interrupted"
+            and (_event_payload(e) or {}).get("reason") != "round_cap_exhausted"
+            for e in db.list_flow_events(case_id)
+        )
+
+        # Cancel the in-flight WORKER tasks joined to this Case. A dispatched worker
+        # task is linked entity_type='task', role='task', created_by='manager' (the
+        # Manager's own-turn attach is created_by='system'; the root task is
+        # role='root_task') — so filter on created_by to target only workers.
+        # Best-effort; an already-cancelled/absent task returns False ⇒ idempotent.
+        cancelled: List[str] = []
+        try:
+            for link in db.list_flow_links(
+                flow_run_id=case_id, entity_type="task", role="task",
+            ):
+                if str(link.get("created_by") or "") != "manager":
+                    continue
+                tid = str(link.get("entity_id") or "").strip()
+                if tid and self.cancel_task(tid):
+                    cancelled.append(tid)
+        except Exception as e:
+            logger.warning("event=interrupt_case_cancel_failed case=%s err=%s", case_id, e)
+
+        # Mark blocked (resumable) — a follow-up turn can re-enter the Case.
+        if status != "blocked":
+            try:
+                db.update_flow_run(case_id, status="blocked")
+            except Exception as e:
+                logger.warning("event=interrupt_case_block_failed case=%s err=%s", case_id, e)
+
+        if not already:
+            db.append_flow_event(
+                case_id, "flow.interrupted", actor,
+                payload={"reason": reason, "cancelled_tasks": cancelled},
+            )
+            self._emit_event(
+                "case_interrupted", None,
+                {"case_id": case_id, "reason": reason, "cancelled": len(cancelled)},
+            )
+            try:
+                await self.notifier.notify_error(
+                    f"[kill] Case {case_id} was interrupted ({reason}); "
+                    f"{len(cancelled)} in-flight worker task(s) cancelled. The Case is "
+                    "BLOCKED (resumable) — re-enter it to continue or close it."
+                )
+            except Exception as e:
+                logger.debug("event=interrupt_case_escalate_failed case=%s err=%s", case_id, e)
+
+        return {"ok": True, "cancelled_tasks": cancelled, "already": already, "status": "blocked"}
 
     def _start_stale_busy_reconciler(self) -> None:
         """Start the periodic M3 reconciliation loop when mesh routing is active."""
