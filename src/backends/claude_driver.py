@@ -432,6 +432,24 @@ def _session_allowed_tools(role: Optional[str] = None) -> List[str]:
     return tools
 
 
+def _governor_option_kwargs(
+    max_turns: Optional[int], max_budget_usd: Optional[float],
+) -> Dict[str, Any]:
+    """[A53] The ClaudeAgentOptions governor kwargs for an SDK session.
+
+    Returns ``max_turns`` / ``max_budget_usd`` ONLY when set to a positive value —
+    so an unconfigured session passes neither and boots byte-identically to the
+    pre-A53 path. Pure + module-level so the enforcement wiring is unit-testable
+    without booting the SDK. Both are first-class ClaudeAgentOptions fields; the
+    SDK halts the session on breach (surfaced honestly, not a silent stall)."""
+    kw: Dict[str, Any] = {}
+    if isinstance(max_turns, int) and not isinstance(max_turns, bool) and max_turns > 0:
+        kw["max_turns"] = max_turns
+    if isinstance(max_budget_usd, (int, float)) and not isinstance(max_budget_usd, bool) and max_budget_usd > 0:
+        kw["max_budget_usd"] = float(max_budget_usd)
+    return kw
+
+
 class _SDKSession:
     """Holds the live async SDK client and its dedicated asyncio event loop,
     both running in a background daemon thread.
@@ -460,6 +478,8 @@ class _SDKSession:
         system_prompt: Optional[Dict[str, object]] = None,
         allowed_tools: Optional[List[str]] = None,
         setting_sources: Optional[List[str]] = None,
+        max_turns: Optional[int] = None,
+        max_budget_usd: Optional[float] = None,
     ):
         self.session_key = session_key
         self.cwd = cwd
@@ -467,6 +487,9 @@ class _SDKSession:
         self.effort = effort
         self.resume = resume
         self.proc_env = proc_env
+        # [A53] Governor ceilings for this SDK session (None ⇒ no cap ⇒ legacy).
+        self.max_turns = max_turns
+        self.max_budget_usd = max_budget_usd
         # [A38] Role-boot injection: when set (manager session, flag ON), the
         # options build appends the role's system_prompt and uses the pre-scoped
         # tool list. Both None ⇒ the default path (byte-identical to pre-A38).
@@ -544,6 +567,7 @@ class _SDKSession:
             **({"resume": self.resume} if self.resume else {}),
             **({"system_prompt": self.system_prompt} if self.system_prompt else {}),
             **({"setting_sources": self.setting_sources} if self.setting_sources else {}),
+            **_governor_option_kwargs(self.max_turns, self.max_budget_usd),
         )
 
         self._client = ClaudeSDKClient(options=options)
@@ -991,12 +1015,25 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 # connected — dispatch_worker silently absent. Keeping "user" restores
                 # the MCP wiring while still loading the project CLAUDE.md.
                 setting_sources = ["user", "project"] if system_prompt is not None else None
+                # [A53] Resolve the SDK-driver governor ceilings from config
+                # (None ⇒ no cap ⇒ byte-identical legacy boot). Best-effort: a
+                # config glitch must never block a session boot.
+                gov_max_turns: Optional[int] = None
+                gov_max_budget: Optional[float] = None
+                try:
+                    from config import config as _cfg
+                    gov_max_turns = getattr(_cfg.claude, "sdk_max_turns", None)
+                    gov_max_budget = getattr(_cfg.claude, "sdk_max_budget_usd", None)
+                except Exception:
+                    pass
                 sdk_sess = _SDKSession(
                     key, session.repo_path, model, proc_env,
                     effort=effort,
                     resume=resume_id,
                     system_prompt=system_prompt, allowed_tools=allowed_tools,
                     setting_sources=setting_sources,
+                    max_turns=gov_max_turns,
+                    max_budget_usd=gov_max_budget,
                 )
                 sdk_sess._on_proactive = self._on_proactive
                 sdk_sess.start()

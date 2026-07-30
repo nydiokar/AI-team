@@ -71,11 +71,49 @@ The round cap (A52/M3.4); reconstruction/respawn (A54/A55).
 
 ---
 ## Milestone (burndown)
-- [ ] max_turns threaded into ClaudeAgentOptions + config knob + health surfacing
-- [ ] kill path → cancel + flow.interrupted + blocked (resumable) + escalate, idempotent
-- [ ] cost cap shipped or reserved with a written reason
-- [ ] e2e green, default byte-identical
-- [ ] PR opened + merged
+- [x] max_turns threaded into ClaudeAgentOptions + config knob + health surfacing
+- [x] kill path → cancel + flow.interrupted + blocked (resumable) + escalate, idempotent
+- [x] cost cap shipped (native `max_budget_usd`) — not reserved; it was cheap (see below)
+- [x] e2e green, default byte-identical
+- [x] PR opened + merged
 
-## Closure (fill on completion)
-_(verdict + evidence)_
+## Closure (2026-07-30) — SHIPPED
+**Verdict:** built + merged on `feat/m33-turn-cost-governor`. Both halves shipped; cost cap came for
+free (the SDK exposes it natively), so R1's turns-only fallback was unnecessary.
+
+**Turn/cost governor (a + c):**
+- New `ClaudeConfig.sdk_max_turns: Optional[int]` + `sdk_max_budget_usd: Optional[float]` (default
+  None ⇒ no ceiling ⇒ byte-identical). DISTINCT from the legacy one-off `max_turns` (a Manager runs
+  many turns; sharing that knob would cripple it). Env: `CLAUDE_SDK_MAX_TURNS` /
+  `CLAUDE_SDK_MAX_BUDGET_USD`, parsed by a shared `_apply_sdk_governor_env` (both config-apply sites),
+  registered in `_MANAGED_ENV_KEYS`.
+- `_governor_option_kwargs` (pure, module-level, unit-tested) yields `{max_turns?, max_budget_usd?}`
+  ONLY for positive non-bool values; spread into `ClaudeAgentOptions`. The installed SDK exposes BOTH
+  `max_turns` and `max_budget_usd` as first-class fields (verified), so the SDK halts the session on
+  breach — surfaced honestly, not a silent stall. Threaded through `_SDKSession.__init__` +
+  `_get_or_create` (resolved from config, best-effort).
+- `/health` now surfaces the effective governor (`{governor: {sdk_max_turns, sdk_max_budget_usd}}`) so
+  the operator can verify enforcement is configured. Additive (return type `Dict[str,str]`→`Dict[str,Any]`).
+
+**Kill path (b):** `orchestrator.interrupt_case(case_id, *, actor, reason)` (async) — refuses
+unknown/terminal Cases; cancels the Case's in-flight WORKER tasks by reusing `cancel_task` (correct
+production link filter: `entity_type='task', role='task', created_by='manager'` — NOT role='worker',
+which is the SESSION link); sets `status='blocked'` (resumable per A37, never force-closed); appends
+ONE `flow.interrupted`; escalates once; idempotent across kill reasons. Route
+`POST /api/cases/{id}/interrupt` (auth-required, NOT flag-gated — a safety valve must always be
+reachable). **Durability:** `_continue_case_once` now skips a `blocked` Case so the Wake-Dispatcher
+cannot auto-resume a Case the operator just killed (`blocked` has exactly one writer: interrupt_case).
+
+**Proof:** 333 targeted tests green (`test_sdk_governor` [new], `test_case_interrupt` [new],
+`test_case_continuation` [+blocked-skip], `test_control_api_wait_group` [+interrupt route],
+`test_claude_driver`, `test_settings_env_file`, plus the A52 modules). Flag/knob default ⇒
+byte-identical. **Adversarial review (2 rounds):** round 1 caught a CONFIRMED cross-layer bug — the
+kill filtered `role='worker'` (a session role) so it cancelled ZERO worker tasks in production and a
+fabricated-shape test masked it; fixed to the real `role='task', created_by='manager'` shape + a
+regression test that a system-attach/root_task is NOT cancelled. Also closed: non-durable-against-
+continuation (blocked-skip) and per-reason idempotency.
+
+**Reality/seam honesty:** enforcement lives on the PERSISTENT SDK driver path (`_SDKSession`), which
+is what M3.4 Manager/worker sessions use; the legacy print_resume/one-off path is unchanged. Live
+proof (a real session actually halted at the cap) is operator-gated/paid and NOT run here — the tests
+prove the option is passed only when configured, not the SDK's runtime halt.

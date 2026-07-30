@@ -375,3 +375,24 @@ def test_any_condition_repeats_on_each_new_completion(tmp_path, monkeypatch):
     assert _continue(orch2, db, fid) == 1
     assert "t2" in orch2.deliveries[0]["description"]
     assert db.get_task(continuation_task_id(fid, 2))["status"] == "claimed"
+
+
+# --------------------------------------------------------------------------- #
+# [A53] A killed (blocked) Case is NOT auto-resumed by the Wake-Dispatcher     #
+# --------------------------------------------------------------------------- #
+
+def test_blocked_case_is_not_continued(tmp_path, monkeypatch):
+    _on(monkeypatch)
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=2)
+    db.arm_wait_group(fid, "g1", "ALL", ["t1", "t2"])
+    _finished(db, fid, "t1")
+    _finished(db, fid, "t2")
+    # operator kill → blocked; the satisfied wait-group must NOT re-drive it
+    db.update_flow_run(fid, status="blocked")
+
+    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
+    assert _continue(orch, db, fid) == 0
+    assert db.list_continuation_rows(fid) == []
+    assert orch.deliveries == []
