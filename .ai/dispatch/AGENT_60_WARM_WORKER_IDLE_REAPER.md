@@ -25,6 +25,33 @@ A worker still joined to an open Case, or mid-turn, is never reaped.
 ## TYPE
 code. Branch `feat/warm-worker-idle-reaper`; PR at close, merge yourself.
 
+## SEAM MAP (verified read-only 2026-07-30 — execute-ready)
+- **Loop to hook:** `orchestrator._stale_busy_reconciliation_loop` (`src/orchestrator.py:916`, interval
+  `config.mesh.session_reconcile_interval_sec` default 60s; started via `_start_stale_busy_reconciler` ~:905).
+  Mirror this shape — do NOT add a second scheduler. (The M3.4 wake-dispatcher `_wake_dispatcher_loop` ~:689
+  is the other template.)
+- **Identify an idle warm worker (all must hold):** `sessions.status IN ('idle','awaiting_input')` (NOT `busy`)
+  · `sessions.case_role='worker'` · idle beyond TTL by `sessions.updated_at` (stamped every turn via
+  `session_store.save(touch=True)`, `src/services/session_store.py:106` — reliable) · AND its Case is closed/none
+  (join `flow_runs.status IN _CLOSED_STATUSES`, or `current_case_id IS NULL`). A worker still joined to an OPEN
+  Case is NEVER reaped.
+- **Primitives:** `db.set_session_case(session_id, None, None)` (`src/control/db.py:858`, atomic, idempotent,
+  clobber-safe) clears affiliation; `session_service.close_session(session_id, backends=…)` (used by
+  `orchestrator._close_worker_session_on_case_close`, `src/orchestrator.py:2527`) closes the session.
+- **⚠️ close vs clear-only:** the §7 leak is a held **backend slot** — clearing affiliation alone does NOT free
+  it. The reaper MUST `close_session` (then clear affiliation), i.e. it reverses A48's warm-keep *after a long
+  idle TTL*. That is the intended semantics (warm for re-dialogue up to TTL, then reclaimed).
+- **Config pattern to mirror:** `getattr(config.mesh, "warm_worker_idle_ttl_sec", <default>)` (cf.
+  `MESH_AFFINITY_OFFLINE_GRACE_SEC`, `session_reconcile_interval_sec`). **`0` ⇒ disabled ⇒ byte-identical.**
+
+## SEQUENCING / URGENCY (owner note 2026-07-30)
+Not urgent **yet**: the leak only bites once *long autonomous* runs exist, and M3.4 continuation
+(`CASE_CONTINUATION_ENABLED`) is still **OFF**. Pull this the moment A52 activates continuation (or A55
+crash-respawn lands). **Single biggest risk:** a reap-close racing a Manager re-dispatch to that warm worker —
+mitigate with (a) a **generous default TTL** (≥1h) so active workflows have wide margin, (b) reap only
+`status='idle'` (never mid-turn), (c) the open-Case guard above. TTL should ideally be sized against one real
+autonomous run's idle profile rather than guessed — hence deferring the build until continuation is live.
+
 ## CONTEXT (reuse verbatim)
 - Warm-keep policy: A48 / PR #26 (`feat/manager-decided-worker-close`) — removed auto-close-on-Case-close.
 - `release_worker` guard + session→case index: PR #27 (`/api/work/affiliations/sessions`), `case_id`-scoped.
