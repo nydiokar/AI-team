@@ -98,3 +98,24 @@ def test_too_many_members_413(client, monkeypatch, orch):
     r = client.post("/api/cases/c1/wait-group", json=body, headers=_auth())
     assert r.status_code == 413
     assert orch.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# [A52] CaseOpenBody.round_cap validation (gt=0)                               #
+# --------------------------------------------------------------------------- #
+
+def test_case_open_body_rejects_non_positive_round_cap():
+    import pytest as _pytest
+    from pydantic import ValidationError
+    from src.control.control_api import CaseOpenBody
+
+    for bad in (0, -1):
+        with _pytest.raises(ValidationError):
+            CaseOpenBody(objective="o", session_id="s", round_cap=bad)
+
+
+def test_case_open_body_accepts_positive_round_cap_and_none():
+    from src.control.control_api import CaseOpenBody
+
+    assert CaseOpenBody(objective="o", session_id="s", round_cap=6).round_cap == 6
+    assert CaseOpenBody(objective="o", session_id="s").round_cap is None
