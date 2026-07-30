@@ -442,10 +442,13 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         # therefore be given the Case as flow_run_id (task_id alone can't resolve a
         # flow that does not exist); it filters the Case timeline by this task_id.
         lines.append(
-            f"Next: call wait_for_worker(task_id='{task_id}', flow_run_id='{case_id}') to "
-            f"block until this worker's task.finished lands on the Case timeline. (A joined "
-            f"worker has no own flow_run, so task_id ALONE cannot resolve it.) The poll holds "
-            f"no task slot."
+            f"Next: after you have dispatched the workers for this batch, arm_wait_group("
+            f"case_id='{case_id}', member_task_ids=[…, '{task_id}'], condition='ANY') and RETURN "
+            f"control — the harness re-enters this Case with a review turn as each worker finishes, "
+            f"and a wake never interrupts a live operator turn. Only fall back to wait_for_worker("
+            f"task_id='{task_id}', flow_run_id='{case_id}') for a single synchronous wait when you "
+            f"have nothing else to do. (A joined worker has no own flow_run, so task_id ALONE cannot "
+            f"resolve it.) Neither holds a task slot."
         )
     else:
         lines.append(
@@ -687,12 +690,25 @@ def _get_case(args: Dict[str, Any]) -> str:
     criteria = flow.get("completion_criteria")
     stage = flow.get("current_stage")
     objective = flow.get("objective_lock") or flow.get("objective")
+    # [A52] completion_criteria may be the dual-shape object {"round_cap": N,
+    # "criteria": …} when a round_cap was set — unpack it so the Manager reads the
+    # human criteria (not a JSON blob) and sees the cap on its own line.
+    criteria_display, round_cap_line = criteria, None
+    if isinstance(criteria, str) and criteria.strip().startswith("{"):
+        try:
+            obj = json.loads(criteria)
+            if isinstance(obj, dict) and "round_cap" in obj:
+                criteria_display = obj.get("criteria")
+                round_cap_line = f"round_cap:           {obj.get('round_cap')!r} (autonomous-continuation backstop)"
+        except Exception:
+            pass
     lines = [
         f"Case {case_id}",
         f"status:              {status!r} (a Case with status NULL/open is still IN PROGRESS — "
         "a finished worker Task does NOT close it)",
         f"current_stage:       {stage!r}",
-        f"completion_criteria: {criteria!r}",
+        f"completion_criteria: {criteria_display!r}",
+        *([round_cap_line] if round_cap_line else []),
         f"objective:           {objective!r}",
         "",
         "Decide from git evidence + these criteria: close (via close_case) only when the "
@@ -775,15 +791,32 @@ def _open_case(args: Dict[str, Any]) -> str:
     if completion_criteria:
         body["completion_criteria"] = completion_criteria
 
+    # [M3.4/A52] Optional autonomous-continuation round cap. Validate it here so a
+    # bad value is a clean tool error, not a 422 from the route.
+    round_cap_raw = args.get("round_cap")
+    round_cap: Optional[int] = None
+    if round_cap_raw is not None:
+        try:
+            round_cap = int(round_cap_raw)
+        except (TypeError, ValueError):
+            return f"open_case: round_cap must be a positive integer, got {round_cap_raw!r}."
+        if round_cap <= 0:
+            return f"open_case: round_cap must be a positive integer, got {round_cap}."
+        body["round_cap"] = round_cap
+
     result = _api_request("POST", "/api/cases", body)
     case_id = result.get("case_id", "?")
+    cap_line = f"round_cap: {round_cap} (autonomous-continuation backstop)\n" if round_cap else ""
     return (
         f"Opened Case {case_id} on session {session_id}.\n"
         f"Objective: {objective}\n"
-        f"completion_criteria: {completion_criteria or '(none — set one so close_case can verify done)'}\n\n"
+        f"completion_criteria: {completion_criteria or '(none — set one so close_case can verify done)'}\n"
+        f"{cap_line}\n"
         f"This is YOUR Case now. dispatch_worker(case_id='{case_id}') to run a worker into it, "
-        f"record_review after verifying its git diff, and close_case('{case_id}') when the criteria "
-        f"are truly met. When you close it, this session stays alive — open_case again for the next objective."
+        f"then arm_wait_group(case_id='{case_id}', …) to be re-entered on completion instead of "
+        f"block-polling. record_review after verifying its git diff, and close_case('{case_id}') "
+        f"when the criteria are truly met. When you close it, this session stays alive — open_case "
+        f"again for the next objective."
     )
 
 
@@ -966,9 +999,10 @@ _TOOLS = [
         "description": (
             "Open a NEW Case on YOUR OWN Manager session (POST /api/cases). This is how a single "
             "persistent Manager session takes on another objective without spawning a fresh session "
-            "— open -> dispatch_worker(case_id) -> review -> close_case -> open the next. Provide your "
-            "own session_id and a checkable completion_criteria (close_case will demand it). Returns "
-            "the new case_id. Use when you finish one Case and want to start the next in the same "
+            "— open -> dispatch_worker(case_id) -> arm_wait_group -> review -> close_case -> open the "
+            "next. Provide your own session_id and a checkable completion_criteria (close_case will "
+            "demand it). Pass round_cap to bound an autonomous continuation loop. Returns the new "
+            "case_id. Use when you finish one Case and want to start the next in the same "
             "conversation, or when the operator hands you a new objective."
         ),
         "inputSchema": {
@@ -977,6 +1011,7 @@ _TOOLS = [
                 "objective": {"type": "string", "description": "The objective for the new Case. Ground it; do not overstate scope."},
                 "session_id": {"type": "string", "description": "YOUR OWN Manager session id (the session this Case is owned by)."},
                 "completion_criteria": {"type": "string", "description": "The checkable done-gate close_case will require (e.g. 'tests green; diff reviewed; PR opened')."},
+                "round_cap": {"type": "integer", "description": "Optional autonomous-continuation backstop: the MAX number of Wake-Dispatcher re-entries (arm_wait_group) before the Case escalates instead of looping. A safety bound, not a tuning knob — set a small value (e.g. 6-10) for a live autonomous run. Omit to use the engine default (50)."},
             },
             "required": ["objective", "session_id"],
         },

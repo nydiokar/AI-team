@@ -1972,6 +1972,7 @@ class MeshDB:
         session_id: str,
         role: str = "manager",
         completion_criteria: Optional[str] = None,
+        round_cap: Optional[int] = None,
     ) -> str:
         """[A36] The ONLY sanctioned Case-birth path.
 
@@ -1983,16 +1984,24 @@ class MeshDB:
         checkable "done" condition) is persisted on the Case and later demanded by
         ``close_case`` in A37. Returns the new flow_run_id.
 
+        [M3.4/A52] The optional ``round_cap`` is the autonomous-continuation
+        backstop (:func:`case_round_cap`). When given it is folded INTO
+        ``completion_criteria`` as the JSON object ``{"round_cap": N, "criteria": …}``
+        — no new column — so the human done-gate and the machine cap ride the same
+        field. When ``round_cap`` is None the criteria is stored verbatim
+        (byte-identical to the pre-A52 behaviour).
+
         Writes the Case row + the session link + a ``flow.created`` event as one
         logical birth. current_stage starts at 'objective_lock' (the objective is
         locked at open); status stays NULL (open). task_id is NULL — a Case is an
         objective, not a task.
         """
+        stored_criteria = _compose_completion_criteria(completion_criteria, round_cap)
         flow_run_id = self.create_flow_run(
             None,
             "objective_lock",
             objective_lock=objective,
-            completion_criteria=completion_criteria,
+            completion_criteria=stored_criteria,
         )
         self.create_flow_link(
             flow_run_id, "session", session_id, role, created_by="manager",
@@ -3539,16 +3548,53 @@ _CURRENT_VERSION = max(v for v, _ in _get_migrations())
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _compose_completion_criteria(
+    raw: Optional[str], round_cap: Optional[int],
+) -> Optional[str]:
+    """[M3.4/A52] The value to PERSIST in ``completion_criteria`` given an optional
+    human criteria string and an optional continuation ``round_cap``.
+
+    Without a positive ``round_cap`` the human ``raw`` is stored verbatim
+    (byte-identical to the pre-A52 behaviour ⇒ the flag/feature is a no-op).
+    With one, the two are folded into a single JSON object
+    ``{"round_cap": N, "criteria": <raw>}`` — the object shape
+    :func:`case_round_cap` already reads and :func:`_parse_completion_criteria`
+    now unpacks — so no new column is introduced. A ``raw`` that is itself a JSON
+    list/string is embedded as its parsed value so the array shape survives the
+    round-trip. Pure; never raises."""
+    if not isinstance(round_cap, int) or round_cap <= 0:
+        return raw
+    obj: Dict[str, Any] = {"round_cap": round_cap}
+    if raw is not None and str(raw).strip():
+        criteria_val: Any = str(raw)
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, (list, str)):
+                criteria_val = parsed
+        except Exception:
+            pass
+        obj["criteria"] = criteria_val
+    return json.dumps(obj)
+
+
 def _parse_completion_criteria(raw: Optional[str]) -> List[str]:
     """[A37] A Case's ``completion_criteria`` → a list of criterion strings.
 
-    A JSON array yields its (non-blank) items; any other non-blank value is a
-    single-criterion list; None/blank yields an empty list (⇒ no criteria to
-    reconcile). Pure; never raises."""
+    A JSON array yields its (non-blank) items; a JSON object (the [A52] dual-shape
+    that also carries ``round_cap``) yields its ``criteria`` member unpacked the
+    same way; any other non-blank value is a single-criterion list; None/blank
+    yields an empty list (⇒ no criteria to reconcile). Pure; never raises."""
     if raw is None:
         return []
     try:
         v = json.loads(raw)
+        if isinstance(v, dict):
+            inner = v.get("criteria")
+            if isinstance(inner, list):
+                return [str(x).strip() for x in inner if str(x).strip()]
+            if isinstance(inner, str):
+                return [inner.strip()] if inner.strip() else []
+            return []
         if isinstance(v, list):
             return [str(x).strip() for x in v if str(x).strip()]
         if isinstance(v, str):

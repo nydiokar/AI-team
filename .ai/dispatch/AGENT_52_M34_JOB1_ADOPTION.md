@@ -76,13 +76,41 @@ Engine changes; reconstruction/respawn (A54/A55); the turn/cost governor (A53).
 
 ---
 ## Milestone (burndown)
-- [ ] role posture rewritten (arm-and-return default)
-- [ ] dispatch hints updated
-- [ ] round_cap threaded tool→route→db, dual-shape criteria safe
-- [ ] activation runbook written
-- [ ] targeted pytest green, flag OFF byte-identical
-- [ ] PR opened + merged
-- [ ] (operator) live re-entry proof captured
+- [x] role posture rewritten (arm-and-return default) — `manager.md` "Waiting on a batch"
+- [x] dispatch hints updated — `_dispatch_worker` joined-worker "Next:" now points at `arm_wait_group`
+- [x] round_cap threaded tool→route→db, dual-shape criteria safe — `_compose_completion_criteria`
+- [x] activation runbook written — `manager.md` "Activation runbook (operator)"
+- [x] targeted pytest green, flag OFF byte-identical
+- [x] PR opened + merged
+- [ ] (operator) live re-entry proof captured — operator-gated/paid (V-series)
 
-## Closure (fill on completion)
-_(verdict + evidence)_
+## Closure (2026-07-30) — SHIPPED
+**Verdict:** built + merged on branch `feat/m34-job1-adoption` (PR). The Wake-Dispatcher is now the
+Manager's default waiting posture; `wait_for_worker` demoted to a last-resort single synchronous wait.
+
+**What changed (minimal diff, no engine change):**
+- `docs/harness/roles/manager.md` — "Waiting on a batch" rewritten to **arm_wait_group + return
+  control** (ANY/ALL/NAMED explained; BUSY-skip = operator stays free to talk while workers run);
+  round_cap guidance (small N for live); **operator activation runbook** (flag-on + restart + verify).
+- `scripts/mcp_manager.py` — `_open_case` accepts + validates `round_cap` (>0) and threads it into the
+  POST body + tool inputSchema; `_dispatch_worker` joined-worker "Next:" now steers to `arm_wait_group`;
+  `_get_case` unpacks the dual-shape `completion_criteria` object so the Manager reads clean criteria +
+  a separate `round_cap:` line (not a JSON blob).
+- `src/control/control_api.py` — `CaseOpenBody.round_cap: Optional[int] = Field(gt=0)` (422 on a
+  non-positive cap, mirroring the tool); route threads it to `orchestrator.open_case`.
+- `src/orchestrator.py` — `open_case` threads `round_cap` to `db.open_case`.
+- `src/control/db.py` — `open_case(round_cap=…)` folds the cap into `completion_criteria` via the new
+  pure `_compose_completion_criteria` (`{"round_cap": N, "criteria": …}`); `_parse_completion_criteria`
+  taught to unpack the object's `criteria` member (A37 close-gate unaffected). **No new column.**
+
+**Proof:** acceptance #1 (round_cap round-trips; plain-text criteria still parse; close-gate no
+regression) + #2 (docs no longer default block-poll) + #3 (flag OFF byte-identical) all green. 212
+targeted tests pass (`test_case_round_cap_adoption` [new, 9], `test_mcp_manager`, `test_control_api_*`,
+`test_case_continuation/closure/admission`, `test_manager_role`, `test_durable_relay`,
+`test_review_emitter`). Two adversarial-review findings fixed (get_case dual-shape display; route
+`gt=0` validation); a test-double signature regression caught by the suite and fixed.
+
+**Reality/seam honesty:** this is the ADOPTION + wiring only. Live re-entry (acceptance #4) is
+operator-gated/paid and NOT run here. Activation = `CASE_CONTINUATION_ENABLED=1` + `pm2 restart
+ai-team-gateway` (runbook in `manager.md`). Running an autonomous loop *long* still wants A53 (turn/
+cost governor + kill path) before it is safe.

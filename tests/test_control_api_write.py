@@ -437,8 +437,8 @@ def _wire_open_case(orch, *, enabled=True, returns="case-new"):
     orch._manager_role_enabled = lambda: enabled
     orch.open_case_calls = []
 
-    def _open_case(objective, session_id, role="manager", completion_criteria=None):
-        orch.open_case_calls.append((objective, session_id, role, completion_criteria))
+    def _open_case(objective, session_id, role="manager", completion_criteria=None, round_cap=None):
+        orch.open_case_calls.append((objective, session_id, role, completion_criteria, round_cap))
         return returns
 
     orch.open_case = _open_case
@@ -455,7 +455,34 @@ def test_open_case_opens_on_existing_session(client, orch):
     )
     assert r.status_code == 200
     assert r.json() == {"ok": True, "case_id": "case-new"}
-    assert orch.open_case_calls == [("next objective", sess.session_id, "manager", "tests green")]
+    assert orch.open_case_calls == [("next objective", sess.session_id, "manager", "tests green", None)]
+
+
+def test_open_case_threads_round_cap_through_route(client, orch):
+    """[A52] round_cap on the body reaches orchestrator.open_case."""
+    _wire_open_case(orch, returns="case-rc")
+    sess = orch.session_service.store.create(backend="claude", repo_path="/tmp/repo")
+    r = client.post(
+        "/api/cases",
+        json={"objective": "obj", "session_id": sess.session_id, "round_cap": 6},
+        headers=_auth(),
+    )
+    assert r.status_code == 200
+    assert orch.open_case_calls[0][4] == 6
+
+
+def test_open_case_rejects_non_positive_round_cap_422(client, orch):
+    """[A52] a non-positive round_cap is rejected at the boundary (422), never
+    silently widened to the engine default."""
+    _wire_open_case(orch)
+    sess = orch.session_service.store.create(backend="claude", repo_path="/tmp/repo")
+    r = client.post(
+        "/api/cases",
+        json={"objective": "obj", "session_id": sess.session_id, "round_cap": 0},
+        headers=_auth(),
+    )
+    assert r.status_code == 422
+    assert orch.open_case_calls == []  # never reached the seam
 
 
 def test_open_case_disabled_returns_409(client, orch):
