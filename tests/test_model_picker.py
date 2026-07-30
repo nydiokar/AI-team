@@ -34,6 +34,15 @@ def test_every_backend_has_exactly_one_default():
         assert default_model(backend) == defaults[0].name
 
 
+def test_claude_default_is_sonnet_not_opus():
+    # Cost-hygiene guard: the last-resort *catalog* default for Claude must be the
+    # cheaper sonnet, never opus. The opus flip once slipped in undispatched
+    # (A17/d1556ad) and quietly routed every default-fallthrough session to the
+    # expensive model. (The gateway-wide default is a separate operator config knob,
+    # CLAUDE_DEFAULT_MODEL — this asserts only the code-level safety net.)
+    assert default_model("claude") == "sonnet"
+
+
 def test_opencode_cli_and_server_share_one_list():
     assert options("opencode") is options("opencode-server")
 
@@ -108,13 +117,24 @@ def test_resolve_precedence_pinned_wins():
     assert resolve_model(_mk("claude", "opus")) == "opus"
 
 
-def test_resolve_falls_back_to_catalog_default_when_unpinned():
+def _clear_config_defaults(monkeypatch):
+    # These tests exercise the *catalog* fallback, so neutralize the gateway-wide
+    # config default (loaded from the ambient .env, e.g. CLAUDE_DEFAULT_MODEL) —
+    # otherwise the assertion silently tracks whatever the host .env pins.
+    from config import config as _cfg
+    for backend_cfg in (_cfg.claude, _cfg.codex):
+        monkeypatch.setattr(backend_cfg, "default_model", None, raising=False)
+
+
+def test_resolve_falls_back_to_catalog_default_when_unpinned(monkeypatch):
+    _clear_config_defaults(monkeypatch)
     assert resolve_model(_mk("claude")) == default_model("claude")
     assert resolve_model(_mk("codex")) == default_model("codex")
 
 
-def test_resolve_invalid_strict_model_falls_back_to_default():
+def test_resolve_invalid_strict_model_falls_back_to_default(monkeypatch):
     # a garbage stored model must never reach a strict CLI
+    _clear_config_defaults(monkeypatch)
     assert resolve_model(_mk("claude", "bogus")) == default_model("claude")
 
 
