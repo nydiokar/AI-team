@@ -119,3 +119,53 @@ def test_case_open_body_accepts_positive_round_cap_and_none():
 
     assert CaseOpenBody(objective="o", session_id="s", round_cap=6).round_cap == 6
     assert CaseOpenBody(objective="o", session_id="s").round_cap is None
+
+
+# --------------------------------------------------------------------------- #
+# [A53] POST /api/cases/{id}/interrupt (kill path)                             #
+# --------------------------------------------------------------------------- #
+
+class _KillOrchestrator:
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+
+    async def interrupt_case(self, case_id, *, actor="operator", reason="operator_kill"):
+        self.calls.append((case_id, actor, reason))
+        return self._result
+
+
+def _kill_client(monkeypatch, orch):
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    return TestClient(control_api.build_control_api(orch))
+
+
+def test_interrupt_requires_auth(monkeypatch):
+    orch = _KillOrchestrator({"ok": True, "cancelled_tasks": [], "already": False})
+    client = _kill_client(monkeypatch, orch)
+    assert client.post("/api/cases/c1/interrupt", json={}).status_code in (401, 403)
+
+
+def test_interrupt_ok(monkeypatch):
+    orch = _KillOrchestrator({"ok": True, "cancelled_tasks": ["t1"], "already": False, "status": "blocked"})
+    client = _kill_client(monkeypatch, orch)
+    r = client.post("/api/cases/c1/interrupt", json={"reason": "runaway"}, headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["cancelled_tasks"] == ["t1"]
+    assert orch.calls == [("c1", "operator", "runaway")]
+
+
+def test_interrupt_unknown_case_404(monkeypatch):
+    orch = _KillOrchestrator({"ok": False, "reason": "case_not_found"})
+    client = _kill_client(monkeypatch, orch)
+    r = client.post("/api/cases/nope/interrupt", json={}, headers=_auth())
+    assert r.status_code == 404
+
+
+def test_interrupt_not_flag_gated(monkeypatch):
+    """The kill path is a safety valve — reachable even with CASE_CONTINUATION_ENABLED off."""
+    monkeypatch.delenv("CASE_CONTINUATION_ENABLED", raising=False)
+    orch = _KillOrchestrator({"ok": True, "cancelled_tasks": [], "already": False})
+    client = _kill_client(monkeypatch, orch)
+    r = client.post("/api/cases/c1/interrupt", json={}, headers=_auth())
+    assert r.status_code == 200
