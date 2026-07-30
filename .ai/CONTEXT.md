@@ -3,6 +3,26 @@
 **Last Updated:** 2026-07-30
 **Active branch:** `main` — M2 Work Control Substrate + full M3 survivability arc merged; `HARNESS_FLOW_DRIVE` **ON** live; **M3.4 Job 1 (autonomous Case continuation) MERGED, flag OFF.**
 
+> **🟢 STATUS 2026-07-30 (later) — NEGLECTED-WORK SWEEP: N1 + N2/opus CLEARED; A58–A60 logged; V2/V3 confirmed done on Horse.**
+> A read-only audit of the "neglected work" surfaced three actionable items; this sweep closed the two
+> mergeable ones and logged the rest as real jobs:
+> - **N1 — quota-window-coordinator SALVAGED (PR #47, `3d9af82`).** The orphaned observe-only quota/session-window
+>   coordinator (was 190 commits behind, rotting) was rebase-verified **clean** (`git merge-tree` exit 0, zero
+>   conflicts) and cherry-picked onto `main` behind `QUOTA_COORDINATOR_ENABLED` (**default OFF ⇒ byte-identical**).
+>   Added a guard so the coordinator is built ONLY when enabled (its sqlite store eagerly creates
+>   `state/quota_windows.db` in its constructor) → the disabled path is a genuine zero-side-effect no-op. 11
+>   coordinator tests green; full suite (1167) collects clean. **Activation (flag-on + restart) is operator-gated
+>   → new job A58.** This directly attacks the shared-account session-limit failure that halts live runs.
+> - **N2/opus — Claude default reverted opus→sonnet (PR #46, `606092f`).** The undispatched A17 flip (`d1556ad`)
+>   had set the *catalog* default to the expensive opus. Reverted to sonnet + cost-hygiene guard test. **⚠️
+>   Surfaced (operator decision): the live `.env` `CLAUDE_DEFAULT_MODEL=opus` still overrides the catalog at
+>   runtime** — that is an explicit operator config value, not code drift. The code safety-net now defaults cheap;
+>   whether to change the `.env` value (the real live lever on the quota pain) is yours to decide.
+> - **N2/`_ActivityForwarder` — logged as A59** (keep-with-tests; live remote-worker code, zero tests — do not revert).
+> - **Warm-worker idle-reaper (A48/§7 deferral) — logged as A60** (real slot leak once autonomous runs get long).
+> - **V2/V3 CONFIRMED DONE (operator, on Horse):** PR #19 observable worker session + the node re-run of A43
+>   (role-full Manager on a real node) both ran on `Horse`. These validations are no longer outstanding.
+>
 > **🟢 STATUS 2026-07-30 — M3.4 JOB 1 (AUTONOMOUS CASE CONTINUATION) BUILT, TESTED, MERGED (PR #45, `2771611`).**
 > The Rank-1 build item is done. The **Wake-Dispatcher** now lets one bounded Case *continue itself*
 > across worker completions without an operator poke: a Manager arms a wait-group (ANY | ALL | named)
@@ -394,24 +414,18 @@
   "you are here" router. v0.4 §2.3 human-orientation need, not the deferred wiki renderer.
 - **Branch cleanup done (2026-07-06):** merged A18 + A19 to `main`, deleted them + the stale
   `feat/task-harness` (already fully in `main`).
-- **⚠️ OPERATOR FORK 1 — `phase1-quota-window-coordinator` (unmerged remote branch).**
-  **State VERIFIED in git 2026-07-07:** it is **9 ahead / 2 behind `main`**, **+1773 / −0
-  across 6 files** vs its merge-base (`eec87c4`) — a stale *additive* feature branch, NOT the
-  "~293-file-deleting" branch an earlier read reported (the only "deletions" are files `main`
-  added while it sat behind). It is **salvageable via rebase-to-current, not destructive.**
-  **Recommendation:** rebase onto current `main` to salvage its quota-coordinator commits when
-  the quota work is scheduled; until then keep it a **separate fork, never entangled with the
-  v0.6 flow-machine (M1) work.** Do NOT merge/rebase/delete it now — operator's call.
-  (v0.6 §M0 / §4 F1 carry the same verified state; the A20 DISPATCH_LOG row too.)
-- **⚠️ OPERATOR FORK 2 — A17 orphan-code drift (`d1556ad`, `AGENT_17_WIP_MERGE_RECONCILE.md`).**
-  The "WIP snapshot before main merge" commit landed the reviewed A16 admission-block scope
-  (4 files, verified on main) **plus 9 files of undispatched, unreviewed orphan code** — see
-  the "Known drift" bullet below for the four clusters. **Recommendation:** retro-dispatch the
-  two clusters that fix real bugs (backend-usage peak-vs-sum — already done as A17b; mesh-fleet
-  tz/count) through a Level-3 harness loop, and take an explicit keep-with-tests-vs-revert
-  decision on `_ActivityForwarder` (live, zero tests) and the `sonnet→opus` default flip.
-  Remediation touches worker/mesh code ⇒ **Level-3 fork needing operator approval** — surfaced
-  here, not resolved.
+- **✅ OPERATOR FORK 1 — `phase1-quota-window-coordinator` — SALVAGED 2026-07-30 (PR #47, `3d9af82`).**
+  Rebase-feasibility was verified read-only (`git merge-tree` exit 0, **zero conflicts** despite 190
+  commits of drift) and the two additive commits (+1773/−0) cherry-picked cleanly onto `main` behind
+  `QUOTA_COORDINATOR_ENABLED` (default OFF ⇒ byte-identical; construction guarded so no DB file when off).
+  The rot is stopped. **Activation is now A58** (operator-gated). The stale remote branch
+  `origin/phase1-quota-window-coordinator` is fully superseded and safe to delete (operator's call).
+- **🟡 OPERATOR FORK 2 — A17 orphan-code drift (`d1556ad`) — MOSTLY RESOLVED 2026-07-30.**
+  Four clusters: backend-usage peak-vs-sum (**done** A17b) · mesh-fleet tz/count (folded) ·
+  **`sonnet→opus` default flip → FIXED** (PR #46, `606092f`: catalog default reverted to sonnet +
+  guard test; ⚠️ note the live `.env` `CLAUDE_DEFAULT_MODEL=opus` still overrides at runtime — operator
+  decision) · **`_ActivityForwarder` (live remote-worker code, zero tests) → logged as A59** (keep-with-tests;
+  do NOT revert). The Level-3 keep-vs-revert fork is now closed except A59's test-locking.
 - **Known drift (A17 audit, `d1556ad`):** the "WIP snapshot before main merge" commit landed
   the reviewed A16 admission-block scope (4 files, verified on main) **plus 9 files of
   undispatched, unreviewed orphan code** in 4 clusters — **activity-forwarder** (live
@@ -461,13 +475,13 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 | **A55** | **M3.4 Job 3 — crash-respawn** | Respawn a role-full Manager on a dead-session Case (reconstruct via A54, re-arm, resume). Closes the "survive a process restart" clause of the goal. | 🟡 **DISPATCHED.** Packet `AGENT_55_M34_JOB3_CRASH_RESPAWN.md`. `depends_on: A54`. Design §7 job 3. |
 | **A56** | **M4 — spec authoring + scored review + decomposer-as-task-DAG** | The feature-sized-intent front-end: author a spec, rubric-score it, then decompose into a task-DAG inside ONE Case. Currently absent entirely. | 🟡 **DISPATCHED.** Packet `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md`. `depends_on: A52` (wiring); generators may precede. |
 | **A57** | **M4 hybrid-executor spike (gated)** | Decide invoke-vs-build for the intra-task parallel executor (SDK Workflows/subagents). Go/no-go + mechanism, not a full build. | ⚪ **DISPATCHED — GATED.** Packet `AGENT_57_M4_HYBRID_EXECUTOR_SPIKE.md`. `depends_on: A55`. |
-| — | **Validations V1–V4** (operator-gated/paid) | Live proof the merged machinery works end-to-end (Job 1 live, durable-relay e2e, node A43 re-run, whole-loop hands-off). Green unit tests ≠ achieved. | 🟡 Plan §2. Pulled as build tasks land + operator opens the gate. |
+| — | **Validations V1–V4** (operator-gated/paid) | Live proof the merged machinery works end-to-end (Job 1 live, durable-relay e2e, node A43 re-run, whole-loop hands-off). Green unit tests ≠ achieved. | 🟡 Plan §2. **✅ PR #19 observable-worker session + node re-run of A43 DONE on `Horse` (operator, 2026-07-30)** — those two no longer outstanding. Remaining: Job 1 live (Rank 1), durable-relay e2e, whole-loop hands-off. |
 | — | **A51 — dispatch-state-kit migration** (separate plane) | Machine-tracked dispatch board replacing the prose `DISPATCH_LOG`. **NOT part of the automation spec** (design §10) — neither advances nor blocks it. | 🟡 **AUTHORED, NOT STARTED.** Packet `.ai/dispatch/AGENT_51_DISPATCH_STATE_KIT_MIGRATION.md`. Track on its own plane. |
 | — | ~~M3.4 Autonomous Case Continuation — build Job 1~~ | Durable root-cause fix for the blocking-poll model. | **✅ BUILT & MERGED 2026-07-30 (PR #45, `2771611`).** Wake-Dispatcher: wait-group (ANY/ALL/named) → deterministic `cont:{case}:{gen}` `mesh_tasks` lease (sentinel machine_id) → atomic claim → ONE coalesced proactive wake → harness-recorded consumption watermark → round cap → `flow.interrupted` on exhaustion. Reuse-only (no schema change). Flag `CASE_CONTINUATION_ENABLED` default OFF. Six §8 acceptance steps green (`tests/test_case_continuation.py`) + route tests. Live proof = Rank 1. |
 | — | ~~Gateway restart on `aaf1cb2` (PR #37)~~ | Re-connect the Manager MCP tools (`setting_sources`). | **DONE.** #37 merged 2026-07-22; gateway restarted since (last for #44). A fired Manager boots with tools. |
 | — | ~~M3.3 durable relay (PR #38)~~ | `wait_for_worker` in-process → crash loses the wait. | **MERGED** (PR #38, `main` 2026-07-22). Flag `DURABLE_RELAY_ENABLED` (default OFF); `worker.wait_pending`/`worker.wait_resolved` + `reconcile_waits`; 213 pytest green. Live e2e (flag-on marker→crash→reconcile) still un-run. M3.4 (Rank 1) is the layer that *consumes* this relay. |
 | — | ~~Carrier-independent Manager role (#18)~~ | Manager booted only on in-gateway driver. | **MERGED** (PR #18, `main`, 2026-07-14). Dropped `case_role` restored across the dispatch seam. |
-| — | ~~Observable worker sessions + node survivability (#19)~~ | Workers were sessionless `run_oneoff`. | **MERGED** (PR #19 + **#23** the 422 `backend` fix, `main` 2026-07-17). §7 close-on-Case-close also MERGED (**PR #22**). **Still NOT proven live** — needs one paid Manager dispatch that actually opens a worker session row (now unblocked). Deferred: live proof, node-default routing, Web UI linkage. |
+| — | ~~Observable worker sessions + node survivability (#19)~~ | Workers were sessionless `run_oneoff`. | **MERGED** (PR #19 + **#23** the 422 `backend` fix, `main` 2026-07-17). §7 close-on-Case-close also MERGED (**PR #22**). **✅ PROVEN LIVE on `Horse` (operator, 2026-07-30)** — a real Manager dispatch opened a worker session row. Deferred (unchanged): node-default routing, Web UI Case→worker linkage. |
 | — | ~~Timezone → native local everywhere (#20)~~ | Mixed naive/UTC clocks. | **MERGED** (PR #20, `main`). **⛔ TIMEZONE IS STANDARDIZED — do NOT cite tz as a root cause; a wrong time is a writer/render defect, not a UTC-offset to explain away.** |
 | — | ~~Persistent multi-Case Manager session (#21)~~ | `close_case` affiliation-clobber race. | **MERGED** (PR #21, `main`). Single-writer clobber fix. |
 | — | ~~PR #19 §7 gap: close worker sessions on Case-close~~ | Joined worker sessions lingered open after Case-close, holding a backend slot. | **MERGED** (PR #22, `main` 2026-07-17) **but LIVE-PROVEN INERT for the real observable-session path** (A45 run 2026-07-17): the worker joins the Case as a *task* link, not a `flow_links(session,worker)` row, so `close_case`'s session-link scan never sees it (stray session `717441320dcc` left open). ~~**New follow-up job** — see A45 Finding B in DISPATCH_LOG.~~ **✅ SUPERSEDED 2026-07-21 (verified in merged code):** A47 (PR #25, merged) writes the `flow_links(entity_type='session', role='worker')` graph node on JOIN, so the worker session is now first-class in the Case graph; A48 (PR #26, merged) then **deliberately removed auto-close-on-Case-close** — a joined worker is left **WARM** by design and closed only by the Manager's explicit `release_worker`. So a worker session lingering open after Case-close is now *intended warm-keep*, not a leak. Finding B needs no follow-up job. (Deferred, unchanged: warm workers have no idle-reaper — see the §7 note in the 2026-07-18 STATUS block.) |
