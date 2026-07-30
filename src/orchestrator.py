@@ -247,12 +247,18 @@ class TaskOrchestrator(ITaskOrchestrator):
         # notifications (Telegram today, Web UI tomorrow).  Passes self
         # so the notifer reads ``self.telegram_interface`` dynamically.
         self.notifier = NotificationService(orchestrator=self)
-        try:
-            from src.services.quota_window_coordinator import build_quota_coordinator_from_config
-            self.quota_coordinator = build_quota_coordinator_from_config()
-        except Exception as e:
-            logger.warning(f"Failed to initialize quota coordinator: {e}")
-            self.quota_coordinator = None
+        # Quota window coordinator — observe-only, disabled by default. Build it ONLY
+        # when the flag is on: its store eagerly creates state/quota_windows.db in its
+        # constructor, so gating construction here keeps the disabled path a genuine
+        # zero-side-effect no-op (no DB file, no background task) — byte-identical.
+        self.quota_coordinator = None
+        if getattr(getattr(config, "quota", None), "enabled", False):
+            try:
+                from src.services.quota_window_coordinator import build_quota_coordinator_from_config
+                self.quota_coordinator = build_quota_coordinator_from_config()
+            except Exception as e:
+                logger.warning(f"Failed to initialize quota coordinator: {e}")
+                self.quota_coordinator = None
 
     @staticmethod
     def _extract_text_from_payload(payload: Any) -> str:
