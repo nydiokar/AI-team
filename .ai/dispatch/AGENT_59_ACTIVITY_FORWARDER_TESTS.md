@@ -1,7 +1,7 @@
 # DISPATCH — A59 · A17 orphan drift: `_ActivityForwarder` keep-with-tests
 
 **Level:** 3 (live remote-worker path) · **Type:** code (test-first)
-**Authored:** 2026-07-30 · **Status of this packet:** ready (authored, not yet executed)
+**Authored:** 2026-07-30 · **Status of this packet:** **DONE — merged (PR #48, `8e20093`).**
 **Depends on:** — (independent). **Unblocks:** clears the last live, untested A17 orphan cluster.
 **Ultimate goal this serves:** correctness/observability hygiene — untested live code on the worker path.
 
@@ -51,10 +51,16 @@ The other (already-resolved) A17 clusters; any worker-protocol redesign.
 
 ---
 ## Milestone (burndown)
-- [ ] `_ActivityForwarder` behavior characterized
-- [ ] happy-path + failure-isolation + lifecycle tests green
-- [ ] §7 boundary (bound/backpressure/death) answered or deferred in writing
-- [ ] PR opened + merged
+- [x] `_ActivityForwarder` behavior characterized
+- [x] happy-path + failure-isolation + lifecycle tests green
+- [x] §7 boundary (bound/backpressure/death) answered — by design, now test-locked
+- [x] PR opened + merged
 
 ## Closure (fill on completion)
-_(verdict + evidence)_
+**Verdict: DONE (keep-with-tests, no revert, no live behavior change).** Added
+`tests/test_activity_forwarder.py` (8 tests, offline): forwards only well-formed `task_activity`;
+ignores non-activity/malformed; a transport error is swallowed and the forwarder survives; `offer()`
+is non-blocking under backpressure. **§7 boundary:** already handled by the class design (bounded
+queue `max_queue=256`, single daemon thread, best-effort drop, 3s post timeout, all transport
+exceptions swallowed) — the tests lock it. Evidence: PR #48 (`8e20093`); `pytest
+tests/test_activity_forwarder.py` → 8 passed. This clears the last live A17 orphan cluster.
