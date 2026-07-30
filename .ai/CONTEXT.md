@@ -3,6 +3,32 @@
 **Last Updated:** 2026-07-30
 **Active branch:** `main` — M2 Work Control Substrate + full M3 survivability arc merged; `HARNESS_FLOW_DRIVE` **ON** live; **M3.4 Job 1 (autonomous Case continuation) MERGED, flag OFF.**
 
+> **🟢 STATUS 2026-07-30 (latest) — A52 + A53 BUILT, ADVERSARIALLY REVIEWED, MERGED. The event-driven
+> wait behavior is now WIRED (still flag-gated OFF) and it is now SAFE to run bounded-autonomous.**
+> Two Rank-1/2 jobs shipped this session:
+> - **A52 — M3.4 Job 1 adoption (PR #49, `753c65f`).** The Wake-Dispatcher engine was merged-but-inert;
+>   this makes the Manager actually USE it. Role default is now **`arm_wait_group` + return control**
+>   (`wait_for_worker` demoted to a last-resort single sync wait); a wake never interrupts a live
+>   operator turn (BUSY-skip) — so the operator stays free to converse while workers run. `round_cap`
+>   threaded `open_case` tool→route→db (folded into `completion_criteria` as `{"round_cap":N,"criteria":…}`,
+>   no new column; `_parse_completion_criteria` unpacks it so the A37 close-gate is unaffected);
+>   `get_case` renders it cleanly; operator activation runbook added to `manager.md`. Flag
+>   `CASE_CONTINUATION_ENABLED` still **default OFF ⇒ byte-identical**.
+> - **A53 — M3.3 turn/cost governor + kill path (PR #50, `6e80caf`).** New SDK-driver knobs
+>   `sdk_max_turns` / `sdk_max_budget_usd` (default None ⇒ byte-identical; the cost cap was FREE via the
+>   SDK-native `max_budget_usd`) passed to `ClaudeAgentOptions` so a runaway session is halted honestly;
+>   `/health` surfaces the effective governor. Kill path `interrupt_case` + `POST /api/cases/{id}/interrupt`
+>   (cancel in-flight workers → `flow.interrupted` → `status='blocked'` resumable → escalate once,
+>   idempotent) with `_continue_case_once` now skipping a blocked Case so a kill sticks.
+> 333 targeted tests green (4 new files); **two adversarial-review rounds each** — round 1 on A53 caught
+> a real cross-layer bug (the kill filtered `role='worker'`, a *session* role, so it cancelled ZERO
+> worker tasks in production; a fabricated-shape test had masked it) → fixed to the true
+> `role='task', created_by='manager'` shape + regression test. **What remains is the operator call:**
+> activation is now a clean two-step — set `CASE_CONTINUATION_ENABLED=1` (+ optionally
+> `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` for the safety governor) and `pm2 restart
+> ai-team-gateway` (runbook in `manager.md`). Deferred here **on purpose**: flipping it switches on new
+> autonomous behavior + paid spend — surfaced to the operator, NOT self-activated.
+>
 > **🟢 STATUS 2026-07-30 (later) — NEGLECTED-WORK SWEEP: N1 + N2/opus CLEARED; A58–A60 logged; V2/V3 confirmed done on Horse.**
 > A read-only audit of the "neglected work" surfaced three actionable items; this sweep closed the two
 > mergeable ones and logged the rest as real jobs:
@@ -469,8 +495,8 @@ job packets in `.ai/dispatch/` and log them in `DISPATCH_LOG.md`.
 
 | Rank | Item | Why it matters | State |
 |---|---|---|---|
-| **A52** | **M3.4 Job 1 adoption + activation** | The engine exists but is inert: the Manager role still block-polls `wait_for_worker` and the flag is OFF. THIS is the task that delivers the "free-for-convo, woken-on-completion" fix — rewrite the role/dispatch guidance to *arm a group and return control*, thread `round_cap` through `open_case`, then flag-on + restart. | 🟡 **DISPATCHED.** Packet `AGENT_52_M34_JOB1_ADOPTION.md`. `depends_on:` — (Job 1 merged, PR #45). Live activation = operator-gated. |
-| **A53** | **M3.3 completion — turn/cost governor + kill path** | M3.3 shipped only its durable-relay half. `ClaudeAgentOptions` passes NO `max_turns`; no cost cap or kill path runs. A bounded *autonomous* loop is unsafe to run long without this. | 🟡 **DISPATCHED.** Packet `AGENT_53_M33_TURN_COST_GOVERNOR.md`. `depends_on:` — (may run beside A52, different loop). |
+| **A52** | **M3.4 Job 1 adoption + activation** | Delivers the "free-for-convo, woken-on-completion" wait behavior. | ✅ **BUILT & MERGED 2026-07-30 (PR #49, `753c65f`).** Manager role default is now `arm_wait_group`+return control (`wait_for_worker` demoted to last-resort sync wait); `round_cap` threaded tool→route→db (dual-shape `completion_criteria`, no new column); `get_case` unpacks it; operator activation runbook in `manager.md`. Flag `CASE_CONTINUATION_ENABLED` still default OFF ⇒ byte-identical. 2 adversarial-review findings fixed. **Live activation (flag-on + restart) = operator-gated (Rank-1 validation).** |
+| **A53** | **M3.3 completion — turn/cost governor + kill path** | A bounded *autonomous* loop is unsafe to run long without caps + a clean stop. | ✅ **BUILT & MERGED 2026-07-30 (PR #50, `6e80caf`).** New SDK-driver governor `sdk_max_turns`/`sdk_max_budget_usd` (default None ⇒ byte-identical; cost cap free via SDK-native `max_budget_usd`) passed to `ClaudeAgentOptions`; `/health` surfaces it. Kill path `interrupt_case` + `POST /api/cases/{id}/interrupt` (cancel workers→`flow.interrupted`→`blocked` resumable→escalate, idempotent); `_continue_case_once` skips a blocked Case. 2 adversarial rounds (round 1 caught a cross-layer inert-kill bug). **Live halt proof = operator-gated.** |
 | **A54** | **M3.4 Job 2 — durable Case reconstruction** | `get_case_brief` single-call DB state + auto-`reconcile_waits`/re-arm groups at role-boot. The prerequisite that makes crash-respawn safe. | 🟡 **DISPATCHED.** Packet `AGENT_54_M34_JOB2_RECONSTRUCTION.md`. `depends_on: A52`. Design §7 job 2. |
 | **A55** | **M3.4 Job 3 — crash-respawn** | Respawn a role-full Manager on a dead-session Case (reconstruct via A54, re-arm, resume). Closes the "survive a process restart" clause of the goal. | 🟡 **DISPATCHED.** Packet `AGENT_55_M34_JOB3_CRASH_RESPAWN.md`. `depends_on: A54`. Design §7 job 3. |
 | **A56** | **M4 — spec authoring + scored review + decomposer-as-task-DAG** | The feature-sized-intent front-end: author a spec, rubric-score it, then decompose into a task-DAG inside ONE Case. Currently absent entirely. | 🟡 **DISPATCHED.** Packet `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md`. `depends_on: A52` (wiring); generators may precede. |
