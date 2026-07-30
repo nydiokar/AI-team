@@ -913,3 +913,82 @@ def test_api_request_raises_when_all_tokens_401(monkeypatch):
     with pytest.raises(RuntimeError) as ei:
         mcp_manager._api_request("GET", "/api/flows")
     assert "401" in str(ei.value)
+
+
+# --------------------------------------------------------------------------- #
+# [A52] open_case round_cap threading + get_case dual-shape display            #
+# --------------------------------------------------------------------------- #
+
+def test_open_case_threads_round_cap_into_body(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "case_id": "case_9"}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._open_case({
+        "objective": "Ship the thing",
+        "session_id": "mgr_1",
+        "completion_criteria": "tests green",
+        "round_cap": 6,
+    })
+    assert calls[0][2]["round_cap"] == 6
+    assert "round_cap: 6" in out
+
+
+def test_open_case_rejects_non_positive_round_cap(monkeypatch):
+    monkeypatch.setattr(
+        mcp_manager, "_api_request",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not reach API")),
+    )
+    for bad in (0, -3):
+        out = mcp_manager._open_case({
+            "objective": "x", "session_id": "mgr_1", "round_cap": bad,
+        })
+        assert "positive integer" in out
+
+
+def test_open_case_omits_round_cap_when_absent(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, payload=None, timeout=20.0):
+        calls.append(payload)
+        return {"ok": True, "case_id": "case_9"}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    mcp_manager._open_case({"objective": "x", "session_id": "mgr_1"})
+    assert "round_cap" not in calls[0]
+
+
+def test_get_case_unpacks_dual_shape_criteria(monkeypatch):
+    """A Case opened with round_cap stores the object shape; get_case must show the
+    human criteria (not a JSON blob) and the cap on its own line."""
+    def fake_request(method, path, payload=None, timeout=20.0):
+        return {"flow": {
+            "status": None,
+            "completion_criteria": '{"round_cap": 5, "criteria": "tests green"}',
+            "current_stage": "objective_lock",
+            "objective_lock": "obj",
+        }}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._get_case({"case_id": "case_9"})
+    assert "completion_criteria: 'tests green'" in out
+    assert "round_cap:" in out and "5" in out
+    assert '"round_cap"' not in out  # the raw JSON blob is NOT surfaced
+
+
+def test_get_case_plain_criteria_unchanged(monkeypatch):
+    def fake_request(method, path, payload=None, timeout=20.0):
+        return {"flow": {
+            "status": None,
+            "completion_criteria": "just plain text",
+            "current_stage": "objective_lock",
+            "objective_lock": "obj",
+        }}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
+    out = mcp_manager._get_case({"case_id": "case_9"})
+    assert "completion_criteria: 'just plain text'" in out
+    assert "round_cap:" not in out

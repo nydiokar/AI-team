@@ -200,6 +200,11 @@ class CaseOpenBody(BaseModel):
     session_id: str
     completion_criteria: Optional[str] = None
     role: str = "manager"
+    # [M3.4/A52] Optional autonomous-continuation round cap; folded into
+    # completion_criteria as {"round_cap": N} by db.open_case (no new column).
+    # Must be positive — a non-positive cap is rejected (422) rather than silently
+    # widened to the engine default, mirroring the MCP tool's own validation.
+    round_cap: Optional[int] = Field(default=None, gt=0)
 
 
 class BindBody(BaseModel):
@@ -1272,6 +1277,7 @@ def build_control_api(orchestrator) -> FastAPI:
             body.session_id,
             role=body.role or "manager",
             completion_criteria=body.completion_criteria,
+            round_cap=body.round_cap,
         )
         if not case_id:
             raise HTTPException(status_code=400, detail={"ok": False, "reason": "open_case_failed"})
