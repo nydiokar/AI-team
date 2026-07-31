@@ -388,7 +388,8 @@ def _manager_tools_enabled() -> bool:
     so its grant gets a kill switch the operator controls in the gateway env —
     not just the global config file. Both gates must be satisfied to grant.
     """
-    return os.environ.get("MANAGER_TOOLS_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    from src.control.db import manager_tools_enabled
+    return manager_tools_enabled()
 
 
 def _manager_role_enabled() -> bool:
@@ -399,7 +400,8 @@ def _manager_role_enabled() -> bool:
     When ON, the manager grant is SCOPED per-session (only a ``case_role=="manager"``
     session gets the manager_v1 tools), superseding the A34 process-wide grant.
     """
-    return os.environ.get("MANAGER_ROLE_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    from src.control.db import manager_role_enabled
+    return manager_role_enabled()
 
 
 def _session_allowed_tools(role: Optional[str] = None) -> List[str]:

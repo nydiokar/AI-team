@@ -218,6 +218,11 @@ class BindBody(BaseModel):
     chat_id: Optional[int] = None
 
 
+class RuntimeFlagBody(BaseModel):
+    value: bool
+    set_by: Optional[str] = Field(default=None, max_length=128)
+
+
 class ModelBody(BaseModel):
     model: Optional[str] = None
 
@@ -364,8 +369,8 @@ def _control_api_docs_enabled() -> bool:
     Off by default — those endpoints are unauthenticated and leak the full API
     shape. Set CONTROL_API_DOCS=true to re-enable them for local development.
     """
-    import os
-    return os.getenv("CONTROL_API_DOCS", "").lower() == "true"
+    from src.control.db import control_api_docs_enabled
+    return control_api_docs_enabled()
 
 
 async def event_stream_frames(
@@ -696,6 +701,81 @@ def build_control_api(orchestrator) -> FastAPI:
         except Exception:
             pass
         return {"status": "ok", "governor": governor}
+
+    @app.get("/api/flags", dependencies=[Depends(_require_auth)])
+    def api_list_flags() -> JSONResponse:
+        """List effective runtime flags.
+
+        Rows in ``runtime_flags`` are overrides. Missing rows fall back to the
+        current process env and then the compiled default, so introducing this
+        endpoint does not change behavior until a flag is explicitly written.
+        """
+        from src.control.db import RUNTIME_FLAG_DEFINITIONS, render_runtime_flag
+
+        db = _db()
+        return JSONResponse({
+            "ok": True,
+            "flags": [
+                render_runtime_flag(name, db=db)
+                for name in sorted(RUNTIME_FLAG_DEFINITIONS.keys())
+            ],
+        })
+
+    @app.put("/api/flags/{flag_name}", dependencies=[Depends(_require_auth)])
+    def api_set_flag(flag_name: str, body: RuntimeFlagBody) -> JSONResponse:
+        from src.control.db import (
+            RUNTIME_FLAG_DEFINITIONS,
+            render_runtime_flag,
+            runtime_flag_registry_writable,
+        )
+
+        name = (flag_name or "").strip().upper()
+        if name not in RUNTIME_FLAG_DEFINITIONS:
+            raise HTTPException(
+                status_code=404,
+                detail={"ok": False, "reason": "unknown_flag"},
+            )
+        if not runtime_flag_registry_writable(name):
+            raise HTTPException(
+                status_code=409,
+                detail={"ok": False, "reason": "flag_not_registry_writable"},
+            )
+        db = _db()
+        if db is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"ok": False, "reason": "runtime_flag_store_unavailable"},
+            )
+        db.set_runtime_flag(name, body.value, source="api", set_by=body.set_by or "")
+        return JSONResponse({"ok": True, "flag": render_runtime_flag(name, db=db)})
+
+    @app.delete("/api/flags/{flag_name}", dependencies=[Depends(_require_auth)])
+    def api_delete_flag(flag_name: str) -> JSONResponse:
+        from src.control.db import (
+            RUNTIME_FLAG_DEFINITIONS,
+            render_runtime_flag,
+            runtime_flag_registry_writable,
+        )
+
+        name = (flag_name or "").strip().upper()
+        if name not in RUNTIME_FLAG_DEFINITIONS:
+            raise HTTPException(
+                status_code=404,
+                detail={"ok": False, "reason": "unknown_flag"},
+            )
+        if not runtime_flag_registry_writable(name):
+            raise HTTPException(
+                status_code=409,
+                detail={"ok": False, "reason": "flag_not_registry_writable"},
+            )
+        db = _db()
+        if db is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"ok": False, "reason": "runtime_flag_store_unavailable"},
+            )
+        deleted = db.delete_runtime_flag(name)
+        return JSONResponse({"ok": True, "deleted": deleted, "flag": render_runtime_flag(name, db=db)})
 
     @app.get("/api/sessions", dependencies=[Depends(_require_auth)])
     def api_sessions(limit: int = Query(200, ge=1, le=1000)) -> JSONResponse:
@@ -1659,6 +1739,22 @@ def build_control_api(orchestrator) -> FastAPI:
             telemetry_store=_telemetry_store(),
         )
         return JSONResponse(view)
+
+    @app.get("/api/quota-windows", dependencies=[Depends(_require_auth)])
+    def api_quota_windows() -> JSONResponse:
+        coordinator = getattr(orchestrator, "quota_coordinator", None)
+        if coordinator is None:
+            return JSONResponse({
+                "enabled": False,
+                "mode": "observe_only",
+                "adapters": [],
+                "buckets": [],
+                "latest_snapshots": [],
+            })
+        try:
+            return JSONResponse(coordinator.read_status())
+        except Exception:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "quota_store_unavailable"})
 
     # --- projects / models / upload (Telegram parity) ---
 

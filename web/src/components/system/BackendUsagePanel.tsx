@@ -77,8 +77,6 @@ function Row({ row }: { row: BackendUsageRow }) {
           ))}
         </div>
       )}
-      {/* Honest unknown — no invented quota. */}
-      <p className="mt-1 text-[11px] text-ink-muted">Limits &amp; quota: unknown</p>
     </div>
   );
 }
@@ -113,8 +111,8 @@ export function BackendUsagePanel() {
           rows.map((r) => <Row key={r.backend} row={r} />)
         )}
         <p className="px-1 text-[11px] leading-relaxed text-ink-muted">
-          Token counts are observed usage, not a quota. No backend reports account
-          limits or reset times yet.
+          Token counts are observed usage, not quota. Provider quota windows are
+          shown separately when the observer has telemetry.
         </p>
       </div>
     </>

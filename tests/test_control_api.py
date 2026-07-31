@@ -22,6 +22,7 @@ class _StubOrchestrator:
 
     def __init__(self) -> None:
         self.session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
+        self.quota_coordinator = None
 
 
 @pytest.fixture
@@ -87,6 +88,101 @@ def test_no_worker_token_only_dashboard_accepted(monkeypatch, orch):
     assert c.get("/api/sessions", headers=_auth("wrong")).status_code == 401
 
 
+# --- runtime flags -----------------------------------------------------------
+
+def test_flags_endpoint_lists_env_fallback(client, monkeypatch):
+    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+
+    r = client.get("/api/flags", headers=_auth())
+
+    assert r.status_code == 200
+    flags = {f["flag_name"]: f for f in r.json()["flags"]}
+    assert flags["CASE_CONTINUATION_ENABLED"]["value"] is True
+    assert flags["CASE_CONTINUATION_ENABLED"]["source"] == "env"
+    assert flags["CASE_CONTINUATION_ENABLED"]["effect_scope"] == "live"
+    assert flags["CASE_CONTINUATION_ENABLED"]["registry_writable"] is True
+    assert flags["QUOTA_COORDINATOR_ENABLED"]["effect_scope"] == "startup"
+    assert flags["CONTROL_API_ENABLED"]["value"] is True
+    assert flags["CONTROL_API_ENABLED"]["registry_writable"] is False
+    assert flags["MESH_ENABLED"]["registry_writable"] is False
+    assert flags["TELEMETRY_ENABLED"]["value"] is True
+    assert flags["WORKER_REAP_STALE_SESSIONS"]["value"] is True
+
+
+def test_flags_put_overrides_env_and_delete_restores_fallback(client, monkeypatch):
+    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+
+    put = client.put(
+        "/api/flags/CASE_CONTINUATION_ENABLED",
+        headers=_auth(),
+        json={"value": False, "set_by": "test"},
+    )
+    assert put.status_code == 200
+    assert put.json()["flag"]["value"] is False
+    assert put.json()["flag"]["source"] == "registry"
+    assert put.json()["flag"]["registry"]["set_by"] == "test"
+
+    listed = client.get("/api/flags", headers=_auth()).json()["flags"]
+    case_flag = next(f for f in listed if f["flag_name"] == "CASE_CONTINUATION_ENABLED")
+    assert case_flag["value"] is False
+    assert case_flag["source"] == "registry"
+
+    delete = client.delete("/api/flags/CASE_CONTINUATION_ENABLED", headers=_auth())
+    assert delete.status_code == 200
+    assert delete.json()["deleted"] is True
+    assert delete.json()["flag"]["value"] is True
+    assert delete.json()["flag"]["source"] == "env"
+
+
+def test_flags_reject_unknown_flag(client):
+    r = client.put(
+        "/api/flags/NOT_A_FLAG",
+        headers=_auth(),
+        json={"value": True},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["reason"] == "unknown_flag"
+
+
+def test_flags_reject_env_only_write(client):
+    r = client.put(
+        "/api/flags/CONTROL_API_ENABLED",
+        headers=_auth(),
+        json={"value": False},
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "flag_not_registry_writable"
+
+
+def test_registry_inventory_covers_known_boolean_flags():
+    from src.control.db import RUNTIME_FLAG_DEFINITIONS
+
+    expected = {
+        "CASE_CONTINUATION_ENABLED",
+        "CONTROL_API_DOCS",
+        "CONTROL_API_ENABLED",
+        "DURABLE_RELAY_ENABLED",
+        "HARNESS_FLOW_DRIVE",
+        "HARNESS_LEVEL3_GUARD",
+        "MANAGER_ROLE_ENABLED",
+        "MANAGER_TOOLS_ENABLED",
+        "MESH_ENABLED",
+        "MESH_EMBEDDED_SERVER",
+        "MESH_SHADOW_WRITE",
+        "QUOTA_COORDINATOR_ENABLED",
+        "QUOTA_DIGEST_TELEGRAM_ENABLED",
+        "RESTART_CONTEXT_RESTORE_DISABLED",
+        "REVIEW_EMITTER_ENABLED",
+        "TELEMETRY_DETAILED_EVENTS",
+        "TELEMETRY_ENABLED",
+        "WORKER_ACCEPT_UNPINNED",
+        "WORKER_CANARY",
+        "WORKER_REAP_STALE_SESSIONS",
+    }
+
+    assert expected <= set(RUNTIME_FLAG_DEFINITIONS)
+
+
 # --- read-model endpoints (fed by the live SessionService) ------------------
 
 def test_sessions_endpoint_reflects_service(client, orch, tmp_path):
@@ -121,6 +217,39 @@ def test_tasks_and_nodes_endpoints_return_lists(client):
     rn = client.get("/api/nodes", headers=_auth())
     assert rt.status_code == 200 and isinstance(rt.json()["tasks"], list)
     assert rn.status_code == 200 and isinstance(rn.json()["nodes"], list)
+
+
+def test_quota_windows_endpoint_returns_disabled_shape_when_coordinator_not_constructed(client):
+    r = client.get("/api/quota-windows", headers=_auth())
+
+    assert r.status_code == 200
+    assert r.json() == {
+        "enabled": False,
+        "mode": "observe_only",
+        "adapters": [],
+        "buckets": [],
+        "latest_snapshots": [],
+    }
+
+
+def test_quota_windows_endpoint_reads_live_coordinator(client, orch):
+    class FakeCoordinator:
+        def read_status(self):
+            return {
+                "enabled": True,
+                "mode": "observe_only",
+                "adapters": [{"provider": "claude"}],
+                "buckets": [],
+                "latest_snapshots": [{"provider": "claude", "used_percent": 12.0}],
+            }
+
+    orch.quota_coordinator = FakeCoordinator()
+
+    r = client.get("/api/quota-windows", headers=_auth())
+
+    assert r.status_code == 200
+    assert r.json()["enabled"] is True
+    assert r.json()["latest_snapshots"][0]["used_percent"] == 12.0
 
 
 def test_tasks_limit_validation(client):

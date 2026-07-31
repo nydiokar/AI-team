@@ -230,6 +230,18 @@ class NotificationService:
             except Exception as e:
                 logger.warning("notify_error failed err=%s", e)
 
+    async def notify_quota_digest(self, message: str, *, chat_id: Optional[int] = None) -> None:
+        """Deliver a temporary quota coordinator digest through notification seams."""
+        from src.core.observability import emit_event
+
+        emit_event("quota_digest_notification")
+        tg = self._telegram
+        if chat_id and tg:
+            try:
+                await tg.notify_completion("quota-coordinator", message, success=True, chat_id=chat_id)
+            except Exception as e:
+                logger.warning("notify_quota_digest failed err=%s", e)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

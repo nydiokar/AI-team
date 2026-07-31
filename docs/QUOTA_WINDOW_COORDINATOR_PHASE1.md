@@ -1,8 +1,6 @@
 ﻿# Quota Window Coordinator Phase 1
 
-Status: implemented observe-only baseline.
-
-> :warning: **Warning:** check QUOTA_OBSERVE_INTERVAL_SEC addition. 
+Status: A61 finalized observe-only baseline for Claude; activation/warming/classification remain out of scope.
 
 ## Architecture
 
@@ -11,11 +9,24 @@ Phase 1 adds `src/services/quota_window_coordinator.py` as a passive service bes
 The subsystem has four layers:
 
 - typed quota models and `QuotaAdapter` protocol;
-- provider-owned adapters, including Phase 1 unsupported placeholders for Codex, Claude, and OpenCode;
+- provider-owned adapters: Claude status-line observation plus unsupported placeholders for Codex and OpenCode;
 - `QuotaWindowStore`, a dedicated SQLite WAL database with transactional writes and schema versioning;
 - `QuotaWindowCoordinator`, which records sanitized observations and exposes read-only status.
 
-The coordinator is constructed during `TaskOrchestrator` initialization after config, backends, and `SessionService` exist. It is disabled by default. When enabled, it runs only observe cycles and writes sanitized quota state. The dashboard exposes the read model at `GET /api/quota-windows` using the existing bearer-protected read-only control pattern.
+The coordinator is constructed during `TaskOrchestrator` initialization after config, backends, and `SessionService` exist. It is disabled by default. When enabled, it runs only observe cycles and writes sanitized quota state. The in-process Control API exposes the read model at `GET /api/quota-windows` using the existing bearer-protected read-only control pattern. There is no separate `src/control/dashboard.py` route owner in this tree.
+
+## A61 Audit Verdict
+
+Verified against the tree on 2026-07-31:
+
+- Claude is no longer an unsupported placeholder. `ClaudeStatusLineQuotaAdapter` reads captured Claude Code status-line JSON from `CLAUDE_STATUS_LINE_JSON_PATH` or an operator-provided read command, records `rate_limits.five_hour` and `rate_limits.seven_day`, and never starts a model turn.
+- Codex remains `UnsupportedQuotaAdapter("codex", "codex_quota_telemetry_not_validated_phase1")`; the Codex telemetry surface is still unverified.
+- OpenCode remains unsupported as a quota owner; provider-specific adapters must own provider quota telemetry.
+- `GET /api/quota-windows` is wired in `src/control/control_api.py`, bearer-protected, and reads the live in-process coordinator when constructed. With the coordinator flag off, it returns the explicit disabled observe-only shape without constructing the quota store.
+- Observe cadence is adaptive. When snapshots contain a known reset boundary, the loop sleeps until the reset-probe lead window, bounded by `QUOTA_OBSERVE_MAX_INTERVAL_SEC`, instead of unconditionally polling every five minutes. Limit-reached or unknown telemetry falls back to the tight observe interval.
+- The Web UI is the primary operator surface: System -> Backends -> Quota windows reads `GET /api/quota-windows` and renders disabled, unavailable, and observed bucket states honestly.
+- The temporary Telegram digest is separate from the coordinator in `src/services/quota_digest.py`, gated by `QUOTA_DIGEST_TELEGRAM_ENABLED`, and delivered through `NotificationService`. The coordinator contains no Telegram code, and Telegram is not the primary product surface.
+- There is still no activation, warming, or reset-semantics classification.
 
 ## Safety Boundaries
 
@@ -41,8 +52,25 @@ QUOTA_COORDINATOR_ENABLED=false
 # Dedicated local SQLite state. Keep separate from mesh.db.
 QUOTA_DB_PATH=state/quota_windows.db
 
-# Poll interval for observe-only adapters. Minimum: 30 seconds.
-QUOTA_OBSERVE_INTERVAL_SEC=300 <--- this must be reconsidered or done better, we need to no observe every 5 min if the quota window is already running and confirmed, it's redundant - this is not mission-critical and once we confirm the window probably need to stop asking the services. Reduce constant calls to backend providers and spam. 
+# Tight poll interval for unknown/unavailable/limit-reached telemetry. Minimum: 30 seconds.
+QUOTA_OBSERVE_INTERVAL_SEC=300
+
+# Maximum adaptive sleep once reset telemetry is known.
+QUOTA_OBSERVE_MAX_INTERVAL_SEC=21600
+
+# How long before reset to resume tight probing.
+QUOTA_RESET_PROBE_LEAD_SEC=900
+
+# Claude status-line capture path. Configure Claude Code statusLine to run
+# scripts/claude_statusline_capture.py or provide an equivalent sanitized file.
+CLAUDE_STATUS_LINE_JSON_PATH=state/claude_statusline_latest.json
+
+# Stable local account label for principal hashing; no raw account id is stored.
+CLAUDE_QUOTA_PRINCIPAL_KEY=claude-max-nyd
+
+# Temporary operator digest. Separate flag; default off.
+QUOTA_DIGEST_TELEGRAM_ENABLED=false
+QUOTA_DIGEST_INTERVAL_SEC=3600
 
 ```
 
@@ -65,6 +93,16 @@ Response shape:
 }
 ```
 
+## Web UI Surface
+
+Quota windows are shown in the System tab, directly after backend token-usage cards. This placement keeps provider capacity next to backend/account telemetry instead of mixing it into session work or settings. The panel has no activation controls; it shows:
+
+- observer off: no quota DB, polling loop, or provider calls;
+- adapter status summary;
+- provider/bucket usage percentage when observed;
+- reset boundary when the adapter observed one;
+- telemetry quality and unavailable reason.
+
 ## Unresolved Codex Telemetry Questions
 
 - Which installed Codex versions expose quota telemetry without sending a model request?
@@ -73,19 +111,18 @@ Response shape:
 - Which identity fields can safely produce a stable `principal_hash` without storing raw account data?
 - Does telemetry differ between ChatGPT subscription authentication, Codex access tokens, and API-key usage-based billing?
 
-## Unresolved Claude Telemetry Questions
+## Claude Telemetry Notes
 
-- Which Claude Code versions reliably expose status-line rate limit JSON without causing an API/model turn?
-- Are `rate_limits.five_hour` and `rate_limits.seven_day` present before the first model response in a session?
-- Which command or SDK surface identifies subscription/auth mode without persisting raw identity fields?
-- What schema/version marker should disable the adapter when status-line fields change?
-- Do visible `resets_at` fields correspond to subscription quota buckets, API billing, or separate credits for each auth mode?
+- Claude Code status-line JSON is the telemetry source. The official status-line mechanism runs locally and does not consume API tokens; the included capture script only stores sanitized `rate_limits` fields.
+- The adapter reports `authoritative` only when `used_percentage` and `resets_at` are both present for a bucket. Missing files or missing buckets become explicit unavailable snapshots.
+- `resets_at` is observation only. It is not treated as proof of anchored windows.
+- Principal identity uses `CLAUDE_QUOTA_PRINCIPAL_KEY` when configured and stores only a hash plus a human-safe label.
 
 ## Verification Commands
 
 Commands used for this implementation pass:
 
-```powershell
-python -m pytest tests/test_quota_window_coordinator.py tests/test_dashboard.py
-python -m py_compile src/services/quota_window_coordinator.py src/orchestrator.py src/control/dashboard.py config/settings.py
+```bash
+.venv/bin/pytest tests/test_quota_window_coordinator.py tests/test_control_api.py -q
+.venv/bin/python -m py_compile src/services/quota_window_coordinator.py src/services/quota_digest.py src/services/notification_service.py src/control/control_api.py src/orchestrator.py config/settings.py scripts/claude_statusline_capture.py
 ```

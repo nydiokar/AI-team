@@ -29,7 +29,6 @@ Separation of concerns
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -44,9 +43,8 @@ def _flow_drive_enabled() -> bool:
 
     Mirrors Orchestrator._harness_flow_drive_enabled; default OFF ⇒ the approval
     gate behaves byte-identically to before this seam existed."""
-    return os.environ.get("HARNESS_FLOW_DRIVE", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    from src.control.db import flow_drive_enabled
+    return flow_drive_enabled()
 
 # Called when an approval is APPROVED, with the approval row. May be sync or
 # async; the resolver awaits it if it returns an awaitable. Optional — a service

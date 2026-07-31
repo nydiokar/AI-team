@@ -641,12 +641,12 @@ The feature is ready only when all of these hold:
 
 ## 17. Implementation Order
 
-1. Rename internal concept to quota window coordinator.
-2. Add state model and read/write tests.
-3. Add adapter interfaces and fake adapter tests.
-4. Implement observe-only Codex adapter using locally verified app-server or CLI telemetry.
-5. Implement observe-only Claude adapter using status-line or supported CLI telemetry.
-6. Add read-only Control API status.
+1. Rename internal concept to quota window coordinator. Done in the Phase-1/A61 implementation.
+2. Add state model and read/write tests. Done with SQLite WAL store tests.
+3. Add adapter interfaces and fake adapter tests. Done.
+4. Implement observe-only Codex adapter using locally verified app-server or CLI telemetry. Deferred; Codex telemetry remains unverified and the adapter stays explicitly unsupported.
+5. Implement observe-only Claude adapter using status-line or supported CLI telemetry. Done for captured Claude Code status-line JSON; it reads `rate_limits.five_hour` and `rate_limits.seven_day` without starting a model turn.
+6. Add read-only Control API status. Done at bearer-protected `GET /api/quota-windows` in `src/control/control_api.py`.
 7. Add manual activation for one provider behind policy/version gates.
 8. Run the classification protocol across at least three cycles.
 9. Add AUTO_ACTIVATE only for a classified anchored bucket.
@@ -664,6 +664,5 @@ The feature is ready only when all of these hold:
 - OpenCode is a harness, not a quota provider.
 - Work horizons prevent waste.
 - Any ambiguity disables automation.
-
 
 

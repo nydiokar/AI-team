@@ -129,6 +129,27 @@ def test_disabled_flag_is_noop():
     orch._db_get_session_turns_tail.assert_not_called()
 
 
+def test_registry_disabled_flag_is_noop(monkeypatch):
+    """Registry override disables restart-context injection without an env edit."""
+    monkeypatch.delenv("RESTART_CONTEXT_RESTORE_DISABLED", raising=False)
+    from src.control.db import get_db
+
+    db = get_db()
+    assert db is not None
+    db.set_runtime_flag("RESTART_CONTEXT_RESTORE_DISABLED", True, set_by="test")
+
+    sess = _session(driver_status="lost", backend_session_id="bsid")
+    turns = _turns(2)
+    orch = _orch(session=sess, turns=turns)
+    task = _task()
+    original_prompt = task.prompt
+
+    _run(orch._maybe_inject_restart_recovery_context(task))
+
+    assert task.prompt == original_prompt
+    orch._db_get_session_turns_tail.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Flag ON — various guard conditions
 # ---------------------------------------------------------------------------
