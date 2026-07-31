@@ -27,6 +27,7 @@ import type {
   RawTurn,
   RawSessionUsage,
   RawMeshHealthResponse,
+  RawQuotaWindowsResponse,
   RawSessionTimelineResponse,
   RawWorkListResponse,
   RawCaseDetailResponse,
@@ -507,6 +508,11 @@ export const api = {
 
   async meshHealth(token: string, limit = 24): Promise<RawMeshHealthResponse> {
     return get(`/api/mesh/health?limit=${limit}`, token);
+  },
+
+  /** GET /api/quota-windows — observe-only provider quota windows. */
+  async quotaWindows(token: string): Promise<RawQuotaWindowsResponse> {
+    return get<RawQuotaWindowsResponse>(`/api/quota-windows`, token);
   },
 
   // ── Work / Case read model (A27) — read-only ─────────────────────────────

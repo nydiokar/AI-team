@@ -261,3 +261,15 @@ export function useMeshHealth(limit = 24) {
     refetchInterval: SLOW_POLL_MS,
   });
 }
+
+export function useQuotaWindows() {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["quota-windows"],
+    queryFn: () => api.quotaWindows(token),
+    enabled: Boolean(token),
+    refetchInterval: SLOW_POLL_MS,
+    retry: (count, err) =>
+      !(err instanceof ApiError && [401, 500].includes(err.status)) && count < 3,
+  });
+}

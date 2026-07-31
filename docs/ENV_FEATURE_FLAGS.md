@@ -11,8 +11,12 @@ reference so nobody has to rediscover that later.
 > the keys you need into your real `.env`. Values shown are the **code defaults**, not the
 > live box's settings.
 
-**Source of truth:** `config/settings.py` (`_MANAGED_ENV_KEYS` + `_apply_env_overrides`)
-and the ad-hoc `os.getenv` reads listed per row.
+**Source of truth:** `GET /api/flags` renders the live effective flag inventory from
+`src/control/db.py:RUNTIME_FLAG_DEFINITIONS`. Registry-writable flags can be changed with
+`PUT /api/flags/{FLAG}` and fall back to `.env`/defaults when no DB override exists. Bootstrap,
+worker-local, and settings-only booleans are listed there as `registry_writable=false` so the
+operator can see their effective env/default value without the API pretending it can safely flip
+them.
 
 **Two classes of key:**
 - **Managed** — in `_MANAGED_ENV_KEYS`. When `AI_TEAM_ENV_FILE` is set, a key absent from
@@ -106,7 +110,24 @@ and the ad-hoc `os.getenv` reads listed per row.
 
 ---
 
-## D. Telemetry tuning
+## D. Quota coordinator
+
+| Flag | Managed? | Default | Purpose | Code seam |
+|------|----------|---------|---------|-----------|
+| `QUOTA_COORDINATOR_ENABLED` | ✅ YES | false | Construct and start the observe-only quota coordinator at gateway startup. When off, no quota DB is created. | `orchestrator.py`, `quota_window_coordinator.py` |
+| `QUOTA_DB_PATH` | ✅ YES | `state/quota_windows.db` | Dedicated SQLite store for quota observations. | `config/settings.py`, `quota_window_coordinator.py` |
+| `QUOTA_OBSERVE_INTERVAL_SEC` | ✅ YES | 300 | Tight polling interval for unknown/unavailable/limit-reached quota telemetry. | `config/settings.py`, `quota_window_coordinator.py` |
+| `QUOTA_OBSERVE_MAX_INTERVAL_SEC` | ✅ YES | 21600 | Maximum adaptive sleep once reset telemetry is known. | `config/settings.py`, `quota_window_coordinator.py` |
+| `QUOTA_RESET_PROBE_LEAD_SEC` | ✅ YES | 900 | Resume probing this many seconds before a known reset boundary. | `config/settings.py`, `quota_window_coordinator.py` |
+| `CLAUDE_STATUS_LINE_JSON_PATH` | ✅ YES | `state/claude_statusline_latest.json` | Sanitized Claude Code status-line JSON captured by `scripts/claude_statusline_capture.py`. | `config/settings.py`, `quota_window_coordinator.py` |
+| `CLAUDE_STATUS_LINE_COMMAND` | ✅ YES | "" | Optional read command that prints sanitized status-line JSON; no model command. | `config/settings.py`, `quota_window_coordinator.py` |
+| `CLAUDE_QUOTA_PRINCIPAL_KEY` | ✅ YES | "" | Operator-provided stable account label used only to derive `principal_hash`. | `config/settings.py`, `quota_window_coordinator.py` |
+| `QUOTA_DIGEST_TELEGRAM_ENABLED` | ✅ YES | false | Temporary Telegram digest subscriber for quota observations; separate from the coordinator. | `orchestrator.py`, `quota_digest.py` |
+| `QUOTA_DIGEST_INTERVAL_SEC` | ✅ YES | 3600 | Minimum digest aggregation interval after the first state-change message. | `config/settings.py`, `quota_digest.py` |
+
+---
+
+## E. Telemetry tuning
 
 | Flag | Managed? | Default | Purpose | Code seam |
 |------|----------|---------|---------|-----------|
@@ -190,6 +211,7 @@ then remove them from `.env`:
 
 ---
 
-**Maintenance rule:** when a dispatch adds a new `os.getenv`/`os.environ.get` call, add a
-row here in the same change, and decide whether it belongs in `_MANAGED_ENV_KEYS`. A
-default-OFF flag with no row here is a future "why isn't it working" ticket.
+**Maintenance rule:** when a dispatch adds a new boolean feature/config gate, add it to
+`RUNTIME_FLAG_DEFINITIONS` in the same change. If it is safe for DB overrides, mark it
+`registry_writable=true` and route code through a canonical reader; otherwise mark it read-only
+with an honest `effect_scope`.

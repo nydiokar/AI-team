@@ -10,11 +10,14 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import shlex
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Protocol
@@ -109,6 +112,9 @@ class QuotaAdapterError(Exception):
         self.quality = quality
 
 
+QuotaEventHandler = Callable[[str, Dict[str, Any]], None]
+
+
 def utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -153,6 +159,53 @@ def _snapshot_identity(snapshot: QuotaSnapshot) -> str:
         snapshot.unavailable_reason,
     ]
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+
+def _principal_hash(provider: str, key: str) -> str:
+    source = f"{provider}\x1f{key or 'principal_unknown'}"
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _coerce_percent(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        pct = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pct < 0:
+        return 0.0
+    if pct > 100:
+        return 100.0
+    return pct
+
+
+def _is_stale_reset(reset_at: datetime | None, observed_at: datetime, *, grace: timedelta = timedelta(minutes=5)) -> bool:
+    if reset_at is None:
+        return False
+    reset = normalize_utc(reset_at)
+    observed = normalize_utc(observed_at)
+    if reset is None or observed is None:
+        return False
+    return reset < observed - grace
+
+
+def _coerce_reset_at(value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            if raw.isdigit():
+                return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+            return normalize_utc(raw)
+        except Exception:
+            return None
+    return None
 
 
 _CURRENT_VERSION = 1
@@ -436,15 +489,15 @@ class QuotaWindowStore:
             for r in conn.execute(
                 """
                 SELECT s.* FROM snapshots s
-                JOIN (
-                    SELECT provider, principal_hash, bucket_id, MAX(observed_at) AS observed_at
-                    FROM snapshots
-                    GROUP BY provider, principal_hash, bucket_id
-                ) latest
-                ON latest.provider = s.provider
-                   AND latest.principal_hash = s.principal_hash
-                   AND latest.bucket_id = s.bucket_id
-                   AND latest.observed_at = s.observed_at
+                WHERE s.snapshot_id = (
+                    SELECT i.snapshot_id
+                    FROM snapshots i
+                    WHERE i.provider = s.provider
+                      AND i.principal_hash = s.principal_hash
+                      AND i.bucket_id = s.bucket_id
+                    ORDER BY i.observed_at DESC, i.created_at DESC, i.snapshot_id DESC
+                    LIMIT 1
+                )
                 ORDER BY s.provider, s.bucket_id
                 """
             ).fetchall()
@@ -495,6 +548,181 @@ class UnsupportedQuotaAdapter:
             telemetry_quality=TelemetryQuality.UNSUPPORTED,
             notes=self.reason,
         )
+
+
+class ClaudeStatusLineQuotaAdapter:
+    """Observe Claude Code quota from captured status-line JSON.
+
+    Claude Code passes status-line data to the configured statusLine command on
+    stdin. This adapter reads the latest captured JSON (or an operator-provided
+    read command) and never starts a Claude model turn.
+    """
+
+    provider = "claude"
+    adapter_version = "claude-statusline-v1"
+    schema_version = "claude-statusline-rate-limits-v1"
+
+    def __init__(
+        self,
+        *,
+        status_json_path: str | Path = "state/claude_statusline_latest.json",
+        status_command: str = "",
+        principal_key: str = "",
+        timeout_sec: float = 2.0,
+        now: Callable[[], datetime] = utc_now,
+    ) -> None:
+        self.status_json_path = Path(status_json_path)
+        self.status_command = status_command.strip()
+        self.principal_key = principal_key.strip()
+        self.timeout_sec = max(0.1, float(timeout_sec))
+        self._now = now
+        self._cached_status: Optional[Dict[str, Any]] = None
+        self._cached_status_at: float = 0.0
+        self.model_invocations = 0
+
+    async def identify_principal(self) -> QuotaPrincipal:
+        key = self.principal_key or os.getenv("CLAUDE_QUOTA_PRINCIPAL_KEY", "").strip()
+        label = key or "principal_unknown"
+        return QuotaPrincipal(
+            provider=self.provider,
+            principal_hash=_principal_hash(self.provider, key),
+            label=label,
+            authentication_mode="claude_code_status_line",
+        )
+
+    async def discover_buckets(self) -> list[QuotaBucket]:
+        principal = await self.identify_principal()
+        return [
+            QuotaBucket(
+                provider=self.provider,
+                bucket_id="five_hour",
+                bucket_name="Claude 5-hour session limit",
+                principal_hash=principal.principal_hash,
+                telemetry_quality=TelemetryQuality.PARTIAL,
+                window_duration_seconds=5 * 60 * 60,
+            ),
+            QuotaBucket(
+                provider=self.provider,
+                bucket_id="seven_day",
+                bucket_name="Claude 7-day rolling limit",
+                principal_hash=principal.principal_hash,
+                telemetry_quality=TelemetryQuality.PARTIAL,
+                window_duration_seconds=7 * 24 * 60 * 60,
+            ),
+        ]
+
+    async def observe(self, bucket_id: str) -> QuotaSnapshot:
+        principal = await self.identify_principal()
+        try:
+            status = await self._read_status_json()
+        except QuotaAdapterError as e:
+            return QuotaSnapshot(
+                provider=self.provider,
+                principal_hash=principal.principal_hash,
+                bucket_id=bucket_id,
+                observed_at=self._now(),
+                telemetry_quality=e.quality,
+                raw_status="unavailable",
+                unavailable_reason=e.reason,
+            )
+
+        rate_limits = status.get("rate_limits") if isinstance(status, dict) else None
+        bucket = rate_limits.get(bucket_id) if isinstance(rate_limits, dict) else None
+        if not isinstance(bucket, dict):
+            return QuotaSnapshot(
+                provider=self.provider,
+                principal_hash=principal.principal_hash,
+                bucket_id=bucket_id,
+                observed_at=self._now(),
+                telemetry_quality=TelemetryQuality.UNAVAILABLE,
+                raw_status="status_line",
+                unavailable_reason="rate_limit_bucket_absent",
+            )
+
+        used_percent = _coerce_percent(bucket.get("used_percentage"))
+        reset_at = _coerce_reset_at(bucket.get("resets_at"))
+        observed_at = self._now()
+        reason = ""
+        if _is_stale_reset(reset_at, observed_at):
+            reset_at = None
+            reason = "reset_at_stale"
+        quality = TelemetryQuality.AUTHORITATIVE if used_percent is not None and reset_at is not None else TelemetryQuality.PARTIAL
+        limit_reached = None if used_percent is None else used_percent >= 100.0
+        return QuotaSnapshot(
+            provider=self.provider,
+            principal_hash=principal.principal_hash,
+            bucket_id=bucket_id,
+            observed_at=observed_at,
+            telemetry_quality=quality,
+            used_percent=used_percent,
+            reset_at=reset_at,
+            limit_reached=limit_reached,
+            window_duration_seconds=5 * 60 * 60 if bucket_id == "five_hour" else 7 * 24 * 60 * 60,
+            raw_status="status_line",
+            unavailable_reason=reason,
+        )
+
+    async def detect_active_user_session(self) -> bool | None:
+        return None
+
+    async def capabilities(self) -> AdapterCapability:
+        return AdapterCapability(
+            provider=self.provider,
+            adapter_version=self.adapter_version,
+            schema_version=self.schema_version,
+            can_observe=True,
+            supports_active_session_detection=False,
+            telemetry_quality=TelemetryQuality.PARTIAL,
+            notes="reads captured Claude Code status-line JSON; no model request",
+        )
+
+    async def _read_status_json(self) -> Dict[str, Any]:
+        now = time.monotonic()
+        if self._cached_status is not None and now - self._cached_status_at < 1.0:
+            return self._cached_status
+        if self.status_command:
+            data = await self._read_status_command()
+            self._cached_status = data
+            self._cached_status_at = now
+            return data
+        try:
+            raw = self.status_json_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise QuotaAdapterError("claude_status_line_json_missing", quality=TelemetryQuality.UNAVAILABLE)
+        except OSError:
+            raise QuotaAdapterError("claude_status_line_json_unreadable", quality=TelemetryQuality.UNAVAILABLE)
+        data = self._parse_status_json(raw)
+        self._cached_status = data
+        self._cached_status_at = now
+        return data
+
+    async def _read_status_command(self) -> Dict[str, Any]:
+        args = shlex.split(self.status_command)
+        if not args:
+            raise QuotaAdapterError("claude_status_line_command_empty", quality=TelemetryQuality.UNAVAILABLE)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout_sec)
+        except asyncio.TimeoutError:
+            raise QuotaAdapterError("claude_status_line_command_timeout", quality=TelemetryQuality.UNAVAILABLE)
+        except OSError:
+            raise QuotaAdapterError("claude_status_line_command_failed", quality=TelemetryQuality.UNAVAILABLE)
+        if proc.returncode != 0:
+            raise QuotaAdapterError("claude_status_line_command_nonzero", quality=TelemetryQuality.UNAVAILABLE)
+        return self._parse_status_json(stdout.decode("utf-8", errors="replace"))
+
+    def _parse_status_json(self, raw: str) -> Dict[str, Any]:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            raise QuotaAdapterError("claude_status_line_json_malformed", quality=TelemetryQuality.MALFORMED)
+        if not isinstance(data, dict):
+            raise QuotaAdapterError("claude_status_line_json_not_object", quality=TelemetryQuality.MALFORMED)
+        return data
 
 
 class FakeQuotaAdapter:
@@ -576,15 +804,21 @@ class QuotaWindowCoordinator:
         adapters: Iterable[QuotaAdapter],
         enabled: bool = False,
         observe_interval_sec: int = 300,
+        observe_max_interval_sec: int = 21600,
+        reset_probe_lead_sec: int = 900,
         expected_schema_versions: Optional[Dict[str, str]] = None,
         now: Callable[[], datetime] = utc_now,
+        event_handlers: Optional[Iterable[QuotaEventHandler]] = None,
     ) -> None:
         self.store = store
         self.adapters = list(adapters)
         self.enabled = enabled
         self.observe_interval_sec = max(30, int(observe_interval_sec))
+        self.observe_max_interval_sec = max(self.observe_interval_sec, int(observe_max_interval_sec))
+        self.reset_probe_lead_sec = max(0, int(reset_probe_lead_sec))
         self.expected_schema_versions = expected_schema_versions or {}
         self._now = now
+        self._event_handlers = list(event_handlers or [])
         self._task: Optional[asyncio.Task] = None
         self._last_now: Optional[datetime] = None
 
@@ -619,11 +853,32 @@ class QuotaWindowCoordinator:
         try:
             while True:
                 await self.observe_once()
-                await asyncio.sleep(self.observe_interval_sec)
+                await asyncio.sleep(self.next_observe_delay_sec())
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.warning("quota_observe_loop_stopped err=%s", e)
+
+    def next_observe_delay_sec(self) -> int:
+        now = normalize_utc(self._now()) or utc_now()
+        snapshots = self.store.status().get("latest_snapshots", [])
+        known_reset_delays: list[int] = []
+        for row in snapshots:
+            if row.get("limit_reached") == 1:
+                return self.observe_interval_sec
+            reset_at = normalize_utc(row.get("reset_at"))
+            used_percent = row.get("used_percent")
+            quality = row.get("telemetry_quality")
+            if reset_at is None or used_percent is None:
+                continue
+            if quality not in (TelemetryQuality.AUTHORITATIVE.value, TelemetryQuality.PARTIAL.value):
+                continue
+            seconds_until_probe = int((reset_at - now).total_seconds()) - self.reset_probe_lead_sec
+            if seconds_until_probe > self.observe_interval_sec:
+                known_reset_delays.append(seconds_until_probe)
+        if not known_reset_delays:
+            return self.observe_interval_sec
+        return max(self.observe_interval_sec, min(min(known_reset_delays), self.observe_max_interval_sec))
 
     def _record_clock_state(self) -> None:
         now = normalize_utc(self._now()) or utc_now()
@@ -719,6 +974,18 @@ class QuotaWindowCoordinator:
 
     def _record_event(self, name: str, *, provider: str = "", principal_hash: str = "", bucket_id: str = "", reason: str = "", payload: Optional[dict] = None) -> None:
         self.store.add_event(name, provider=provider, principal_hash=principal_hash, bucket_id=bucket_id, reason=reason, payload=payload)
+        event_payload: Dict[str, Any] = {
+            "provider": provider,
+            "principal_hash": principal_hash,
+            "bucket_id": bucket_id,
+            "reason": reason,
+            **(payload or {}),
+        }
+        for handler in self._event_handlers:
+            try:
+                handler(name, event_payload)
+            except Exception:
+                logger.debug("quota_event_handler_failed event=%s", name, exc_info=True)
         try:
             from src.core.observability import emit_event
 
@@ -734,24 +1001,39 @@ def _safe_dict(value: Any) -> Dict[str, Any]:
 
 
 def build_default_quota_adapters() -> list[QuotaAdapter]:
+    from config import config
+
+    quota_cfg = getattr(config, "quota", None)
     return [
         UnsupportedQuotaAdapter("codex", "codex_quota_telemetry_not_validated_phase1"),
-        UnsupportedQuotaAdapter("claude", "claude_quota_telemetry_not_validated_phase1"),
+        ClaudeStatusLineQuotaAdapter(
+            status_json_path=getattr(quota_cfg, "claude_status_json_path", "state/claude_statusline_latest.json"),
+            status_command=getattr(quota_cfg, "claude_status_command", ""),
+            principal_key=getattr(quota_cfg, "claude_principal_key", ""),
+        ),
         UnsupportedQuotaAdapter("opencode", "opencode_is_provider_router_no_phase1_quota_owner"),
     ]
 
 
-def build_quota_coordinator_from_config() -> QuotaWindowCoordinator:
+def build_quota_coordinator_from_config(
+    *,
+    enabled: Optional[bool] = None,
+    event_handlers: Optional[Iterable[QuotaEventHandler]] = None,
+) -> QuotaWindowCoordinator:
     from config import config
 
     quota_cfg = getattr(config, "quota", None)
     db_path = getattr(quota_cfg, "db_path", "state/quota_windows.db")
-    enabled = bool(getattr(quota_cfg, "enabled", False))
+    cfg_enabled = bool(getattr(quota_cfg, "enabled", False)) if enabled is None else bool(enabled)
     interval = int(getattr(quota_cfg, "observe_interval_sec", 300))
+    max_interval = int(getattr(quota_cfg, "observe_max_interval_sec", 21600))
+    lead = int(getattr(quota_cfg, "reset_probe_lead_sec", 900))
     return QuotaWindowCoordinator(
         store=QuotaWindowStore(db_path),
         adapters=build_default_quota_adapters(),
-        enabled=enabled,
+        enabled=cfg_enabled,
         observe_interval_sec=interval,
+        observe_max_interval_sec=max_interval,
+        reset_probe_lead_sec=lead,
+        event_handlers=event_handlers,
     )
-

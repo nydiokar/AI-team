@@ -315,6 +315,13 @@ class QuotaConfig:
     enabled: bool = False                  # QUOTA_COORDINATOR_ENABLED
     db_path: str = "state/quota_windows.db"  # QUOTA_DB_PATH
     observe_interval_sec: int = 300        # QUOTA_OBSERVE_INTERVAL_SEC
+    observe_max_interval_sec: int = 21600  # QUOTA_OBSERVE_MAX_INTERVAL_SEC
+    reset_probe_lead_sec: int = 900        # QUOTA_RESET_PROBE_LEAD_SEC
+    claude_status_json_path: str = "state/claude_statusline_latest.json"  # CLAUDE_STATUS_LINE_JSON_PATH
+    claude_status_command: str = ""        # CLAUDE_STATUS_LINE_COMMAND
+    claude_principal_key: str = ""         # CLAUDE_QUOTA_PRINCIPAL_KEY
+    digest_telegram_enabled: bool = False  # QUOTA_DIGEST_TELEGRAM_ENABLED
+    digest_interval_sec: int = 3600        # QUOTA_DIGEST_INTERVAL_SEC
 
 class Config:
     """Main configuration class"""
@@ -597,13 +604,9 @@ class Config:
                 self.opencode.mode = v
         except Exception:
             pass
-        # Quota coordinator env overrides (observe-only; disabled by default)
-        try:
-            v = os.getenv("QUOTA_COORDINATOR_ENABLED")
-            if v is not None:
-                self.quota.enabled = v.lower() == "true"
-        except Exception:
-            pass
+        # Quota coordinator enablement is read through the runtime flag registry
+        # in TaskOrchestrator so DB overrides can take effect on the next gateway
+        # restart. The registry reader still falls back to QUOTA_COORDINATOR_ENABLED.
         try:
             v = os.getenv("QUOTA_DB_PATH")
             if v:
@@ -614,6 +617,48 @@ class Config:
             v = os.getenv("QUOTA_OBSERVE_INTERVAL_SEC")
             if v is not None:
                 self.quota.observe_interval_sec = max(30, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("QUOTA_OBSERVE_MAX_INTERVAL_SEC")
+            if v is not None:
+                self.quota.observe_max_interval_sec = max(self.quota.observe_interval_sec, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("QUOTA_RESET_PROBE_LEAD_SEC")
+            if v is not None:
+                self.quota.reset_probe_lead_sec = max(0, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("CLAUDE_STATUS_LINE_JSON_PATH")
+            if v:
+                self.quota.claude_status_json_path = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("CLAUDE_STATUS_LINE_COMMAND")
+            if v:
+                self.quota.claude_status_command = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("CLAUDE_QUOTA_PRINCIPAL_KEY")
+            if v:
+                self.quota.claude_principal_key = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("QUOTA_DIGEST_TELEGRAM_ENABLED")
+            if v is not None:
+                self.quota.digest_telegram_enabled = v.lower() in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+        try:
+            v = os.getenv("QUOTA_DIGEST_INTERVAL_SEC")
+            if v is not None:
+                self.quota.digest_interval_sec = max(60, int(v))
         except Exception:
             pass
         # Mesh env overrides

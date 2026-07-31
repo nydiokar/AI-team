@@ -11,7 +11,7 @@ for the layer names this doc assumes (domain / transport / hooks).
 | `/sessions/:id` | `screens/SessionDetailScreen.tsx` | full-screen | The chat/session workspace — see below, the largest screen. |
 | `/work` | `screens/WorkScreen.tsx` | tab | Read-only Case inbox, grouped by attention bucket (A28). |
 | `/work/:id` | `screens/WorkDetailScreen.tsx` | full-screen | One Case: header, lineage, ledger, audit timeline. |
-| `/system` | `screens/SystemScreen.tsx` | tab | Nodes/targets, jobs, backend usage, push settings — infra-focused. |
+| `/system` | `screens/SystemScreen.tsx` | tab | Nodes/targets, jobs, backend usage, quota windows, push settings — infra-focused. |
 | `/tasks` | — | redirect | → `/system`. Tasks was folded into Session Detail + System (`.ai/CONTEXT.md` #36). |
 | (linked from Files tab in Session Detail) | `screens/FilesScreen.tsx` | — | Artifact/file-change browser (`useArtifacts`/`useArtifact`). |
 
@@ -83,7 +83,8 @@ components/
 | File | Role |
 |---|---|
 | `JobsPanel.tsx` | parity with `/jobs` — running + recently-finished watched jobs. Headerless by design (parent owns the one `SectionHeader`). |
-| `BackendUsagePanel.tsx` | Backend Account + Usage (#30/#33) — **provable facts only**; unknown limits render literally as "unknown", never fabricated. |
+| `BackendUsagePanel.tsx` | Backend Account + Usage (#30/#33) — **provable facts only**; token usage is not treated as quota. |
+| `QuotaWindowPanel.tsx` | Observe-only provider quota windows from `/api/quota-windows`; disabled/unavailable states render explicitly, with no activation controls. |
 | `NodeDetailSheet.tsx` | parity with `/node <id>` — backends, repos, load, heartbeat, reusing the already-fetched `Target` (no extra call) + `useProjects`. |
 | `PushSetting.tsx` | Web Push toggle (#21) — only offers a button when push is genuinely available; otherwise states the honest unavailable-reason. |
 

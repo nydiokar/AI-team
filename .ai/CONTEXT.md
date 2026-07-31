@@ -39,6 +39,12 @@
 >   `state/quota_windows.db` in its constructor) → the disabled path is a genuine zero-side-effect no-op. 11
 >   coordinator tests green; full suite (1167) collects clean. **Activation (flag-on + restart) is operator-gated
 >   → new job A58.** This directly attacks the shared-account session-limit failure that halts live runs.
+>   **⚠️ CORRECTION 2026-07-31: what merged is SCAFFOLDING, not a working observer.** All provider adapters are
+>   `Unsupported` placeholders — flipping the flag observes NOTHING real (writes "unsupported" rows). No real
+>   Claude sensor, no classification, read endpoint doc-contradictory, wasteful fixed 5-min poll. **A58 activation
+>   is blocked; finalization is new job A61** (`AGENT_61_QUOTA_COORDINATOR_FINALIZATION.md` — real status-line
+>   Claude adapter + read API + adaptive cadence + a separate default-OFF Telegram digest). Observe-only; still no
+>   warming/activation. Do not treat the "SALVAGED" framing above as "ready."
 > - **N2/opus — Claude default reverted opus→sonnet (PR #46, `606092f`).** The undispatched A17 flip (`d1556ad`)
 >   had set the *catalog* default to the expensive opus. Reverted to sonnet + cost-hygiene guard test. **⚠️
 >   Surfaced (operator decision): the live `.env` `CLAUDE_DEFAULT_MODEL=opus` still overrides the catalog at

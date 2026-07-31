@@ -15,6 +15,7 @@ import { NodeDetailSheet } from "../components/system/NodeDetailSheet";
 import { JobsPanel } from "../components/system/JobsPanel";
 import { PushSetting } from "../components/system/PushSetting";
 import { BackendUsagePanel } from "../components/system/BackendUsagePanel";
+import { QuotaWindowPanel } from "../components/system/QuotaWindowPanel";
 import { useMeshHealth, useTargets } from "../hooks/useLiveData";
 import type { Target } from "../domain/models";
 import type { RawMeshHealthResponse } from "../transport/rawApi";
@@ -377,6 +378,7 @@ export function SystemScreen() {
       <JobsPanel expanded={jobsExpanded} onSummary={setJobs} owned="unowned" />
 
       <BackendUsagePanel />
+      <QuotaWindowPanel />
 
       {/* ── Settings — quiet footnote, not a faux feature card ── */}
       <SectionHeader label="Settings" />

@@ -26,6 +26,10 @@ Work in a continuous case-level loop: decide the next move, dispatch or act, ins
 interpret what it changes, adjust the plan, and continue. Do not treat a worker response as the
 end of the reasoning process.
 
+Use the harness' event-driven capabilities by default: after dispatching workers, arm a wait-group
+and return control unless there is a specific reason to block synchronously. The Case can wake you
+for coalesced review turns when workers finish; use that autonomy deliberately and keep it bounded.
+
 Review actual artifacts, diffs, tests, runs, and data rather than accepting completion claims.
 Then step back and challenge the work from the higher perspective: was it the right work, done
 in the right way, and does it still serve the original objective? Consider architectural
@@ -166,9 +170,10 @@ below); until it is on, fall back to a single short `wait_for_worker` plus readi
 ### Activation runbook (operator) — turning the Wake-Dispatcher on
 The arm-and-return loop above is live only when the gateway has the continuation engine enabled. To
 activate (operator's call — it switches on new autonomous behavior):
-1. Set `CASE_CONTINUATION_ENABLED=1` in the gateway `.env`.
+1. Prefer the control API registry: `PUT /api/flags/CASE_CONTINUATION_ENABLED` with `{"value":true}`.
 2. Confirm the sibling flags are on: `HARNESS_FLOW_DRIVE=1`, `MANAGER_ROLE_ENABLED=1`.
-3. `pm2 restart ai-team-gateway`, then `curl http://127.0.0.1:9003/health` → `{"status":"ok"}`.
+3. If you used `.env` instead of the registry, `pm2 restart ai-team-gateway`, then
+   `curl http://127.0.0.1:9003/health` → `{"status":"ok"}`.
 4. Verify inert-when-off is now on: a Manager's `arm_wait_group` should return `ok` (not a
    `disabled` reason). Flag OFF ⇒ arming is a silent no-op (byte-identical to pre-M3.4).
 

@@ -163,6 +163,214 @@ REVIEW_VERDICT_EVENT_TYPES = {
 # The set of review.* event types the close-gate scans for the LATEST verdict.
 _REVIEW_EVENT_TYPES = frozenset(REVIEW_VERDICT_EVENT_TYPES.values())
 
+_TRUTHY_FLAG_VALUES = ("1", "true", "yes", "on")
+
+RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
+    "HARNESS_FLOW_DRIVE": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Work Control Substrate flow_links/flow_events write path.",
+    },
+    "REVIEW_EMITTER_ENABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Manager review verdict emitter and unresolved-rework close gate.",
+    },
+    "DURABLE_RELAY_ENABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Durable worker wait markers and wait reconciliation routes.",
+    },
+    "CASE_CONTINUATION_ENABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Wake-Dispatcher autonomous Case continuation.",
+    },
+    "HARNESS_LEVEL3_GUARD": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Admission backstop requiring explicit approval for Level-3 auto-picked tasks.",
+    },
+    "RESTART_CONTEXT_RESTORE_DISABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Disable bounded prior-context injection after a worker restart loses SDK state.",
+    },
+    "MANAGER_ROLE_ENABLED": {
+        "default": "0",
+        "effect_scope": "session_boot",
+        "registry_writable": "1",
+        "description": "Manager role path, role prompt, and scoped Manager tool grants for new sessions.",
+    },
+    "MANAGER_TOOLS_ENABLED": {
+        "default": "0",
+        "effect_scope": "session_boot",
+        "registry_writable": "1",
+        "description": "Legacy process-wide Manager MCP tool grant for new Claude sessions.",
+    },
+    "CONTROL_API_DOCS": {
+        "default": "0",
+        "effect_scope": "startup",
+        "registry_writable": "1",
+        "description": "Expose FastAPI docs/openapi routes when the control API is built.",
+    },
+    "QUOTA_COORDINATOR_ENABLED": {
+        "default": "0",
+        "effect_scope": "startup",
+        "registry_writable": "1",
+        "description": "Observe-only quota coordinator construction at gateway startup.",
+    },
+    "QUOTA_DIGEST_TELEGRAM_ENABLED": {
+        "default": "0",
+        "effect_scope": "startup",
+        "registry_writable": "1",
+        "description": "Temporary Telegram digest for quota coordinator observations.",
+    },
+    "CLAUDE_SKIP_PERMISSIONS": {
+        "default": "0",
+        "effect_scope": "startup",
+        "registry_writable": "0",
+        "description": "Claude CLI permission bypass mode from process environment.",
+    },
+    "CONTROL_API_ENABLED": {
+        "default": "1",
+        "effect_scope": "bootstrap",
+        "registry_writable": "0",
+        "description": "Start the gateway Control API. Bootstrap/env-only because disabling it removes this API.",
+    },
+    "GUARDED_WRITE": {
+        "default": "0",
+        "effect_scope": "startup",
+        "registry_writable": "0",
+        "description": "System guarded-write mode from process environment.",
+    },
+    "MESH_ENABLED": {
+        "default": "0",
+        "effect_scope": "startup",
+        "registry_writable": "0",
+        "description": "Enable mesh routing through worker nodes.",
+    },
+    "MESH_EMBEDDED_SERVER": {
+        "default": "0",
+        "effect_scope": "startup",
+        "registry_writable": "0",
+        "description": "Run the mesh task server embedded in the gateway process.",
+    },
+    "MESH_SHADOW_WRITE": {
+        "default": "1",
+        "effect_scope": "bootstrap",
+        "registry_writable": "0",
+        "description": "Mirror sessions/tasks into the mesh DB; disabling can make the registry unavailable.",
+    },
+    "OPENCODE_SERVER_ENABLED": {
+        "default": "0",
+        "effect_scope": "startup",
+        "registry_writable": "0",
+        "description": "Legacy OpenCode server mode compatibility flag.",
+    },
+    "TELEMETRY_ENABLED": {
+        "default": "1",
+        "effect_scope": "startup",
+        "registry_writable": "0",
+        "description": "Enable durable LLM telemetry collection.",
+    },
+    "TELEMETRY_DETAILED_EVENTS": {
+        "default": "1",
+        "effect_scope": "startup",
+        "registry_writable": "0",
+        "description": "Enable detailed telemetry event capture.",
+    },
+    "WORKER_ACCEPT_UNPINNED": {
+        "default": "1",
+        "effect_scope": "worker_startup",
+        "registry_writable": "0",
+        "description": "Worker daemon accepts tasks not pinned to a specific node.",
+    },
+    "WORKER_CANARY": {
+        "default": "0",
+        "effect_scope": "worker_startup",
+        "registry_writable": "0",
+        "description": "Mark a worker process as canary in its advertised live state.",
+    },
+    "WORKER_REAP_STALE_SESSIONS": {
+        "default": "1",
+        "effect_scope": "worker_startup",
+        "registry_writable": "0",
+        "description": "Worker boot reaps stale backend child processes from a previous incarnation.",
+    },
+}
+
+
+def _truthy_flag(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in _TRUTHY_FLAG_VALUES
+
+
+def runtime_flag_registry_writable(flag_name: str) -> bool:
+    definition = RUNTIME_FLAG_DEFINITIONS.get(flag_name)
+    return bool(definition) and _truthy_flag(definition.get("registry_writable"))
+
+
+def _runtime_flag_row(flag_name: str, db: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+    if not runtime_flag_registry_writable(flag_name):
+        return None
+    try:
+        flag_db = db if db is not None else get_db()
+        if flag_db is None:
+            return None
+        return flag_db.get_runtime_flag(flag_name)
+    except Exception as e:
+        logger.warning("event=runtime_flag_read_failed flag=%s err=%s", flag_name, e)
+        return None
+
+
+def runtime_flag_enabled(flag_name: str) -> bool:
+    """Return a registry-over-env boolean for a known runtime flag.
+
+    DB rows are operator/agent overrides and win immediately at call sites that
+    consult this function per request/tick. Missing rows fall back to the current
+    process environment, preserving existing defaults and `.env` deployments.
+    """
+    definition = RUNTIME_FLAG_DEFINITIONS.get(flag_name)
+    if definition is None:
+        raise ValueError(f"unknown runtime flag: {flag_name}")
+    row = _runtime_flag_row(flag_name) if runtime_flag_registry_writable(flag_name) else None
+    if row is not None:
+        return _truthy_flag(str(row.get("value") or ""))
+    return _truthy_flag(os.environ.get(flag_name, definition["default"]))
+
+
+def render_runtime_flag(flag_name: str, db: Optional[Any] = None) -> Dict[str, Any]:
+    definition = RUNTIME_FLAG_DEFINITIONS[flag_name]
+    writable = runtime_flag_registry_writable(flag_name)
+    row = _runtime_flag_row(flag_name, db=db) if writable else None
+    env_raw = os.environ.get(flag_name)
+    if row is not None:
+        source = "registry"
+        raw_value = str(row.get("value") or "")
+    elif env_raw is not None:
+        source = "env"
+        raw_value = env_raw
+    else:
+        source = "default"
+        raw_value = definition["default"]
+    return {
+        "flag_name": flag_name,
+        "value": _truthy_flag(raw_value),
+        "raw_value": "1" if _truthy_flag(raw_value) else "0",
+        "source": source,
+        "effect_scope": definition["effect_scope"],
+        "registry_writable": writable,
+        "description": definition["description"],
+        "registry": row,
+        "env_value": env_raw,
+    }
+
 
 def review_emitter_enabled() -> bool:
     """[M3.2] Whether the review.* verdict emitter is active (slice 1).
@@ -172,9 +380,7 @@ def review_emitter_enabled() -> bool:
     returns 404 AND ``close_case`` skips the unresolved-rework gate ⇒ byte-identical
     to pre-M3.2 behavior.
     """
-    return os.environ.get("REVIEW_EMITTER_ENABLED", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    return runtime_flag_enabled("REVIEW_EMITTER_ENABLED")
 
 
 def durable_relay_enabled() -> bool:
@@ -186,9 +392,7 @@ def durable_relay_enabled() -> bool:
     to pre-A46 behavior (no ``worker.wait_*`` events are ever written, and the two
     /api/cases/{id}/waits routes return 404).
     """
-    return os.environ.get("DURABLE_RELAY_ENABLED", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    return runtime_flag_enabled("DURABLE_RELAY_ENABLED")
 
 
 def case_continuation_enabled() -> bool:
@@ -200,9 +404,7 @@ def case_continuation_enabled() -> bool:
     ``cont:*`` rows are enqueued and no proactive wake turns are delivered ⇒
     byte-identical to pre-M3.4 behavior.
     """
-    return os.environ.get("CASE_CONTINUATION_ENABLED", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    return runtime_flag_enabled("CASE_CONTINUATION_ENABLED")
 
 
 # [M3.4] The reserved ``machine_id`` sentinel that keeps a continuation row
@@ -237,9 +439,41 @@ def flow_drive_enabled() -> bool:
     When OFF, no flow_links/flow_events are written ⇒ behavior is byte-identical to
     A19. It never reads a substrate row to DRIVE execution — it only gates RECORDS.
     """
-    return os.environ.get("HARNESS_FLOW_DRIVE", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    return runtime_flag_enabled("HARNESS_FLOW_DRIVE")
+
+
+def manager_role_enabled() -> bool:
+    """Registry-over-env read of ``MANAGER_ROLE_ENABLED``.
+
+    The API gate observes this immediately. Role prompts and scoped MCP grants
+    are session-boot decisions, so existing sessions do not gain/lose tools until
+    their next boot.
+    """
+    return runtime_flag_enabled("MANAGER_ROLE_ENABLED")
+
+
+def manager_tools_enabled() -> bool:
+    """Registry-over-env read of ``MANAGER_TOOLS_ENABLED``.
+
+    This controls the legacy Claude Manager MCP tool grant when a session boots;
+    changing it does not mutate an already-running SDK session's allowed tools.
+    """
+    return runtime_flag_enabled("MANAGER_TOOLS_ENABLED")
+
+
+def harness_level3_guard_enabled() -> bool:
+    """Registry-over-env read of ``HARNESS_LEVEL3_GUARD``."""
+    return runtime_flag_enabled("HARNESS_LEVEL3_GUARD")
+
+
+def restart_context_restore_disabled() -> bool:
+    """Registry-over-env read of ``RESTART_CONTEXT_RESTORE_DISABLED``."""
+    return runtime_flag_enabled("RESTART_CONTEXT_RESTORE_DISABLED")
+
+
+def control_api_docs_enabled() -> bool:
+    """Registry-over-env read of ``CONTROL_API_DOCS`` at API construction time."""
+    return runtime_flag_enabled("CONTROL_API_DOCS")
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +581,16 @@ CREATE TABLE IF NOT EXISTS nodes (
     last_heartbeat      TEXT NOT NULL,
     registered_at       TEXT NOT NULL,
     updated_at          TEXT NOT NULL
+);
+
+-- Agent-operable feature flags. A row is an override; absence falls back to the
+-- process environment and then each flag's compiled default.
+CREATE TABLE IF NOT EXISTS runtime_flags (
+    flag_name TEXT PRIMARY KEY,
+    value     TEXT NOT NULL,
+    source    TEXT NOT NULL DEFAULT 'api',
+    set_at    TEXT NOT NULL,
+    set_by    TEXT NOT NULL DEFAULT ''
 );
 
 -- Watched jobs — orthogonal to mesh_tasks/session lifecycle.
@@ -745,6 +989,79 @@ class MeshDB:
         }
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    # ------------------------------------------------------------------
+    # Runtime flags
+    # ------------------------------------------------------------------
+
+    def get_runtime_flag(self, flag_name: str) -> Optional[Dict[str, Any]]:
+        name = (flag_name or "").strip().upper()
+        if name not in RUNTIME_FLAG_DEFINITIONS:
+            return None
+        row = self._conn().execute(
+            """
+            SELECT flag_name, value, source, set_at, set_by
+            FROM runtime_flags
+            WHERE flag_name = ?
+            """,
+            (name,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_runtime_flags(self) -> List[Dict[str, Any]]:
+        rows = self._conn().execute(
+            """
+            SELECT flag_name, value, source, set_at, set_by
+            FROM runtime_flags
+            ORDER BY flag_name
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_runtime_flag(
+        self,
+        flag_name: str,
+        enabled: bool,
+        *,
+        source: str = "api",
+        set_by: str = "",
+    ) -> Dict[str, Any]:
+        name = (flag_name or "").strip().upper()
+        if name not in RUNTIME_FLAG_DEFINITIONS:
+            raise ValueError(f"unknown runtime flag: {flag_name}")
+        if not runtime_flag_registry_writable(name):
+            raise ValueError(f"runtime flag is not registry-writable: {flag_name}")
+        val = "1" if bool(enabled) else "0"
+        src = (source or "api").strip()[:32] or "api"
+        actor = (set_by or "").strip()[:128]
+        now = _now()
+        with self._write() as conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_flags(flag_name, value, source, set_at, set_by)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(flag_name) DO UPDATE SET
+                    value = excluded.value,
+                    source = excluded.source,
+                    set_at = excluded.set_at,
+                    set_by = excluded.set_by
+                """,
+                (name, val, src, now, actor),
+            )
+        row = self.get_runtime_flag(name)
+        if row is None:
+            raise RuntimeError(f"runtime flag write did not persist: {name}")
+        return row
+
+    def delete_runtime_flag(self, flag_name: str) -> bool:
+        name = (flag_name or "").strip().upper()
+        if name not in RUNTIME_FLAG_DEFINITIONS:
+            raise ValueError(f"unknown runtime flag: {flag_name}")
+        if not runtime_flag_registry_writable(name):
+            raise ValueError(f"runtime flag is not registry-writable: {flag_name}")
+        with self._write() as conn:
+            cur = conn.execute("DELETE FROM runtime_flags WHERE flag_name = ?", (name,))
+            return int(cur.rowcount or 0) > 0
 
     # ------------------------------------------------------------------
     # Sessions
@@ -3537,6 +3854,15 @@ def _get_migrations() -> List[tuple]:
         (25, "ALTER TABLE sessions ADD COLUMN effort TEXT"),  # per-session thinking effort; NULL = backend default
         (26, "ALTER TABLE sessions ADD COLUMN role_boot TEXT"),  # [Worker role] explicit opt-in role-boot signal; NULL = tier-0 default
         (27, "ALTER TABLE sessions ADD COLUMN continued_from TEXT"),  # [Session-fork] session→session lineage; NULL = not a continuation
+        (28, """
+            CREATE TABLE IF NOT EXISTS runtime_flags (
+                flag_name TEXT PRIMARY KEY,
+                value     TEXT NOT NULL,
+                source    TEXT NOT NULL DEFAULT 'api',
+                set_at    TEXT NOT NULL,
+                set_by    TEXT NOT NULL DEFAULT ''
+            )
+        """),  # Agent-operable feature flag overrides. Missing row => env/default fallback.
     ]
 
 

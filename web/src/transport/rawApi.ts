@@ -1,9 +1,9 @@
 /**
- * Raw backend payload shapes — EXACTLY as `src/control/dashboard.py` returns
+ * Raw backend payload shapes — EXACTLY as `src/control/control_api.py` returns
  * them. These are the snake_case rows that must NOT leak into components
  * (spec §11.1); the adapters in this directory translate them into ../domain.
  *
- * Verified against dashboard.py + core/view_models.py + control/db.py
+ * Verified against control_api.py + core/view_models.py + control/db.py
  * (2026-06-22). If the backend shape changes, change it HERE and in the adapter,
  * never in components.
  */
@@ -365,6 +365,53 @@ export interface RawMeshHealthResponse {
   current: RawMeshHealthCurrent;
   history: { recent: RawMeshHealthSample[] };
   reconcile: RawMeshReconcileStatus;
+}
+
+// GET /api/quota-windows -> observe-only provider quota status.
+export interface RawQuotaAdapterStatus {
+  provider: string;
+  enabled: number;
+  status: string;
+  reason: string;
+  adapter_version: string;
+  schema_version: string;
+  last_checked_at: string;
+}
+
+export interface RawQuotaBucket {
+  provider: string;
+  principal_hash: string;
+  bucket_id: string;
+  bucket_name: string;
+  window_semantics: string;
+  telemetry_quality: string;
+  window_duration_seconds: number | null;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface RawQuotaSnapshot {
+  snapshot_id: string;
+  provider: string;
+  principal_hash: string;
+  bucket_id: string;
+  observed_at: string;
+  telemetry_quality: string;
+  used_percent: number | null;
+  reset_at: string | null;
+  limit_reached: number | null;
+  window_duration_seconds: number | null;
+  raw_status: string;
+  unavailable_reason: string;
+  created_at: string;
+}
+
+export interface RawQuotaWindowsResponse {
+  enabled: boolean;
+  mode: "observe_only" | string;
+  adapters: RawQuotaAdapterStatus[];
+  buckets: RawQuotaBucket[];
+  latest_snapshots: RawQuotaSnapshot[];
 }
 
 // GET /api/approvals → { approvals: RawApproval[] } (Move H).

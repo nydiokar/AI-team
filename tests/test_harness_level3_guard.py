@@ -103,6 +103,17 @@ def test_falsey_flag_values_leave_guard_off(monkeypatch, flag):
     assert GUARD(_task({"harness_level": 3})) is True
 
 
+def test_registry_override_controls_guard(monkeypatch):
+    monkeypatch.delenv("HARNESS_LEVEL3_GUARD", raising=False)
+    from src.control.db import get_db
+
+    db = get_db()
+    assert db is not None
+    db.set_runtime_flag("HARNESS_LEVEL3_GUARD", True, set_by="test")
+
+    assert GUARD(_task({"harness_level": 3})) is False
+
+
 # ---------------------------------------------------------------------------
 # Hot-path admission gate in `_enqueue_task` — the choke point every ingestion
 # lane (submit_instruction/Telegram/Web + .task.md) passes through. This is the

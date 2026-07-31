@@ -252,10 +252,32 @@ class TaskOrchestrator(ITaskOrchestrator):
         # constructor, so gating construction here keeps the disabled path a genuine
         # zero-side-effect no-op (no DB file, no background task) — byte-identical.
         self.quota_coordinator = None
-        if getattr(getattr(config, "quota", None), "enabled", False):
+        try:
+            from src.control.db import runtime_flag_enabled
+            quota_enabled = runtime_flag_enabled("QUOTA_COORDINATOR_ENABLED")
+        except Exception:
+            quota_enabled = bool(getattr(getattr(config, "quota", None), "enabled", False))
+        if quota_enabled:
             try:
                 from src.services.quota_window_coordinator import build_quota_coordinator_from_config
-                self.quota_coordinator = build_quota_coordinator_from_config()
+                event_handlers = []
+                try:
+                    from src.control.db import runtime_flag_enabled as _flag_enabled
+                    digest_enabled = _flag_enabled("QUOTA_DIGEST_TELEGRAM_ENABLED")
+                except Exception:
+                    digest_enabled = bool(getattr(getattr(config, "quota", None), "digest_telegram_enabled", False))
+                if digest_enabled:
+                    from src.services.quota_digest import QuotaTelegramDigestSubscriber
+                    digest = QuotaTelegramDigestSubscriber(
+                        notifier=self.notifier,
+                        chat_id=config.telegram.notification_chat_id,
+                        interval_sec=getattr(config.quota, "digest_interval_sec", 3600),
+                    )
+                    self.quota_digest_subscriber = digest
+                    event_handlers.append(digest.handle_event)
+                else:
+                    self.quota_digest_subscriber = None
+                self.quota_coordinator = build_quota_coordinator_from_config(enabled=True, event_handlers=event_handlers)
             except Exception as e:
                 logger.warning(f"Failed to initialize quota coordinator: {e}")
                 self.quota_coordinator = None
@@ -2659,7 +2681,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         ``_manager_role_enabled`` (same env var) — a Manager booted here only picks
         up its role prompt + scoped tools when the driver gate is also ON.
         """
-        return os.environ.get("MANAGER_ROLE_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+        from src.control.db import manager_role_enabled
+        return manager_role_enabled()
 
     async def invoke_manager(
         self,
@@ -2977,8 +3000,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         (FLOW_STAGES) is written at each harness transition — a SHADOW record:
         NO code path reads current_stage to decide what runs.
         """
-        flag = os.environ.get("HARNESS_FLOW_DRIVE", "").strip().lower()
-        return flag in ("1", "true", "yes", "on")
+        from src.control.db import flow_drive_enabled
+        return flow_drive_enabled()
 
     def _flow_stage_transition(self, task: "Task", stage: str) -> None:
         """[A22] Single flag-guarded, best-effort stage-transition helper.
@@ -3205,9 +3228,8 @@ class TaskOrchestrator(ITaskOrchestrator):
     @staticmethod
     def _restart_ctx_enabled() -> bool:
         # ON by default. Set RESTART_CONTEXT_RESTORE_DISABLED=true to opt out.
-        return os.environ.get("RESTART_CONTEXT_RESTORE_DISABLED", "").strip().lower() not in (
-            "1", "true", "yes", "on"
-        )
+        from src.control.db import restart_context_restore_disabled
+        return not restart_context_restore_disabled()
 
     async def _maybe_inject_restart_recovery_context(self, task: "Task") -> None:
         """Prepend recent completed turns when a session's driver was lost on restart.
@@ -3554,8 +3576,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         The convention (a documented rule the dispatch prompt obeys) is the primary
         control; this is the enforcement backstop for when a drafter ignores it.
         """
-        flag = os.environ.get("HARNESS_LEVEL3_GUARD", "").strip().lower()
-        if flag not in ("1", "true", "yes", "on"):
+        from src.control.db import harness_level3_guard_enabled
+        if not harness_level3_guard_enabled():
             return True  # guard off ⇒ legacy behavior
 
         meta = getattr(task, "metadata", None) or {}
