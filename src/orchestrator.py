@@ -55,13 +55,21 @@ def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
     tier opt-in the driver's ``_role_boot`` reads to apply the Worker role prompt
     + tools. Dropping it makes a node-pinned role-ful worker boot role-less
     (same carrier-coupling class as ``case_role``).
+
+    ``model`` MUST be resolved here (gateway-side), not sent as the raw
+    ``session.model`` field. A remote node has no visibility into the
+    gateway's ``CLAUDE_DEFAULT_MODEL`` — an unresolved/empty model let the
+    node's own local Claude CLI installation pick its own default, which can
+    silently diverge from the gateway's configured default.
     """
+    from config.models import resolve_model
+
     return {
         "session_id": session.session_id,
         "backend": session.backend,
         "repo_path": session.repo_path,
         "backend_session_id": session.backend_session_id,
-        "model": session.model,
+        "model": resolve_model(session),
         "effort": getattr(session, "effort", None),
         "machine_id": session.machine_id,
         "telegram_chat_id": session.telegram_chat_id,
@@ -4747,6 +4755,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                         build_event,
                         new_telemetry_id,
                     )
+                    from config.models import resolve_model
+                    # Resolved (gateway-side), not the raw session.model — mirrors
+                    # _session_dispatch_payload so the gateway's own mesh_dispatch
+                    # telemetry never reports a blank/wrong model for default-model turns.
+                    _mesh_model = resolve_model(session)
                     _mesh_invocation_id = new_telemetry_id("inv")
                     self._telemetry_sink.emit(
                         build_event(
@@ -4758,7 +4771,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                             source="worker",
                             invocation_id=_mesh_invocation_id,
                             backend=backend_name,
-                            model=getattr(session, "model", None),
+                            model=_mesh_model,
                             attributes={"action": "mesh_dispatch"},
                         )
                     )
@@ -4777,7 +4790,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 source="worker",
                                 invocation_id=_mesh_invocation_id,
                                 backend=backend_name,
-                                model=getattr(session, "model", None),
+                                model=_mesh_model,
                                 attributes={
                                     "status": "success" if getattr(result, "success", False) else "failed",
                                     "duration_ms": int(getattr(result, "execution_time", 0.0) * 1000),
