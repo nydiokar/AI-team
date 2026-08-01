@@ -51,7 +51,9 @@ def _events(db: MeshDB, case_id: str, event_type: str) -> list:
 
 
 class _FakeSession:
-    def __init__(self, sid, status=SessionStatus.IDLE, backend="claude", repo="/repo"):
+    # Default AWAITING_INPUT: a Manager that armed a wait-group has already run a
+    # turn, so that is the real post-turn state a wake target is in (NOT IDLE).
+    def __init__(self, sid, status=SessionStatus.AWAITING_INPUT, backend="claude", repo="/repo"):
         self.session_id = sid
         self.status = status
         self.backend = backend
@@ -227,6 +229,23 @@ def test_awaiting_input_manager_is_woken(tmp_path, monkeypatch):
     assert len(orch.deliveries) == 1
     assert orch.deliveries[0]["session_id"] == "mgr-sess"
     assert "t1" in orch.deliveries[0]["description"]
+
+
+def test_idle_never_run_session_is_not_woken(tmp_path, monkeypatch):
+    # IDLE is not a wake condition: it means a freshly-created / reset / restored
+    # session that has never run a turn, so it cannot legitimately own a satisfied
+    # group. Even if the ledger looks satisfied, an IDLE session is skipped.
+    _on(monkeypatch)
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=2)
+    db.arm_wait_group(fid, "g1", "ANY", ["t1"])
+    _finished(db, fid, "t1")
+
+    session = _FakeSession("mgr-sess", status=SessionStatus.IDLE)
+    orch = _FakeOrch(_FakeStore(session))
+    assert _continue(orch, db, fid) == 0
+    assert db.list_continuation_rows(fid) == []
 
 
 def test_busy_manager_is_not_woken(tmp_path, monkeypatch):
