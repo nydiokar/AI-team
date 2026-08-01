@@ -17,6 +17,37 @@ v0.7 §M4. Verified absent: no `spec_authoring` stage, no `publish_artifact`, no
 feature-sized intent, and any decomposition today would scatter N orphan flow_runs instead of a DAG in one
 Case. The substrate (M2.5 Case container + M3.1 Manager + M3.2 review vocab) is all present to host it.
 
+> **⚠️ Addendum (2026-08-01) — this is not new territory, it's an abandoned capability. Reuse its
+> design, don't reinvent it.** The v0.5 harness already had a proven, evidenced intent-expansion
+> contract for exactly this problem — `docs/harness/generators/draft_packet.md`'s job (verbatim):
+> *"separate what the operator actually wants from what they literally said, and lock scope before
+> any code is written"* — forcing `<real_objective>` (outcome in the world) vs `<literal_request>`
+> (their exact words) vs `<interpreted_task>` (your reading, flagging divergence), plus mandatory
+> `<assumptions>`/`<drift_risks>` ("an empty one of these is a drafting failure, not a pass"). It ran
+> across ~20 real packets (`AGENT_9`–`AGENT_29`). Someone already tried to extend it to feature-sized,
+> multi-packet intents — `AGENT_24_DECOMPOSER_GENERATOR.md` (2026-07-07), salvaging a
+> `TaskExpertAgent`-style "intent → dependency-aware task list" pattern from a retired orchestrator —
+> but it stalled at zero burndown, deferred 2026-07-08 pending the Case substrate. **That blocking
+> condition (M2.5) has been live since mid-July; A24 was never resumed.** Separately, dispatch
+> *authoring itself* silently drifted off `draft_packet.md`'s structured contract entirely starting
+> `AGENT_31` (the M2→M3 cutover) — no decision was ever recorded, see `AGENT_64_HARNESS_DOC_DRIFT_RECONCILIATION.md`.
+> The net effect: the **live Manager today receives a flat `objective: str`** (`ManagerInvocation`,
+> `src/core/roles.py`) with no literal-vs-interpreted separation and no forced assumptions/drift-risks
+> — a real, live gap, not a hypothetical one. **Before designing (a) `spec_authoring` from scratch,
+> read `draft_packet.md` and `AGENT_24` and decide explicitly whether M4 reuses/extends that contract
+> shape or deliberately supersedes it — do not silently reinvent a weaker version.**
+>
+> **Open fork, not resolved here — surface it, don't guess:** `draft_packet.md` made a deliberate call
+> that this should be *"a drafting mode any capable model can play... NOT a service to build"* — i.e.
+> the entity about to execute (the Manager) does its own intent-expansion inline, no separate role.
+> That argues for folding this into the Manager's own spec-authoring stage, as this packet currently
+> assumes. But the system has since grown real distinct Manager/Worker roles that didn't exist when
+> that call was made — it is legitimate to reconsider whether intent-expansion should instead be a
+> distinct step/role that hands a locked, expanded spec *to* the Manager, rather than the Manager
+> doing double duty as both interpreter and executor of its own interpretation (a self-grading risk
+> the M3.2 review vocab exists to avoid elsewhere). Decide this explicitly when scoping (a); don't
+> default to "Manager does it" just because that's what's drafted below.
+
 ## TASK
 Add a spec-authoring stage with a rubric-scored adversarial review gate before decomposition, an artifact
 publish path, and a decomposer that expands an objective into a task-DAG **inside one Case**.

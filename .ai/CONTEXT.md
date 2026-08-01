@@ -424,24 +424,21 @@
 - **A24 decomposer generator is deferred (2026-07-08).** It remains valid M4 prompt work, but
   decomposition before durable Work/Case linkage creates more loose artifacts. Resume A24 only
   after the Work Control Substrate can attach decomposed packets/tasks to cases.
-- **Task harness is COMPLETE and on `main` (one branch).** A13/A14/A15 all merged
-  2026-07-03/04. The loop now has: the `docs/harness/` templates + generators, the
-  **config map** (`loop_config_map.md` — the knobs), the **doc-structure contract**
-  (`DOC_MAP.md`, lean DISPATCH_LOG, one-dispatch-one-file), the **promotion ladder**
-  (`promotion_ladder.md` — evidence-gated v0.4 roadmap; 3 of 6 elements are drop-candidates),
-  and the **driver** (`manager_invocation.md` — paste this to fire a loop).
-- **Proven on docs (A12/A13/A14/A15); NOT yet on a real code task.** The adversarial-review
-  / checkpoint half still wants a real *code* diff to validate — the next loop should run
-  on a real feature/fix.
-- **How to start a loop:** paste `docs/harness/manager_invocation.md`, fill the spec slot.
+- **Task harness (v0.5 prototype era) is HISTORICAL.** A13/A14/A15 merged 2026-07-03/04 as the
+  original manual-paste kernel. Since superseded by the live, invoked Manager role (M3.1+,
+  `POST /api/manager`, `docs/harness/roles/manager.md`) — **`manager_invocation.md` and
+  `promotion_ladder.md` were retired and deleted 2026-08-01 (A64 cleanup)**, zero code refs, git
+  history only. `loop_config_map.md` and `DOC_MAP.md`'s doc-structure contract remain current.
+- **How to start a loop today:** `POST /api/manager` (role-boot, live) — see `docs/harness/roles/manager.md`
+  and `docs/M3_MANAGER_INVOCATION_SPEC.md`, not the retired paste-driver above.
 - **Branch policy (anti-sprawl, 2026-07-06; merge-authority clarified 2026-07-28):** the driver no
   longer reflexively branches. **Docs-only loops commit straight to `main`** (no branch/PR/merge);
   **code loops** cut `feat/<loop>-<slug>`, **open a PR at close** (`gh pr create`), **and merge it to
   `main` yourself** (`gh pr merge`) — pushing/opening/merging PRs are the agent's job, NOT gated on
   the operator; never leave a dangling local branch or an open PR "awaiting sign-off". Restarting the
   **gateway** to deploy merged code is likewise the agent's to do; **only a worker / node-carrier
-  restart** (disrupts live sessions) is surfaced to the operator. See `manager_invocation.md` "Branch
-  policy" + CLOSE step and the root `CLAUDE.md` Branch/Restart policy.
+  restart** (disrupts live sessions) is surfaced to the operator. See the root `CLAUDE.md`
+  Branch/Restart policy.
 - **Newcomer front door shipped (A18) — MERGED to `main`.** `docs/OVERVIEW.md`: a static
   "you are here" router. v0.4 §2.3 human-orientation need, not the deferred wiki renderer.
 - **Branch cleanup done (2026-07-06):** merged A18 + A19 to `main`, deleted them + the stale
