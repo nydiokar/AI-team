@@ -107,6 +107,11 @@ class _FakeOrch:
             self, case_id, cap, generation,
         )
 
+    async def _escalate_headless_case(self, db, case_id, session_id):
+        return await TaskOrchestrator._escalate_headless_case(
+            self, db, case_id, session_id,
+        )
+
     async def _finalize_continuation(self, *a, **k):
         # No-op stand-in so the background consumption task doesn't run here; the
         # HARNESS-records-consumption contract is asserted directly via
@@ -246,6 +251,45 @@ def test_idle_never_run_session_is_not_woken(tmp_path, monkeypatch):
     orch = _FakeOrch(_FakeStore(session))
     assert _continue(orch, db, fid) == 0
     assert db.list_continuation_rows(fid) == []
+
+
+def test_satisfied_case_with_closed_manager_escalates_once(tmp_path, monkeypatch):
+    # Live-observed strand (2026-08-01): a satisfied Case whose registered Manager
+    # session is CLOSED cannot self-continue — the wake would target a dead session.
+    # It must ESCALATE (once), not silently return 0.
+    _on(monkeypatch)
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=2)
+    db.arm_wait_group(fid, "g1", "ANY", ["t1"])
+    _finished(db, fid, "t1")
+
+    session = _FakeSession("mgr-sess", status=SessionStatus.CLOSED)
+    orch = _FakeOrch(_FakeStore(session))
+    assert _continue(orch, db, fid) == 0
+    assert db.list_continuation_rows(fid) == []
+    marker = _events(db, fid, "case.manager_unavailable")
+    assert len(marker) == 1
+    assert len(orch.notifier.errors) == 1
+
+    # Idempotent: a second tick does not double-escalate.
+    assert _continue(orch, db, fid) == 0
+    assert len(_events(db, fid, "case.manager_unavailable")) == 1
+    assert len(orch.notifier.errors) == 1
+
+
+def test_missing_manager_session_escalates(tmp_path, monkeypatch):
+    # Manager link resolves but the session row is GONE — also a headless strand.
+    _on(monkeypatch)
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=2)
+    db.arm_wait_group(fid, "g1", "ANY", ["t1"])
+    _finished(db, fid, "t1")
+
+    orch = _FakeOrch(_FakeStore())  # empty store → session_store.get() returns None
+    assert _continue(orch, db, fid) == 0
+    assert len(_events(db, fid, "case.manager_unavailable")) == 1
 
 
 def test_busy_manager_is_not_woken(tmp_path, monkeypatch):
