@@ -1,7 +1,35 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-07-30
-**Active branch:** `main` — M2 Work Control Substrate + full M3 survivability arc merged; `HARNESS_FLOW_DRIVE` **ON** live; **M3.4 Job 1 (autonomous Case continuation) MERGED, flag OFF.**
+**Last Updated:** 2026-08-01
+**Active branch:** `main` — M2 Work Control Substrate + full M3 survivability arc merged; `HARNESS_FLOW_DRIVE` **ON** live; **M3.4 Job 1 flag `CASE_CONTINUATION_ENABLED` ON live and now PROVEN end-to-end (wake-dispatcher IDLE-gate bug fixed, PR #51).**
+
+> **🟢 STATUS 2026-08-01 — WAKE-DISPATCHER WAS INERT IN PRODUCTION; ROOT-CAUSED, FIXED, PROVEN LIVE (PR #51, `4723b5a`).**
+> Symptom (operator): a Manager on node **Horse** used `arm_wait_group`; the workers finished but the
+> Manager was **never woken** to review/synthesize/decide next — the autonomous continuation never fired,
+> despite `CASE_CONTINUATION_ENABLED=1` (set in the runtime_flags registry 10:01Z) and the dispatcher loop
+> running (`wake_dispatcher_started` in logs).
+> - **Root cause (a test/prod status mismatch, NOT the flag):** `orchestrator._continue_case_once` required
+>   the wake-target session to be **strictly `SessionStatus.IDLE`**. But a Manager that armed a wait-group
+>   has by definition already run a turn, so it settles in **`AWAITING_INPUT`** (set on every turn completion:
+>   local `:4761`, mesh `:3831`, node reconcile `:632`). `IDLE` is only the freshly-created, never-run state.
+>   The gate was therefore **never true for any real Manager** → `_continue_case_once` bailed every tick →
+>   **zero `cont:*` rows ever enqueued, zero wakes delivered.** The unit suite masked it — the fake session
+>   defaulted to `IDLE` (`tests/test_case_continuation.py`). Classic "green test on your own layer ≠ goal
+>   holds end-to-end."
+> - **Live evidence:** `state/mesh.db` case `9c898d4341ef` (Mgr session `138f3c9dac4d` on Horse, status
+>   `awaiting_input`): wait-groups `p1-3-terminal-redesign` + `p14-wave1` armed, every member `task.finished`,
+>   case open — yet no `cont:*` row and no `worker.wait_resolved`.
+> - **Fix:** accept `IDLE` **or** `AWAITING_INPUT` as a valid wake target (mirrors the restart-recovery gate at
+>   `_reconcile_pooled_sdk_clients` `:485`; offline pinned sessions are `PINNED_NODE_OFFLINE` → still skipped).
+>   Same latent IDLE-only assumption fixed in `_finalize_continuation`'s in-process fallback. Regression tests
+>   drive `_continue_case_once` with `AWAITING_INPUT` (woken) and `BUSY` (skipped); the AWAITING_INPUT test
+>   fails against the old code (`0==1`). 12 continuation + 76 wait-group/mcp_manager tests green.
+> - **PROVEN LIVE (on the very case that failed).** Merged PR #51, restarted gateway (#46, worker/Horse carrier
+>   untouched so the live Mgr session survived). Within one tick: `cont:9c898d…:1` enqueued + atomically
+>   claimed by `kanebra` → Mgr `awaiting_input→busy` (autonomous wake delivered to the node-carried session) →
+>   **`review.accepted`** emitted → consumption watermark recorded (`generation 1`, all 5 workers consumed) →
+>   both groups `worker.wait_resolved` → Mgr synthesized and wrapped the round (0 runaway re-dispatch). The
+>   "free-for-convo, woken-on-completion, review-gated" behavior now works for a real (node-carried) Manager.
 
 > **🟢 STATUS 2026-07-30 (latest) — A52 + A53 BUILT, ADVERSARIALLY REVIEWED, MERGED. The event-driven
 > wait behavior is now WIRED (still flag-gated OFF) and it is now SAFE to run bounded-autonomous.**
