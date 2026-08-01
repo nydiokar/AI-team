@@ -24,6 +24,10 @@
 >   Same latent IDLE-only assumption fixed in `_finalize_continuation`'s in-process fallback. Regression tests
 >   drive `_continue_case_once` with `AWAITING_INPUT` (woken) and `BUSY` (skipped); the AWAITING_INPUT test
 >   fails against the old code (`0==1`). 12 continuation + 76 wait-group/mcp_manager tests green.
+> - **Follow-up (PR #52, `9fd5d14`, operator note):** the wake gate is now **`AWAITING_INPUT` only** —
+>   `IDLE` is not a wake condition (it only means a freshly-created / reset / restored session that never
+>   ran a turn, so it cannot own a satisfied group). Tests updated to model reality (the fake session
+>   defaulted to the impossible IDLE-wake state); added `test_idle_never_run_session_is_not_woken`.
 > - **PROVEN LIVE (on the very case that failed).** Merged PR #51, restarted gateway (#46, worker/Horse carrier
 >   untouched so the live Mgr session survived). Within one tick: `cont:9c898d…:1` enqueued + atomically
 >   claimed by `kanebra` → Mgr `awaiting_input→busy` (autonomous wake delivered to the node-carried session) →
