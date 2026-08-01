@@ -28,6 +28,19 @@
 >   `IDLE` is not a wake condition (it only means a freshly-created / reset / restored session that never
 >   ran a turn, so it cannot own a satisfied group). Tests updated to model reality (the fake session
 >   defaulted to the impossible IDLE-wake state); added `test_idle_never_run_session_is_not_woken`.
+> - **2nd incident + fix (PR #53, `5595fb0`) — case-identity split / silent headless strand.** A live
+>   Manager (`1940bcef`, booted onto NEW case `a217e226`) was told "rejoin case `9c898d`", but
+>   `/api/manager` ALWAYS opens a new case, so it armed its wait-group + dispatched the worker on `9c898d`
+>   — whose only manager flow_link was the **CLOSED** prior session `138f3c9dac4d`. The satisfied group
+>   resolved to that dead session → wake **silently skipped** → worker result surfaced to the OPERATOR,
+>   never the Manager. **Recovered live (no restart)** by pointing `9c898d`'s newest manager link at the
+>   live session so the running dispatcher woke it (`cont:9c898d:2` → `review.accepted` → consumed).
+>   **Fix:** `_continue_case_once` now escalates a satisfied Case whose manager session is
+>   missing/CLOSED/CANCELLED (idempotent `case.manager_unavailable` event + operator notify) instead of
+>   returning 0 in silence; transient IDLE/BUSY still self-resolve. **⚠️ Still-open product gap (operator
+>   decision):** `/api/manager` opens a new case even when told to rejoin one → a "rejoin existing open
+>   case" boot (re-point the manager link) is the real fix; the manager arming waits on its OWN `case_id`
+>   also avoids it. The escalation is only the safety net.
 > - **PROVEN LIVE (on the very case that failed).** Merged PR #51, restarted gateway (#46, worker/Horse carrier
 >   untouched so the live Mgr session survived). Within one tick: `cont:9c898d…:1` enqueued + atomically
 >   claimed by `kanebra` → Mgr `awaiting_input→busy` (autonomous wake delivered to the node-carried session) →
