@@ -799,9 +799,22 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Wake-Dispatcher inert against every real Manager.
         session_id = db.case_manager_session_id(case_id)
         if not session_id:
+            # Satisfied Case with NO manager link at all — headless. Surface it.
+            await self._escalate_headless_case(db, case_id, None)
             return 0
         session = self.session_store.get(session_id)
-        if session is None:
+        # A satisfied Case whose registered Manager session is GONE or CLOSED can
+        # never self-continue: the wake would target a dead session and the finished
+        # workers would strand SILENTLY (observed live 2026-08-01 — a live Manager on
+        # a NEW case armed the wait on an OLD open case whose only manager link was a
+        # closed session; the worker result surfaced to the operator, never the
+        # Manager). Escalate ONCE instead of returning 0 in silence. A transient
+        # non-waiting state (IDLE just-restored, BUSY mid-turn) is NOT a strand — it
+        # resolves on its own — so only CLOSED/CANCELLED/missing escalates.
+        if session is None or session.status in (
+            SessionStatus.CLOSED, SessionStatus.CANCELLED,
+        ):
+            await self._escalate_headless_case(db, case_id, session_id)
             return 0
         if session.status != SessionStatus.AWAITING_INPUT:
             return 0
@@ -938,6 +951,40 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
         except Exception as e:
             logger.debug("event=case_continuation_escalate_failed case=%s err=%s", case_id, e)
+
+    async def _escalate_headless_case(
+        self, db, case_id: str, session_id: Optional[str],
+    ) -> None:
+        """[M3.4] A satisfied Case whose Manager session is missing/closed can never
+        self-continue — its finished workers are stranded. Record an idempotent
+        ``case.manager_unavailable`` marker and notify the operator ONCE (keyed on
+        case_id, independent of which dead session), so the strand is VISIBLE
+        instead of a silent no-op. Isolated: a notify/db failure must never crash
+        the tick."""
+        try:
+            already = any(
+                e.get("event_type") == "case.manager_unavailable"
+                for e in db.list_flow_events(case_id)
+            )
+            if already:
+                return
+            db.append_flow_event(
+                case_id, "case.manager_unavailable", "system",
+                payload={"reason": "manager_session_unavailable",
+                         "manager_session_id": session_id},
+            )
+            self._emit_event(
+                "case_manager_unavailable", None,
+                {"case_id": case_id, "manager_session_id": session_id},
+            )
+            await self.notifier.notify_error(
+                f"[continuation] Case {case_id} has finished worker(s) awaiting "
+                f"review but its Manager session ({session_id or 'none'}) is "
+                "closed/unavailable — the wake cannot be delivered and the work is "
+                "stranded. Re-enter the Case with a live Manager (or close it).",
+            )
+        except Exception as e:
+            logger.debug("event=headless_case_escalate_failed case=%s err=%s", case_id, e)
 
     async def interrupt_case(
         self, case_id: str, *, actor: str = "operator", reason: str = "operator_kill",
