@@ -738,7 +738,14 @@ def build_control_api(orchestrator) -> FastAPI:
         if not runtime_flag_registry_writable(name):
             raise HTTPException(
                 status_code=409,
-                detail={"ok": False, "reason": "flag_not_registry_writable"},
+                detail={
+                    "ok": False,
+                    "reason": "flag_not_registry_writable",
+                    "message": (
+                        f"{name} is an env-controlled flag, not registry-writable. "
+                        "Set it in .env and restart the gateway to change it."
+                    ),
+                },
             )
         db = _db()
         if db is None:
@@ -766,7 +773,14 @@ def build_control_api(orchestrator) -> FastAPI:
         if not runtime_flag_registry_writable(name):
             raise HTTPException(
                 status_code=409,
-                detail={"ok": False, "reason": "flag_not_registry_writable"},
+                detail={
+                    "ok": False,
+                    "reason": "flag_not_registry_writable",
+                    "message": (
+                        f"{name} is an env-controlled flag, not registry-writable. "
+                        "Set it in .env and restart the gateway to change it."
+                    ),
+                },
             )
         db = _db()
         if db is None:
