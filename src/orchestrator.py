@@ -787,17 +787,23 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._escalate_case_continuation_cap(case_id, cap, generation)
             return 0
 
-        # The wake target must be a live+idle Manager session. A dead session is
-        # Job-3 territory (crash-respawn) — do nothing here. A BUSY session already
-        # has a turn in flight — the atomic claim below is the real single-flight
-        # gate, but skipping BUSY avoids a needless enqueue.
+        # The wake target must be a live, WAITING Manager session. A dead session
+        # is Job-3 territory (crash-respawn) — do nothing here. A BUSY session
+        # already has a turn in flight — the atomic claim below is the real
+        # single-flight gate, but skipping non-waiting states avoids a needless
+        # enqueue. A Manager that has run a turn (which it MUST, to arm a
+        # wait-group) lands in AWAITING_INPUT, not IDLE — a freshly-created,
+        # never-run session is the only thing ever left at IDLE. So a wake target
+        # is EITHER waiting state (mirrors the restart-recovery gate at
+        # `_reconcile_pooled_sdk_clients`); requiring strictly IDLE made the
+        # Wake-Dispatcher inert against every real Manager.
         session_id = db.case_manager_session_id(case_id)
         if not session_id:
             return 0
         session = self.session_store.get(session_id)
         if session is None:
             return 0
-        if session.status != SessionStatus.IDLE:
+        if session.status not in (SessionStatus.IDLE, SessionStatus.AWAITING_INPUT):
             return 0
 
         cont_id = continuation_task_id(case_id, generation)
@@ -897,17 +903,18 @@ class TaskOrchestrator(ITaskOrchestrator):
                     break
                 continue
             # In-process (non-mesh) turn with no mesh_tasks row: consider it returned
-            # only after we saw the session go BUSY and then return to IDLE with the
-            # wake task no longer active.
+            # only after we saw the session go BUSY and then settle back to a waiting
+            # state (IDLE or AWAITING_INPUT — a Manager that finished a turn lands in
+            # AWAITING_INPUT, never IDLE) with the wake task no longer active.
             sess = self.session_store.get(session_id)
             if sess is None:
                 continue
             if sess.status == SessionStatus.BUSY:
                 seen_busy = True
                 continue
-            if seen_busy and sess.status == SessionStatus.IDLE and (
-                not wake_task_id or wake_task_id not in self.active_tasks
-            ):
+            if seen_busy and sess.status in (
+                SessionStatus.IDLE, SessionStatus.AWAITING_INPUT,
+            ) and (not wake_task_id or wake_task_id not in self.active_tasks):
                 break
         db.record_continuation_consumed(
             case_id, continuation_id, generation, presented, retired_group_ids,
