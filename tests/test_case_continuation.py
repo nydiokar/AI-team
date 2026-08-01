@@ -205,6 +205,46 @@ def test_satisfy_schedules_one_row_single_claim_coalesced_turn(tmp_path, monkeyp
 
 
 # --------------------------------------------------------------------------- #
+# Regression — a Manager that has run a turn is AWAITING_INPUT, never IDLE.     #
+# The Wake-Dispatcher must wake it; requiring strictly IDLE made the whole      #
+# feature inert against every real (in-gateway OR node-carried) Manager.        #
+# --------------------------------------------------------------------------- #
+
+def test_awaiting_input_manager_is_woken(tmp_path, monkeypatch):
+    _on(monkeypatch)
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=2)
+    db.arm_wait_group(fid, "g1", "ANY", ["t1"])
+    _finished(db, fid, "t1")
+
+    # A Manager that armed a wait-group has, by definition, already run a turn —
+    # so its session sits at AWAITING_INPUT (the real post-turn state), not IDLE.
+    session = _FakeSession("mgr-sess", status=SessionStatus.AWAITING_INPUT)
+    orch = _FakeOrch(_FakeStore(session))
+    assert _continue(orch, db, fid) == 1
+    assert len(db.list_continuation_rows(fid)) == 1
+    assert len(orch.deliveries) == 1
+    assert orch.deliveries[0]["session_id"] == "mgr-sess"
+    assert "t1" in orch.deliveries[0]["description"]
+
+
+def test_busy_manager_is_not_woken(tmp_path, monkeypatch):
+    # BUSY = a turn already in flight; skip the needless enqueue.
+    _on(monkeypatch)
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=2)
+    db.arm_wait_group(fid, "g1", "ANY", ["t1"])
+    _finished(db, fid, "t1")
+
+    session = _FakeSession("mgr-sess", status=SessionStatus.BUSY)
+    orch = _FakeOrch(_FakeStore(session))
+    assert _continue(orch, db, fid) == 0
+    assert db.list_continuation_rows(fid) == []
+
+
+# --------------------------------------------------------------------------- #
 # Step 3 — no concurrent duplicate under live ownership (session BUSY)         #
 # --------------------------------------------------------------------------- #
 
