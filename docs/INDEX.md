@@ -71,15 +71,19 @@ others are kept as trace, not duplicated history.
 | [`harness/level_rubric.md`](harness/level_rubric.md) | 🟢 | Deterministic checklist for picking harness level 0–3. |
 | [`harness/loop_config_map.md`](harness/loop_config_map.md) | 🟢 | The loop's control surface — every configurable knob, who drives it, what file programs it. |
 | [`harness/operating_model.md`](harness/operating_model.md) | 🟢 | How the loop is actually run in practice; wins over the spec where they differ on *how*, not *discipline*. |
-| [`harness/manager_invocation.md`](harness/manager_invocation.md) | 🟢 | The driver doc — paste this to cold-boot a Manager and run a loop. Now a compatibility wrapper around `roles/manager.md`. |
-| [`harness/roles/manager.md`](harness/roles/manager.md) | 🟢 | Canonical, provider-neutral Manager role profile — stable identity/authority, loaded at session boot. |
+| [`harness/roles/manager.md`](harness/roles/manager.md) | 🟢 | Canonical, provider-neutral Manager role profile — stable identity/authority, loaded verbatim into the system prompt at session boot. |
+| [`harness/roles/worker.md`](harness/roles/worker.md) | 🟢 | Canonical Worker role profile — mirrors `manager.md`. |
 | [`harness/FLOW_MAP.md`](harness/FLOW_MAP.md) | 🟢 | Where state lands as a flow runs through the automated (v0.6+) harness. |
-| [`harness/milestone_template.md`](harness/milestone_template.md) | 🟢 | Template for a dispatch's `## Milestone` burndown section. |
-| [`harness/packet_template.xml`](harness/packet_template.xml) | 🟢 | XML task packet template. |
-| [`harness/generators/draft_packet.md`](harness/generators/draft_packet.md) | 🟢 | DRAFT generator — intent → task packet. |
-| [`harness/generators/adversarial_review.md`](harness/generators/adversarial_review.md) | 🟢 | REVIEW generator — adversarial pass over packet/diff. |
-| [`harness/generators/closure_summary.md`](harness/generators/closure_summary.md) | 🟢 | CLOSE generator — closure summary + doc-update stub. |
-| [`harness/promotion_ladder.md`](harness/promotion_ladder.md) | ⚪ | **Retired 2026-07-06**, superseded by v0.6 automation build spec. Kept for the evidence-gated prototype-era decision trail only. |
+| [`harness/milestone_template.md`](harness/milestone_template.md) | 🟡 | Template for a dispatch's `## Milestone` burndown section — field shape drifted from current practice, see `harness/README.md` drift note (A64). |
+| [`harness/packet_template.xml`](harness/packet_template.xml) | 🟡 | XML task packet template — superseded in practice by free-prose packets since `AGENT_36`; never formally retired, see `harness/README.md` drift note (A64). |
+| [`harness/generators/draft_packet.md`](harness/generators/draft_packet.md) | 🟡 | DRAFT generator — intent → task packet. Same drift as `packet_template.xml`. |
+| [`harness/generators/adversarial_review.md`](harness/generators/adversarial_review.md) | 🟢 | REVIEW generator — adversarial pass, F-tag convention still followed. |
+| [`harness/generators/closure_summary.md`](harness/generators/closure_summary.md) | 🟢 | CLOSE generator — closure summary + doc-update stub, still broadly accurate. |
+
+**Retired and removed (2026-08-01, A64 cleanup):** `harness/manager_invocation.md` (legacy
+paste-driver, fully superseded by `harness/roles/manager.md` + live `/api/manager` role-boot, zero
+code references) and `harness/promotion_ladder.md` (self-marked retired 2026-07-06, superseded by
+v0.6 automation; the file said the operator may delete it). Both existed only in git history now.
 
 ## Specs — session/state timeline
 

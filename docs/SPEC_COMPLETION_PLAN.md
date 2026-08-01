@@ -120,6 +120,13 @@ racing tick.
 ### T5 — M4: **feature-spec authoring + scored review + decomposer-as-task-DAG**  ·  ⛔ none for generators; wiring ⛔ T1
 **Why:** v0.7 §M4 — the front-end for a *feature-sized* intent (goal step 2). Currently absent (no
 `spec_authoring` stage, no `publish_artifact`, no decomposer).
+**⚠️ Not greenfield — an abandoned capability, read before building:** the v0.5 harness already had a
+proven intent-expansion contract (`docs/harness/generators/draft_packet.md`'s literal-vs-interpreted-
+vs-real-objective split + forced assumptions/drift-risks) and a stalled attempt to extend it to
+feature-sized intents (`AGENT_24_DECOMPOSER_GENERATOR.md`, deferred 2026-07-08, never resumed even
+though its blocker — M2.5 — has been live since mid-July). The live Manager today gets a flat
+`objective: str` with none of that structure. Full trail + an open "should this be the Manager or a
+separate role" fork: see the addendum in `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md`.
 **Scope (in):**
 - `spec_authoring` stage before LOOP 0: Manager authors a spec + runs a **rubric-scored adversarial
   review** (a cheap/cross-model plan-reviewer seat, per M3.2) before decomposing.

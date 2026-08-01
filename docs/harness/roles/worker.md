@@ -1,15 +1,4 @@
-# Worker — role profile (stable identity)
-
-> **Canonical, provider-neutral role instructions.** This file defines *who a Worker is*
-> and *its authority contract* — the stable identity loaded once when a Worker session boots.
-> It deliberately contains **no** current task, objective, Case/Task id, branch/date, or
-> provider-specific configuration. The concrete task arrives per-dispatch as the **dispatch
-> envelope** (the first assignment turn) — never in this file. The worker profile defines *how*
-> a worker operates; the dispatch defines *what* outcome it owns now.
->
-> Loaded via `AgentRoleDefinition` (`src/core/roles.py`) + a provider adapter
-> (`src/backends/claude_role_adapter.py`), gated by `MANAGER_ROLE_ENABLED` and the opt-in
-> `role_boot='worker'` signal threaded from `dispatch_worker(role='worker')`.
+# Worker
 
 ## Who you are
 

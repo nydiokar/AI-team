@@ -15,8 +15,11 @@ usage() {
 Control board for the gateway's runtime flag registry (GET/PUT/DELETE /api/flags).
 
 Usage:
-  $SELF list                    show every flag as a table (value, source, scope, writable)
-  $SELF explain                 like list, but with each flag's description (what it does)
+  $SELF list [-w|--writable]     show every flag as a table (value, source, scope, writable)
+                                  -w/--writable: only registry_writable=true flags (the ones
+                                  actually controllable via this script's on/off/unset)
+  $SELF explain [FLAG...]        full description for every flag, or just the ones named
+                                  (avoids the wall of text — e.g. 'explain FOO BAR')
   $SELF get   <FLAG_NAME>       show one flag's full detail
   $SELF on    <FLAG_NAME>       set flag to true
   $SELF off   <FLAG_NAME>       set flag to false
@@ -42,6 +45,9 @@ Notes:
 
 Examples:
   $SELF list
+  $SELF list --writable
+  $SELF explain
+  $SELF explain CASE_CONTINUATION_ENABLED QUOTA_COORDINATOR_ENABLED
   $SELF get CASE_CONTINUATION_ENABLED
   $SELF on  CASE_CONTINUATION_ENABLED
   $SELF off QUOTA_COORDINATOR_ENABLED && pm2 restart ai-team-gateway
@@ -98,24 +104,44 @@ api() {
 }
 
 print_table() {
+    # $1: 1 to filter registry_writable==true only, 0 for all
     # reads {"ok":true,"flags":[{flag_name,value,source,effect_scope,registry_writable,...}, ...]}
+    local writable_only="${1:-0}"
     {
         echo -e "FLAG\tVALUE\tSOURCE\tSCOPE\tWRITABLE"
-        jq -r '.flags[] | [.flag_name, .value, .source, .effect_scope, .registry_writable] | @tsv'
+        jq -r --argjson w "$writable_only" \
+            '.flags[] | select($w == 0 or .registry_writable == true) | [.flag_name, .value, .source, .effect_scope, .registry_writable] | @tsv'
     } | column -t -s $'\t'
 }
 
 explain() {
-    # reads {"ok":true,"flags":[{flag_name,value,source,effect_scope,registry_writable,description,...}, ...]}
-    jq -r '.flags[] | "\(.flag_name)  [\(.value)]  source=\(.source)  scope=\(.effect_scope)  writable=\(.registry_writable)\n  \(.description)\n"'
+    # $@: optional flag names to restrict to; empty = all
+    # reads {"ok":true,"flags":[{flag_name,value,source,effect_scope,registry_writable,description,...}, ...]} from stdin
+    local body
+    body="$(cat)"
+    if [[ $# -eq 0 ]]; then
+        echo "$body" | jq -r '.flags[] | "\(.flag_name)  [\(.value)]  source=\(.source)  scope=\(.effect_scope)  writable=\(.registry_writable)\n  \(.description)\n"'
+        return
+    fi
+    local names_json
+    names_json="$(printf '%s\n' "$@" | jq -R . | jq -s .)"
+    echo "$body" | jq -r --argjson names "$names_json" \
+        '.flags[] | select(.flag_name as $f | $names | index($f)) | "\(.flag_name)  [\(.value)]  source=\(.source)  scope=\(.effect_scope)  writable=\(.registry_writable)\n  \(.description)\n"'
+    local unknown
+    unknown="$(echo "$body" | jq -r --argjson names "$names_json" '[.flags[].flag_name] as $all | $names[] | select(. as $n | $all | index($n) | not)')"
+    if [[ -n "$unknown" ]]; then
+        echo "unknown flag(s): $(echo "$unknown" | tr '\n' ' ')" >&2
+    fi
 }
 
 case "$cmd" in
     list)
-        api GET /api/flags | print_table
+        w=0
+        [[ "${2:-}" == "-w" || "${2:-}" == "--writable" ]] && w=1
+        api GET /api/flags | print_table "$w"
         ;;
     explain)
-        api GET /api/flags | explain
+        api GET /api/flags | explain "${@:2}"
         ;;
     get)
         [[ -n "$flag" ]] || { echo "usage: $SELF get <FLAG_NAME>" >&2; exit 1; }

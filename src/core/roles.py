@@ -40,6 +40,17 @@ MANAGER_ALLOWED_DECISIONS: List[str] = ["close", "rework", "derive", "block", "e
 
 # Canonical role artifact, resolved relative to the repo root (this file is
 # src/core/roles.py ⇒ repo root is parents[2]).
+#
+# manager.md defines *who the Manager is* and its authority contract — the stable
+# identity loaded once when a Manager session boots. It deliberately contains NO
+# current objective, Case/Task, branch/date, or provider config: that arrives
+# per-invocation as ManagerInvocation / the first assignment turn (see below),
+# never baked into the file. The file is loaded VERBATIM (read_text().strip(),
+# no markdown parsing) and appended onto the Claude Code system prompt preset by
+# claude_role_adapter.claude_system_prompt() — so anything written in manager.md
+# is live model context on every boot. Keep it free of engineering meta-doc
+# (this comment is where that belongs instead) and of anything that reads as an
+# instruction only a human operator should carry out.
 _MANAGER_ROLE_DOC: Path = (
     Path(__file__).resolve().parents[2] / "docs" / "harness" / "roles" / "manager.md"
 )
@@ -55,6 +66,11 @@ WORKER_TOOL_PROFILE: str = "worker_v1"
 # package exists for a worker, so none is claimed here.
 WORKER_SKILLS: List[str] = []
 
+# worker.md mirrors manager.md: the concrete task arrives per-dispatch as the
+# dispatch envelope (the first assignment turn), never in this file. Loaded
+# verbatim, gated by MANAGER_ROLE_ENABLED + the opt-in role_boot='worker' signal
+# threaded from dispatch_worker(role='worker'). Same "no engineering meta-doc,
+# no human-only instructions" rule as manager.md above.
 _WORKER_ROLE_DOC: Path = (
     Path(__file__).resolve().parents[2] / "docs" / "harness" / "roles" / "worker.md"
 )

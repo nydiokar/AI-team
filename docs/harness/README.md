@@ -32,17 +32,27 @@ escalate one level.
 
 ## Which file to use when
 
+> ⚠️ **Known drift (2026-08-01, see A64):** `packet_template.xml` and the three
+> `generators/*.md` files below describe the XML-packet DRAFT/REVIEW ritual used through
+> `AGENT_16`–`AGENT_29` (mid-July). No dispatch since `AGENT_36` (M2.5 onward) has used the XML
+> shape — the actual, current house style is free-prose packets like `.ai/dispatch/AGENT_61_*`
+> onward (`Why` / `TASK` / `TYPE` / `CONTEXT` / `ACCEPTANCE` / `RESERVED DECISIONS` / `SCOPE OUT`
+> / `TRAIL` sections + a `## Milestone` burndown + `## Closure`, folded into one file per the
+> ONE-FILE RULE). Nobody ever marked the XML ritual retired. Do not treat the table below as
+> current practice for DRAFT/REVIEW until A64 reconciles it — `level_rubric.md`'s Level ladder and
+> `dispatch_pipeline.md`'s stage doctrine + ONE-FILE RULE remain accurate and followed.
+> `promotion_ladder.md` was already retired 2026-07-06 and is now deleted (git history only).
+
 | File | Use it to… |
 |------|-----------|
 | [`level_rubric.md`](level_rubric.md) | pick the level (do this first) |
-| [`packet_template.xml`](packet_template.xml) | lock objective + plan + execution rules (model-facing) |
-| [`milestone_template.md`](milestone_template.md) | track resumable progress (executor keeps it current) |
-| [`generators/draft_packet.md`](generators/draft_packet.md) | DRAFT: intent → packet + milestone |
-| [`generators/adversarial_review.md`](generators/adversarial_review.md) | REVIEW: packet → F-tagged findings (≤2 rounds) |
-| [`generators/closure_summary.md`](generators/closure_summary.md) | CLOSE: what changed, F-tag outcomes, doc updates |
-| [`dispatch_pipeline.md`](dispatch_pipeline.md) | the end-to-end runbook (start here to run a task) |
+| [`packet_template.xml`](packet_template.xml) | ⚠️ stale — see drift note above; historical XML packet shape, not current practice |
+| [`milestone_template.md`](milestone_template.md) | ⚠️ stale field shape — see drift note above; current practice: a `## Milestone` checkbox burndown folded into the dispatch doc |
+| [`generators/draft_packet.md`](generators/draft_packet.md) | ⚠️ stale — see drift note above |
+| [`generators/adversarial_review.md`](generators/adversarial_review.md) | REVIEW: packet → F-tagged findings (≤2 rounds) — the F-tag convention is still followed; the XML-packet framing is stale |
+| [`generators/closure_summary.md`](generators/closure_summary.md) | CLOSE: what changed, F-tag outcomes, doc updates — still broadly accurate |
+| [`dispatch_pipeline.md`](dispatch_pipeline.md) | the end-to-end runbook (start here to run a task) — stage doctrine + ONE-FILE RULE current; DRAFT/REVIEW artifact pointers stale |
 | [`loop_config_map.md`](loop_config_map.md) | the loop's **control surface**: node table (driver/programmed-by/dials per stage), the "temperature" dials, Manager-vs-Executor behavior + Manager spec, and a failure→node→dial localization table (read this to debug a bad loop) |
-| [`promotion_ladder.md`](promotion_ladder.md) | the **evidence-gated roadmap** for the harness's own future: for each v0.4 element v0.5 deferred, the concrete observed trigger that would ever justify promoting it (model-routing promotion is governed here). Authorizes nothing; gates everything. |
 
 ## Cost guard (always)
 
