@@ -787,15 +787,15 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._escalate_case_continuation_cap(case_id, cap, generation)
             return 0
 
-        # The wake target must be a live, WAITING Manager session. A dead session
-        # is Job-3 territory (crash-respawn) — do nothing here. A BUSY session
-        # already has a turn in flight — the atomic claim below is the real
-        # single-flight gate, but skipping non-waiting states avoids a needless
-        # enqueue. A Manager that has run a turn (which it MUST, to arm a
-        # wait-group) lands in AWAITING_INPUT, not IDLE — a freshly-created,
-        # never-run session is the only thing ever left at IDLE. So a wake target
-        # is EITHER waiting state (mirrors the restart-recovery gate at
-        # `_reconcile_pooled_sdk_clients`); requiring strictly IDLE made the
+        # The wake target must be a live Manager session that has RUN a turn and is
+        # now WAITING for the next one — i.e. AWAITING_INPUT. A Manager that armed a
+        # wait-group has by definition already run a turn, so that is the only state
+        # a real wake target is ever in. IDLE is NOT a wake condition: it means a
+        # freshly-created / just-reset / just-restored session that has never run a
+        # turn (so it cannot own a satisfied group), and BUSY means a turn is already
+        # in flight (the atomic claim below is the real single-flight gate; skipping
+        # here just avoids a needless enqueue). A dead session is Job-3 territory
+        # (crash-respawn). Requiring strictly IDLE — the original bug — made the
         # Wake-Dispatcher inert against every real Manager.
         session_id = db.case_manager_session_id(case_id)
         if not session_id:
@@ -803,7 +803,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         session = self.session_store.get(session_id)
         if session is None:
             return 0
-        if session.status not in (SessionStatus.IDLE, SessionStatus.AWAITING_INPUT):
+        if session.status != SessionStatus.AWAITING_INPUT:
             return 0
 
         cont_id = continuation_task_id(case_id, generation)
