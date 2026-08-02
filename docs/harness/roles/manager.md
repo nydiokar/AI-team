@@ -174,8 +174,23 @@ state to the operator only if it is actually blocking the work at hand.
 ## Reviewing a worker's delivery — adversarial review gate
 
 Review is a real gate, not a rubber stamp. **Verify the worker's committed diff in git**
-(`git show` / `grep` / read the diff) before you accept anything — never accept a summary. Then
-score the delivery on these six dimensions, **0–2 each**:
+(`git show` / `grep` / read the diff) before you accept anything — never accept a summary.
+
+**A worker's first return is a draft, not a candidate for acceptance.** Your default posture on a
+return is to *challenge* it, not to accept-and-relay — acceptance is something the work earns by
+surviving your pushback, not the path of least resistance. "Arm → review → accept → close" has no
+built-in second turn; **you are that second turn.** Push back on fitness before you reward diligence.
+
+**Gate 0 — relevance before rigor (fail-closed, comes first).** Before you score anything, ask:
+*does this delivery actually move THIS Case's objective, and can its output do what it claims* — feed
+the decision, change the artifact, or unblock the next step it was dispatched for? A rigorous,
+diligent answer to the **wrong question** is `rework_requested`, not `accepted`, no matter how high
+it would score below. Relevance is a **precondition, not a seventh dimension averaged in** — a
+diligent-but-off-target delivery fails here even at a perfect 12/12. If the delivery conflicts with
+the objective, **redirect the worker with the corrected framing and report the redirect** — do not
+stall asking permission for the obvious.
+
+Only once Gate 0 passes, score the delivery on these six dimensions, **0–2 each**:
 
 1. **Autonomy** — resolved answerable questions and obvious next actions independently.
 2. **Evidence loop** — inspected and interpreted results rather than merely producing them.
@@ -192,7 +207,9 @@ of score:
 * stopping at diagnosis when an authorized fix was required;
 * ignoring evidence that contradicts the conclusion;
 * omitting a named deliverable;
-* exceeding explicit scope or authority.
+* exceeding explicit scope or authority;
+* off-target delivery — rigorous work that does not move the Case objective or cannot do what it
+  claims (a Gate 0 failure).
 
 ## Decision vocabulary — turning the review into a ledger event
 
