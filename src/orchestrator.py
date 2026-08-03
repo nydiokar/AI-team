@@ -947,6 +947,24 @@ class TaskOrchestrator(ITaskOrchestrator):
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED,
         ):
+            # [A55 / M3.4 Job 3] CRASH-RESPAWN. The bound Manager session is dead
+            # (gone/closed) but the Case is genuinely open (the 'blocked' guard
+            # above already excluded operator-halted Cases) and SATISFIED — its
+            # finished workers would strand. Instead of only escalating, bring a
+            # role-full Manager back ON THE SAME Case (reconstruct via A54's
+            # get_case_brief, re-arm waits/groups, resume) under a strict
+            # single-flight lease so a racing tick never double-respawns.
+            if await self._respawn_manager_for_case(db, case_id, generation, session_id):
+                # A respawn is owned for this Case this tick — either THIS tick won
+                # the single-flight and respawned, or a concurrent tick did and we
+                # lost the atomic claim. Either way a role-full Manager is (being)
+                # brought back on the SAME Case; do NOT also escalate a strand or
+                # enqueue a wake on the dead session_id. The new session boots and
+                # is woken next tick (AWAITING_INPUT after its resume turn).
+                return 0
+            # Respawn genuinely not viable (continuation off — unreachable here —
+            # or no placement node / spawn failed): fall through to the visible
+            # strand escalation exactly as before A55.
             await self._escalate_headless_case(db, case_id, session_id)
             return 0
         if session.status != SessionStatus.AWAITING_INPUT:
@@ -1020,6 +1038,180 @@ class TaskOrchestrator(ITaskOrchestrator):
             "dispatch the next task / wait on remaining workers / close the Case if its "
             "completion_criteria are met. This turn was delivered autonomously by the "
             "harness — treat it exactly like an operator poke to continue the Case."
+        )
+
+    async def _respawn_manager_for_case(
+        self, db, case_id: str, generation: int, dead_session_id: Optional[str],
+    ) -> bool:
+        """[A55 / M3.4 Job 3] Bring a role-full Manager back on a SATISFIED Case whose
+        bound Manager session is dead — on the SAME Case, exactly once, never new work.
+
+        Returns True iff a respawn is owned for this Case this tick (this tick won the
+        single-flight and (re)spawned, OR a concurrent tick won and this one lost the
+        atomic claim — either way a Manager is being brought back, so the caller must
+        NOT escalate a strand). Returns False only when a respawn is genuinely not
+        viable (continuation off, no placement node, reconstruction/spawn failed) — the
+        caller then falls through to the visible-strand escalation as before A55.
+
+        SINGLE-FLIGHT: reuses the continuation lease mechanism verbatim — a deterministic
+        ``respawn:{case}:{gen}`` row pinned to ``CONTINUATION_MACHINE_SENTINEL`` (invisible
+        to every worker claim scan) claimed via the atomic ``claim_task``. Two racing ticks
+        enqueue the SAME id (UNIQUE collapses to one row); ``claim_task`` (an
+        ``UPDATE … WHERE status='pending'`` + ``changes()>0``) elects a single winner. NO
+        second lock model. A crash between claim and spawn leaves the row ``claimed`` by a
+        dead incarnation → reaped to ``pending`` by the SAME reaper → re-claimed and retried
+        by a later tick (at-least-once, no permanent stall).
+
+        ANTI-GOAL: this NEVER calls ``open_case`` and NEVER mints a new ``flow_run_id`` — it
+        binds the fresh session to the passed ``case_id`` via a manager ``flow_link`` and
+        reconstructs the objective/waits from the DB (``get_case_brief`` /
+        ``boot_reconcile_case``). The objective-lock is preserved end to end.
+        """
+        from src.control.db import (
+            case_continuation_enabled, CONTINUATION_MACHINE_SENTINEL,
+            RESPAWN_ACTION, respawn_task_id,
+        )
+        # Defensive re-gate (this path is only reached with continuation ON, but keep
+        # the respawn itself explicitly flag-guarded so it can never fire otherwise).
+        if not case_continuation_enabled():
+            return False
+        # Manager respawn boots a role-full Manager session; the driver's _role_boot
+        # only applies the role prompt + scoped manager tools when MANAGER_ROLE is ON.
+        # Without it a "respawn" would be a naked session with no dispatch tools — worse
+        # than the visible strand. Surface via the escalation path instead.
+        if not self._manager_role_enabled():
+            return False
+
+        # Reconstruct the Case from the DB ALONE (A54). A None brief means the Case is
+        # unknown/unreadable — not respawnable; let the caller escalate.
+        brief = db.get_case_brief(case_id)
+        if brief is None:
+            return False
+        objective = str(brief.get("objective") or "").strip()
+        if not objective:
+            return False
+
+        # SINGLE-FLIGHT CLAIM (atomic, one winner) — BEFORE any spawn side-effect.
+        respawn_id = respawn_task_id(case_id, generation)
+        db.enqueue_task(
+            respawn_id,
+            session_id=None,
+            machine_id=CONTINUATION_MACHINE_SENTINEL,
+            backend="claude",
+            action=RESPAWN_ACTION,
+            payload={"case_id": case_id, "generation": generation,
+                     "dead_session_id": dead_session_id},
+        )
+        if not db.claim_task(respawn_id, socket.gethostname()):
+            # Lost the race — a concurrent tick owns the respawn. Report "owned" so the
+            # caller does NOT double-respawn or escalate a strand that is being healed.
+            return True
+
+        # --- We are the single respawn owner. Everything below runs at most once. ---
+        try:
+            # NODE PLACEMENT: reuse the dead Manager's recorded node if we can read it,
+            # else the gateway host (__local__). Remote-node MCP reachability is a known
+            # deferred item — if the recorded node is remote we still pin it (the mesh
+            # dispatch path owns reachability); a __local__/absent pin lands in-gateway.
+            node_id = "__local__"
+            repo_path = os.getcwd()
+            backend = "claude"
+            if dead_session_id:
+                dead_row = db.get_session(dead_session_id)
+                if dead_row is not None:
+                    node_id = str(dead_row.get("machine_id") or "") or "__local__"
+                    repo_path = str(dead_row.get("repo_path") or "") or repo_path
+                    backend = str(dead_row.get("backend") or "") or backend
+
+            from src.core.interfaces import SessionOrigin
+            result = self.session_service.create_session(
+                backend=backend, repo_path=repo_path, node_id=node_id,
+                origin=SessionOrigin(channel="web", kind="user"), bind_chat=False,
+            )
+            if not getattr(result, "ok", False) or getattr(result, "session", None) is None:
+                # Spawn failed AFTER the claim — release the lease so a later tick can
+                # retry cleanly rather than stranding the row 'claimed' (recovery).
+                db.release_task(respawn_id, socket.gethostname())
+                return False
+            new_session = result.session
+            new_sid = new_session.session_id
+
+            # Bind the fresh session to the SAME Case as its Manager — the anti-goal
+            # boundary. NO open_case, NO new flow_run_id: just a manager flow_link on the
+            # existing Case + the durable session affiliation the wake target is read from.
+            db.create_flow_link(
+                case_id, "session", new_sid, "manager", created_by="system",
+            )
+            self._set_session_case_affiliation(new_sid, case_id, role="manager")
+            db.append_flow_event(
+                case_id, "case.manager_respawned", "system",
+                entity_type="session", entity_id=new_sid,
+                payload={"reason": "manager_session_dead",
+                         "dead_session_id": dead_session_id,
+                         "generation": generation, "node_id": node_id},
+            )
+
+            # Re-arm the Case's outstanding waits/groups from the ledger (A54, idempotent).
+            try:
+                db.boot_reconcile_case(case_id, actor="manager")
+            except Exception as e:
+                logger.debug("event=respawn_reconcile_failed case=%s err=%s", case_id, e)
+
+            # Resume turn — a role-full Manager first assignment that RESUMES this Case
+            # (get_case_brief + reconcile_waits), NOT a new objective. Delivering the turn
+            # flips the new session BUSY→AWAITING_INPUT so the next tick wakes it normally.
+            resume = self._render_respawn_turn(case_id, objective)
+            try:
+                await self.submit_instruction(
+                    description=resume,
+                    session_id=new_sid,
+                    cwd=new_session.repo_path,
+                    source="manager_respawn",
+                )
+            except Exception as e:
+                # The session + binding are already durable; a failed first-turn deliver
+                # leaves a bound Manager the next tick can still drive. Keep the claim
+                # COMPLETED (we did respawn) and surface the deliver failure.
+                logger.warning("event=respawn_deliver_failed case=%s err=%s", case_id, e)
+
+            db.complete_task(respawn_id, result={"session_id": new_sid, "node_id": node_id})
+            self._emit_event(
+                "case_manager_respawned", None,
+                {"case_id": case_id, "new_session_id": new_sid,
+                 "dead_session_id": dead_session_id, "generation": generation},
+            )
+            logger.info(
+                "event=case_manager_respawned case=%s new_session=%s dead_session=%s node=%s",
+                case_id, new_sid, dead_session_id, node_id,
+            )
+            return True
+        except Exception as e:
+            # Any failure after the claim releases the lease for a clean retry — the
+            # respawn must never permanently stall a Case on a transient error.
+            logger.warning("event=respawn_failed case=%s err=%s", case_id, e)
+            try:
+                db.release_task(respawn_id, socket.gethostname())
+            except Exception:
+                pass
+            return False
+
+    def _render_respawn_turn(self, case_id: str, objective: str) -> str:
+        """[A55] The role-full resume turn for a respawned Manager. Points it at the
+        SAME Case to reconstruct (get_case_brief) and reconcile (reconcile_waits) — it
+        RESUMES a bounded Case, it does NOT open a new one."""
+        return (
+            "[respawn] You are resuming an EXISTING Case whose prior Manager session "
+            f"crashed/was lost. Case: {case_id}. Objective (unchanged, do NOT re-open "
+            f"or re-scope it): {objective}\n"
+            "FIRST call get_case(case_id) / read your Case brief to reconstruct the full "
+            "working state (dispatched workers, latest verdicts, open/ready waits, rounds "
+            "used) from the durable record — your in-process memory is empty. Then call "
+            "reconcile_waits to re-establish your outstanding obligations. Review any "
+            "finished-but-unreviewed worker deliveries IN ORDER (relevance gate before "
+            "rigor gate), then dispatch the next task / wait on remaining workers / "
+            "close the Case if its completion_criteria are met. Do NOT open_case a new "
+            "objective — this is a continuation of the SAME bounded Case. This turn was "
+            "delivered autonomously by the harness after a crash-respawn."
         )
 
     async def _finalize_continuation(
