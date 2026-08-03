@@ -208,5 +208,21 @@ needs it.
 - [ ] Phase 3: budget/burn-rate alerts (billable-USD only), enforcement flag-gated OFF via governor seam
 - [ ] Adversarial-review items re-checked against the shipped diff (no drift into scope-out)
 
+## OPERATOR ADDENDUM (2026-08-03, after the Phase-0 audit landed) — in scope, applies to Phases 1-3
+1. **Finish off Codex usage — required, not optional.** Codex is currently "underrepresented":
+   token accounting is double-counted (`includes_cache` rows also carry a separate cache column)
+   and no codex/gpt model is priceable. "Finish off" = (a) correct codex token accounting in the
+   read-model (bill `uncached_input = input - cache_read` for `includes_cache` rows), and
+   (b) **resolve R1 in favor of extending `_PRICE_TABLE`** with current codex/gpt prices so the
+   #1 consumer (and all codex/gpt sessions) show USD. Prices must be sourced (web-check current
+   public rates) and each entry carries its as-of date; coverage % still surfaces in the UI so a
+   stale price never reads as truth. This makes "complete codex usage" the closing part of the
+   job.
+2. **Cost tab MUST filter by time range AND project.** Dropdown ranges: last 24 hours, 48 hours,
+   last 7 days, last 30 days / this month (24h | 48h | 7d | 30d), defaulting to 7d. A second
+   filter: **per project** (repo_path). All three read-model endpoints take `from`/`to` (+
+   optional `repo_path`) so the UI and API agree; the explorer dimension list gains `project`.
+   These are the operator's explicit UI requirements — Phase 2 acceptance includes them.
+
 ## Closure (fill on completion)
 (fill when executed)
