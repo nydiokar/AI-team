@@ -109,6 +109,7 @@ v0.6 automation; the file said the operator may delete it). Both existed only in
 |---|---|---|
 | [`schema/results.schema.json`](schema/results.schema.json) | 🟢 | JSON schema for task result artifacts. |
 | [`dictionary/words_&_relations.md`](dictionary/words_&_relations.md) | 🔵 | Working glossary — Case/Task/Session/Event/Artifact vocabulary and the Manager/Skill/Tool layering. Not yet cross-linked from other specs; treat as draft until reconciled with `harness/roles/manager.md` and the M3 spec. |
+| [`cost_monitoring_audit.md`](cost_monitoring_audit.md) | 🟢 | A65 Phase-0 truthfulness audit of the cost telemetry the Cost read-model/dashboard is built on: real-usage provenance, codex `includes_cache` double-count, 51% unpriced share, standalone-session dominance, attribution gaps, `total`-definition bug. Update as the A65 read-model lands. |
 
 ## TBD — proposals, not committed work
 
