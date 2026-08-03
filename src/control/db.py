@@ -144,6 +144,10 @@ FLOW_EVENT_TYPES = (
     "review.accepted",
     "review.rework_requested",
     "review.waived",
+    "artifact.published",
+    "spec.authored",
+    "spec.review_scored",
+    "case.decomposed",
     "flow.blocked",
     "flow.unblocked",
     "flow.interrupted",
@@ -189,6 +193,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "effect_scope": "live",
         "registry_writable": "1",
         "description": "Wake-Dispatcher autonomous Case continuation.",
+    },
+    "SPEC_AUTHORING_ENABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "M4 spec-authoring stage, scored spec-review gate, publish_artifact, and the decomposer.",
     },
     "HARNESS_LEVEL3_GUARD": {
         "default": "0",
@@ -405,6 +415,121 @@ def case_continuation_enabled() -> bool:
     byte-identical to pre-M3.4 behavior.
     """
     return runtime_flag_enabled("CASE_CONTINUATION_ENABLED")
+
+
+def spec_authoring_enabled() -> bool:
+    """[A56/M4] Whether the spec-authoring stage + scored review gate + decomposer
+    are active.
+
+    Canonical read of ``SPEC_AUTHORING_ENABLED`` (truthy: 1/true/yes/on); default
+    OFF. Mirrors ``case_continuation_enabled()``. When OFF: ``publish_artifact``,
+    ``publish_spec``, ``record_spec_review`` and ``decompose_case`` all write
+    nothing and return a disabled marker, and their /api routes return 404 ⇒
+    byte-identical to pre-M4 behaviour (no ``artifact.*``/``spec.*``/``case.decomposed``
+    events are ever written and no ``task_attached`` links are created).
+    """
+    return runtime_flag_enabled("SPEC_AUTHORING_ENABLED")
+
+
+# [A56/M4] R1 — the scored spec-review rubric. Six dimensions, each scored 0–2 by a
+# SEPARATE plan-reviewer seat (never the authoring Manager grading its own spec). A
+# spec PASSES (⇒ decomposition is allowed) only when BOTH hold:
+#   * the total score meets SPEC_REVIEW_PASS_THRESHOLD (≥8/12), AND
+#   * neither of the two CRITICAL dimensions scored a hard zero (a spec with an
+#     unclear objective or one that cannot be decomposed is unusable regardless of a
+#     high total — a critical-zero BLOCKS even above threshold).
+# These are tunable config constants, not magic numbers scattered at call sites.
+SPEC_REVIEW_DIMENSIONS: tuple = (
+    "objective_clarity",
+    "scope_boundaries",
+    "decomposability",
+    "acceptance_testability",
+    "dependency_correctness",
+    "risks_and_assumptions",
+)
+SPEC_REVIEW_MAX_PER_DIM = 2
+SPEC_REVIEW_MAX_SCORE = SPEC_REVIEW_MAX_PER_DIM * len(SPEC_REVIEW_DIMENSIONS)  # 12
+SPEC_REVIEW_PASS_THRESHOLD = 8
+# A hard zero on either of these BLOCKS decomposition even if the total clears the
+# threshold — they are load-bearing for a decomposable, actionable spec.
+SPEC_REVIEW_CRITICAL_DIMENSIONS: tuple = ("objective_clarity", "decomposability")
+
+
+def _score_spec_review(scores: Dict[str, Any]) -> Dict[str, Any]:
+    """[A56/M4] Grade a spec-review score-card against R1. Pure/no I/O.
+
+    ``scores`` maps each of ``SPEC_REVIEW_DIMENSIONS`` to an int in
+    [0, SPEC_REVIEW_MAX_PER_DIM]. Returns a structured verdict:
+    ``{"total", "max", "threshold", "passed", "verdict", "critical_zero": [...],
+    "missing": [...], "out_of_range": [...]}``. ``passed`` is True iff the total
+    meets the threshold AND no critical dimension scored zero. A malformed
+    score-card (missing/out-of-range dims) never passes and is reported explicitly.
+    """
+    missing: List[str] = []
+    out_of_range: List[str] = []
+    total = 0
+    critical_zero: List[str] = []
+    for dim in SPEC_REVIEW_DIMENSIONS:
+        raw = scores.get(dim)
+        if raw is None:
+            missing.append(dim)
+            continue
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            out_of_range.append(dim)
+            continue
+        if val < 0 or val > SPEC_REVIEW_MAX_PER_DIM:
+            out_of_range.append(dim)
+            continue
+        total += val
+        if val == 0 and dim in SPEC_REVIEW_CRITICAL_DIMENSIONS:
+            critical_zero.append(dim)
+    well_formed = not missing and not out_of_range
+    passed = bool(
+        well_formed
+        and total >= SPEC_REVIEW_PASS_THRESHOLD
+        and not critical_zero
+    )
+    return {
+        "total": total,
+        "max": SPEC_REVIEW_MAX_SCORE,
+        "threshold": SPEC_REVIEW_PASS_THRESHOLD,
+        "passed": passed,
+        "verdict": "accepted" if passed else "rework_requested",
+        "critical_zero": critical_zero,
+        "missing": missing,
+        "out_of_range": out_of_range,
+    }
+
+
+def _topological_order(
+    keys: List[str],
+    deps: Dict[str, List[str]],
+) -> Optional[List[str]]:
+    """[A56/M4] Kahn's topological sort of a task-DAG. Pure/no I/O.
+
+    ``deps[key]`` are the task_keys ``key`` DEPENDS ON (its prerequisites, which
+    must run first). Returns one valid schedule (prerequisites before dependents),
+    or ``None`` if the graph contains a cycle (⇒ unschedulable). Deterministic:
+    ties are broken by the original ``keys`` order so two runs agree.
+    """
+    indegree: Dict[str, int] = {k: 0 for k in keys}
+    dependents: Dict[str, List[str]] = {k: [] for k in keys}
+    for k in keys:
+        for prereq in deps.get(k, []):
+            indegree[k] += 1
+            dependents[prereq].append(k)
+    ready = [k for k in keys if indegree[k] == 0]
+    order: List[str] = []
+    while ready:
+        node = ready.pop(0)
+        order.append(node)
+        for child in dependents[node]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                ready.append(child)
+    return order if len(order) == len(keys) else None
 
 
 # [M3.4] The reserved ``machine_id`` sentinel that keeps a continuation row
@@ -2500,6 +2625,305 @@ class MeshDB:
             (flow_run_id, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # [A56 / M4] Spec authoring → scored review gate → decomposer-as-DAG.
+    #
+    # For a feature-sized intent a Manager authors a spec (durable evidence via an
+    # ``artifact`` flow_link + ``spec.authored`` event), a SEPARATE plan-reviewer
+    # seat scores it against R1 (``_score_spec_review``), and ONLY an accepted score
+    # unlocks decomposition. Decomposition expands the approved objective into N
+    # ``task_attached`` flow_links ON THE SAME CASE with dependency edges on
+    # ``metadata_json`` — a task-DAG as DATA. It creates ZERO new ``flow_runs``: the
+    # orphan-flow_run scatter is the exact failure mode M2.5 exists to prevent (§0.2
+    # anti-goal). All four methods are flag-gated by ``spec_authoring_enabled()`` ⇒
+    # OFF is byte-identical (no ``artifact.*``/``spec.*``/``case.decomposed`` events,
+    # no ``task_attached`` links). This layer RECORDS + gates; nothing here is read to
+    # DRIVE execution (the Manager dispatches from the DAG in order — A56 delivers the
+    # DAG as data; the parallel executor is the out-of-scope A57 spike).
+    # ------------------------------------------------------------------
+
+    def publish_artifact(
+        self,
+        flow_run_id: str,
+        artifact_id: str,
+        *,
+        kind: str = "artifact",
+        title: Optional[str] = None,
+        uri: Optional[str] = None,
+        actor: str = "manager",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """[A56/M4] Publish a durable artifact onto a Case: an ``artifact`` flow_link
+        + an ``artifact.published`` event (evidence, not a second ledger).
+
+        Idempotent via the flow_links unique index (repeat call reuses the link).
+        Flag-gated: with ``SPEC_AUTHORING_ENABLED`` OFF this writes NOTHING and
+        returns ``{"ok": False, "reason": "spec_authoring_disabled"}``. Returns
+        ``{"ok": True, "link_id", "event_id", "artifact_id"}`` on a publish.
+        ``metadata`` is JSON-encoded verbatim (kind/title/uri are folded in for the
+        link record); db.py does not interpret it.
+        """
+        if not spec_authoring_enabled():
+            return {"ok": False, "reason": "spec_authoring_disabled"}
+        link_meta: Dict[str, Any] = {"kind": kind}
+        if title is not None:
+            link_meta["title"] = title
+        if uri is not None:
+            link_meta["uri"] = uri
+        if metadata:
+            link_meta.update(metadata)
+        link_id = self.create_flow_link(
+            flow_run_id, "artifact", artifact_id, kind,
+            created_by=actor, metadata=link_meta,
+        )
+        event_id = self.append_flow_event(
+            flow_run_id, "artifact.published", actor,
+            entity_type="artifact", entity_id=artifact_id,
+            payload={"artifact_id": artifact_id, "kind": kind, "title": title, "uri": uri},
+        )
+        return {
+            "ok": True, "link_id": link_id, "event_id": event_id,
+            "artifact_id": artifact_id,
+        }
+
+    def publish_spec(
+        self,
+        flow_run_id: str,
+        spec_id: str,
+        spec_body: str,
+        *,
+        title: Optional[str] = None,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[A56/M4] Author a spec ON a Case as durable evidence — a specialised
+        :func:`publish_artifact` (kind='spec') plus a distinct ``spec.authored``
+        event so the audit trail names the authoring step explicitly.
+
+        The spec is stored as an ``artifact`` flow_link carrying the (bounded) body
+        on ``metadata_json`` so the Case is self-describing from the DB alone. This
+        writes the SPEC; it does NOT grade it (that is :func:`record_spec_review`, a
+        separate seat) — the author never approves its own spec. Flag-gated: OFF ⇒
+        ``{"ok": False, "reason": "spec_authoring_disabled"}``, nothing written.
+        """
+        if not spec_authoring_enabled():
+            return {"ok": False, "reason": "spec_authoring_disabled"}
+        result = self.publish_artifact(
+            flow_run_id, spec_id, kind="spec", title=title, actor=actor,
+            metadata={"body": spec_body},
+        )
+        # publish_artifact re-checked the flag; if it wrote, name the authoring step.
+        if result.get("ok"):
+            result["event_id"] = self.append_flow_event(
+                flow_run_id, "spec.authored", actor,
+                entity_type="artifact", entity_id=spec_id,
+                payload={"spec_id": spec_id, "title": title},
+            )
+            result["spec_id"] = spec_id
+            self.update_flow_stage(flow_run_id, "spec_authoring")
+        return result
+
+    def record_spec_review(
+        self,
+        flow_run_id: str,
+        spec_id: str,
+        scores: Dict[str, Any],
+        *,
+        reviewer: str = "reviewer",
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat and
+        record the verdict as the canonical ``review.*`` event (reusing M3.2 vocab)
+        PLUS a ``spec.review_scored`` event carrying the full score-card.
+
+        ``scores`` maps each ``SPEC_REVIEW_DIMENSIONS`` key to 0–2. The verdict is
+        computed by :func:`_score_spec_review` (≥8/12 AND no critical-zero) — it is
+        NOT taken on the caller's word, so a low or malformed card cannot self-report
+        a pass. ``reviewer`` should differ from the spec's author (the SEAT is
+        separate); the db records whoever the API/orchestrator seam passes. The
+        resulting ``review.accepted`` / ``review.rework_requested`` event is what
+        :func:`decompose_case` gates on. Flag-gated: OFF ⇒ nothing written,
+        ``{"ok": False, "reason": "spec_authoring_disabled"}``.
+        """
+        if not spec_authoring_enabled():
+            return {"ok": False, "reason": "spec_authoring_disabled"}
+        graded = _score_spec_review(scores)
+        review_event_type = REVIEW_VERDICT_EVENT_TYPES[graded["verdict"]]
+        # The full score-card as durable evidence (its own event so the audit trail
+        # carries the numbers, not just the pass/fail verdict).
+        self.append_flow_event(
+            flow_run_id, "spec.review_scored", reviewer,
+            entity_type="artifact", entity_id=spec_id,
+            payload={
+                "spec_id": spec_id,
+                "scores": {d: scores.get(d) for d in SPEC_REVIEW_DIMENSIONS},
+                "total": graded["total"],
+                "max": graded["max"],
+                "threshold": graded["threshold"],
+                "passed": graded["passed"],
+                "critical_zero": graded["critical_zero"],
+                "missing": graded["missing"],
+                "out_of_range": graded["out_of_range"],
+                "reason": reason,
+            },
+        )
+        # The canonical M3.2 verdict event — the ONE the decompose-gate reads.
+        review_event_id = self.append_flow_event(
+            flow_run_id, review_event_type, reviewer,
+            entity_type="artifact", entity_id=spec_id,
+            payload={"verdict": graded["verdict"], "spec_id": spec_id, "reason": reason},
+        )
+        return {
+            "ok": True,
+            "spec_id": spec_id,
+            "verdict": graded["verdict"],
+            "passed": graded["passed"],
+            "total": graded["total"],
+            "max": graded["max"],
+            "threshold": graded["threshold"],
+            "critical_zero": graded["critical_zero"],
+            "missing": graded["missing"],
+            "out_of_range": graded["out_of_range"],
+            "event_id": review_event_id,
+            "event_type": review_event_type,
+        }
+
+    def latest_spec_review(
+        self,
+        flow_run_id: str,
+        spec_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """[A56/M4] The most recent ``spec.review_scored`` verdict on a Case (for an
+        optional specific ``spec_id``), or None if the spec was never scored.
+
+        Read-only. Returns the parsed score-card payload (with ``passed``). This is
+        the authoritative "is decomposition unlocked?" read — decompose_case uses it.
+        """
+        latest: Optional[Dict[str, Any]] = None
+        for e in self.list_flow_events(flow_run_id):
+            if e.get("event_type") != "spec.review_scored":
+                continue
+            if spec_id is not None and e.get("entity_id") != spec_id:
+                continue
+            latest = _event_payload(e) or {}
+        return latest
+
+    def decompose_case(
+        self,
+        flow_run_id: str,
+        spec_id: str,
+        tasks: List[Dict[str, Any]],
+        *,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[A56/M4] Expand an APPROVED objective into a task-DAG ON THIS ONE CASE.
+
+        Each entry in ``tasks`` is ``{"task_key": str, "objective": str,
+        "depends_on": [task_key, ...], ...(optional planning hints)}``. For each we
+        create exactly ONE ``flow_link`` with ``entity_type='task'``,
+        ``role='task_attached'``, ``entity_id=task_key`` (a PLAN node id, never a
+        flow_run), and the dependency edges + objective on ``metadata_json``. It
+        creates ZERO ``flow_runs`` — the DAG is N attached links on the SAME Case, the
+        exact shape M2.5 exists to enforce (orphan flow_runs are the anti-goal).
+
+        HARD GATES (each writes nothing and returns a structured refusal):
+          * flag OFF ⇒ ``spec_authoring_disabled``;
+          * the spec was never scored, or its latest score did NOT pass ⇒
+            ``spec_not_approved`` (the scored-review gate is a REAL block, not a warning);
+          * duplicate/empty ``task_key`` ⇒ ``invalid_task_keys``;
+          * a ``depends_on`` edge to an unknown task_key ⇒ ``unknown_dependency``;
+          * the dependency graph has a CYCLE ⇒ ``cyclic_dependencies`` (a DAG must be
+            acyclic — a cycle is unschedulable).
+
+        On success returns ``{"ok": True, "task_keys": [...], "order": [...],
+        "link_ids": [...]}`` where ``order`` is one valid topological schedule and
+        appends one ``case.decomposed`` event. Idempotent per (case, task_key, role)
+        via the flow_links unique index.
+        """
+        if not spec_authoring_enabled():
+            return {"ok": False, "reason": "spec_authoring_disabled"}
+
+        review = self.latest_spec_review(flow_run_id, spec_id)
+        if review is None or not review.get("passed"):
+            return {
+                "ok": False,
+                "reason": "spec_not_approved",
+                "review": review,
+            }
+
+        # ---- Validate the DAG as pure DATA before any write (all-or-nothing) ----
+        keys: List[str] = []
+        deps: Dict[str, List[str]] = {}
+        for t in tasks:
+            key = str((t or {}).get("task_key") or "").strip()
+            if not key or key in deps:
+                return {"ok": False, "reason": "invalid_task_keys", "task_key": key}
+            keys.append(key)
+            deps[key] = [str(d).strip() for d in (t.get("depends_on") or []) if str(d).strip()]
+        keyset = set(keys)
+        for key, edges in deps.items():
+            for d in edges:
+                if d not in keyset:
+                    return {"ok": False, "reason": "unknown_dependency",
+                            "task_key": key, "depends_on": d}
+        order = _topological_order(keys, deps)
+        if order is None:
+            return {"ok": False, "reason": "cyclic_dependencies"}
+
+        # ---- Write: N task_attached links + ONE decomposition event. Zero flow_runs.
+        link_ids: List[Optional[int]] = []
+        by_key = {str(t.get("task_key")).strip(): t for t in tasks}
+        for key in keys:
+            t = by_key[key]
+            meta: Dict[str, Any] = {
+                "objective": t.get("objective"),
+                "depends_on": deps[key],
+                "spec_id": spec_id,
+            }
+            # Carry any non-authoritative planning hints verbatim.
+            for hint in ("estimated_hours", "priority", "human_task", "files"):
+                if hint in t:
+                    meta[hint] = t[hint]
+            link_ids.append(self.create_flow_link(
+                flow_run_id, "task", key, "task_attached",
+                created_by=actor, metadata=meta,
+            ))
+        self.append_flow_event(
+            flow_run_id, "case.decomposed", actor,
+            entity_type="artifact", entity_id=spec_id,
+            payload={"spec_id": spec_id, "task_count": len(keys), "order": order},
+        )
+        self.update_flow_stage(flow_run_id, "decomposed")
+        return {
+            "ok": True,
+            "task_keys": keys,
+            "order": order,
+            "link_ids": link_ids,
+        }
+
+    def list_dag_tasks(self, flow_run_id: str) -> List[Dict[str, Any]]:
+        """[A56/M4] The decomposed task-DAG of a Case: every ``task_attached`` link
+        with its parsed dependency edges. Read-only — the Manager's "what do I
+        dispatch, and in what order?" read. Returns ``[{task_key, objective,
+        depends_on, metadata}, ...]`` in link-id order."""
+        out: List[Dict[str, Any]] = []
+        for link in self.list_flow_links(
+            flow_run_id=flow_run_id, entity_type="task", role="task_attached",
+        ):
+            meta = {}
+            raw = link.get("metadata_json")
+            if raw:
+                try:
+                    meta = json.loads(raw)
+                except (ValueError, TypeError):
+                    meta = {}
+            out.append({
+                "task_key": link.get("entity_id"),
+                "objective": meta.get("objective"),
+                "depends_on": meta.get("depends_on") or [],
+                "metadata": meta,
+            })
+        return out
 
     # ------------------------------------------------------------------
     # [A46 / M3.3] Durable worker-wait relay. A Manager's ``wait_for_worker``

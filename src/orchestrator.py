@@ -2988,6 +2988,90 @@ class TaskOrchestrator(ITaskOrchestrator):
         )
         return {"ok": True, "event_type": event_type, "event_id": event_id}
 
+    def publish_artifact(
+        self,
+        flow_run_id: str,
+        artifact_id: str,
+        *,
+        kind: str = "artifact",
+        title: Optional[str] = None,
+        uri: Optional[str] = None,
+        actor: str = "manager",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """[A56/M4] Orchestrator seam — publish a durable artifact onto a Case
+        (:func:`db.publish_artifact`). Mirrors the ``record_review`` seam. Flag-gated
+        in the db layer (``SPEC_AUTHORING_ENABLED`` OFF ⇒ nothing written). Returns
+        the db layer's ``{"ok", ...}`` (or ``{"ok": False, "reason": "db_unavailable"}``)."""
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        return db.publish_artifact(
+            flow_run_id, artifact_id, kind=kind, title=title, uri=uri,
+            actor=actor, metadata=metadata,
+        )
+
+    def publish_spec(
+        self,
+        flow_run_id: str,
+        spec_id: str,
+        spec_body: str,
+        *,
+        title: Optional[str] = None,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[A56/M4] Orchestrator seam — author a spec onto a Case as durable evidence
+        (:func:`db.publish_spec`). Mirrors the ``publish_artifact`` seam; flag-gated in
+        the db layer. Returns the db ``{"ok", ...}`` or ``{"ok": False, "reason": "db_unavailable"}``."""
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        return db.publish_spec(flow_run_id, spec_id, spec_body, title=title, actor=actor)
+
+    def record_spec_review(
+        self,
+        flow_run_id: str,
+        spec_id: str,
+        scores: Dict[str, Any],
+        *,
+        reviewer: str = "reviewer",
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[A56/M4] Orchestrator seam — score a spec against R1 by a separate
+        plan-reviewer seat (:func:`db.record_spec_review`). The verdict is computed
+        from the scores, not taken on trust. Mirrors the ``publish_artifact`` seam;
+        flag-gated in the db layer. Returns the db ``{"ok", ...}`` or
+        ``{"ok": False, "reason": "db_unavailable"}``."""
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        return db.record_spec_review(
+            flow_run_id, spec_id, scores, reviewer=reviewer, reason=reason,
+        )
+
+    def decompose_case(
+        self,
+        flow_run_id: str,
+        spec_id: str,
+        tasks: List[Dict[str, Any]],
+        *,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[A56/M4] Orchestrator seam — expand an APPROVED objective into a task-DAG
+        of N ``task_attached`` links ON ONE CASE (:func:`db.decompose_case`). Refuses
+        (writes nothing) unless the spec's latest scored review PASSED, and refuses a
+        cyclic/malformed DAG. Creates ZERO new flow_runs. Mirrors the
+        ``publish_artifact`` seam; flag-gated in the db layer. Returns the db
+        ``{"ok", ...}`` or ``{"ok": False, "reason": "db_unavailable"}``."""
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        return db.decompose_case(flow_run_id, spec_id, tasks, actor=actor)
+
     def record_worker_wait(
         self,
         flow_run_id: str,
