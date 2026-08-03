@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_55_M34_JOB3_CRASH_RESPAWN
 created_at: "2026-07-30T02:34:12+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: AGENT_54_M34_JOB2_RECONSTRUCTION
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:34:21.157521+00:00"
+evidence: tests/test_case_respawn.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:44:33.082572+00:00"
 ```
 
 # DISPATCH — A55 · M3.4 Job 3: crash-respawn dispatcher path
