@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_37_CASE_CONTINUITY_CLOSURE
+created_at: "2026-07-11T21:03:16+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_37_CASE_CONTINUITY_CLOSURE.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:08.092864+00:00"
+```
+
 # A37 — M2.5 Job 2: Case continuity, honest stages & closure semantics
 
 **Level:** 3 (code) · **Branch:** `feat/m2.5-case-admission` (continues A36) · **Date:** 2026-07-11 · **Status:** `dispatched`

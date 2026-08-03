@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_12_HARNESS_SELFTEST
+created_at: "2026-07-03T17:14:13+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_12_HARNESS_SELFTEST.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:01.979635+00:00"
+```
+
 # AGENT_12 — Harness Self-Test: run one real task through the loop
 
 **Dispatch created:** 2026-07-03

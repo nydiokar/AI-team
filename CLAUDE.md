@@ -9,8 +9,13 @@ separate on purpose — do not expect your role prompt to name files or repo rul
 ## Read these first (canonical, in order)
 1. **`.ai/CONTEXT.md`** — hot context: what is active NOW, the **Current Priorities** table,
    current state, and constraints. **START HERE.**
-2. **`.ai/dispatch/DISPATCH_LOG.md`** — the job ledger: what has been dispatched, is in-flight,
-   or is still open.
+2. **`.ai/dispatch/DISPATCH_LOG.md`** — the job ledger (the **primary human index + closure
+   surface**): what has been dispatched, is in-flight, or is still open. Job state is also
+   **machine-tracked** — each `AGENT_N_*.md` carries a ` ```yaml ` state block (protocol in
+   `.ai/dispatch/CLAUDE.md`); keep `status:` correct via
+   `scripts/dispatch/dispatch_state.py --set`, and `--audit` is the honest queue. The
+   generated `_DISPATCH_STATE.md` is a complementary query view, **never** a replacement for
+   DISPATCH_LOG.
 3. **`.ai/DOC_MAP.md`** — which document owns what.
 
 Then verify against **git** (`git log`, `git status`, `git show`, `gh pr list`) — never trust

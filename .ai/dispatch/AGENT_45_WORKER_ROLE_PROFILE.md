@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_45_WORKER_ROLE_PROFILE
+created_at: "2026-07-17T13:59:11+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_45_WORKER_ROLE_PROFILE.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:09.378517+00:00"
+```
+
 # AGENT_45 — Worker role profile + loader + tier selector
 
 **Dispatched:** 2026-07-17

@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER
+created_at: "2026-07-30T02:34:12+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: ready              # ready | active | blocked | done | dead
+owner: ""
+depends_on: AGENT_52_M34_JOB1_ADOPTION
+results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: []                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:31.457850+00:00"
+```
+
 # DISPATCH — A56 · M4: feature-spec authoring + scored review + decomposer-as-task-DAG-in-one-Case
 
 **Level:** 3 (new stage + artifact links + decomposer) · **Type:** code + docs

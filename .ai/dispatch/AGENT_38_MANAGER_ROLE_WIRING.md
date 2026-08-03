@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_38_MANAGER_ROLE_WIRING
+created_at: "2026-07-12T02:10:32+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_38_MANAGER_ROLE_WIRING.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:08.350108+00:00"
+```
+
 # A38 — M3 Phase 3.1: Manager role wiring (canonical architecture + minimal vertical slice)
 
 **Level:** 3 (code) · **Branch:** `feat/m3-phase31-manager-role` · **Date:** 2026-07-12

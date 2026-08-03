@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_19_FLOW_RUNS_RECORD
+created_at: "2026-07-05T18:19:14+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_19_FLOW_RUNS_RECORD.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:04.376956+00:00"
+```
+
 # AGENT_19 — FlowRun record (v0.4 §13 item 1) — **operator override of COLD verdict**
 
 > **Level 3.** New gateway state + a DB migration. Operator pre-approved and explicitly

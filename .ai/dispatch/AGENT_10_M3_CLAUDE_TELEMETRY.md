@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_10_M3_CLAUDE_TELEMETRY
+created_at: "2026-07-03T13:15:30+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_10_M3_CLAUDE_TELEMETRY.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:01.472452+00:00"
+```
+
 # AGENT 10 — M3 Claude Telemetry + #9 Gateway-Mesh Smoke
 
 **Dispatch created:** 2026-07-03

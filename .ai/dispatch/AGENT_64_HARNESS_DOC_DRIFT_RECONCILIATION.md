@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_64_HARNESS_DOC_DRIFT_RECONCILIATION
+created_at: "2026-08-01T13:48:33+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: ready              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: []                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:20:23.320706+00:00"
+```
+
 # DISPATCH — A64 · Harness docs: reconcile the abandoned XML-packet ritual against actual practice
 
 **Level:** 1 (docs-only, no code) · **Type:** docs

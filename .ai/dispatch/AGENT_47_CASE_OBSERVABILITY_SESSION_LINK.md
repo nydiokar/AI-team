@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_47_CASE_OBSERVABILITY_SESSION_LINK
+created_at: "2026-07-17T15:09:11+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_47_CASE_OBSERVABILITY_SESSION_LINK.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:09.937592+00:00"
+```
+
 # AGENT_47 — Case observability: attach the worker session to the Case graph
 
 **Dispatched:** 2026-07-17

@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_58_QUOTA_COORDINATOR_ACTIVATION
+created_at: "2026-07-30T03:07:45+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: blocked              # ready | active | blocked | done | dead
+owner: ""
+depends_on: AGENT_61_QUOTA_COORDINATOR_FINALIZATION
+results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: []                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:31.200176+00:00"
+```
+
 # DISPATCH — A58 · Quota window coordinator: activation + Phase-2 (act on windows)
 
 **Level:** 3 (runtime behavior on the shared Claude account) · **Type:** code + operator gate

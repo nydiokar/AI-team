@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_26_FLOW_LINK_WRITE_PATH
+created_at: "2026-07-08T14:59:26+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_26_FLOW_LINK_WRITE_PATH.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:05.757754+00:00"
+```
+
 # A26 — Flow link/event write path: populate authoritative relationships
 
 **Dispatch created:** 2026-07-08
