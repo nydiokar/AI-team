@@ -18,10 +18,23 @@ TOKEN = "test-control-token"
 class _StubOrchestrator:
     def __init__(self):
         self.calls = []
+        self.brief_calls = []
+        self.reconcile_calls = []
+        self._brief_ok = True
 
     def arm_wait_group(self, case_id, wait_group_id, condition, member_task_ids, *, actor="manager"):
         self.calls.append((case_id, wait_group_id, condition, list(member_task_ids), actor))
         return {"ok": True, "event_id": 42}
+
+    def get_case_brief(self, case_id):
+        self.brief_calls.append(case_id)
+        if not self._brief_ok:
+            return {"ok": False, "reason": "case_not_found"}
+        return {"ok": True, "brief": {"case_id": case_id, "workers": []}}
+
+    def boot_reconcile_case(self, case_id, *, actor="manager"):
+        self.reconcile_calls.append((case_id, actor))
+        return {"ok": True, "reconciled": {"resolved": []}, "rearmed": []}
 
 
 @pytest.fixture
@@ -67,6 +80,47 @@ def test_arms_and_delegates_when_flag_on(client, monkeypatch, orch):
     assert r.status_code == 200
     assert r.json() == {"ok": True, "event_id": 42}
     assert orch.calls == [("c1", "g1", "ALL", ["t1", "t2"], "manager")]
+
+
+# --- A54 get_case_brief route (read-only, NOT flag-gated) -------------------
+
+def test_brief_requires_auth(client):
+    assert client.get("/api/cases/c1/brief").status_code in (401, 403)
+
+
+def test_brief_returns_state_no_flag_needed(client, monkeypatch, orch):
+    _off(monkeypatch)  # read is NOT flag-gated — still served
+    r = client.get("/api/cases/c1/brief", headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["brief"]["case_id"] == "c1"
+    assert orch.brief_calls == ["c1"]
+
+
+def test_brief_404_for_unknown_case(client, monkeypatch, orch):
+    orch._brief_ok = False
+    r = client.get("/api/cases/nope/brief", headers=_auth())
+    assert r.status_code == 404
+
+
+# --- A54 boot-reconcile route (flag-gated like /waits/reconcile) ------------
+
+def test_boot_reconcile_requires_auth(client):
+    assert client.post("/api/cases/c1/boot-reconcile").status_code in (401, 403)
+
+
+def test_boot_reconcile_404_when_relay_off(client, monkeypatch, orch):
+    monkeypatch.delenv("DURABLE_RELAY_ENABLED", raising=False)
+    r = client.post("/api/cases/c1/boot-reconcile", headers=_auth())
+    assert r.status_code == 404
+    assert orch.reconcile_calls == []  # never reached the seam
+
+
+def test_boot_reconcile_delegates_when_relay_on(client, monkeypatch, orch):
+    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
+    r = client.post("/api/cases/c1/boot-reconcile", headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert orch.reconcile_calls == [("c1", "manager")]
 
 
 def test_condition_normalized_to_upper(client, monkeypatch, orch):

@@ -972,6 +972,46 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             )
             return None, None
 
+    def _boot_reconcile_manager_case(self, session: Session) -> None:
+        """[A54/M3.4 Job 2] Fire the boot reconcile+re-arm hook for a Manager session
+        resuming onto an existing OPEN Case.
+
+        Only acts when this is a MANAGER session (``case_role == 'manager'``) bound to
+        an open Case (``current_case_id`` set, status not terminal). Reconciles the
+        Case's outstanding worker waits and re-arms its live wait-groups from the
+        durable ledger via ``db.boot_reconcile_case`` — idempotent (a double-boot
+        writes no duplicate markers) and flag-gated in the db layer (no-op when the
+        durable relay is OFF ⇒ byte-identical). Isolated: any failure logs and
+        returns so a reconcile problem never blocks the session from booting.
+        """
+        try:
+            if getattr(session, "case_role", None) != MANAGER_ROLE_ID:
+                return
+            case_id = (getattr(session, "current_case_id", None) or "").strip()
+            if not case_id:
+                return
+            from src.control.db import get_db, durable_relay_enabled
+            if not durable_relay_enabled():
+                return  # nothing durable to reconcile ⇒ byte-identical no-op
+            db = get_db()
+            if db is None:
+                return
+            row = db.get_flow_run(case_id)
+            if row is None or (row.get("status") or "") in db._CLOSED_STATUSES:
+                return  # unknown or already-closed Case ⇒ not a resume
+            result = db.boot_reconcile_case(case_id, actor="manager")
+            logger.info(
+                "event=manager_boot_reconcile session_id=%s case_id=%s reconciled=%s rearmed=%s",
+                getattr(session, "session_id", "?"), case_id,
+                (result.get("reconciled") or {}).get("resolved") if result.get("ok") else result.get("reason"),
+                result.get("rearmed") if result.get("ok") else None,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=manager_boot_reconcile_failed session_id=%s err=%s",
+                getattr(session, "session_id", "?"), e,
+            )
+
     def _get_or_create(
         self,
         session: Session,
@@ -999,6 +1039,14 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 existing = None
             if existing is None:
                 system_prompt, allowed_tools = self._role_boot(session)
+                # [A54/M3.4 Job 2] Boot-reconcile hook: a Manager (re)booting onto an
+                # existing OPEN Case IS a resume — its in-process waits/groups were
+                # lost. Reconcile its outstanding waits AND re-arm its live wait-groups
+                # from the durable ledger so it wakes with its FULL obligation set.
+                # Idempotent + flag-gated (no-op when the durable relay is OFF ⇒
+                # byte-identical). Best-effort/isolated: never blocks a session boot.
+                if system_prompt is not None:
+                    self._boot_reconcile_manager_case(session)
                 # [autonomy] A role-bound session (system_prompt set) also loads
                 # filesystem settings so the repo CLAUDE.md — the project
                 # orientation layer (canonical docs + how to find open work) —

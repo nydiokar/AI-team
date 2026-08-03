@@ -1485,6 +1485,30 @@ def build_control_api(orchestrator) -> FastAPI:
         )
         return JSONResponse(result)
 
+    @app.get("/api/cases/{case_id}/brief", dependencies=[Depends(_require_auth)])
+    def api_get_case_brief(case_id: str) -> JSONResponse:
+        """[A54/M3.4 Job 2] The full working state of a Case from the DB ALONE — the
+        Manager's single 'where am I on this Case' read for reconstructing after a
+        context reset. Read-only (no flag gate — a pure read is always byte-identical
+        whether the continuation feature is on or off). 404 for an unknown Case."""
+        result = orchestrator.get_case_brief(case_id)
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail=result.get("reason") or "case_not_found")
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/boot-reconcile", dependencies=[Depends(_require_auth)])
+    def api_boot_reconcile_case(case_id: str) -> JSONResponse:
+        """[A54/M3.4 Job 2] Boot-time reconstruction hook — reconcile outstanding
+        worker waits AND re-arm live wait-groups from the ledger (idempotent). Gated
+        by ``DURABLE_RELAY_ENABLED`` (404 when OFF ⇒ byte-identical no-op, exactly
+        like the /waits/reconcile route). The write itself is also flag-gated in the
+        db layer (defence in depth)."""
+        from src.control.db import durable_relay_enabled
+        if not durable_relay_enabled():
+            raise HTTPException(status_code=404, detail="not_found")
+        result = orchestrator.boot_reconcile_case(case_id, actor="manager")
+        return JSONResponse(result)
+
     @app.post("/api/cases/{case_id}/interrupt", dependencies=[Depends(_require_auth)])
     async def api_interrupt_case(case_id: str, body: CaseInterruptBody) -> JSONResponse:
         """[A53] KILL path: cancel a Case's in-flight worker task(s), mark it
