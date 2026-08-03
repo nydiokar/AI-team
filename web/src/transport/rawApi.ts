@@ -732,3 +732,112 @@ export interface RawCaseRosterResponse {
   counts: { sessions: number; jobs: number; running_jobs: number };
   token_totals: RawRosterTokens;
 }
+
+// ── A65 cost read-model — GET /api/cost/* + /api/cases/{id}/usage ──────────
+// Shapes = src/control/cost_read_model.py assemblers (verified 2026-08-03).
+export interface RawTokenBuckets {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_creation: number;
+  total: number;
+}
+
+export interface RawCostUsd {
+  known: number;
+  unpriced_tokens: number;
+  coverage_pct: number;
+}
+
+export interface RawDominantModel {
+  model: string;
+  usd_total: number | null;
+  known: boolean;
+  reason: string | null;
+  tokens_total: number;
+}
+
+// One explorer series row: (time-bucket × dimension) + dominant models.
+export interface RawCostSeries {
+  bucket: string;
+  dim: string;
+  models: RawDominantModel[];
+  tokens: RawTokenBuckets;
+  usd: RawCostUsd;
+}
+
+// GET /api/cost/explorer → assemble_explorer
+export interface RawCostExplorerResponse {
+  ok: boolean;
+  dimension: string;
+  granularity: string;
+  from: string | null;
+  to: string | null;
+  repo_path: string | null;
+  series: RawCostSeries[];
+  totals: { tokens: RawTokenBuckets; usd: RawCostUsd };
+  unattributed: {
+    tokens: RawTokenBuckets;
+    usd: RawCostUsd;
+    models: RawDominantModel[];
+  };
+}
+
+// GET /api/cost/top → assemble_top_sessions
+export interface RawCostTopRow {
+  session_id: string;
+  repo_path: string | null;
+  backend: string | null;
+  role: string | null;
+  models: RawDominantModel[];
+  tokens: RawTokenBuckets;
+  usd: RawCostUsd;
+}
+
+export interface RawCostTopResponse {
+  ok: boolean;
+  by: string;
+  limit: number;
+  rows: RawCostTopRow[];
+  totals: { tokens: RawTokenBuckets; usd: RawCostUsd };
+}
+
+// GET /api/cost/projects → assemble_projects (token rollup only — a project is
+// not a model, so the dropdown lists projects + their token weight).
+export interface RawCostProject {
+  repo_path: string;
+  tokens: RawTokenBuckets;
+}
+
+export interface RawCostProjectsResponse {
+  ok: boolean;
+  limit: number;
+  projects: RawCostProject[];
+}
+
+// GET /api/cases/{id}/usage → assemble_case_usage (404 when the case is unknown)
+export interface RawCaseUsageSession {
+  session_id: string;
+  role: string;
+  models: RawDominantModel[];
+  tokens: RawTokenBuckets;
+  usd: RawCostUsd;
+}
+
+export interface RawCaseUsageResponse {
+  ok: boolean;
+  flow_run_id: string;
+  case: {
+    status: string | null;
+    objective_lock: string | null;
+    created_at: string | null;
+  };
+  sessions: RawCaseUsageSession[];
+  mgr_vs_workers: {
+    manager: { tokens: RawTokenBuckets; usd: RawCostUsd };
+    workers: { tokens: RawTokenBuckets; usd: RawCostUsd };
+    workers_share_pct: number | null;
+    worker_sessions: number;
+  };
+  totals: { tokens: RawTokenBuckets; usd: RawCostUsd };
+}

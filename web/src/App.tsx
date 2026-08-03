@@ -29,6 +29,9 @@ const WorkScreen = lazy(() =>
 const WorkDetailScreen = lazy(() =>
   import("./screens/WorkDetailScreen").then((m) => ({ default: m.WorkDetailScreen })),
 );
+const CostScreen = lazy(() =>
+  import("./screens/CostScreen").then((m) => ({ default: m.CostScreen })),
+);
 
 function ScreenFallback() {
   return (
@@ -65,6 +68,7 @@ export function App() {
                 <Routes>
                   <Route path="/work" element={<WorkScreen />} />
                   <Route path="/sessions" element={<SessionsScreen />} />
+                  <Route path="/cost" element={<CostScreen />} />
                   <Route path="/tasks" element={<Navigate to="/system" replace />} />
                   <Route path="/system" element={<SystemScreen />} />
                   <Route path="*" element={<Navigate to="/sessions" replace />} />
