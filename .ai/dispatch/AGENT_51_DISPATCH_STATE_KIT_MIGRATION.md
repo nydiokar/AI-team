@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_51_DISPATCH_STATE_KIT_MIGRATION
 created_at: "2026-07-28T18:55:33+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: scripts/dispatch/dispatch_state.py                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:26:12.823406+00:00"
+updated_at: "2026-08-03T13:31:07.559602+00:00"
 ```
 
 # DISPATCH — A51 · Port the legacy prose dispatch system onto the portable dispatch-state kit
