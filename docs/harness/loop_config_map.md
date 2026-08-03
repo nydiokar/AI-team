@@ -1,15 +1,14 @@
 # Loop Configuration Map — the harness's control surface, made legible
 
-**Status:** the loop's configuration/behavior *contract* (2026-07-03). This is the
+**Status:** the loop's configuration/behavior *contract* (reconciled 2026-08-04). This is the
 operator's "fake node graph": a MAP of every configurable step in the harness loop —
 who drives it, which existing file **programs** its behavior, its input/output
 contract, and the specific dials that change its output quality (the "temperature").
 
-**What this is NOT:** it is **not machinery**. It configures nothing at runtime — no
-`flow_runs`, no stage column, no driver, no gateway state (that is Phase 2, spec §16,
-deferred). It is a human/agent-facing document. The deliverable is the tables + prose
-below, not a rendered graphic. It changes no stage logic; it only makes the existing
-loop debuggable *before* real work is driven through it.
+**What this is NOT:** it is **not machinery**. It configures nothing at runtime. The
+gateway now has durable case/flow state, but this file neither writes nor drives it; it
+is a human/agent-facing document. The deliverable is the tables + prose below, not a
+rendered graphic. It changes no stage logic; it makes the existing loop debuggable.
 
 **Why it exists:** today the loop's behavior is documented **per-file** — each
 generator describes its own stage. There was no single place that maps, across all
@@ -52,14 +51,14 @@ edit that file and the node behaves differently. Dials are cited inline.
 
 | Node | Driver | Programmed by (file) | Input contract | Output contract | Quality dials |
 |------|--------|----------------------|----------------|-----------------|---------------|
-| **0 · LEVEL-SELECT** | Manager | [`level_rubric.md`](level_rubric.md) | operator intent | one number 0–3 (packet `<harness_level>` / `.task.md` `harness_level:`) | **Level triggers** — the 8 Level-3 triggers (`level_rubric.md` "Step 1"); **escalate-when-in-doubt bias** (`level_rubric.md` "When in doubt, escalate one level"). Determines how many downstream nodes run at all. |
-| **1 · DRAFT** | Manager (drafting mode; a cheaper route is fine — `draft_packet.md` "a cheaper route is fine for DRAFT") | [`generators/draft_packet.md`](generators/draft_packet.md) + [`packet_template.xml`](packet_template.xml) | intent + level + curated context | filled `packet_template.xml` + initialized `milestone_template.md` (`Current Status: drafting`) | **Objective-lock granularity** — `<real_objective>` vs `<literal_request>` vs `<interpreted_task>` split (`packet_template.xml` L28–40); **non-goal/assumption/drift fill** ("an empty one of these is a drafting failure" — `draft_packet.md` L27); **context injection** — `<context_snippets>` curation (§8) + `continues:`/`load_compact_context` resume (`draft_packet.md` "Memory" L44–56); **memory reuse** — file-memory scars read before drafting (`draft_packet.md` L54–56). |
-| **2 · REVIEW** | Manager (Reviewer action, not a separate agent — `operating_model.md` L22) | [`generators/adversarial_review.md`](generators/adversarial_review.md) | the drafted `packet_template.xml` | F-tagged P0/P1 findings (house style); zero findings is valid | **Severity floor** — P0/P1 only, no nits (`adversarial_review.md` L17–24); **scar-targeting bias** — the prioritized failure list (`adversarial_review.md` L38–42). Whether to run at all is set upstream by node 0 (review OFF for Level ≤ 1 — `level_rubric.md` "Cost cap"). |
-| **3 · FIX** | Manager | [`generators/adversarial_review.md`](generators/adversarial_review.md) "The FIX loop" (L46–56) + `dispatch_pipeline.md` step 3 | F-tags from node 2 + the packet | revised packet (inline per `[Fn]`); unresolved → `<non_goal>`/logged risk; per-tag outcome recorded | **Round cap** — default 2 rounds, then stop (`adversarial_review.md` L51, spec §3 L174); **unresolved-finding disposition** — spill to `<non_goal>`/risk, never silent-drop (`adversarial_review.md` L53). |
-| **4 · DISPATCH** | Manager | [`dispatch_pipeline.md`](dispatch_pipeline.md) step 4 (L64–90) | finalized packet | `.ai/dispatch/<NAME>.md` + `DISPATCH_LOG.md` row (`dispatched`); optional `.task.md` frontmatter | **Auto-pickup boundary** — `.task.md` auto-enqueue allowed for Level ≤ 2; Level 3 needs `approved: true` (`dispatch_pipeline.md` L113–119); **enforcement backstop** — `HARNESS_LEVEL3_GUARD` env flag, OFF by default (`dispatch_pipeline.md` L125, table L127–134). *(This is the ONE runtime-config dial in the whole loop; every other dial is prompt/artifact.)* |
-| **5 · EXECUTE** | Executor | [`dispatch_pipeline.md`](dispatch_pipeline.md) step 5 (L92–98) + [`milestone_template.md`](milestone_template.md) | dispatched packet | code/docs change + milestone updated after each step + checkpoint commits | **Milestone-update cadence** — "update the milestone after every meaningful step" kills hallucinated success (`milestone_template.md` L4–8, `dispatch_pipeline.md` L93–95); **Single-Item lane** — one item → verify → log → next for fragile/rote work (spec §6, `dispatch_pipeline.md` L96–97). |
-| **6 · CHECKPOINT** | Manager (Reviewer action) reviews the Executor's committed diff | [`dispatch_pipeline.md`](dispatch_pipeline.md) step 6 (L99–103) + `operating_model.md` L95–97 | the **committed** diff | P0/P1 F-tags on real code; iterate or pass | **Skill set** — `/code-review` + `/security-review` on the committed diff (`dispatch_pipeline.md` L100–101); **sequential-not-tailing** — commit *then* review, no live-tail (`dispatch_pipeline.md` L102–103, spec §5 L194–204). Severity floor P0/P1 shared with node 2. |
-| **7 · CLOSE** | Manager | [`generators/closure_summary.md`](generators/closure_summary.md) | finished work + milestone + F-tags | closure summary + milestone `closed` + `.ai/CONTEXT.md`/`DISPATCH_LOG.md` update; optional `continues:` handoff | **Honesty floor** — SHIPPED/PARTIAL/BLOCKED stated plainly, skipped steps named (`closure_summary.md` L22, L45–47); **memory write** — durable `<memory_entry>` if a scar was learned (`closure_summary.md` L49–51); **`continues:` handoff** — resume context for the next task (`closure_summary.md` L52–54). The Level-3 wiki is `none (fixed behavior — optional, never a gate)` (`closure_summary.md` L44–46). |
+| **0 · LEVEL-SELECT** | Manager | [`level_rubric.md`](level_rubric.md) | operator intent | one number 0–3 (packet `**Level:**` / `.task.md` `harness_level:`) | **Level triggers** — the 8 Level-3 triggers (`level_rubric.md` "Step 1"); **escalate-when-in-doubt bias** (`level_rubric.md` "When in doubt, escalate one level"). Determines how many downstream nodes run at all. |
+| **1 · DRAFT** | Manager (drafting mode; a cheaper route is fine — `draft_packet.md` "a cheaper route is fine for DRAFT") | [`generators/draft_packet.md`](generators/draft_packet.md) + [`packet_template.md`](packet_template.md) | intent + level + curated context | filled free-prose `packet_template.md` + a `## Milestone (burndown)` section (`milestone_template.md`) | **Objective-lock granularity** — the `## Why (intent)` outcome vs the literal request, with `## SCOPE OUT` (`packet_template.md` "Why"/"SCOPE OUT"); **reserved-decision fill** ("an empty one of these is fine only if there genuinely is no fork" — `draft_packet.md` L37); **context injection** — `## CONTEXT` curation ("Curate context, never dump it" — `draft_packet.md` L43) + `continues:`/`load_compact_context` resume (`draft_packet.md` "Memory" L48); **memory reuse** — file-memory scars read before drafting (`draft_packet.md` L62–63). |
+| **2 · REVIEW** | Manager (Reviewer action, not a separate agent — `operating_model.md` L22) | [`generators/adversarial_review.md`](generators/adversarial_review.md) | the drafted free-prose packet (`packet_template.md` shape) | F-tagged P0/P1 findings (house style); zero findings is valid | **Severity floor** — P0/P1 only, no nits (`adversarial_review.md` L17–24); **scar-targeting bias** — the prioritized failure list (`adversarial_review.md` L39–42). Whether to run at all is set upstream by node 0 (review OFF for Level ≤ 1 — `level_rubric.md` "Cost cap"). |
+| **3 · FIX** | Manager | [`generators/adversarial_review.md`](generators/adversarial_review.md) "The FIX loop" (L48) + `dispatch_pipeline.md` step 3 | F-tags from node 2 + the packet | revised packet (inline per `[Fn]`); unresolved → `## SCOPE OUT` item / logged risk; per-tag outcome recorded | **Round cap** — default 2 rounds, then stop (`adversarial_review.md` L52, spec §3 L174); **unresolved-finding disposition** — spill to `## SCOPE OUT`/risk, never silent-drop (`adversarial_review.md` L54–55). |
+| **4 · DISPATCH** | Manager | [`dispatch_pipeline.md`](dispatch_pipeline.md) step 4 (L77–106) | finalized packet | `.ai/dispatch/<NAME>.md` + `DISPATCH_LOG.md` row (`dispatched`); optional `.task.md` frontmatter | **Auto-pickup boundary** — `.task.md` auto-enqueue allowed for Level ≤ 2; Level 3 needs `approved: true` (`dispatch_pipeline.md` L130–137); **enforcement backstop** — `HARNESS_LEVEL3_GUARD` env flag, OFF by default (`dispatch_pipeline.md` L138, table L144–152). *(This is the ONE runtime-config dial in the whole loop; every other dial is prompt/artifact.)* |
+| **5 · EXECUTE** | Executor | [`dispatch_pipeline.md`](dispatch_pipeline.md) step 5 (L108–113) + [`milestone_template.md`](milestone_template.md) | dispatched packet | code/docs change + milestone updated after each step + checkpoint commits | **Milestone-update cadence** — "update the milestone after every meaningful step" kills hallucinated success (`milestone_template.md` L4–8, `dispatch_pipeline.md` L108–112); **Single-Item lane** — one item → verify → log → next for fragile/rote work (spec §6, `dispatch_pipeline.md` L112–113). |
+| **6 · CHECKPOINT** | Manager (Reviewer action) reviews the Executor's committed diff | [`dispatch_pipeline.md`](dispatch_pipeline.md) step 6 (L115–120) + `operating_model.md` L95–97 | the **committed** diff | P0/P1 F-tags on real code; iterate or pass | **Skill set** — `/code-review` + `/security-review` on the committed diff (`dispatch_pipeline.md` L116–118); **sequential-not-tailing** — commit *then* review, no live-tail (`dispatch_pipeline.md` L118–119, spec §5 L194–204). Severity floor P0/P1 shared with node 2. |
+| **7 · CLOSE** | Manager | [`generators/closure_summary.md`](generators/closure_summary.md) | finished work + milestone + F-tags | closure summary + milestone burndown fully ticked + `.ai/CONTEXT.md`/`DISPATCH_LOG.md` update; optional `continues:` handoff | **Honesty floor** — SHIPPED/PARTIAL/BLOCKED stated plainly, skipped steps named (`closure_summary.md` L22, L45–47); **memory write** — durable `<memory_entry>` if a scar was learned (`closure_summary.md` L49–51); **`continues:` handoff** — resume context for the next task (`closure_summary.md` L52–54). The Level-3 wiki is `none (fixed behavior — optional, never a gate)` (`closure_summary.md` L44–46). |
 
 **All 8 nodes mapped cleanly.** No stage resisted mapping. See the friction note at the
 end for the two stages where the driver identity needed cross-referencing
@@ -94,34 +93,35 @@ nothing outside it is a real dial.
    L174–175.
 
 4. **Objective-lock granularity** — node 1. *Controls:* how sharply the packet
-   separates the real objective from the literal words and the drafter's reading — the
-   anti-drift dial. *Default:* all three of `<real_objective>` / `<literal_request>` /
-   `<interpreted_task>` filled; non-goals/assumptions/drift-risks non-empty.
+   separates the real objective (`## Why (intent)`) from the literal words and what the
+   task does NOT do (`## SCOPE OUT`) — the anti-drift dial. *Default:* a concrete
+   outcome-shaped `## Why`, `## TASK` steps each with a non-paid verification, and a
+   non-empty `## SCOPE OUT`.
    *Cost↔quality:* a vaguer lock is cheaper to write but lets execution drift (the #1
-   scar). *Source:* [`packet_template.xml`](packet_template.xml) L28–59;
-   [`generators/draft_packet.md`](generators/draft_packet.md) L23–27.
+   scar). *Source:* [`packet_template.md`](packet_template.md) "Why"/"TASK"/"SCOPE OUT";
+   [`generators/draft_packet.md`](generators/draft_packet.md) L37.
 
 5. **F-tag severity/scope** — nodes 2, 3, 6. *Controls:* what the adversarial pass
    hunts for. *Default:* the prioritized scar list (overbatch+hallucinated success,
-   forbidden migration/stage machine, paid-CLI verify, unbounded spiral, drift from
-   `<real_objective>`). *Cost↔quality:* narrowing it to the scars finds the defects
+   forbidden migration/stage machine, paid-CLI verify, unbounded spiral, drift from the
+   packet's `## Why (intent)` outcome). *Cost↔quality:* narrowing it to the scars finds the defects
    that actually recur; widening it re-introduces nit-spirals. *Source:*
-   [`generators/adversarial_review.md`](generators/adversarial_review.md) L38–42.
+   [`generators/adversarial_review.md`](generators/adversarial_review.md) L39–42.
 
 6. **Context injection** — node 1. *Controls:* what prior/curated context enters the
-   prompt. *Default:* `<context_snippets>` are small, source-tagged, relevance-stated,
+   prompt. *Default:* the `## CONTEXT` section is small, source-tagged, relevance-stated,
    non-instruction-overriding (§8); resume context is opt-in via `continues:` →
    `load_compact_context`, hard-capped ~4 KB. *Cost↔quality:* more context can ground
    the work or can bury the instruction / override execution rules — hence "curate,
    never dump." *Source:* [`generators/draft_packet.md`](generators/draft_packet.md)
-   L44–56; spec §8 L275–290; spec §14 `continues:` L444–457.
+   L43 + L48; spec §8 L275–290; spec §14 `continues:` L444–457.
 
 7. **Memory reuse (file-memory)** — nodes 1 & 7. *Controls:* whether durable scars
    inform drafting and whether new scars are written back. *Default:* read
    `MEMORY.md` + `memory/*.md` before drafting; write a `<memory_entry>` at close only
    if something durable was learned. *Cost↔quality:* reusing memory avoids repeating a
    recorded failure; skipping it repeats scars. *Source:*
-   [`generators/draft_packet.md`](generators/draft_packet.md) L54–56;
+   [`generators/draft_packet.md`](generators/draft_packet.md) L62–63;
    [`generators/closure_summary.md`](generators/closure_summary.md) L49–51; spec §7.
 
 8. **Auto-pickup boundary + guard flag** — node 4. *Controls:* whether a task
@@ -129,20 +129,20 @@ nothing outside it is a real dial.
    needs `approved: true`; the code backstop `HARNESS_LEVEL3_GUARD` is **OFF by
    default** (convention is the primary control). *Cost↔quality:* the guard trades a
    little friction for a hard stop on unreviewed infra/security/autonomy work.
-   *Source:* [`dispatch_pipeline.md`](dispatch_pipeline.md) L113–134;
-   [`level_rubric.md`](level_rubric.md) "The one hard boundary".
+    *Source:* [`dispatch_pipeline.md`](dispatch_pipeline.md) L130–152;
+    [`level_rubric.md`](level_rubric.md) "The one hard boundary".
 
 9. **Milestone-update cadence** — node 5. *Controls:* how often visible progress is
    written; this is the anti-hallucinated-success dial. *Default:* after **every
    meaningful step** ("if it isn't written here, it didn't happen"). *Cost↔quality:*
    coarser updates are faster but re-open the overbatch/false-success scar. *Source:*
-   [`milestone_template.md`](milestone_template.md) L4–8;
-   [`dispatch_pipeline.md`](dispatch_pipeline.md) L93–95.
+    [`milestone_template.md`](milestone_template.md) L4–8;
+    [`dispatch_pipeline.md`](dispatch_pipeline.md) L108–112.
 
 10. **Single-Item long-running lane** — node 5. *Controls:* batch size for fragile/
     rote extraction. *Default:* one item → verify → log → next; never batch-and-claim.
     *Cost↔quality:* single-item is slower but stops the overbatch scar cold. *Source:*
-    spec §6 L216–227; [`dispatch_pipeline.md`](dispatch_pipeline.md) L96–97.
+    spec §6 L216–227; [`dispatch_pipeline.md`](dispatch_pipeline.md) L112–113.
 
 11. **Closure honesty floor** — node 7. *Controls:* whether a partial/blocked result
     is reported truthfully. *Default:* state SHIPPED/PARTIAL/BLOCKED plainly; name any
@@ -187,7 +187,8 @@ Manager-behavior spec below (its driving contract). It never works the burndown 
 The worker agent. Configured by: [`operating_model.md`](operating_model.md)
 "The three participants" (role) + [`dispatch_pipeline.md`](dispatch_pipeline.md) step 5
 (behavior) + [`milestone_template.md`](milestone_template.md) (the artifact it must
-keep current) + the dispatch packet's `<execution_rules>` (the per-task `do`/`do_not`).
+keep current) + the dispatch packet's `## TASK` / `## SCOPE OUT` sections (the per-task
+do/do-not).
 Its contract:
 - Pick up **one** dispatch packet with clear behavior + "when to stop" instructions.
 - Work the **Burndown**; **update the milestone after every meaningful step** — this,
@@ -235,14 +236,14 @@ The Manager's driving behavior, per node:
 2. **Level select (node 0).** Apply `level_rubric.md` by rule, escalate when in doubt.
 
 3. **Objective-lock ownership (node 1).** The Manager owns the scope lock — it protects
-   `<real_objective>` when the literal request and the real goal diverge, and fills
-   non-goals/assumptions/drift-risks so the Executor can't drift into them.
+   the `## Why (intent)` outcome when the literal request and the real goal diverge, and
+   fills `## SCOPE OUT` + `## RESERVED DECISIONS` so the Executor can't drift into them.
    *Configured by:* [`generators/draft_packet.md`](generators/draft_packet.md) +
-   `packet_template.xml`.
+   `packet_template.md`.
 
 4. **Adversarial review (node 2) + bounded fix (node 3).** The Manager runs the
    adversarial pass on the *drafted packet*, emits P0/P1 F-tags, and caps the fix loop
-   at 2 rounds; unresolved findings spill to `<non_goal>`/risk. *Configured by:*
+   at 2 rounds; unresolved findings spill to `## SCOPE OUT`/risk. *Configured by:*
    [`generators/adversarial_review.md`](generators/adversarial_review.md).
 
 5. **Scope containment (throughout).** The Manager keeps the Executor inside the locked
@@ -287,8 +288,8 @@ fixes.
 | A trading/mesh/autonomy change auto-enqueued with no human sign-off | 0 & 4 | **Auto-pickup boundary + guard flag (8)** — set `HARNESS_LEVEL3_GUARD=on`; require `approved: true`; and re-check it was leveled 3 (dial 1). |
 | Review missed a real correctness/security defect | 2 · REVIEW / 6 · CHECKPOINT | **Severity floor (2)** + **F-tag severity/scope (5)** — the adversarial pass wasn't hunting the right class; re-point it at the scar list. |
 | Review drowned in style nits; fix rounds burned on cosmetics | 2 · REVIEW | **Severity floor (2)** — raise it back to P0/P1-only; nits are not findings. |
-| The packet kept churning; review never converged | 3 · FIX | **Fix round cap (3)** — enforce the 2-round cap; spill the unresolved finding to `<non_goal>` and lock. |
-| The Executor built the literal words, not what the operator wanted | 1 · DRAFT | **Objective-lock granularity (4)** — sharpen `<real_objective>` vs `<literal_request>`; fill the drift-risks. |
+| The packet kept churning; review never converged | 3 · FIX | **Fix round cap (3)** — enforce the 2-round cap; spill the unresolved finding to `## SCOPE OUT` and lock. |
+| The Executor built the literal words, not what the operator wanted | 1 · DRAFT | **Objective-lock granularity (4)** — sharpen the `## Why (intent)` outcome against the literal request; fill the drift risks. |
 | The work drifted into out-of-scope territory mid-loop | 1 · DRAFT (+ Manager scope containment) | **Objective-lock granularity (4)** — the non-goals were empty/weak; name the scope the Executor drifted into. |
 | The prompt was grounded in stale/irrelevant/overriding context | 1 · DRAFT | **Context injection (6)** — curate the snippets (small, source-tagged, non-overriding); check `continues:` pointed at the right prior task. |
 | A previously-recorded failure was repeated | 1 · DRAFT / 7 · CLOSE | **Memory reuse (7)** — the scar wasn't read before drafting, or wasn't written at close; read/write file-memory. |

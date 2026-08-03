@@ -4,7 +4,8 @@
 packet** (before execution) and, at checkpoints, on the **committed diff** (spec
 §5). It is an adversary: it assumes the packet is wrong and tries to prove it.
 
-**Input:** a filled `packet_template.xml` (plan review) OR a committed diff
+**Input:** a drafted free-prose dispatch packet in the house style
+([`packet_template.md`](../packet_template.md)) (plan review) OR a committed diff
 (checkpoint review).
 **Output:** F-tagged findings in the house style, feeding an inline FIX loop
 **capped at 2 rounds**.
@@ -37,7 +38,8 @@ packet** (before execution) and, at checkpoints, on the **committed diff** (spec
 > - Every finding needs a **concrete failure scenario**, not a worry.
 > - Prefer findings that catch the recorded scars: overbatch + hallucinated
 >   success; adding a migration/stage machine when the spec forbids it; a paid-CLI
->   "verify"; an unbounded review spiral; drift from `<real_objective>`.
+>   "verify"; an unbounded review spiral; drift from the packet's `## Why (intent)`
+>   outcome.
 > - If the packet is sound, return **zero findings** — an empty review is a valid
 >   result, not a failure.
 
@@ -49,8 +51,8 @@ packet** (before execution) and, at checkpoints, on the **committed diff** (spec
    guards.
 2. Re-review only what changed. **Stop after 2 rounds** (spec §3 cost cap) — a
    locked-but-imperfect packet beats an infinite spiral.
-3. Any finding still unresolved after the cap becomes an **explicit `<non_goal>`**
-   or a **logged risk** in the packet — it is **never silently dropped**.
+3. Any finding still unresolved after the cap becomes an **explicit `## SCOPE OUT`
+   item** or a **logged risk** in the packet — it is **never silently dropped**.
 4. The implementation log records each tag's outcome: `fixed` / `accepted` /
    `no change needed`.
 

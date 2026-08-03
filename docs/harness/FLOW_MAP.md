@@ -1,4 +1,11 @@
-# Flow Map — Automated Harness State Machine (v0.6)
+# Flow Map — historical Automated Harness State Machine (v0.6)
+
+> **Historical reference — do not use this as the current operating map.** This is an
+> accurate snapshot of the pre-Manager v0.6 task-flow state machine, last maintained
+> before M3/M4 shipped. The live role/case loop is documented by
+> [`roles/manager.md`](roles/manager.md), [`dispatch_pipeline.md`](dispatch_pipeline.md),
+> and [`.ai/CONTEXT.md`](../../.ai/CONTEXT.md). It remains here only to preserve the
+> v0.6 schema/stage lineage; its “NOT YET” labels are historical, not current status.
 
 > **Purpose:** One shared picture of where state lands as a flow runs through the
 > automated harness. Answer in two minutes: input → where it goes → to whom → then what

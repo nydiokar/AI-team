@@ -39,7 +39,8 @@ file (packet → milestone → closure). The Level-3 wiki is **optional and neve
 >   `built` / `reviewed` / `merged` (keep it one line — all detail stays in the
 >   dispatch doc's `## Closure` section).
 >
-> Set the dispatch doc's `## Milestone` section `Current Status: closed`.
+> Tick the dispatch doc's `## Milestone (burndown)` items when their evidence is
+> complete. Do not mark a partial result as shipped.
 
 ---
 
