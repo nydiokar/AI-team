@@ -51,6 +51,15 @@ from typing import Any, Dict, List, Optional
 def _bootstrap() -> None:
     """Load project .env into os.environ before anything else runs."""
     project_root = Path(__file__).resolve().parent.parent
+    # Ensure the repo root is importable REGARDLESS of the launching interpreter or
+    # cwd. This MCP server is spawned by the session driver, which may use a bare
+    # interpreter with no editable install (`.pth`) and a cwd outside the repo — in
+    # that case the lazy `from config.models import ...` in dispatch_worker raises
+    # `No module named 'config'` and breaks every new-worker dispatch. Put the repo
+    # root on sys.path up front so `config`/`src` resolve from source unconditionally.
+    root_str = str(project_root)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
     ai_team_env = os.environ.get("AI_TEAM_ENV_FILE", "")
     env_path = Path(ai_team_env) if ai_team_env else (project_root / ".env")
 
