@@ -28,7 +28,7 @@ import logging
 import threading
 from collections import OrderedDict
 from contextlib import asynccontextmanager, contextmanager
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Security, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -36,6 +36,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from src.core import observability
+
+if TYPE_CHECKING:
+    from src.control.db import MeshDB
 
 # Map a CommandResult.reason (stable machine code) to an HTTP status. The body
 # always still carries {ok, reason} so the client owns the wording (no prose here).
@@ -1872,6 +1875,97 @@ def build_control_api(orchestrator) -> FastAPI:
             telemetry_store=_telemetry_store(),
         )
         return JSONResponse(view)
+
+    # --- A65 cost monitoring: explorer / case usage / top spenders / projects ---
+
+    def _cost_db() -> MeshDB:
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        return db
+
+    @app.get("/api/cost/explorer", dependencies=[Depends(_require_auth)])
+    def api_cost_explorer(
+        dimension: str = Query("project"),
+        granularity: str = Query("day"),
+        from_ts: Optional[str] = Query(default=None, alias="from"),
+        to_ts: Optional[str] = Query(default=None, alias="to"),
+        repo_path: Optional[str] = Query(default=None),
+        limit: int = Query(100, ge=1, le=5000),
+    ) -> JSONResponse:
+        """Spend explorer: token+USD breakdown along one dimension
+        (project|backend|model|role|case|session), optionally bucketed per UTC day
+        and filtered by time window + project. Prices per model with coverage %
+        surfaced honestly; unmatched models land in an explicit ``<unknown>``
+        bucket, never silently dropped."""
+        from src.control.cost_read_model import assemble_explorer
+        from src.control.db import _COST_DIMENSIONS
+        if dimension not in _COST_DIMENSIONS:
+            raise HTTPException(status_code=422, detail={"ok": False, "reason": "unknown_dimension"})
+        return JSONResponse(
+            assemble_explorer(
+                _cost_db(),
+                dimension=dimension,
+                granularity=granularity,
+                from_ts=from_ts or None,
+                to_ts=to_ts or None,
+                repo_path=repo_path or None,
+                limit=limit,
+            )
+        )
+
+    @app.get("/api/cases/{case_id}/usage", dependencies=[Depends(_require_auth)])
+    def api_case_usage(case_id: str) -> JSONResponse:
+        """Per-case cost breakdown (the manager/workers split): each session's
+        tokens + USD, and the mgr_vs_workers summary. 404 for an unknown case."""
+        from src.control.cost_read_model import assemble_case_usage
+        result = assemble_case_usage(_cost_db(), case_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "case_not_found"})
+        return JSONResponse(result)
+
+    @app.get("/api/cost/top", dependencies=[Depends(_require_auth)])
+    def api_cost_top(
+        by: str = Query("usd"),
+        from_ts: Optional[str] = Query(default=None, alias="from"),
+        to_ts: Optional[str] = Query(default=None, alias="to"),
+        repo_path: Optional[str] = Query(default=None),
+        limit: int = Query(10, ge=1, le=100),
+    ) -> JSONResponse:
+        """Top spenders: sessions ranked by USD (or raw tokens) within the window.
+        Every row carries its dominant model + coverage % so an unpriced burner is
+        visible, not silent."""
+        from src.control.cost_read_model import assemble_top_sessions
+        if by not in ("usd", "tokens"):
+            raise HTTPException(status_code=422, detail={"ok": False, "reason": "unknown_sort_by"})
+        return JSONResponse(
+            assemble_top_sessions(
+                _cost_db(),
+                from_ts=from_ts or None,
+                to_ts=to_ts or None,
+                repo_path=repo_path or None,
+                by=by,
+                limit=limit,
+            )
+        )
+
+    @app.get("/api/cost/projects", dependencies=[Depends(_require_auth)])
+    def api_cost_projects(
+        from_ts: Optional[str] = Query(default=None, alias="from"),
+        to_ts: Optional[str] = Query(default=None, alias="to"),
+        limit: int = Query(200, ge=1, le=1000),
+    ) -> JSONResponse:
+        """Distinct projects with usage (token rollup), ordered by size — the
+        Cost-tab project-filter dropdown fuel."""
+        from src.control.cost_read_model import assemble_projects
+        return JSONResponse(
+            assemble_projects(
+                _cost_db(),
+                from_ts=from_ts or None,
+                to_ts=to_ts or None,
+                limit=limit,
+            )
+        )
 
     @app.get("/api/quota-windows", dependencies=[Depends(_require_auth)])
     def api_quota_windows() -> JSONResponse:

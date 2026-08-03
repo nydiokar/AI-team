@@ -169,6 +169,40 @@ _REVIEW_EVENT_TYPES = frozenset(REVIEW_VERDICT_EVENT_TYPES.values())
 
 _TRUTHY_FLAG_VALUES = ("1", "true", "yes", "on")
 
+# A65 cost read-model. Usage sources that record ``input_token_semantics =
+# 'includes_cache'`` — ``input_tokens`` ALREADY CONTAINS the cached-input portion
+# (codex ``last_token_usage`` / codex ``turn.completed`` aggregates), so the cost
+# read-model must subtract ``cache_read_tokens`` from ``input`` or it double-counts
+# the cached tokens. Claude (``claude.result.usage``) is recorded exclusive-cache
+# (input excludes the cache) and is left untouched. Proven against the live DB:
+# every row from the inclusive sources satisfies input >= cache_read.
+_INCLUSIVE_CACHE_SOURCES: Tuple[str, ...] = (
+    "codex.rollout.token_count.last_token_usage",
+    "turn.completed.usage",
+)
+
+# SQL expression that yields the NON-double-counted uncached input for one
+# llm_model_requests row (used by every cost aggregation).
+_COST_INPUT_EXPR = (
+    "CASE WHEN r.input_token_semantics = 'includes_cache'"
+    " AND r.usage_source IN ('codex.rollout.token_count.last_token_usage',"
+    " 'turn.completed.usage')"
+    " THEN MAX(COALESCE(r.input_tokens, 0) - COALESCE(r.cache_read_tokens, 0), 0)"
+    " ELSE COALESCE(r.input_tokens, 0) END"
+)
+
+# Cost-explorer GROUP BY targets. Values are evaluated against the cost query's
+# aliases (s=session row, t=turn row, r=request row). ``model`` keeps the raw
+# (possibly empty) model so the assembler can price and label honestly.
+_COST_DIMENSIONS: Dict[str, str] = {
+    "project": "COALESCE(NULLIF(s.repo_path, ''), '<no repo path>')",
+    "backend": "COALESCE(NULLIF(t.backend, ''), s.backend, 'unknown')",
+    "model": "COALESCE(NULLIF(r.model, ''), '')",
+    "role": "COALESCE(NULLIF(s.case_role, ''), 'standalone')",
+    "case": "COALESCE(NULLIF(s.current_case_id, ''), 'standalone')",
+    "session": "t.session_id",
+}
+
 RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "HARNESS_FLOW_DRIVE": {
         "default": "0",
@@ -4029,7 +4063,21 @@ class MeshDB:
         Authoritative per-request token columns live in llm_model_requests (one
         table deeper than llm_turns, which has no session_id); we join on turn_id
         and MUST filter is_duplicate=0 or retried/duplicated requests double-count.
-        Returns {session_id: {input, output, cache_read, cache_creation, total}}.
+
+        Cache de-duplication (A65): codex/adapter rows are recorded with
+        ``input_token_semantics='includes_cache'`` — ``input_tokens`` already
+        CONTAINS the cached-input portion AND ``cache_read_tokens`` reports it
+        separately. Adding both double-counts the cached tokens (the codex burn
+        was inflated ~2x). We subtract the cache from ``input`` for exactly those
+        sources (proven against the DB: input >= cache_read in every such row);
+        claude rows are recorded exclusive-cache (input excludes the cache) and
+        are left untouched.
+
+        ``total`` is the sum of ALL FOUR buckets (input + output + cache_read +
+        cache_creation) — the same definition ``pricing.TokenTotals.total`` uses.
+        This was previously ``input + output`` (cache excluded), so the roster
+        "Total tokens" and the Session-detail cost could disagree. Returns
+        {session_id: {input, output, cache_read, cache_creation, total}}.
         Sessions with no recorded requests are simply absent (caller renders 0)."""
         if not session_ids:
             return {}
@@ -4037,10 +4085,10 @@ class MeshDB:
         rows = self._conn().execute(
             f"""
             SELECT t.session_id AS session_id,
-                   COALESCE(SUM(r.input_tokens), 0)          AS input,
-                   COALESCE(SUM(r.output_tokens), 0)         AS output,
-                   COALESCE(SUM(r.cache_read_tokens), 0)     AS cache_read,
-                   COALESCE(SUM(r.cache_creation_tokens), 0) AS cache_creation
+                   COALESCE(SUM({_COST_INPUT_EXPR}), 0)              AS input,
+                   COALESCE(SUM(r.output_tokens), 0)                 AS output,
+                   COALESCE(SUM(r.cache_read_tokens), 0)             AS cache_read,
+                   COALESCE(SUM(r.cache_creation_tokens), 0)         AS cache_creation
             FROM llm_turns t
             JOIN llm_model_requests r ON r.turn_id = t.turn_id
             WHERE t.session_id IN ({placeholders}) AND r.is_duplicate = 0
@@ -4051,9 +4099,228 @@ class MeshDB:
         out: Dict[str, Dict[str, int]] = {}
         for r in rows:
             d = dict(r)
-            d["total"] = (d.get("input") or 0) + (d.get("output") or 0)
+            d["total"] = (
+                (d.get("input") or 0)
+                + (d.get("output") or 0)
+                + (d.get("cache_read") or 0)
+                + (d.get("cache_creation") or 0)
+            )
             out[d["session_id"]] = d
         return out
+
+    # ------------------------------------------------------------------
+    # A65 cost read-model — bounded SQL aggregates over the same
+    # llm_model_requests telemetry (is_duplicate=0 everywhere, includes_cache
+    # corrected). Each call is ONE bounded GROUP BY; pricing lives in
+    # src/control/cost_read_model.py.
+    # ------------------------------------------------------------------
+
+    def cost_usage_rows(
+        self,
+        *,
+        dimension: str,
+        granularity: str = "day",
+        from_ts: Optional[str] = None,
+        to_ts: Optional[str] = None,
+        repo_path: Optional[str] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """Per (time-bucket, dimension, model) token rows — the explorer fuel.
+
+        One bounded GROUP BY over llm_model_requests joined to their turn/session
+        (no N+1). ``dimension`` is one of project|backend|model|role|session;
+        ``granularity='day'`` buckets by the request's UTC date. Rows carry the
+        normalized (uncached) input + the four raw buckets; the assembler prices
+        per model in Python and rolls up. ``is_duplicate=0`` replicates the
+        proven de-dup filter; turns with no session_id are excluded here and
+        surfaced separately via ``cost_unattributed``."""
+        if dimension not in _COST_DIMENSIONS:
+            raise ValueError(f"unknown cost dimension: {dimension}")
+        dim_expr: str = _COST_DIMENSIONS[dimension]
+        bucket_expr: str = (
+            "substr(COALESCE(r.started_at, t.started_at, t.created_at), 1, 10)"
+            if granularity == "day"
+            else "''"
+        )
+        where = ["r.is_duplicate = 0", "t.session_id IS NOT NULL"]
+        params: List[Any] = []
+        if from_ts:
+            where.append("COALESCE(r.started_at, t.started_at, t.created_at) >= ?")
+            params.append(from_ts)
+        if to_ts:
+            where.append("COALESCE(r.started_at, t.started_at, t.created_at) <= ?")
+            params.append(to_ts)
+        if repo_path:
+            where.append("s.repo_path = ?")
+            params.append(repo_path)
+        params.append(max(1, min(int(limit), 100_000)))
+        rows = self._conn().execute(
+            f"""
+            SELECT {bucket_expr} AS bucket,
+                   {dim_expr} AS dim,
+                   COALESCE(NULLIF(r.model, ''), '') AS model,
+                   SUM({_COST_INPUT_EXPR})                              AS input,
+                   SUM(COALESCE(r.output_tokens, 0))                    AS output,
+                   SUM(COALESCE(r.cache_read_tokens, 0))                AS cache_read,
+                   SUM(COALESCE(r.cache_creation_tokens, 0))            AS cache_creation,
+                   COALESCE(NULLIF(t.backend, ''), s.backend, 'unknown') AS backend,
+                   COALESCE(NULLIF(s.case_role, ''), 'standalone')      AS role
+            FROM llm_turns t
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            LEFT JOIN sessions s ON s.session_id = t.session_id
+            WHERE {' AND '.join(where)}
+            GROUP BY bucket, dim, r.model
+            ORDER BY bucket, dim, model
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def cost_case_rows(self, flow_run_id: str) -> List[Dict[str, Any]]:
+        """Per (session, model) token rows for every session linked to a case.
+
+        The operator-question fuel: manager + its flow_links-joined workers, each
+        session's tokens split per model so USD prices correctly per model. The
+        case's session roles come from the links (fetched by the assembler)."""
+        rows = self._conn().execute(
+            f"""
+            SELECT t.session_id AS session_id,
+                   COALESCE(NULLIF(r.model, ''), '') AS model,
+                   SUM({_COST_INPUT_EXPR})                            AS input,
+                   SUM(COALESCE(r.output_tokens, 0))                  AS output,
+                   SUM(COALESCE(r.cache_read_tokens, 0))              AS cache_read,
+                   SUM(COALESCE(r.cache_creation_tokens, 0))          AS cache_creation
+            FROM flow_links fl
+            JOIN llm_turns t ON t.session_id = fl.entity_id
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            WHERE fl.flow_run_id = ? AND fl.entity_type = 'session'
+              AND r.is_duplicate = 0
+            GROUP BY t.session_id, r.model
+            ORDER BY t.session_id, model
+            """,
+            (flow_run_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def cost_session_model_rows(
+        self,
+        *,
+        from_ts: Optional[str] = None,
+        to_ts: Optional[str] = None,
+        repo_path: Optional[str] = None,
+        limit: int = 5000,
+    ) -> List[Dict[str, Any]]:
+        """Per (session, model) token rows within a window — the top-spenders
+        fuel. The assembler prices per model, rolls each session up, and sorts by
+        USD. Bounded (LIMIT) so the read stays cheap on a grown DB."""
+        where = ["r.is_duplicate = 0", "t.session_id IS NOT NULL"]
+        params: List[Any] = []
+        if from_ts:
+            where.append("COALESCE(r.started_at, t.started_at, t.created_at) >= ?")
+            params.append(from_ts)
+        if to_ts:
+            where.append("COALESCE(r.started_at, t.started_at, t.created_at) <= ?")
+            params.append(to_ts)
+        if repo_path:
+            where.append("s.repo_path = ?")
+            params.append(repo_path)
+        params.append(max(1, min(int(limit), 100_000)))
+        rows = self._conn().execute(
+            f"""
+            SELECT t.session_id AS session_id,
+                   COALESCE(NULLIF(r.model, ''), '') AS model,
+                   SUM({_COST_INPUT_EXPR})                            AS input,
+                   SUM(COALESCE(r.output_tokens, 0))                  AS output,
+                   SUM(COALESCE(r.cache_read_tokens, 0))              AS cache_read,
+                   SUM(COALESCE(r.cache_creation_tokens, 0))          AS cache_creation,
+                   s.repo_path                                        AS repo_path,
+                   COALESCE(NULLIF(t.backend, ''), s.backend, 'unknown') AS backend,
+                   COALESCE(NULLIF(s.case_role, ''), 'standalone')    AS role
+            FROM llm_turns t
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            LEFT JOIN sessions s ON s.session_id = t.session_id
+            WHERE {' AND '.join(where)}
+            GROUP BY t.session_id, r.model
+            ORDER BY (SUM({_COST_INPUT_EXPR}) + COALESCE(SUM(r.output_tokens), 0)) DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def cost_unattributed(
+        self,
+        *,
+        from_ts: Optional[str] = None,
+        to_ts: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Per-model tokens on turns with NO session_id (not attributable to any
+        session/project). Surfaced honestly as an ``unattributed`` bucket rather
+        than silently dropped (the audit found 26 orphan-session + 14 no-session
+        turns ≈ 11M tokens, ~0.2%)."""
+        where = ["r.is_duplicate = 0", "t.session_id IS NULL"]
+        params: List[Any] = []
+        if from_ts:
+            where.append("COALESCE(r.started_at, t.started_at, t.created_at) >= ?")
+            params.append(from_ts)
+        if to_ts:
+            where.append("COALESCE(r.started_at, t.started_at, t.created_at) <= ?")
+            params.append(to_ts)
+        rows = self._conn().execute(
+            f"""
+            SELECT COALESCE(NULLIF(r.model, ''), '') AS model,
+                   SUM({_COST_INPUT_EXPR})                            AS input,
+                   SUM(COALESCE(r.output_tokens, 0))                  AS output,
+                   SUM(COALESCE(r.cache_read_tokens, 0))              AS cache_read,
+                   SUM(COALESCE(r.cache_creation_tokens, 0))          AS cache_creation
+            FROM llm_turns t
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            WHERE {' AND '.join(where)}
+            GROUP BY r.model
+            """,
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_cost_projects(
+        self,
+        *,
+        from_ts: Optional[str] = None,
+        to_ts: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Distinct repo_paths with usage — the project-filter dropdown fuel,
+        ordered by total tokens so the spenders float to the top. Rows also carry
+        the per-project token rollup for the dashboard's spend-by-project card."""
+        where = ["r.is_duplicate = 0", "t.session_id IS NOT NULL"]
+        params: List[Any] = []
+        if from_ts:
+            where.append("COALESCE(r.started_at, t.started_at, t.created_at) >= ?")
+            params.append(from_ts)
+        if to_ts:
+            where.append("COALESCE(r.started_at, t.started_at, t.created_at) <= ?")
+            params.append(to_ts)
+        params.append(max(1, min(int(limit), 1000)))
+        rows = self._conn().execute(
+            f"""
+            SELECT COALESCE(NULLIF(s.repo_path, ''), '<no repo path>') AS repo_path,
+                   SUM({_COST_INPUT_EXPR})                            AS input,
+                   SUM(COALESCE(r.output_tokens, 0))                  AS output,
+                   SUM(COALESCE(r.cache_read_tokens, 0))              AS cache_read,
+                   SUM(COALESCE(r.cache_creation_tokens, 0))          AS cache_creation
+            FROM llm_turns t
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            LEFT JOIN sessions s ON s.session_id = t.session_id
+            WHERE {' AND '.join(where)}
+            GROUP BY s.repo_path
+            ORDER BY (SUM({_COST_INPUT_EXPR}) + COALESCE(SUM(r.output_tokens), 0)
+                      + COALESCE(SUM(r.cache_read_tokens), 0)) DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_session_turn_counts(
         self, session_ids: List[str]

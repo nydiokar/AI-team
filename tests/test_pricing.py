@@ -61,4 +61,8 @@ def test_zero_totals_known_model_is_zero_cost():
 
 
 def test_priced_families_present():
-    assert set(priced_models()) == {"opus", "sonnet", "haiku"}
+    families = set(priced_models())
+    # A65: claude + fable + gpt-5.x families are all priceable.
+    assert {"opus", "sonnet", "haiku", "fable"}.issubset(families)
+    assert "gpt-5.6-terra" in families and "gpt-5.5" in families
+    assert "gpt-5.3-codex" in families

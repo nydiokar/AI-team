@@ -4,14 +4,20 @@ Honesty-first, mirroring ``backend_usage.py``: when a session's model cannot be
 mapped to a known price table we return ``known=False`` and a ``null`` cost with
 a reason, never a fabricated number.
 
-Prices are per **million tokens** in USD. Cache economics follow Anthropic's
-published structure (prompt-caching): a cache *write* (creation) bills at 1.25×
-the base input rate (5-minute ephemeral, the Claude Code default) and a cache
-*read* at ~0.10× the base input rate. Base input/output rates per model family:
-Opus $5/$25, Sonnet $3/$15, Haiku $1/$5 per MTok.
+Prices are per **million tokens** in USD. Cache economics follow the published
+prompt-caching structure shared by Anthropic and OpenAI: a cache *write*
+(creation) bills at 1.25× the base input rate and a cache *read* at ~0.10× the
+base input rate. Base input/output rates per model family (per MTok): Opus $5/$25,
+Sonnet $3/$15, Haiku $1/$5; Claude Fable 5 $10/$50; gpt-5.6-sol $5/$30,
+gpt-5.6-terra $2/$12, gpt-5.6-luna $0.20/$1.20, gpt-5.5 $5/$30, gpt-5.3-codex
+$1.75/$14.
 
-Update the table below when Anthropic revises pricing — it is the single source
-of truth for cost math in the gateway.
+Sources (as of 2026-08-03): Anthropic platform pricing page (claude families +
+Fable 5), OpenAI API pricing page + openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6
+(gpt-5.6 terra/luna dropped to $2/$12 and $0.20/$1.20 on 2026-07-30). Each entry
+carries its rate as a single source-of-truth row here; a model absent from this
+table renders an honest ``known=False`` estimate. Bump the table when a provider
+revises pricing — it is the single source of truth for cost math in the gateway.
 """
 from __future__ import annotations
 
@@ -40,13 +46,21 @@ def _family(input_usd: float, output_usd: float) -> PriceRates:
     )
 
 
-# Substring → rates. Keys are matched against a lowercased model id; order does
-# not matter (families are disjoint). Covers the Claude 4.x families used by the
-# Claude Code backend today.
+# Substring → rates. Keys are matched against a lowercased model id; the longest
+# matching key wins (so "gpt-5.5" never prices "gpt-5.5-pro"). Covers the model
+# families used by the Claude Code and Codex backends today.
 _PRICE_TABLE: Dict[str, PriceRates] = {
     "opus": _family(5.0, 25.0),
     "sonnet": _family(3.0, 15.0),
     "haiku": _family(1.0, 5.0),
+    # Claude Fable 5 (Mythos class) — platform.claude.com pricing, 2026-08-03.
+    "fable": _family(10.0, 50.0),
+    # OpenAI GPT-5.x via the Codex CLI — OpenAI API pricing page, 2026-08-03.
+    "gpt-5.6-sol": _family(5.0, 30.0),
+    "gpt-5.6-terra": _family(2.0, 12.0),    # 2026-07-30 cut from $2.50/$15
+    "gpt-5.6-luna": _family(0.2, 1.2),      # 2026-07-30 cut from $1/$6
+    "gpt-5.5": _family(5.0, 30.0),
+    "gpt-5.3-codex": _family(1.75, 14.0),
 }
 
 
@@ -77,10 +91,13 @@ def _match_rates(model: Optional[str]) -> Optional[PriceRates]:
     if not model:
         return None
     needle: str = model.lower()
+    best: Optional[PriceRates] = None
+    best_len: int = -1
     for key, rates in _PRICE_TABLE.items():
-        if key in needle:
-            return rates
-    return None
+        if key in needle and len(key) > best_len:
+            best = rates
+            best_len = len(key)
+    return best
 
 
 def priced_models() -> List[str]:
