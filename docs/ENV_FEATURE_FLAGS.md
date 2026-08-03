@@ -46,6 +46,7 @@ them.
 | `GUARDED_WRITE` | ✅ YES | false | Stored in `config.system.guarded_write`. **Currently only surfaces as metadata** in the result artifact's `security.guarded_write` field (`orchestrator.py:3299`). It does not actually guard or block any file write at the code level today. Vestigial — was presumably planned to enforce something but the enforcement was never wired. | `config/settings.py:445`, `orchestrator.py:3299` |
 | `CLAUDE_SKIP_PERMISSIONS` | ✅ YES | false | Appends `--dangerously-skip-permissions` to the Claude CLI. **Security-relevant** — leave OFF unless you know why. | `config/settings.py:307` |
 | `CONTROL_API_DOCS` | ⚠ NO | false | Exposes the control-API OpenAPI/Swagger docs route. Keep OFF on tailnet-facing binds. | `control_api.py:203` |
+| `COST_ALERT_ENFORCE_ENABLED` | ⚠ NO | off | **A65 — Cost-alert enforcement seam.** When ON, `/api/cost/alerts` surfaces the existing `sdk_max_budget_usd` governor ceiling; it never creates a second kill path. Alert evaluation itself is read-only and is enabled by any positive `COST_ALERT_*_USD` threshold. | `control_api.py:api_cost_alerts` · `control/db.py:RUNTIME_FLAG_DEFINITIONS` |
 
 ---
 
@@ -108,6 +109,9 @@ them.
 | `OPENCODE_ALLOWED_ROOT` | ⚠ NO | (falls back to CLAUDE_ALLOWED_ROOT) | OpenCode filesystem root. Not managed; falls back to `CLAUDE_ALLOWED_ROOT`. | `backends/opencode.py:821` |
 | `CODEX_DEFAULT_MODEL` | ✅ YES | (settings default) | Default model for Codex backend. | `config/settings.py:538` |
 | `CODEX_NODE_PATH` / `NODE_EXE` | ⚠ NO | (PATH lookup) | Node.js binary path for Codex/OpenCode on Windows. Not managed. | `backends/codex.py:123` |
+| `COST_ALERT_DAILY_BUDGET_USD` | ⚠ NO | 0 (= off) | Current-UTC-day known billable USD threshold across attributed and unattributed usage. | `services/cost_alerts.py` |
+| `COST_ALERT_SESSION_BURN_USD` | ⚠ NO | 0 (= off) | Current-UTC-day known billable USD threshold for the highest-spend session. | `services/cost_alerts.py` |
+| `COST_ALERT_CASE_TOTAL_USD` | ⚠ NO | 0 (= off) | Current-UTC-day known billable USD threshold for each Case. | `services/cost_alerts.py` |
 
 ---
 

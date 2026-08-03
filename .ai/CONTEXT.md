@@ -55,7 +55,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active | Cost monitoring & visibility: P0 audit + P1 read-model (`/api/cost/*` + `/api/cases/{id}/usage`) + P2 Cost tab shipped; **P3 budgets/burn-rate alerts (billable-USD only, enforcement flagged OFF) in flight**. Spawned from the 2026-08-03 manager-vs-workers cost report. |
 | **A51** | `AGENT_51_DISPATCH_STATE_KIT_MIGRATION.md` | — | ready / not started | Install dispatch-state-kit; migrate all 59 job files to machine-tracked YAML state. |
 | **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |
 | **A55** | `AGENT_55_M34_JOB3_CRASH_RESPAWN.md` | A54 | dispatched | Respawn a role-full Manager on a dead-session Case. Closes "survive a process restart." |
@@ -66,7 +65,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | **A61** | `AGENT_61_QUOTA_COORDINATOR_FINALIZATION.md` | — | built (direct commit `cbbaa10`, no PR) | Real Claude status-line adapter + quota windows API. **Needs A63 independent audit before treating as done.** |
 | **A62** | `AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN.md` | — | dispatched | Extend `/api/flags` to numeric/string knobs; land `CLAUDE_SDK_MAX_TURNS`/`CLAUDE_SDK_MAX_BUDGET_USD` as first real numeric case. |
 | **A63** | `AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT.md` | — | dispatched | Independent audit of A61's commit — re-derive every gap claim from the tree, not from the packet. |
-| **A64** | `AGENT_64_HARNESS_DOC_DRIFT_RECONCILIATION.md` | — | dispatched | Reconcile stale harness docs against real current practice. Docs-only. |
 
 **Operator-gated validations still pending:**
 - Job 1 live activation: `CASE_CONTINUATION_ENABLED=1` + gateway restart (runbook in `manager.md`).
@@ -77,14 +75,17 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-08-03 — A65 cost monitoring: P0+P1+P2 shipped, P3 in flight.**
+**2026-08-04 — A65 cost monitoring complete (PR #62).**
 The manager-vs-workers cost job is live end-to-end: P0 truthfulness audit
 (`docs/cost_monitoring_audit.md`), P1 cost read-model (`ac5aea2`, PR #61 — codex `includes_cache`
 accounting fixed, `_PRICE_TABLE` extended for codex/gpt, `/api/cost/explorer|top|projects` +
 `/api/cases/{id}/usage`, six-case report reproduced via API), P2 Cost tab (`1f04be5` — 24h/48h/7d/30d
 range defaulting 7d + per-project filter, spend by project/model with honest coverage %, top-N by
-USD, per-case manager-vs-workers drilldown). Live-verified through 127.0.0.1:9003. Next: P3
-budgets/burn-rate alerts (billable-USD only, enforcement flag-gated OFF).
+USD, per-case manager-vs-workers drilldown). P3 (`8792f9f`, PR #62) adds the authenticated
+`/api/cost/alerts` read surface and Cost-tab alert banner: daily/session/Case thresholds are
+known billable USD only; alerting activates when a positive `COST_ALERT_*_USD` knob is configured;
+the separate enforcement flag remains OFF and only surfaces the existing SDK governor seam. Targeted
+Python tests and the full web test suite pass.
 
 **2026-08-01 — Wake-dispatcher IDLE-gate bug fixed and proven live (PRs #51/#52/#53).**
 A Manager on Horse armed a wait-group; workers finished but the Manager was never woken despite

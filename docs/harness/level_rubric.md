@@ -2,7 +2,7 @@
 
 The level decides how much of the loop runs. An autonomous agent MUST be able to
 pick it **deterministically**, so this is a checklist, not a vibe. The output is a
-single number 0–3 that goes in the packet `<harness_level>` and, for a dispatched
+single number 0–3 that goes in the packet's `**Level:**` line and, for a dispatched
 `.task.md`, in the frontmatter `harness_level:` field.
 
 ---
@@ -49,7 +49,7 @@ not talk yourself down a level.
 |------:|------|
 | **0 — tiny** | `intent → execute` |
 | **1 — small** | `intent → short plan → execute → optional review` |
-| **2 — standard** | `objective lock → XML packet → plan review → burndown fix → execute → implementation review → closure` |
+| **2 — standard** | `objective lock → free-prose packet → plan review → burndown fix → execute → implementation review → closure` |
 | **3 — strict** | `objective lock → adversarial plan review → operator approval → execution milestone → checkpoint reviewer → implementation review → fix loop → closure → (optional) wiki` |
 
 ---
@@ -59,7 +59,7 @@ not talk yourself down a level.
 - **Review defaults to OFF for Level ≤ 1.** Don't spend a review pass on a typo.
 - **Cap the plan ↔ review ↔ fix loop at 2 rounds** (spec §3), then stop. A
   locked-but-imperfect packet beats an infinite review spiral. Unresolved findings
-  become explicit `<non_goals>` or logged risks — never silently dropped.
+  become explicit `## SCOPE OUT` items or logged risks — never silently dropped.
 - **No stage may invoke a paid CLI to "verify"** (Test Cost Guard). Use targeted
   `pytest`, `--collect-only`, import smoke, `tsc -b`, `curl /health`. Real e2e is
   OpenCode-only (`AI_TEAM_ALLOW_OPENCODE_E2E=1 pytest --run-e2e`).

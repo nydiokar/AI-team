@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_65_COST_MONITORING_VISIBILITY
 created_at: "2026-08-03T16:59:09.868948+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: docs/cost_monitoring_audit.md                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T18:03:42.938251+00:00"
+updated_at: "2026-08-03T22:37:16.549337+00:00"
 ```
 
 # DISPATCH — A65 · Cost monitoring & visibility: cost explorer + dashboards + budgets/alerts
@@ -205,8 +205,8 @@ needs it.
 - [x] Phase 0 remaining: `total`-definition fix + codex `includes_cache` correction + `_PRICE_TABLE` extension (R1 per OPERATOR ADDENDUM) landed WITH Phase 1 (`ac5aea2`)
 - [x] Phase 1: three read-model endpoints + 31 tests; six-case report reproducible via `/api/cases/{id}/usage` (mgr $22.47 / 7w $32.72 / share 59.3% reproduced); live-verified
 - [x] Phase 2: Cost tab (`1f04be5`) — 24h/48h/7d/30d range (default 7d) + project filter per ADDENDUM, spend by project/model with coverage %, top-N sessions by USD, per-case manager-vs-workers drilldown; 26 vitest + 127 web total green
-- [ ] Phase 3: budget/burn-rate alerts (billable-USD only), enforcement flag-gated OFF via governor seam
-- [ ] Adversarial-review items re-checked against the shipped diff (no drift into scope-out)
+- [x] Phase 3: budget/burn-rate alerts (billable-USD only), enforcement flag-gated OFF via governor seam (`8792f9f`, PR #62)
+- [x] Adversarial-review items re-checked against the shipped diff (no drift into scope-out)
 
 ## OPERATOR ADDENDUM (2026-08-03, after the Phase-0 audit landed) — in scope, applies to Phases 1-3
 1. **Finish off Codex usage — required, not optional.** Codex is currently "underrepresented":
@@ -224,5 +224,17 @@ needs it.
    optional `repo_path`) so the UI and API agree; the explorer dimension list gains `project`.
    These are the operator's explicit UI requirements — Phase 2 acceptance includes them.
 
-## Closure (fill on completion)
-(fill when executed)
+## Closure (2026-08-04)
+
+**What changed:** P3 added authenticated `GET /api/cost/alerts`, three positive-USD environment
+thresholds, the Cost-tab alert banner, and a registry-backed default-OFF enforcement seam that only
+reports the existing `sdk_max_budget_usd` governor setting. It does not add a new kill path or wire
+the quota coordinator.
+
+**Verification:** `.venv/bin/pytest -q tests/test_cost_alerts.py tests/test_cost_read_model.py` and
+`pnpm --dir web test -- --runInBand` passed (130 web tests).
+
+**Service boundary:** endpoint is authenticated and accepts no payload; alert computation uses the
+bounded existing cost read model. It is read-only and polled by the Cost tab. No request timeout or
+separate alert-delivery queue is introduced; Web Push remains limited to terminal task outcomes, so
+budget alerts deliberately surface in the authenticated UI instead of creating an unbounded push path.

@@ -73,10 +73,10 @@ others are kept as trace, not duplicated history.
 | [`harness/operating_model.md`](harness/operating_model.md) | 🟢 | How the loop is actually run in practice; wins over the spec where they differ on *how*, not *discipline*. |
 | [`harness/roles/manager.md`](harness/roles/manager.md) | 🟢 | Canonical, provider-neutral Manager role profile — stable identity/authority, loaded verbatim into the system prompt at session boot. |
 | [`harness/roles/worker.md`](harness/roles/worker.md) | 🟢 | Canonical Worker role profile — mirrors `manager.md`. |
-| [`harness/FLOW_MAP.md`](harness/FLOW_MAP.md) | 🟢 | Where state lands as a flow runs through the automated (v0.6+) harness. |
-| [`harness/milestone_template.md`](harness/milestone_template.md) | 🟡 | Template for a dispatch's `## Milestone` burndown section — field shape drifted from current practice, see `harness/README.md` drift note (A64). |
-| [`harness/packet_template.xml`](harness/packet_template.xml) | 🟡 | XML task packet template — superseded in practice by free-prose packets since `AGENT_36`; never formally retired, see `harness/README.md` drift note (A64). |
-| [`harness/generators/draft_packet.md`](harness/generators/draft_packet.md) | 🟡 | DRAFT generator — intent → task packet. Same drift as `packet_template.xml`. |
+| [`harness/FLOW_MAP.md`](harness/FLOW_MAP.md) | 🟡 | Historical v0.6 task-flow state-machine snapshot; its “NOT YET” labels are not current status. Use the Manager role, pipeline, and CONTEXT for the live loop. |
+| [`harness/milestone_template.md`](harness/milestone_template.md) | 🟢 | Template for the current inline `## Milestone (burndown)` checkbox section. |
+| [`harness/packet_template.md`](harness/packet_template.md) | 🟢 | Current free-prose dispatch-packet template, grounded in post-A29 packets. |
+| [`harness/generators/draft_packet.md`](harness/generators/draft_packet.md) | 🟢 | DRAFT generator — intent → current free-prose dispatch packet. |
 | [`harness/generators/adversarial_review.md`](harness/generators/adversarial_review.md) | 🟢 | REVIEW generator — adversarial pass, F-tag convention still followed. |
 | [`harness/generators/closure_summary.md`](harness/generators/closure_summary.md) | 🟢 | CLOSE generator — closure summary + doc-update stub, still broadly accurate. |
 

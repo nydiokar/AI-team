@@ -1,6 +1,6 @@
 # Operating Model — how we actually run the harness
 
-**Status:** the real, in-use operating model (2026-07-03). Reconciles what we *do* with
+**Status:** the real, in-use operating model (reconciled 2026-08-04). Reconciles what we *do* with
 `Task_harness_workflow.md` §4/§5. Where they differ, **this file wins for how we run**;
 the spec still governs the *discipline inside a loop* (objective-lock, F-tags, bounded
 fix rounds, closure).
@@ -90,12 +90,12 @@ FINAL LOOP — after the milestone is exhausted
 
 ## Mapping to existing artifacts (nothing new invented)
 
-- **LOOP 0 / packets** → `.ai/dispatch/AGENT_N_*.md` (+ `_REVIEW.md`), per `dispatch_pipeline.md`.
+- **LOOP 0 / packets** → `.ai/dispatch/AGENT_N_*.md`, per `dispatch_pipeline.md`.
 - **Loop state / status** → `.ai/dispatch/DISPATCH_LOG.md` — already the loop tracker
   (`dispatched → built → reviewed → merged`, plus `blocked`/`deferred`). Manager updates it.
 - **MANAGER REVIEW (d)** → `/code-review` + `/security-review` on the committed diff,
   house F-tag style; this IS spec §5's checkpoint reviewer, run by the Manager.
-- **Milestone burndown** → a `## Milestone` section INSIDE the dispatch doc (body from
+- **Milestone burndown** → a `## Milestone (burndown)` section INSIDE the dispatch doc (body from
   `docs/harness/milestone_template.md`) — one file, no `.milestone.md` sibling.
 - **Closure / derive** → a `## Closure` section appended to the same dispatch doc (per
   `generators/closure_summary.md`) + `.ai/CONTEXT.md` ledger update. One dispatch = one
@@ -106,7 +106,7 @@ FINAL LOOP — after the milestone is exhausted
 ## What the spec still owns (unchanged)
 
 Inside any loop, the discipline is the spec's: level selection (§3), objective-lock +
-XML packet (§2.1), F-tagged adversarial review capped at ~2 rounds (§3 cost rule),
+locked packet (§2.1), F-tagged adversarial review capped at ~2 rounds (§3 cost rule),
 memory-reuse (§7), no paid CLI to "verify" (§9), ZERO new gateway state in v1 (§0/§11).
 This file changes *who does what and how loops nest* — not the quality bar within a loop.
 ```

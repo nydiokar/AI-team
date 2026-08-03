@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_64_HARNESS_DOC_DRIFT_RECONCILIATION
 created_at: "2026-08-01T13:48:33+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:20:23.320706+00:00"
+updated_at: "2026-08-03T22:37:16.414210+00:00"
 ```
 
 # DISPATCH — A64 · Harness docs: reconcile the abandoned XML-packet ritual against actual practice
@@ -139,12 +139,24 @@ gap, surface it as a separate finding, don't silently fix it here).
 
 ---
 ## Milestone (burndown)
-- [ ] Drift cutoff confirmed (AGENT_30–35 checked, not just 16–29)
-- [ ] Current house-style template extracted from ≥5 real packets
-- [ ] Per-file disposition decided for all 5 "abandoned ritual" files (retire or rewrite)
-- [ ] `dispatch_pipeline.md` DRAFT/REVIEW steps + worked example updated
-- [ ] `operating_model.md`/`loop_config_map.md`/`FLOW_MAP.md` audited against current practice
-- [ ] `docs/harness/README.md` + `docs/INDEX.md` reconciled
+- [x] Drift cutoff confirmed (A31 is the first post-A29 packet; A32–36 checked)
+- [x] Current house-style template extracted from A52/55/56/60/61/62/63/64
+- [x] Per-file disposition decided for all five abandoned-ritual files
+- [x] `dispatch_pipeline.md` DRAFT/REVIEW steps + worked example updated
+- [x] `operating_model.md`/`loop_config_map.md`/`FLOW_MAP.md` audited against current practice
+- [x] `docs/harness/README.md` + `docs/INDEX.md` reconciled
 
-## Closure (fill on completion)
-(fill when executed)
+## Closure (2026-08-04)
+
+**What changed:** Retired `packet_template.xml`; added the current free-prose
+`packet_template.md`; rewrote the draft/review/milestone/closure/runbook references; and aligned
+README, INDEX, DOC_MAP, rubric, and map terminology. `FLOW_MAP.md` is retained only as an explicitly
+historical v0.6 state-machine snapshot.
+
+**Evidence:** XML appears through A29; the first subsequent packet is A31 and the common current
+shape was checked against A52/55/56/60/61/62/63/64. `rg` confirms no live harness pointer to the
+retired XML template.
+
+**Disposition:** rewrite — packet, draft, review, milestone, pipeline, operating model, config map;
+unchanged in substance — closure generator (only milestone wording corrected); retain-as-historical —
+FLOW_MAP; retire — XML template. No historical dispatch packet was changed.

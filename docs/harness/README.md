@@ -1,7 +1,8 @@
 # Task Harness — prompt-and-artifact task-quality loop
 
-The harness is a **small task-quality loop**, not a workflow engine. It adds
-**zero new gateway state**: the XML task packet, the milestone burndown file, and
+The harness is a **small task-quality loop**, not a workflow engine. Its task-quality
+process adds **zero new gateway state**: the free-prose dispatch packet, the inline
+milestone burndown, and
 the dispatch convention *are* the state. It rides on what the gateway already has
 (`mesh_tasks` ledger, `load_compact_context`, file-memory). If you feel the urge to
 add a migration or a stage machine — stop; that is Phase 2 (spec §16), out of scope.
@@ -32,26 +33,22 @@ escalate one level.
 
 ## Which file to use when
 
-> ⚠️ **Known drift (2026-08-01, see A64):** `packet_template.xml` and the three
-> `generators/*.md` files below describe the XML-packet DRAFT/REVIEW ritual used through
-> `AGENT_16`–`AGENT_29` (mid-July). No dispatch since `AGENT_36` (M2.5 onward) has used the XML
-> shape — the actual, current house style is free-prose packets like `.ai/dispatch/AGENT_61_*`
-> onward (`Why` / `TASK` / `TYPE` / `CONTEXT` / `ACCEPTANCE` / `RESERVED DECISIONS` / `SCOPE OUT`
-> / `TRAIL` sections + a `## Milestone` burndown + `## Closure`, folded into one file per the
-> ONE-FILE RULE). Nobody ever marked the XML ritual retired. Do not treat the table below as
-> current practice for DRAFT/REVIEW until A64 reconciles it — `level_rubric.md`'s Level ladder and
-> `dispatch_pipeline.md`'s stage doctrine + ONE-FILE RULE remain accurate and followed.
-> `promotion_ladder.md` was already retired 2026-07-06 and is now deleted (git history only).
+> **Current packet shape (A64, 2026-08-04):** XML was used through `AGENT_29`; the
+> first post-cutover packet, `AGENT_31`, and all recent packets use free prose:
+> `Why` / `TASK` / `TYPE` / `CONTEXT` / `ACCEPTANCE` / `RESERVED DECISIONS` / `SCOPE OUT`
+> / `TRAIL`, followed by `## Milestone (burndown)` and `## Closure` in the same file.
+> Use the template and generators below. Historical packets stay unchanged in
+> `.ai/dispatch/`.
 
 | File | Use it to… |
 |------|-----------|
 | [`level_rubric.md`](level_rubric.md) | pick the level (do this first) |
-| [`packet_template.xml`](packet_template.xml) | ⚠️ stale — see drift note above; historical XML packet shape, not current practice |
-| [`milestone_template.md`](milestone_template.md) | ⚠️ stale field shape — see drift note above; current practice: a `## Milestone` checkbox burndown folded into the dispatch doc |
-| [`generators/draft_packet.md`](generators/draft_packet.md) | ⚠️ stale — see drift note above |
-| [`generators/adversarial_review.md`](generators/adversarial_review.md) | REVIEW: packet → F-tagged findings (≤2 rounds) — the F-tag convention is still followed; the XML-packet framing is stale |
-| [`generators/closure_summary.md`](generators/closure_summary.md) | CLOSE: what changed, F-tag outcomes, doc updates — still broadly accurate |
-| [`dispatch_pipeline.md`](dispatch_pipeline.md) | the end-to-end runbook (start here to run a task) — stage doctrine + ONE-FILE RULE current; DRAFT/REVIEW artifact pointers stale |
+| [`packet_template.md`](packet_template.md) | current free-prose dispatch-packet shape, grounded in current packets |
+| [`milestone_template.md`](milestone_template.md) | current inline `## Milestone (burndown)` checkbox shape |
+| [`generators/draft_packet.md`](generators/draft_packet.md) | DRAFT: intent + level + curated context → free-prose packet |
+| [`generators/adversarial_review.md`](generators/adversarial_review.md) | REVIEW: packet → F-tagged P0/P1 findings (≤2 rounds) |
+| [`generators/closure_summary.md`](generators/closure_summary.md) | CLOSE: what changed, F-tag outcomes, evidence, and tracker updates |
+| [`dispatch_pipeline.md`](dispatch_pipeline.md) | the end-to-end runbook (start here to run a task) — current stage doctrine + ONE-FILE RULE |
 | [`loop_config_map.md`](loop_config_map.md) | the loop's **control surface**: node table (driver/programmed-by/dials per stage), the "temperature" dials, Manager-vs-Executor behavior + Manager spec, and a failure→node→dial localization table (read this to debug a bad loop) |
 
 ## Cost guard (always)
