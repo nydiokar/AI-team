@@ -1,3 +1,14 @@
+```yaml
+job_id: DROP_MANAGER_TELEMETRY_COCKPIT
+created_at: "2026-07-22T15:00:39+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/DROP_MANAGER_TELEMETRY_COCKPIT.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:13.613034+00:00"
+```
+
 # DROP — Manager Telemetry & Work Cockpit
 
 **Date:** 2026-07-22 · **Branch:** `feat/manager-telemetry-cockpit`

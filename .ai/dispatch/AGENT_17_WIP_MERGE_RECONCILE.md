@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_17_WIP_MERGE_RECONCILE
+created_at: "2026-07-05T11:11:43+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_17_WIP_MERGE_RECONCILE.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:03.585752+00:00"
+```
+
 # A17 — Reconcile the `d1556ad` WIP-snapshot merge on `main`
 
 > ⚠️ **TEST COST GUARD.** No paid Claude/Codex CLI in tests. Do **not** run the full

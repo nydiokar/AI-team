@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_29_WORK_SUBSTRATE_HARDENING
+created_at: "2026-07-08T14:59:26+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_29_WORK_SUBSTRATE_HARDENING.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:06.552362+00:00"
+```
+
 # A29 — Work substrate hardening: truth, stale/conflict states, and milestone closure
 
 **Dispatch created:** 2026-07-08

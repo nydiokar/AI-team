@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_24_DECOMPOSER_GENERATOR
+created_at: "2026-07-07T13:37:34+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: blocked              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: []                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:20:18.751160+00:00"
+```
+
 # AGENT_24 — Decomposer generator: salvage MAX's one real pattern as a by-hand DRAFT front-half
 
 **Dispatch created:** 2026-07-07

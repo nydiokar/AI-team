@@ -1,0 +1,16 @@
+# Project-specific files in .ai/dispatch/ that are NOT dispatch jobs.
+# One filename per line. The portable dispatch_state.py already excludes the
+# universal ones (DISPATCH_LOG.md, CLAUDE.md, AGENTS.md, README.md, the two
+# generated views). Put THIS project's quirks below.
+#
+# --- REVIEW verdict docs (build-review prose paired to a job, not dispatched themselves) ---
+AGENT_8_OPERATOR_SIGNAL_REVIEW.md
+AGENT_8_T1_BUILD_REVIEW.md
+AGENT_9_BUILD_REVIEW.md
+AGENT_9_COMPACT_CONTEXT_REVIEW.md
+AGENT_9_TASK_HARNESS_BUILD_REVIEW.md
+AGENT_9_TASK_HARNESS_REVIEW.md
+AGENT_10_M3_CLAUDE_TELEMETRY_REVIEW.md
+#
+# --- handoff addendum (a cold-boot continue doc, not a dispatched job) ---
+SUBSTRATE_BUILD_HANDOFF.md

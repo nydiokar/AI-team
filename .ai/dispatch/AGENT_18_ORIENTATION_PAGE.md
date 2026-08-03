@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_18_ORIENTATION_PAGE
+created_at: "2026-07-05T14:22:06+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: docs/OVERVIEW.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:24:45.189368+00:00"
+```
+
 # A18 — Orientation / Overview Page
 
 > ONE living file (DOC_MAP one-file rule): packet → `## Milestone` → `## Closure`.

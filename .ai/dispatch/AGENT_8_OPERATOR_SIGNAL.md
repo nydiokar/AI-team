@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_8_OPERATOR_SIGNAL
+created_at: "2026-07-03T02:31:15+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_8_OPERATOR_SIGNAL.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:12.020176+00:00"
+```
+
 # AGENT 8 — Operator Signal Track
 
 **Dispatch created:** 2026-07-03

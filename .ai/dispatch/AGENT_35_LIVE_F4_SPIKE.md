@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_35_LIVE_F4_SPIKE
+created_at: "2026-07-10T01:28:21+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: dead              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: []                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:20:20.027849+00:00"
+```
+
 # A35 — M3 Phase 3.0 acceptance: the live F4 spike (OPERATOR-GATED runbook)
 
 **Level:** 3 (live/paid) · **Branch:** `feat/m3-phase30-mcp-manager` · **Date:** 2026-07-10

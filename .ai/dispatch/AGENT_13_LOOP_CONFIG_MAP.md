@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_13_LOOP_CONFIG_MAP
+created_at: "2026-07-03T22:04:31+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: docs/harness/loop_config_map.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:24:45.324655+00:00"
+```
+
 # AGENT_13 — Loop Configuration Map: make the harness's control surface legible before we drive real work
 
 **Dispatch created:** 2026-07-03
