@@ -1,18 +1,18 @@
 ```yaml
 job_id: AGENT_65_COST_MONITORING_VISIBILITY
 created_at: "2026-08-03T16:59:09.868948+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: done              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: docs/cost_monitoring_audit.md                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T22:37:16.549337+00:00"
+results_ref: 8792f9f             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["docs/cost_monitoring_audit.md", "tests/test_cost_alerts.py", "web/src/components/cost/CostAlertBanner.tsx"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T23:22:31.116751+00:00"
 ```
 
 # DISPATCH — A65 · Cost monitoring & visibility: cost explorer + dashboards + budgets/alerts
 
 **Level:** 3 (code) · **Type:** backend read-model + Web UI + flag-gated alerting
-**Authored:** 2026-08-03 · **Status of this packet:** ready (authored, adversarially reviewed, not executed)
+**Authored:** 2026-08-03 · **Status of this packet:** active — P0–P2 and the initial P3 UI/API landed; final review reopened P3 for the missing browser-push delivery seam
 **Depends on:** — (independent; must NOT cross into the blocked A61/A63 quota-coordinator scope — see R2)
 
 > **Read this first — why this packet exists.** On 2026-08-03 the operator asked, by hand, "for the
@@ -224,7 +224,7 @@ needs it.
    optional `repo_path`) so the UI and API agree; the explorer dimension list gains `project`.
    These are the operator's explicit UI requirements — Phase 2 acceptance includes them.
 
-## Closure (2026-08-04)
+## Closure (2026-08-04 — provisional, reopened by final review)
 
 **What changed:** P3 added authenticated `GET /api/cost/alerts`, three positive-USD environment
 thresholds, the Cost-tab alert banner, and a registry-backed default-OFF enforcement seam that only
@@ -238,3 +238,12 @@ the quota coordinator.
 bounded existing cost read model. It is read-only and polled by the Cost tab. No request timeout or
 separate alert-delivery queue is introduced; Web Push remains limited to terminal task outcomes, so
 budget alerts deliberately surface in the authenticated UI instead of creating an unbounded push path.
+
+## Reopen — final adversarial review (2026-08-04)
+
+**F1 (P1 — stated delivery contract unmet):** Phase 3 requires alert delivery through the existing
+`/api/push/subscribe` infrastructure. The shipped implementation only polls `/api/cost/alerts` from
+the Cost tab; the closure’s “deliberately” wording documents the deviation rather than satisfying
+the packet. **Resolution:** wire a bounded, best-effort budget-alert notification at the existing
+terminal-outcome notification seam, reusing `PushService` fanout/timeout/concurrency and adding a
+targeted regression test. The alert remains billable-USD-only and enforcement remains OFF.

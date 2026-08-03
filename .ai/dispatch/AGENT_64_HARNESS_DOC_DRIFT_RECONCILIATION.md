@@ -4,15 +4,15 @@ created_at: "2026-08-01T13:48:33+03:00"        # CANONICAL — set once at dispa
 status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T22:37:16.414210+00:00"
+results_ref: 757387f             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["docs/harness/packet_template.md", "docs/harness/dispatch_pipeline.md"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T23:22:30.709809+00:00"
 ```
 
 # DISPATCH — A64 · Harness docs: reconcile the abandoned XML-packet ritual against actual practice
 
 **Level:** 1 (docs-only, no code) · **Type:** docs
-**Authored:** 2026-08-01 · **Status of this packet:** ready (authored, not executed)
+**Authored:** 2026-08-01 · **Status of this packet:** done — merged to `main` in `757387f`
 **Depends on:** — (this session already did the zero-ambiguity part: deleted
 `docs/harness/manager_invocation.md` and `docs/harness/promotion_ladder.md`, both self-marked
 retired with zero code references; fixed the blockquote-leak-into-Manager/Worker-system-prompt bug;
