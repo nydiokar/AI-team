@@ -58,6 +58,9 @@ class _FakeSession:
         self.status = status
         self.backend = backend
         self.repo_path = repo
+        self.machine_id = "__local__"
+        self.current_case_id = None
+        self.case_role = None
 
 
 class _FakeStore:
@@ -66,6 +69,36 @@ class _FakeStore:
 
     def get(self, sid):
         return self._s.get(sid)
+
+    def add(self, s):
+        self._s[s.session_id] = s
+
+    def save(self, s):
+        self._s[s.session_id] = s
+
+
+class _CreateResult:
+    def __init__(self, session):
+        self.ok = session is not None
+        self.session = session
+        self.reason = None if session is not None else "create_session_failed"
+
+
+class _FakeSessionService:
+    """[A55] Minimal spawn stub so the dead-session branch's respawn path is
+    exercisable from these continuation tests."""
+
+    def __init__(self, store):
+        self.store = store
+        self.created = []
+
+    def create_session(self, *, backend, repo_path, node_id, origin, bind_chat):
+        sid = f"respawned-{len(self.created) + 1}"
+        sess = _FakeSession(sid, status=SessionStatus.AWAITING_INPUT,
+                            backend=backend, repo=repo_path)
+        self.store.add(sess)
+        self.created.append(sid)
+        return _CreateResult(sess)
 
 
 class _FakeNotifier:
@@ -83,15 +116,35 @@ class _FakeOrch:
 
     def __init__(self, store):
         self.session_store = store
+        self.session_service = _FakeSessionService(store)
         self.notifier = _FakeNotifier()
         self.active_tasks = {}
         self.running = True
         self.deliveries = []
         self.emitted = []
         self.finalized = []
+        self.affiliations = []
 
     def _emit_event(self, name, _a, payload):
         self.emitted.append((name, payload))
+
+    def _manager_role_enabled(self):
+        return TaskOrchestrator._manager_role_enabled(self)
+
+    def _set_session_case_affiliation(self, sid, case_id, role=None):
+        sess = self.session_store.get(sid)
+        if sess is not None:
+            sess.current_case_id = case_id
+            sess.case_role = role
+        self.affiliations.append((sid, case_id, role))
+
+    async def _respawn_manager_for_case(self, db, case_id, generation, dead_sid):
+        return await TaskOrchestrator._respawn_manager_for_case(
+            self, db, case_id, generation, dead_sid,
+        )
+
+    def _render_respawn_turn(self, case_id, objective):
+        return TaskOrchestrator._render_respawn_turn(self, case_id, objective)
 
     def _render_wake_turn(self, case_id, presented):
         return TaskOrchestrator._render_wake_turn(self, case_id, presented)
@@ -253,11 +306,12 @@ def test_idle_never_run_session_is_not_woken(tmp_path, monkeypatch):
     assert db.list_continuation_rows(fid) == []
 
 
-def test_satisfied_case_with_closed_manager_escalates_once(tmp_path, monkeypatch):
-    # Live-observed strand (2026-08-01): a satisfied Case whose registered Manager
-    # session is CLOSED cannot self-continue — the wake would target a dead session.
-    # It must ESCALATE (once), not silently return 0.
+def test_satisfied_case_with_closed_manager_escalates_when_role_off(tmp_path, monkeypatch):
+    # With MANAGER_ROLE OFF, respawn is not viable (a respawned Manager would be a
+    # naked, tool-less session). The dead-session branch then falls back to the
+    # pre-A55 visible-strand ESCALATION (once, idempotent) instead of respawning.
     _on(monkeypatch)
+    monkeypatch.delenv("MANAGER_ROLE_ENABLED", raising=False)
     db = _db(tmp_path)
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     fid = _open_case(db, round_cap=2)
@@ -278,9 +332,30 @@ def test_satisfied_case_with_closed_manager_escalates_once(tmp_path, monkeypatch
     assert len(orch.notifier.errors) == 1
 
 
-def test_missing_manager_session_escalates(tmp_path, monkeypatch):
-    # Manager link resolves but the session row is GONE — also a headless strand.
+def test_satisfied_case_with_closed_manager_respawns_when_role_on(tmp_path, monkeypatch):
+    # [A55] With MANAGER_ROLE ON, a satisfied Case whose Manager session is CLOSED
+    # is CRASH-RESPAWNED on the SAME Case — not left as a strand.
     _on(monkeypatch)
+    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=2)
+    db.arm_wait_group(fid, "g1", "ANY", ["t1"])
+    _finished(db, fid, "t1")
+
+    session = _FakeSession("mgr-sess", status=SessionStatus.CLOSED)
+    orch = _FakeOrch(_FakeStore(session))
+    assert _continue(orch, db, fid) == 0
+    assert len(orch.session_service.created) == 1  # exactly one respawn
+    assert len(_events(db, fid, "case.manager_respawned")) == 1
+    assert _events(db, fid, "case.manager_unavailable") == []
+
+
+def test_missing_manager_session_respawns_when_role_on(tmp_path, monkeypatch):
+    # [A55] Manager link resolves but the session row is GONE — respawn on the SAME
+    # Case (with MANAGER_ROLE ON).
+    _on(monkeypatch)
+    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     db = _db(tmp_path)
     db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
     fid = _open_case(db, round_cap=2)
@@ -289,7 +364,9 @@ def test_missing_manager_session_escalates(tmp_path, monkeypatch):
 
     orch = _FakeOrch(_FakeStore())  # empty store → session_store.get() returns None
     assert _continue(orch, db, fid) == 0
-    assert len(_events(db, fid, "case.manager_unavailable")) == 1
+    assert len(orch.session_service.created) == 1
+    assert len(_events(db, fid, "case.manager_respawned")) == 1
+    assert _events(db, fid, "case.manager_unavailable") == []
 
 
 def test_busy_manager_is_not_woken(tmp_path, monkeypatch):

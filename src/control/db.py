@@ -414,6 +414,12 @@ def case_continuation_enabled() -> bool:
 # claim it. ``action`` is the Wake-Dispatcher's discriminator for the row.
 CONTINUATION_MACHINE_SENTINEL = "__manager_continuation__"
 CONTINUATION_ACTION = "manager_continuation"
+# [A55 / M3.4 Job 3] The crash-respawn single-flight action. A respawn row rides
+# the SAME reserved ``CONTINUATION_MACHINE_SENTINEL`` (so it stays invisible to
+# every worker/embedded claim scan) and the SAME ``claim_task``/reaper mechanism
+# as the continuation lease — NO second lock model. Only the ``action`` and the
+# id namespace differ so a respawn token never collides with a ``cont:`` wake row.
+RESPAWN_ACTION = "manager_respawn"
 # Default round cap when a Case's completion_criteria does not carry an explicit
 # ``round_cap`` — a backstop against a runaway continuation loop, not a tuning knob.
 DEFAULT_CONTINUATION_ROUND_CAP = 50
@@ -428,6 +434,20 @@ def continuation_task_id(case_id: str, generation: int) -> str:
     elects a single winner. The generation is parsed back off the id suffix.
     """
     return f"cont:{case_id}:{int(generation)}"
+
+
+def respawn_task_id(case_id: str, generation: int) -> str:
+    """[A55 / M3.4 Job 3] Deterministic id for a Case's generation-N crash-respawn
+    single-flight token.
+
+    Deterministic ⇒ two racing Wake-Dispatcher ticks that both find the SAME
+    dead-session Case at the SAME satisfaction generation compute the SAME id, so
+    the ``UNIQUE constraint`` on ``mesh_tasks.id`` collapses them to one row and
+    the atomic ``claim_task`` elects a single respawn winner. Distinct namespace
+    from :func:`continuation_task_id` so a respawn token never collides with the
+    ``cont:`` wake-delivery row for the same (case, generation).
+    """
+    return f"respawn:{case_id}:{int(generation)}"
 
 
 def flow_drive_enabled() -> bool:
