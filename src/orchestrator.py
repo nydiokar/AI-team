@@ -1,8 +1,65 @@
 """
-Main gateway orchestrator.
+orchestrator.py — TaskOrchestrator
+====================================
+Central gateway coordinator: receives instructions from every inbound surface,
+routes them to the right backend (local or remote mesh node), manages session
+lifecycle, and drives the M3 Manager/Worker automation loop.
 
-The current intended product path is session-first:
-Telegram -> gateway session -> Claude Code / Codex native resume.
+ARCHITECTURE — data flow
+------------------------
+  Inbound surfaces         Entry points              Execution
+  ─────────────────────    ──────────────────────    ──────────────────────────
+  Telegram / Web UI   ──► submit_instruction()  ──► _enqueue_task()
+  .task.md file drop  ──► _handle_new_task_file()    │
+  MCP manager tool    ──► invoke_manager()            ▼
+                                                  _task_worker()  (pool)
+                                                      │
+                                              ┌───────┴────────┐
+                                              ▼                ▼
+                                  _dispatch_or_run_local()  _process_task_remote()
+                                  (local backend)           (mesh node)
+                                              │
+                                              ▼
+                                      _write_artifacts()
+                                      _emit_event() / _emit_turn_telemetry()
+
+  Autonomous (M3.4)   ──► _wake_dispatcher_loop() ──► _continue_case_once()
+                                                   ──► _finalize_continuation()
+
+SECTIONS (in source order)
+--------------------------
+  1.  Result parsing & text extraction       (static helpers)
+  2.  Backend resolution                     (_resolve_task_backend)
+  3.  Startup recovery                       (restart scan, stale-session heal)
+  4.  Wake dispatcher / case continuation    (M3.4, flag CASE_CONTINUATION_ENABLED)
+  5.  Stale-busy reconciler + reattach       (M3 mesh, flag MESH_ENABLED)
+  6.  Job completion poller                  (T3 watched-jobs, flag MESH_ENABLED)
+  7.  Lifecycle — start / stop               (embedded servers, worker pool)
+  8.  Task creation & enqueue                (_make_task, _enqueue_task, flow-run record)
+  9.  Case management                        (open/close/arm/wait — M3/M3.4)
+  10. Manager invocation                     (invoke_manager — M3.1)
+  11. Flow tracking                          (flow_runs / flow_events / flow_links — M1/M2)
+  12. Task submission & context injection    (submit_instruction ★, compact/restart ctx)
+  13. Worker loop                            (_task_worker coroutine pool)
+  14. Task execution — local path            (process_task ★)
+  15. Task execution — remote path           (_process_task_remote)
+  16. Artifact write                         (_write_artifacts)
+  17. Error classification & retry           (_classify_error, _get_retry_strategy)
+  18. Events & telemetry                     (_emit_event, _emit_turn_telemetry)
+  19. Status / session recording             (get_status, _write_session_summary)
+  20. Mesh routing                           (_run_backend_local, _dispatch_to_node)
+  21. Mesh DB shadow-write helpers           (_mesh_enqueue_task, reconcile)
+  22. Proactive turns (reach-back)           (_handle_proactive_turn, _notify_proactive_turn)
+
+FEATURE FLAGS (runtime-gated, all default OFF unless noted)
+------------------------------------------------------------
+  HARNESS_FLOW_DRIVE          — write flow_runs stage transitions (M1/M2, shadow)
+  MANAGER_ROLE_ENABLED        — enable M3 Manager role boot via /api/manager
+  REVIEW_EMITTER_ENABLED      — emit review.* events on record_review()
+  CASE_CONTINUATION_ENABLED   — wake-dispatcher autonomous continuation (M3.4)
+  DURABLE_RELAY_ENABLED       — persist worker.wait_pending markers for crash recovery
+  HARNESS_LEVEL3_GUARD        — admission gate for level-3 harness tasks
+  QUOTA_COORDINATOR_ENABLED   — observe-only quota/session-window coordinator
 """
 import asyncio
 import json
@@ -131,19 +188,36 @@ class HarnessAdmissionBlocked(Exception):
 
 
 class TaskOrchestrator(ITaskOrchestrator):
-    """Main gateway coordinator.
+    """Central gateway coordinator (see module docstring for the full nav map).
 
-    Responsibilities:
-    - Watch `tasks/` for new `.task.md` files and parse them into `Task` objects
-    - Queue and execute tasks concurrently with bounded worker pool
-    - Route session tasks into backend-native Claude/Codex resume flows
-    - Keep LLAMA limited to optional helper duties such as summarization
-    - Persist artifacts (`results/*.json`, `summaries/*.txt`) and maintain a lightweight index
-    - Emit structured events to `logs/events.ndjson` for observability
+    Responsibilities (current, post-M3):
+    - Receive instructions from Telegram, Web UI, .task.md files, and the MCP
+      manager tool surface; enqueue them through a single admission gate.
+    - Route session tasks to the right backend (local pool or mesh-remote node)
+      while enforcing hard session-affinity (pinned sessions NEVER relocate).
+    - Drive the M3 Manager/Worker automation loop: role-boot a Manager session,
+      dispatch workers, gate on review.* verdicts, close on criteria met.
+    - Run the M3.4 Wake-Dispatcher: autonomous case continuation without operator
+      pokes (CASE_CONTINUATION_ENABLED flag; default OFF).
+    - Persist artifacts (mesh_tasks DB canonical; results/*.json fallback),
+      maintain artifact index, emit structured events and LLM-turn telemetry.
+    - Own the embedded task server (mesh) and embedded control API (Web UI).
 
-    Threading/async model:
-    - File system events come from watchdog thread → marshalled into asyncio loop
-    - Workers are asyncio Tasks consuming from an in-memory queue
+    Threading / async model:
+    - File-system events arrive from a watchdog thread → marshalled onto the
+      asyncio event loop via asyncio.Queue.
+    - Worker coroutines (_task_worker) run as asyncio.Tasks against the loop.
+    - Background loops (wake-dispatcher, stale-busy reconciler, job poller) are
+      also asyncio.Tasks on the same loop — NEVER spawn threads for these.
+    - The mesh task server runs embedded on this same event loop (MESH_ENABLED).
+
+    Key seams / do-not-cross rules:
+    - session.machine_id is a HARD correctness boundary: a pinned session's turn
+      runs on that machine or waits — never silently relocates.
+    - DB (mesh.db) is canonical. state/sessions/<id>.json is the fallback/audit
+      trail — it is NEVER deleted and NEVER the sole source of truth.
+    - All new feature behavior is flag-gated (default OFF ⇒ byte-identical legacy).
+      See FEATURE FLAGS in the module docstring.
     """
     
     def __init__(self):
@@ -196,6 +270,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._inflight_paths: set[str] = set()
         
         logger.info("TaskOrchestrator initialized")
+
+        # ------------------------------------------------------------------
+        # Remaining init: queue state, reconcile handles, background-task
+        # handles, and optional interfaces. All flag-gated subsystems are
+        # built ONLY when their flag is ON so a disabled path has zero
+        # side-effects (no DB file, no background coroutine, no import cost).
+        # ------------------------------------------------------------------
         self.validation_engine = ValidationEngine()
         # Ensure logs directory exists for event emission
         try:
@@ -255,40 +336,56 @@ class TaskOrchestrator(ITaskOrchestrator):
         # notifications (Telegram today, Web UI tomorrow).  Passes self
         # so the notifer reads ``self.telegram_interface`` dynamically.
         self.notifier = NotificationService(orchestrator=self)
-        # Quota window coordinator — observe-only, disabled by default. Build it ONLY
-        # when the flag is on: its store eagerly creates state/quota_windows.db in its
-        # constructor, so gating construction here keeps the disabled path a genuine
-        # zero-side-effect no-op (no DB file, no background task) — byte-identical.
+        self._build_quota_coordinator()
+
+    def _build_quota_coordinator(self) -> None:
+        """Initialize the quota-window coordinator (QUOTA_COORDINATOR_ENABLED flag).
+
+        Built ONLY when the flag is ON — the coordinator's store eagerly creates
+        state/quota_windows.db in its constructor, so gating construction here keeps
+        the disabled path a genuine zero-side-effect no-op (no DB file, no background
+        task, no import cost) — byte-identical when off.
+
+        Sets self.quota_coordinator and self.quota_digest_subscriber.
+        """
         self.quota_coordinator = None
+        self.quota_digest_subscriber = None
         try:
             from src.control.db import runtime_flag_enabled
             quota_enabled = runtime_flag_enabled("QUOTA_COORDINATOR_ENABLED")
         except Exception:
             quota_enabled = bool(getattr(getattr(config, "quota", None), "enabled", False))
-        if quota_enabled:
+        if not quota_enabled:
+            return
+        try:
+            from src.services.quota_window_coordinator import build_quota_coordinator_from_config
+            event_handlers = []
             try:
-                from src.services.quota_window_coordinator import build_quota_coordinator_from_config
-                event_handlers = []
-                try:
-                    from src.control.db import runtime_flag_enabled as _flag_enabled
-                    digest_enabled = _flag_enabled("QUOTA_DIGEST_TELEGRAM_ENABLED")
-                except Exception:
-                    digest_enabled = bool(getattr(getattr(config, "quota", None), "digest_telegram_enabled", False))
-                if digest_enabled:
-                    from src.services.quota_digest import QuotaTelegramDigestSubscriber
-                    digest = QuotaTelegramDigestSubscriber(
-                        notifier=self.notifier,
-                        chat_id=config.telegram.notification_chat_id,
-                        interval_sec=getattr(config.quota, "digest_interval_sec", 3600),
-                    )
-                    self.quota_digest_subscriber = digest
-                    event_handlers.append(digest.handle_event)
-                else:
-                    self.quota_digest_subscriber = None
-                self.quota_coordinator = build_quota_coordinator_from_config(enabled=True, event_handlers=event_handlers)
-            except Exception as e:
-                logger.warning(f"Failed to initialize quota coordinator: {e}")
-                self.quota_coordinator = None
+                from src.control.db import runtime_flag_enabled as _flag_enabled
+                digest_enabled = _flag_enabled("QUOTA_DIGEST_TELEGRAM_ENABLED")
+            except Exception:
+                digest_enabled = bool(getattr(getattr(config, "quota", None), "digest_telegram_enabled", False))
+            if digest_enabled:
+                from src.services.quota_digest import QuotaTelegramDigestSubscriber
+                digest = QuotaTelegramDigestSubscriber(
+                    notifier=self.notifier,
+                    chat_id=config.telegram.notification_chat_id,
+                    interval_sec=getattr(config.quota, "digest_interval_sec", 3600),
+                )
+                self.quota_digest_subscriber = digest
+                event_handlers.append(digest.handle_event)
+            self.quota_coordinator = build_quota_coordinator_from_config(
+                enabled=True, event_handlers=event_handlers
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize quota coordinator: {e}")
+            self.quota_coordinator = None
+
+    # ===========================================================================
+    # RESULT PARSING & TEXT EXTRACTION
+    # Static helpers that extract or format user-visible text from TaskResult /
+    # raw backend payloads. No I/O, no side-effects — safe to call anywhere.
+    # ===========================================================================
 
     @staticmethod
     def _extract_text_from_payload(payload: Any) -> str:
@@ -465,6 +562,12 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         return "Claude failed"
 
+    # ===========================================================================
+    # BACKEND RESOLUTION
+    # Thin helpers to map a task/session to the backend name string used by the
+    # rest of the routing layer.
+    # ===========================================================================
+
     def _resolve_task_backend(self, task: Task) -> str:
         """Resolve the backend associated with a task before it finishes."""
         session_id = (task.metadata or {}).get("session_id", "").strip()
@@ -479,6 +582,16 @@ class TaskOrchestrator(ITaskOrchestrator):
     def _backend_event_name(backend_name: str, phase: str) -> str:
         backend = (backend_name or "claude").strip().lower() or "claude"
         return f"{backend}_{phase}"
+
+    # ===========================================================================
+    # STARTUP RECOVERY
+    # Called once during start() to heal sessions and tasks that were in-flight
+    # when the gateway last exited. Two passes:
+    #   1. Mark SDK-driver sessions on THIS host as driver_lost (they cannot be
+    #      resumed — the driver process is gone).
+    #   2. Scan BUSY sessions that have a completed mesh_tasks row and deliver
+    #      the result as if the task just finished (_recover_completed_session).
+    # ===========================================================================
 
     def _mark_local_claude_driver_sessions_lost_after_restart(self, host: str) -> int:
         """A gateway restart orphaned live SDK clients owned by this process."""
@@ -689,16 +802,28 @@ class TaskOrchestrator(ITaskOrchestrator):
             prefix="_(recovered after a gateway restart)_\n\n",
         )
 
-    # ------------------------------------------------------------------
-    # [M3.4] Wake-Dispatcher — autonomous Case continuation (Job 1).
-    # A live+idle Manager session that has armed a wait-group is re-entered
-    # automatically when the group is satisfied: schedule ONE deterministic
-    # mesh_tasks continuation row, atomically claim it (single winner), deliver
-    # ONE coalesced proactive turn, and — on turn return — HARNESS-record the
-    # consumed watermark. Bounded by a round cap; on exhaustion escalate. This is
-    # the re-entry engine the SDK cannot provide (no durable server-side session).
-    # Flag-gated by CASE_CONTINUATION_ENABLED (default OFF ⇒ this loop never runs).
-    # ------------------------------------------------------------------
+    # ===========================================================================
+    # WAKE DISPATCHER — AUTONOMOUS CASE CONTINUATION  (M3.4)
+    # Flag: CASE_CONTINUATION_ENABLED (default OFF ⇒ loop never starts).
+    #
+    # Allows a Manager to arm a wait-group over a dispatch set; when all members
+    # finish the harness schedules ONE deterministic continuation row in
+    # mesh_tasks (sentinel machine_id __manager_continuation__), atomically
+    # claims it, and delivers ONE coalesced proactive review turn to the live
+    # Manager session.  Bounded by round_cap; on exhaustion → flow.interrupted.
+    #
+    # Entry: _start_wake_dispatcher() (called from start())
+    # Tick:  _wake_dispatcher_tick_once() → _continue_case_once() per open case
+    # Land:  _finalize_continuation() → _notify_proactive_turn()
+    # Kill:  interrupt_case() → sets case status=blocked, skipped next tick
+    #
+    # FUTURE EXTRACTION → CaseContinuationEngine (own file/class)
+    #   Prerequisite: A54 (durable reconstruction) + A55 (crash-respawn) landed
+    #   and proven live.  Do NOT extract mid-M3.4 — A54/A55 still touch these
+    #   methods directly.  When stable, inject via:
+    #     self._db_factory, self.session_store, self.notifier,
+    #     self._notify_proactive_turn (callback), self._finalize_continuation.
+    # ===========================================================================
 
     _CONTINUATION_TERMINAL_STATUSES = ("completed", "failed", "failed_node_offline")
 
@@ -1086,6 +1211,20 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         return {"ok": True, "cancelled_tasks": cancelled, "already": already, "status": "blocked"}
 
+    # ===========================================================================
+    # STALE-BUSY RECONCILER & REMOTE TASK REATTACH  (M3 mesh)
+    # Flag: MESH_ENABLED (without it the loop never starts).
+    #
+    # Periodic scan for sessions stuck in BUSY state whose remote mesh_tasks row
+    # is actually terminal.  On hit: _recover_completed_session() delivers the
+    # result and transitions the session.  _reattach_remote_task() handles the
+    # case where the result row exists but was never surfaced to the operator.
+    #
+    # FUTURE EXTRACTION → MeshReconciler (low priority, small surface ~3 methods).
+    #   Only worth it if the reconciler grows (e.g. per-backend policies, metrics).
+    #   Defer until post-M4 when the mesh protocol is stable.
+    # ===========================================================================
+
     def _start_stale_busy_reconciler(self) -> None:
         """Start the periodic M3 reconciliation loop when mesh routing is active."""
         interval = int(getattr(config.mesh, "session_reconcile_interval_sec", 60) or 0)
@@ -1279,6 +1418,19 @@ class TaskOrchestrator(ITaskOrchestrator):
             task_id=task_id,
             chat_id=session.telegram_chat_id,
         )
+
+    # ===========================================================================
+    # JOB COMPLETION POLLER  (T3 watched-jobs)
+    # Flag: MESH_ENABLED (poller only runs when mesh is on).
+    #
+    # Background coroutine that polls for watched jobs reaching terminal state
+    # and fans out Telegram notifications.  Deduplicates via
+    # _processed_terminal_jobs so each job notifies exactly once per run.
+    #
+    # FUTURE EXTRACTION → JobCompletionPoller (very low priority, ~11 methods).
+    #   Self-contained enough but too small to justify now.  Revisit if T3 grows
+    #   (e.g. Web Push per-job, per-node polling policies, or a jobs feed API).
+    # ===========================================================================
 
     async def _job_completion_poller(self) -> None:
         """Poll for terminal watched jobs and push Telegram notifications.
@@ -1686,6 +1838,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         haystack = "\n".join(str(item) for item in texts).lower()
         return "no conversation found with session id" in haystack
     
+    # ===========================================================================
+    # LIFECYCLE — START / STOP
+    # start() boots the worker pool, embedded servers, file watcher, and all
+    # background loops (stale-busy reconciler, job poller, wake dispatcher).
+    # stop() drains the queue, cancels workers, and shuts down servers cleanly.
+    # reload_worker_pool() adjusts the pool size at runtime without a restart.
+    # ===========================================================================
+
     async def start(self):
         """Start all system components.
 
@@ -2080,6 +2240,15 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception:
             return False
 
+    # ===========================================================================
+    # TASK CREATION & ENQUEUE
+    # _make_task()    — build an in-memory Task object (does NOT enqueue).
+    # _enqueue_task() — admission gate + queue push; raises HarnessAdmissionBlocked
+    #                   if the level-3 guard is ON and the task is unapproved.
+    #                   Also records the flow_run row (M1) and stamps dispatch
+    #                   lineage (M2) when HARNESS_FLOW_DRIVE is ON.
+    # ===========================================================================
+
     def _make_task(
         self,
         description: str,
@@ -2395,6 +2564,24 @@ class TaskOrchestrator(ITaskOrchestrator):
             task.metadata[key] = value
         except Exception:
             pass
+
+    # ===========================================================================
+    # CASE MANAGEMENT  (M3 / M3.4)
+    # A Case is the durable unit of Manager-supervised work.  One Manager session
+    # owns one Case; workers JOIN the Case as task or session links.
+    #
+    # open_case()              — create a Case row + affiliate the Manager session
+    # close_case()             — guard-checked close (open children, unresolved
+    #                            rework, completion_criteria all checked first)
+    # record_review()          — emit review.accepted / review.rework_requested
+    # record_worker_wait()     — append worker.wait_pending marker
+    # arm_wait_group()         — M3.4 register a wait-group on the Case
+    # reconcile_worker_waits() — resolve outstanding waits against task.finished
+    # _close_worker_session_on_case_close() — best-effort warm-worker cleanup
+    #
+    # Affiliation helpers (_set/_clear/_persist/_resolve) keep session↔case
+    # membership in sync across DB and in-memory state.
+    # ===========================================================================
 
     def _set_session_case_affiliation(
         self,
@@ -2743,6 +2930,17 @@ class TaskOrchestrator(ITaskOrchestrator):
                 session_id, e,
             )
 
+    # ---------------------------------------------------------------------------
+    # MANAGER INVOCATION  (M3.1)
+    # Flag: MANAGER_ROLE_ENABLED (default OFF).
+    #
+    # invoke_manager() is the single entry point for /api/manager.  It opens a
+    # Case, creates or reuses a session, applies the Manager role boot
+    # (system-prompt + scoped MCP tools), and submits the first-turn objective
+    # via submit_instruction().  Everything after that is driven by the Manager
+    # itself (dispatch_worker → wait/arm → review → close_case).
+    # ---------------------------------------------------------------------------
+
     def _manager_role_enabled(self) -> bool:
         """[A38] Master gate for the Phase 3.1 Manager-role invocation path.
 
@@ -2865,6 +3063,22 @@ class TaskOrchestrator(ITaskOrchestrator):
             "case_id": case_id,
             "task_id": task_id,
         }
+
+    # ===========================================================================
+    # FLOW TRACKING  (M1 flow_runs / M2 flow_events + flow_links)
+    # Flag: HARNESS_FLOW_DRIVE (default OFF ⇒ shadow-only, nothing reads stage).
+    #
+    # These are WRITE-ONLY observability records.  No execution path reads
+    # current_stage or flow_events to decide what runs — they exist purely for
+    # the read model (/api/flows, /api/cases/{id}/timeline, the Web UI Work tab).
+    #
+    # _record_flow_stage()         — update flow_runs.current_stage (A19/M1)
+    # _record_flow_link()          — append to flow_links (M2 dispatch lineage)
+    # _record_flow_event()         — append to flow_events (M2 event ledger)
+    # _stamp_child_dispatch_lineage() — set parent_flow_run_id on child at dispatch
+    # _flow_stage_transition()     — convenience: stage + event in one call
+    # _flow_terminal_outcome()     — write terminal stage + emit terminal event
+    # ===========================================================================
 
     def _record_flow_stage(self, flow_run_id: Optional[str], stage: str) -> None:
         """Best-effort FlowRun stage-transition update (A19). Swallows failures.
@@ -3145,6 +3359,19 @@ class TaskOrchestrator(ITaskOrchestrator):
                 getattr(task, "id", "?"), e,
             )
 
+    # ===========================================================================
+    # TASK SUBMISSION & CONTEXT INJECTION                        ★ ENTRY POINT
+    # submit_instruction() is the canonical inbound gate called by Telegram,
+    # the Web UI control API, and invoke_manager().  It builds the Task, optionally
+    # injects compact prior-context or restart-recovery context, then calls
+    # _enqueue_task().
+    #
+    # Context injection (both opt-in, neither changes task logic):
+    #   _maybe_inject_compact_context()       — prepend `continues:` prior context
+    #   _maybe_inject_restart_recovery_context() — prepend SDK-driver restart ctx
+    # ===========================================================================
+
+    # ★ PRIMARY ENTRY POINT — called by Telegram, Web UI, invoke_manager()
     async def submit_instruction(
         self,
         description: str,
@@ -3668,6 +3895,13 @@ class TaskOrchestrator(ITaskOrchestrator):
             approved = approved.strip().lower() in ("1", "true", "yes", "on")
         return bool(approved)
 
+    # ===========================================================================
+    # WORKER LOOP
+    # Each worker coroutine pulls from task_queue, calls process_task(), persists
+    # artifacts, then loops.  The pool size is config.system.max_concurrent_tasks.
+    # Workers are cancelled during stop() after the queue drains.
+    # ===========================================================================
+
     async def _task_worker(self, worker_name: str):
         """Worker coroutine that processes tasks from the queue.
 
@@ -3967,6 +4201,15 @@ class TaskOrchestrator(ITaskOrchestrator):
         
         logger.info(f"Task worker {worker_name} stopped")
     
+    # ===========================================================================
+    # TASK EXECUTION — LOCAL PATH                                ★ ENTRY POINT
+    # process_task() is THE execution entry point.  It decides local vs remote:
+    #   Local  → _dispatch_or_run_local() → _run_backend_local()
+    #   Remote → _process_task_remote() (MESH_ENABLED + session.machine_id set)
+    # After execution: _write_artifacts(), _emit_event(), session state update.
+    # ===========================================================================
+
+    # ★ EXECUTION ENTRY POINT — called by _task_worker() and directly by tests
     async def process_task(self, task: Task) -> TaskResult:
         """Process a single task through the complete pipeline.
 
@@ -4516,6 +4759,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                 timestamp=now_iso()
             )
 
+    # ===========================================================================
+    # TASK EXECUTION — REMOTE PATH  (MESH_ENABLED + session.machine_id set)
+    # _process_task_remote() mirrors process_task()'s bookkeeping but dispatches
+    # to the remote node via _dispatch_to_node() and polls for completion.
+    # Session-affinity is the hard correctness invariant here: this method is
+    # only reached when session.machine_id names a node that is NOT this host.
+    # ===========================================================================
+
     async def _process_task_remote(
         self,
         task: "Task",
@@ -4877,6 +5128,14 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         return result
 
+    # ===========================================================================
+    # ARTIFACT WRITE & CONTENT RECONSTRUCTION
+    # _write_artifacts()          — persist TaskResult to mesh_tasks (canonical)
+    #                               and results/*.json (fallback/debug).
+    # _reconstruct_task_content() — rebuild the original prompt text when the
+    #                               Task object was partially deserialized.
+    # ===========================================================================
+
     def _reconstruct_task_content(self, task: Task) -> str:
         """Reconstruct a `.task.md` representation for LLAMA processing.
 
@@ -5081,6 +5340,16 @@ created: {task.created}
             encoding="utf-8"
         )
 
+    # ===========================================================================
+    # ERROR CLASSIFICATION & RETRY
+    # _classify_error()       — map a TaskResult to an error_class string:
+    #                           none | rate_limit | usage_limit | timeout |
+    #                           context_overflow | auth | fatal | interactive
+    # _get_retry_strategy()   — return max_retries / delay / backoff per class
+    # _suggest_actions()      — human-readable next-step hints for the operator
+    # cancel_task()           — hard-cancel a queued or running task
+    # ===========================================================================
+
     def _get_retry_strategy(self, error_class: str) -> Dict[str, Any]:
         """Return retry strategy for an error class.
 
@@ -5211,6 +5480,16 @@ created: {task.created}
         if any(s in text_lower for s in ("unauthorized", "forbidden", "permission denied", "not logged in", "authentication")):
             return "auth"
         return "fatal"
+
+    # ===========================================================================
+    # EVENTS & TELEMETRY
+    # _emit_event()             — append NDJSON line to logs/events.ndjson
+    #                             (legacy envelope, backwards-compatible readers)
+    # _emit_turn_telemetry()    — write LLM-turn telemetry to llm_events via the
+    #                             telemetry sink (M3 Claude stream-json adapter)
+    # create_task_from_description() — alternate Task factory used by control API
+    # _send_task_heartbeats()   — periodic Telegram progress pings during long tasks
+    # ===========================================================================
 
     def _emit_event(self, name: str, task: Optional[Task] = None, extra: Optional[Dict[str, Any]] = None) -> None:
         """Append a single NDJSON event line to logs/events.ndjson.
@@ -5455,6 +5734,16 @@ Generated from user description: {description}
         except asyncio.CancelledError:
             pass
 
+    # ===========================================================================
+    # STATUS / SESSION RECORDING
+    # get_status()              — /api/health + /status aggregate: queue depth,
+    #                             worker count, mesh state, active tasks.
+    # _mesh_status()            — mesh-specific subset (node count, DB available).
+    # _write_session_summary()  — persist per-session summary markdown.
+    # _append_session_event()   — append to logs/session_events/<id>.log.
+    # _extract_tool_summary()   — parse tool-use stats from raw_stdout.
+    # ===========================================================================
+
     def _mesh_status(self) -> Dict[str, Any]:
         """Return operator-facing mesh mode without probing live services."""
         online_nodes: Optional[int] = None
@@ -5599,9 +5888,26 @@ Generated from user description: {description}
         return {"calls": counts, "total": sum(counts.values()), "bash_commands": bash_commands}
 
 
-    # ------------------------------------------------------------------
-    # Mesh routing
-    # ------------------------------------------------------------------
+    # ===========================================================================
+    # MESH ROUTING
+    # _run_backend_local()     — execute task on THIS machine using backend pool.
+    # _dispatch_to_node()      — HTTP POST to remote node's task server; polls
+    #                            for completion, handles pinned-node-offline grace.
+    # _dispatch_or_run_local() — top-level router: local vs remote decision gate.
+    # _nudge_worker_for_dispatch() — wake a sleeping worker daemon on the node.
+    # _refresh_capable_nodes_before_routing() — pre-flight node capability check.
+    # _dispatch_remote_close() — send a close signal to the node when a session ends.
+    #
+    # HARD INVARIANT: a session with machine_id set NEVER runs on a substitute
+    # node — it waits, errors (PINNED_NODE_OFFLINE), or is operator re-pinned.
+    #
+    # FUTURE EXTRACTION → MeshRouter (post-M4, ~14 methods, highest value extract).
+    #   This is the largest coherent cluster.  High coupling TODAY: needs
+    #   session_store, push_service, notifier, _mesh_complete_task, _emit_event.
+    #   Extract only once M4 executor shape is settled (no more routing additions).
+    #   When done, inject deps via constructor; keep the affinity invariant as a
+    #   MeshRouter-level assertion, not scattered across process_task callers.
+    # ===========================================================================
 
     async def _run_backend_local(
         self,
@@ -6098,9 +6404,15 @@ Generated from user description: {description}
 
         return await self._dispatch_to_node(task, session, node)
 
-    # ------------------------------------------------------------------
-    # Mesh DB shadow-write helpers
-    # ------------------------------------------------------------------
+    # ===========================================================================
+    # MESH DB SHADOW-WRITE HELPERS
+    # _mesh_enqueue_task()         — insert/self-claim a mesh_tasks row at dispatch.
+    # _mesh_complete_task()        — write terminal result into the mesh_tasks row.
+    # _spool_mesh_completion_reconcile() — persist to results/reconcile/ if DB write
+    #                                      fails (replayed on next startup).
+    # reconcile_spooled_mesh_completions() — drain the reconcile spool into DB.
+    # mesh_reconcile_status()      — operator read of spool health.
+    # ===========================================================================
 
     def _mesh_enqueue_task(self, task: Task, backend_name: str) -> None:
         """Shadow-write a dispatched task into mesh_tasks.
@@ -6470,6 +6782,15 @@ Generated from user description: {description}
             "oldest_pending_at": oldest_pending_at,
             "latest_reconciled_at": latest_reconciled_at,
         }
+
+    # ===========================================================================
+    # PROACTIVE TURNS — REACH-BACK NOTIFICATIONS
+    # When a worker node completes a turn autonomously (M3.4 continuation or a
+    # background worker reporting progress), the mesh task server calls
+    # _handle_proactive_turn() on the orchestrator to fan out notifications
+    # (Web Push + Telegram) without blocking the worker.
+    # _notify_proactive_turn() does the actual async fan-out.
+    # ===========================================================================
 
     def _handle_proactive_turn(
         self,
