@@ -2863,6 +2863,230 @@ class MeshDB:
         return DEFAULT_CONTINUATION_ROUND_CAP
 
     # ------------------------------------------------------------------
+    # [A54 / M3.4 Job 2] Durable Case reconstruction. A Manager that lost its
+    # in-process context (compaction, restart, respawn) must be able to pick a
+    # Case back up knowing everything that matters from the DB ALONE, in ONE
+    # bounded read, and re-establish its outstanding waits/groups. get_case_brief
+    # is that single read; boot_reconcile_case is the idempotent re-arm hook the
+    # role-boot path fires. Both are pure reads over the existing substrate plus
+    # the already-idempotent A46/M3.4 writers — no new table, no new column.
+    # ------------------------------------------------------------------
+
+    def get_case_brief(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """[A54] The full working state of a Case, reconstructed from the DB ALONE.
+
+        A single BOUNDED read set (CLAUDE.md §8 — no N+1 per worker): the Case row
+        (:func:`get_flow_run`), its links (:func:`list_flow_links` — one JOIN'd
+        query), its events (:func:`list_flow_events` — one query), the continuation
+        watermark and the derived wait-group satisfaction (:func:`compute_continuation_tick`,
+        itself a bounded pass over the same events + continuation rows). Every worker
+        field is bucketed from those already-fetched lists in memory — NOT re-queried
+        per worker.
+
+        Returns ``None`` for an unknown Case. The shape:
+          * ``case_id`` / ``objective`` / ``status`` / ``current_stage``
+          * ``completion_criteria`` — the human criteria list (dual-shape unpacked)
+          * ``round_cap`` / ``rounds_used`` / ``rounds_remaining`` — the M3.4
+            continuation backstop and how much of it is spent
+          * ``workers`` — one entry per DISPATCHED worker (flow_link entity_type='task',
+            role='task', created_by='manager'): ``{task_id, session_id, finished,
+            outcome, latest_review}`` (session from the worker session link if any;
+            ``latest_review`` is the newest review.* verdict TAGGED to this task, else
+            None — reviews are Case-level today so most tasks carry None here)
+          * ``latest_review`` — the newest Case-level review.* verdict (verdict + reason
+            + event_type), or None
+          * ``open_waits`` / ``ready_waits`` — per-task A46 waits still pending vs.
+            finished-but-unresolved (from the wait markers + task.finished)
+          * ``wait_groups`` — every ARMED (unresolved) wait-group and its live
+            satisfaction state derived by ``compute_continuation_tick``:
+            ``{wait_group_id, condition, members, satisfied, presented_task_ids, retire}``
+
+        Read-only; introduces no new table/column. Never raises on a well-formed id —
+        an unknown Case is ``None``.
+        """
+        row = self.get_flow_run(case_id)
+        if row is None:
+            return None
+
+        # ---- ONE bounded read of each substrate list (no per-worker fanout) ----
+        links = self.list_flow_links(flow_run_id=case_id)
+        events = self.list_flow_events(case_id)
+
+        # Index events ONCE into the buckets the brief needs.
+        finished: Dict[str, str] = {}          # task_id -> outcome
+        wait_pending_tasks: set = set()        # A46 per-task pending markers
+        wait_resolved_tasks: set = set()       # A46 per-task resolved markers
+        review_by_task: Dict[str, Dict[str, Any]] = {}   # task_id -> latest review.* (tagged)
+        latest_case_review: Optional[Dict[str, Any]] = None
+        for e in events:
+            et = e.get("event_type")
+            etype = e.get("entity_type")
+            eid = e.get("entity_id")
+            if et == "task.finished" and eid:
+                finished[eid] = _event_outcome(e) or "success"
+            elif et == "worker.wait_pending" and etype == "task" and eid:
+                wait_pending_tasks.add(eid)
+            elif et == "worker.wait_resolved" and etype == "task" and eid:
+                wait_resolved_tasks.add(eid)
+            elif et in _REVIEW_EVENT_TYPES:
+                pl = _event_payload(e) or {}
+                verdict_rec = {
+                    "verdict": pl.get("verdict"),
+                    "reason": pl.get("reason"),
+                    "event_type": et,
+                }
+                # Newest wins (events are id-ascending, so overwrite as we go).
+                latest_case_review = verdict_rec
+                if eid:  # a review TAGGED to a specific worker task (forward-compat)
+                    review_by_task[eid] = verdict_rec
+
+        # ---- Dispatched workers (entity_type='task', role='task', by='manager') ----
+        # Worker sessions ride the entity_type='session', role='worker' links; index
+        # them ONCE by nothing (there is no task↔session key on the link), so we expose
+        # the set separately rather than guess a mapping.
+        worker_session_ids: List[str] = [
+            str(l.get("entity_id"))
+            for l in links
+            if l.get("entity_type") == "session" and l.get("role") == "worker" and l.get("entity_id")
+        ]
+        workers: List[Dict[str, Any]] = []
+        for l in links:
+            if l.get("entity_type") != "task" or l.get("role") != "task":
+                continue
+            if str(l.get("created_by") or "") != "manager":
+                continue
+            tid = str(l.get("entity_id") or "")
+            if not tid:
+                continue
+            workers.append({
+                "task_id": tid,
+                "finished": tid in finished,
+                "outcome": finished.get(tid),
+                "latest_review": review_by_task.get(tid),
+            })
+
+        # ---- A46 per-task waits: open (pending, not resolved, not finished) vs ready
+        # (finished but the wait not yet resolved — the Manager should reconcile it).
+        open_waits: List[str] = []
+        ready_waits: List[str] = []
+        for tid in wait_pending_tasks:
+            if tid in wait_resolved_tasks:
+                continue
+            if tid in finished:
+                ready_waits.append(tid)
+            else:
+                open_waits.append(tid)
+
+        # ---- Armed wait-groups + live satisfaction (reuse the M3.4 derivation) ----
+        tick = self.compute_continuation_tick(case_id)
+        sat_by_gid = {g["wait_group_id"]: g for g in tick.get("satisfied_groups", [])}
+        # Enumerate the ARMED (unresolved) groups from the same event pass.
+        armed_groups: Dict[str, Dict[str, Any]] = {}
+        resolved_groups: set = set()
+        for e in events:
+            if e.get("entity_type") != "wait_group":
+                continue
+            gid = e.get("entity_id")
+            if not gid:
+                continue
+            if e.get("event_type") == "worker.wait_pending":
+                pl = _event_payload(e) or {}
+                armed_groups[gid] = {
+                    "wait_group_id": gid,
+                    "condition": str(pl.get("condition", "ANY")).upper(),
+                    "members": list(pl.get("member_task_ids") or []),
+                }
+            elif e.get("event_type") == "worker.wait_resolved":
+                resolved_groups.add(gid)
+        wait_groups: List[Dict[str, Any]] = []
+        for gid, g in armed_groups.items():
+            if gid in resolved_groups:
+                continue  # discharged — not a live obligation
+            sat = sat_by_gid.get(gid)
+            wait_groups.append({
+                **g,
+                "satisfied": sat is not None,
+                "presented_task_ids": list(sat.get("presented", [])) if sat else [],
+                "retire": bool(sat.get("retire")) if sat else False,
+            })
+
+        round_cap = self.case_round_cap(case_id)
+        rounds_used = int(tick.get("completed_rounds", 0))
+        return {
+            "case_id": case_id,
+            "objective": row.get("objective_lock") or row.get("objective"),
+            "status": row.get("status"),
+            "current_stage": row.get("current_stage"),
+            "completion_criteria": _parse_completion_criteria(row.get("completion_criteria")),
+            "round_cap": round_cap,
+            "rounds_used": rounds_used,
+            "rounds_remaining": max(0, round_cap - rounds_used),
+            "workers": workers,
+            "worker_session_ids": worker_session_ids,
+            "latest_review": latest_case_review,
+            "open_waits": sorted(open_waits),
+            "ready_waits": sorted(ready_waits),
+            "wait_groups": wait_groups,
+        }
+
+    def boot_reconcile_case(
+        self,
+        case_id: str,
+        *,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[A54] Boot-time reconstruction hook: a Manager resuming onto an existing
+        OPEN Case reconciles its outstanding worker waits AND re-arms its live
+        wait-groups from the ledger — so it wakes with its FULL obligation set,
+        not the empty in-process state a fresh boot starts with.
+
+        IDEMPOTENT by construction (running it twice writes NO duplicate markers):
+          * ``reconcile_worker_waits`` (A46) skips already-resolved waits;
+          * re-arming replays each still-armed group through ``arm_wait_group``,
+            which is idempotent per (case, wait_group_id) — an existing unresolved
+            group marker is returned, never duplicated.
+
+        Flag-gated: no-ops (``{"ok": False, "reason": ...}``) when the durable relay
+        is OFF (reconcile has nothing to do) — group re-arm additionally needs
+        continuation ON, but ``arm_wait_group`` self-gates so a flags-mixed state is
+        safe. Returns ``{"ok", "reconciled": {...}, "rearmed": [wait_group_id, ...]}``.
+        """
+        if not durable_relay_enabled():
+            # Nothing durable to reconcile ⇒ byte-identical no-op.
+            return {"ok": False, "reason": "durable_relay_disabled"}
+
+        reconciled = self.reconcile_worker_waits(case_id, actor=actor)
+
+        # Re-arm every STILL-ARMED (unresolved) wait-group from the ledger. Replaying
+        # arm_wait_group with the SAME (gid, condition, members) is idempotent — the
+        # existing unresolved marker is returned, so a double-boot writes nothing new.
+        armed: Dict[str, Dict[str, Any]] = {}
+        resolved: set = set()
+        for e in self.list_flow_events(case_id):
+            if e.get("entity_type") != "wait_group":
+                continue
+            gid = e.get("entity_id")
+            if not gid:
+                continue
+            if e.get("event_type") == "worker.wait_pending":
+                pl = _event_payload(e) or {}
+                armed[gid] = {
+                    "condition": str(pl.get("condition", "ANY")).upper(),
+                    "members": list(pl.get("member_task_ids") or []),
+                }
+            elif e.get("event_type") == "worker.wait_resolved":
+                resolved.add(gid)
+        rearmed: List[str] = []
+        for gid, g in armed.items():
+            if gid in resolved:
+                continue
+            self.arm_wait_group(
+                case_id, gid, g["condition"], g["members"], actor=actor,
+            )
+            rearmed.append(gid)
+        return {"ok": True, "reconciled": reconciled, "rearmed": rearmed}
+
+    # ------------------------------------------------------------------
     # Approvals (Move H) — durable approval gate. A pending approval is a
     # promise of a NOT-yet-dispatched action; resolving it is what triggers
     # dispatch. Persisting it here is what lets it survive a gateway restart
