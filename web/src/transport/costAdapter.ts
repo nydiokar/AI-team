@@ -14,6 +14,8 @@ import type {
   RawCostTopResponse,
   RawCostProjectsResponse,
   RawCaseUsageResponse,
+  RawCostAlertsResponse,
+  RawCostAlert,
 } from "./rawApi";
 import type {
   TokenBuckets,
@@ -27,6 +29,8 @@ import type {
   CostTop,
   CostProjects,
   CaseUsage,
+  CostAlerts,
+  CostAlertRule,
 } from "../domain/cost";
 
 export function toTokenBuckets(raw: RawTokenBuckets | null | undefined): TokenBuckets {
@@ -144,6 +148,33 @@ export function toCaseUsage(raw: RawCaseUsageResponse): CaseUsage {
       workerSessions: raw.mgr_vs_workers?.worker_sessions ?? 0,
     },
     totals: toBucket(raw.totals?.tokens, raw.totals?.usd),
+  };
+}
+
+const ALERT_RULES: CostAlertRule[] = ["daily_budget", "session_burn", "case_total"];
+
+export function toCostAlerts(raw: RawCostAlertsResponse): CostAlerts {
+  const rule = (r: string | undefined): CostAlertRule =>
+    r && (ALERT_RULES as string[]).includes(r) ? (r as CostAlertRule) : "daily_budget";
+  return {
+    enabled: Boolean(raw.enabled),
+    budgets: {
+      dailyBudgetUsd: raw.budgets?.daily_budget_usd ?? 0,
+      sessionBurnUsd: raw.budgets?.session_burn_usd ?? 0,
+      caseTotalUsd: raw.budgets?.case_total_usd ?? 0,
+    },
+    alerts: (raw.alerts ?? []).map((a: RawCostAlert) => ({
+      rule: rule(a.rule),
+      scope: a.scope ?? "",
+      valueUsd: a.value_usd ?? 0,
+      budgetUsd: a.budget_usd ?? 0,
+      pct: a.pct ?? 0,
+    })),
+    enforcement: {
+      enabled: Boolean(raw.enforcement?.enabled),
+      mechanism: raw.enforcement?.mechanism ?? "sdk_max_budget_usd",
+      governorSdkMaxBudgetUsd: raw.enforcement?.governor_sdk_max_budget_usd ?? null,
+    },
   };
 }
 

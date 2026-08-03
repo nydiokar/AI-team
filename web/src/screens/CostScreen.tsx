@@ -15,10 +15,11 @@ import { SectionHeader } from "../components/ui/SectionHeader";
 import { CostRangePicker } from "../components/cost/CostRangePicker";
 import { CostProjectFilter } from "../components/cost/CostProjectFilter";
 import { CostTotalCard } from "../components/cost/CostTotalCard";
+import { CostAlertBanner } from "../components/cost/CostAlertBanner";
 import { SpendRows } from "../components/cost/SpendRows";
 import { TopSpenders } from "../components/cost/TopSpenders";
 import { CaseCostSheet } from "../components/cost/CaseCostSheet";
-import { useCostExplorer, useCostTop, useCostProjects } from "../hooks/useCost";
+import { useCostExplorer, useCostTop, useCostProjects, useCostAlerts } from "../hooks/useCost";
 import { useSessionAffiliations } from "../hooks/useWork";
 import {
   DEFAULT_COST_RANGE,
@@ -55,6 +56,7 @@ export function CostScreen() {
   const byModel = useCostExplorer({ dimension: "model", granularity: "none", ...window, limit: 30 });
   const top = useCostTop({ by: "usd", limit: 10, ...window });
   const projects = useCostProjects({ from, to });
+  const alerts = useCostAlerts();
   const { index: affiliations } = useSessionAffiliations();
 
   const loading =
@@ -84,6 +86,10 @@ export function CostScreen() {
       </div>
 
       <div className="mt-4 space-y-3">
+        <div className="px-4">
+          <CostAlertBanner alerts={alerts.data} />
+        </div>
+
         {loading && (
           <div className="space-y-3 px-4">
             <SkeletonBlock />

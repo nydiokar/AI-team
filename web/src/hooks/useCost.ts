@@ -13,6 +13,7 @@ import {
   toCostTop,
   toCostProjects,
   toCaseUsage,
+  toCostAlerts,
 } from "../transport/costAdapter";
 import type { CostDimension, CostGranularity } from "../domain/cost";
 import { useAuthStore } from "../stores/authStore";
@@ -122,6 +123,18 @@ export function useCaseUsage(flowRunId: string | undefined) {
     queryKey: ["case-usage", flowRunId],
     queryFn: async () => toCaseUsage(await api.caseUsage(token, flowRunId!)),
     enabled: Boolean(token) && Boolean(flowRunId),
+    refetchInterval: POLL_MS,
+    placeholderData: (prev) => prev,
+    retry,
+  });
+}
+
+export function useCostAlerts() {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["cost-alerts"],
+    queryFn: async () => toCostAlerts(await api.costAlerts(token)),
+    enabled: Boolean(token),
     refetchInterval: POLL_MS,
     placeholderData: (prev) => prev,
     retry,
