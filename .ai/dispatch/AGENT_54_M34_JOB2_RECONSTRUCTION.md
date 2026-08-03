@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_54_M34_JOB2_RECONSTRUCTION
 created_at: "2026-07-30T02:34:12+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: AGENT_52_M34_JOB1_ADOPTION
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:21:31.329261+00:00"
+evidence: tests/test_case_brief.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:31:20.224778+00:00"
 ```
 
 # DISPATCH — A54 · M3.4 Job 2: durable Case reconstruction (`get_case_brief`) + auto-reconcile at boot
