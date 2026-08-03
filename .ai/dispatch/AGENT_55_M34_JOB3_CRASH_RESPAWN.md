@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_55_M34_JOB3_CRASH_RESPAWN
 created_at: "2026-07-30T02:34:12+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: blocked              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: AGENT_54_M34_JOB2_RECONSTRUCTION
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:21:30.940856+00:00"
+updated_at: "2026-08-03T13:34:21.157521+00:00"
 ```
 
 # DISPATCH — A55 · M3.4 Job 3: crash-respawn dispatcher path
@@ -78,11 +78,61 @@ M4; the intra-task executor spike (A57).
 
 ---
 ## Milestone (burndown)
-- [ ] respawn path on the dead-session branch (reconstruct → respawn → re-arm → resume)
-- [ ] single-flight guard (atomic claim), no second lock model
-- [ ] anti-goal test (same flow_run_id, no new Case)
-- [ ] e2e green, byte-identical when flag OFF
-- [ ] PR opened + merged
+- [x] respawn path on the dead-session branch (reconstruct → respawn → re-arm → resume)
+- [x] single-flight guard (atomic claim), no second lock model
+- [x] anti-goal test (same flow_run_id, no new Case)
+- [x] e2e green, byte-identical when flag OFF
+- [x] PR opened (merge left to Manager review)
 
-## Closure (fill on completion)
-_(verdict + evidence)_
+## Closure (2026-08-03)
+
+**Verdict: BUILT — all four acceptance criteria proven with a fake backend, no paid CLI.**
+
+**What landed**
+- `db.py`: `RESPAWN_ACTION = "manager_respawn"` + `respawn_task_id(case, gen)` →
+  `"respawn:{case}:{gen}"` (a DISTINCT id namespace from the `cont:` wake row, riding
+  the SAME `CONTINUATION_MACHINE_SENTINEL` + the SAME `claim_task`/reaper — no second
+  lock model, no new table/column).
+- `orchestrator.py`: dead-session branch of `_continue_case_once` now attempts
+  `_respawn_manager_for_case` before falling back to the strand escalation. The new
+  method reconstructs via `get_case_brief` (A54), atomically claims the single-flight
+  respawn row, spawns ONE role-full Manager session via `session_service.create_session`,
+  binds it to the SAME Case (`create_flow_link` manager link + affiliation — NEVER
+  `open_case`), runs `boot_reconcile_case` to re-arm waits/groups, and delivers a
+  role-full resume turn (`_render_respawn_turn`). `case.manager_respawned` marker recorded.
+
+**Single-flight (atomic, not TOCTOU):** the winner is decided by
+`claim_task = UPDATE mesh_tasks SET status='claimed' WHERE id=? AND status='pending'`
++ `changes()>0`, inside a `_write()` txn (SQLite serializes writers). Two racing ticks
+enqueue the SAME deterministic id (UNIQUE collapses to one row); exactly one UPDATE flips
+`pending→claimed`. The loser gets False and returns `True` ("a respawn is owned — don't
+escalate/double-spawn"), spawning nothing.
+
+**Crash recovery:** the respawn row is `claimer_incarnation`-stamped; a crash between
+claim and spawn leaves it `claimed` by a dead incarnation → `list_stale_claims` reaps it
+→ `release_task` → `pending` → a later tick re-claims and retries. No permanent stall. A
+spawn failure AFTER the claim also releases the lease and escalates the strand.
+
+**Anti-goal:** no `open_case`, no new `flow_run_id` — proven by
+`test_respawn_preserves_flow_run_id_and_creates_no_new_case` (open-case set unchanged,
+objective_lock preserved, new session `current_case_id == case_id`).
+
+**Refusal:** `blocked`/`interrupted` (operator-halted) Cases are excluded by the existing
+`blocked` guard in `_continue_case_once` (short-circuits BEFORE the dead branch) — proven
+by `test_blocked_case_with_dead_manager_is_not_respawned`.
+
+**Flag OFF byte-identical:** with `CASE_CONTINUATION_ENABLED` OFF the tick returns 0 at the
+top gate and the loop never starts — the dead-session branch is unreachable (pre-A55
+behaviour). Respawn additionally re-gates on the flag defensively.
+
+**Node placement:** reuse the dead Manager's recorded node (`session.machine_id`) if the
+row is readable, else gateway host (`__local__`). Remote-node MCP reachability is the known
+deferred item — a remote pin is honoured (the mesh path owns reachability); if the spawn/
+first-turn then fails, the lease is released and the strand escalated (surfaced, not hacked).
+
+**pytest evidence (from inside the worktree; `src.orchestrator.__file__` =
+`/home/cifran/dev/AI-team-wt/a55-respawn/src/orchestrator.py`):**
+`tests/test_case_respawn.py` 9 passed · `tests/test_case_continuation.py` +
+`tests/test_case_brief.py` + `tests/test_control_api_wait_group.py` → 50 passed together ·
+adjacent `tests/test_manager_role.py` + `tests/test_manager_carrier_role.py` +
+`tests/test_control_api.py` → 73 passed. No paid CLI, no `--run-e2e`.
