@@ -1967,6 +1967,32 @@ def build_control_api(orchestrator) -> FastAPI:
             )
         )
 
+    @app.get("/api/cost/alerts", dependencies=[Depends(_require_auth)])
+    def api_cost_alerts() -> JSONResponse:
+        """A65 P3 cost budget/burn-rate alerts. Billable-USD only — never raw
+        token/cache-read volume. Thresholds are the env knobs
+        COST_ALERT_DAILY_BUDGET_USD / COST_ALERT_SESSION_BURN_USD /
+        COST_ALERT_CASE_TOTAL_USD (0 = off); an alert fires when the read-model's
+        known USD crosses a set knob. Read-only: alerts surface the existing SDK
+        governor ceiling (``sdk_max_budget_usd``) as the enforcement lever and
+        never add a new kill mechanism; enforcement stays flag-gated OFF."""
+        from src.control.db import runtime_flag_enabled
+        from src.services.cost_alerts import check_cost_alerts
+
+        governor_budget: Optional[float] = None
+        try:
+            from config import config as _cfg
+            governor_budget = getattr(_cfg.claude, "sdk_max_budget_usd", None)
+        except Exception:
+            pass
+        result = check_cost_alerts(_cost_db())
+        result["enforcement"] = {
+            "enabled": runtime_flag_enabled("COST_ALERT_ENFORCE_ENABLED"),
+            "mechanism": "sdk_max_budget_usd",
+            "governor_sdk_max_budget_usd": governor_budget,
+        }
+        return JSONResponse(result)
+
     @app.get("/api/quota-windows", dependencies=[Depends(_require_auth)])
     def api_quota_windows() -> JSONResponse:
         coordinator = getattr(orchestrator, "quota_coordinator", None)
