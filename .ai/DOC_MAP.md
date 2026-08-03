@@ -21,7 +21,8 @@ links, no build-time magic) but mkdocs is **not installed** and out of scope —
 | Surface | Role (one line) | Holds | Does NOT hold |
 |---|---|---|---|
 | `.ai/CONTEXT.md` | Fast orientation + the single home of forward priorities. | **Current Focus** (what's active now), architecture-as-it-runs, the Shipped Ledger, the **Current Priorities** table + the **Deferred** tables (the roadmap — see below). | Per-dispatch state (→ DISPATCH_LOG). A dispatch's blow-by-blow work log (→ its dispatch doc). Durable reference doctrine (→ `docs/`). |
-| `.ai/dispatch/DISPATCH_LOG.md` | Lean **index** of every dispatch — status at a glance, one line each. | One row per dispatch: `# · Dispatch · Date · Level · Status · One-line`. The status vocabulary. | Any paragraph of "what was done / what's left" (→ the dispatch doc). "What to work on next" (→ CONTEXT Current Focus + Priorities). Open operator-TODOs (→ the dispatch doc). |
+| `.ai/dispatch/DISPATCH_LOG.md` | **The primary, authoritative human-readable dispatch index + closure surface** — status at a glance, one line each. | One row per dispatch: `# · Dispatch · Date · Level · Status · One-line` + the per-job closure line. The status vocabulary. Stays grep-searchable and human-loved. | Any paragraph of "what was done / what's left" (→ the dispatch doc). "What to work on next" (→ CONTEXT Current Focus + Priorities). Open operator-TODOs (→ the dispatch doc). |
+| `.ai/dispatch/_DISPATCH_STATE.md` (+ optional `_dispatch.parquet`) | **GENERATED, complementary machine/query view** of per-job yaml state — never hand-edit, never a replacement for DISPATCH_LOG. Rebuilt by `scripts/dispatch/dispatch_state.py` (git pre-commit, warn-only). | A rendered table from each job's ` ```yaml ` state block (`status`/`created_at`/`depends_on`/`evidence`/flags); the honest `--audit` board (gaps, unproven-done). Query/audit convenience only. | The authoritative human index/closure role (that stays DISPATCH_LOG). Any hand edits (regenerated → clobbered). Forward priorities (→ CONTEXT). |
 | The **roadmap** = `.ai/CONTEXT.md` Priorities + Deferred tables | Forward priorities and deliberately-parked work — the one home for "what's next". | Ranked next-work (Current Priorities) and deferred-but-valid items (the two Deferred tables). | Anything a dispatch has already shipped (→ Shipped Ledger). Job status (→ DISPATCH_LOG). **There is no separate `ROADMAP.md`** — this decision is fixed here so it stays unambiguous. |
 | The **dispatch doc** `.ai/dispatch/AGENT_N_*.md` | ONE job's whole life in ONE file. | The packet (objective-lock, plan, scope) **plus** a `## Milestone` burndown section **plus** a `## Closure` section, grown in place through the job's lifecycle. Open operator-TODOs relocated from the log row. | Reference doctrine meant to outlive the job (maps, specs → `docs/`). A sibling `.milestone.md` / `.closure.md` file — those are folded in here, never spawned. |
 | `docs/` | Durable **reference doctrine** — specs, maps, runbooks that outlive any one job. | Specs, architecture/data-flow maps, runbooks, contracts. Materially-important artifacts a dispatch produces for reuse. | A dispatch byproduct or job-scoped scratch (that stays in the dispatch doc). Live project state / current focus (→ CONTEXT). |
@@ -43,7 +44,14 @@ yourself recording *what is happening* here, it belongs in CONTEXT or a dispatch
 - **Materially-important reference artifacts go in `docs/`, never `.ai/dispatch/`.** The
   dispatch folder is for job packets and their inline lifecycle only. A map/spec/runbook
   that others will reuse is doctrine → `docs/`.
-- **DISPATCH_LOG stays an index.** If a row needs a paragraph, that paragraph is in the
-  wrong file — it belongs in the dispatch doc.
+- **DISPATCH_LOG stays THE index.** It is the one authoritative human-readable status +
+  closure surface. If a row needs a paragraph, that paragraph is in the wrong file — it
+  belongs in the dispatch doc.
+- **Job state is machine-tracked, complementary to (never replacing) DISPATCH_LOG.** Each
+  `AGENT_N_*.md` carries a ` ```yaml ` state block (protocol: `.ai/dispatch/CLAUDE.md`);
+  the generated `_DISPATCH_STATE.md` + `--audit` are a query/audit view only. Keep
+  `status:` correct via `scripts/dispatch/dispatch_state.py --set` — never hand-edit the
+  yaml block or the generated views. There is exactly ONE authoritative *human* status
+  surface (DISPATCH_LOG); the generated view does not compete for that role.
 - **Forward priorities have exactly one home:** CONTEXT.md's Priorities + Deferred
   tables. No surface duplicates them.

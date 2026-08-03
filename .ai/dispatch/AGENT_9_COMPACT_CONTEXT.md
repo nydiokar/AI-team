@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_9_COMPACT_CONTEXT
+created_at: "2026-07-03T04:58:47+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_9_COMPACT_CONTEXT.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:12.276255+00:00"
+```
+
 # AGENT 9 — Compact-Context Continuation Track
 
 **Dispatch created:** 2026-07-03

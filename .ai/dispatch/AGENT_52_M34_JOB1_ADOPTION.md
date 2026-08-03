@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_52_M34_JOB1_ADOPTION
+created_at: "2026-07-30T02:34:12+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_52_M34_JOB1_ADOPTION.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:10.981539+00:00"
+```
+
 # DISPATCH — A52 · M3.4 Job 1 adoption + activation (make the Wake-Dispatcher actually used)
 
 **Level:** 3 (role prompt + MCP tool + control route + db seam) · **Type:** code + docs

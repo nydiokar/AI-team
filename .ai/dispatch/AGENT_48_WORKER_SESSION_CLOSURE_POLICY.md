@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_48_WORKER_SESSION_CLOSURE_POLICY
+created_at: "2026-07-17T15:09:11+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_48_WORKER_SESSION_CLOSURE_POLICY.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:10.197494+00:00"
+```
+
 # AGENT_48 — Worker-session closure is a Manager decision, not automatic
 
 **Dispatched:** 2026-07-17

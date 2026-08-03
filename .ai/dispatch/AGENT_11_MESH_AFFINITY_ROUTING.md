@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_11_MESH_AFFINITY_ROUTING
+created_at: "2026-07-03T17:18:44+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_11_MESH_AFFINITY_ROUTING.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:01.724336+00:00"
+```
+
 # AGENT 11 — Mesh Affinity Routing: session pin ignored at execution (silent local fallback)
 
 **Dispatch created:** 2026-07-03

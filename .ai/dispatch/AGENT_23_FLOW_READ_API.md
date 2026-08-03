@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_23_FLOW_READ_API
+created_at: "2026-07-07T02:57:26+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_23_FLOW_READ_API.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:05.187070+00:00"
+```
+
 # A23 — Flow read API + minimal operator surface (M1)
 
 **Milestone:** v0.6 M1. **Level:** 2. **Branch:** code → `feat/m1-flow-read-api` → PR.

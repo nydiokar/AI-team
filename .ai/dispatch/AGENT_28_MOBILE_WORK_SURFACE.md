@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_28_MOBILE_WORK_SURFACE
+created_at: "2026-07-08T14:59:26+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_28_MOBILE_WORK_SURFACE.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:06.273069+00:00"
+```
+
 # A28 — Mobile Work surface: read-only operations inbox + session affiliation
 
 **Dispatch created:** 2026-07-08

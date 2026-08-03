@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_17_BACKEND_USAGE_AGGREGATION_TESTS
+created_at: "2026-07-05T03:22:11+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_17_BACKEND_USAGE_AGGREGATION_TESTS.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:03.318950+00:00"
+```
+
 # A17 — Regression coverage for backend-usage token aggregation (sum vs peak)
 
 ## Locked Packet
