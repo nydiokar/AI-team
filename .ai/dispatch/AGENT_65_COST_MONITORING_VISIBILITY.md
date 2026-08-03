@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_65_COST_MONITORING_VISIBILITY
 created_at: "2026-08-03T16:59:09.868948+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T16:59:09.868970+00:00"
+evidence: docs/cost_monitoring_audit.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T18:03:42.938251+00:00"
 ```
 
 # DISPATCH — A65 · Cost monitoring & visibility: cost explorer + dashboards + budgets/alerts
@@ -202,9 +202,9 @@ needs it.
 ---
 ## Milestone (burndown)
 - [x] Phase 0 audit doc written (`docs/cost_monitoring_audit.md`, committed to `main` 2026-08-03): real-usage provenance confirmed, codex `includes_cache` double-count found, 51% unpriced share quantified, standalone-session 91% finding, attribution gaps, `total`-definition bug
-- [ ] Phase 0 remaining: `total`-definition fix lands WITH Phase 1 code on its `feat/` branch (not on main)
-- [ ] Phase 1: three read-model endpoints + tests; six-case report reproducible via `/api/cases/{id}/usage`
-- [ ] Phase 2: Cost tab (spend-by-project, top-N by USD w/ unpriced marker, manager-vs-workers panel) + vitest
+- [x] Phase 0 remaining: `total`-definition fix + codex `includes_cache` correction + `_PRICE_TABLE` extension (R1 per OPERATOR ADDENDUM) landed WITH Phase 1 (`ac5aea2`)
+- [x] Phase 1: three read-model endpoints + 31 tests; six-case report reproducible via `/api/cases/{id}/usage` (mgr $22.47 / 7w $32.72 / share 59.3% reproduced); live-verified
+- [x] Phase 2: Cost tab (`1f04be5`) — 24h/48h/7d/30d range (default 7d) + project filter per ADDENDUM, spend by project/model with coverage %, top-N sessions by USD, per-case manager-vs-workers drilldown; 26 vitest + 127 web total green
 - [ ] Phase 3: budget/burn-rate alerts (billable-USD only), enforcement flag-gated OFF via governor seam
 - [ ] Adversarial-review items re-checked against the shipped diff (no drift into scope-out)
 
