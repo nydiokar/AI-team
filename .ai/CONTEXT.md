@@ -55,6 +55,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
+| **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | ready | Cost monitoring & visibility: truthfulness audit → cost read-model (`/api/cost/*` + `/api/cases/{id}/usage`) → Web-UI Cost tab → budgets/burn-rate alerts (billable-USD only, enforcement flagged OFF). Spawned from the 2026-08-03 manager-vs-workers cost report. |
 | **A51** | `AGENT_51_DISPATCH_STATE_KIT_MIGRATION.md` | — | ready / not started | Install dispatch-state-kit; migrate all 59 job files to machine-tracked YAML state. |
 | **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |
 | **A55** | `AGENT_55_M34_JOB3_CRASH_RESPAWN.md` | A54 | dispatched | Respawn a role-full Manager on a dead-session Case. Closes "survive a process restart." |
