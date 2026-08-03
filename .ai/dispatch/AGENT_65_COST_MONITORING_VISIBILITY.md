@@ -69,8 +69,10 @@ read-model will depend on:
 5. **The `total` definition is inconsistent TODAY** — `db.get_session_token_totals` sets
    `total = input + output` (cache excluded) while `pricing.TokenTotals.total` sums all four
    buckets. The existing UI's "Total tokens" and its own cost estimate can disagree. Pick ONE
-   definition (recommend: total = all four buckets; billable = input+output+cache_write) and make
-   both code paths agree — this is a real truthfulness bug fix, not cosmetics.
+   definition (recommend: `total` = all four buckets; **`billable` = the `estimate_cost` USD
+   number, which already prices cache reads at their real 0.10× and writes at 1.25×** — cache IS
+   real usage, at its discounted rate, never zero) and make both code paths agree — this is a real
+   truthfulness bug fix, not cosmetics.
 6. **Price-table drift** — `pricing.py` is hardcoded (Opus $5/$25, Sonnet $3/$15, Haiku $1/$5).
    Note in the audit that it's the single source of truth and must be bumped by a human when
    Anthropic revises; do not silently invent current prices (that's a data-quality decision — R1).
@@ -199,7 +201,8 @@ needs it.
 
 ---
 ## Milestone (burndown)
-- [ ] Phase 0: audit doc written, all six items answered with real numbers, `total`-definition bug fixed
+- [x] Phase 0 audit doc written (`docs/cost_monitoring_audit.md`, committed to `main` 2026-08-03): real-usage provenance confirmed, codex `includes_cache` double-count found, 51% unpriced share quantified, standalone-session 91% finding, attribution gaps, `total`-definition bug
+- [ ] Phase 0 remaining: `total`-definition fix lands WITH Phase 1 code on its `feat/` branch (not on main)
 - [ ] Phase 1: three read-model endpoints + tests; six-case report reproducible via `/api/cases/{id}/usage`
 - [ ] Phase 2: Cost tab (spend-by-project, top-N by USD w/ unpriced marker, manager-vs-workers panel) + vitest
 - [ ] Phase 3: budget/burn-rate alerts (billable-USD only), enforcement flag-gated OFF via governor seam
