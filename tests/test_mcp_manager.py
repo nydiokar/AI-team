@@ -992,3 +992,32 @@ def test_get_case_plain_criteria_unchanged(monkeypatch):
     out = mcp_manager._get_case({"case_id": "case_9"})
     assert "completion_criteria: 'just plain text'" in out
     assert "round_cap:" not in out
+
+
+# --------------------------------------------------------------------------
+# Regression: _bootstrap must put the repo root on sys.path so the lazy
+# `from config.models import ...` in dispatch_worker resolves regardless of the
+# launching interpreter / cwd. The live MCP server is spawned by the session
+# driver with a bare interpreter (no editable install) and a cwd outside the
+# repo — that raised `No module named 'config'` and broke every new-worker
+# dispatch. Assert the fix directly and deterministically (no interpreter
+# assumptions): stripped from sys.path, _bootstrap re-inserts the repo root.
+# --------------------------------------------------------------------------
+
+def test_bootstrap_inserts_repo_root_on_sys_path():
+    repo_root = str(Path(mcp_manager.__file__).resolve().parent.parent)
+    saved = list(sys.path)
+    try:
+        # Simulate the live spawn: repo root absent from sys.path (bare
+        # interpreter, foreign cwd). Without the fix, _bootstrap leaves it absent
+        # and `from config.models import ...` in dispatch_worker would raise
+        # `No module named 'config'` — this assertion fails.
+        sys.path[:] = [p for p in sys.path if p != repo_root]
+        assert repo_root not in sys.path
+        mcp_manager._bootstrap()
+        assert repo_root in sys.path, (
+            "_bootstrap must put the repo root on sys.path so config/src resolve "
+            "under any launching interpreter"
+        )
+    finally:
+        sys.path[:] = saved
