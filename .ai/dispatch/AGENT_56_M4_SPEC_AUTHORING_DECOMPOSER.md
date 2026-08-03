@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER
 created_at: "2026-07-30T02:34:12+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: AGENT_52_M34_JOB1_ADOPTION
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:21:31.457850+00:00"
+updated_at: "2026-08-03T13:48:17.036405+00:00"
 ```
 
 # DISPATCH — A56 · M4: feature-spec authoring + scored review + decomposer-as-task-DAG-in-one-Case
@@ -114,12 +114,75 @@ The intra-task parallel executor (A57 spike). Provider-native subagents as first
 
 ---
 ## Milestone (burndown)
-- [ ] spec_authoring stage + generator
-- [ ] scored review gate (blocks decomposition on low score)
-- [ ] publish_artifact → artifact links/events
-- [ ] decomposer → one Case + N task_attached DAG edges (no orphan flow_runs)
-- [ ] e2e green, byte-identical when OFF
-- [ ] PR(s) opened + merged
+- [x] spec_authoring stage + generator (`publish_spec` → `spec.authored`; stage set to `spec_authoring`; `docs/harness/generators/spec_authoring.md`)
+- [x] scored review gate (R1 6-dim ×0–2, ≥8/12 AND no critical-zero; `record_spec_review` — a low OR critical-zero score BLOCKS `decompose_case` with `spec_not_approved`, a real refusal not a warning)
+- [x] publish_artifact → `artifact` links/events (`artifact.published`)
+- [x] decomposer → one Case + N `task_attached` DAG edges, ZERO orphan flow_runs (`decompose_case`; `docs/harness/generators/decomposer.md`; cycle/unknown-dep/dup-key refused)
+- [x] e2e green (18 new tests), byte-identical when OFF (flag `SPEC_AUTHORING_ENABLED`, default OFF ⇒ methods no-op + routes 404)
+- [ ] PR opened (single PR, R2 rationale below); merge left to Manager per role
 
-## Closure (fill on completion)
-_(verdict + evidence)_
+## Closure (2026-08-03 — A56 built, PR open, NOT merged)
+
+**Verdict: BUILT & PROVEN e2e (fake backend, no paid CLI).** All acceptance items met.
+
+**R2 decision — ONE PR.** The change is ~430 code lines (db + orchestrator seams +
+API routes + MCP tools) + 2 generator docs, well under the ≈600 split threshold, and
+the generators are meaningless without the wiring they describe (they cite the exact
+flag/reason strings). A generators-first docs PR would have shipped un-runnable prose.
+So: single well-structured PR `feat/m4-spec-authoring`.
+
+**R1 rubric (as-built, tunable constants in `src/control/db.py`):** 6 dims ×0–2 —
+`objective_clarity`⚠️, `scope_boundaries`, `decomposability`⚠️, `acceptance_testability`,
+`dependency_correctness`, `risks_and_assumptions`. Pass = `total ≥ SPEC_REVIEW_PASS_THRESHOLD`
+(8/12) AND no hard zero on either ⚠️ CRITICAL dim (`SPEC_REVIEW_CRITICAL_DIMENSIONS`).
+Verdict is COMPUTED gateway-side (`_score_spec_review`), never taken on the reviewer's word.
+
+**pytest evidence** (from inside the worktree; `src.control.db.__file__` =
+`/home/cifran/dev/AI-team-wt/a56-m4/src/control/db.py`):
+- `tests/test_spec_authoring_decompose.py` — 18 passed (the M4 e2e/db/API/MCP contract).
+- Regression: `test_review_emitter test_case_closure test_mcp_manager test_flow_links_events
+  test_control_api_flows` — 134 passed together (incl. the 18); plus
+  `test_case_admission test_case_brief test_case_continuation test_case_respawn
+  test_flow_runs test_durable_relay` — 57 passed. TEST COST GUARD honoured: no full/e2e suite.
+
+**Sample authored spec + score + one-Case DAG dump** (live run, temp DB):
+- Case `open_case('Add a context-fill gauge to the Web UI')` → 1 flow_run.
+- `publish_spec('spec-ctxgauge', ...)` (real_objective/literal/interpreted + scope_out +
+  assumptions + drift_risks) → `artifact` link + `spec.authored`.
+- `record_spec_review(reviewer='cheap-reviewer', scores={oc:2,sb:2,dec:2,at:1,dc:2,ra:1})`
+  → **total 10/12, passed=True, verdict=accepted**.
+- `decompose_case` with 4 tasks (`backend-projection → api-field → ui-gauge → ui-tests`)
+  → order `['backend-projection','api-field','ui-gauge','ui-tests']`.
+- **NO-ORPHAN PROOF:** flow_runs before=1, after=1 (delta 0). The whole Case tree is
+  exactly ONE flow_run; the 4 tasks are `task_attached` flow_links on it with
+  dependency edges on `metadata_json` (queryable via `list_dag_tasks`).
+
+**Adversarial self-review (findings + resolution):**
+1. *Orphan flow_run?* Static-traced all four M4 write methods — none call
+   `create_flow_run`/`open_case`/`update_flow_run`; only `update_flow_stage` (mutates
+   the EXISTING Case's `current_stage`). e2e asserts `COUNT(flow_runs)` unchanged. CLEAN.
+2. *Gate a real block?* `decompose_case` returns `spec_not_approved` and writes nothing
+   before the gate (checked: no review, low score, AND critical-zero score all blocked;
+   asserted no `task_attached` links appear). API returns 422. REAL block.
+3. *Reviewer separate from author?* The scored-review actor is the `reviewer` seat
+   (default `reviewer`), distinct from the author's `manager` actor; asserted the two
+   event actors differ. HONEST BOUNDARY: separation is enforced as a distinct *seat*
+   (a cheap/cross-model pass, per Manager decision #1) recorded durably in the actor
+   field — the seam does not hard-reject `reviewer=="manager"`; that independence is
+   operational (which model is invoked), matching `draft_packet.md`'s "any capable model
+   can play" call. Documented in `spec_authoring.md`.
+4. *DAG acyclic + queryable? cycle handling?* Kahn topo-sort; self-cycle, multi-node
+   cycle → `None` → refused `cyclic_dependencies` (writes nothing); diamond DAG passes.
+   Edges queryable via `list_dag_tasks`.
+5. *Byte-identical OFF?* `SPEC_AUTHORING_ENABLED` default OFF: methods return
+   `spec_authoring_disabled` (no write), routes 404. Asserted no events/links written.
+   The only unconditional additions are declarative (event-type tuple + flag def) —
+   no code path changes when unused.
+
+**Seams verified / not verified (cross-layer honesty):** verified db → orchestrator
+seam → control API route → MCP tool registration, all four, over a real temp MeshDB +
+FastAPI TestClient. NOT verified: a live gateway restart / a real Manager session
+driving these tools (no paid CLI run — out of test-cost scope); the Manager role prompt
+does not yet *instruct* spec-authoring for feature intents (the tools are granted by the
+existing manager MCP surface, but wiring the role prompt to prefer this path for
+feature-sized intents is a follow-on, not in A56's acceptance).

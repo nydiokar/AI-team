@@ -971,6 +971,136 @@ def _record_review(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tools: M4 spec authoring → scored review → decomposer (A56)
+# ---------------------------------------------------------------------------
+
+# R1 rubric dimensions surfaced to the reviewer tool. Kept in sync with
+# src.control.db.SPEC_REVIEW_DIMENSIONS (the db layer is authoritative for grading).
+_SPEC_REVIEW_DIMENSIONS = (
+    "objective_clarity",
+    "scope_boundaries",
+    "decomposability",
+    "acceptance_testability",
+    "dependency_correctness",
+    "risks_and_assumptions",
+)
+
+
+def _publish_spec(args: Dict[str, Any]) -> str:
+    """[A56/M4] Author a feature spec ONTO your Case as durable evidence.
+
+    Before dispatching workers for a feature-sized intent, author a spec (reuse the
+    draft_packet contract: real_objective vs literal_request vs interpreted_task +
+    forced assumptions/drift_risks). It is recorded as an ``artifact`` link + a
+    ``spec.authored`` event. This does NOT grade the spec — a SEPARATE reviewer seat
+    scores it (record_spec_review). A 404/disabled reason means SPEC_AUTHORING_ENABLED
+    is OFF on the gateway."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    spec_id = _bounded_text(args.get("spec_id"), "spec_id", _MAX_ID_CHARS, required=True)
+    body_text = _bounded_text(args.get("body"), "body", _MAX_OBJECTIVE_CHARS, required=True)
+    title = _bounded_text(args.get("title"), "title", 512, required=False)
+    body = {"spec_id": spec_id, "body": body_text, "title": title}
+    result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/spec", body)
+    if not result.get("ok"):
+        return (
+            f"publish_spec did NOT record on Case {case_id}: {result.get('reason')}. "
+            "(A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway.)"
+        )
+    return (
+        f"Authored spec {spec_id!r} on Case {case_id} (durable artifact + spec.authored "
+        "event). Next: have a SEPARATE reviewer score it via record_spec_review before decomposing."
+    )
+
+
+def _publish_artifact(args: Dict[str, Any]) -> str:
+    """[A56/M4] Publish an arbitrary durable artifact (kind/title/uri) onto your Case
+    as evidence (an ``artifact`` link + ``artifact.published`` event). A 404/disabled
+    reason means SPEC_AUTHORING_ENABLED is OFF on the gateway."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    artifact_id = _bounded_text(args.get("artifact_id"), "artifact_id", _MAX_ID_CHARS, required=True)
+    kind = _bounded_text(args.get("kind"), "kind", 64, required=False) or "artifact"
+    title = _bounded_text(args.get("title"), "title", 512, required=False)
+    uri = _bounded_text(args.get("uri"), "uri", _MAX_PATH_CHARS, required=False)
+    body = {"artifact_id": artifact_id, "kind": kind, "title": title, "uri": uri}
+    result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/artifacts", body)
+    if not result.get("ok"):
+        return (
+            f"publish_artifact did NOT record on Case {case_id}: {result.get('reason')}. "
+            "(A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway.)"
+        )
+    return f"Published artifact {artifact_id!r} (kind={kind}) on Case {case_id}."
+
+
+def _record_spec_review(args: Dict[str, Any]) -> str:
+    """[A56/M4] Score a Case's spec against the R1 rubric — this is the SEPARATE
+    plan-reviewer seat, NOT the author grading its own spec. ``scores`` maps each of
+    six dimensions (objective_clarity, scope_boundaries, decomposability,
+    acceptance_testability, dependency_correctness, risks_and_assumptions) to 0–2.
+    The verdict is COMPUTED (≥8/12 AND no zero on objective_clarity or decomposability),
+    not taken on your word: a below-threshold or critical-zero score BLOCKS decomposition.
+    A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    spec_id = _bounded_text(args.get("spec_id"), "spec_id", _MAX_ID_CHARS, required=True)
+    reason = _bounded_text(args.get("reason"), "reason", _MAX_OBJECTIVE_CHARS, required=False)
+    reviewer = _bounded_text(args.get("reviewer"), "reviewer", 64, required=False) or "reviewer"
+    scores = args.get("scores")
+    if not isinstance(scores, dict) or not scores:
+        return (
+            "record_spec_review requires a `scores` object mapping each rubric dimension to 0-2: "
+            + ", ".join(_SPEC_REVIEW_DIMENSIONS)
+        )
+    body = {"spec_id": spec_id, "scores": scores, "reason": reason, "reviewer": reviewer}
+    result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/spec-review", body)
+    if not result.get("ok"):
+        return (
+            f"record_spec_review did NOT record on Case {case_id}: {result.get('reason')}. "
+            "(A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF on the gateway.)"
+        )
+    verdict = result.get("verdict")
+    gate = "UNLOCKS decomposition" if result.get("passed") else "BLOCKS decomposition (fix the spec + re-score)"
+    return (
+        f"Scored spec {spec_id!r} on Case {case_id}: {result.get('total')}/{result.get('max')} "
+        f"(threshold {result.get('threshold')}), verdict={verdict!r} — {gate}. "
+        f"critical_zero={result.get('critical_zero')} missing={result.get('missing')} "
+        f"out_of_range={result.get('out_of_range')}."
+    )
+
+
+def _decompose_case(args: Dict[str, Any]) -> str:
+    """[A56/M4] Expand an APPROVED objective into a task-DAG on this ONE Case — N
+    task_attached links carrying dependency edges, NOT N scattered child cases. Each
+    task is ``{task_key, objective, depends_on: [task_key,...], ...hints}``. REFUSED
+    (structured reason) unless the spec's latest scored review PASSED, and unless the
+    DAG is acyclic + every depends_on names a known task_key. Creates ZERO new
+    flow_runs. A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    spec_id = _bounded_text(args.get("spec_id"), "spec_id", _MAX_ID_CHARS, required=True)
+    tasks = args.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return "decompose_case requires a non-empty `tasks` list ({task_key, objective, depends_on})."
+    if len(tasks) > 256:
+        return "decompose_case: too many tasks (max 256). Under-decompose over over-decompose."
+    body = {"spec_id": spec_id, "tasks": tasks}
+    # A blocked decomposition (unapproved spec / cyclic / malformed DAG) returns HTTP 422
+    # whose structured detail _api_request folds into the RuntimeError message — surface
+    # it as a clean refusal rather than leaking a traceback.
+    try:
+        result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/decompose", body)
+    except RuntimeError as e:
+        return (
+            f"decompose_case REFUSED on Case {case_id}: {e}. "
+            "(spec_not_approved => get a passing spec-review first; cyclic_dependencies => break the "
+            "cycle; unknown_dependency/invalid_task_keys => fix the DAG; a 404 => SPEC_AUTHORING_ENABLED OFF.)"
+        )
+    order = result.get("order") or []
+    return (
+        f"Decomposed Case {case_id} into {len(result.get('task_keys') or [])} task_attached DAG node(s) "
+        f"(ZERO new flow_runs). Dispatch order (topological): {order}. Dispatch each in order as its "
+        "dependencies complete."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool: release_worker  (A48 — the Manager's explicit worker-close decision)
 # ---------------------------------------------------------------------------
 
@@ -1265,6 +1395,97 @@ _TOOLS = [
         },
     },
     {
+        "name": "publish_spec",
+        "description": (
+            "Author a feature SPEC onto your Case before decomposing (M4). For a feature-sized "
+            "intent, do NOT dive straight into dispatch: author a spec (reuse the draft_packet "
+            "contract — real_objective vs literal_request vs interpreted_task + forced "
+            "assumptions/drift_risks), recorded as a durable artifact + spec.authored event. "
+            "This does NOT grade the spec; a SEPARATE reviewer scores it (record_spec_review). "
+            "A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Manager's OWN Case id the spec belongs to."},
+                "spec_id": {"type": "string", "description": "A stable id for this spec (e.g. 'spec-feature-x')."},
+                "body": {"type": "string", "description": "The authored spec text (draft_packet structure)."},
+                "title": {"type": "string", "description": "Optional short title for the spec."},
+            },
+            "required": ["case_id", "spec_id", "body"],
+        },
+    },
+    {
+        "name": "publish_artifact",
+        "description": (
+            "Publish an arbitrary durable artifact (kind/title/uri) onto your Case as evidence "
+            "(artifact link + artifact.published event). A 404/disabled reason means "
+            "SPEC_AUTHORING_ENABLED is OFF."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Manager's OWN Case id."},
+                "artifact_id": {"type": "string", "description": "A stable id for the artifact."},
+                "kind": {"type": "string", "description": "Free label for the artifact kind (default 'artifact')."},
+                "title": {"type": "string", "description": "Optional short title."},
+                "uri": {"type": "string", "description": "Optional pointer (path/URL) to the artifact body."},
+            },
+            "required": ["case_id", "artifact_id"],
+        },
+    },
+    {
+        "name": "record_spec_review",
+        "description": (
+            "Score a Case's spec against the R1 rubric — the SEPARATE plan-reviewer seat, NOT "
+            "the author grading its own spec. `scores` maps six dimensions (objective_clarity, "
+            "scope_boundaries, decomposability, acceptance_testability, dependency_correctness, "
+            "risks_and_assumptions) each to 0-2. The verdict is COMPUTED (>=8/12 AND no zero on "
+            "objective_clarity or decomposability): a below-threshold or critical-zero score "
+            "BLOCKS decomposition. A 404/disabled reason means SPEC_AUTHORING_ENABLED is OFF."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Case id whose spec is being scored."},
+                "spec_id": {"type": "string", "description": "The spec id being scored (from publish_spec)."},
+                "scores": {
+                    "type": "object",
+                    "description": "Map each rubric dimension to an integer 0-2.",
+                    "properties": {d: {"type": "integer"} for d in _SPEC_REVIEW_DIMENSIONS},
+                },
+                "reason": {"type": "string", "description": "Optional note explaining the score."},
+                "reviewer": {"type": "string", "description": "The reviewing seat (should differ from the author)."},
+            },
+            "required": ["case_id", "spec_id", "scores"],
+        },
+    },
+    {
+        "name": "decompose_case",
+        "description": (
+            "Expand an APPROVED objective into a task-DAG on this ONE Case — N task_attached "
+            "links with dependency edges, NOT N scattered child cases (orphan flow_runs are the "
+            "anti-goal M2.5 exists to prevent). Each task is {task_key, objective, depends_on: "
+            "[task_key,...], ...hints}. REFUSED unless the spec's latest scored review PASSED and "
+            "the DAG is acyclic + every depends_on names a known task_key. Creates ZERO new "
+            "flow_runs. Dispatch the returned topological order in sequence. A 404/disabled reason "
+            "means SPEC_AUTHORING_ENABLED is OFF."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Manager's OWN Case id to decompose."},
+                "spec_id": {"type": "string", "description": "The APPROVED spec id (must have a passing spec-review)."},
+                "tasks": {
+                    "type": "array",
+                    "description": "The DAG nodes.",
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["case_id", "spec_id", "tasks"],
+        },
+    },
+    {
         "name": "release_worker",
         "description": (
             "Close ONE worker session when YOU have decided that worker is truly done — the "
@@ -1299,6 +1520,10 @@ _TOOL_IMPLS = {
     "record_review": _record_review,
     "reconcile_waits": _reconcile_waits,
     "arm_wait_group": _arm_wait_group,
+    "publish_spec": _publish_spec,
+    "publish_artifact": _publish_artifact,
+    "record_spec_review": _record_spec_review,
+    "decompose_case": _decompose_case,
     "release_worker": _release_worker,
 }
 
