@@ -40,6 +40,7 @@ import type {
   RawCostTopResponse,
   RawCostProjectsResponse,
   RawCaseUsageResponse,
+  RawCostAlertsResponse,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -689,6 +690,12 @@ export const api = {
       `/api/cases/${encodeURIComponent(flowRunId)}/usage`,
       token,
     );
+  },
+
+  /** GET /api/cost/alerts — budget/burn-rate alerts (billable-USD only) plus the
+   *  enforcement surface. Read-only; fires only when a budget knob is set. */
+  async costAlerts(token: string): Promise<RawCostAlertsResponse> {
+    return get<RawCostAlertsResponse>(`/api/cost/alerts`, token);
   },
 };
 

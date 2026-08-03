@@ -234,6 +234,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "M4 spec-authoring stage, scored spec-review gate, publish_artifact, and the decomposer.",
     },
+    "COST_ALERT_ENFORCE_ENABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "A65 cost-alert enforcement: when ON, alerting surfaces the existing SDK governor ceiling (sdk_max_budget_usd) as the lever. Never a new kill mechanism.",
+    },
     "HARNESS_LEVEL3_GUARD": {
         "default": "0",
         "effect_scope": "live",

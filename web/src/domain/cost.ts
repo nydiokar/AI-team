@@ -116,3 +116,36 @@ export interface CaseUsage {
   };
   totals: CostBucket;
 }
+
+// ── Budget / burn-rate alerts (P3) ──────────────────────────────────────────
+export type CostAlertRule = "daily_budget" | "session_burn" | "case_total";
+
+/** One fired alert: the read-model's known USD crossed a configured budget. */
+export interface CostAlert {
+  rule: CostAlertRule;
+  scope: string;
+  valueUsd: number;
+  budgetUsd: number;
+  pct: number;
+}
+
+export interface CostBudgetKnobs {
+  dailyBudgetUsd: number;
+  sessionBurnUsd: number;
+  caseTotalUsd: number;
+}
+
+/** Enforcement never adds a new kill mechanism — it surfaces the existing SDK
+ *  governor ceiling and stays flag-gated OFF by default. */
+export interface CostEnforcement {
+  enabled: boolean;
+  mechanism: string;
+  governorSdkMaxBudgetUsd: number | null;
+}
+
+export interface CostAlerts {
+  enabled: boolean;
+  budgets: CostBudgetKnobs;
+  alerts: CostAlert[];
+  enforcement: CostEnforcement;
+}

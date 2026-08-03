@@ -11,12 +11,14 @@ import {
   toCostTop,
   toCostProjects,
   toCaseUsage,
+  toCostAlerts,
 } from "./costAdapter";
 import type {
   RawCostExplorerResponse,
   RawCostTopResponse,
   RawCostProjectsResponse,
   RawCaseUsageResponse,
+  RawCostAlertsResponse,
 } from "./rawApi";
 
 const T = (total = 100, extra: Partial<Record<string, number>> = {}) => ({
@@ -270,5 +272,59 @@ describe("toCaseUsage", () => {
     });
     expect(out.mgrVsWorkers.workersSharePct).toBeNull();
     expect(out.mgrVsWorkers.workerSessions).toBe(0);
+  });
+});
+
+describe("toCostAlerts — P3 budget/burn-rate alerts", () => {
+  const raw: RawCostAlertsResponse = {
+    ok: true,
+    enabled: true,
+    budgets: { daily_budget_usd: 100, session_burn_usd: 0, case_total_usd: 0 },
+    alerts: [
+      { rule: "daily_budget", scope: "today (UTC)", value_usd: 2244.3, budget_usd: 100, pct: 2244.3 },
+      { rule: "session_burn", scope: "sess-1", value_usd: 73.6, budget_usd: 50, pct: 147.2 },
+    ],
+    enforcement: {
+      enabled: false,
+      mechanism: "sdk_max_budget_usd",
+      governor_sdk_max_budget_usd: null,
+    },
+  };
+
+  it("maps fired alerts, budgets and the enforcement surface honestly", () => {
+    const out = toCostAlerts(raw);
+    expect(out.enabled).toBe(true);
+    expect(out.budgets).toEqual({ dailyBudgetUsd: 100, sessionBurnUsd: 0, caseTotalUsd: 0 });
+    expect(out.alerts[0]).toEqual({
+      rule: "daily_budget",
+      scope: "today (UTC)",
+      valueUsd: 2244.3,
+      budgetUsd: 100,
+      pct: 2244.3,
+    });
+    expect(out.alerts[1].rule).toBe("session_burn");
+    expect(out.enforcement.enabled).toBe(false);
+    expect(out.enforcement.mechanism).toBe("sdk_max_budget_usd");
+    expect(out.enforcement.governorSdkMaxBudgetUsd).toBeNull();
+  });
+
+  it("normalizes an unknown rule to daily_budget (never invents)", () => {
+    const out = toCostAlerts({ ...raw, alerts: [{ ...raw.alerts[0], rule: "bogus" }] });
+    expect(out.alerts[0].rule).toBe("daily_budget");
+  });
+
+  it("defaults absent fields instead of guessing", () => {
+    const out = toCostAlerts({
+      ok: true,
+      enabled: false,
+      budgets: undefined as never,
+      alerts: [],
+      enforcement: undefined as never,
+    });
+    expect(out.enabled).toBe(false);
+    expect(out.budgets).toEqual({ dailyBudgetUsd: 0, sessionBurnUsd: 0, caseTotalUsd: 0 });
+    expect(out.alerts).toEqual([]);
+    expect(out.enforcement.enabled).toBe(false);
+    expect(out.enforcement.governorSdkMaxBudgetUsd).toBeNull();
   });
 });
