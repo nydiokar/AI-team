@@ -190,6 +190,43 @@ class CaseWaitGroupBody(BaseModel):
     member_task_ids: List[str]
 
 
+class CasePublishArtifactBody(BaseModel):
+    """[A56/M4] Publish a durable artifact onto a Case. ``artifact_id`` names the
+    artifact; ``kind`` is a free label (defaults to 'artifact'); ``title``/``uri`` are
+    optional; ``metadata`` is verbatim JSON evidence."""
+    artifact_id: str
+    kind: str = "artifact"
+    title: Optional[str] = None
+    uri: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class CaseSpecBody(BaseModel):
+    """[A56/M4] Author a spec onto a Case (durable evidence). ``spec_id`` names it;
+    ``body`` is the authored spec text; ``title`` is an optional short label."""
+    spec_id: str
+    body: str
+    title: Optional[str] = None
+
+
+class CaseSpecReviewBody(BaseModel):
+    """[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat. ``spec_id``
+    is the spec being scored; ``scores`` maps each rubric dimension to 0–2; ``reason``
+    is an optional note; ``reviewer`` names the (separate) reviewing seat."""
+    spec_id: str
+    scores: Dict[str, Any]
+    reason: Optional[str] = None
+    reviewer: str = "reviewer"
+
+
+class CaseDecomposeBody(BaseModel):
+    """[A56/M4] Decompose an APPROVED objective into a task-DAG on ONE Case.
+    ``spec_id`` is the approved spec; ``tasks`` is the list of task nodes, each
+    ``{task_key, objective, depends_on: [...], ...hints}``."""
+    spec_id: str
+    tasks: List[Dict[str, Any]]
+
+
 class CaseInterruptBody(BaseModel):
     """[A53] Kill a Case: cancel its in-flight worker task(s), mark it blocked
     (resumable), record flow.interrupted, escalate once. ``reason`` is an optional
@@ -1483,6 +1520,64 @@ def build_control_api(orchestrator) -> FastAPI:
         result = orchestrator.arm_wait_group(
             case_id, body.wait_group_id, cond, body.member_task_ids, actor="manager",
         )
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/artifacts", dependencies=[Depends(_require_auth)])
+    def api_publish_artifact(case_id: str, body: CasePublishArtifactBody) -> JSONResponse:
+        """[A56/M4] Publish a durable artifact onto a Case (``artifact`` flow_link +
+        ``artifact.published`` event). Gated by ``SPEC_AUTHORING_ENABLED`` (404 when
+        OFF ⇒ byte-identical). The write is also flag-gated in the db layer."""
+        from src.control.db import spec_authoring_enabled
+        if not spec_authoring_enabled():
+            raise HTTPException(status_code=404, detail="not_found")
+        result = orchestrator.publish_artifact(
+            case_id, body.artifact_id, kind=body.kind, title=body.title,
+            uri=body.uri, actor="manager", metadata=body.metadata,
+        )
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/spec", dependencies=[Depends(_require_auth)])
+    def api_publish_spec(case_id: str, body: CaseSpecBody) -> JSONResponse:
+        """[A56/M4] Author a spec onto a Case as durable evidence (``spec.authored``).
+        Gated by ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
+        from src.control.db import spec_authoring_enabled
+        if not spec_authoring_enabled():
+            raise HTTPException(status_code=404, detail="not_found")
+        result = orchestrator.publish_spec(
+            case_id, body.spec_id, body.body, title=body.title, actor="manager",
+        )
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/spec-review", dependencies=[Depends(_require_auth)])
+    def api_record_spec_review(case_id: str, body: CaseSpecReviewBody) -> JSONResponse:
+        """[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat; the
+        verdict (accepted|rework_requested) is computed from the scores, not trusted.
+        Records ``spec.review_scored`` + the canonical ``review.*`` event. Gated by
+        ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
+        from src.control.db import spec_authoring_enabled
+        if not spec_authoring_enabled():
+            raise HTTPException(status_code=404, detail="not_found")
+        result = orchestrator.record_spec_review(
+            case_id, body.spec_id, body.scores, reviewer=body.reviewer, reason=body.reason,
+        )
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/decompose", dependencies=[Depends(_require_auth)])
+    def api_decompose_case(case_id: str, body: CaseDecomposeBody) -> JSONResponse:
+        """[A56/M4] Expand an APPROVED objective into a task-DAG of N ``task_attached``
+        links on ONE Case (no orphan flow_runs). REFUSES (422 with a structured reason)
+        unless the spec's latest scored review PASSED and the DAG is acyclic/well-formed.
+        Gated by ``SPEC_AUTHORING_ENABLED`` (404 when OFF ⇒ byte-identical)."""
+        from src.control.db import spec_authoring_enabled
+        if not spec_authoring_enabled():
+            raise HTTPException(status_code=404, detail="not_found")
+        result = orchestrator.decompose_case(
+            case_id, body.spec_id, body.tasks, actor="manager",
+        )
+        if not result.get("ok"):
+            # A blocked decomposition (unapproved spec / cyclic / malformed DAG) is a
+            # structured refusal, not a server error — 422 so the caller can react.
+            raise HTTPException(status_code=422, detail=result)
         return JSONResponse(result)
 
     @app.get("/api/cases/{case_id}/brief", dependencies=[Depends(_require_auth)])

@@ -4,7 +4,7 @@
 
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
-| ready | AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER | 2026-07-30 | 2026-08-03 | AGENT_52_M34_JOB1_ADOPTION | — |  |
+| active | AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER | 2026-07-30 | 2026-08-03 | AGENT_52_M34_JOB1_ADOPTION | — |  |
 | ready | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-03 | — | — |  |
 | ready | AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN | 2026-08-01 | 2026-08-03 | — | — |  |
 | ready | AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT | 2026-08-01 | 2026-08-03 | — | — |  |
