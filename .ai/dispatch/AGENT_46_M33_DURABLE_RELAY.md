@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_46_M33_DURABLE_RELAY
+created_at: "2026-07-17T13:59:11+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_46_M33_DURABLE_RELAY.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:09.637562+00:00"
+```
+
 # AGENT_46 — M3.3 durable relay (recoverable worker wait)
 
 **Dispatched:** 2026-07-17

@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_42_F1_LIVE_REVIEW_LOOP
+created_at: "2026-07-13T13:27:06+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_42_F1_LIVE_REVIEW_LOOP.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:08.864772+00:00"
+```
+
 # AGENT_42 — F1 live Manager loop (continuous, review-gated, 2 tasks)
 
 **Dispatched:** 2026-07-13

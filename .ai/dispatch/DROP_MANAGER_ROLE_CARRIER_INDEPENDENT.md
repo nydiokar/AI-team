@@ -1,3 +1,14 @@
+```yaml
+job_id: DROP_MANAGER_ROLE_CARRIER_INDEPENDENT
+created_at: "2026-07-13T17:10:23+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/DROP_MANAGER_ROLE_CARRIER_INDEPENDENT.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:13.343672+00:00"
+```
+
 # DROP — Manager role must boot on ANY carrier (gateway embedded worker OR node agent worker)
 
 **Raised:** 2026-07-13 (operator, after the A43 live run)

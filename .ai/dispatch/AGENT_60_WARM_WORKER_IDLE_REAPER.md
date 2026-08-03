@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_60_WARM_WORKER_IDLE_REAPER
+created_at: "2026-07-30T03:07:45+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: ready              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: []                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:20:22.819046+00:00"
+```
+
 # DISPATCH — A60 · Warm-worker idle-reaper (§7 resource leak)
 
 **Level:** 3 (worker lifecycle) · **Type:** code

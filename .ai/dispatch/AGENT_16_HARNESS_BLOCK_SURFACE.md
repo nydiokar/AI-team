@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_16_HARNESS_BLOCK_SURFACE
+created_at: "2026-08-03T13:05:59.088644+00:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: src/control/control_api.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:24:45.745476+00:00"
+```
+
 # A16 — WebUI-first surfacing of the Level-3 admission block
 
 > ⚠️ **TEST COST GUARD.** No paid Claude/Codex CLI in tests. Do **not** run the

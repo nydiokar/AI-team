@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_31_M3_PHASE30_MCP_MANAGER
+created_at: "2026-07-09T22:37:22+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: scripts/mcp_manager.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:24:45.616313+00:00"
+```
+
 # A31 — M3 Phase 3.0: `mcp_manager` tool surface (F4 spike, part 1)
 
 **Level:** 3 (code) · **Branch:** `feat/m3-phase30-mcp-manager` · **Date:** 2026-07-09

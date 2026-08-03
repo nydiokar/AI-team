@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_32_LINEAGE_ENDPOINT
+created_at: "2026-07-10T01:07:02+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_32_LINEAGE_ENDPOINT.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:07.068928+00:00"
+```
+
 # A32 — M3 Phase 3.0: lineage endpoint extension (`parent_flow_run_id` on `/api/instructions`)
 
 **Level:** 3 (code) · **Branch:** `feat/m3-phase30-mcp-manager` (continues A31) · **Date:** 2026-07-10

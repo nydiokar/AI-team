@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_59_ACTIVITY_FORWARDER_TESTS
+created_at: "2026-07-30T03:07:45+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_59_ACTIVITY_FORWARDER_TESTS.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:11.505781+00:00"
+```
+
 # DISPATCH — A59 · A17 orphan drift: `_ActivityForwarder` keep-with-tests
 
 **Level:** 3 (live remote-worker path) · **Type:** code (test-first)

@@ -1,3 +1,14 @@
+```yaml
+job_id: DROP_TIMEZONE_NATIVE_TIME
+created_at: "2026-07-13T17:10:23+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: src/core/timeutil.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:24:45.485547+00:00"
+```
+
 # DROP — Timezone: one clock, native local time, everywhere (kill the ambiguity for good)
 
 **Raised:** 2026-07-13 (operator, live incident debrief)

@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_57_M4_HYBRID_EXECUTOR_SPIKE
+created_at: "2026-07-30T02:34:12+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: blocked              # ready | active | blocked | done | dead
+owner: ""
+depends_on: AGENT_55_M34_JOB3_CRASH_RESPAWN
+results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: []                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:31.071933+00:00"
+```
+
 # DISPATCH — A57 · M4 hybrid-executor spike (invoke, don't build) — GATED
 
 **Level:** 3 (SDK capability spike) · **Type:** spike (investigation → written verdict, not a full build)

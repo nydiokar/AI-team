@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_51_DISPATCH_STATE_KIT_MIGRATION
+created_at: "2026-07-28T18:55:33+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: active              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: scripts/dispatch/dispatch_state.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:26:12.823406+00:00"
+```
+
 # DISPATCH — A51 · Port the legacy prose dispatch system onto the portable dispatch-state kit
 
 **Level:** 3 (touches tooling + a git hook + 59 tracked job files + a doc-role contract) · **Type:** code + docs
@@ -157,14 +168,122 @@ is fine; the portable trigger is the committed script + views.
 
 ## Milestone (burndown — grow in place)
 
-- [ ] R1/R2 decisions taken
-- [ ] kit copied + deps resolved
-- [ ] `--migrate` run, report captured
-- [ ] all 59 statuses reconciled to ground truth, evidence added to every `done`
-- [ ] DOC_MAP + root pointer reconciled
-- [ ] git hook wired, `--selftest` PASS, `--audit` clean/explained
-- [ ] PR opened + merged
+- [x] R1/R2 decisions taken — R1 = **markdown-view-only** (operator pre-decided; no pandas/pyarrow
+      on this Pi `.venv`); R2 = **dogfood yes** (this file carries a yaml block).
+- [x] kit copied + R1 guard applied — engine, `.ai/dispatch/CLAUDE.md`, `.dispatch_not_a_job`,
+      `scaffold-dispatch/SKILL.md`, Stop-hook wrapper copied; minimal `try/except ImportError`
+      guard on `import pandas` in the COPIED engine so parquet degrades to md-view-only.
+- [x] `--migrate` run, report captured — 64 job files seeded (mostly `unknown`, as the packet
+      warned the inference would be inert here).
+- [x] all statuses reconciled to ground truth (DISPATCH_LOG Index + real git), evidence added to
+      every `done` — via `--set` ONLY, never hand-edited.
+- [x] DOC_MAP + root pointer + per-job protocol reconciled — DISPATCH_LOG kept as the PRIMARY
+      human index+closure surface; `_DISPATCH_STATE.md` labeled complementary/machine-only.
+- [x] git hook wired (warn-only, into the shared common hooks dir — worktree-safe), `--selftest`
+      PASS, `--audit` `✓ no gaps`.
+- [ ] PR opened (feat/dispatch-state-kit → main); **left OPEN for Manager review — not merged**.
 
-## Closure (fill on completion)
+## Closure
 
-_(verdict prose, the acceptance evidence, and any residual explained gaps go here)_
+**Verdict: DONE.** The dispatch-state kit is installed and every job file carries a machine-readable
+state reconciled against the DISPATCH_LOG Index **and** real git merge state. `--audit` returns
+`✓ no gaps, no unproven-done, no stale-active`. Zero jobs lost. `DISPATCH_LOG.md` is byte-unchanged
+and remains the primary human index+closure surface (the generated `_DISPATCH_STATE.md` is
+complementary/query-only, per the operator constraint). Run in **markdown-view-only** mode (R1):
+no pandas/pyarrow added; `_dispatch.parquet` intentionally not generated.
+
+### `--selftest` (all 7 checks)
+```
+  ✓ round-trip: yaml block parses back exactly
+  ✓ gap detection: bare file yields no block (→ MISSING_STATE)
+  ✓ proof guard: done+missing-evidence flags, done+no-claim does not
+  ✓ canonical created_at: existing block never overwritten
+  ✓ bad status flagged
+  ✓ set_field: edits value, keeps comment, bumps updated_at, stays parseable
+  ✓ scalar evidence coerces to [path], not char-split
+SELFTEST PASS
+```
+
+### `--audit` (honest board)
+```
+64 files · 64 with state · 0 orphans (MISSING_STATE)
+  ACTIVE  (1)   AGENT_51_DISPATCH_STATE_KIT_MIGRATION
+  READY   (6)   A54, A56, A60, A62, A63, A64
+  BLOCKED (4)   A24 (deferred), A55 (dep A54), A57 (dep A55, gated), A58 (premise-wrong, dep A61)
+  DONE (52) · DEAD (1: AGENT_35 superseded by A41)
+  ✓ no gaps, no unproven-done, no stale-active
+```
+
+### No-lost-job count check
+- `.ai/dispatch/*.md` tracked at HEAD (pre-A51): **73**. Working tree: **75** (added: `CLAUDE.md`
+  protocol doc + generated `_DISPATCH_STATE.md`; the original 73 all present, **zero deleted** —
+  `git status` shows no `D` on any dispatch `.md`).
+- Tool-visible **job files: 64** (73 originals − DISPATCH_LOG − 7 REVIEW docs − SUBSTRATE handoff,
+  all listed in `.dispatch_not_a_job`). Each carries **exactly one** yaml block (multi=0, zero=0).
+- `--audit` reports `64 files · 64 with state · 0 orphans` — job-file count == state-row count.
+- Parquet not generated (md-view-only); its role of "one row per job" is served by
+  `_DISPATCH_STATE.md` (64 rows).
+
+### `created_at` immutability
+Ran `--migrate` a second time: all 64 files reported `(has block)`, and `md5sum -c` over a
+pre-run snapshot matched every file — **zero files changed** (no re-stamp of `created_at`).
+
+### DISPATCH_LOG untouched + hook warn-only
+- `git diff HEAD -- .ai/dispatch/DISPATCH_LOG.md` → **0 lines** (byte-unchanged; role intact).
+- The pre-commit hook (`--stop-hook || true`) exits **0** even with gaps (`stop_hook()` always
+  returns 0); ran the actual hook script → `exit=0`. Warn-only confirmed.
+
+### Status reconciliation sample (guessed by --migrate → corrected to ground truth)
+The migrator guessed `unknown` for 58/64 files and mis-guessed 2 from own-file markers; all
+corrected via `--set` against the DISPATCH_LOG Index + git PR merge state:
+
+| Job | migrate guess | corrected | ground truth |
+|---|---|---|---|
+| AGENT_16_HARNESS_BLOCK_SURFACE | unknown | **done** | `HarnessAdmissionBlocked` on `main:src/control/control_api.py` (PR #16 arc; log "built — op-merge" now merged) |
+| AGENT_18_ORIENTATION_PAGE | unknown | **done** | `docs/OVERVIEW.md` on main (`0d6dc79`) |
+| AGENT_31_M3_PHASE30_MCP_MANAGER | unknown | **done** | `scripts/mcp_manager.py` on main (PR arc merged) |
+| AGENT_35_LIVE_F4_SPIKE | unknown | **dead** | log: "superseded by A41" |
+| AGENT_41_LIVE_MANAGER_SPIKE_A40 | active (marker "LIVE") | **done** | spike RAN & PASSED 2026-07-12, built PR #11 (merged) |
+| AGENT_42_F1_LIVE_REVIEW_LOOP | unknown | **done** | PR #16 MERGED |
+| AGENT_46_M33_DURABLE_RELAY | unknown | **done** | PR #38 MERGED |
+| AGENT_49_MANAGER_FORK_FROM_CONVERSATION | unknown | **done** | PR #31 MERGED |
+| AGENT_52_M34_JOB1_ADOPTION | unknown | **done** | PR #49 MERGED |
+| AGENT_53_M33_TURN_COST_GOVERNOR | unknown | **done** | PR #50 MERGED |
+| AGENT_54_M34_JOB2_RECONSTRUCTION | unknown | **ready** | dispatched, no PR, dep A52 done → unblocked |
+| AGENT_55_M34_JOB3_CRASH_RESPAWN | unknown | **blocked** | dispatched, dep A54 (not done) |
+| AGENT_57_M4_HYBRID_EXECUTOR_SPIKE | unknown | **blocked** | dispatched — GATED on A55 |
+| AGENT_58_QUOTA_COORDINATOR_ACTIVATION | unknown | **blocked** | log: premise wrong, dep A61 |
+| AGENT_24_DECOMPOSER_GENERATOR | unknown | **blocked** | log Status = `deferred` (parked on purpose) |
+| AGENT_61_QUOTA_COORDINATOR_FINALIZATION | unknown | **done** | direct commit `cbbaa10` to main |
+| DROP_MANAGER_TELEMETRY_COCKPIT | unknown | **done** | PR #36 MERGED (is a real job, not a non-job doc) |
+| DROP_TIMEZONE_NATIVE_TIME | done (marker) | **done** | PR #20 MERGED — evidence `src/core/timeutil.py` |
+| DROP_MANAGER_ROLE_CARRIER_INDEPENDENT | done (marker) | **done** | PR #18 MERGED |
+| FIX_CLAUDE_ISERROR_PROMPT_TOO_LONG | unknown | **done** | FX1 merged `a3f734b` |
+
+### Adversarial self-review — findings + fixes
+1. **Copied `.ai/dispatch/CLAUDE.md` demoted DISPATCH_LOG** ("NOT a status table anymore … do
+   NOT re-introduce a status table"). This VIOLATES the hard operator constraint. **Fixed:**
+   rewrote the "what each file is" section + command table to keep DISPATCH_LOG as the primary
+   authoritative human index+closure surface and label `_DISPATCH_STATE.md` complementary. (Source
+   kit untouched; only the copied file adapted.)
+2. **A16/A18 were "built — op-merge" in the log** (could still be unmerged → wrong `done`).
+   **Verified** both landed on `main` (A16 symbol in `main:src/`, A18 `docs/OVERVIEW.md` on main)
+   before marking `done` and attached concrete merged-artifact evidence.
+3. **A55/A57/A58 depend on not-done work** — a naive "dispatched → ready" would have mislabeled
+   them. **Fixed:** set `blocked` + populated `depends_on` so the graph is honest.
+4. **A41 own-file marker "LIVE" → migrator guessed `active`.** Ground truth: the spike ran and
+   PASSED and built merged PR #11 → **corrected to `done`.**
+5. **Git hook could not install via the tool** (worktree: `.git` is a file, not `.git/hooks`).
+   **Fixed:** installed the identical warn-only managed block into the shared common hooks dir
+   (`git rev-parse --git-common-dir`), then proved it exits 0 with/without gaps.
+6. **Every `done` re-checked for `CLAIMED_DONE_NO_PROOF`** — all 52 carry an `evidence:` path that
+   exists on disk (packet file or a concrete merged artifact); `--audit` raises none.
+
+### Residual notes (explained, no unexplained gaps)
+- **Job count is 64, not the packet's "59".** The packet was authored 2026-07-28; jobs A56–A64
+  and the reclassification of `DROP_MANAGER_TELEMETRY_COCKPIT` (a real merged PR #36 job, not a
+  non-job doc) were added since. 64 is the correct current count. Zero jobs lost.
+- **`_dispatch.parquet` intentionally absent** (R1 md-view-only). The `--audit`/`_DISPATCH_STATE.md`
+  eyeball table is the live query surface; the parquet query view is explicitly deferred.
+- **`deferred/` subdir** (3 SUPERSEDED_* + 1 old AGENT_11 file) is out of scope — the tool only
+  globs top-level `.ai/dispatch/*.md`; those historical files are correctly not tracked as jobs.

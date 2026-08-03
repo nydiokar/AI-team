@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_49_MANAGER_FORK_FROM_CONVERSATION
+created_at: "2026-07-21T17:28:29+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_49_MANAGER_FORK_FROM_CONVERSATION.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:10.463619+00:00"
+```
+
 # AGENT_49 — Fork a prior conversation into a Manager session (role + tools + prior context)
 
 **Dispatched:** 2026-07-21

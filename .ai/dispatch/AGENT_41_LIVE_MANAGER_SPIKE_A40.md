@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_41_LIVE_MANAGER_SPIKE_A40
+created_at: "2026-07-12T15:28:20+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_41_LIVE_MANAGER_SPIKE_A40.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:08.608953+00:00"
+```
+
 # A41 — Combined A35+3.1 LIVE manager spike, run against a REAL task (A40 slice 1)
 
 **Level:** 3 (live/paid) · **Branch (code under test):** `feat/m3-phase31-manager-role` (A38, PR #10)

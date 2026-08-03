@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_43_LIVE_REWORK_RESTART_HARDENING
+created_at: "2026-07-13T17:10:23+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_43_LIVE_REWORK_RESTART_HARDENING.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:09.121859+00:00"
+```
+
 # A43 — Live rework-cycle proof + restart-incident hardening
 
 **Date:** 2026-07-13 · **Level:** 3 · **Status:** merged (PR #17) · **Branch:** `feat/manager-restart-resilience` (merged, deleted)

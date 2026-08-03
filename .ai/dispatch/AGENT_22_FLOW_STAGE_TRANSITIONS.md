@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_22_FLOW_STAGE_TRANSITIONS
+created_at: "2026-07-07T02:57:26+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_22_FLOW_STAGE_TRANSITIONS.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:04.921703+00:00"
+```
+
 # A22 — Authoritative stage transitions (shadow, flag-guarded) (M1)
 
 **Milestone:** v0.6 M1. **Level:** 3. **Branch:** code → `feat/m1-stage-transitions` → PR.

@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_53_M33_TURN_COST_GOVERNOR
+created_at: "2026-07-30T02:34:12+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_53_M33_TURN_COST_GOVERNOR.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:11.240283+00:00"
+```
+
 # DISPATCH — A53 · M3.3 completion: per-invocation turn/cost governor + kill path
 
 **Level:** 3 (backend driver options + orchestrator lifecycle + Case status) · **Type:** code

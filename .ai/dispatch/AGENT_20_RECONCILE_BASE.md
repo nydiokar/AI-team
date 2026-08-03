@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_20_RECONCILE_BASE
+created_at: "2026-07-07T02:57:26+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_20_RECONCILE_BASE.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:20:40.887778+00:00"
+```
+
 # A20 — Reconcile the base + ready the spec (M0) before flow-machine build
 
 **Milestone:** v0.6 M0 (`docs/Task_Harness_v0.6_AUTOMATION.md` §3). **Level:** 1 (docs) +

@@ -1,3 +1,14 @@
+```yaml
+job_id: AGENT_27_WORK_READ_MODEL_API
+created_at: "2026-07-08T14:59:26+03:00"        # CANONICAL — set once at dispatch, never derive again
+status: done              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .ai/dispatch/AGENT_27_WORK_READ_MODEL_API.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-03T13:21:06.015925+00:00"
+```
+
 # A27 — Work read model API: ledger, timeline, and graph over authoritative links
 
 **Dispatch created:** 2026-07-08
