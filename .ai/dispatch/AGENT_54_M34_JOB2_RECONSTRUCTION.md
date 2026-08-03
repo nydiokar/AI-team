@@ -66,11 +66,46 @@ Respawning a dead session (A55); M4.
 
 ---
 ## Milestone (burndown)
-- [ ] get_case_brief db read (single bounded query set)
-- [ ] get_case_brief MCP tool
-- [ ] boot reconcile + re-arm hook, idempotent
-- [ ] e2e green, byte-identical when flags OFF
-- [ ] PR opened + merged
+- [x] get_case_brief db read (single bounded query set) — `db.get_case_brief` + orchestrator seam `get_case_brief`
+- [x] get_case_brief MCP tool — `scripts/mcp_manager.py` (`GET /api/cases/{id}/brief` route)
+- [x] boot reconcile + re-arm hook, idempotent — `db.boot_reconcile_case` + orchestrator seam + driver `_boot_reconcile_manager_case` on the real role-boot path
+- [x] e2e green, byte-identical when flags OFF — `tests/test_case_brief.py` (6) + route tests in `tests/test_control_api_wait_group.py` (6 new)
+- [x] PR opened (NOT merged — left open for the Manager's review)
 
 ## Closure (fill on completion)
-_(verdict + evidence)_
+**Verdict: DELIVERED.** A Manager that lost its context can reconstruct a Case from
+the DB alone in ONE bounded read (`get_case_brief`, exposed as an MCP tool over
+`GET /api/cases/{id}/brief`), and a Manager (re)booting onto an existing OPEN Case
+auto-reconciles its waits + re-arms its live wait-groups idempotently via
+`db.boot_reconcile_case`, wired into the REAL role-boot path
+(`claude_driver._get_or_create` → `_boot_reconcile_manager_case`, gated so
+flag-OFF is byte-identical).
+
+**The brief's full field list** (all FROM THE DB ALONE):
+`case_id`, `objective`, `status`, `current_stage`, `completion_criteria` (list),
+`round_cap`, `rounds_used`, `rounds_remaining`, `workers` (per dispatched worker:
+`task_id`/`finished`/`outcome`/`latest_review`), `worker_session_ids`,
+`latest_review` (Case-level newest verdict + reason + event_type), `open_waits`
+(pending, still running), `ready_waits` (finished, reconcile them), `wait_groups`
+(per armed group: `wait_group_id`/`condition`/`members`/`satisfied`/
+`presented_task_ids`/`retire`).
+
+**Note (honesty):** `record_review` writes review.* events at Case level with no
+`entity_id`, so per-worker verdict tagging degrades to `latest_review: None` on most
+workers and the authoritative verdict is the Case-level `latest_review`. The brief
+buckets by task `entity_id` when present (forward-compatible) and always exposes the
+Case-level verdict. Turn/cost caps are NOT in the schema (A53 governor lives at the
+SDK-driver via config), so only the round cap is surfaced — as the packet allows.
+
+**pytest evidence** (from inside the worktree, worktree `src/` confirmed exercised
+via `src.control.db.__file__` → the worktree path):
+- `tests/test_case_brief.py` — 6 passed (full-state reconstruction, unknown→None,
+  bounded-query-set N+1 proof via `set_trace_callback` execute-count equality for
+  2 vs 12 workers, idempotent double-boot reconcile+re-arm, read-only-no-writes,
+  relay-OFF no-op).
+- `tests/test_control_api_wait_group.py` — 25 passed (12 pre-existing + 6 new
+  brief/boot-reconcile route tests: auth, read-not-flag-gated, 404 unknown,
+  404-when-relay-off, delegate-on).
+- Adjacent touched suites all green: continuation/durable_relay/flow_links_events/
+  case_closure/case_round_cap/claude_driver/manager_role — full targeted run
+  **188 passed**.

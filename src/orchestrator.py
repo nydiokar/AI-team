@@ -2867,6 +2867,37 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"ok": False, "reason": "db_unavailable"}
         return db.reconcile_worker_waits(flow_run_id, actor=actor)
 
+    def get_case_brief(self, flow_run_id: str) -> Dict[str, Any]:
+        """[A54] Orchestrator seam — the full working state of a Case from the DB
+        alone (:func:`db.get_case_brief`), for a Manager reconstructing after a
+        context reset. Read-only; mirrors the ``reconcile_worker_waits`` seam.
+        Returns ``{"ok": True, "brief": {...}}`` or ``{"ok": False, reason}`` for an
+        unknown Case / unavailable db."""
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        brief = db.get_case_brief(flow_run_id)
+        if brief is None:
+            return {"ok": False, "reason": "case_not_found"}
+        return {"ok": True, "brief": brief}
+
+    def boot_reconcile_case(
+        self,
+        flow_run_id: str,
+        *,
+        actor: str = "manager",
+    ) -> Dict[str, Any]:
+        """[A54] Orchestrator seam — the boot-time reconcile+re-arm hook
+        (:func:`db.boot_reconcile_case`) a resuming Manager fires onto an existing
+        OPEN Case. Idempotent + flag-gated in the db layer. Mirrors the
+        ``reconcile_worker_waits`` seam."""
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        return db.boot_reconcile_case(flow_run_id, actor=actor)
+
     def _clear_session_case_affiliation(self, session_id: str, case_id: str) -> None:
         """[A37] Clear a session's durable Case affiliation on Case close.
 

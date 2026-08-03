@@ -727,6 +727,76 @@ def _get_case(args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: get_case_brief  (A54 — durable single-call Case reconstruction)
+# ---------------------------------------------------------------------------
+
+def _get_case_brief(args: Dict[str, Any]) -> str:
+    """[A54] The FULL working state of a Case from the DB alone (read-only over
+    GET /api/cases/{case_id}/brief).
+
+    This is the Manager's single 'where am I on this Case' read when it has lost
+    its in-process context (compaction, restart, respawn): objective + criteria +
+    round cap + rounds used + every dispatched worker (finished? latest verdict?) +
+    outstanding/ready waits + armed wait-groups and whether each is satisfied — all
+    reconstructed from the durable ledger, not lost memory. Prefer this over
+    get_case when resuming a Case; get_case is the minimal status read."""
+    case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
+    result = _api_request("GET", f"/api/cases/{urllib.parse.quote(case_id)}/brief")
+    brief = result.get("brief") or {}
+    if not brief:
+        return f"get_case_brief: no Case found for {case_id!r} (unknown or unavailable)."
+
+    workers = brief.get("workers") or []
+    groups = brief.get("wait_groups") or []
+    open_waits = brief.get("open_waits") or []
+    ready_waits = brief.get("ready_waits") or []
+    latest_review = brief.get("latest_review") or None
+    lines = [
+        f"Case {brief.get('case_id')} — reconstructed from the DB (durable state, not memory).",
+        f"objective:           {brief.get('objective')!r}",
+        f"status:              {brief.get('status')!r} (NULL/open ⇒ still IN PROGRESS)",
+        f"current_stage:       {brief.get('current_stage')!r}",
+        f"completion_criteria: {brief.get('completion_criteria')!r}",
+        f"rounds:              {brief.get('rounds_used')}/{brief.get('round_cap')} used "
+        f"({brief.get('rounds_remaining')} remaining before the continuation cap)",
+        f"latest_review:       {latest_review!r}",
+        "",
+        f"Dispatched workers ({len(workers)}):",
+    ]
+    for w in workers:
+        rev = w.get("latest_review")
+        lines.append(
+            f"  • task {w.get('task_id')} — "
+            f"{'finished' if w.get('finished') else 'in-flight'}"
+            + (f" outcome={w.get('outcome')!r}" if w.get('finished') else "")
+            + (f" review={rev.get('verdict')!r}" if rev else "")
+        )
+    if not workers:
+        lines.append("  (none dispatched yet.)")
+    lines.append("")
+    lines.append(
+        f"Waits — open (still running): {open_waits or '[]'}; "
+        f"ready (finished, reconcile them): {ready_waits or '[]'}"
+    )
+    lines.append(f"Armed wait-groups ({len(groups)}):")
+    for g in groups:
+        lines.append(
+            f"  • {g.get('wait_group_id')} ({g.get('condition')}) over "
+            f"{len(g.get('members') or [])} member(s) — "
+            f"{'SATISFIED' if g.get('satisfied') else 'waiting'}"
+            + (f", present={g.get('presented_task_ids')}" if g.get('satisfied') else "")
+        )
+    if not groups:
+        lines.append("  (no live wait-groups.)")
+    lines.append("")
+    lines.append(
+        "Resume from THIS state: reconcile any 'ready' waits, re-arm/continue the live "
+        "groups, review finished workers' git diffs, and decide close vs. rework."
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Tool: read_session_history  (pull a prior session's real conversation on demand)
 # ---------------------------------------------------------------------------
 
@@ -1042,6 +1112,26 @@ _TOOLS = [
         },
     },
     {
+        "name": "get_case_brief",
+        "description": (
+            "Reconstruct the FULL working state of a Case from the DB ALONE (read-only over "
+            "GET /api/cases/{case_id}/brief) — the Manager's single 'where am I on this Case' "
+            "read after a context reset (compaction, restart, respawn). Returns objective + "
+            "completion_criteria + round cap + rounds used + every DISPATCHED worker (finished? "
+            "outcome? latest review verdict?) + outstanding/ready worker waits + every ARMED "
+            "wait-group and whether it is currently satisfied. Prefer this over get_case when "
+            "resuming a Case you have lost the in-memory picture of; get_case is the minimal "
+            "status-only read. Read-only — it decides nothing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "The Case (flow_run) id to reconstruct — the Manager's own case."},
+            },
+            "required": ["case_id"],
+        },
+    },
+    {
         "name": "read_session_history",
         "description": (
             "Read a specific session's REAL conversation, oldest→newest (read-only over "
@@ -1203,6 +1293,7 @@ _TOOL_IMPLS = {
     "wait_for_worker": _wait_for_worker,
     "open_case": _open_case,
     "get_case": _get_case,
+    "get_case_brief": _get_case_brief,
     "read_session_history": _read_session_history,
     "close_case": _close_case,
     "record_review": _record_review,
