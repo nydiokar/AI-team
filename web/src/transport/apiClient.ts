@@ -36,6 +36,10 @@ import type {
   RawCaseRosterResponse,
   RawSessionAffiliationsResponse,
   RawWorkBucket,
+  RawCostExplorerResponse,
+  RawCostTopResponse,
+  RawCostProjectsResponse,
+  RawCaseUsageResponse,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -609,6 +613,82 @@ export const api = {
   /** GET /api/backends/usage — honest per-backend account/usage facts. */
   async backendsUsage(token: string): Promise<BackendUsageResponse> {
     return get<BackendUsageResponse>(`/api/backends/usage`, token);
+  },
+
+  // ── A65 cost monitoring ──────────────────────────────────────────────────
+
+  /**
+   * GET /api/cost/explorer — token + USD breakdown along one dimension
+   * (project|backend|model|role|case|session), optionally day-bucketed, filtered
+   * by time window + project. `dimension` is validated server-side (422 on an
+   * unknown value). The payload's totals carry an honest coverage %.
+   */
+  async costExplorer(
+    token: string,
+    opts: {
+      dimension?: string;
+      granularity?: "day" | "none";
+      from?: string;
+      to?: string;
+      repoPath?: string;
+      limit?: number;
+    } = {},
+  ): Promise<RawCostExplorerResponse> {
+    const qs = new URLSearchParams({
+      dimension: opts.dimension ?? "project",
+      granularity: opts.granularity ?? "day",
+      limit: String(opts.limit ?? 100),
+    });
+    if (opts.from) qs.set("from", opts.from);
+    if (opts.to) qs.set("to", opts.to);
+    if (opts.repoPath) qs.set("repo_path", opts.repoPath);
+    return get<RawCostExplorerResponse>(`/api/cost/explorer?${qs.toString()}`, token);
+  },
+
+  /**
+   * GET /api/cost/top — sessions ranked by USD (default) or raw tokens within the
+   * window. Each row carries its dominant models + coverage so an unpriced burner
+   * is visible.
+   */
+  async costTop(
+    token: string,
+    opts: {
+      by?: "usd" | "tokens";
+      from?: string;
+      to?: string;
+      repoPath?: string;
+      limit?: number;
+    } = {},
+  ): Promise<RawCostTopResponse> {
+    const qs = new URLSearchParams({
+      by: opts.by ?? "usd",
+      limit: String(opts.limit ?? 10),
+    });
+    if (opts.from) qs.set("from", opts.from);
+    if (opts.to) qs.set("to", opts.to);
+    if (opts.repoPath) qs.set("repo_path", opts.repoPath);
+    return get<RawCostTopResponse>(`/api/cost/top?${qs.toString()}`, token);
+  },
+
+  /** GET /api/cost/projects — distinct projects with usage, ordered by size (the
+   *  Cost-tab project-filter dropdown fuel). */
+  async costProjects(
+    token: string,
+    opts: { from?: string; to?: string; limit?: number } = {},
+  ): Promise<RawCostProjectsResponse> {
+    const qs = new URLSearchParams({ limit: String(opts.limit ?? 200) });
+    if (opts.from) qs.set("from", opts.from);
+    if (opts.to) qs.set("to", opts.to);
+    return get<RawCostProjectsResponse>(`/api/cost/projects?${qs.toString()}`, token);
+  },
+
+  /** GET /api/cases/{id}/usage — one case's manager/workers cost split (404 on an
+   *  unknown case). */
+  async caseUsage(token: string, flowRunId: string): Promise<RawCaseUsageResponse> {
+    return get<RawCaseUsageResponse>(
+      `/api/cases/${encodeURIComponent(flowRunId)}/usage`,
+      token,
+    );
   },
 };
 

@@ -1,10 +1,11 @@
 import { NavLink } from "react-router-dom";
-import { MessagesSquare, Activity, Briefcase } from "lucide-react";
+import { MessagesSquare, Activity, Briefcase, HandCoins } from "lucide-react";
 import { cn } from "../../lib/cn";
 
 const TABS = [
   { to: "/work", label: "Work", Icon: Briefcase },
   { to: "/sessions", label: "Sessions", Icon: MessagesSquare },
+  { to: "/cost", label: "Cost", Icon: HandCoins },
   { to: "/system", label: "System", Icon: Activity },
 ];
 
@@ -12,7 +13,7 @@ export function BottomNavigation() {
   return (
     <nav
       aria-label="Main navigation"
-      className="sticky bottom-0 z-20 grid grid-cols-3 border-t border-hairline bg-surface-1/80 backdrop-blur-xl"
+      className="sticky bottom-0 z-20 grid grid-cols-4 border-t border-hairline bg-surface-1/80 backdrop-blur-xl"
       style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
     >
       {TABS.map(({ to, label, Icon }) => (
