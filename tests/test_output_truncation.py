@@ -36,6 +36,28 @@ class _FakeBackend:
         return ExecutionResult(success=True, output=self._output, return_code=0)
 
 
+class _FakeErrorBackend:
+    """Stands in for a failing backend (e.g. the interrupt/salvage path).
+
+    Returns an ExecutionResult with a full transcript + stderr, mirroring the
+    99d997c3c8b6 shape where the agent was interrupted mid-response.
+    """
+
+    def __init__(self, output: str, raw_stdout: str):
+        self._output = output
+        self._raw_stdout = raw_stdout
+
+    def run_oneoff(self, cwd, prompt):
+        return ExecutionResult(
+            success=False,
+            output=self._output,
+            raw_stdout=self._raw_stdout,
+            raw_stderr="error_class=backend_error\nstderr_tail:\nfake stderr tail",
+            error_class="backend_error",
+            return_code=0,
+        )
+
+
 def _run_task(backends, task_row):
     return asyncio.run(worker_agent._execute_task(task_row, backends))
 
@@ -104,3 +126,25 @@ def test_worker_output_survives_split_end_to_end(monkeypatch):
 
     assert len(chunks) > 1
     assert "".join(chunks).replace("\n", "") == _LONG.replace("\n", "")
+
+
+def test_worker_error_result_ships_full_payload(monkeypatch):
+    """An error turn must carry the FULL backend transcript + stderr to the
+    gateway, not just a bounded 4k diagnostic (the 99d997c3c8b6 truncation)."""
+    monkeypatch.delenv("WORKER_MAX_OUTPUT_CHARS", raising=False)
+    salvaged = "The agent's progress ... the oldest note is at line 419."
+    raw_stdout = (
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"work"}]}}\n'
+        '{"type":"result","subtype":"error_during_execution","is_error":true}'
+    )
+    backends = {"claude": _FakeErrorBackend(salvaged, raw_stdout)}
+    task_row = {"action": "run_oneoff", "backend": "claude", "payload": {"prompt": "go"}}
+
+    result = _run_task(backends, task_row)
+
+    assert result["success"] is False
+    assert result["output"] == salvaged  # the agent's reply is not eaten
+    assert result["raw_stdout"] == raw_stdout  # full NDJSON survives the wire
+    assert "error_during_execution" in result["raw_stdout"]
+    assert "fake stderr tail" in result["raw_stderr"]
+    assert result["error_class"] == "backend_error"
