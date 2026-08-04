@@ -40,7 +40,7 @@ processes on **other** machines that dial in over the mesh.
    └───────────────────┬───────────────────────────────────┬─────────────────────────┘
                        │ HTTP (browser can't import Python) │ HTTP (mesh protocol)
               ┌────────┴─────────┐                 ┌────────┴──────────────┐
-              │  web/  (React)   │                 │  WORKER NODES          │ (Pi5, Horse…)
+              │  web/  (React)   │                 │  WORKER NODES          │ (gateway-host, worker-node…)
               │  your phone /    │                 │  src/worker/agent.py   │ separate machines,
               │  laptop browser  │                 │  separate processes    │ separate processes
               │  → port 9003     │                 │  → CONTROLLER_URL:9002  │

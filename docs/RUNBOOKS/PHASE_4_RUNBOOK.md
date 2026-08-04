@@ -131,7 +131,7 @@ python main.py health     # expect OK (telegram + a backend present)
    WORKER_TAILSCALE_IP=<PC_TS_IP>
    CONTROLLER_URL=http://<VPS_TS_IP>:9002
    WORKER_BACKENDS=claude,opencode
-   WORKER_PROJECTS_ROOT=C:/Users/Cicada38/Projects   # optional, enables repo discovery
+   WORKER_PROJECTS_ROOT=C:/Users/<user>/Projects   # optional, enables repo discovery
    ```
    First start:
    ```bash

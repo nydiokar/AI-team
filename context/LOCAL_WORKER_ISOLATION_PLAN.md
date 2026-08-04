@@ -2,7 +2,7 @@
 
 **Problem**: The gateway owns the Claude agent's lifecycle. When PM2 restarts the gateway, any in-flight local task dies with it. The user sees "interrupted by gateway restart" — a backend detail that should never surface.
 
-**Root cause**: Kanebra runs local tasks via `_run_backend_local` → `backend.create_session / resume_session` — all inside the gateway's own asyncio event loop. The Claude CLI subprocess is a child of the gateway process. Parent dies, child dies.
+**Root cause**: Gateway-host runs local tasks via `_run_backend_local` → `backend.create_session / resume_session` — all inside the gateway's own asyncio event loop. The Claude CLI subprocess is a child of the gateway process. Parent dies, child dies.
 
 **Contrast with Horse (correct)**: `agent.py` runs as a separate PM2 process on Horse. It registers via HTTP, claims tasks, runs Claude independently, posts results to the DB. Gateway restart is invisible to it. On startup the gateway calls `_reattach_remote_task` and picks up the result.
 
@@ -10,7 +10,7 @@
 
 ## Goal
 
-Kanebra should run `agent.py` as a separate PM2 process alongside the gateway, registering as `node_id=kanebra` (or `local`). The gateway becomes a pure router. Local and remote tasks go through identical paths.
+Gateway-host should run `agent.py` as a separate PM2 process alongside the gateway, registering as `node_id=gateway-host` (or `local`). The gateway becomes a pure router. Local and remote tasks go through identical paths.
 
 **Result**: gateway restart → agent keeps running → task completes → notification arrives. User sees nothing abnormal.
 
@@ -18,7 +18,7 @@ Kanebra should run `agent.py` as a separate PM2 process alongside the gateway, r
 
 ## What Changes
 
-### 1. Run agent.py on Kanebra via PM2
+### 1. Run agent.py on Gateway-host via PM2
 
 Add a second entry to `ecosystem.config.js` for the local worker:
 
@@ -28,7 +28,7 @@ Add a second entry to `ecosystem.config.js` for the local worker:
   script: "worker_main.py",
   interpreter: "python3",
   env: {
-    NODE_ID: "kanebra",
+    NODE_ID: "gateway-host",
     CONTROLLER_URL: "http://localhost:8000",
     // ... same env vars Horse uses
   }
@@ -47,7 +47,7 @@ Once the local worker is registered as a node, it will appear in the node regist
 
 ### 3. Session recovery becomes uniform
 
-`_reattach_remote_task` already handles "task still in DB as claimed, worker still running." With the local worker now being a proper node, the existing reattach path covers Kanebra too. The `session_recovery_deferred` branch (the silent drop) becomes unreachable for local tasks.
+`_reattach_remote_task` already handles "task still in DB as claimed, worker still running." With the local worker now being a proper node, the existing reattach path covers Gateway-host too. The `session_recovery_deferred` branch (the silent drop) becomes unreachable for local tasks.
 
 ---
 

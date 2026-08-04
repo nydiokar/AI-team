@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# T1 — Pull-based auto-deploy for the gateway/server host (the Pi5 `kanebra`).
+# T1 — Pull-based auto-deploy for the gateway/server host (the gateway host).
 #
 # WHY pull-based (not GitHub Actions -> SSH): the Pi5 is a home server behind
 # NAT; the user does not want CI reaching into the tailnet or inbound SSH.

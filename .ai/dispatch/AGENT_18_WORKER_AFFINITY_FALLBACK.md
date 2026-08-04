@@ -12,14 +12,14 @@ updated_at: "2026-08-03T13:21:04.118028+00:00"
 # AGENT 18 — Worker Affinity Fallback: offline pinned node hard-ERRORs the session (no controlled fallback)
 
 **Dispatch created:** 2026-07-05
-**Owner:** build agent (Horse) in relay-cooperation with the gateway agent (kanebra).
+**Owner:** build agent (worker-node) in relay-cooperation with the gateway agent (gateway-host).
 **Branch to cut:** `fix/worker-affinity-fallback` off `main`
 **Level:** 2 build, with **one Level-3 policy fork** (see §Operator decision) — do NOT
 implement a fallback policy that runs a pinned turn on another host without operator sign-off.
 **Theme:** A11 correctly closed the *silent local fallback* (a remote-pinned session must never
 execute on the wrong host — `backend_session_id` is machine-local). But it left the **offline
 path undefined**: when the pinned worker is down, the gateway **immediately hard-fails** the
-turn and drives the session to `ERROR` with `retries=0`. A transient worker outage (e.g. Horse
+turn and drives the session to `ERROR` with `retries=0`. A transient worker outage (e.g. worker-node
 rebooting for 30 s) therefore *permanently kills an otherwise-healthy session* with no wait, no
 requeue, and no operator recovery affordance. This packet defines the **controlled** fallback
 policy for the offline-pinned-worker case — the third path between "run local" (wrong) and
@@ -27,7 +27,7 @@ policy for the offline-pinned-worker case — the third path between "run local"
 
 > **Test cost guard (READ FIRST).** Design + implementation here is DB reads, a config check,
 > unit tests, and code review — **NO paid CLI turn** is required. Only a final optional
-> re-validation would submit ONE turn (reuse the A10 §T1 procedure, pinned to Horse, with Horse
+> re-validation would submit ONE turn (reuse the A10 §T1 procedure, pinned to worker-node, with worker-node
 > deliberately offline then online). Never loop it, never run the full e2e suite, never run
 > `python main.py status` (kills the live gateway). Check the live gateway with
 > `curl -s 127.0.0.1:9003/health`.
@@ -102,7 +102,7 @@ again be misread as license to break affinity. Two task classes, two policies:
 the operator must notice and manually rebuild. That is brittle and opaque. The application-level
 fix is: distinguish *transient* (node will likely be back) from *terminal* (node gone / retries
 exhausted), hold briefly on transient, and when it does become terminal, surface an **honest,
-actionable** state — "pinned node `Horse` offline, session paused, [retry] / [re-pin to another
+actionable** state — "pinned node `worker-node` offline, session paused, [retry] / [re-pin to another
 node]" — instead of a bare `ERROR`. This mirrors the existing honest-state posture
 (`task_state_truth.py`, the #39 honest worker/session reporting work already shipped).
 
@@ -112,7 +112,7 @@ node]" — instead of a bare `ERROR`. This mirrors the existing honest-state pos
 
 **Option A — Bounded hold-and-requeue (RECOMMENDED).**
 When the pinned node is offline at dispatch: do **not** immediately ERROR. Instead enqueue the
-task to the mesh pending table (it's already affinity-scoped so only `Horse` can claim it) and
+task to the mesh pending table (it's already affinity-scoped so only `worker-node` can claim it) and
 enter a bounded wait: `PAUSED_PINNED_NODE_OFFLINE` for up to `AFFINITY_OFFLINE_GRACE_SEC`
 (default e.g. 120 s), polling node liveness. If the node re-registers within the grace window,
 the pinned worker claims and runs the turn normally — the blip is invisible to the operator. If
@@ -179,8 +179,8 @@ today's A11 behavior.
 6. Run `pytest tests/test_session_service*.py tests/test_control_api.py
    tests/test_mesh_dispatch_timeout.py -q` and the new file. No `--run-e2e`.
 
-Optional T-final (ONE paid turn, operator-scheduled): A10 §T1 smoke pinned to Horse with Horse
-stopped for < grace then restarted → turn lands on Horse (`execution_node_id=Horse`), no
+Optional T-final (ONE paid turn, operator-scheduled): A10 §T1 smoke pinned to worker-node with worker-node
+stopped for < grace then restarted → turn lands on worker-node (`execution_node_id=worker-node`), no
 `affinity_unrouted`, no off-host execution. Only after that: mark PASSED, update `CONTEXT.md`
 + `DISPATCH_LOG.md`.
 
@@ -246,7 +246,7 @@ maximally-reversible reading that lets code land now without changing any live b
 - [x] Merged to `main`: `739e3e4` (A18) + `19ade75` (merge). Branches consolidated;
       `fix/worker-affinity-fallback` + `feat/composer-draft-persistence` deleted.
 - [ ] (optional) T-final one-turn re-validation, operator-scheduled
-- [ ] Gateway redeploy on kanebra (operator) + set `MESH_AFFINITY_OFFLINE_GRACE_SEC` to activate
+- [ ] Gateway redeploy on gateway-host (operator) + set `MESH_AFFINITY_OFFLINE_GRACE_SEC` to activate
 
 ## Closure
 

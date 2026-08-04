@@ -54,7 +54,7 @@ them.
 
 | Flag | Managed? | Default | Meaning | Code seam |
 |------|----------|---------|---------|-----------|
-| `MESH_ENABLED` | ✅ YES | false in code / **true on this box** | Activates worker-dispatch routing through the node registry. The live kanebra+worker mesh requires this **true**. | `config/settings.py:563` |
+| `MESH_ENABLED` | ✅ YES | false | Activates worker-dispatch routing through the node registry. Set to **true** when running a multi-node mesh (gateway + worker). | `config/settings.py:563` |
 | `MESH_SHADOW_WRITE` | ✅ YES | true | Mirror session/task writes into the mesh DB. | `config/settings.py:677` |
 | `CONTROL_API_ENABLED` | ✅ YES | true | The in-process `/api/*` control surface (Web UI + read APIs, incl. `/api/flows`). | `config/settings.py:611` |
 | `TELEMETRY_ENABLED` | ✅ YES | true | LLM-turn telemetry capture. OFF ⇒ `NullTelemetrySink`. | `config/settings.py:695` |

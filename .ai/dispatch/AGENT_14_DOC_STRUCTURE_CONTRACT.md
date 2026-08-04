@@ -80,7 +80,7 @@ The doc system has **no separation of concerns and is rotting like CONTEXT.md di
    dispatch shipped what; move any essential "what's left" into the dispatch doc if it isn't
    already there. **[F2] Open operator-TODOs are sacred:** before compressing any row,
    check whether it carries a pending operator action (e.g. A8 "set VAPID_* env / pip
-   install .[push]", A11 "kanebra redeploy" — some are now DONE, verify against
+   install .[push]", A11 "gateway-host redeploy" — some are now DONE, verify against
    CONTEXT.md/git). If still open, **relocate it into that dispatch's own doc** before
    dropping it from the row — an open TODO may NOT vanish in the slim. Add a header line: "This is an INDEX. Full state per job lives in its
    `AGENT_N_*.md`. If a row needs a paragraph, it's in the wrong file." **Validation:**

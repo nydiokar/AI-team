@@ -11,7 +11,7 @@
 
 ## 1. Problem Statement
 
-An agent on a worker machine (e.g. `Horse`) is told to start a long-running
+An agent on a worker machine (e.g. `worker-node`) is told to start a long-running
 script (build, training run, data job, `pm2`-managed process). The script runs
 for minutes-to-hours, often **detached** — the agent reports "script is running"
 and the task turn ends. The script then runs owned by nobody: nothing is
@@ -104,7 +104,7 @@ These are wrong on purpose-stated so a future agent doesn't "helpfully" build th
   message on the existing return channel, not a second uncontrolled path.
 - **NG5 — Do NOT mimic Claude/Codex in-process completion hooks.** Those are
   single-machine, in-process subprocess hooks; they cannot cross the mesh
-  boundary (agent on `Horse`, gateway on the Pi5) to reach the phone. Reusing
+  boundary (agent on `worker-node`, gateway on the gateway-host) to reach the phone. Reusing
   them here would die at the machine edge.
 - **NG6 — Do NOT make completion depend on the script cooperating.** The watcher
   determines completion by **observing the process** (PID/pgid exit), not by

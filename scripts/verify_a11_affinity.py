@@ -49,7 +49,7 @@ def token() -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--node", default="Horse")
+    ap.add_argument("--node", required=True, help="Worker node ID to verify affinity against")
     ap.add_argument("--repo-path", required=True)
     ap.add_argument("--gateway-proc", default="ai-team-gateway")
     ap.add_argument("--timeout", type=float, default=120.0)

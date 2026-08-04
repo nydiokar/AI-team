@@ -263,11 +263,11 @@ def test_build_case_roster_missing_session_row_is_honest():
 def test_build_case_roster_jobs_flags_and_running_count():
     jobs = [
         {"id": "job_a", "label": "IGNITION_1", "command": "claude -p --model opus 'x'",
-         "session_id": "mgr1", "node_id": "kanebra", "status": "running",
+         "session_id": "mgr1", "node_id": "gateway-host", "status": "running",
          "started_at": "t1", "started_epoch": 1000.0, "finished_at": None,
          "exit_code": None, "tail": None, "orphaned": 0},
         {"id": "job_b", "label": "train", "command": "python train.py",
-         "session_id": "mgr1", "node_id": "kanebra", "status": "lost",
+         "session_id": "mgr1", "node_id": "gateway-host", "status": "lost",
          "started_at": "t0", "started_epoch": 900.0, "finished_at": None,
          "exit_code": None, "tail": "killed", "orphaned": 1},
     ]

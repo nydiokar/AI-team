@@ -35,9 +35,9 @@ UI Case→worker linkage are DEFERRED with written traces (see "Resolution" at b
 
 ## Finding 1 — workers are NOT sessions (verified in DB, 2026-07-13)
 
-Manager case `d536af369743475bb2b26ad6c7751962` (the A42/F1 live loop). Its two "workers":
+Manager case `<case-id-redacted>` (the A42/F1 live loop). Its two "workers":
 
-- `task_835909d9`, `task_f076ba59`: **`action=run_oneoff`, `session_id=NULL`.**
+- `<task-id>`, `<task-id>`: **`action=run_oneoff`, `session_id=NULL`.**
 - One-shot tasks: prompt in → a single `reply_text` blob out → done.
 - **No `sessions` row, no per-turn transcript, nothing to open in the UI.**
 - Across the whole DB: **50 sessionless `run_oneoff` worker tasks; 0 worker sessions ever.**
@@ -52,7 +52,7 @@ task system and is auditable at the *task* level — but it is invisible at the 
 ## Finding 2 — automation sessions are bolted to the gateway, so they die on restart
 
 `invoke_manager` (`src/orchestrator.py:2092`) defaults `node_id="__local__"` → the manager
-session pins to the **gateway host embedded worker** (`machine_id=kanebra`). Its Claude CLI is a
+session pins to the **gateway host embedded worker** (`machine_id=gateway-host`). Its Claude CLI is a
 **child of the gateway process**. Consequences observed 2026-07-13:
 
 - Gateway restarted at **11:26:33 UTC** (clean `pm2` restart; log shows `Loaded environment
@@ -64,10 +64,10 @@ session pins to the **gateway host embedded worker** (`machine_id=kanebra`). Its
   correctly flagged this as dishonest: the UI shows an openable session that cannot actually be
   resumed because nothing re-attaches a manager session after a gateway restart.
 
-### ⚠️ VERIFIED 2026-07-13: the manager-role-ON-a-node path is BROKEN (test run, `dfa521bfb2df`)
+### ⚠️ VERIFIED 2026-07-13: the manager-role-ON-a-node path is BROKEN (test run, `<session-id>`)
 
-Invoked `POST /api/manager` with `node_id="kanebra-worker"`. Session pinned correctly
-(`machine_id=kanebra-worker`, driver live) — BUT the boot turn came up as a **generic Claude
+Invoked `POST /api/manager` with `node_id="worker-node"`. Session pinned correctly
+(`machine_id=worker-node`, driver live) — BUT the boot turn came up as a **generic Claude
 session**: reply was *"I'm ready to help. What would you like me to work on?"*, citing the plain
 CLAUDE.md workflow, NOT the Manager role. It received **no role prompt, no objective/assignment,
 and no manager MCP tools** (dispatch_worker/review/close_case). Finished in 9s, 102 output tokens,
@@ -84,10 +84,10 @@ MCP-tool wiring onto the node-worker execution path. This is the crux of the dro
 config toggle. The proven live manager path remains in-gateway (`__local__`, A41/A42).
 
 Operator's architectural point (still correct): an automation session should run on a **legit node
-worker (its own process, e.g. `Horse`/`kanebra-worker`)**, not on the gateway's embedded worker. A node worker
+worker (its own process, e.g. `worker-node`/`worker-node`)**, not on the gateway's embedded worker. A node worker
 maintains the subprocess independently of gateway lifecycle, so a gateway restart does not kill
-the automation. `node_id="Horse"` is already wired through `/api/manager` →
-`create_session(machine_id="Horse")` — but the **manager-role-ON-a-node path has never been run**
+the automation. `node_id="worker-node"` is already wired through `/api/manager` →
+`create_session(machine_id="worker-node")` — but the **manager-role-ON-a-node path has never been run**
 (A41/A42 both ran in-gateway). Reachability of the manager MCP tools from a node is unverified.
 
 ## Work to scope (Level-3 plan required before building)

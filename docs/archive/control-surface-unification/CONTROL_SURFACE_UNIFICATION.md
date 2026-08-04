@@ -322,7 +322,7 @@ both interfaces obtain identical capabilities.** That is the machine-checkable f
 reusing `observability.read_recent_events`. Rationale:
 
 - `events.ndjson` is *already* a primitive shared event space — the live U1 test showed
-  remote worker (`Horse`) events landing in it from another process. An in-process
+  remote worker (`worker-node`) events landing in it from another process. An in-process
   `emit_event` WS hook would push instantly but **only see events emitted in the gateway
   process**, missing all worker/remote events. SSE-over-file sees everything.
 - The HTTP contract (`GET /api/events/stream`, SSE frames carrying the same envelope as

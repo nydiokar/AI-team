@@ -52,7 +52,7 @@ If any part fails, that failure *is* M3's first real job (as §4 F4 warns) — c
 | Precondition | Why | How to check (read-only) | Live status 2026-07-10 |
 |---|---|---|---|
 | `MAX_CONCURRENT_TASKS ≥ 2` | The manager holds ITS slot while blocked in `wait_for_worker`; the child needs a *different* slot or it deadlocks. | gateway env | **4** ✅ (ample) |
-| A worker node online | Extra isolation: the child can route off-host entirely. | `GET /api/nodes` | `Horse` + `kanebra-worker` **online** ✅ |
+| A worker node online | Extra isolation: the child can route off-host entirely. | `GET /api/nodes` | `worker-node` + `worker-node` **online** ✅ |
 | `HARNESS_FLOW_DRIVE=1` | Lineage + flow rows only persist with the drive flag ON (M1/M2 shadow gate). | your gateway `.env` | CONTEXT says ON — **confirm in `.env`** |
 | Branch deployed | A31–A34 code must be the running code. | `git -C ~/dev/AI-team log --oneline -1` after checkout | pending operator merge/deploy |
 
@@ -94,9 +94,9 @@ curl -s http://127.0.0.1:9003/health          # expect {"status":"ok"} AFTER
 > ⛔ **Never** run `python main.py status` — it grabs the gateway lock and KILLS the live
 > gateway (CONTEXT cost-guard). The only liveness check is `curl .../health`.
 
-## Step 4 — Run the spike (operator, from the gateway host `kanebra`)
+## Step 4 — Run the spike (operator, from the gateway host `gateway-host`)
 
-The control API is loopback-only, so drive this from `kanebra`. `T=<DASHBOARD_TOKEN>` from `.env`.
+The control API is loopback-only, so drive this from `gateway-host`. `T=<DASHBOARD_TOKEN>` from `.env`.
 
 1. **Spawn a manager session** (Telegram: open a Claude session on a small repo; or):
    ```bash

@@ -67,19 +67,19 @@ sessions:
   driver_status: live
   cache_health: healthy
   cache_unhealthy_count: 0
-  machine_id: Horse
+  machine_id: worker-node
 
 mesh_tasks:
   task_7eed64fc:
     action: create_session
     status: completed
-    claimed_by: Horse
+    claimed_by: worker-node
     usage_json: {"input_tokens": 3, "cached_input_tokens": 12422,
                  "output_tokens": 11, "reasoning_output_tokens": 0}
   task_3b410136:
     action: resume_session
     status: completed
-    claimed_by: Horse
+    claimed_by: worker-node
     payload session driver_type/status/cache: sdk/live/healthy
     payload backend_session_id: fc84fb4e-4084-4419-ae00-21f65d7e2c28
     usage_json: {"input_tokens": 3, "cached_input_tokens": 12446,
@@ -94,7 +94,7 @@ llm_turns:
 ```
 
 The gateway/UI did not visibly report "agent picked up the task" for the resume
-turn, but the database proves the worker did pick it up (`claimed_by=Horse`,
+turn, but the database proves the worker did pick it up (`claimed_by=worker-node`,
 `claimed_at` populated), completed it, and persisted usage. Treat any missing
 pickup notification as a separate non-P0 visibility issue.
 
@@ -133,7 +133,7 @@ Blocking unsafe resume is only a safety sidecar. The P0 fix is to implement and 
 Faulty local Claude session:
 
 ```text
-C:\Users\Cicada38\.claude\projects\C--Users-Cicada38-Projects-tokens-ingest\dac4f1ce-f955-4864-b384-53f42bff2254.jsonl
+C:\Users\<user>\.claude\projects\C--Users-<user>-Projects-tokens-ingest\dac4f1ce-f955-4864-b384-53f42bff2254.jsonl
 ```
 
 Concrete cache recreation evidence:
@@ -147,7 +147,7 @@ turn after later resume: cache_read=7,346 / cache_create=170,316
 This is not explained by wrong cwd/model/session:
 
 ```text
-cwd: C:\Users\Cicada38\Projects\tokens_ingest
+cwd: C:\Users\<user>\Projects\tokens_ingest
 Claude Code version: 2.1.196
 entrypoint: sdk-cli
 permissionMode: bypassPermissions

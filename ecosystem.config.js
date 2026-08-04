@@ -131,7 +131,7 @@ module.exports = {
         // Optional:
         // WORKER_API_PORT: "9001",
         // WORKER_MAX_CONCURRENT: "2",
-        // WORKER_PROJECTS_ROOT: "C:/Users/Cicada38/Projects",  // enables repo discovery
+        // WORKER_PROJECTS_ROOT: "C:/Users/<user>/Projects",  // enables repo discovery
         // CODEX_NODE_PATH: "C:/Program Files/nodejs/node.exe",  // required if PM2 cannot see node.exe
       },
       out_file: path.join(__dirname, "logs", "pm2-worker-out.log"),

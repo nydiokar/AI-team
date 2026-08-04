@@ -227,7 +227,7 @@ def test_dispatch_worker_opens_observable_session_when_cwd_and_no_session(monkey
         "objective": "Implement T1",
         "cwd": "/repo",
         "case_id": "case_1",
-        "node_id": "kanebra-worker",
+        "node_id": "worker-node",
         "model": "sonnet",
     })
 
@@ -238,7 +238,7 @@ def test_dispatch_worker_opens_observable_session_when_cwd_and_no_session(monkey
     assert calls[0][2] == {
         "repo_path": "/repo",
         "backend": "claude",
-        "node_id": "kanebra-worker",
+        "node_id": "worker-node",
         "model": "sonnet",
     }
     # Second call submits INTO that session, joined to the Manager's Case.
