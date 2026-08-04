@@ -38,11 +38,11 @@ def test_git_file_detector_basic():
         changes = detector.detect_file_changes()
         print(f"  ✅ File changes detected: {changes['total']} total changes")
         
-        return True
+        assert True
         
     except Exception as e:
         print(f"  ❌ Error: {e}")
-        return False
+        assert False, f"Error: {e}"
 
 def test_git_cli_basic():
     """Test git CLI commands without LLAMA"""
@@ -59,23 +59,17 @@ def test_git_cli_basic():
         
         if result.returncode == 0:
             print("  ✅ git-status command executed successfully")
-            if "Git Repository Status" in result.stdout:
-                print("  ✅ git-status output contains expected content")
-                return True
-            else:
-                print("  ⚠️  git-status output format may be unexpected")
-                print(f"  📄 Output: {result.stdout[:200]}...")
-                return False
+            assert "Git Repository Status" in result.stdout, (
+                f"git-status output format may be unexpected: {result.stdout[:200]}"
+            )
+            print("  ✅ git-status output contains expected content")
         else:
-            print(f"  ❌ git-status command failed: {result.stderr}")
-            return False
+            assert False, f"git-status command failed: {result.stderr}"
         
     except subprocess.TimeoutExpired:
-        print("  ❌ git-status command timed out")
-        return False
+        assert False, "git-status command timed out"
     except Exception as e:
-        print(f"  ❌ Error testing CLI commands: {e}")
-        return False
+        assert False, f"Error testing CLI commands: {e}"
 
 def test_temp_repo_basic():
     """Test with temporary repository without LLAMA"""
@@ -120,11 +114,11 @@ def test_temp_repo_basic():
         else:
             print("  ❌ Failed to create feature branch")
         
-        return True
+        assert True
         
     except Exception as e:
         print(f"  ❌ Error: {e}")
-        return False
+        assert False, f"Error: {e}"
     finally:
         # Cleanup with Windows-friendly approach
         try:
@@ -189,7 +183,8 @@ def test_imports_only():
             print(f"  ❌ {module_name} import failed: {e}")
             results.append(False)
     
-    return all(results)
+    failed = [name for (name, _), ok in zip(modules, results) if not ok]
+    assert all(results), f"Module imports failed: {failed}"
 
 def main():
     """Run basic tests"""
