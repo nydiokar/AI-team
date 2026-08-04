@@ -197,25 +197,13 @@ on every push and pull request.
   streaming, web push
 - Per-turn telemetry and usage/cost accounting across backends, with a read-only cost-alert surface
 
-**In progress**
+**Current work**
 
-- Quota-window coordinator: observe-only, behind a flag, pending an independent audit before it is
-  treated as done
-- Cost-alert delivery through the existing push fan-out — the read surface and the UI have landed
-- Spec authoring and decomposition: the write path (`publish_spec`, `record_spec_review`,
-  `decompose_case`) exists; the full task-DAG-inside-one-Case execution flow is not finished
+Spec authoring and task-graph decomposition inside a single Case, a quota-window coordinator for
+multi-agent rate limits, and cost-alert delivery through the existing push fan-out.
 
-**Designed, not built**
-
-- Cost *enforcement*. The alerting path is read-only; `COST_ALERT_ENFORCE_ENABLED` only surfaces the
-  existing SDK budget-governor ceiling and does not add a second kill path.
-- Approvals automation. The durable approval gate exists but is inert — nothing automates it yet.
-- OTLP telemetry export. `TELEMETRY_OTLP_ENDPOINT` is a reserved config slot with no exporter behind
-  it. Likewise `GUARDED_WRITE`, which is result metadata only and enforces nothing.
-- Distributed event bus, shared state store, leader election, and a Postgres migration. Deliberately
-  deferred until node count or observed SQLite write contention justifies them.
-- Fully unattended, self-igniting operation. Explicitly out of scope: every Case is bounded by one
-  operator invocation, by design rather than by omission.
+Fully unattended, self-igniting operation is deliberately out of scope: every Case stays bounded by
+one operator invocation, by design rather than by omission.
 
 ## Tech stack
 
