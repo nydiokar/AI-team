@@ -23,6 +23,21 @@ from typing import Any, Dict, List
 
 ROOT = Path(__file__).resolve().parents[1]
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+
+def _pm2_cmd() -> str:
+    """Resolve the pm2 executable. On Windows, pm2 is a .cmd/.ps1 shim that
+    subprocess.run cannot launch directly via a bare "pm2" argv[0]."""
+    resolved = shutil.which("pm2")
+    if not resolved:
+        raise RuntimeError("pm2 not found on PATH")
+    return resolved
+
 
 def _load_env() -> None:
     env_file = os.environ.get("AI_TEAM_ENV_FILE") or str(ROOT / ".env")
@@ -37,7 +52,16 @@ def _load_env() -> None:
 
 def _run(cmd: List[str], *, env: Dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess:
     print("+", " ".join(cmd))
-    cp = subprocess.run(cmd, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    cp = subprocess.run(
+        cmd,
+        cwd=ROOT,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
     if cp.stdout:
         print(cp.stdout.rstrip())
     if check and cp.returncode != 0:
@@ -139,7 +163,7 @@ def _preflight(backends: List[str]) -> None:
 
 
 def _pm2_delete(app: str) -> None:
-    _run(["pm2", "delete", app], check=False)
+    _run([_pm2_cmd(), "delete", app], check=False)
 
 
 def _start_canary(app: str, node_id: str, port: int) -> None:
@@ -159,7 +183,7 @@ def _start_canary(app: str, node_id: str, port: int) -> None:
     _pm2_delete(app)
     _run(
         [
-            "pm2",
+            _pm2_cmd(),
             "start",
             "worker_main.py",
             "--name",
@@ -192,7 +216,7 @@ def _wait_for_node(node_id: str, timeout_sec: int) -> Dict[str, Any]:
 
 
 def _promote(real_app: str, canary_app: str, canary_node: str, timeout_sec: int) -> None:
-    _run(["pm2", "restart", real_app, "--update-env"])
+    _run([_pm2_cmd(), "restart", real_app, "--update-env"])
     real_node = os.environ["WORKER_NODE_ID"]
     deadline = time.time() + timeout_sec
     last = None
