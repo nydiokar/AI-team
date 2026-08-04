@@ -24,7 +24,7 @@ def _session(case_role=None, current_case_id=None) -> Session:
         status=SessionStatus.BUSY,
         created_at=now,
         updated_at=now,
-        machine_id="kanebra-worker",
+        machine_id="worker-node",
         last_user_message="You are being invoked as the Manager...",
         current_case_id=current_case_id,
         case_role=case_role,

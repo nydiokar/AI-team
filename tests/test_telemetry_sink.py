@@ -201,7 +201,7 @@ def test_gateway_writes_local_db_and_never_ships(monkeypatch):
     """The gateway owns the store — it must write locally, not HTTP-ship to itself."""
     local = _RecordingSink()
     monkeypatch.setattr(sink_mod, "_build_local_db_sink", lambda: local)
-    sink = build_runtime_telemetry_sink(node_id="kanebra", is_gateway=True)
+    sink = build_runtime_telemetry_sink(node_id="gateway-host", is_gateway=True)
     assert sink is local
 
 

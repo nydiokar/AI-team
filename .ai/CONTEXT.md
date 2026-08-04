@@ -79,14 +79,14 @@ the separate enforcement flag remains OFF and only surfaces the existing SDK gov
 Python tests and the full web test suite pass.
 
 **2026-08-01 — Wake-dispatcher IDLE-gate bug fixed and proven live (PRs #51/#52/#53).**
-A Manager on Horse armed a wait-group; workers finished but the Manager was never woken despite
+A Manager on worker-node armed a wait-group; workers finished but the Manager was never woken despite
 `CASE_CONTINUATION_ENABLED=1`. Root cause: `_continue_case_once` required strictly `IDLE` but
 a Manager that ran a turn settles in `AWAITING_INPUT`. Fix: accept `AWAITING_INPUT` as the wake
 target (PR #51). PR #52 refined: `IDLE` is explicitly NOT a wake condition (freshly-created,
 never-ran session cannot own a satisfied group). PR #53 fixed a silent case-identity split where
 a satisfied group resolved to a dead/closed manager session — now escalates with
 `case.manager_unavailable` instead of returning 0 silently. Proven live on the original failing
-case (`9c898d`). Gateway restarted post-merge; worker/Horse untouched.
+case (<case-id>). Gateway restarted post-merge; worker/worker-node untouched.
 
 **2026-07-31 — A61 quota coordinator commit landed directly on `main` (`cbbaa10`).**
 Bypassed branch+PR policy. A63 is the independent audit job. Do not treat A61 as reviewed until
@@ -153,12 +153,11 @@ embedded on its own event loop.
   ├── src/control/db.py                 SQLite mesh DB (WAL, busy_timeout=5000, migrations)
   ├── src/control/embedded_server.py    task server, embedded (mesh on)
   ├── src/control/{task_server,node_registry}.py  HTTP API + node registry
-  ├── src/worker/agent.py               worker daemon — own process on worker nodes (e.g. Horse)
+  ├── src/worker/agent.py               worker daemon — own process on worker nodes (e.g. worker-node)
   └── src/backends/                     claude_code, codex, opencode, opencode-server
 ```
 
-**Mesh (live):** gateway + embedded task server on **Pi5 (`kanebra`)**; worker daemon on
-**`Horse`**. `MESH_ENABLED=false` → gateway is byte-for-byte the old behavior.
+**Mesh (live):** gateway + embedded task server on the gateway host; worker daemon on a separate worker node. `MESH_ENABLED=false` → gateway is byte-for-byte the old behavior.
 
 **State layout:**
 ```
@@ -170,9 +169,8 @@ logs/events.ndjson                    system-wide event log
 ```
 
 **Config flags:** `MESH_ENABLED` (default `false`), `MESH_SHADOW_WRITE` (default `true`),
-`WORKER_TOKEN`, `MESH_TAILSCALE_IP`, `MESH_TASK_SERVER_PORT` (9002). Feature flags →
-`docs/ENV_FEATURE_FLAGS.md`. Currently live ON: `HARNESS_FLOW_DRIVE`, `MANAGER_ROLE_ENABLED`,
-`REVIEW_EMITTER_ENABLED`, `CASE_CONTINUATION_ENABLED`.
+`WORKER_TOKEN`, `MESH_TAILSCALE_IP`, `MESH_TASK_SERVER_PORT`. Feature flags →
+`docs/ENV_FEATURE_FLAGS.md`.
 
 ---
 

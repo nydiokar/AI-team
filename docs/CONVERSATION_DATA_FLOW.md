@@ -218,7 +218,7 @@ No file I/O. No NDJSON parsing. No fallback chains. One query.
 **HANDOFF PROMPT — conversation_turns DB migration**
 
 Context: We have a running multi-agent gateway (Python/FastAPI backend + React PWA frontend).
-The codebase is at `C:\Users\Cicada38\Projects\AI-team`.
+The codebase is at `C:\Users\<user>\Projects\AI-team`.
 
 **The problem:** The chat conversation (user instructions + agent replies) is currently
 stored across 3 sources stitched together at read time:

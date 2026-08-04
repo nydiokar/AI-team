@@ -31,7 +31,7 @@ task_server.py; A22 = orchestrator surface).
       never fabricated. Auth/binding consistent with existing control API. No paid CLI; pytest.</constraints>
     <non_goals>No write/transition endpoints. No lineage rendering (M2). No cockpit graph view
       (M2). No auth redesign.</non_goals>
-    <assumptions>Control API host is loopback on kanebra (check §9003 health from kanebra, not a
+    <assumptions>Control API host is loopback on gateway-host (check §9003 health from gateway-host, not a
       worker box) — VERIFY the existing API auth/bind pattern before adding routes.</assumptions>
     <drift_risks>Adding a mutation endpoint; exposing on a public bind; fabricating absent fields.</drift_risks>
   </objective_lock>
@@ -39,8 +39,8 @@ task_server.py; A22 = orchestrator surface).
     <steps>1. Read the existing control API route + auth pattern (task_server.py). 2. Add
       get_flow_run(id) to db.py if absent. 3. Add GET /api/flows + /api/flows/{id} (read-only).
       4. Tests: list returns rows; detail returns full record; unknown id ⇒ 404; NULL fields
-      serialize as null. 5. Verify live with curl http://127.0.0.1:9003/... from kanebra.</steps>
-    <validation>pytest green; curl returns expected JSON from kanebra; 404 on unknown id; no
+      serialize as null. 5. Verify live with curl http://127.0.0.1:9003/... from gateway-host.</steps>
+    <validation>pytest green; curl returns expected JSON from gateway-host; 404 on unknown id; no
       mutation route present (grep).</validation>
     <definition_of_done>Operator can list flows + read one flow's full state over the control
       API, read-only, honest nulls.</definition_of_done>

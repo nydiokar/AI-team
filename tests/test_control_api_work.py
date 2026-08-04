@@ -168,7 +168,7 @@ def test_work_roster_joins_sessions_and_jobs(client, db):
     db.create_flow_link(case, "session", "mgr_sess", "manager")
     # A non-session link must NOT leak into the roster's session join.
     db.create_flow_link(case, "task", "task_1", "root_task")
-    db.register_job("job_x", "kanebra", "IGNITION_1", session_id="mgr_sess",
+    db.register_job("job_x", "gateway-host", "IGNITION_1", session_id="mgr_sess",
                     command="claude -p --model opus 'do x'")
 
     r = client.get(f"/api/work/{case}/roster", headers=_auth())

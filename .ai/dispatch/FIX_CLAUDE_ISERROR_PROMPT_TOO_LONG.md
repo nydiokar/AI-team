@@ -12,14 +12,14 @@ updated_at: "2026-08-03T13:21:14.680397+00:00"
 # FIX: SDK `is_error` result stored as a successful reply ("Prompt is too long")
 
 **Status:** root cause CONFIRMED with live evidence + SDK source verification.
-**Repro turn:** `task_68d7e8c2`, session `31128d41ba31`, ran on node `Horse`, 2026-07-03 10:00–10:04 (4m33s).
+**Repro turn:** `<task-id>`, session `<session-id>`, ran on node `worker-node`, 2026-07-03 10:00–10:04 (4m33s).
 **Reference conversation id:** b29fded5-9a83-43c6-abdc-7d3bc29321ff
 
 ---
 
 ## What actually happened (not a hypothesis)
 
-The user's turn ran ~4m33s on worker `Horse` and did **real, expensive work**
+The user's turn ran ~4m33s on worker `worker-node` and did **real, expensive work**
 (`usage_json` on the live row: `output_tokens=9749`, `cached_input_tokens=5,958,178`).
 On the **final wrap-up message**, the model's cumulative context exceeded the window, so the
 Claude Agent SDK returned a terminal `ResultMessage` with:
@@ -144,14 +144,14 @@ message / salvaged progress, `mesh_tasks.status=failed`, `error_class=context_ov
 
 ## Access note for the server manager
 
-Fixes 1 & 3 land in the repo run by BOTH kanebra (gateway) and Horse (worker) —
-`C:\Users\Cicada38\Projects\AI-team` on Horse, `/home/cifran/dev/AI-team` on kanebra. **Horse must
+Fixes 1 & 3 land in the repo run by BOTH gateway-host (gateway) and worker-node (worker) —
+`C:\Users\<user>\Projects\AI-team` on worker-node, `/home/cifran/dev/AI-team` on gateway-host. **worker-node must
 be redeployed** (it's a Windows mesh node running the SDK driver) for Fix 1 to take effect on
-remote turns; Fix 2 protects the gateway even before Horse is updated. Confirm Horse's
+remote turns; Fix 2 protects the gateway even before worker-node is updated. Confirm worker-node's
 `claude-agent-sdk` version — behavior above is verified for 0.2.110.
 
 ## Open follow-ups (relocated from DISPATCH_LOG on the 2026-07-03 index slim)
 
-- **Horse redeploy** for Fix 1 to take on remote turns (the 2026-07-03 restart covers it).
+- **worker-node redeploy** for Fix 1 to take on remote turns (the 2026-07-03 restart covers it).
 - **#41 context-fill gauge still open** — a proactive context-fill indicator (warn before
   overflow) is not built; this fix only handles the overflow *after* it happens honestly.

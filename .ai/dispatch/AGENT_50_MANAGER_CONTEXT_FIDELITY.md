@@ -48,10 +48,10 @@ Two operator-surfaced gaps after the fork→Manager delivery fixes (#31/#32):
   endpoint, byte-identical when no fork / MANAGER_ROLE_ENABLED OFF.
 
 ## Caveat (honest)
-`read_session_history` runs via the manager MCP server; on a **remote node** (Horse) it works only
+`read_session_history` runs via the manager MCP server; on a **remote node** (worker-node) it works only
 if that node's `~/.claude.json` has the manager server configured and can reach the gateway API
 (the standing "remote-node MCP reachability = on-box only" caveat). Works immediately for `__local__`
-Managers; unverified on Horse from here.
+Managers; unverified on worker-node from here.
 
 ## Status
 BUILT → adversarially reviewed → merged → gateway restarted + frontend rebuilt (operator directive).

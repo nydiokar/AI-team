@@ -89,9 +89,9 @@ if needed.
 
 ## Auto-Deploy (T1 — gateway host only)
 
-The gateway/server host (the Pi5 `kanebra`) can auto-deploy pushes to `main`
+The gateway/server host (the gateway-host `gateway-host`) can auto-deploy pushes to `main`
 instead of a manual `git pull` + restart. We use a **pull-based** poller that
-runs *on the Pi5* rather than GitHub Actions → SSH, because the Pi5 is behind
+runs *on the gateway-host* rather than GitHub Actions → SSH, because the gateway-host is behind
 home NAT and we don't want CI reaching into the tailnet.
 
 **Mechanism:** `scripts/auto_deploy.sh`, driven by the `ai-team-deploy` PM2 entry
@@ -118,7 +118,7 @@ as a `cron_restart` job (runs, exits, re-runs every 2 min). Each run:
    the bad SHA in `.deploy.poison`, and exit non-zero (loud). A bad commit never
    leaves the gateway down silently or loops.
 
-**Enable on the Pi5 (only there):**
+**Enable on the gateway-host (only there):**
 
 ```bash
 pm2 start ecosystem.config.js --only ai-team-deploy
@@ -126,14 +126,14 @@ pm2 save
 pm2 logs ai-team-deploy        # watch a deploy happen
 ```
 
-**Scope — do NOT enable on worker boxes** (e.g. `Horse`). Auto-restarting a
+**Scope — do NOT enable on worker boxes** (e.g. `worker-node`). Auto-restarting a
 worker mid-task drops its in-flight claim and costs the gateway a full dispatch
 timeout (the T4 bug). Worker nodes update on their own cadence. After T4
 (reclaim-on-restart) lands, revisit whether workers can auto-deploy safely.
 
 **Tunables** (PM2 `env` block or `.env`): `DEPLOY_PM2_APPS`,
 `DEPLOY_HEALTH_URL`, `DEPLOY_HEALTH_TIMEOUT`, `DEPLOY_BRANCH`. Full list in the
-script header. The script is Linux/bash only (it runs on the Pi5).
+script header. The script is Linux/bash only (it runs on the gateway-host).
 
 ## Notes
 

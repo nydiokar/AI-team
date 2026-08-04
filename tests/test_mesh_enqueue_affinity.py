@@ -2,7 +2,7 @@
 Regression: a session pinned to THIS host must not be double-executed.
 
 Root cause (fixed): the gateway host and a standalone worker daemon can share a
-node_id (e.g. both 'kanebra' — the Pi's hostname). When a session was pinned to
+node_id (e.g. both 'gateway-host' — the Pi's hostname). When a session was pinned to
 that node, `process_task` ran it locally (machine_id == host ⇒ NOT remote) while
 `_mesh_enqueue_task` left the row 'pending' (it only self-claimed when machine_id
 was UNSET). The daemon then claimed the same 'pending' row and ran the task a
@@ -21,7 +21,7 @@ from src.orchestrator import TaskOrchestrator
 import src.orchestrator as orch_mod
 
 
-HOST = "kanebra"
+HOST = "gateway-host"
 
 
 def _db(tmp_path) -> MeshDB:

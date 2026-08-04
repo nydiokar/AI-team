@@ -72,12 +72,12 @@ def _wait_for(pred, timeout: float = 3.0) -> bool:
 
 def test_forwards_wellformed_task_activity():
     http = _FakeHTTP()
-    fwd = _ActivityForwarder(http, node_id="kanebra")
+    fwd = _ActivityForwarder(http, node_id="gateway-host")
     fwd.offer(_activity())
     assert _wait_for(lambda: http.call_count() == 1), "activity was not forwarded"
     path, body, timeout = http.calls[0]
     assert path == "/events/activity"
-    assert body["node_id"] == "kanebra"
+    assert body["node_id"] == "gateway-host"
     assert body["session_id"] == "s" * 12
     assert body["task_id"] == "task_abc"
     assert body["label"] == "Using Bash"
@@ -95,7 +95,7 @@ def test_forwards_wellformed_task_activity():
 )
 def test_ignores_non_activity_and_malformed(payload):
     http = _FakeHTTP()
-    fwd = _ActivityForwarder(http, node_id="kanebra")
+    fwd = _ActivityForwarder(http, node_id="gateway-host")
     fwd.offer(payload)
     # then a valid one — only the valid one must be delivered
     fwd.offer(_activity(label="Thinking…"))
@@ -106,7 +106,7 @@ def test_ignores_non_activity_and_malformed(payload):
 def test_transport_failure_is_swallowed_and_forwarder_survives():
     http = _FakeHTTP()
     http.fail_once = True
-    fwd = _ActivityForwarder(http, node_id="kanebra")
+    fwd = _ActivityForwarder(http, node_id="gateway-host")
     # first offer's POST raises inside the daemon thread and must be swallowed
     fwd.offer(_activity(label="first"))
     # a subsequent event must still be delivered — the thread did not die
@@ -119,7 +119,7 @@ def test_offer_is_non_blocking_under_backpressure():
     # Hold the consumer inside post(); with max_queue=1 the queue fills immediately.
     http = _FakeHTTP()
     http.gate = threading.Event()
-    fwd = _ActivityForwarder(http, node_id="kanebra", max_queue=1)
+    fwd = _ActivityForwarder(http, node_id="gateway-host", max_queue=1)
     try:
         # Offer far more than the queue can hold; offer() must never block or raise.
         start = time.monotonic()
@@ -135,7 +135,7 @@ def test_offer_before_any_consumer_progress_does_not_raise():
     # Pure enqueue path: even with the consumer gated, a well-formed offer returns.
     http = _FakeHTTP()
     http.gate = threading.Event()
-    fwd = _ActivityForwarder(http, node_id="kanebra", max_queue=8)
+    fwd = _ActivityForwarder(http, node_id="gateway-host", max_queue=8)
     try:
         fwd.offer(_activity())  # should not raise
     finally:

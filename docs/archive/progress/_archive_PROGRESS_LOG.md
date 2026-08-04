@@ -7,13 +7,13 @@ task server plus a separate PM2 worker process on this host.
 
 Closed:
 
-- Started `ai-team-worker` as `kanebra-smoke` with
+- Started `ai-team-worker` as `gateway-host-smoke` with
   `WORKER_ACCEPT_UNPINNED=false`, `WORKER_BACKENDS=codex`, and
   `WORKER_MAX_CONCURRENT=1`, so it can only claim tasks explicitly pinned to
   that node.
 - Verified gateway health after restart: `/health` was `ok`, no claimed tasks,
-  and `kanebra-smoke` was registered/heartbeating independently of the gateway.
-- Proved pinned-only isolation: `kanebra-smoke` claimed the smoke tasks and no
+  and `gateway-host-smoke` was registered/heartbeating independently of the gateway.
+- Proved pinned-only isolation: `gateway-host-smoke` claimed the smoke tasks and no
   unrelated live queue rows.
 - Found and fixed a live M2 bug: failed mesh tasks marked the queue row
   terminal, but the telemetry turn could remain `running` because
@@ -21,13 +21,13 @@ Closed:
   worker result. Failed results also did not preserve structured result JSON,
   losing return code and telemetry invocation id.
 - Added regression coverage in `tests/test_claim_reaper.py`.
-- Live failed smoke: `task_smoke_20260626160459` pinned to `kanebra-smoke`
+- Live failed smoke: `task_smoke_20260626160459` pinned to `gateway-host-smoke`
   failed because this ChatGPT account does not support `gpt-5.2-codex`; the
   patched gateway persisted the structured result and projected
   `final_status=failed`, `final_exit_code=1`, with `telemetry.reconciled` and
   `turn.completed`.
 - Live success smoke: `task_smoke_success_20260626160547` pinned to
-  `kanebra-smoke` completed via `gpt-5.5` in ~7.6s, returned exactly
+  `gateway-host-smoke` completed via `gpt-5.5` in ~7.6s, returned exactly
   `WORKER_SMOKE_OK`, projected `final_status=success`, `final_exit_code=0`,
   and captured aggregate usage (`input_tokens=11681`, `output_tokens=9`,
   `cache_read_tokens=4992`) with usage coverage `aggregate_only`.
@@ -252,7 +252,7 @@ Tests: `.venv/bin/python -m pytest tests/test_watched_jobs.py`.
 
 **Milestone: the State Separation architecture is proven in production.** The
 mesh now runs split across two real machines — gateway + embedded task server on
-the Pi5 (`kanebra`), worker daemon on this PC (`Horse`) — and a task survives a
+the gateway-host (`gateway-host`), worker daemon on this PC (`worker-node`) — and a task survives a
 gateway restart end-to-end: dispatched → gateway restarts mid-flight → worker
 keeps running → gateway reattaches on startup → delivers the worker's **real**
 result to Telegram. This retires the long-standing "blocked on 2nd machine"

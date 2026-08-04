@@ -151,13 +151,13 @@ appearing in graph/diagnostics/timeline with real token usage and tool call coun
 
 ### T1 — Close #9: gateway-routed mesh smoke
 
-**Prerequisite:** mesh is live across kanebra + Horse per `.ai/CONTEXT.md`. Gateway
+**Prerequisite:** mesh is live across gateway-host + worker-node per `.ai/CONTEXT.md`. Gateway
 running at tailnet address on port 9003. Worker registered and healthy.
 
 **Execution steps (manual operational, not pytest):**
 
 1. **Confirm mesh health.** Check `GET /api/mesh/health` (bearer auth) on the gateway.
-   Confirm at least one worker node is online. If not, start the worker on Horse first.
+   Confirm at least one worker node is online. If not, start the worker on worker-node first.
 2. **Create a smoke session.** `POST /api/sessions` with `backend: codex` (Codex, not
    Claude — lower cost, simpler output). Body: `{"backend": "codex", "cwd": "<repo_dir>"}`.
    Record the `session_id`.
@@ -372,48 +372,48 @@ pytest -q \
 
 ## Implementation log
 
-### T1 — Close #9: gateway-routed mesh smoke — DONE (2026-07-03, run from kanebra)
+### T1 — Close #9: gateway-routed mesh smoke — DONE (2026-07-03, run from gateway-host)
 
-**Closed per the handoff below (run from kanebra, control API is loopback-only).**
-`POST /api/sessions` (`backend=codex`, `node_id=Horse`, `repo_path` from the mesh
+**Closed per the handoff below (run from gateway-host, control API is loopback-only).**
+`POST /api/sessions` (`backend=codex`, `node_id=worker-node`, `repo_path` from the mesh
 `nodes` table) → `POST /api/instructions` with sentinel `PROMPT_SECRET_LLMOBS_GWMESH_20260703B`
 → polled `GET /api/tasks` to terminal → verified **[F2]**:
 
 ```
 sqlite3 state/mesh.db "SELECT turn_id, gateway_node_id, execution_node_id, final_status
 FROM llm_turns WHERE turn_id='task_35655be9'"
-→ gateway_node_id=kanebra, execution_node_id=Horse, final_status=success
+→ gateway_node_id=gateway-host, execution_node_id=worker-node, final_status=success
 ```
 
-Non-null and distinct — gate passes. `llm_invocations.node_id` = `[kanebra, Horse]`,
-confirming the worker-side invocation ran on Horse. Privacy scan **[F3]**: sentinel
+Non-null and distinct — gate passes. `llm_invocations.node_id` = `[gateway-host, worker-node]`,
+confirming the worker-side invocation ran on worker-node. Privacy scan **[F3]**: sentinel
 appeared 4 times in `.dump`, only in benign reply/summary fields — zero leaks. No
 `affinity_unrouted` in gateway logs for this task_id. Session closed **[F4]** (200 ok).
 
 **Note for future runs:** the original relay instructions assumed both the mesh task
 server (9002) and the dashboard/control API (9003) bind the Tailscale IP. Only 9002
-does — 9003 is `127.0.0.1`-only. Run T1-style checks from kanebra itself, or set
+does — 9003 is `127.0.0.1`-only. Run T1-style checks from gateway-host itself, or set
 `CONTROL_API_HOST` to expose 9003 on the tailnet first.
 
 **#9 is CLOSED. M1/M2 are SHIPPED.**
 
 <details>
-<summary>Original blocked attempt (2026-07-03, run from Horse) — superseded above</summary>
+<summary>Original blocked attempt (2026-07-03, run from worker-node) — superseded above</summary>
 
-**Attempted from:** the Horse worker box (this machine). **Result:** cannot execute the
+**Attempted from:** the worker-node worker box (this machine). **Result:** cannot execute the
 gateway-routed submit here. Prerequisites confirmed live, gate confirmed still open, but the
-production submit surface is unreachable from Horse. Recording the blocker per instructions;
+production submit surface is unreachable from worker-node. Recording the blocker per instructions;
 **#9 is NOT closed and M1/M2 are NOT marked shipped.**
 
 **Prerequisites — CONFIRMED live:**
-- Worker on Horse: `pm2 describe ai-team-worker` → `online`; log shows
-  `event=registered node_id=Horse controller=http://100.88.11.88:9002` (kanebra).
-- Gateway task server: `curl http://100.88.11.88:9002/health` → `status=ok`,
-  `nodes_online=2`, `mesh_health.degraded=false`. Both kanebra + Horse are up and registered.
+- Worker on worker-node: `pm2 describe ai-team-worker` → `online`; log shows
+  `event=registered node_id=worker-node controller=http://<tailscale-ip>:9002` (gateway-host).
+- Gateway task server: `curl http://<tailscale-ip>:9002/health` → `status=ok`,
+  `nodes_online=2`, `mesh_health.degraded=false`. Both gateway-host + worker-node are up and registered.
 
 **Gate confirmed still OPEN (why the smoke is still needed).** Direct read of
 `state/mesh.db` `llm_turns`, grouped by `(gateway_node_id, execution_node_id)`:
-- `(None, 'Horse', 146)` — mesh-executed on Horse, `gateway_node_id` **null**. This is the
+- `(None, 'worker-node', 146)` — mesh-executed on worker-node, `gateway_node_id` **null**. This is the
   exact blocker #9 describes.
 - `(None, 'smoke-mesh-20260702', 1)` — the 2026-07-02 controlled smoke; also null, as the
   packet already documented (bypassed the gateway submit path).
@@ -423,33 +423,33 @@ production submit surface is unreachable from Horse. Recording the blocker per i
 - **Zero** rows exist with distinct non-null `(gateway_node_id, execution_node_id)`. The gate
   has never passed.
 
-**Why it cannot run from Horse (the blocker).** The gate requires an instruction submitted
-through the kanebra gateway orchestrator (which sets `gateway_node_id = socket.gethostname()`
-in `_process_task_remote`, `src/orchestrator.py:3995`), pinned to Horse. Per **[F1]** this
+**Why it cannot run from worker-node (the blocker).** The gate requires an instruction submitted
+through the gateway-host gateway orchestrator (which sets `gateway_node_id = socket.gethostname()`
+in `_process_task_remote`, `src/orchestrator.py:3995`), pinned to worker-node. Per **[F1]** this
 must go through the production control/gateway submit path, NOT a task-server endpoint. But:
 - The control API (`src/control/control_api.py`, `POST /api/instructions` + `POST /api/sessions`,
-  port 9003) binds to `control_api_host or tailscale_ip or 127.0.0.1`. From Horse,
-  `curl http://100.88.11.88:9003/health` → connection refused (exit 7 / HTTP 000). It is not
-  exposed on the tailnet — effectively loopback-only on kanebra.
+  port 9003) binds to `control_api_host or tailscale_ip or 127.0.0.1`. From worker-node,
+  `curl http://<tailscale-ip>:9003/health` → connection refused (exit 7 / HTTP 000). It is not
+  exposed on the tailnet — effectively loopback-only on gateway-host.
 - The only tailnet-exposed gateway port is 9002, the worker-facing task server. Its routes are
   worker plumbing only (`/nodes/*`, `/tasks/{pending,claim,release,result}`, `/files`, `/jobs`,
   `/telemetry/batches`) — there is no instruction-submit route, and **[F1]** forbids using
   task-server endpoints that bypass the gateway.
-- Telegram also routes through kanebra's orchestrator and cannot be driven from this harness.
+- Telegram also routes through gateway-host's orchestrator and cannot be driven from this harness.
 
-**Handoff — how to actually close it (run ON kanebra, or expose the control API):**
-1. Either run these steps from a shell on kanebra (where the control API is reachable at
+**Handoff — how to actually close it (run ON gateway-host, or expose the control API):**
+1. Either run these steps from a shell on gateway-host (where the control API is reachable at
    `127.0.0.1:9003`), or set `CONTROL_API_HOST`/tailscale bind so 9003 is reachable on the
    tailnet, then run from anywhere on the tailnet.
 2. `POST http://<gw>:9003/api/sessions` (bearer = `WORKER_TOKEN`, or `DASHBOARD_TOKEN`) with
-   `{"backend":"codex","node_id":"Horse","repo_path":"<repo>"}` to pin the session to Horse.
+   `{"backend":"codex","node_id":"worker-node","repo_path":"<repo>"}` to pin the session to worker-node.
 3. `POST http://<gw>:9003/api/instructions` with `{"session_id":"<id>","description":"Reply
    with only: GWMESH_CODEX_SMOKE_20260703 PROMPT_SECRET_LLMOBS_GWMESH_20260703"}`. Record
    the returned `task_id`.
 4. Poll `GET /api/sessions/{id}` (or `/timeline`) to terminal.
 5. Verify **[F2]**: `SELECT turn_id, gateway_node_id, execution_node_id, final_status FROM
-   llm_turns WHERE turn_id='<task_id>'` — expect `gateway_node_id`=kanebra hostname,
-   `execution_node_id='Horse'`, both non-null and distinct.
+   llm_turns WHERE turn_id='<task_id>'` — expect `gateway_node_id`=gateway-host hostname,
+   `execution_node_id='worker-node'`, both non-null and distinct.
 6. Privacy scan **[F3]**, close session **[F4]**, update docs **[F5]**.
 
 Pre-existing gap noted (per adversarial review R2): `ClaudeSDKClientDriver._run_turn()`
@@ -561,7 +561,7 @@ etc. all populated correctly). A third real user turn (`task_e4e1281a`) confirme
 
 **T2 status: SHIPPED and VERIFIED LIVE.** M3 is complete on the canonical
 worker-agent/SDK-driver execution path, which is what runs on every mesh node
-(kanebra, Horse, and future nodes) — not the legacy `orchestrator.py` in-process
+(gateway-host, worker-node, and future nodes) — not the legacy `orchestrator.py` in-process
 retry loop, which mesh routing has superseded for task execution.
 
 **Known follow-up (non-blocking, UI-only):** the session dashboard's turn detail

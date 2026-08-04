@@ -251,5 +251,5 @@ status`, which kills the live gateway). You DO own closure and deploy: commit, p
 merge it to `main`, and restart the **gateway** (`pm2 restart ai-team-gateway`) to make merged code
 live — these are delegated to you, do not wait for operator sign-off. The one restart that is NOT
 yours: never restart a **worker / node-carrier** process (the `ai-team-worker` daemon or the worker
-on `Horse`) reflexively — it disrupts live worker sessions; surface that to the operator instead. If
+on `worker-node`) reflexively — it disrupts live worker sessions; surface that to the operator instead. If
 you cannot see a project `CLAUDE.md`, stop and surface it before running anything paid or destructive.

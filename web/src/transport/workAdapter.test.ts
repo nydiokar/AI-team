@@ -311,7 +311,7 @@ describe("toCaseRoster", () => {
       jobs: [
         {
           job_id: "job_a", label: "IGNITION_1", command_summary: "claude -p --model opus",
-          session_id: "mgr1", node: "kanebra", status: "running",
+          session_id: "mgr1", node: "gateway-host", status: "running",
           started_at: "t1", started_epoch: 1000, finished_at: null,
           exit_code: null, tail: null, orphaned: false, is_agent_spawn: true,
         },

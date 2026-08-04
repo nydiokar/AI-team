@@ -74,7 +74,7 @@ shape `{"criterion": "...", "status": "met"|"waived", "reason": "..."}`):**
 | **A39 integration proof green** | `pytest tests/test_manager_loop_integration.py` | 4 passed (no paid CLI) |
 | PR #10 (A38) merged/deployed OR branch deployed | `git -C ~/dev/AI-team log --oneline -1` | A38 code is the running code |
 | `MAX_CONCURRENT_TASKS ≥ 2` | gateway env | manager holds a slot while waiting; worker needs another |
-| Worker node online | `GET /api/nodes` | `Horse`/`kanebra-worker` online |
+| Worker node online | `GET /api/nodes` | `worker-node`/`worker-node` online |
 | Deliverable branch exists | `git -C ~/dev/AI-team branch` | `feat/m3.2-review-emitter` cut from the A38 base |
 
 ---
@@ -118,7 +118,7 @@ curl -s http://127.0.0.1:9003/health          # {"status":"ok"} AFTER
 ```
 > ⛔ **Never** `python main.py status` (grabs the gateway lock → kills the live gateway). Liveness = `curl .../health` only.
 
-## Step 4 — Invoke the Manager on the REAL objective (operator, from `kanebra`)
+## Step 4 — Invoke the Manager on the REAL objective (operator, from `gateway-host`)
 
 `T=<DASHBOARD_TOKEN>` from `.env`. This uses the A38 `/api/manager` path (NOT the A35 manual pattern).
 

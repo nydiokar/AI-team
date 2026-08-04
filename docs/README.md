@@ -1,137 +1,130 @@
 # AI-Team Gateway
 
-A gateway for local coding agents, controlled from its own Web UI (and, as a
-secondary surface, Telegram).
+> Your local coding agents, with a control room.
 
-Current intended product:
-- open a persistent session from the Web UI (or Telegram)
-- continue that session through native Claude Code or Codex resume
-- keep state file-backed and inspectable
-- constrain execution by explicit workspace scope
+AI-Team Gateway is a session-first control plane for local coding agents. Open a
+conversation from the web UI, send work from Telegram when you are away from
+your desk, and continue the same native agent session on the next turn—without
+turning the system into an opaque autonomous-agent framework.
 
-This repository is no longer positioned as a generic AI task orchestrator or a local prompt-agent framework.
+The gateway is built for work you can inspect: durable session state, task and
+artifact history, event logs, bounded workspace access, and an optional mesh
+for routing work to other machines.
 
-## What Is Active
+## What it gives you
 
-- Web UI session control (`web/` — React, served by the gateway itself)
-- Telegram session control (secondary surface, same backend)
-- native backend resume for Claude Code and Codex
-- file-backed session state
-- per-session summaries and event logs
-- one-off task fallback
-- path validation and path suggestions for session creation
-- git helper commands
+| Capability | What it means in practice |
+| --- | --- |
+| **One session, native resume** | Continue Claude Code, Codex, or OpenCode-backed sessions through their own native resume mechanisms. |
+| **A real control surface** | Use the mobile-first web UI as the primary interface; Telegram is an optional secondary interface over the same gateway. |
+| **Inspectable state** | SQLite is the canonical read store; session JSON remains a durable file-backed fallback. Events, task history, and artifacts stay available for review. |
+| **Bounded execution** | Workspace roots, task timeouts, queue limits, and per-session audit data keep agent work explicit and reviewable. |
+| **Optional distributed work** | Enable the mesh only when you need remote worker nodes; pinned sessions stay on the machine that owns their native backend session. |
+| **Opt-in Manager/Cases** | A flag-gated Manager can coordinate worker sessions inside a durable Case. It is invoked explicitly—not autonomous by default. |
 
-## What Is Not The Main Runtime Path
-
-- LLAMA prompt engineering
-- local agent-template orchestration
-- modular local prompt-agents
-
-Those components may remain in the repo as dormant future-facing code, but they are not the current product path.
-
-## Architecture
+## The shape of the system
 
 ```text
-Web UI / Telegram -> gateway session -> Claude Code / Codex native session
-         -> state/sessions/*.json
-         -> state/summaries/*.md
-         -> logs/session_events/*.log
-         -> results/*.json
+Browser (primary UI) ─┐
+                      ├─► AI-Team Gateway ─► Claude Code / Codex / OpenCode
+Telegram (optional) ──┘          │
+                                 ├─► SQLite + inspectable fallback files
+                                 └─► optional remote worker nodes
 ```
 
-See [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for the full process/HTTP map.
+The web UI, Control API, and optional Telegram bot run in one gateway process.
+When mesh mode is enabled, the task server runs alongside it and remote workers
+connect to that server. Read the [architecture map](ARCHITECTURE.md) for the
+full process and HTTP surface.
 
-## Key Commands
+## Quick start (Linux)
 
-### Web UI
+Prerequisites: Python 3.11+, a supported local agent CLI, and pnpm for building
+the web UI. Telegram is optional.
 
-Open `http://<gateway-host>:9003/` (Tailscale-bound; see `docs/frontend/`).
+```bash
+python -m venv .venv
+.venv/bin/pip install -e ".[dev,telegram]"
+cp .env.example .env
+```
 
-### Telegram (secondary surface)
-
-- `/session_new <backend> <path>`
-- `/session_list`
-- `/session_use <session_id>`
-- `/session_status [session_id]`
-- `/session_dirs [path]`
-- `/session_cancel [session_id]`
-- `/session_close [session_id]`
-- `/run <instruction>`
-- `/say <instruction>`
-- `/task <instruction>`
-- `/progress <task_id>`
-- `/cancel <task_id>`
-- `/git_status`
-- `/commit <task_id> [--no-branch] [--push]`
-- `/commit_all <task_id> [--no-branch] [--push]`
-
-### CLI
-
-- `python main.py`
-- `python main.py status`
-- `python main.py doctor`
-- `python main.py health`
-- `python main.py tail-events`
-- `python main.py stats`
-- `python main.py telemetry-reconcile [--turn-id ID] [--since HOURS]`
-- `python main.py telemetry-cleanup [--event-days N] [--summary-days N]`
-- `pm2 start ecosystem.config.js --only ai-team-gateway --update-env`
-- `pm2 restart ai-team-gateway --update-env`
-
-## Configuration
-
-The most important production settings are:
+Set the workspace boundary in `.env` before starting a gateway that can edit
+files:
 
 ```env
-GATEWAY_TELEGRAM_BOT_TOKEN=...
-GATEWAY_TELEGRAM_ALLOWED_USERS=123456789
-
-CLAUDE_BASE_CWD=C:\Users\you\Projects
-CLAUDE_ALLOWED_ROOT=C:\Users\you\Projects
-CLAUDE_SKIP_PERMISSIONS=false
-CLAUDE_TIMEOUT_SEC=300
-CLAUDE_MAX_TURNS=0
+CLAUDE_BASE_CWD=/home/you/projects
+CLAUDE_ALLOWED_ROOT=/home/you/projects
 ```
 
-`CLAUDE_BASE_CWD` and `CLAUDE_ALLOWED_ROOT` should usually point to the parent workspace that contains every repo the gateway is allowed to touch. Do not set them so narrowly that the gateway cannot access intended repos, including itself if self-editing is expected.
+Build the UI and check the local environment:
 
-Turn observability is enabled by default. Its primary settings are:
-
-```env
-TELEMETRY_ENABLED=true
-TELEMETRY_DETAILED_EVENTS=true
-TELEMETRY_UPLOAD_BATCH_SIZE=50
-TELEMETRY_UPLOAD_INTERVAL_MS=1000
-TELEMETRY_UPLOAD_MAX_BYTES=524288
-TELEMETRY_SPOOL_MAX_BYTES=268435456
-TELEMETRY_EVENT_RETENTION_DAYS=30
-TELEMETRY_SUMMARY_RETENTION_DAYS=180
-TELEMETRY_TASK_SERVER_URL=
+```bash
+pnpm --dir web install
+pnpm --dir web build
+.venv/bin/python main.py doctor
 ```
 
-Durable accounting lives in `state/mesh.db`; `logs/events.ndjson` remains the
-operational event tail. Failed remote uploads spool under
-`logs/telemetry_spool/`.
+Start the gateway, then open `http://127.0.0.1:9003/`:
 
-## Current Production Status
+```bash
+.venv/bin/python main.py
+```
 
-The session-first architecture is implemented.
+In a second terminal, use the health endpoint to confirm the running service:
 
-The main production gate that still matters is a live end-to-end validation:
-1. create a session from the Web UI (or Telegram)
-2. send a first message
-3. verify `backend_session_id` is stored
-4. send a second message
-5. verify native backend resume continues the same conversation
+```bash
+curl http://127.0.0.1:9003/health
+```
 
-## Canonical Internal Docs
+For the complete setup and first-session walkthrough, see
+[Quick Start](QUICK_START.md). For a production deployment, set an explicit
+`DASHBOARD_TOKEN` (or `WORKER_TOKEN`) and bind the Control API only to an
+appropriate private interface.
 
-**Source of truth (read these first):**
-- [.ai/CONTEXT.md](../.ai/CONTEXT.md) — current priorities, wiring, constraints, shipped ledger
-- [.ai/dispatch/DISPATCH_LOG.md](../.ai/dispatch/DISPATCH_LOG.md) — state of every dispatched job
-- [.ai/context/production_vision.md](../.ai/context/production_vision.md) — strategic intent + anti-goals
+## What this is not
 
-**Everything else in `docs/`:**
-- [OVERVIEW.md](OVERVIEW.md) — newcomer front door, routes by topic
-- [INDEX.md](INDEX.md) — full categorized catalog of every doc in `docs/`, with current/superseded/archived status
+- Not a generic autonomous-agent framework.
+- Not a hidden memory or PTY-persistence system.
+- Not a router that silently moves machine-pinned sessions to another worker.
+- Not a promise that every experimental or legacy component in the repository is
+  part of the production path.
+
+The product direction and anti-goals live in
+[the production vision](../.ai/context/production_vision.md).
+
+## Operating notes
+
+- The web UI is served by the gateway itself; its development sources live in
+  [`web/`](../web/).
+- `GET /health` is an unauthenticated liveness check. `/api/*` requires a bearer
+  token; API docs are off by default.
+- Mesh, Manager/Case orchestration, and other advanced behavior are feature
+  gated. Review [the feature-flag reference](ENV_FEATURE_FLAGS.md) before
+  activating them—some flags can create paid agent work.
+- The current deployment and work-in-progress are deliberately kept out of this
+  README. Check [the live context](../.ai/CONTEXT.md) for that information.
+
+## Explore from here
+
+| If you want to… | Start here |
+| --- | --- |
+| Understand the runtime topology and API | [Architecture](ARCHITECTURE.md) |
+| Configure a local or production deployment | [Quick Start](QUICK_START.md) · [Environment flags](ENV_FEATURE_FLAGS.md) |
+| Work on the web UI | [Web UI README](../web/README.md) |
+| Use the Manager/worker harness | [Dispatch pipeline](harness/dispatch_pipeline.md) |
+| Find the document that owns a topic | [Documentation overview](OVERVIEW.md) · [full index](INDEX.md) |
+| See current priorities and active jobs | [Repository context](../.ai/CONTEXT.md) · [dispatch log](../.ai/dispatch/DISPATCH_LOG.md) |
+
+## Development checks
+
+Run only the checks relevant to the area you changed:
+
+```bash
+.venv/bin/python -m pytest tests/<targeted_test>.py
+pnpm --dir web typecheck
+pnpm --dir web test
+pnpm --dir web build
+```
+
+Some end-to-end tests can invoke paid agent CLIs. They are opt-in; see
+[the test README](../tests/README_TESTS.md) before running them.

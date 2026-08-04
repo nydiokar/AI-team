@@ -22,12 +22,12 @@ in-process Claude CLI subprocesses; only the session with an in-flight turn surf
 
 ## What ran (proof)
 Operator-driven, bounded, supervised in-gateway Manager via `POST /api/manager` (`node_id` omitted =
-`__local__`). Case `e8bb1b92fbcc41d4a2c667134bb799f2`, session `1f9bce3f5a87`. Sequential 2-task loop:
+`__local__`). Case `<case-id-redacted>`, session `<session-id>`. Sequential 2-task loop:
 
 ```
-flow.created → T1 dispatch(task_c903fca2) → finish → review.REWORK_REQUESTED   ← first live rework
-             → rework dispatch(task_e64405b8) → finish → review.ACCEPTED
-             → T2 dispatch(task_5fc16122) → finish → review.ACCEPTED
+flow.created → T1 dispatch(<task-id>) → finish → review.REWORK_REQUESTED   ← first live rework
+             → rework dispatch(<task-id>) → finish → review.ACCEPTED
+             → T2 dispatch(<task-id>) → finish → review.ACCEPTED
              → flow.CLOSED
 ```
 
@@ -44,7 +44,7 @@ worker 1's first commit and the rework produced a correct second commit it then 
   dishonesty flagged in the incident).
 
 ## 🔴 Critical finding — Manager role is carrier-coupled
-The same invoke with `node_id="kanebra-worker"` (session `dfa521bfb2df`) booted a **bare, role-less,
+The same invoke with `node_id="worker-node"` (session `<session-id>`) booted a **bare, role-less,
 tool-less Claude session** (*"I'm ready to help. What would you like me to work on?"*) — no role
 prompt, no manager MCP tools, no assignment. Role boot lives only on the in-gateway SDK driver path,
 not the node worker path. **The Manager cannot run on any node → stuck on the gateway host.**

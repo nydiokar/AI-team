@@ -51,16 +51,16 @@ Operator-supervised: dispatcher monitors the Case live via `get_case` / `/api/wo
 
 ## Live log
 - **2026-07-13 — F1 loop RAN and PASSED (first genuine `review.accepted` verdicts live).**
-- `case_id=d536af369743475bb2b26ad6c7751962` (`case_role=manager`, opened via `/api/manager`).
+- `case_id=<case-id-redacted>` (`case_role=manager`, opened via `/api/manager`).
 - **Grounding:** confirmed the gap in git — reactive `is_error` "Prompt is too long"
   (`orchestrator.py:316`/`:4253`, `claude_driver.py:114`) is the only pre-flight signal;
   `telemetry_projection.py` already computes per-turn `context_used_ratio`/`context_window_tokens`/
   `context_remaining_tokens`, but `session_timeline._compact_metrics` stripped them. No spec conflict.
-- **Task 1 (backend)** — `task_835909d9`, JOINed the Case. Commit `db4593f`: reuse-first projection
+- **Task 1 (backend)** — `<task-id>`, JOINed the Case. Commit `db4593f`: reuse-first projection
   change (whitelist 3 fields + `context_fill` session summary, honesty-first null+reason), 5/5 pytest.
   Reviewed adversarially in git (verified `turns[0]` == latest via `list_turns ... DESC`).
   → `record_review=accepted`.
-- **Task 2 (frontend)** — `task_f076ba59`, JOINed the Case (dispatched only after T1 accepted).
+- **Task 2 (frontend)** — `<task-id>`, JOINed the Case (dispatched only after T1 accepted).
   Commit `0f35efe`: read-only `ContextFillGauge` above the Composer consuming T1's `context_fill`
   (rawApi→adapter→`useSessionActivity`), honesty-first "ctx —" when unknown. 3 vitest + `tsc -b` clean.
   → `record_review=accepted`.

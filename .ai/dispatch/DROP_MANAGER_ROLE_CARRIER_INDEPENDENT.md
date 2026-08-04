@@ -30,9 +30,9 @@ gateway host, where a gateway restart kills it (exactly today's incident).
 
 ## Verified finding (A43, 2026-07-13)
 
-`POST /api/manager` with `node_id="kanebra-worker"` (a node agent-worker process on this server):
+`POST /api/manager` with `node_id="worker-node"` (a node agent-worker process on this server):
 
-- Session pinned correctly (`machine_id=kanebra-worker`, driver live).
+- Session pinned correctly (`machine_id=worker-node`, driver live).
 - BUT the boot turn returned a **bare, generic Claude session**: *"I'm ready to help. What would
   you like me to work on?"* — citing the plain CLAUDE.md workflow, NOT the Manager role.
 - **No role prompt, no first-assignment delivery, no manager MCP tools** (dispatch_worker /
@@ -68,9 +68,9 @@ nothing on the node path **applies the role** or **hands the session those tools
    what the node needs to reconstruct the role boot (role id, case id, assignment, tool profile) so
    the node isn't guessing. Verify `mesh_tasks.payload` / dispatch envelope carries it.
 3. **Confirm MCP tool reachability from the node execution context** (documented as green on-box for
-   `kanebra-worker`; verify for a truly remote node like `Horse` over tailnet, or scope the manager
+   `worker-node`; verify for a truly remote node like `worker-node` over tailnet, or scope the manager
    to on-box nodes until remote MCP reachability is solved).
-4. **Re-run the A43 loop with `node_id="kanebra-worker"`** and assert it behaves identically to the
+4. **Re-run the A43 loop with `node_id="worker-node"`** and assert it behaves identically to the
    in-gateway run (role prompt present, tools present, dispatch→review→rework→accept→close).
 
 ## Acceptance criteria
@@ -128,11 +128,11 @@ case-admission tests green.
 - [ ] **Operator-gated (paid):** `POST /api/manager` with a node `node_id` boots the
       role prompt + scoped tools + assignment identical to in-gateway, and drives a full
       review-gated loop. `POST /api/manager` is a real paid boot — left for a **bounded,
-      supervised** operator re-run of the A43 loop with `node_id="kanebra-worker"`.
+      supervised** operator re-run of the A43 loop with `node_id="worker-node"`.
 
 ### Documented deferral (drop item #3 — remote-node MCP reachability)
-On-box `kanebra-worker` shares `~/.claude.json` + loopback control API, so MCP tools
-are reachable. A **truly remote** node (Horse) additionally needs its own
+On-box `worker-node` shares `~/.claude.json` + loopback control API, so MCP tools
+are reachable. A **truly remote** node (worker-node) additionally needs its own
 `~/.claude.json` manager server + tailnet reach to the loopback control API. That is a
 deployment concern orthogonal to this code fix; scope the Manager to on-box nodes until
 remote MCP reachability is solved.

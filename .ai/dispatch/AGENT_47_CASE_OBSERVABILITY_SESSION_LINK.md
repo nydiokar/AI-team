@@ -22,8 +22,8 @@ columns, never to the `flow_links` graph** that the Work read-model / Case view 
 opening the Case shows `1 manager session + N undifferentiated role='task' tasks` and **no worker
 session, no manager↔worker relay.** You cannot see who did what.
 
-Evidence (DB, Case `9f3d34…`): `flow_links` = `{session:df8b7e024864/manager}`,
-`{task:task_c7d4274b/task}`, `{task:task_05bf908a/task}`. The worker session `717441320dcc`
+Evidence (DB, Case `9f3d34…`): `flow_links` = `{session:<session-id>/manager}`,
+`{task:<task-id>/task}`, `{task:<task-id>/task}`. The worker session `<session-id>`
 (`case_role='worker'`, `current_case_id=9f3d34…`) is present in `sessions` but **absent from
 `flow_links`**; and the manager's own-turn task and the worker's task are indistinguishable (both
 `role='task'`).
