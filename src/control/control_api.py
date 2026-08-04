@@ -557,11 +557,14 @@ def _upload_staging_root() -> "Path":
     return Path(__file__).resolve().parents[2] / "state" / "uploads"
 
 
-def _instruction_extra_metadata(body: InstructionBody) -> Dict[str, Any]:
+def _instruction_extra_metadata(body: InstructionBody) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = dict(_fork_carry_meta(body.continue_inline) or {})
     if body.upload_attachment and body.upload_attachment.staged_file:
         metadata["staged_file"] = dict(body.upload_attachment.staged_file)
-    return metadata
+    # None (not {}) for an empty carry-over: submit_instruction treats
+    # extra_metadata=None as a byte-identical legacy boot turn, and callers
+    # (e.g. tests / fork-continuity) rely on that exact distinction.
+    return metadata or None
 
 
 def _upload_attached_instruction(instruction: str, file_path: str) -> str:
