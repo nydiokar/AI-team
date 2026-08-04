@@ -99,6 +99,37 @@ from src.validation.engine import ValidationEngine
 logger = logging.getLogger(__name__)
 
 
+def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
+    """True when a backend failed its terminal wrap-up after producing useful work.
+
+    The task still failed for audit/review purposes. The distinction is only for
+    the reusable session status: do not leave the session in ERROR when the
+    operator has a salvaged reply/file evidence to inspect and can continue.
+    """
+    if result.success:
+        return False
+    if (getattr(result, "error_class", "") or "") != "backend_error":
+        return False
+    if not (result.files_modified or []):
+        return False
+    output = (result.output or "").strip()
+    if not output:
+        return False
+    raw = (result.raw_stdout or "").lower()
+    return (
+        '"subtype": "error_during_execution"' in raw
+        or '"subtype":"error_during_execution"' in raw
+    )
+
+
+def _session_status_after_result(result: TaskResult, *, cancel_requested: bool = False) -> SessionStatus:
+    if result.success or _is_salvaged_backend_finalization_error(result):
+        return SessionStatus.AWAITING_INPUT
+    if cancel_requested or any("cancelled" in str(error).lower() for error in (result.errors or [])):
+        return SessionStatus.CANCELLED
+    return SessionStatus.ERROR
+
+
 def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
     """Serialize a Session into the ``payload["session"]`` dict a worker node
     reconstructs via ``_make_session_from_payload``.
@@ -4438,12 +4469,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                                 "files_modified": session.last_files_modified[:20],
                             })
                             session.task_history = session.task_history[-20:]
-                            if result.success:
-                                session.status = SessionStatus.AWAITING_INPUT
-                            elif "cancelled" in [str(err).lower() for err in (result.errors or [])]:
-                                session.status = SessionStatus.CANCELLED
-                            else:
-                                session.status = SessionStatus.ERROR
+                            session.status = _session_status_after_result(result)
                             self.session_store.save(session)
 
                             # Compact summary  state/summaries/<session_id>.md
@@ -5390,12 +5416,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
             return result
 
-        if result.success:
-            session.status = SessionStatus.AWAITING_INPUT
-        elif cancel_ev is not None and cancel_ev.is_set():
-            session.status = SessionStatus.CANCELLED
-        else:
-            session.status = SessionStatus.ERROR
+        session.status = _session_status_after_result(
+            result,
+            cancel_requested=cancel_ev is not None and cancel_ev.is_set(),
+        )
         self.session_store.save(session)
 
         # Annotate failure errors with the node name so users see *which* machine failed.
