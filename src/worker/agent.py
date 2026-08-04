@@ -759,6 +759,14 @@ async def _execute_task(
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "return_code": getattr(raw, "return_code", 0),
                 "error_detail": error_detail,
+                # Ship the FULL backend transcript + stderr, not just the bounded
+                # diagnostic: the gateway persists raw_stdout into the artifact,
+                # so an error turn must not lose the agent's complete payload
+                # (previously only a 4k error_detail made it over the wire and
+                # the gateway mirrored raw_stdout=output, hiding the rest).
+                "raw_stdout": _bound_output(getattr(raw, "raw_stdout", "") or ""),
+                "raw_stderr": _bound_output(getattr(raw, "raw_stderr", "") or ""),
+                "error_class": getattr(raw, "error_class", "") or "",
                 "backend_session_id": raw.backend_session_id or "",
                 "driver_type": getattr(session, "driver_type", "") if action in ("create_session", "resume_session") else "",
                 "driver_status": getattr(session, "driver_status", "") if action in ("create_session", "resume_session") else "",

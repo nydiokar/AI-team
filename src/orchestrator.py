@@ -105,21 +105,41 @@ def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
     The task still failed for audit/review purposes. The distinction is only for
     the reusable session status: do not leave the session in ERROR when the
     operator has a salvaged reply/file evidence to inspect and can continue.
+
+    Gates (all three must hold):
+      - the terminal result is a backend ``error_during_execution`` — the SDK
+        ends the turn normally after the agent's work, so this is NOT a hard
+        execution failure. The marker lives in the raw transcript (raw_stdout),
+        or in the diagnostic tail (raw_stderr / error_detail) for older rows
+        where the gateway mirrored raw_stdout=output;
+      - ``output`` is the driver's honest salvaged reply, i.e. it starts with the
+        salvage banner AND carries agent content beyond that banner (a bare
+        error string like "backend failed" is not salvage).
+    Deliberately does NOT depend on ``error_class == "backend_error"``: every
+    call site reclassifies via ``_classify_error`` (which never returns that
+    value) — the original gate could never fire. And it does NOT require
+    ``files_modified``: work that is already committed leaves it empty while the
+    agent still produced a real reply.
     """
     if result.success:
-        return False
-    if (getattr(result, "error_class", "") or "") != "backend_error":
-        return False
-    if not (result.files_modified or []):
         return False
     output = (result.output or "").strip()
     if not output:
         return False
-    raw = (result.raw_stdout or "").lower()
-    return (
+    raw = (
+        f"{result.raw_stdout or ''}\n{result.raw_stderr or ''}\n"
+        f"{getattr(result, 'error_detail', '') or ''}"
+    ).lower()
+    if not (
         '"subtype": "error_during_execution"' in raw
         or '"subtype":"error_during_execution"' in raw
-    )
+    ):
+        return False
+    from src.backends.claude_driver import SALVAGE_ERROR_BANNER
+
+    if not output.startswith(SALVAGE_ERROR_BANNER):
+        return False
+    return len(output) > len(SALVAGE_ERROR_BANNER)
 
 
 def _session_status_after_result(result: TaskResult, *, cancel_requested: bool = False) -> SessionStatus:
@@ -6493,14 +6513,17 @@ Generated from user description: {description}
                         execution_time=r.get("execution_time", 0.0),
                         timestamp=r.get("timestamp", now_iso()),
                         return_code=r.get("return_code", 0),
-                        # The worker only ships `output` over the wire; mirror it
-                        # into raw_stdout so the artifact JSON (which persists
-                        # raw_stdout, not output) captures the full remote result
-                        # rather than an empty field (T2).
-                        raw_stdout=worker_output,
+                        # Prefer the worker's real transcript when it ships one
+                        # (full backend NDJSON); fall back to mirroring `output`
+                        # for older workers so the artifact JSON (which persists
+                        # raw_stdout, not output) never ends up empty (T2).
+                        raw_stdout=r.get("raw_stdout") or worker_output,
+                        raw_stderr=r.get("raw_stderr") or "",
                     )
                     setattr(result, "usage", r.get("usage"))
                     setattr(result, "backend_name", row.get("backend", "claude"))
+                    if r.get("error_detail"):
+                        setattr(result, "error_detail", r.get("error_detail"))
                     setattr(
                         result,
                         "telemetry_invocation_id",
@@ -6540,8 +6563,13 @@ Generated from user description: {description}
                         execution_time=r.get("execution_time", 0.0),
                         timestamp=r.get("timestamp", now_iso()) if r else now_iso(),
                         return_code=r.get("return_code", 1) if r else 1,
-                        raw_stdout=r.get("output", "") if r else "",
-                        raw_stderr=error_detail,
+                        # Preserve the worker's full backend transcript (NDJSON)
+                        # when shipped; only mirror `output` for legacy workers.
+                        # Previously raw_stdout was overwritten with `output`,
+                        # which erased the error_during_execution marker and hid
+                        # the agent's complete payload from the artifact.
+                        raw_stdout=(r.get("raw_stdout") if r else "") or (r.get("output", "") if r else ""),
+                        raw_stderr=(r.get("raw_stderr") if r else "") or error_detail,
                     )
                     setattr(result, "error_detail", error_detail)
                     setattr(result, "usage", r.get("usage") if r else None)
