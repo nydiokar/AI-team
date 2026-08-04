@@ -33,13 +33,6 @@ Current work:
    but does not deliver them through the existing browser-push seam stipulated by the packet. Reuse
    bounded `PushService` fanout at terminal task outcome; no new kill path or quota integration.
 
-2. **Dispatch state kit (A51)** — the `DISPATCH_LOG.md` prose table rots; status drifts from
-   reality. A51 installs the `dispatch-state-kit` (from `/home/cifran/dev/dispatch-state-kit/`):
-   per-job YAML state blocks in each `AGENT_N_*.md`, generated `_DISPATCH_STATE.md` view,
-   and a `--audit` command that surfaces structural gaps. Once landed, **run
-   `python scripts/dispatch/dispatch_state.py --list`** (or equivalent) to see the live job board
-   instead of reading this file's table. Until A51 lands, the source of truth is the Index table
-   in `.ai/dispatch/DISPATCH_LOG.md`.
 
 > **Finding active jobs:** until the dispatch-state-kit is installed, read
 > `.ai/dispatch/DISPATCH_LOG.md` → Index table. Each row points to its `AGENT_N_*.md` packet.
@@ -54,7 +47,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
 | **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |
-| **A51** | `AGENT_51_DISPATCH_STATE_KIT_MIGRATION.md` | — | ready / not started | Install dispatch-state-kit; migrate all 59 job files to machine-tracked YAML state. |
 | **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |
 | **A55** | `AGENT_55_M34_JOB3_CRASH_RESPAWN.md` | A54 | dispatched | Respawn a role-full Manager on a dead-session Case. Closes "survive a process restart." |
 | **A56** | `AGENT_56_M4_SPEC_AUTHORING_DECOMPOSER.md` | A52 ✅ | dispatched | M4: spec authoring + rubric-scored review + decomposer-as-task-DAG inside ONE Case. |

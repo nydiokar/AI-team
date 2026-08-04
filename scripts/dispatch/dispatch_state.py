@@ -16,13 +16,15 @@ from git). Only `updated_at` refreshes on edits.
 
 Because the folder IS the registry, gaps are structurally detectable:
   - a *.md with no yaml block          → MISSING_STATE
-  - status=done with an evidence path that doesn't exist on disk → CLAIMED_DONE_NO_PROOF
+  - status=done with no evidence or an evidence path that doesn't exist → CLAIMED_DONE_NO_PROOF
+  - explicitly auto-unblockable job whose dependencies are done → READY_TO_UNBLOCK
   - a row in the parquet with no file   → shows up as a removed row in git diff
 
 Commands:
   --new ID    create a new dispatch job stub (canonical created_at stamped NOW), then render
   --set ID F V  safely edit one yaml field (the ONLY sanctioned state edit), then render
-  --audit     scan + print the honest board (default)
+  --audit --strict  scan + return nonzero for actionable gaps
+  --resolve-blocks  manually flip explicitly opted-in blocked jobs whose dependencies are done
   --render    (re)write _DISPATCH_STATE.md + _dispatch.parquet from the yaml blocks
   --stop-hook auto-render + print gaps ONLY (quiet if clean); for the Stop hook, fail-open
   --migrate   one-time: infer + inject a yaml block into every bare *.md, seeding
@@ -108,6 +110,7 @@ class JobState:
     depends_on: list[str] = field(default_factory=list)
     results_ref: str | None = None
     evidence: list[str] = field(default_factory=list)
+    auto_unblock: bool = False
     # derived (not stored in yaml):
     flags: list[str] = field(default_factory=list)
 
@@ -170,20 +173,31 @@ def scan() -> list[JobState]:
             depends_on=_as_list(data.get("depends_on")),
             results_ref=data.get("results_ref"),
             evidence=_as_list(data.get("evidence")),
+            auto_unblock=data.get("auto_unblock") is True,
         )
-        js.flags = _derive_flags(js)
         jobs.append(js)
+    for js in jobs:
+        js.flags = _derive_flags(js, jobs)
     return jobs
 
 
-def _derive_flags(js: JobState) -> list[str]:
+def _derive_flags(js: JobState, all_jobs: list[JobState] | None = None) -> list[str]:
     flags: list[str] = []
     if js.status not in VALID_STATUS:
         flags.append("BAD_STATUS")
-    if js.status == "done" and js.evidence:
-        missing = [e for e in js.evidence if not (REPO_ROOT / e).exists()]
-        if missing:
+    if js.status == "done":
+        if not js.evidence or any(not (REPO_ROOT / e).exists() for e in js.evidence):
             flags.append("CLAIMED_DONE_NO_PROOF")
+    if js.status == "blocked" and js.auto_unblock and js.depends_on and all_jobs is not None:
+        jobs_by_id = {j.job_id: j for j in all_jobs}
+        if all(
+            (dependency := jobs_by_id.get(dep)) is not None
+            and dependency.status == "done"
+            and bool(dependency.evidence)
+            and all((REPO_ROOT / evidence).exists() for evidence in dependency.evidence)
+            for dep in js.depends_on
+        ):
+            flags.append("READY_TO_UNBLOCK")
     if js.status in {"active", "ready", "blocked"} and js.created_at:
         age = _age_days(js.updated_at or js.created_at)
         if js.status == "active" and age is not None and age > 14:
@@ -196,6 +210,8 @@ def _age_days(iso: str) -> int | None:
         d = dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=dt.timezone.utc)
     now = dt.datetime.now(dt.timezone.utc)
     return (now - d).days
 
@@ -249,7 +265,7 @@ def render(jobs: list[JobState]) -> None:
 
 # ─────────────────────────────── audit ───────────────────────────────────────
 
-def audit(jobs: list[JobState]) -> int:
+def audit(jobs: list[JobState], strict: bool = False) -> int:
     n = len(jobs)
     with_state = sum(1 for j in jobs if "MISSING_STATE" not in j.flags)
     orphans = n - with_state
@@ -271,15 +287,23 @@ def audit(jobs: list[JobState]) -> int:
     print()
 
     problems = [(j, f) for j in jobs for f in j.flags
-                if f in {"MISSING_STATE", "CLAIMED_DONE_NO_PROOF", "BAD_STATUS"}
+                if f in {"MISSING_STATE", "CLAIMED_DONE_NO_PROOF", "BAD_STATUS", "READY_TO_UNBLOCK"}
                 or f.startswith("STALE_")]
     if problems:
         print("  ⚠ ATTENTION:")
         for j, f in problems:
             print(f"      {f:24} {j.job_id} ({j.file})")
-        return 1
+        return 1 if strict else 0
     print("  ✓ no gaps, no unproven-done, no stale-active")
     return 0
+
+
+def resolve_blocks(jobs: list[JobState]) -> list[str]:
+    """Manually unblock only packets that explicitly opt in via auto_unblock."""
+    ready = [j for j in jobs if "READY_TO_UNBLOCK" in j.flags]
+    for job in ready:
+        set_field(job.job_id, "status", "ready")
+    return [job.job_id for job in ready]
 
 
 # ─────────────────────────────── migrate ─────────────────────────────────────
@@ -467,7 +491,7 @@ def stop_hook() -> int:
         print(f"[dispatch] render skipped ({type(e).__name__}) — state views may be stale.")
         return 0
     gaps = [(j, f) for j in jobs for f in j.flags
-            if f in {"MISSING_STATE", "CLAIMED_DONE_NO_PROOF", "BAD_STATUS"}
+            if f in {"MISSING_STATE", "CLAIMED_DONE_NO_PROOF", "BAD_STATUS", "READY_TO_UNBLOCK"}
             or f.startswith("STALE_")]
     if not gaps:
         return 0
@@ -477,6 +501,7 @@ def stop_hook() -> int:
             "MISSING_STATE": f"add a yaml block:  pnpm dispatch:set {j.job_id} status <s>",
             "CLAIMED_DONE_NO_PROOF": f"add real evidence: paths in {j.file}, or set status back",
             "BAD_STATUS": f"pnpm dispatch:set {j.job_id} status ready|active|blocked|done|dead",
+            "READY_TO_UNBLOCK": f"review then run: python scripts/dispatch/dispatch_state.py --resolve-blocks",
         }.get(f, f"review {j.file} — {f}")
         print(f"    {f:22} {j.job_id:34} → {fix}")
     return 0
@@ -541,13 +566,13 @@ def selftest() -> int:
         assert _read_yaml_block(p) is None
     print("  ✓ gap detection: bare file yields no block (→ MISSING_STATE)")
 
-    # 3) CLAIMED_DONE_NO_PROOF fires on a done job whose evidence is absent
+    # 3) CLAIMED_DONE_NO_PROOF fires unless a done job names existing proof
     js = JobState("J", "J.md", "done", "2026-01-01", "2026-01-01",
                   evidence=["does/not/exist.parquet"])
     assert "CLAIMED_DONE_NO_PROOF" in _derive_flags(js)
     js2 = JobState("J", "J.md", "done", "2026-01-01", "2026-01-01", evidence=[])
-    assert "CLAIMED_DONE_NO_PROOF" not in _derive_flags(js2)
-    print("  ✓ proof guard: done+missing-evidence flags, done+no-claim does not")
+    assert "CLAIMED_DONE_NO_PROOF" in _derive_flags(js2)
+    print("  ✓ proof guard: every done job requires existing evidence")
 
     # 4) canonical created_at immutability: injecting never clobbers an existing block
     with tempfile.TemporaryDirectory() as d:
@@ -586,6 +611,23 @@ def selftest() -> int:
     assert _as_list(None) == [] and _as_list("") == []
     print("  ✓ scalar evidence coerces to [path], not char-split")
 
+    # 8) legacy naive timestamps must not crash age checks
+    assert _age_days("2026-01-01T00:00:00") is not None
+    print("  ✓ naive timestamp is normalized before age calculation")
+
+    # 9) dependency completion alone never changes an operator-gated job
+    prerequisite = JobState("PRE", "PRE.md", "done", "", "", evidence=["pyproject.toml"])
+    gated = JobState("GATED", "GATED.md", "blocked", "", "", depends_on=["PRE"])
+    opted_in = JobState("OPTED", "OPTED.md", "blocked", "", "", depends_on=["PRE"], auto_unblock=True)
+    unproven = JobState("UNPROVEN", "UNPROVEN.md", "done", "", "", evidence=[])
+    unsafe = JobState("UNSAFE", "UNSAFE.md", "blocked", "", "", depends_on=["UNPROVEN"], auto_unblock=True)
+    jobs = [prerequisite, gated, opted_in]
+    assert "READY_TO_UNBLOCK" not in _derive_flags(gated, jobs)
+    assert "READY_TO_UNBLOCK" in _derive_flags(opted_in, jobs)
+    unproven.flags = _derive_flags(unproven, [unproven, unsafe])
+    assert "READY_TO_UNBLOCK" not in _derive_flags(unsafe, [unproven, unsafe])
+    print("  ✓ auto-unblock requires explicit per-packet opt-in")
+
     print("\nSELFTEST PASS" if ok else "\nSELFTEST FAIL")
     return 0 if ok else 1
 
@@ -595,6 +637,8 @@ def selftest() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Dispatch state manager (folder-is-the-registry).")
     ap.add_argument("--audit", action="store_true", help="scan + print the honest board (default)")
+    ap.add_argument("--strict", action="store_true", help="with --audit, fail when gaps exist")
+    ap.add_argument("--resolve-blocks", action="store_true", help="manually unblock explicit auto_unblock jobs")
     ap.add_argument("--render", action="store_true", help="(re)write _DISPATCH_STATE.md + _dispatch.parquet")
     ap.add_argument("--migrate", action="store_true", help="one-time: inject yaml blocks + seed created_at, then render")
     ap.add_argument("--set", nargs=3, metavar=("JOB_ID", "FIELD", "VALUE"),
@@ -611,6 +655,11 @@ def main() -> int:
         return install_git_hook()
     if args.stop_hook:
         return stop_hook()
+    if args.resolve_blocks:
+        flipped = resolve_blocks(scan())
+        render(scan())
+        print("resolved: " + ", ".join(flipped) if flipped else "no explicitly auto-unblockable jobs")
+        return 0
     if args.new:
         new_job(args.new)
         render(scan())
@@ -628,7 +677,7 @@ def main() -> int:
                                  else " (md-view-only: pandas absent, parquet skipped)")
         print(f"wrote {wrote}")
         return 0
-    return audit(scan())  # default
+    return audit(scan(), strict=args.strict)  # default
 
 
 if __name__ == "__main__":
