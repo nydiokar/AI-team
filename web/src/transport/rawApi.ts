@@ -285,6 +285,14 @@ export interface RawUploadResult {
   size: number;
   /** Relative to repo root: "uploads/<filename>" */
   path: string;
+  /** local = saved only; pending_instruction = staged for next turn; attached = submitted with a turn */
+  delivery?: "local" | "pending_instruction" | "attached";
+  task_id?: string;
+  instruction?: string;
+  staged_file?: {
+    file_id: string;
+    filename: string;
+  };
 }
 
 // GET /api/jobs → { running: RawJob[], recent: RawJob[] }
