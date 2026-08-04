@@ -172,6 +172,16 @@ def classify_error_text(text: str) -> str:
 _SALVAGE_INLINE_CAP = 24000
 
 
+# Leading banner of every salvaged error reply. Shared with the orchestrator so
+# the session-status salvage detection can recognize "the agent did work, then
+# its terminal wrap-up failed" without depending on error_class (which the
+# orchestrator reclassifies) or files_modified (empty when the work is committed).
+SALVAGE_ERROR_BANNER = (
+    "⚠️ The turn ended with a backend error before a final summary. "
+    "The agent's progress up to that point is below."
+)
+
+
 def _reset_hint(error_text: str) -> str:
     """Extract a human 'resets <when>' hint from a usage-limit error string, if any.
     e.g. "You've hit your session limit · resets 4:40pm (Europe/Kiev)" -> "4:40pm (Europe/Kiev)".
@@ -201,10 +211,7 @@ def _build_salvaged_reply(error_class: str, salvaged: str, error_text: str = "")
             f"once the limit resets."
         )
     else:
-        banner = (
-            "⚠️ The turn ended with a backend error before a final summary. "
-            "The agent's progress up to that point is below."
-        )
+        banner = SALVAGE_ERROR_BANNER
     if not salvaged:
         return banner
     body = salvaged

@@ -1,5 +1,6 @@
 from src.backends import claude_code
 from src.backends.claude_code import ClaudeCodeBackend
+from src.backends.claude_driver import SALVAGE_ERROR_BANNER
 from src.orchestrator import TaskOrchestrator, _session_status_after_result
 from src.core.interfaces import ExecutionResult, Task, TaskType, TaskPriority, TaskStatus, TaskResult, SessionStatus
 import asyncio
@@ -221,7 +222,7 @@ def test_salvaged_backend_finalization_error_keeps_session_awaiting_input():
     result = TaskResult(
         task_id="task_salvaged_backend_error",
         success=False,
-        output="The turn ended with a backend error before a final summary.\n\nI changed config.py.",
+        output=f"{SALVAGE_ERROR_BANNER}\n\n---\n\nI changed config.py.",
         errors=["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"],
         files_modified=["config.py"],
         execution_time=1.0,
@@ -233,6 +234,52 @@ def test_salvaged_backend_finalization_error_keeps_session_awaiting_input():
     )
 
     assert _session_status_after_result(result) == SessionStatus.AWAITING_INPUT
+
+
+def test_salvaged_detection_survives_gateway_reclassification_and_committed_work():
+    """The real 99d997c3c8b6 incident shape: the orchestrator reclassifies
+    error_class to ``fatal`` (never ``backend_error``), the work is already
+    committed (files_modified=[]), and on the mesh path the error_during_execution
+    marker lands in raw_stderr (the diagnostic tail) because the old worker never
+    shipped raw_stdout. All three must still resolve to AWAITING_INPUT."""
+    result = TaskResult(
+        task_id="task_ed5283f1",
+        success=False,
+        output=f"{SALVAGE_ERROR_BANNER}\n\n---\n\n"
+        "I need to verify the eviction decision ... the oldest note is at line 419.",
+        errors=["[Horse] [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"],
+        files_modified=[],
+        execution_time=412.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout="",
+        raw_stderr=(
+            "error_class=backend_error\nstdout_tail:\n"
+            '{"type":"result","subtype":"error_during_execution","is_error":true}'
+        ),
+        return_code=0,
+        error_class="fatal",
+    )
+
+    assert _session_status_after_result(result) == SessionStatus.AWAITING_INPUT
+
+
+def test_salvage_banner_without_agent_content_is_not_salvage():
+    """A reply that is only the banner (no agent work beyond it) is not
+    inspectable progress — keep the session ERROR so it does not mask a dead end."""
+    result = TaskResult(
+        task_id="task_banner_only",
+        success=False,
+        output=SALVAGE_ERROR_BANNER,
+        errors=["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"error_during_execution","is_error":true}',
+        raw_stderr="",
+        return_code=0,
+    )
+
+    assert _session_status_after_result(result) == SessionStatus.ERROR
 
 
 def test_plain_backend_error_still_marks_session_error():
