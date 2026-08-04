@@ -276,14 +276,20 @@ def test_unsubscribe_disables(client):
     assert len(client._test_db.list_push_subscriptions(enabled_only=True)) == 0
 
 
-def test_status_reports_unavailable_without_vapid(client):
+def test_status_reports_unavailable_without_vapid(client, monkeypatch):
+    # The status endpoint reads the real config.push (ambient .env), so make the
+    # VAPID state deterministic: clear all three vars regardless of the environment.
+    from config import config
+    monkeypatch.setattr(config.push, "vapid_public_key", "")
+    monkeypatch.setattr(config.push, "vapid_private_key", "")
+    monkeypatch.setattr(config.push, "vapid_subject", "")
+
     r = client.get("/api/push/status", headers=_auth())
     assert r.status_code == 200
     body = r.json()
     assert body["available"] is False
     assert body["vapid_public_key"] == ""
-    # Operator diagnostics name the missing env var(s). (The ambient test .env may
-    # have some VAPID vars set; VAPID_SUBJECT is the one this suite never sets.)
+    # Operator diagnostics name the missing env var(s).
     assert "VAPID_SUBJECT" in body["missing_env"]
     assert body["enabled_subscriptions"] == 0
 
