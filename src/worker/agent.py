@@ -928,6 +928,7 @@ class WorkerAgent:
         self._heartbeat_now = asyncio.Event()
         self._semaphore = asyncio.Semaphore(self.cfg.max_concurrent)
         self._slots_used: int = 0  # semaphore-acquired count; differs from len(_active) which includes queued tasks
+        self._inflight_sessions: set = set()  # session_ids with a claimed, executing turn task
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
         self._canary = (os.getenv("WORKER_CANARY") or "").lower() in {"1", "true", "yes"}
         self._incarnation_id = uuid.uuid4().hex
@@ -1477,6 +1478,7 @@ class WorkerAgent:
                 })
                 emit_event("task_claimed", backend=task_row.get("backend", ""))
                 self._heartbeat_now.set()  # push slots_used immediately to the server
+                self._inflight_sessions.add(session_id)
 
                 # Execute
                 result = await _execute_task(
@@ -1507,15 +1509,39 @@ class WorkerAgent:
                     logger.error("result_post_failed err=%s", e)
             finally:
                 self._slots_used -= 1
+                self._inflight_sessions.discard(session_id)
                 self._heartbeat_now.set()  # push slots_used=0 immediately after task ends
+
+    async def _wait_for_inflight_turn(self, session_id: str) -> None:
+        """Hold a close_session control task until the session's turn finishes.
+
+        Closing a session while its turn is mid-generation calls the SDK
+        interrupt (``cancel_inflight`` → ``client.interrupt()``), which surfaces
+        in the turn result as ``error_during_execution`` and marks the task
+        failed with the reply truncated. Wait for the running turn to post its
+        real outcome first; the close then tears the process down after nothing
+        is mid-flight. Runs as a concurrent task (outside the semaphore), so the
+        wait never blocks the poll loop or other slots.
+        """
+        waited = 0
+        while session_id in self._inflight_sessions:
+            if waited and waited % 60 == 0:
+                logger.warning(
+                    "event=close_deferred_inflight session_id=%s waited_s=%d",
+                    session_id, waited,
+                )
+            await asyncio.sleep(1)
+            waited += 1
 
     async def _handle_close_session(self, task_row: Dict[str, Any]) -> None:
         """Claim + execute a close_session control task outside the slot semaphore.
 
         Claims the task (so it leaves the pending queue and is not re-polled),
-        runs the backend teardown via _execute_task's close_session branch, and
-        posts a terminal result. Kept deliberately separate from the turn path so
-        a close is never blocked by a full slot pool."""
+        defers while the session has an in-flight turn (so the teardown never
+        interrupts a generating reply), then runs the backend teardown via
+        _execute_task's close_session branch and posts a terminal result. Kept
+        deliberately separate from the turn path so a close is never blocked by a
+        full slot pool."""
         task_id = task_row.get("id", "unknown")
         try:
             await asyncio.to_thread(
@@ -1528,6 +1554,9 @@ class WorkerAgent:
         except Exception as e:
             logger.warning("close_claim_failed err=%s", e)
             return
+        session_id = task_row.get("session_id", "")
+        if session_id:
+            await self._wait_for_inflight_turn(session_id)
         result = await _execute_task(
             task_row,
             self._backends,
