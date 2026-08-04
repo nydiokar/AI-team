@@ -16,7 +16,9 @@ from typing import Dict, List
 from src.core.roles import AgentRoleDefinition, MANAGER_TOOL_PROFILE, WORKER_TOOL_PROFILE
 
 # Concrete Claude Code MCP tool names granted by each declared tool profile.
-# `manager_v1` = the minimum Case-aware surface the M3.1 vertical slice drives.
+# `manager_v1` = the complete Case-aware surface exposed by ``mcp_manager``.
+# Keep this list synchronized with that server: naming a tool in the role prompt
+# without granting it here makes the capability unreachable to a real Manager.
 # `worker_v1` = EMPTY on purpose: a Worker gets NO extra MCP grant beyond the
 # driver defaults. It must NOT hold the manager surface (no dispatch_worker /
 # open_case / close_case / record_review). An empty list is the honest grant —
@@ -30,6 +32,13 @@ _PROFILE_TOOLS: Dict[str, List[str]] = {
         "mcp__manager__read_session_history",
         "mcp__manager__close_case",
         "mcp__manager__record_review",
+        "mcp__manager__reconcile_waits",
+        "mcp__manager__arm_wait_group",
+        "mcp__manager__get_case_brief",
+        "mcp__manager__publish_spec",
+        "mcp__manager__publish_artifact",
+        "mcp__manager__record_spec_review",
+        "mcp__manager__decompose_case",
         "mcp__manager__release_worker",
     ],
     WORKER_TOOL_PROFILE: [],
