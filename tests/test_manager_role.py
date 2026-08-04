@@ -356,34 +356,36 @@ def test_close_case_tool_success_and_refusal(monkeypatch):
     import scripts.mcp_manager as m
 
     monkeypatch.setattr(m, "_api_request", lambda *a, **k: {"ok": True, "closed": True, "reason": None})
-    assert "CLOSED" in m._close_case({"case_id": "c1"})
+    assert "CLOSED" in m._close_case({"case_id": "c1", "continuation_plan": "Next: prioritize A65 review."})
+    with pytest.raises(ValueError, match="continuation_plan"):
+        m._close_case({"case_id": "c1"})
 
     monkeypatch.setattr(
         m, "_api_request",
         lambda *a, **k: {"ok": False, "closed": False, "reason": "completion_criteria not reconciled: ['tests green']"},
     )
-    refused = m._close_case({"case_id": "c1"})
+    refused = m._close_case({"case_id": "c1", "continuation_plan": "Next: keep existing A54 first."})
     assert "REFUSED" in refused and "completion_criteria" in refused
 
 
-def test_api_close_case_returns_result_dict(monkeypatch):
-    from fastapi.testclient import TestClient
+def test_api_close_case_returns_result_dict():
     from src.control import control_api
 
     calls = {}
 
-    def _close(case_id, *, outcome="closed", actor="operator", criteria_reconciliation=None):
-        calls.update(case_id=case_id, actor=actor, outcome=outcome)
+    def _close(case_id, *, outcome="closed", actor="operator", criteria_reconciliation=None, continuation_plan=None):
+        calls.update(case_id=case_id, actor=actor, outcome=outcome, continuation_plan=continuation_plan)
         return {"ok": False, "closed": False, "reason": "case has 1 open child flow(s)"}
 
     orch = types.SimpleNamespace(close_case=_close)
-    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
-    client = TestClient(control_api.build_control_api(orch))
-    r = client.post("/api/cases/c1/close", headers={"Authorization": "Bearer tok"}, json={})
+    app = control_api.build_control_api(orch)
+    body = control_api.CaseCloseBody(continuation_plan="Next: resolve the open child flow.")
+    route = next(r for r in app.routes if getattr(r, "path", None) == "/api/cases/{case_id}/close")
+    result = route.endpoint("c1", body).body
     # A blocked close is a normal 200 decision signal, not an HTTP error.
-    assert r.status_code == 200
-    assert r.json()["reason"] == "case has 1 open child flow(s)"
+    assert b"case has 1 open child flow(s)" in result
     assert calls["case_id"] == "c1" and calls["actor"] == "manager"
+    assert calls["continuation_plan"] == "Next: resolve the open child flow."
 
 
 # ---------------------------------------------------------------------------

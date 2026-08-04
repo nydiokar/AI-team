@@ -268,7 +268,10 @@ async def test_manager_loop_end_to_end(orch, client, route_tools_through_client)
         assert "DONE" not in out_ghost, out_ghost
 
     # ── STEP F · CLOSE — refuses, then closes ────────────────────────────────
-    refused = await asyncio.to_thread(mcp_manager._close_case, {"case_id": case_id})
+    refused = await asyncio.to_thread(
+        mcp_manager._close_case,
+        {"case_id": case_id, "continuation_plan": "Next: finish criteria reconciliation."},
+    )
     assert "REFUSED" in refused and "completion_criteria" in refused, refused
     assert db.get_flow_run(case_id)["status"] is None  # still open after refusal
 
@@ -279,7 +282,11 @@ async def test_manager_loop_end_to_end(orch, client, route_tools_through_client)
     # corrected to match; this asserts the canonical, working contract.
     closed = await asyncio.to_thread(
         mcp_manager._close_case,
-        {"case_id": case_id, "criteria_reconciliation": [{"criterion": "tests green", "status": "met"}]},
+        {
+            "case_id": case_id,
+            "criteria_reconciliation": [{"criterion": "tests green", "status": "met"}],
+            "continuation_plan": "Next: no new job; existing dispatched priorities remain first.",
+        },
     )
     assert "CLOSED" in closed, closed
     assert db.get_flow_run(case_id)["status"] == "closed"
@@ -291,7 +298,10 @@ async def test_manager_loop_end_to_end(orch, client, route_tools_through_client)
     assert sess.case_role is None
 
     # Idempotent: a second close is a no-op decision signal, not a duplicate close.
-    again = await asyncio.to_thread(mcp_manager._close_case, {"case_id": case_id})
+    again = await asyncio.to_thread(
+        mcp_manager._close_case,
+        {"case_id": case_id, "continuation_plan": "Next: already closed; no new action."},
+    )
     assert "already terminal" in again, again
 
 
@@ -340,7 +350,8 @@ async def test_failed_worker_leaves_case_open_for_rework(orch, client, route_too
     closed = await asyncio.to_thread(
         mcp_manager._close_case,
         {"case_id": case_id, "outcome": "cancelled",
-         "criteria_reconciliation": [{"criterion": "tests green", "status": "waived", "reason": "worker failed; abandoning"}]},
+         "criteria_reconciliation": [{"criterion": "tests green", "status": "waived", "reason": "worker failed; abandoning"}],
+         "continuation_plan": "Next: investigate the failed worker before redispatch."},
     )
     assert "CLOSED" in closed, closed
     assert db.get_flow_run(case_id)["status"] == "cancelled"

@@ -29,7 +29,9 @@ file (packet → milestone → closure). The Level-3 wiki is **optional and neve
 > **Verification:** the exact non-paid commands run + their results
 >                   (targeted pytest / tsc -b / curl /health / --collect-only).
 > **F-tag outcomes:** each [Fn] → fixed | accepted | no change needed.
-> **What follows:** the next task(s) / open items / operator follow-ups (not code).
+> **What follows / continuation plan:** required. Name the next jobs to dispatch, monitoring
+> or follow-up created by this result, research forks or hypotheses, or the existing job IDs that
+> remain the priority. Include a short reason for each priority.
 > ```
 >
 > Then produce the **doc-update stub**:
@@ -54,6 +56,8 @@ file (packet → milestone → closure). The Level-3 wiki is **optional and neve
   (`false-success-intent-only`) — closure is where it gets caught.
 - **File-memory, if anything durable was learned.** Write a `<memory_entry>`-shaped
   fact to `MEMORY.md` + `memory/*.md` (spec §7) — a write format, not a new store.
+- **Continuation is mandatory.** A closeout must either name newly derived next work or state
+  which existing jobs remain the priority. "Nothing follows" is valid only with a reason.
 - **Note `continues:` for a follow-up.** If the next task should resume this one's
   context, tell the drafter to set `continues: <this_task_id>` in its frontmatter
   (spec §7/§14) — the runtime injects the prior context opt-in.
