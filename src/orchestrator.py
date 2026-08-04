@@ -2957,6 +2957,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         outcome: str = "closed",
         actor: str = "operator",
         criteria_reconciliation: Optional[List[Dict[str, Any]]] = None,
+        continuation_plan: Optional[str] = None,
         close_worker_sessions: bool = False,
     ) -> Dict[str, Any]:
         """[A37] Orchestrator seam over ``db.close_case`` — authoritative closure.
@@ -2980,6 +2981,16 @@ class TaskOrchestrator(ITaskOrchestrator):
         db = get_db()
         if db is None:
             return {"ok": False, "closed": False, "reason": "db_unavailable"}
+        plan = (continuation_plan or "").strip()
+        if actor == "manager" and not plan:
+            return {
+                "ok": False,
+                "closed": False,
+                "reason": (
+                    "continuation_plan required: record the next jobs, monitoring/follow-up, "
+                    "research forks, or named existing jobs that remain the priority"
+                ),
+            }
         try:
             closed = db.close_case(
                 flow_run_id, outcome=outcome, actor=actor,
@@ -3007,6 +3018,20 @@ class TaskOrchestrator(ITaskOrchestrator):
                     "event=case_affiliation_clear_failed flow_run_id=%s err=%s",
                     flow_run_id, e,
                 )
+            if plan:
+                try:
+                    db.append_flow_event(
+                        flow_run_id,
+                        "case.continuation_planned",
+                        actor,
+                        payload={"continuation_plan": plan},
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "event=case_continuation_plan_append_failed flow_run_id=%s err=%s",
+                        flow_run_id,
+                        e,
+                    )
         return {"ok": True, "closed": bool(closed), "reason": None}
 
     def record_review(
