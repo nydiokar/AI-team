@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-08-03
+**Last Updated:** 2026-08-05
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -65,6 +65,13 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-08-05 — Close-session race gate merged (PR #70, `AGENT_70`).**
+The close-vs-turn race behind `task_ed5283f1` is fixed at the root: the worker now defers a
+`close_session` control task until the session's in-flight turn posts its real outcome
+(`_inflight_sessions` tracking in `src/worker/agent.py`). PR #68/#69 already fixed the aftermath
+(full payload shipped, salvaged session status). **Worker-side code — lands only on the next
+worker redeploy (Horse); gateway side unaffected, no restart needed.**
 
 **2026-08-04 — Upload endpoint boundary deferral.**
 `POST /api/sessions/{id}/upload` is an external-input path. It now routes remote mesh uploads through

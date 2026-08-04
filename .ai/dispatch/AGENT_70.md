@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_70
 created_at: "2026-08-04T23:13:48.757530+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: big-pickle
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-04T23:14:07.331217+00:00"
+results_ref: DISPATCH_LOG.md#agente-70             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ['tests/test_session_close_propagation.py','409d366']                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-04T23:19:14.511307+00:00"
 ```
 
 # DISPATCH — AGENT_70
