@@ -49,8 +49,7 @@ def test_git_automation_service():
         
         # Manual timeout check for Windows
         if not SIGALRM_AVAILABLE and (time.time() - start_time) > 30:
-            print("  ❌ Test timed out - LLAMA initialization may be hanging")
-            return False
+            assert False, "Test timed out - LLAMA initialization may be hanging"
             
         print("  ✅ GitAutomationService initialized successfully")
         
@@ -64,17 +63,14 @@ def test_git_automation_service():
         
         if SIGALRM_AVAILABLE:
             signal.alarm(0)  # Cancel timeout
-        return True
+        assert True
         
     except TimeoutError:
-        print("  ❌ Test timed out - LLAMA initialization may be hanging")
-        return False
+        assert False, "Test timed out - LLAMA initialization may be hanging"
     except ImportError as e:
-        print(f"  ❌ Import error: {e}")
-        return False
+        assert False, f"Import error: {e}"
     except Exception as e:
-        print(f"  ❌ Error: {e}")
-        return False
+        assert False, f"Error: {e}"
     finally:
         if SIGALRM_AVAILABLE:
             signal.alarm(0)  # Ensure timeout is cancelled
@@ -95,21 +91,17 @@ def test_git_cli_commands():
         
         if result.returncode == 0:
             print("  ✅ git-status command executed successfully")
-            if "Git Repository Status" in result.stdout:
-                print("  ✅ git-status output contains expected content")
-            else:
-                print("  ⚠️  git-status output format may be unexpected")
+            assert "Git Repository Status" in result.stdout, (
+                "git-status output format may be unexpected"
+            )
+            print("  ✅ git-status output contains expected content")
         else:
-            print(f"  ❌ git-status command failed: {result.stderr}")
-            
-        return True
+            assert False, f"git-status command failed: {result.stderr}"
         
     except subprocess.TimeoutExpired:
-        print("  ❌ git-status command timed out")
-        return False
+        assert False, "git-status command timed out"
     except Exception as e:
-        print(f"  ❌ Error testing CLI commands: {e}")
-        return False
+        assert False, f"Error testing CLI commands: {e}"
 
 def test_git_file_detector():
     """Test GitFileDetector functionality"""
@@ -138,14 +130,12 @@ def test_git_file_detector():
         else:
             print("  ⚠️  Could not determine current branch")
         
-        return True
+        assert True
         
     except ImportError as e:
-        print(f"  ❌ Import error: {e}")
-        return False
+        assert False, f"Import error: {e}"
     except Exception as e:
-        print(f"  ❌ Error: {e}")
-        return False
+        assert False, f"Error: {e}"
 
 def test_integration_with_temp_repo():
     """Test git automation with a temporary repository"""
@@ -212,14 +202,12 @@ def test_integration_with_temp_repo():
             if SIGALRM_AVAILABLE:
                 signal.alarm(0)  # Cancel timeout
         
-        return True
+        assert True
         
     except TimeoutError:
-        print("  ❌ Integration test timed out - commit operation may be hanging")
-        return False
+        assert False, "Integration test timed out - commit operation may be hanging"
     except Exception as e:
-        print(f"  ❌ Integration test error: {e}")
-        return False
+        assert False, f"Integration test error: {e}"
     finally:
         # Cleanup with Windows-friendly approach
         try:
@@ -301,17 +289,14 @@ def test_llama_performance():
             if SIGALRM_AVAILABLE:
                 signal.alarm(0)  # Cancel timeout
             
-        return True
+        assert True
         
     except TimeoutError:
-        print("  ❌ LLAMA initialization timed out - model may be too slow")
-        return False
+        assert False, "LLAMA initialization timed out - model may be too slow"
     except ImportError as e:
-        print(f"  ❌ Import error: {e}")
-        return False
+        assert False, f"Import error: {e}"
     except Exception as e:
-        print(f"  ❌ Error: {e}")
-        return False
+        assert False, f"Error: {e}"
 
 def main():
     """Run all tests"""

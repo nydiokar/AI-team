@@ -19,6 +19,7 @@ burning tokens. This conftest makes that impossible:
 These guards are set BEFORE any test imports config, so they win over .env.
 """
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -28,6 +29,12 @@ import pytest
 # --- 1–2. Force safe env as early as possible (import time) -----------------
 os.environ["AI_TEAM_TEST_MODE"] = "1"
 os.environ["MESH_ENABLED"] = "false"
+
+# --- DB migration noise. The startup-scope runtime-flag read (get_db() in
+# build_control_api) legitimately initializes a second MeshDB in some tests, so
+# each test run replays every migration. That is intentional; silence the per-
+# migration INFO lines during tests only (never globally).
+logging.getLogger("src.control.db").setLevel(logging.WARNING)
 
 
 @pytest.fixture(autouse=True, scope="session")
