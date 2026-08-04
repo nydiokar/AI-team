@@ -5,8 +5,8 @@ status: done              # ready | active | blocked | done | dead
 owner: big-pickle
 depends_on: []
 results_ref: DISPATCH_LOG.md#agente-70             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: ['tests/test_session_close_propagation.py','409d366']                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-04T23:19:14.511307+00:00"
+evidence: ['tests/test_session_close_propagation.py']                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-04T23:19:59.600746+00:00"
 ```
 
 # DISPATCH — AGENT_70
