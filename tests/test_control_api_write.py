@@ -35,6 +35,7 @@ class _StubOrchestrator:
     def __init__(self):
         self.session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
         self.submitted = []          # (description, session_id, cwd, source)
+        self.submit_kwargs = []
         self.parent_flow_run_ids = []  # [A32] loose lineage id per submit
         self.cancelled = []          # task_ids
         self.compacted = []          # session_ids
@@ -52,6 +53,11 @@ class _StubOrchestrator:
             from src.orchestrator import HarnessAdmissionBlocked
             raise HarnessAdmissionBlocked(self.block_task_id)
         self.submitted.append((description, session_id, cwd, source))
+        self.submit_kwargs.append({
+            "target_files": target_files,
+            "parent_flow_run_id": parent_flow_run_id,
+            **_,
+        })
         # [A32] Record the loose lineage id separately so tests can assert it is
         # threaded from InstructionBody without disturbing the legacy tuple shape.
         self.parent_flow_run_ids.append(parent_flow_run_id)
@@ -274,6 +280,147 @@ def test_idempotency_key_is_concurrency_safe(monkeypatch, orch):
     # Exactly one real submission despite two concurrent identical requests.
     assert len(orch.submitted) == 1
     assert j1 == j2
+
+
+# --- file upload ------------------------------------------------------------
+
+def test_upload_local_session_writes_uploads_dir(orch, tmp_path):
+    import asyncio
+
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    assert res.ok
+
+    body = asyncio.run(
+        control_api._store_session_upload(orch, res.session, "note.txt", b"hello")
+    )
+
+    assert body["ok"] is True
+    assert body["path"] == "uploads/note.txt"
+    assert body["delivery"] == "local"
+    assert (tmp_path / "uploads" / "note.txt").read_bytes() == b"hello"
+    assert orch.submitted == []
+
+
+def test_upload_local_session_with_instruction_references_deduped_name(orch, tmp_path):
+    import asyncio
+
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    assert res.ok
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "note.txt").write_text("old", encoding="utf-8")
+
+    body = asyncio.run(
+        control_api._store_session_upload(
+            orch,
+            res.session,
+            "note.txt",
+            b"new",
+            instruction="read this",
+        )
+    )
+
+    assert body["delivery"] == "attached"
+    assert body["path"] == "uploads/note_1.txt"
+    assert body["instruction"] == "read this\n\n📎 File: `uploads/note_1.txt`"
+    assert (upload_dir / "note_1.txt").read_bytes() == b"new"
+    assert orch.submitted[-1][0] == "read this\n\n📎 File: `uploads/note_1.txt`"
+
+
+def test_upload_remote_session_stages_without_separate_delivery_task(
+    orch,
+    monkeypatch,
+    tmp_path,
+):
+    import asyncio
+
+    res = orch.session_service.create_session(
+        backend="claude",
+        repo_path=r"C:\Users\Cicada38\Projects\tokens_ingest",
+    )
+    assert res.ok
+    res.session.machine_id = "Horse"
+    orch.session_service.store.save(res.session)
+    monkeypatch.setattr("src.control.node_inspector.session_node", lambda _session: "Horse")
+    monkeypatch.setattr(control_api, "_upload_staging_root", lambda: tmp_path / "state" / "uploads")
+
+    body = asyncio.run(control_api._store_session_upload(orch, res.session, "spec.md", b"# spec"))
+
+    assert body["ok"] is True
+    assert body["path"] == "uploads/spec.md"
+    assert body["delivery"] == "pending_instruction"
+    assert body["staged_file"]["filename"] == "spec.md"
+    assert orch.submitted == []
+    staged_files = list((tmp_path / "state" / "uploads").glob("*/spec.md"))
+    assert len(staged_files) == 1
+    assert staged_files[0].read_bytes() == b"# spec"
+    wrong_gateway_path = tmp_path / r"C:\Users\Cicada38\Projects\tokens_ingest" / "uploads" / "spec.md"
+    assert not wrong_gateway_path.exists()
+
+
+def test_upload_remote_session_with_instruction_attaches_file_to_single_turn(
+    orch,
+    monkeypatch,
+    tmp_path,
+):
+    import asyncio
+    from src.core.interfaces import SessionStatus
+
+    res = orch.session_service.create_session(
+        backend="claude",
+        repo_path=r"C:\Users\Cicada38\Projects\tokens_ingest",
+    )
+    assert res.ok
+    res.session.machine_id = "Horse"
+    orch.session_service.store.save(res.session)
+    monkeypatch.setattr("src.control.node_inspector.session_node", lambda _session: "Horse")
+    monkeypatch.setattr(control_api, "_upload_staging_root", lambda: tmp_path / "state" / "uploads")
+
+    body = asyncio.run(
+        control_api._store_session_upload(
+            orch,
+            res.session,
+            "spec.md",
+            b"# spec",
+            instruction="summarize this",
+        )
+    )
+
+    assert body["ok"] is True
+    assert body["delivery"] == "attached"
+    assert body["instruction"] == "summarize this\n\n📎 File: `uploads/spec.md`"
+    assert orch.submitted == [
+        (
+            "summarize this\n\n📎 File: `uploads/spec.md`",
+            res.session.session_id,
+            res.session.repo_path,
+            "web_session",
+        )
+    ]
+    meta = orch.submit_kwargs[0]["extra_metadata"]
+    assert meta["staged_file"]["filename"] == "spec.md"
+    assert "task_type" not in meta
+    stored = orch.session_service.store.get(res.session.session_id)
+    assert stored.status == SessionStatus.BUSY
+    assert stored.last_task_id == orch._next_task_id
+    staged_files = list((tmp_path / "state" / "uploads").glob("*/spec.md"))
+    assert len(staged_files) == 1
+    assert staged_files[0].read_bytes() == b"# spec"
+
+
+def test_instruction_metadata_includes_pending_uploaded_file():
+    body = control_api.InstructionBody(
+        description="summarize this\n\n📎 File: `uploads/spec.md`",
+        session_id="session-1",
+        upload_attachment=control_api.UploadedFileAttachment(
+            path="uploads/spec.md",
+            staged_file={"file_id": "stage-1", "filename": "spec.md"},
+        ),
+    )
+
+    meta = control_api._instruction_extra_metadata(body)
+
+    assert meta["staged_file"] == {"file_id": "stage-1", "filename": "spec.md"}
 
 
 # --- stop / compact ---------------------------------------------------------

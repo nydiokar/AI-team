@@ -66,6 +66,13 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-08-04 — Upload endpoint boundary deferral.**
+`POST /api/sessions/{id}/upload` is an external-input path. It now routes remote mesh uploads through
+worker staging instead of gateway-local path writes, but the pre-existing request-size/timeout posture
+remains: upload bodies are read into memory and bounded only when `GATEWAY_UPLOAD_MAX_MB` is set; there
+is no upload-specific timeout/semaphore yet. Size this before raising upload volume or allowing broad
+untrusted use.
+
 **2026-08-04 — A65 cost monitoring complete (PR #62).**
 The manager-vs-workers cost job is live end-to-end: P0 truthfulness audit
 (`docs/cost_monitoring_audit.md`), P1 cost read-model (`ac5aea2`, PR #61 — codex `includes_cache`
