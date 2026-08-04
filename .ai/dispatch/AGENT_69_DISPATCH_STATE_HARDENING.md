@@ -4,9 +4,9 @@ created_at: "2026-08-04T04:17:26+03:00"        # CANONICAL — set once at dispa
 status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+results_ref: PR #64             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: ["scripts/dispatch/dispatch_state.py", "tests/test_dispatch_state.py", "pyproject.toml"]                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-04T01:18:27.272434+00:00"
+updated_at: "2026-08-04T01:37:46.876486+00:00"
 ```
 
 # DISPATCH — A69 · Dispatch state hardening reconstruction
@@ -37,7 +37,7 @@ timestamps, and dependency completion must never silently change an operator-gat
 
 ## Closure
 
-Implemented and verified on 2026-08-04. The audit now treats every `done` state as a claim that
+Implemented, CI-verified, and merged by PR #64 on 2026-08-04. The audit now treats every `done` state as a claim that
 must cite an existing artifact; legacy timestamps without an offset are normalized as UTC; and
 dependency completion is advisory unless the dependent packet declares `auto_unblock: true`.
 Even then, `--resolve-blocks` is an explicit operator command. Focused regression tests, the
