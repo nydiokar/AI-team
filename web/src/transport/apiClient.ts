@@ -266,6 +266,13 @@ export const api = {
       sessionId?: string;
       cwd?: string;
       targetFiles?: string[];
+      uploadAttachment?: {
+        path: string;
+        stagedFile?: {
+          file_id: string;
+          filename: string;
+        };
+      };
       /** [Session-fork] Verbatim digest of the marked messages carried over from a
        *  forked source session — injected once as reference-only prior context on
        *  this (the new session's first) turn. Omit on every normal turn. */
@@ -283,6 +290,12 @@ export const api = {
         session_id: args.sessionId ?? null,
         cwd: args.cwd ?? null,
         target_files: args.targetFiles ?? null,
+        upload_attachment: args.uploadAttachment
+          ? {
+              path: args.uploadAttachment.path,
+              staged_file: args.uploadAttachment.stagedFile ?? null,
+            }
+          : null,
         continue_inline: args.continueInline ?? null,
         case_id: args.caseId ?? null,
       },
@@ -436,9 +449,17 @@ export const api = {
   },
 
   /** POST /api/sessions/{id}/upload — multipart file upload to session's uploads/ dir. */
-  async uploadFile(token: string, sessionId: string, file: File): Promise<RawUploadResult> {
+  async uploadFile(
+    token: string,
+    sessionId: string,
+    file: File,
+    instruction?: string,
+  ): Promise<RawUploadResult> {
     const fd = new FormData();
     fd.append("file", file);
+    if (instruction?.trim()) {
+      fd.append("instruction", instruction.trim());
+    }
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },

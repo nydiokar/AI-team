@@ -11,6 +11,15 @@ import { useSentStore } from "../../stores/sentStore";
 import { useDraftStore } from "../../stores/draftStore";
 import { useForkStore } from "../../stores/forkStore";
 
+interface PendingUpload {
+  fileRef: string;
+  path: string;
+  stagedFile?: {
+    file_id: string;
+    filename: string;
+  };
+}
+
 export function Composer({
   sessionId,
   running,
@@ -26,6 +35,7 @@ export function Composer({
     () => useDraftStore.getState().bySession[sessionId] ?? "",
   );
   const [uploadBanner, setUploadBanner] = useState<string | null>(null);
+  const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -37,6 +47,7 @@ export function Composer({
     if (lastSessionRef.current !== sessionId) {
       lastSessionRef.current = sessionId;
       setText(useDraftStore.getState().bySession[sessionId] ?? "");
+      setPendingUpload(null);
     }
   }, [sessionId]);
 
@@ -66,7 +77,11 @@ export function Composer({
   const clearCarry = useForkStore((s) => s.clearCarry);
 
   const send = (overrideText?: string) => {
-    const body = (overrideText ?? text).trim();
+    const baseBody = (overrideText ?? text).trim();
+    const body =
+      pendingUpload && !baseBody.includes(pendingUpload.fileRef)
+        ? `${baseBody}\n\n${pendingUpload.fileRef}`.trim()
+        : baseBody;
     if (!body || submit.isPending) return;
     const id = newIdempotencyKey();
     const carry = useForkStore.getState().bySession[sessionId];
@@ -87,6 +102,12 @@ export function Composer({
         description: body,
         sessionId,
         idempotencyKey: id,
+        uploadAttachment: pendingUpload
+          ? {
+              path: pendingUpload.path,
+              stagedFile: pendingUpload.stagedFile,
+            }
+          : undefined,
         // A fork carries ONLY the marked-message digest onto its first turn. Fork is
         // a pure session action (session→session lineage via `continued_from`), so it
         // never joins a Case here — Case membership is the Manager/Worker axis, kept
@@ -96,6 +117,10 @@ export function Composer({
       {
         onSuccess: (res) => {
           updateSent(id, { delivery: "acknowledged", taskId: res.task_id });
+          if (pendingUpload && body.includes(pendingUpload.fileRef)) {
+            setPendingUpload(null);
+            setUploadBanner(null);
+          }
           // The fork context has been delivered — never attach it again.
           if (carry) clearCarry(sessionId);
         },
@@ -111,31 +136,62 @@ export function Composer({
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = "";
+    const instructionText = text.trim();
     setUploadBanner(`Uploading ${file.name}…`);
     upload.mutate(
-      { sessionId, file },
+      { sessionId, file, instruction: instructionText || undefined },
       {
         onSuccess: (res) => {
           setUploadBanner(null);
-          const fileRef = `📎 File: ${res.path}`;
-          const instruction = text.trim() ? `${text.trim()}\n\n${fileRef}` : null;
+          const fileRef = `📎 File: \`${res.path}\``;
+          const uploadId = newIdempotencyKey();
+          addSent({
+            id: uploadId,
+            sessionId,
+            text: `File \`${res.path}\` uploaded.`,
+            createdAt: new Date().toISOString(),
+            delivery: "acknowledged",
+            taskId: res.task_id ?? null,
+          });
+          const instruction = res.instruction ?? (
+            instructionText ? `${instructionText}\n\n${fileRef}` : null
+          );
           if (instruction) {
+            const id = newIdempotencyKey();
+            addSent({
+              id,
+              sessionId,
+              text: instruction,
+              createdAt: new Date().toISOString(),
+              delivery: "acknowledged",
+              taskId: res.task_id ?? null,
+            });
+            setPendingUpload(null);
             updateText("");
-            send(instruction);
           } else {
-            // No instruction yet — show a transient banner with the saved path.
-            // We do NOT inject a fake chat bubble: it isn't a backend event, so it
-            // would refresh away and sort out of order. The path is auto-appended
-            // to the next instruction the user sends (see fileRef above).
+            // No instruction yet — keep a visible chat trace and attach the file
+            // reference to the next typed message, matching the file+caption UX.
+            setPendingUpload({
+              fileRef,
+              path: res.path,
+              stagedFile: res.staged_file,
+            });
             setUploadBanner(
               `Saved ${res.filename} (${Math.round(res.size / 1024)} KB) → ${res.path}. Type an instruction to use it.`,
             );
-            setTimeout(() => setUploadBanner(null), 8000);
           }
         },
         onError: (err) => {
-          setUploadBanner(null);
-          updateText(`Upload failed: ${String(err.message)}. `);
+          const uploadId = newIdempotencyKey();
+          addSent({
+            id: uploadId,
+            sessionId,
+            text: `Upload failed: ${String(err.message)}`,
+            createdAt: new Date().toISOString(),
+            delivery: "rejected",
+            taskId: null,
+          });
+          setUploadBanner("Upload failed.");
         },
       },
     );

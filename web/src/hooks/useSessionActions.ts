@@ -32,6 +32,13 @@ export function useSubmitInstruction() {
       description: string;
       sessionId?: string;
       idempotencyKey?: string;
+      uploadAttachment?: {
+        path: string;
+        stagedFile?: {
+          file_id: string;
+          filename: string;
+        };
+      };
       /** [Session-fork] Carry-over attached on the forked session's FIRST turn. */
       continueInline?: string;
       caseId?: string;
@@ -41,6 +48,7 @@ export function useSubmitInstruction() {
         {
           description: vars.description,
           sessionId: vars.sessionId,
+          uploadAttachment: vars.uploadAttachment,
           continueInline: vars.continueInline,
           caseId: vars.caseId,
         },
@@ -212,8 +220,8 @@ export function useRestoreSession() {
 export function useUploadFile() {
   const token = useAuthStore((s) => s.token);
   return useMutation({
-    mutationFn: (vars: { sessionId: string; file: File }) =>
-      api.uploadFile(token, vars.sessionId, vars.file),
+    mutationFn: (vars: { sessionId: string; file: File; instruction?: string }) =>
+      api.uploadFile(token, vars.sessionId, vars.file, vars.instruction),
     retry: false,
   });
 }

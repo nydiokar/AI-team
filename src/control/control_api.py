@@ -30,7 +30,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Security, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Security, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -97,11 +97,17 @@ def _harness_blocked_http(blocked: Exception) -> HTTPException:
 _CONTINUE_INLINE_MAX = 48000
 
 
+class UploadedFileAttachment(BaseModel):
+    path: str
+    staged_file: Optional[Dict[str, str]] = None
+
+
 class InstructionBody(BaseModel):
     description: str
     session_id: Optional[str] = None
     cwd: Optional[str] = None
     target_files: Optional[List[str]] = None
+    upload_attachment: Optional[UploadedFileAttachment] = None
     # [A32] Optional Manager→worker lineage. When a Manager session dispatches a
     # worker via mcp_manager, it passes its own flow_run id (the case). Stamped
     # onto the child's flow_runs row ONLY when HARNESS_FLOW_DRIVE is ON (else a
@@ -543,6 +549,199 @@ def _results_dir() -> "Path":
         return Path(_cfg.system.results_dir)
     except Exception:
         return Path("results")
+
+
+def _upload_staging_root() -> "Path":
+    """Gateway staging directory for files that must be pulled by remote workers."""
+    from pathlib import Path
+    return Path(__file__).resolve().parents[2] / "state" / "uploads"
+
+
+def _instruction_extra_metadata(body: InstructionBody) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = dict(_fork_carry_meta(body.continue_inline) or {})
+    if body.upload_attachment and body.upload_attachment.staged_file:
+        metadata["staged_file"] = dict(body.upload_attachment.staged_file)
+    return metadata
+
+
+def _upload_attached_instruction(instruction: str, file_path: str) -> str:
+    clean_instruction: str = instruction.strip()
+    return f"{clean_instruction}\n\n📎 File: `{file_path}`" if clean_instruction else ""
+
+
+async def _store_session_upload(
+    orchestrator: Any,
+    session: Any,
+    raw_name: str,
+    content: bytes,
+    instruction: Optional[str] = None,
+) -> Dict[str, Any]:
+    import os as _os
+    import re as _re
+    import shutil as _shutil
+    import uuid as _uuid
+    from pathlib import Path as _Path
+    from src.control.node_inspector import session_node
+
+    ext = _os.path.splitext(raw_name)[1].lower()
+    blocked_exts: set[str] = {
+        ".exe", ".bat", ".cmd", ".com", ".msi", ".msp", ".scr", ".pif",
+        ".vbs", ".vbe", ".ps1", ".psm1", ".psd1", ".wsf", ".wsh", ".hta",
+        ".jar", ".dll", ".reg", ".lnk",
+    }
+    if ext in blocked_exts:
+        raise HTTPException(status_code=400, detail="dangerous_extension")
+
+    try:
+        from config import config as _cfg
+        max_mb: int = getattr(_cfg.telegram, "upload_max_mb", 0)
+    except Exception:
+        max_mb = 0
+    if max_mb > 0 and len(content) > max_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="file_too_large")
+
+    safe_name: str = _re.sub(r"[^\w.\-]", "_", raw_name)[:200] or "upload"
+    if not safe_name.strip("._"):
+        safe_name = "upload"
+    file_path: str = f"uploads/{safe_name}"
+    attached_instruction: str = _upload_attached_instruction(instruction or "", file_path)
+
+    remote_node = session_node(session)
+    if remote_node is not None:
+        stage_id: str = _uuid.uuid4().hex[:16]
+        stage_dir = _upload_staging_root() / stage_id
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        dest = (stage_dir / safe_name).resolve()
+        try:
+            dest.relative_to(stage_dir.resolve())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="dangerous_extension")
+        dest.write_bytes(content)
+        staged_file_meta: dict[str, str] = {"file_id": stage_id, "filename": safe_name}
+        if not attached_instruction:
+            logger.info(
+                "event=web_upload_staged_pending session=%s file=%s size=%d node=%s",
+                session.session_id,
+                safe_name,
+                len(content),
+                remote_node,
+            )
+            return {
+                "ok": True,
+                "filename": safe_name,
+                "size": len(content),
+                "path": file_path,
+                "delivery": "pending_instruction",
+                "staged_file": staged_file_meta,
+            }
+
+        orchestrator.session_service.mark_busy(
+            session.session_id, last_user_message=attached_instruction)
+        session = orchestrator.session_service.store.get(session.session_id) or session
+        try:
+            task_id: str = await orchestrator.submit_instruction(
+                description=attached_instruction,
+                session_id=session.session_id,
+                cwd=session.repo_path,
+                source="web_session",
+                extra_metadata={
+                    "staged_file": staged_file_meta,
+                },
+            )
+        except Exception as exc:
+            orchestrator.session_service.mark_idle(session.session_id)
+            _shutil.rmtree(stage_dir, ignore_errors=True)
+            logger.error(
+                "event=web_upload_attached_enqueue_failed session=%s file=%s node=%s error=%s",
+                session.session_id,
+                safe_name,
+                remote_node,
+                exc,
+            )
+            raise HTTPException(status_code=500, detail="delivery_enqueue_failed") from exc
+        logger.info(
+            "event=web_upload_attached session=%s file=%s size=%d node=%s task=%s",
+            session.session_id,
+            safe_name,
+            len(content),
+            remote_node,
+            task_id,
+        )
+        session.last_task_id = task_id
+        orchestrator.session_service.store.save(session)
+        return {
+            "ok": True,
+            "filename": safe_name,
+            "size": len(content),
+            "path": file_path,
+            "delivery": "attached",
+            "task_id": task_id,
+            "instruction": attached_instruction,
+        }
+
+    upload_dir = _Path(session.repo_path) / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    dest = (upload_dir / safe_name).resolve()
+
+    try:
+        dest.relative_to(upload_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="dangerous_extension")
+
+    if dest.exists():
+        stem, suffix = _os.path.splitext(safe_name)
+        counter: int = 1
+        while dest.exists():
+            dest = (upload_dir / f"{stem}_{counter}{suffix}").resolve()
+            counter += 1
+        safe_name = dest.name
+        file_path = f"uploads/{safe_name}"
+        attached_instruction = _upload_attached_instruction(instruction or "", file_path)
+
+    dest.write_bytes(content)
+    logger.info(
+        "event=web_upload session=%s file=%s size=%d", session.session_id, safe_name, len(content)
+    )
+    if attached_instruction:
+        orchestrator.session_service.mark_busy(
+            session.session_id, last_user_message=attached_instruction)
+        session = orchestrator.session_service.store.get(session.session_id) or session
+        try:
+            task_id = await orchestrator.submit_instruction(
+                description=attached_instruction,
+                session_id=session.session_id,
+                cwd=session.repo_path,
+                target_files=[str(dest)],
+                source="web_session",
+            )
+        except Exception as exc:
+            orchestrator.session_service.mark_idle(session.session_id)
+            logger.error(
+                "event=web_upload_attached_enqueue_failed session=%s file=%s error=%s",
+                session.session_id,
+                safe_name,
+                exc,
+            )
+            raise HTTPException(status_code=500, detail="delivery_enqueue_failed") from exc
+        session.last_task_id = task_id
+        orchestrator.session_service.store.save(session)
+        return {
+            "ok": True,
+            "filename": safe_name,
+            "size": len(content),
+            "path": file_path,
+            "delivery": "attached",
+            "task_id": task_id,
+            "instruction": attached_instruction,
+        }
+
+    return {
+        "ok": True,
+        "filename": safe_name,
+        "size": len(content),
+        "path": file_path,
+        "delivery": "local",
+    }
 
 
 def _sessions_dir() -> "Path":
@@ -1318,7 +1517,7 @@ def build_control_api(orchestrator) -> FastAPI:
                         source="web_session",
                         parent_flow_run_id=body.parent_flow_run_id,
                         join_case_id=body.case_id,
-                        extra_metadata=_fork_carry_meta(body.continue_inline),
+                        extra_metadata=_instruction_extra_metadata(body),
                     )
                 except HarnessAdmissionBlocked as blocked:
                     # No task ran — return the session to IDLE so it stays usable.
@@ -1335,7 +1534,7 @@ def build_control_api(orchestrator) -> FastAPI:
                         source="web_oneoff",
                         parent_flow_run_id=body.parent_flow_run_id,
                         join_case_id=body.case_id,
-                        extra_metadata=_fork_carry_meta(body.continue_inline),
+                        extra_metadata=_instruction_extra_metadata(body),
                     )
                 except HarnessAdmissionBlocked as blocked:
                     raise _harness_blocked_http(blocked)
@@ -2042,14 +2241,17 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse({"models": result})
 
     @app.post("/api/sessions/{session_id}/upload", dependencies=[Depends(_require_auth)])
-    async def api_upload_file(session_id: str, file: UploadFile) -> JSONResponse:
-        """Upload a file to session.repo_path/uploads/ (local sessions). Mirrors
-        TelegramInterface._handle_document for local sessions. Remote (mesh) sessions
-        are not supported in v1 — the client should check session.workspace.targetId."""
-        import re as _re
-        import os as _os
-        from pathlib import Path as _Path
+    async def api_upload_file(
+        session_id: str,
+        file: UploadFile = File(...),
+        instruction: Optional[str] = Form(default=None),
+    ) -> JSONResponse:
+        """Upload a file to the session's uploads/ directory.
 
+        Local sessions write directly to session.repo_path/uploads/. Remote mesh
+        sessions mirror Telegram caption semantics: staged files ride as task
+        metadata so the owning worker pulls them before backend execution.
+        """
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session_not_found")
@@ -2057,56 +2259,9 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=400, detail="no_repo_path")
 
         raw_name = file.filename or "upload"
-        ext = _os.path.splitext(raw_name)[1].lower()
-        _BLOCKED_EXTS = {
-            ".exe", ".bat", ".cmd", ".com", ".msi", ".msp", ".scr", ".pif",
-            ".vbs", ".vbe", ".ps1", ".psm1", ".psd1", ".wsf", ".wsh", ".hta",
-            ".jar", ".dll", ".reg", ".lnk",
-        }
-        if ext in _BLOCKED_EXTS:
-            raise HTTPException(status_code=400, detail="dangerous_extension")
-
-        try:
-            from config import config as _cfg
-            max_mb = getattr(_cfg.telegram, "upload_max_mb", 0)
-        except Exception:
-            max_mb = 0
-
-        safe_name = _re.sub(r"[^\w.\-]", "_", raw_name)[:200] or "upload"
-        if not safe_name.strip("._"):
-            safe_name = "upload"
-
-        upload_dir = _Path(session.repo_path) / "uploads"
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        dest = (upload_dir / safe_name).resolve()
-
-        # Path-traversal guard: dest must stay inside upload_dir.
-        if not str(dest).startswith(str(upload_dir.resolve())):
-            raise HTTPException(status_code=400, detail="dangerous_extension")
-
         content = await file.read()
-        if max_mb > 0 and len(content) > max_mb * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="file_too_large")
-
-        # Deduplicate filename if it already exists.
-        if dest.exists():
-            stem, suffix = _os.path.splitext(safe_name)
-            counter = 1
-            while dest.exists():
-                dest = (upload_dir / f"{stem}_{counter}{suffix}").resolve()
-                counter += 1
-            safe_name = dest.name
-
-        dest.write_bytes(content)
-        logger.info(
-            "event=web_upload session=%s file=%s size=%d", session_id, safe_name, len(content)
-        )
-        return JSONResponse({
-            "ok": True,
-            "filename": safe_name,
-            "size": len(content),
-            "path": f"uploads/{safe_name}",
-        })
+        return JSONResponse(await _store_session_upload(
+            orchestrator, session, raw_name, content, instruction=instruction))
 
     # --- inspect / jobs / git (U3.5 tier 2 — thin wraps over existing services) ---
 
