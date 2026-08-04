@@ -5,6 +5,7 @@ All tests honour the test cost guard: no paid Claude/Codex CLI invoked.
 
 import json
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -132,6 +133,44 @@ def test_stale_claims_when_online_active_task_exceeds_runtime(tmp_path):
     assert len(stale) == 1
     assert stale[0]["id"] == tid
     assert stale[0]["_stale_reason"] == "active_task_over_max_runtime"
+
+
+def test_reaper_defers_missing_live_state_until_max_runtime():
+    from src.control.task_server import _should_release_stale_claim
+
+    now = datetime(2026, 8, 4, 18, 47, 8)
+    row = {
+        "id": "task_live_but_missing",
+        "claimed_at": (now - timedelta(seconds=311)).isoformat(),
+        "_stale_reason": "missing_from_live_state",
+    }
+
+    assert _should_release_stale_claim(row, max_runtime_sec=1800, now=now) is False
+
+
+def test_reaper_releases_missing_live_state_after_max_runtime():
+    from src.control.task_server import _should_release_stale_claim
+
+    now = datetime(2026, 8, 4, 18, 47, 8)
+    row = {
+        "id": "task_missing_too_long",
+        "claimed_at": (now - timedelta(seconds=1801)).isoformat(),
+        "_stale_reason": "missing_from_live_state",
+    }
+
+    assert _should_release_stale_claim(row, max_runtime_sec=1800, now=now) is True
+
+
+def test_reaper_still_releases_strong_stale_reasons_after_lease():
+    from src.control.task_server import _should_release_stale_claim
+
+    row = {
+        "id": "task_node_offline",
+        "claimed_at": "2026-08-04T18:41:57+00:00",
+        "_stale_reason": "node_offline",
+    }
+
+    assert _should_release_stale_claim(row, max_runtime_sec=1800) is True
 
 
 def test_stale_claims_when_node_offline(tmp_path):
