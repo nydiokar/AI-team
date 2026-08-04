@@ -1,7 +1,7 @@
 ```yaml
 job_id: AGENT_57_M4_HYBRID_EXECUTOR_SPIKE
 created_at: "2026-07-30T02:34:12+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: blocked              # ready | active | blocked | done | dead
+status: dead                 # ready | active | blocked | done | dead
 owner: ""
 depends_on: AGENT_55_M34_JOB3_CRASH_RESPAWN
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
@@ -9,7 +9,7 @@ evidence: []                  # artifact paths that PROVE it ran (checked to exi
 updated_at: "2026-08-03T13:21:31.071933+00:00"
 ```
 
-# DISPATCH — A57 · M4 hybrid-executor spike (invoke, don't build) — GATED
+# DISPATCH — A57 · M4 hybrid-executor spike — RETIRED
 
 **Level:** 3 (SDK capability spike) · **Type:** spike (investigation → written verdict, not a full build)
 **Authored:** 2026-07-30 · **Status of this packet:** ready (authored, gated). **Depends on:** A55 (Jobs
@@ -75,5 +75,10 @@ Shipping the executor (a follow-on dispatch decided by this spike).
 - [ ] containment design + minimal contained-subagent proof
 - [ ] go/no-go verdict + follow-on scope
 
-## Closure (fill on completion)
-_(verdict + evidence)_
+## Closure (2026-08-04 — retired before execution)
+
+The project contract is explicit: parallel work uses gateway-managed, observable worker
+**sessions** opened or reused through `dispatch_worker`, not SDK-internal subagents. This packet
+proposed a second, ephemeral execution mechanism (`Workflow`/`AgentDefinition`) and is therefore
+incompatible with the canonical session/Case/telemetry model. It is retired rather than executed.
+No SDK subagent was created, configured, or run.

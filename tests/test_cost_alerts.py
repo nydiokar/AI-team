@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from src.control import control_api
 from src.control.db import get_db, runtime_flag_enabled
+from src.services import cost_alerts
 from src.services.cost_alerts import check_cost_alerts
 
 from test_cost_read_model import _auth, _seed, _StubOrchestrator, TOKEN
@@ -110,6 +111,9 @@ def test_alerts_endpoint_requires_auth(client):
 
 def test_alerts_endpoint_fires_and_surfaces_enforcement(client, seeded_db, monkeypatch):
     _knobs(monkeypatch, daily=1)
+    monkeypatch.setattr(
+        cost_alerts, "check_cost_alerts", lambda db: check_cost_alerts(db, now=NOW)
+    )
     r = client.get("/api/cost/alerts", headers=_auth())
     assert r.status_code == 200
     body = r.json()

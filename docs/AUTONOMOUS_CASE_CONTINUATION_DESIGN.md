@@ -46,7 +46,7 @@ scheduler is not duplication; the SDK cannot provide it. The line is **coarse vs
 | Layer | Owner | Why |
 |---|---|---|
 | Inner model↔tool loop — one turn: reason, call tools, verify, stop | **Claude Agent SDK** | `ClaudeSDKClient` persistent stream (`claude_driver.py:503-528`); ADR-0001. Do not rebuild. |
-| Fine-grained execution graph inside one task — parallel subagents, branching, loop-until-done | **Dynamic Workflows / SDK subagents** (hybrid, §7) | First-class `Workflow`/`agent()`/`pipeline()` runtime, headless via SDK. But ephemeral: resumable only within the same live session; restarts fresh on crash. |
+| Parallel task execution | **Gateway worker sessions** | The Manager opens or reuses observable workers through `dispatch_worker`; every worker remains a session with canonical Case membership, telemetry, recovery, and review. Do not introduce SDK-internal subagents as a second executor. |
 | **Durable coarse-grained Case graph** — objective, `completion_criteria`, dispatch lineage, review verdicts, budget, closure | **Our harness** | `flow_runs`/`flow_links`/`flow_events` (migrations 21–24) — the only crash-durable record. |
 | **Autonomous continuation = durable scheduler + control loop** — persist a pending wake, dedupe, lease to one invocation, re-enter across turns/crashes, enforce budget, ack | **Our harness** (the SDK has no equivalent) | No server-side session store; wake intent (`worker.wait_pending`) is durable but nothing acts on it — `reconcile_waits` is pull-only, no background consumer exists. |
 | Final closure authority / escalation / permissions / budget ceilings | **Our harness**, enforcing via SDK primitives (`max_turns`, `PreToolUse` deny hook) | Today no round/cost governor runs on any Manager/worker (`max_turns` echoed in health only, never passed to `ClaudeAgentOptions`). |
@@ -241,19 +241,11 @@ and ANY alike.
    invocation. **Depends on Job 2** — a crashed Manager must not be respawned until durable
    reconstruction exists. Until Job 3, a tick that finds the session dead does nothing.
 
-**Parked (later integration spike, not in this sequence): M4 task-graph — HYBRID.** Keep the
-durable coarse Case graph as owner of objective/state/budget/closure; **replace M4's hand-rolled
-task-DAG *executor*** with Dynamic Workflows / SDK subagents for parallel decomposition inside a
-selected task, whose only durable footprint is one `task_attached` node + a synthesized result +
-one `review.*` verdict. **Gated on a prerequisite spike:** (a) confirm the **Python**
-`claude_agent_sdk` exposes the `Workflow`/`Task` tool (docs cite TS only); the Manager's
-`ClaudeAgentOptions` (`claude_driver.py:491-501`) passes no `Task`/`Workflow`/`agents=` today, and
-its grant is Read/Edit/Bash + manager MCP only (`claude_role_adapter.py:24-36`) — enabling it is an
-allowlist add; (b) the account's workflow `/config` toggle; (c) a `PreToolUse` hook + git-worktree
-to contain workflow subagents' `acceptEdits` auto-approval (`AgentDefinition.tools` is
-under-enforced — SDK #172/#189). If (a) fails, fall back to SDK **subagents** (`agents=`/
-`AgentDefinition`), Python-confirmed. **Do not de-scope M4; re-scope it to "invoke, don't build,"
-and gate on this spike.** Not started until Jobs 1–3 land.
+**Decision (2026-08-04): no SDK-internal executor.** M4 parallelism is realized by the existing
+gateway worker-session model: the Manager uses `dispatch_worker` to open or reuse workers within
+the Case, then reviews their canonical results. This preserves session identity, Case lineage,
+telemetry, recovery, model selection, and operator control. A second SDK `Workflow` or subagent
+executor is retired as an architectural mismatch; see A57's closure.
 
 ---
 

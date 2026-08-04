@@ -139,16 +139,12 @@ the DAG as data only; do not build a bespoke executor.
 holding a task-DAG (dependency edges present); a low-scored spec blocks decomposition.
 **Files:** `src/orchestrator.py`, `docs/harness/` generators, `scripts/mcp_manager.py`, `src/control/db.py`, tests.
 
-### T6 — M4 **hybrid-executor spike** (invoke, don't build)  ·  ⛔ T4  ·  SPIKE, gated
-**Why:** design §7 "parked" — decide whether the intra-task parallel executor is SDK Dynamic
-Workflows / subagents rather than a hand-rolled DAG executor.
-**Scope (in):** confirm the **Python** `claude_agent_sdk` exposes `Workflow`/`Task` (docs cite TS
-only); the account workflow toggle; a `PreToolUse` hook + git-worktree to contain subagent
-auto-approval. If the Workflow tool is absent, fall back to SDK **subagents** (`agents=`/
-`AgentDefinition`). **Output: a go/no-go + chosen mechanism, not a full build.**
-**Scope (out):** shipping the executor (a follow-on task decided by the spike).
-**Acceptance:** a written verdict with the confirmed mechanism + the containment design; a minimal
-proof that one subagent runs contained in a worktree.
+### T6 — retired (2026-08-04)
+
+The proposed SDK Workflow/subagent executor conflicts with the architecture: independently
+executing work is performed through gateway-managed worker sessions opened or reused with
+`dispatch_worker`, not through an opaque second agent runtime. A57 is retired; M4 parallel work
+continues to use the canonical worker-session/Case path.
 
 ---
 
