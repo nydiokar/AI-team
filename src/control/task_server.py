@@ -17,6 +17,7 @@ import shutil
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -125,6 +126,45 @@ async def _local_node_heartbeat_loop() -> None:
                 logger.debug("event=local_node_heartbeat_error err=%s", e)
     except asyncio.CancelledError:
         pass
+
+
+def _parse_claimed_at(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def _should_release_stale_claim(row: Dict[str, Any], *, max_runtime_sec: int, now: Optional[datetime] = None) -> bool:
+    """Whether the stale-claim reaper may requeue this row.
+
+    `missing_from_live_state` is weak evidence: a heartbeat can overwrite a node's
+    active task list while the original worker turn is still alive. Releasing it
+    at the short claim lease creates duplicate execution. Wait until the bounded
+    max-runtime window before requeueing that reason; stronger reasons still
+    release immediately after the lease.
+    """
+    reason = str(row.get("_stale_reason") or "")
+    if reason != "missing_from_live_state":
+        return True
+    max_runtime = max(0, int(max_runtime_sec or 0))
+    if max_runtime <= 0:
+        return False
+    claimed = _parse_claimed_at(row.get("claimed_at"))
+    if claimed is None:
+        return False
+    clock = now or datetime.utcnow()
+    if clock.tzinfo is not None:
+        clock = clock.astimezone(timezone.utc).replace(tzinfo=None)
+    return (clock - claimed).total_seconds() >= max_runtime
 
 
 @asynccontextmanager
@@ -804,6 +844,11 @@ async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
                             logger.warning(
                                 "event=stale_claim_failed task_id=%s claimed_by=%s claimed_at=%s reason=%s",
                                 task_id, claimed_by, claimed_at, reason,
+                            )
+                        elif not _should_release_stale_claim(row, max_runtime_sec=max_runtime_sec):
+                            logger.warning(
+                                "event=stale_claim_release_deferred task_id=%s claimed_by=%s claimed_at=%s reason=%s max_runtime_sec=%s",
+                                task_id, claimed_by, claimed_at, reason, max_runtime_sec,
                             )
                         else:
                             db.release_task(task_id, claimed_by)

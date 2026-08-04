@@ -1,6 +1,6 @@
 from src.backends import claude_code
 from src.backends.claude_code import ClaudeCodeBackend
-from src.orchestrator import TaskOrchestrator
+from src.orchestrator import TaskOrchestrator, _session_status_after_result
 from src.core.interfaces import ExecutionResult, Task, TaskType, TaskPriority, TaskStatus, TaskResult, SessionStatus
 import asyncio
 from datetime import datetime
@@ -215,6 +215,56 @@ def test_classify_error_detects_session_limit_without_rate_limit_event():
     )
 
     assert orch._classify_error(result) == "rate_limit"
+
+
+def test_salvaged_backend_finalization_error_keeps_session_awaiting_input():
+    result = TaskResult(
+        task_id="task_salvaged_backend_error",
+        success=False,
+        output="The turn ended with a backend error before a final summary.\n\nI changed config.py.",
+        errors=["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"],
+        files_modified=["config.py"],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"error_during_execution","is_error":true}',
+        raw_stderr="",
+        return_code=0,
+        error_class="backend_error",
+    )
+
+    assert _session_status_after_result(result) == SessionStatus.AWAITING_INPUT
+
+
+def test_plain_backend_error_still_marks_session_error():
+    result = TaskResult(
+        task_id="task_plain_backend_error",
+        success=False,
+        output="backend failed",
+        errors=["backend failed"],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"error_during_execution","is_error":true}',
+        raw_stderr="",
+        return_code=1,
+        error_class="backend_error",
+    )
+
+    assert _session_status_after_result(result) == SessionStatus.ERROR
+
+
+def test_cancelled_result_still_marks_session_cancelled():
+    result = TaskResult(
+        task_id="task_cancelled",
+        success=False,
+        output="",
+        errors=["cancelled"],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+    )
+
+    assert _session_status_after_result(result) == SessionStatus.CANCELLED
 
 
 def test_short_failure_reason_handles_session_limit_phrasing():
