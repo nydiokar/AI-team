@@ -66,6 +66,18 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-08-05 — Mesh security review shipped (PR #72, `AGENT_67`).**
+Adversarial review of the mesh surfaces completed: private findings in `.security/` (git-ignored —
+never commit/publish), public threat-model in `docs/MESH_SECURITY.md` (hcom-structured). A **P0 was
+verified and fixed live**: the task-server `/files` staging upload used the client filename verbatim
+as a path segment, so a `../../` name escaped the staging root (arbitrary file write on the gateway
+host). PR #72 adds sanitize + containment; gateway restarted post-merge; worker untouched. `.env`
+and `state/mesh.db` chmod `0600`. **Escalated to operator** (R2, not silently patched): per-node
+credentials replacing the single shared `WORKER_TOKEN` (self-reported node identity), claim/result
+identity binding, server-side dispatch bounds + rate limits, dashboard token out of served HTML.
+Until the credential model lands, treat `WORKER_TOKEN`/`DASHBOARD_TOKEN` as full-admin — see
+`docs/MESH_SECURITY.md`.
+
 **2026-08-05 — Close-session race gate merged (PR #70, `AGENT_70`).**
 The close-vs-turn race behind `task_ed5283f1` is fixed at the root: the worker now defers a
 `close_session` control task until the session's in-flight turn posts its real outcome
