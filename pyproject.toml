@@ -62,9 +62,14 @@ include-package-data = true
 
 [tool.pytest.ini_options]
 addopts = "-q"
+asyncio_mode = "auto"
+pythonpath = ["."]
 testpaths = [
   "tests",
 ]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
 
 [tool.ruff]
 line-length = 100

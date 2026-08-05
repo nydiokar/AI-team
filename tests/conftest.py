@@ -30,11 +30,18 @@ import pytest
 os.environ["AI_TEAM_TEST_MODE"] = "1"
 os.environ["MESH_ENABLED"] = "false"
 
-# --- DB migration noise. The startup-scope runtime-flag read (get_db() in
-# build_control_api) legitimately initializes a second MeshDB in some tests, so
-# each test run replays every migration. That is intentional; silence the per-
-# migration INFO lines during tests only (never globally).
-logging.getLogger("src.control.db").setLevel(logging.WARNING)
+@pytest.fixture(autouse=True, scope="session")
+def _silence_db_migration_logs():
+    """DB migration noise. The startup-scope runtime-flag read (get_db() in
+    build_control_api) legitimately initializes a second MeshDB in some tests,
+    so each test run replays every migration. That is intentional; silence the
+    per-migration INFO lines during tests only, restoring the prior level after.
+    """
+    logger = logging.getLogger("src.control.db")
+    previous_level = logger.level
+    logger.setLevel(logging.WARNING)
+    yield
+    logger.setLevel(previous_level)
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -43,11 +50,8 @@ def _enforce_test_mode():
     os.environ["AI_TEAM_TEST_MODE"] = "1"
     os.environ["MESH_ENABLED"] = "false"
     # If config was already imported, make sure its mesh flag reflects test mode.
-    try:
-        from config import config
-        config.mesh.enabled = False
-    except Exception:
-        pass
+    from config import config
+    config.mesh.enabled = False
     yield
 
 
@@ -63,24 +67,38 @@ def _isolate_db():
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
     test_db = Path(tmp.name)
+
+    from config import config
+    import src.control.db as db_mod
+
+    previous_db_path = config.mesh.db_path
+    previous_shadow_write = config.mesh.shadow_write
+
+    old = db_mod._db_instance
+    if old is not None:
+        old.close()
+
+    db_mod._db_instance = None
+    config.mesh.shadow_write = True
+    config.mesh.db_path = str(test_db)
+
     try:
-        from config import config
-        config.mesh.shadow_write = True
-        config.mesh.db_path = str(test_db)
-        import src.control.db as db_mod
-        old = db_mod._db_instance
-        db_mod._db_instance = None
-        if old is not None:
-            old.close()
         yield
     finally:
+        current = db_mod._db_instance
+        db_mod._db_instance = None
+
+        if current is not None:
+            current.close()
+
+        config.mesh.db_path = previous_db_path
+        config.mesh.shadow_write = previous_shadow_write
+
         for ext in ("", "-wal", "-shm"):
-            p = Path(str(test_db) + ext)
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+            try:
+                Path(str(test_db) + ext).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 @pytest.fixture(autouse=True)
@@ -92,17 +110,17 @@ def _disable_file_watcher(monkeypatch):
     """
     try:
         from src.services.file_watcher import AsyncFileWatcher
+    except ImportError:
+        pytest.fail("Could not import AsyncFileWatcher safety guard")
 
-        async def _noop_start_async(self, *a, **k):
-            return None
+    async def _noop_start_async(self, *a, **k):
+        return None
 
-        async def _noop_stop_async(self, *a, **k):
-            return None
+    async def _noop_stop_async(self, *a, **k):
+        return None
 
-        monkeypatch.setattr(AsyncFileWatcher, "start_async", _noop_start_async, raising=False)
-        monkeypatch.setattr(AsyncFileWatcher, "stop_async", _noop_stop_async, raising=False)
-    except Exception:
-        pass
+    monkeypatch.setattr(AsyncFileWatcher, "start_async", _noop_start_async, raising=False)
+    monkeypatch.setattr(AsyncFileWatcher, "stop_async", _noop_stop_async, raising=False)
     yield
 
 
