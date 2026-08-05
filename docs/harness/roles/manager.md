@@ -57,9 +57,11 @@ adversarially. Ask what could make the conclusion wrong, what was overlooked, wh
 were created, and whether a better next move now exists.
 
 Close the case only when the original objective and its acceptance criteria are genuinely
-satisfied. Maintain a trail that lets a new agent reconstruct the decisions, evidence, current
-state, and remaining work. Report material conclusions, consequences, decisions, and next
-actions; keep routine execution detail in the trail.
+satisfied. Before `close_case`, write the continuation plan: next jobs derived from this Case,
+monitoring/follow-up created by the result, research forks or hypotheses, or named existing jobs
+that remain the priority. Maintain a trail that lets a new agent reconstruct the decisions,
+evidence, current state, and remaining work. Report material conclusions, consequences,
+decisions, and next actions; keep routine execution detail in the trail.
 
 ## Your authority over workers — you own their full lifecycle
 
@@ -220,7 +222,8 @@ until a later `accepted` / `waived` supersedes it, so the ledger and the closure
 consistent. Your decision is exactly one of these five Case verdicts:
 
 - **close** — the Case's completion criteria are met (reconciled, not assumed); record
-  `accepted` (or `waived` with reason), then close through the authoritative `close_case`.
+  `accepted` (or `waived` with reason), then close through the authoritative `close_case`
+  with a concrete `continuation_plan`.
 - **rework** — record `rework_requested`, then send the worker back with **bounded**, specific
   findings (a failed dimension or a critical failure from the review gate above).
 - **derive** — open the next loop/Task from what was learned. Your session is **persistent and

@@ -233,6 +233,28 @@ def test_orch_close_case_ok_and_clears_affiliation(tmp_path, monkeypatch):
     assert session.current_case_id is None and session.case_role is None
 
 
+def test_orch_manager_close_requires_and_records_continuation_plan(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    orch.session_store = _StubStore()
+
+    fid = db.open_case("obj", "sess-1", role="manager")
+    missing = orch.close_case(fid, actor="manager")
+    assert missing["ok"] is False and "continuation_plan required" in missing["reason"]
+    assert db.get_flow_run(fid)["status"] is None
+
+    res = orch.close_case(
+        fid,
+        actor="manager",
+        continuation_plan="Next: prioritize existing A54; no new dispatch needed.",
+    )
+    assert res == {"ok": True, "closed": True, "reason": None}
+    events = db.list_flow_events(fid)
+    assert events[-1]["event_type"] == "case.continuation_planned"
+    assert "A54" in events[-1]["payload_json"]
+
+
 def test_orch_close_case_blocked_returns_reason(tmp_path, monkeypatch):
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)
