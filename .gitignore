@@ -10,6 +10,9 @@ summaries/
 tasks_done/
 state/
 
+# Security-review findings — PRIVATE. Never commit or publish these artifacts.
+.security/
+
 # Auto-deploy (T1) runtime artifacts — per-host, never committed
 .deploy.lock
 .deploy.poison

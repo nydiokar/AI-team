@@ -875,11 +875,22 @@ async def stage_file(file: UploadFile = File(...)) -> Dict[str, str]:
     Returns {file_id, filename}. The remote worker fetches it via GET /files/{file_id}
     and deletes it via DELETE /files/{file_id} once saved locally.
     """
+    import re as _re
     file_id = uuid.uuid4().hex[:16]
     dest_dir = _STAGING_ROOT / file_id
     dest_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = file.filename or "upload"
-    dest = dest_dir / safe_name
+    # The client-supplied name becomes a path segment; a raw name with "../" escaped
+    # the staging root (security review P0-1). Mirror the control-API upload policy:
+    # sanitize to a safe charset, then enforce containment via resolve()/relative_to().
+    safe_name = _re.sub(r"[^\w.\-]", "_", file.filename or "upload")[:200] or "upload"
+    if not safe_name.strip("._"):
+        safe_name = "upload"
+    dest = (dest_dir / safe_name).resolve()
+    try:
+        dest.relative_to(dest_dir.resolve())
+    except ValueError:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="dangerous_filename")
     content = await file.read()
     dest.write_bytes(content)
     logger.info("event=file_staged file_id=%s filename=%s size=%d", file_id, safe_name, len(content))
