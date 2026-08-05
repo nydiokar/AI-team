@@ -46,6 +46,10 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
+| **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
+| **A74** | `AGENT_74_PROACTIVE_TURN_OWNERSHIP.md` | — | dispatched | Bind proactive-turn writes to session ownership when pinned (`node_id` must equal `machine_id`, else 403); unpinned unaffected. |
+| **A73** | `AGENT_73_NODE_ENV_FILE_GUARD.md` | — | dispatched | Worker deploy-time guard: `safe_worker_deploy.py` refuses a group/other-readable `.env` unless `AI_TEAM_ALLOW_LOOSE_ENV=1`. Script-only, nothing live until next surfaced deploy. |
+| **A72** | `AGENT_72_SECURITY_INPUT_CAPS.md` | — | dispatched | Generous server-side caps on `description`/`objective`/`completion_criteria` (256 KB, 422 on oversize). No rate limit (Manager parallel-dispatch risk). |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
 | **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |
 | **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |
@@ -66,6 +70,12 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-08-05 — A67 follow-ups dispatched as four small jobs (A72–A75).**
+Operator chose "several jobs / small PRs, gradually" over folding everything into A71. Dispatched:
+A72 input caps (P2-3), A73 node `.env` deploy guard (P1-4 node-side), A74 proactive-turn ownership
+(P2-6), A75 token-out-of-HTML (P2-4, sequenced after A71 design). A71 stays the per-node credential
+migration. Executing A72 then A73 next (both provably non-breaking).
 
 **2026-08-05 — Mesh security review shipped (PR #72, `AGENT_67`).**
 Adversarial review of the mesh surfaces completed: private findings in `.security/` (git-ignored —
