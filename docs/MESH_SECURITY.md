@@ -133,6 +133,10 @@ sequence below is the runbook:
 
 - `WORKER_TOKEN` / `DASHBOARD_TOKEN` live in `.env` — mode `0600` on the gateway
   (hardened 2026-08-05). Verify the same on every node.
+- **Node deploy guard (2026-08-05, PR #74).** `scripts/safe_worker_deploy.py` refuses to
+  load a `.env` that is group/other-readable, so the next surfaced worker deploy enforces
+  `0600` on every node automatically; `AI_TEAM_ALLOW_LOOSE_ENV=1` is the explicit
+  acknowledged override. Backups must preserve modes (`tar --preserve-permissions`).
 - `state/mesh.db` — mode `0600` (hardened 2026-08-05). Holds session turns, task
   payloads, node state. Anyone who can read it sees the mesh's history.
 - Tokens are **not** logged by application code and are **not** stored in the DB or in
