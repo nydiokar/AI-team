@@ -1046,6 +1046,17 @@ def report_proactive_turn(session_id: str, payload: ProactiveTurnPayload) -> Dic
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
 
+    # [A74/P2-6] Ownership: a session pinned to a node may only receive proactive
+    # turns from that node. Unpinned sessions (no machine_id) stay open to any
+    # worker — a legit worker may execute any unpinned task, so nothing legit
+    # breaks. The full identity fix rides on A71 per-node credentials.
+    pinned = session.get("machine_id")
+    if pinned and payload.node_id != pinned:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Session {session_id!r} is pinned to node {pinned!r}, not {payload.node_id!r}",
+        )
+
     text = (payload.output or "").strip()
     if not text:
         # An autonomous turn that produced only tool activity / no user-facing
