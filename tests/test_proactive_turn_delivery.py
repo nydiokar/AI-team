@@ -146,3 +146,85 @@ def test_proactive_endpoint_404_for_unknown_session(tmp_path):
     finally:
         db_mod._db_instance = None
         db_mod._db_instance = old
+
+
+def test_proactive_turn_rejected_for_pinned_session_wrong_node(tmp_path):
+    """[A74/P2-6] A session pinned to a node may not accept a proactive turn from a
+    different node — closes the forged-turn vector under the shared token."""
+    from config import config as cfg
+    cfg.mesh.db_path = str(tmp_path / "mesh_own.db")
+    cfg.mesh.worker_token = "tok"
+    import src.control.db as db_mod
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old is not None:
+        old.close()
+    try:
+        db = db_mod.get_db()
+        db.upsert_session(_session("sess_pinned"))  # pinned to "Horse"
+        import src.control.task_server as ts
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            ts.report_proactive_turn("sess_pinned", ts.ProactiveTurnPayload(
+                node_id="OtherNode", session_id="sess_pinned", output="spoofed"))
+        assert exc.value.status_code == 403
+        assert db.get_session_turns("sess_pinned") == []
+    finally:
+        db_mod._db_instance = None
+        db_mod._db_instance = old
+
+
+def test_proactive_turn_accepted_for_pinned_session_owning_node(tmp_path):
+    """[A74/P2-6] The owning node's proactive turn still lands."""
+    from config import config as cfg
+    cfg.mesh.db_path = str(tmp_path / "mesh_own_ok.db")
+    cfg.mesh.worker_token = "tok"
+    import src.control.db as db_mod
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old is not None:
+        old.close()
+    try:
+        db = db_mod.get_db()
+        db.upsert_session(_session("sess_ok"))
+        import src.control.task_server as ts
+        ts.bind_proactive_hook(lambda sid, tid, text, bsid: None)
+        try:
+            resp = ts.report_proactive_turn("sess_ok", ts.ProactiveTurnPayload(
+                node_id="Horse", session_id="sess_ok", output="legit turn"))
+            assert resp["status"] == "accepted"
+            assert len(db.get_session_turns("sess_ok")) == 1
+        finally:
+            ts.bind_proactive_hook(None)
+    finally:
+        db_mod._db_instance = None
+        db_mod._db_instance = old
+
+
+def test_proactive_turn_accepted_for_unpinned_session_any_node(tmp_path):
+    """[A74/P2-6] Unpinned sessions stay open to any worker (normal flow)."""
+    from config import config as cfg
+    cfg.mesh.db_path = str(tmp_path / "mesh_free.db")
+    cfg.mesh.worker_token = "tok"
+    import src.control.db as db_mod
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old is not None:
+        old.close()
+    try:
+        db = db_mod.get_db()
+        free = _session("sess_free")
+        free.machine_id = ""
+        db.upsert_session(free)
+        import src.control.task_server as ts
+        ts.bind_proactive_hook(lambda sid, tid, text, bsid: None)
+        try:
+            resp = ts.report_proactive_turn("sess_free", ts.ProactiveTurnPayload(
+                node_id="AnyNode", session_id="sess_free", output="unpinned ok"))
+            assert resp["status"] == "accepted"
+        finally:
+            ts.bind_proactive_hook(None)
+    finally:
+        db_mod._db_instance = None
+        db_mod._db_instance = old
+
