@@ -2,11 +2,11 @@
 job_id: AGENT_72_SECURITY_INPUT_CAPS
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
 status: ready              # ready | active | blocked | done | dead
-owner: ""
+owner: opencode-agent
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+results_ref: DISPATCH_LOG A72 (PR #73)             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T09:34:34.482453+00:00"
+updated_at: "2026-08-05T10:21:22.235181+00:00"
 ```
 
 # DISPATCH — AGENT_72_SECURITY_INPUT_CAPS
@@ -54,3 +54,19 @@ see `AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL.md` closure and `docs/MESH_SECUR
 - Three body classes bounded server-side; oversized → 422; normal dispatch unaffected.
 - Targeted `pytest` evidence recorded; PR merged to `main`; gateway restarted and `/health` ok.
 - Set `evidence:` to the test report + PR ref and `status: done`.
+
+## Milestone
+
+- 2026-08-05: PR #73 merged (`feat/security-api-input-caps`, `b5d9ad1`). 4 control-api suites green
+  (write + fork + wait_group + flows). Gateway restarted; `/health` ok.
+
+## Closure
+
+**Verdict: done.** All five write-surface fields bounded at `_MAX_INSTRUCTION_CHARS = 262144`
+(`InstructionBody.description`, `ManagerInvokeBody.objective`/`completion_criteria`,
+`CaseOpenBody.objective`/`completion_criteria`). Oversized ⇒ pydantic 422, verified **live** on the
+restarted gateway with a 262145-char description probe. Under-cap dispatch flows untouched (existing
+suites green). No rate limit shipped, per plan (Manager parallel-dispatch risk). Evidence:
+`tests/test_control_api_write.py` (3 new tests) + live 422 probe. `docs/MESH_SECURITY.md` note
+updated in the A73 commit batch.
+
