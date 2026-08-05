@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL
 created_at: "2026-08-03T18:17:00.272353+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: done              # ready | active | blocked | done | dead
+owner: opencode-agent
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T18:17:00.272377+00:00"
+results_ref: DISPATCH_LOG A67 (verdict prose)             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: .security/mesh_findings_2026-08.md                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-05T09:26:48.554368+00:00"
 ```
 
 # DISPATCH — A67 · Mesh/relay/worker security review + threat-model doc
@@ -129,10 +129,32 @@ written to avoid disclosing the exploit (reference the private finding ID, not t
 
 ---
 ## Milestone (burndown)
-- [ ] Step 0: `.security/` git-ignored confirmed/added
-- [ ] Part A: every surface audited; findings triaged P0–P3 (private)
-- [ ] P0/P1 patched private-first OR escalated to operator
-- [ ] Part B: `docs/MESH_SECURITY.md` written (no exploit recipes)
+- [x] Step 0: `.security/` git-ignored confirmed/added
+- [x] Part A: every surface audited; findings triaged P0–P3 (private)
+- [x] P0/P1 patched private-first OR escalated to operator
+- [x] Part B: `docs/MESH_SECURITY.md` written (no exploit recipes)
 
 ## Closure (fill on completion)
-(fill when executed)
+Executed 2026-08-05 by opencode-agent.
+
+- **Step 0:** `.security/` added to `.gitignore` (committed on the patch branch, now on `main`).
+- **Part A:** `.security/mesh_findings_2026-08.md` written (PRIVATE, git-ignored, not committed)
+  covering all §7 surfaces: token model/storage/leak-blast, control-API auth+bind+size caps,
+  dispatch-as-RCE, registry poisoning, claim/result integrity, staging uploads, malformed-input
+  posture, secrets-in-logs, file modes.
+- **P0 (VERIFIED, patched):** task-server `/files` upload wrote the client filename verbatim as a
+  path segment → `../../` escaped the staging root → arbitrary file write on the gateway host.
+  Fixed in PR #72 (`feat/security-mesh-hardening`, merged to `main` 2026-08-05): sanitize to
+  `[\w.-]` + `resolve()`/`relative_to()` containment, mirroring the control-API path. Regression
+  tests `tests/test_task_server_upload_safety.py` (6 green) + related task-server suites green.
+  Gateway restarted post-merge; fix live. Worker untouched.
+- **P1-4 (patched):** `.env` and `state/mesh.db` chmod `0600` on the gateway.
+- **Escalated to operator (not silently patched, per R2):** per-node credentials replacing the
+  single shared `WORKER_TOKEN` (with self-reported node identity), claim/result identity binding,
+  server-side dispatch bounds + rate limits, dashboard token out of served HTML, proactive-turn
+  ownership. Details + recommendations in the private findings.
+- **Part B:** `docs/MESH_SECURITY.md` on `main` — hcom-structured trust domain / token meaning /
+  limits-by-design / bounded-execution / incident response / storage. No exploit recipes.
+- **Cost guard:** plain `pytest` on touched modules only; no full/e2e suite, no paid backends.
+- **State:** `status: done`, `owner: opencode-agent`, `evidence: .security/mesh_findings_2026-08.md`,
+  `results_ref: DISPATCH_LOG A67`.
