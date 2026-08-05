@@ -94,11 +94,13 @@ The honest list, adapted from hcom's relay section:
   boot is gated by `MANAGER_ROLE_ENABLED`. These are flag-gated; in the live env they are
   ON. There is no per-turn or per-session tool allowlist beyond the role gates.
 - **Input caps.** The Manager MCP client bounds its own arguments (`objective` ≤ 8000
-  chars, path/id/files caps, `wait_for_worker` timeout ≤ 600 s). The HTTP API itself
-  bounds `continue_inline` (48 000) and `continuation_plan` (8 000) but not `description`;
-  uploads are capped only when `GATEWAY_UPLOAD_MAX_MB` (control API) or
-  `telegram.upload_max_mb` is set, and the `:9002` `/files` staging endpoint has no size
-  cap of its own.
+  chars, path/id/files caps, `wait_for_worker` timeout ≤ 600 s). The HTTP API bounds
+  `continue_inline` (48 000), `continuation_plan` (8 000), and — since 2026-08-05 (PR #73) —
+  the whole write surface (`description`, Manager/Case `objective`,
+  `completion_criteria` ≤ 256 KB; oversized ⇒ 422). No request rate limit is imposed: the
+  Manager can legitimately dispatch several workers in parallel. Uploads are capped only
+  when `GATEWAY_UPLOAD_MAX_MB` (control API) or `telegram.upload_max_mb` is set, and the
+  `:9002` `/files` staging endpoint has no size cap of its own.
 - **Staged uploads.** Uploaded filenames are sanitized to a safe charset and
   containment-checked against the staging root (hardened 2026-08-05, PR #72) on both the
   control-API and task-server paths, so a hostile filename cannot escape the upload
