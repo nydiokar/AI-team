@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_71_MESH_PER_NODE_CREDENTIALS
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: opencode-agent
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T10:33:01.879296+00:00"
+updated_at: "2026-08-05T10:42:08.505036+00:00"
 ```
 
 # DISPATCH — AGENT_71_MESH_PER_NODE_CREDENTIALS

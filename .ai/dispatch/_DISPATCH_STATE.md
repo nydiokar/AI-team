@@ -5,12 +5,12 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_65_COST_MONITORING_VISIBILITY | 2026-08-03 | 2026-08-03 | — | ✓ |  |
+| active | AGENT_71_MESH_PER_NODE_CREDENTIALS | 2026-08-05 | 2026-08-05 | — | — |  |
 | ready | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-03 | — | — |  |
 | ready | AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN | 2026-08-01 | 2026-08-03 | — | — |  |
 | ready | AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT | 2026-08-01 | 2026-08-03 | — | — |  |
 | ready | AGENT_66_FILE_EDIT_COLLISION_DETECTION | 2026-08-03 | 2026-08-03 | — | — |  |
 | ready | AGENT_68_PEER_MESSAGING_TRANSPORT_INVESTIGATION | 2026-08-03 | 2026-08-03 | — | — |  |
-| ready | AGENT_71_MESH_PER_NODE_CREDENTIALS | 2026-08-05 | 2026-08-05 | — | — |  |
 | ready | AGENT_72_SECURITY_INPUT_CAPS | 2026-08-05 | 2026-08-05 | — | — |  |
 | ready | AGENT_73_NODE_ENV_FILE_GUARD | 2026-08-05 | 2026-08-05 | — | — |  |
 | ready | AGENT_74_PROACTIVE_TURN_OWNERSHIP | 2026-08-05 | 2026-08-05 | — | — |  |
