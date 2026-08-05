@@ -47,7 +47,6 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
 | **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
-| **A74** | `AGENT_74_PROACTIVE_TURN_OWNERSHIP.md` | — | dispatched | Bind proactive-turn writes to session ownership when pinned (`node_id` must equal `machine_id`, else 403); unpinned unaffected. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
 | **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |
 | **A54** | `AGENT_54_M34_JOB2_RECONSTRUCTION.md` | A52 ✅ | dispatched | `get_case_brief` DB read + auto-reconcile/re-arm at role-boot. Prerequisite for crash-respawn. |

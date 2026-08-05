@@ -2,11 +2,11 @@
 job_id: AGENT_74_PROACTIVE_TURN_OWNERSHIP
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
 status: ready              # ready | active | blocked | done | dead
-owner: ""
+owner: opencode-agent
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+results_ref: DISPATCH_LOG A74 (PR #75)             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T09:34:34.482453+00:00"
+updated_at: "2026-08-05T10:24:54.161536+00:00"
 ```
 
 # DISPATCH — AGENT_74_PROACTIVE_TURN_OWNERSHIP
@@ -53,3 +53,18 @@ while A71 lands the full per-node credential model).
 - Pinned-session proactive-turn forgery rejected (403); owning node and unpinned flows unaffected.
 - Targeted `pytest` evidence recorded; PR merged to `main`; gateway restarted and `/health` ok.
 - Set `evidence:` to the test report + PR ref and `status: done`.
+
+## Milestone
+
+- 2026-08-05: PR #75 merged (`feat/security-proactive-turn-ownership`, `c94b471`). 4 new tests +
+  existing proactive/task-server suites green. Gateway restarted post-merge; `/health` ok.
+
+## Closure
+
+**Verdict: done.** `report_proactive_turn` now rejects (403) a proactive turn for a session whose
+`machine_id` is set and differs from `payload.node_id`; unpinned sessions (empty `machine_id`)
+remain open to any worker. No legit flow changed (a worker only reports turns for sessions it runs;
+pinned sessions are host-or-nothing by design). Verification was offline unit-level (direct endpoint
+calls with a real `MeshDB`) — no live probe was run to avoid disturbing real sessions. Evidence:
+`tests/test_proactive_turn_delivery.py` (4 new tests, 7 total in file).
+
