@@ -168,9 +168,11 @@ class ManagerInvokeBody(BaseModel):
 class CaseCloseBody(BaseModel):
     """[A38] Authoritatively close a Case (A37 close_case). ``outcome`` must be a
     terminal status; ``criteria_reconciliation`` records each completion_criterion
-    as met or waived-with-reason so an honest close can proceed."""
+    as met or waived-with-reason so an honest close can proceed.
+    ``continuation_plan`` records the Manager's next-priority handoff."""
     outcome: str = "closed"
     criteria_reconciliation: Optional[List[Dict[str, Any]]] = None
+    continuation_plan: Optional[str] = Field(default=None, max_length=8000)
 
 
 class CaseReviewBody(BaseModel):
@@ -1648,6 +1650,7 @@ def build_control_api(orchestrator) -> FastAPI:
             outcome=body.outcome,
             actor="manager",
             criteria_reconciliation=body.criteria_reconciliation,
+            continuation_plan=body.continuation_plan,
         )
         return JSONResponse(result)
 

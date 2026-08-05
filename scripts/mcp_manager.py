@@ -894,8 +894,8 @@ def _open_case(args: Dict[str, Any]) -> str:
         f"This is YOUR Case now. dispatch_worker(case_id='{case_id}') to run a worker into it, "
         f"then arm_wait_group(case_id='{case_id}', …) to be re-entered on completion instead of "
         f"block-polling. record_review after verifying its git diff, and close_case('{case_id}') "
-        f"when the criteria are truly met. When you close it, this session stays alive — open_case "
-        f"again for the next objective."
+        f"with a continuation_plan when the criteria are truly met. When you close it, this "
+        f"session stays alive — open_case again for the next objective."
     )
 
 
@@ -912,8 +912,13 @@ def _close_case(args: Dict[str, Any]) -> str:
     or waived-with-reason."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     outcome = _bounded_text(args.get("outcome"), "outcome", 32, required=False) or "closed"
+    continuation_plan = _bounded_text(
+        args.get("continuation_plan"), "continuation_plan", _MAX_OBJECTIVE_CHARS,
+        required=True,
+    )
     reconciliation = args.get("criteria_reconciliation")
     body: Dict[str, Any] = {"outcome": outcome}
+    body["continuation_plan"] = continuation_plan
     if reconciliation is not None:
         if not isinstance(reconciliation, list):
             raise ValueError("criteria_reconciliation must be a list")
@@ -1287,20 +1292,26 @@ _TOOLS = [
             "REFUSES (returns a reason, not an error) while completion_criteria are unreconciled, "
             "a child flow is still open, or a required approval is pending: a finished worker Task "
             "does NOT close the Case, only this call does. Pass criteria_reconciliation to record "
-            "each criterion met or waived-with-reason. Verify the work in git BEFORE closing."
+            "each criterion met or waived-with-reason. continuation_plan is required: record the "
+            "next jobs, monitoring/follow-up, research forks, or named existing jobs that remain "
+            "the priority. Verify the work in git BEFORE closing."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "case_id": {"type": "string", "description": "The Case (flow_run) id to close — the Manager's own case."},
                 "outcome": {"type": "string", "description": "Terminal status: 'closed' (default) or 'cancelled'."},
+                "continuation_plan": {
+                    "type": "string",
+                    "description": "Required closeout handoff: next jobs to dispatch, monitoring/follow-up, research forks/hypotheses, or named existing jobs that remain the priority, with a short reason.",
+                },
                 "criteria_reconciliation": {
                     "type": "array",
                     "description": "Optional list reconciling each completion criterion. Each entry needs a \"status\": e.g. [{\"criterion\":\"tests green\",\"status\":\"met\"}] or [{\"criterion\":\"docs updated\",\"status\":\"waived\",\"reason\":\"out of scope\"}]. A boolean \"met\" is NOT accepted — the Case will refuse to close.",
                     "items": {"type": "object"},
                 },
             },
-            "required": ["case_id"],
+            "required": ["case_id", "continuation_plan"],
         },
     },
     {
