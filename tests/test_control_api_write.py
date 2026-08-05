@@ -153,6 +153,40 @@ def test_instruction_one_off(client, orch):
     assert orch.parent_flow_run_ids[-1] is None
 
 
+def test_instruction_oversized_description_rejected(client, orch):
+    """[A72/P2-3] Generous server-side cap on the write surface: an oversized
+    description must be rejected by pydantic (422) without reaching the service."""
+    from src.control.control_api import _MAX_INSTRUCTION_CHARS
+    big = "x" * (_MAX_INSTRUCTION_CHARS + 1)
+    r = client.post("/api/instructions", headers=_auth(), json={"description": big})
+    assert r.status_code == 422
+    assert orch.submitted == []
+    # A description just under the cap still passes through.
+    ok = "x" * (_MAX_INSTRUCTION_CHARS - 1)
+    r2 = client.post("/api/instructions", headers=_auth(), json={"description": ok})
+    assert r2.status_code == 200
+    assert orch.submitted[-1][0] == ok
+
+
+def test_manager_objective_oversized_rejected(client, orch):
+    """[A72/P2-3] Manager boot objective shares the cap."""
+    from src.control.control_api import _MAX_INSTRUCTION_CHARS
+    big = "y" * (_MAX_INSTRUCTION_CHARS + 1)
+    r = client.post("/api/manager", headers=_auth(),
+                    json={"objective": big, "repo_path": "/tmp"})
+    assert r.status_code == 422
+
+
+def test_case_open_objective_oversized_rejected(client, orch):
+    """[A72/P2-3] M3.3 open-case objective shares the cap."""
+    from src.control.control_api import _MAX_INSTRUCTION_CHARS
+    big = "z" * (_MAX_INSTRUCTION_CHARS + 1)
+    r = client.post("/api/cases", headers=_auth(),
+                    json={"objective": big, "session_id": "s1"})
+    assert r.status_code == 422
+
+
+
 def test_instruction_threads_parent_flow_run_id(client, orch):
     """[A32] A Manager→worker dispatch passes parent_flow_run_id; it must reach
     submit_instruction (which stamps it onto the child flow_runs row when

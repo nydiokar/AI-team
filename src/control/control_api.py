@@ -95,6 +95,11 @@ def _harness_blocked_http(blocked: Exception) -> HTTPException:
 # vector (§7). Mirrors web `FORK_DIGEST_MAX_CHARS` + the orchestrator prior-context
 # clamp; override the clamp at runtime via AI_TEAM_COMPACT_PREFIX_MAX_CHARS.
 _CONTINUE_INLINE_MAX = 48000
+# [A72/P2-3] Generous server-side bound on the control-API write surface. The MCP
+# tool caps objective at 8k and the compact-context budget is 48k — 256 KB is 32x
+# that, so no realistic caller (web composer, MCP Manager, Manager-internal
+# dispatch) can hit it; it only blunts runaway/accidental oversized posts.
+_MAX_INSTRUCTION_CHARS = 262144
 
 
 class UploadedFileAttachment(BaseModel):
@@ -103,7 +108,7 @@ class UploadedFileAttachment(BaseModel):
 
 
 class InstructionBody(BaseModel):
-    description: str
+    description: str = Field(max_length=_MAX_INSTRUCTION_CHARS)
     session_id: Optional[str] = None
     cwd: Optional[str] = None
     target_files: Optional[List[str]] = None
@@ -145,12 +150,12 @@ class CreateSessionBody(BaseModel):
 
 class ManagerInvokeBody(BaseModel):
     """[A38] Boot a Manager session bound to one new Case (M3 Phase 3.1)."""
-    objective: str
+    objective: str = Field(max_length=_MAX_INSTRUCTION_CHARS)
     repo_path: str
     backend: str = "claude"
     model: Optional[str] = None
     node_id: Optional[str] = None
-    completion_criteria: Optional[str] = None
+    completion_criteria: Optional[str] = Field(default=None, max_length=_MAX_INSTRUCTION_CHARS)
     context_refs: Optional[List[str]] = None
     branch: Optional[str] = None
     # [Manager-fork] Seed the Manager boot turn with a prior conversation. All three
@@ -251,9 +256,9 @@ class CaseOpenBody(BaseModel):
     session per Case (the token-inflation the operator flagged). ``session_id`` is
     the Manager's own session; ``completion_criteria`` is the checkable done-gate
     that ``close_case`` later demands."""
-    objective: str
+    objective: str = Field(max_length=_MAX_INSTRUCTION_CHARS)
     session_id: str
-    completion_criteria: Optional[str] = None
+    completion_criteria: Optional[str] = Field(default=None, max_length=_MAX_INSTRUCTION_CHARS)
     role: str = "manager"
     # [M3.4/A52] Optional autonomous-continuation round cap; folded into
     # completion_criteria as {"round_cap": N} by db.open_case (no new column).
