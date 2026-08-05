@@ -42,12 +42,38 @@ def _pm2_cmd() -> str:
 def _load_env() -> None:
     env_file = os.environ.get("AI_TEAM_ENV_FILE") or str(ROOT / ".env")
     os.environ["AI_TEAM_ENV_FILE"] = env_file
+    _assert_env_file_private(env_file)
     try:
         from dotenv import load_dotenv
 
         load_dotenv(env_file, override=False)
     except Exception:
         pass
+
+
+def _assert_env_file_private(env_file: str) -> None:
+    """Refuse to load a .env any user other than its owner can read.
+
+    Group/other-readable bits turn the node credential into a local read-augury
+    for any account on the box. Enforce 0600 at deploy time (A73, P1-4 node-side)
+    unless the operator explicitly acknowledges the risk with
+    AI_TEAM_ALLOW_LOOSE_ENV=1. Windows has no POSIX modes — no-op there.
+    """
+    if os.name == "nt":
+        return
+    if os.environ.get("AI_TEAM_ALLOW_LOOSE_ENV") == "1":
+        return
+    try:
+        mode = os.stat(env_file).st_mode & 0o777
+    except FileNotFoundError:
+        return
+    if mode & 0o044:
+        raise RuntimeError(
+            f"{env_file} is readable by group/other (mode {mode:04o}) — the node "
+            "credential must stay private. Fix with: chmod 600 <env_file> (and chown it "
+            "to the service user; keep mode 600 in backups via tar --preserve-permissions). "
+            "To override this guard for this deploy only, set AI_TEAM_ALLOW_LOOSE_ENV=1."
+        )
 
 
 def _run(cmd: List[str], *, env: Dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess:
