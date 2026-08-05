@@ -275,7 +275,7 @@ def _verify_node_credential(node_id: str, token: str) -> bool:
 
 
 def _authorize_node(
-    request: Request,
+    request: Optional[Request],
     claimed_node_id: str,
     required_machine_id: Optional[str] = None,
 ) -> None:
@@ -283,6 +283,10 @@ def _authorize_node(
     task is pinned, to the pinned machine). No-op while node credentials are
     disabled ⇒ byte-identical to the shared-token model."""
     if not _node_credentials_enabled():
+        return
+    if request is None:
+        # Direct in-process call: no HTTP header to bind. The HTTP gate
+        # (_require_auth) is what protects wire traffic.
         return
     auth = request.headers.get("authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
@@ -610,7 +614,7 @@ def metrics() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.post("/nodes/register", dependencies=[Depends(_require_auth)])
-def register_node(request: Request, payload: NodeRegisterPayload) -> Dict[str, str]:
+def register_node(payload: NodeRegisterPayload, request: Request = None) -> Dict[str, str]:
     _authorize_node(request, payload.node_id)
     info = NodeInfo(
         node_id=payload.node_id,
@@ -629,7 +633,7 @@ def register_node(request: Request, payload: NodeRegisterPayload) -> Dict[str, s
 
 
 @app.post("/nodes/heartbeat", dependencies=[Depends(_require_auth)])
-def node_heartbeat(request: Request, payload: HeartbeatPayload) -> Dict[str, str]:
+def node_heartbeat(payload: HeartbeatPayload, request: Request = None) -> Dict[str, str]:
     _authorize_node(request, payload.node_id)
     live_state = payload.live_state.model_dump() if payload.live_state is not None else None
     ok = get_registry().heartbeat(payload.node_id, live_state=live_state)
@@ -646,7 +650,7 @@ def node_heartbeat(request: Request, payload: HeartbeatPayload) -> Dict[str, str
 
 
 @app.post("/nodes/deregister", dependencies=[Depends(_require_auth)])
-def deregister_node(request: Request, payload: DeregisterPayload) -> Dict[str, str]:
+def deregister_node(payload: DeregisterPayload, request: Request = None) -> Dict[str, str]:
     _authorize_node(request, payload.node_id)
     get_registry().deregister(payload.node_id)
     return {"status": "deregistered", "node_id": payload.node_id}
@@ -658,7 +662,7 @@ def list_nodes() -> List[Dict[str, Any]]:
 
 
 @app.post("/nodes/{node_id}/nudge", dependencies=[Depends(_require_auth)])
-def nudge_node(request: Request, node_id: str) -> Dict[str, str]:
+def nudge_node(node_id: str, request: Request = None) -> Dict[str, str]:
     """VPS pushes a nudge to a worker so it polls immediately.
 
     The actual HTTP call to the worker's nudge listener is fire-and-forget;
@@ -703,11 +707,11 @@ def _fire_nudge(node: NodeInfo) -> None:
 
 @app.get("/tasks/pending", dependencies=[Depends(_require_auth)])
 def get_pending_tasks(
-    request: Request,
     node_id: Optional[str] = None,
     backends: Optional[str] = None,
     accept_unpinned: bool = True,
     limit: int = 10,
+    request: Request = None,
 ) -> List[Dict[str, Any]]:
     """Return pending tasks routable to this node.
 
@@ -740,7 +744,7 @@ def get_pending_tasks(
 
 
 @app.post("/tasks/{task_id}/claim", dependencies=[Depends(_require_auth)])
-def claim_task(request: Request, task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
+def claim_task(task_id: str, payload: ClaimPayload, request: Request = None) -> Dict[str, Any]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -760,7 +764,7 @@ def claim_task(request: Request, task_id: str, payload: ClaimPayload) -> Dict[st
 
 
 @app.post("/tasks/{task_id}/release", dependencies=[Depends(_require_auth)])
-def release_task(request: Request, task_id: str, payload: ClaimPayload) -> Dict[str, str]:
+def release_task(task_id: str, payload: ClaimPayload, request: Request = None) -> Dict[str, str]:
     """Release a claimed task back to pending (worker graceful shutdown).
 
     Only the claiming worker can release its own claim. The stale-claim reaper
@@ -777,7 +781,7 @@ def release_task(request: Request, task_id: str, payload: ClaimPayload) -> Dict[
 
 
 @app.post("/tasks/{task_id}/result", dependencies=[Depends(_require_auth)])
-def submit_result(request: Request, task_id: str, payload: ExecutionResultPayload) -> Dict[str, str]:
+def submit_result(task_id: str, payload: ExecutionResultPayload, request: Request = None) -> Dict[str, str]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
