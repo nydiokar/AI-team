@@ -100,6 +100,14 @@ _CONTINUE_INLINE_MAX = 48000
 # that, so no realistic caller (web composer, MCP Manager, Manager-internal
 # dispatch) can hit it; it only blunts runaway/accidental oversized posts.
 _MAX_INSTRUCTION_CHARS = 262144
+# [A72 review] Smaller semantic fields on the case write surface. The MCP client
+# already bounds spec body ≤ 8k / title ≤ 512 / uri ≤ 1000 / reviewer ≤ 64, so the
+# server bounds below sit at-or-above every legit caller and only reject bulk that
+# no legit path can produce.
+_REASON_MAX = 8000
+_TITLE_MAX = 1024
+_URI_MAX = 2000
+_ID_STR_MAX = 128
 
 
 class UploadedFileAttachment(BaseModel):
@@ -184,7 +192,7 @@ class CaseReviewBody(BaseModel):
     """[M3.2] Record a Manager review verdict on a Case. ``verdict`` must be one of
     accepted|rework_requested|waived; ``reason`` is an optional short note."""
     verdict: str
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(default=None, max_length=_REASON_MAX)
 
 
 class CaseWaitBody(BaseModel):
@@ -210,29 +218,29 @@ class CasePublishArtifactBody(BaseModel):
     """[A56/M4] Publish a durable artifact onto a Case. ``artifact_id`` names the
     artifact; ``kind`` is a free label (defaults to 'artifact'); ``title``/``uri`` are
     optional; ``metadata`` is verbatim JSON evidence."""
-    artifact_id: str
-    kind: str = "artifact"
-    title: Optional[str] = None
-    uri: Optional[str] = None
+    artifact_id: str = Field(max_length=_ID_STR_MAX)
+    kind: str = Field(default="artifact", max_length=_ID_STR_MAX)
+    title: Optional[str] = Field(default=None, max_length=_TITLE_MAX)
+    uri: Optional[str] = Field(default=None, max_length=_URI_MAX)
     metadata: Optional[Dict[str, Any]] = None
 
 
 class CaseSpecBody(BaseModel):
     """[A56/M4] Author a spec onto a Case (durable evidence). ``spec_id`` names it;
     ``body`` is the authored spec text; ``title`` is an optional short label."""
-    spec_id: str
-    body: str
-    title: Optional[str] = None
+    spec_id: str = Field(max_length=_ID_STR_MAX)
+    body: str = Field(max_length=_MAX_INSTRUCTION_CHARS)
+    title: Optional[str] = Field(default=None, max_length=_TITLE_MAX)
 
 
 class CaseSpecReviewBody(BaseModel):
     """[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat. ``spec_id``
     is the spec being scored; ``scores`` maps each rubric dimension to 0–2; ``reason``
     is an optional note; ``reviewer`` names the (separate) reviewing seat."""
-    spec_id: str
+    spec_id: str = Field(max_length=_ID_STR_MAX)
     scores: Dict[str, Any]
-    reason: Optional[str] = None
-    reviewer: str = "reviewer"
+    reason: Optional[str] = Field(default=None, max_length=_REASON_MAX)
+    reviewer: str = Field(default="reviewer", max_length=_ID_STR_MAX)
 
 
 class CaseDecomposeBody(BaseModel):
@@ -247,7 +255,7 @@ class CaseInterruptBody(BaseModel):
     """[A53] Kill a Case: cancel its in-flight worker task(s), mark it blocked
     (resumable), record flow.interrupted, escalate once. ``reason`` is an optional
     short label for the interruption (defaults to 'operator_kill')."""
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(default=None, max_length=_REASON_MAX)
 
 
 class CaseOpenBody(BaseModel):
@@ -322,7 +330,7 @@ class InspectBody(BaseModel):
 
 class GitCommitBody(BaseModel):
     task_id: str
-    task_description: Optional[str] = None
+    task_description: Optional[str] = Field(default=None, max_length=_REASON_MAX)
     create_branch: bool = True
     push_branch: bool = False
 

@@ -353,3 +353,21 @@ def test_e2e_routes_404_when_flag_off(monkeypatch, client, db):
         assert client.post(path, json=body, headers=_auth()).status_code == 404
     assert db.list_flow_events(cid) == [e for e in db.list_flow_events(cid)
                                         if not e["event_type"].startswith(("spec.", "artifact.", "case.decomposed"))]
+
+
+def test_spec_body_capped_server_side(monkeypatch, client, db):
+    """[A72 review] The M4 case write surface shares the server-side bounds: an
+    oversized spec body is rejected by pydantic (422) without touching the db."""
+    from src.control.control_api import _MAX_INSTRUCTION_CHARS
+    _enabled(monkeypatch)
+    cid = db.open_case("obj", "sess-1")
+    big = "x" * (_MAX_INSTRUCTION_CHARS + 1)
+    r = client.post(f"/api/cases/{cid}/spec",
+                    json={"spec_id": "spec-big", "body": big}, headers=_auth())
+    assert r.status_code == 422
+    assert db.list_flow_links(flow_run_id=cid, role="artifact") == []
+    # Just under the cap still lands.
+    ok = "y" * (_MAX_INSTRUCTION_CHARS - 1)
+    r2 = client.post(f"/api/cases/{cid}/spec",
+                     json={"spec_id": "spec-ok", "body": ok}, headers=_auth())
+    assert r2.status_code == 200 and r2.json()["ok"] is True
