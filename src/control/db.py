@@ -3819,6 +3819,44 @@ class MeshDB:
         return dict(row) if row else None
 
     # ------------------------------------------------------------------
+    # [A71] Per-node credentials
+    # ------------------------------------------------------------------
+
+    def enroll_node_credential(self, node_id: str, cred_hash: str) -> None:
+        """Store (or replace) the SHA-256 of a node's credential. The plaintext is
+        never stored — it is shown once at enrollment and lives in the node's .env."""
+        now = _now()
+        with self._write() as conn:
+            conn.execute(
+                """
+                INSERT INTO node_credentials (node_id, cred_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    cred_hash = excluded.cred_hash,
+                    updated_at = excluded.updated_at
+                """,
+                (node_id, cred_hash, now, now),
+            )
+
+    def get_node_credential_hash(self, node_id: str) -> Optional[str]:
+        row = self._conn().execute(
+            "SELECT cred_hash FROM node_credentials WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        return row["cred_hash"] if row else None
+
+    def revoke_node_credential(self, node_id: str) -> bool:
+        cur = self._conn().execute(
+            "DELETE FROM node_credentials WHERE node_id = ?", (node_id,)
+        )
+        return cur.rowcount > 0
+
+    def list_node_credential_hashes(self) -> Dict[str, str]:
+        rows = self._conn().execute(
+            "SELECT node_id, cred_hash FROM node_credentials"
+        ).fetchall()
+        return {r["node_id"]: r["cred_hash"] for r in rows}
+
+    # ------------------------------------------------------------------
     # Watched jobs
     # ------------------------------------------------------------------
 
@@ -4804,6 +4842,16 @@ def _get_migrations() -> List[tuple]:
                 set_by    TEXT NOT NULL DEFAULT ''
             )
         """),  # Agent-operable feature flag overrides. Missing row => env/default fallback.
+        (29, """
+            CREATE TABLE IF NOT EXISTS node_credentials (
+                node_id    TEXT PRIMARY KEY,
+                cred_hash  TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """),  # [A71] Per-node credentials: gateway-issued secrets bound to node_id.
+               # Only the SHA-256 is stored; the plaintext is shown once at enrollment
+               # and lives in the node's .env as NODE_CRED. Flag OFF => unused.
     ]
 
 

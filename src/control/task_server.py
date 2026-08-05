@@ -11,8 +11,10 @@ The backing store is MeshDB (src/control/db.py). No SQL lives here.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import secrets
 import shutil
 import time
 import uuid
@@ -210,8 +212,101 @@ def _require_auth(
     token = _worker_token()
     if not token:
         raise HTTPException(status_code=500, detail="WORKER_TOKEN not configured on server")
-    if creds.credentials != token:
+    if creds.credentials == token:
+        return
+    if not _node_credentials_enabled():
         raise HTTPException(status_code=401, detail="Invalid token")
+    # [A71] Flag ON: accept any enrolled node credential (the node-specific
+    # binding to the claimed node_id is enforced per-handler by _authorize_node).
+    if _verify_any_node_credential(creds.credentials):
+        return
+    raise HTTPException(status_code=401, detail="Invalid token")
+
+
+# ---------------------------------------------------------------------------
+# [A71] Per-node credentials
+# ---------------------------------------------------------------------------
+
+def _node_credentials_enabled() -> bool:
+    try:
+        from config import config as _cfg
+        return bool(_cfg.mesh.node_credentials_enabled)
+    except Exception:
+        return False
+
+
+def _node_credentials_allow_shared_fallback() -> bool:
+    try:
+        from config import config as _cfg
+        return bool(_cfg.mesh.node_credentials_allow_shared_fallback)
+    except Exception:
+        return True
+
+
+def _sha256(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _verify_any_node_credential(token: str) -> bool:
+    """Flag-ON gate: is this Bearer token any enrolled node credential?"""
+    try:
+        db = get_db()
+        if db is None:
+            return False
+        hashes = db.list_node_credential_hashes()
+    except Exception:
+        return False
+    if not hashes:
+        return False
+    digest = _sha256(token)
+    return digest in hashes.values()
+
+
+def _verify_node_credential(node_id: str, token: str) -> bool:
+    """Is this Bearer token bound to node_id (hash-match of its stored credential)?"""
+    try:
+        db = get_db()
+        if db is None:
+            return False
+        stored = db.get_node_credential_hash(node_id)
+    except Exception:
+        return False
+    return bool(stored) and secrets.compare_digest(stored, _sha256(token))
+
+
+def _authorize_node(
+    request: Optional[Request],
+    claimed_node_id: str,
+    required_machine_id: Optional[str] = None,
+) -> None:
+    """[A71] Bind the presented credential to the claimed node_id (and, when a
+    task is pinned, to the pinned machine). No-op while node credentials are
+    disabled ⇒ byte-identical to the shared-token model."""
+    if not _node_credentials_enabled():
+        return
+    if request is None:
+        # Direct in-process call: no HTTP header to bind. The HTTP gate
+        # (_require_auth) is what protects wire traffic.
+        return
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if token == _worker_token() and _node_credentials_allow_shared_fallback():
+        # Shared-token fallback may act as any node during rollout.
+        return
+    if not _verify_node_credential(claimed_node_id, token):
+        raise HTTPException(
+            status_code=403,
+            detail=f"credential not bound to node {claimed_node_id!r}",
+        )
+    if required_machine_id and required_machine_id != claimed_node_id:
+        if not _verify_node_credential(required_machine_id, token):
+            raise HTTPException(
+                status_code=403,
+                detail=f"credential not bound to pinned node {required_machine_id!r}",
+            )
+
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +614,8 @@ def metrics() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.post("/nodes/register", dependencies=[Depends(_require_auth)])
-def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
+def register_node(payload: NodeRegisterPayload, request: Request = None) -> Dict[str, str]:
+    _authorize_node(request, payload.node_id)
     info = NodeInfo(
         node_id=payload.node_id,
         tailscale_ip=payload.tailscale_ip,
@@ -537,7 +633,8 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
 
 
 @app.post("/nodes/heartbeat", dependencies=[Depends(_require_auth)])
-def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
+def node_heartbeat(payload: HeartbeatPayload, request: Request = None) -> Dict[str, str]:
+    _authorize_node(request, payload.node_id)
     live_state = payload.live_state.model_dump() if payload.live_state is not None else None
     ok = get_registry().heartbeat(payload.node_id, live_state=live_state)
     if not ok:
@@ -553,7 +650,8 @@ def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
 
 
 @app.post("/nodes/deregister", dependencies=[Depends(_require_auth)])
-def deregister_node(payload: DeregisterPayload) -> Dict[str, str]:
+def deregister_node(payload: DeregisterPayload, request: Request = None) -> Dict[str, str]:
+    _authorize_node(request, payload.node_id)
     get_registry().deregister(payload.node_id)
     return {"status": "deregistered", "node_id": payload.node_id}
 
@@ -564,13 +662,14 @@ def list_nodes() -> List[Dict[str, Any]]:
 
 
 @app.post("/nodes/{node_id}/nudge", dependencies=[Depends(_require_auth)])
-def nudge_node(node_id: str) -> Dict[str, str]:
+def nudge_node(node_id: str, request: Request = None) -> Dict[str, str]:
     """VPS pushes a nudge to a worker so it polls immediately.
 
     The actual HTTP call to the worker's nudge listener is fire-and-forget;
     this endpoint just records the intent. The worker's poll loop will pick
     up tasks on its next cycle regardless.
     """
+    _authorize_node(request, node_id)
     node = get_registry().get(node_id)
     if not node:
         raise HTTPException(status_code=404, detail=f"Node {node_id!r} not found")
@@ -612,6 +711,7 @@ def get_pending_tasks(
     backends: Optional[str] = None,
     accept_unpinned: bool = True,
     limit: int = 10,
+    request: Request = None,
 ) -> List[Dict[str, Any]]:
     """Return pending tasks routable to this node.
 
@@ -621,6 +721,8 @@ def get_pending_tasks(
       accept_unpinned — when false, only return tasks pinned to node_id
       limit    — max rows returned (default 10)
     """
+    if node_id:
+        _authorize_node(request, node_id)
     db = get_db()
     if db is None:
         return []
@@ -642,10 +744,13 @@ def get_pending_tasks(
 
 
 @app.post("/tasks/{task_id}/claim", dependencies=[Depends(_require_auth)])
-def claim_task(task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
+def claim_task(task_id: str, payload: ClaimPayload, request: Request = None) -> Dict[str, Any]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
+    task = db.get_task(task_id)
+    machine_id = task.get("machine_id") if task else None
+    _authorize_node(request, payload.node_id, required_machine_id=machine_id)
     ok = db.claim_task(task_id, payload.node_id)
     if not ok:
         raise HTTPException(status_code=409, detail="Task already claimed or not pending")
@@ -659,12 +764,13 @@ def claim_task(task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
 
 
 @app.post("/tasks/{task_id}/release", dependencies=[Depends(_require_auth)])
-def release_task(task_id: str, payload: ClaimPayload) -> Dict[str, str]:
+def release_task(task_id: str, payload: ClaimPayload, request: Request = None) -> Dict[str, str]:
     """Release a claimed task back to pending (worker graceful shutdown).
 
     Only the claiming worker can release its own claim. The stale-claim reaper
     handles hard-killed workers that don't call this endpoint.
     """
+    _authorize_node(request, payload.node_id)
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -675,13 +781,15 @@ def release_task(task_id: str, payload: ClaimPayload) -> Dict[str, str]:
 
 
 @app.post("/tasks/{task_id}/result", dependencies=[Depends(_require_auth)])
-def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, str]:
+def submit_result(task_id: str, payload: ExecutionResultPayload, request: Request = None) -> Dict[str, str]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
+
+    _authorize_node(request, payload.node_id)
 
     # Terminal check first: if the task is already done, accept any late
     # result as stale regardless of who sends it. This is essential for

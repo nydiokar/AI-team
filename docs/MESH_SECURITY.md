@@ -53,6 +53,25 @@ Concretely, a leaked `WORKER_TOKEN` (the analog of hcom's join token on a public
 
 Treat `WORKER_TOKEN` and `DASHBOARD_TOKEN` **exactly like an SSH key or API key**.
 
+### Per-node credentials (A71 — flag-gated, in rollout)
+
+`MESH_NODE_CREDENTIALS_ENABLED` (default `false`) turns on node-specific credentials:
+
+- Each node is minted a unique 32-byte secret (`scripts/enroll_node.py <node_id>`).
+  Only its SHA-256 is stored (`node_credentials` table, migration 29); the plaintext is
+  printed exactly once and placed in the node's `.env` as `NODE_CRED`.
+- With the flag **on**, the node lifecycle endpoints (`nodes/register`, `heartbeat`,
+  `deregister`, `nudge`, task claim/result/release, pending) require a credential bound to
+  the claimed `node_id`. A pinned task additionally requires the credential of the pinned
+  machine, so no other node can claim it.
+- `MESH_NODE_CREDENTIALS_ALLOW_SHARED_FALLBACK` (default `true`) keeps `WORKER_TOKEN`
+  usable as "any node" during rollout; set it `false` once every node carries `NODE_CRED`.
+- With the flag **off**, behaviour is byte-identical to the shared-token model above.
+
+The rollback path is safe at every step (gateway-flag off / env out ⇒ old behaviour). The
+shared token remains a control-API credential regardless; this section only hardens the
+`:9002` node surface.
+
 ## Limits by design
 
 The honest list, adapted from hcom's relay section:
