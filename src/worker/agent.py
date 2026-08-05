@@ -905,7 +905,11 @@ class WorkerAgent:
     def __init__(self) -> None:
         from src.worker.config import WorkerConfig
         self.cfg = WorkerConfig.from_env()
-        self._http = _HTTP(self.cfg.controller_url, self.cfg.worker_token)
+        # [A71] Per-node credential: a node's own NODE_CRED (minted by the gateway
+        # at enrollment) takes precedence over the shared WORKER_TOKEN. Worker-side
+        # support only — it takes effect on the next surfaced worker redeploy.
+        node_cred = os.getenv("NODE_CRED") or self.cfg.worker_token
+        self._http = _HTTP(self.cfg.controller_url, node_cred)
         from src.control.telemetry_sink import build_runtime_telemetry_sink
         self._telemetry_sink = build_runtime_telemetry_sink(
             node_id=self.cfg.node_id,

@@ -43,6 +43,8 @@ _MANAGED_ENV_KEYS = {
     "MESH_ENABLED",
     "MESH_HEALTH_FAILURE_THRESHOLD",
     "MESH_HEALTH_WINDOW_SIZE",
+    "MESH_NODE_CREDENTIALS_ALLOW_SHARED_FALLBACK",
+    "MESH_NODE_CREDENTIALS_ENABLED",
     "MESH_ONEOFF_QUEUE_TIMEOUT_SEC",
     "MESH_ROUTING_FRESHNESS_WAIT_SEC",
     "MESH_ROUTING_LIVE_STATE_MAX_AGE_SEC",
@@ -228,6 +230,11 @@ class MeshConfig:
     tailscale_ip: str = ""                  # MESH_TAILSCALE_IP — this node's TS IP
     task_server_port: int = 9002            # MESH_TASK_SERVER_PORT
     worker_token: str = ""                  # WORKER_TOKEN — shared mesh auth secret
+    # [A71] Per-node credentials: gateway-issued secrets bound to node_id on
+    # register/heartbeat/claim/result. Flag OFF (default) ⇒ byte-identical; the
+    # shared WORKER_TOKEN remains acceptable while allow_shared_fallback is true.
+    node_credentials_enabled: bool = False                 # MESH_NODE_CREDENTIALS_ENABLED
+    node_credentials_allow_shared_fallback: bool = True    # MESH_NODE_CREDENTIALS_ALLOW_SHARED_FALLBACK
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
     oneoff_queue_timeout_sec: int = 36000   # MESH_ONEOFF_QUEUE_TIMEOUT_SEC (10 hours)
     # AGENT_18 — pinned-worker offline fallback (Option A, bounded hold-and-requeue).
@@ -690,6 +697,18 @@ class Config:
             v = os.getenv("WORKER_TOKEN")
             if v:
                 self.mesh.worker_token = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_NODE_CREDENTIALS_ENABLED")
+            if v is not None:
+                self.mesh.node_credentials_enabled = v.lower() == "true"
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_NODE_CREDENTIALS_ALLOW_SHARED_FALLBACK")
+            if v is not None:
+                self.mesh.node_credentials_allow_shared_fallback = v.lower() == "true"
         except Exception:
             pass
         try:
