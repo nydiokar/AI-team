@@ -2,11 +2,11 @@
 job_id: AGENT_73_NODE_ENV_FILE_GUARD
 created_at: "2026-08-05T09:34:34.482453+00:00"        # CANONICAL — set once at dispatch, never derive again
 status: ready              # ready | active | blocked | done | dead
-owner: ""
+owner: opencode-agent
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
+results_ref: DISPATCH_LOG A73 (PR #74)             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-05T09:34:34.482453+00:00"
+updated_at: "2026-08-05T10:23:13.844770+00:00"
 ```
 
 # DISPATCH — AGENT_73_NODE_ENV_FILE_GUARD
@@ -56,3 +56,19 @@ chmod 600 by A67 — this extends the discipline to every node via the deploy pa
   function unit-tested green.
 - Targeted `pytest` evidence recorded; PR merged to `main`.
 - Set `evidence:` to the test report + PR ref and `status: done`.
+
+## Milestone
+
+- 2026-08-05: PR #74 merged (`feat/security-env-file-guard`, `25219f4`). 5 unit tests green
+  (`tests/test_safe_worker_deploy_env_guard.py`). Script-only — no gateway restart needed.
+
+## Closure
+
+**Verdict: done.** `_assert_env_file_private(env_file)` added to `scripts/safe_worker_deploy.py`
+and invoked from `_load_env` before `dotenv` load: POSIX mode with group/other read bits ⇒
+`RuntimeError` unless `AI_TEAM_ALLOW_LOOSE_ENV=1` (read from the operator's process env, never from
+the guarded file itself). Windows no-op; missing file no-op; mode 600 passes. Enforcement becomes
+live on the operator's next surfaced worker deploy (Horse) — surfaced, not done silently. Evidence:
+`tests/test_safe_worker_deploy_env_guard.py` (5 tests). `docs/MESH_SECURITY.md` storage section
+updated.
+
