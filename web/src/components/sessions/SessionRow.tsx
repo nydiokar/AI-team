@@ -81,27 +81,32 @@ export function SessionRow({
         session.keepPinned && "ring-1 ring-accent/35",
       )}
     >
+      {/* Keep toggle: a small corner affordance. It overlays the top-right and
+          only the title row yields ~20px to clear it, so the rest of the card
+          keeps full width (no full-height gutter). Subtle until kept. */}
       <button
         type="button"
         onClick={toggleKeep}
         disabled={keep.isPending}
         className={cn(
-          "absolute right-2.5 top-2.5 z-10 flex size-8 items-center justify-center rounded-full hover:bg-surface-2 disabled:opacity-60",
-          session.keepPinned ? "text-accent" : "text-ink-muted opacity-70 hover:opacity-100",
+          "absolute right-1 top-1 z-10 flex size-7 items-center justify-center rounded-full transition-colors hover:bg-surface-2 disabled:opacity-60",
+          session.keepPinned
+            ? "text-accent"
+            : "text-ink-muted/50 hover:text-ink-soft",
         )}
         aria-label={session.keepPinned ? "Remove from kept" : "Keep session"}
         aria-pressed={session.keepPinned}
         title={session.keepPinned ? "Remove from kept" : "Keep session"}
       >
-        <Pin className={cn("size-4", session.keepPinned && "fill-current")} />
+        <Pin className={cn("size-3.5", session.keepPinned && "fill-current")} />
       </button>
       <Link
         to={`/sessions/${session.id}`}
         onPointerDown={prefetch}
-        className="block px-3.5 py-3 pr-12"
+        className="block px-3.5 py-3"
       >
       {/* Project and operational state are the primary scan targets. */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 pr-6">
         <h3 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-ink">
           {proj}
         </h3>

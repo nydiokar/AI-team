@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, Inbox, Pin, Plus, Search } from "lucide-react";
+import { ChevronDown, Inbox, Pin, Plus, Search, X } from "lucide-react";
 import { motion } from "framer-motion";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
@@ -70,6 +70,7 @@ export function SessionsScreen() {
   const [keptExpanded, setKeptExpanded] = useState(true);
   const [newOpen, setNewOpen] = useState(false);
   const [keptOnly, setKeptOnly] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const { data, isLoading, error } = useSessions(keptOnly ? true : undefined);
   // Authoritative session→case affiliation labels (empty until the Work
@@ -105,43 +106,72 @@ export function SessionsScreen() {
         title="Sessions"
         subtitle="Live · persistent context"
         right={
-          <button
-            onClick={() => setNewOpen(true)}
-            className="flex size-9 items-center justify-center rounded-full bg-accent-dim/60 text-accent ring-1 ring-accent/30 hover:bg-accent-dim"
-            aria-label="New session"
-          >
-            <Plus className="size-5" />
-          </button>
+          <div className="flex items-center gap-1">
+            {/* Search is on-demand — a taller hit target only when you want it,
+                not a permanent row. */}
+            <button
+              onClick={() => {
+                setSearchOpen((v) => {
+                  if (v) setQuery("");
+                  return !v;
+                });
+              }}
+              aria-label={searchOpen ? "Close search" : "Search sessions"}
+              aria-pressed={searchOpen}
+              className={cn(
+                "flex size-9 items-center justify-center rounded-full transition-colors",
+                searchOpen ? "bg-surface-2 text-ink" : "text-ink-muted hover:bg-surface-2 hover:text-ink",
+              )}
+            >
+              {searchOpen ? <X className="size-5" /> : <Search className="size-5" />}
+            </button>
+            {/* Kept-only filter, folded into an icon toggle. */}
+            <button
+              onClick={() => setKeptOnly((v) => !v)}
+              aria-label={keptOnly ? "Show all sessions" : "Show kept only"}
+              aria-pressed={keptOnly}
+              title={keptOnly ? "Showing kept only" : "Kept only"}
+              className={cn(
+                "flex size-9 items-center justify-center rounded-full transition-colors",
+                keptOnly ? "bg-accent-dim/60 text-accent ring-1 ring-accent/30" : "text-ink-muted hover:bg-surface-2 hover:text-ink",
+              )}
+            >
+              <Pin className={cn("size-[18px]", keptOnly && "fill-current")} />
+            </button>
+            <button
+              onClick={() => setNewOpen(true)}
+              className="flex size-9 items-center justify-center rounded-full bg-accent-dim/60 text-accent ring-1 ring-accent/30 hover:bg-accent-dim"
+              aria-label="New session"
+            >
+              <Plus className="size-5" />
+            </button>
+          </div>
         }
       />
 
       {newOpen && <NewSessionSheet onClose={() => setNewOpen(false)} />}
 
-      {!isLoading && !error && !empty && (
-        <div className="space-y-2 px-4 pt-4">
+      {searchOpen && !isLoading && !error && !empty && (
+        <div className="px-4 pt-3">
           <div className="flex items-center gap-2 rounded-xl border border-hairline bg-surface-1 px-3 py-2">
             <Search className="size-4 shrink-0 text-ink-muted" />
             <input
+              autoFocus
               value={query}
               onChange={(e) => setQuery(e.currentTarget.value)}
               placeholder={keptOnly ? "Search kept notes and sessions" : "Search sessions"}
               className="min-w-0 flex-1 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-muted"
             />
-          </div>
-          <button
-            type="button"
-            onClick={() => setKeptOnly((v) => !v)}
-            aria-pressed={keptOnly}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium ring-1 ring-inset",
-              keptOnly
-                ? "bg-accent-dim/70 text-accent ring-accent/35"
-                : "bg-surface-1 text-ink-muted ring-hairline hover:text-ink-soft",
+            {query && (
+              <button
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+                className="shrink-0 text-ink-muted hover:text-ink"
+              >
+                <X className="size-4" />
+              </button>
             )}
-          >
-            <Pin className={cn("size-3.5", keptOnly && "fill-current")} />
-            Kept only
-          </button>
+          </div>
         </div>
       )}
 
