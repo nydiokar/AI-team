@@ -516,6 +516,40 @@ class TaskOrchestrator(ITaskOrchestrator):
         return None
 
     @classmethod
+    def _extract_result_terminal_signal(cls, result: TaskResult) -> Tuple[str, Optional[int]]:
+        """Parse the terminal ``{"type": "result", ...}`` NDJSON line for the
+        SDK's own structured ``subtype``/``api_error_status`` fields (mirrored
+        into ``raw_stdout`` by ``claude_driver._outcome_from_result``). These
+        are a precise signal straight from the SDK — prefer them in
+        ``_classify_error`` over guessing the failure reason from free text.
+        Checks ``raw_stderr``/``error_detail`` too (older worker rows mirror
+        the marker there instead of ``raw_stdout``). Returns ("", None) when
+        no structured signal is present.
+        """
+        sources = (
+            getattr(result, "raw_stdout", "") or "",
+            getattr(result, "raw_stderr", "") or "",
+            getattr(result, "error_detail", "") or "",
+        )
+        for source in sources:
+            for line in source.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict) or obj.get("type") != "result":
+                    continue
+                subtype = str(obj.get("subtype") or "")
+                status = obj.get("api_error_status")
+                status = status if isinstance(status, int) else None
+                if subtype or status is not None:
+                    return subtype, status
+        return "", None
+
+    @classmethod
     def _session_reply_text(cls, result: TaskResult) -> str:
         """User-facing text for Telegram session completions."""
         for candidate in (
@@ -5792,11 +5826,14 @@ created: {task.created}
         """
         default_max = max(0, getattr(config.validation, "max_retries", 2))
         default_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
-        if error_class in ("none", "interactive", "auth", "fatal", "context_overflow"):
+        if error_class in ("none", "interactive", "auth", "fatal", "context_overflow", "max_turns"):
+            # max_turns: resubmitting the identical prompt would just hit the
+            # same turn budget again — not retry-eligible, needs an operator
+            # decision (raise CLAUDE_SDK_MAX_TURNS / split the task).
             return {"max_retries": 0, "initial_delay": 0.0, "backoff_multiplier": 1}
         if error_class == "timeout":
             return {"max_retries": min(1, default_max), "initial_delay": 1.0, "backoff_multiplier": 1}
-        if error_class == "network":
+        if error_class in ("network", "upstream_error"):
             return {"max_retries": max(1, default_max), "initial_delay": 1.5, "backoff_multiplier": default_mult}
         if error_class == "rate_limit":
             return {"max_retries": max(2, default_max), "initial_delay": 2.0, "backoff_multiplier": max(2, default_mult)}
@@ -5826,8 +5863,12 @@ created: {task.created}
                 actions.append("Increase GATEWAY_TASK_TIMEOUT_SEC or reduce task scope.")
         elif ec == "network":
             actions.append("Check connectivity/VPN; retry with backoff.")
+        elif ec == "upstream_error":
+            actions.append("Anthropic's API returned a server-side error (5xx) — transient; retrying automatically.")
         elif ec == "context_overflow":
             actions.append("Session context is full. Run /compact on the session or start a new session.")
+        elif ec == "max_turns":
+            actions.append("Turn limit reached before finishing. Increase CLAUDE_SDK_MAX_TURNS or split the task into smaller steps.")
         elif ec == "auth":
             actions.append("Run 'claude auth status' and re-authenticate if needed.")
         elif ec == "fatal":
@@ -5890,7 +5931,8 @@ created: {task.created}
     def _classify_error(self, result: TaskResult) -> str:
         """Classify error type for retry policy.
 
-        Returns one of: none|interactive|rate_limit|timeout|network|auth|fatal
+        Returns one of: none|interactive|rate_limit|timeout|network|upstream_error|
+        context_overflow|max_turns|auth|fatal
         """
         if result.success:
             return "none"
@@ -5900,6 +5942,22 @@ created: {task.created}
                 return "interactive"
         except Exception:
             pass
+        # Structured SDK signal (the terminal ResultMessage's own subtype /
+        # api_error_status) is more precise than guessing from free text —
+        # prefer it before falling back to keyword matching below. A turn
+        # that hit its max-turns budget is never expressible via the text
+        # markers below (the CLI doesn't put that in prose); an
+        # api_error_status means the turn's own lifecycle finished fine and
+        # the underlying Anthropic API call failed (429 = rate limited,
+        # 5xx = transient server-side failure) — reuse the existing
+        # rate_limit/network retry policies rather than inventing new ones.
+        subtype, api_error_status = self._extract_result_terminal_signal(result)
+        if subtype == "error_max_turns":
+            return "max_turns"
+        if api_error_status == 429:
+            return "rate_limit"
+        if api_error_status is not None and api_error_status >= 500:
+            return "upstream_error"
         if self._extract_rate_limit_info(result) is not None:
             return "rate_limit"
         text = self._failure_text(result)

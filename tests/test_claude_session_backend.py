@@ -200,6 +200,67 @@ def test_classify_error_detects_rate_limit_event_from_stream_json():
     assert orch._classify_error(result) == "rate_limit"
 
 
+def test_classify_error_detects_max_turns_from_result_subtype():
+    """error_max_turns never appears as wording in free text — only the
+    structured `subtype` field on the terminal result line carries it. Before
+    threading that field through, this collapsed into the generic 'fatal'
+    bucket with no actionable hint and 0 retries for the wrong reason."""
+    orch = TaskOrchestrator()
+    result = TaskResult(
+        task_id="task_max_turns",
+        success=False,
+        output="",
+        errors=[],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"error_max_turns","is_error":true}',
+        raw_stderr="",
+        return_code=1,
+    )
+
+    assert orch._classify_error(result) == "max_turns"
+    assert orch._get_retry_strategy("max_turns")["max_retries"] == 0
+    assert any("CLAUDE_SDK_MAX_TURNS" in a for a in orch._suggest_actions("max_turns", result))
+
+
+def test_classify_error_detects_upstream_rate_limit_from_api_error_status():
+    orch = TaskOrchestrator()
+    result = TaskResult(
+        task_id="task_api_429",
+        success=False,
+        output="",
+        errors=[],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"success","is_error":true,"api_error_status":429}',
+        raw_stderr="",
+        return_code=1,
+    )
+
+    assert orch._classify_error(result) == "rate_limit"
+
+
+def test_classify_error_detects_upstream_5xx_from_api_error_status():
+    orch = TaskOrchestrator()
+    result = TaskResult(
+        task_id="task_api_529",
+        success=False,
+        output="",
+        errors=[],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"success","is_error":true,"api_error_status":529}',
+        raw_stderr="",
+        return_code=1,
+    )
+
+    assert orch._classify_error(result) == "upstream_error"
+    assert orch._get_retry_strategy("upstream_error")["max_retries"] >= 1
+
+
 def test_classify_error_detects_session_limit_without_rate_limit_event():
     # The live-incident shape: the subscription cap surfaces ONLY as the result
     # text "hit your session limit" — no rate_limit_event stream line. This must
