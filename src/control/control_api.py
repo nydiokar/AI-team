@@ -108,6 +108,8 @@ _REASON_MAX = 8000
 _TITLE_MAX = 1024
 _URI_MAX = 2000
 _ID_STR_MAX = 128
+_KEEP_NOTE_MAX = 4000
+_KEEP_BODY_MAX_BYTES = 4096
 
 
 class UploadedFileAttachment(BaseModel):
@@ -154,6 +156,11 @@ class CreateSessionBody(BaseModel):
     # stamped on the new session for a navigable thread. Purely session-axis — it
     # does NOT touch Case membership or role. Absent on a normal create.
     continued_from: Optional[str] = None
+
+
+class KeepSessionBody(BaseModel):
+    keep_pinned: bool
+    keep_note: Optional[str] = Field(default="", max_length=_KEEP_NOTE_MAX)
 
 
 class ManagerInvokeBody(BaseModel):
@@ -1053,9 +1060,12 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse({"ok": True, "deleted": deleted, "flag": render_runtime_flag(name, db=db)})
 
     @app.get("/api/sessions", dependencies=[Depends(_require_auth)])
-    def api_sessions(limit: int = Query(200, ge=1, le=1000)) -> JSONResponse:
+    def api_sessions(
+        limit: int = Query(200, ge=1, le=1000),
+        keep_pinned: Optional[bool] = Query(default=None),
+    ) -> JSONResponse:
         try:
-            views = orchestrator.session_service.list_views(limit=limit)
+            views = orchestrator.session_service.list_views(limit=limit, keep_pinned=keep_pinned)
             sessions = [v.to_dict() for v in views]
         except Exception as e:
             logger.warning("control_api_sessions_failed err=%s", e)
@@ -1899,6 +1909,46 @@ def build_control_api(orchestrator) -> FastAPI:
     @app.post("/api/sessions/{session_id}/restore", dependencies=[Depends(_require_auth)])
     def api_restore_session(session_id: str) -> JSONResponse:
         result = orchestrator.session_service.restore_session(session_id)
+        env = _command_envelope(result)
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
+        return JSONResponse(env)
+
+    @app.post("/api/sessions/{session_id}/keep", dependencies=[Depends(_require_auth)])
+    async def api_keep_session(session_id: str, request: Request) -> JSONResponse:
+        """Set the operator keep marker and searchable note.
+
+        This is not mesh affinity pinning. It only persists operator intent for
+        later retrieval and survives close because it is ordinary session metadata.
+
+        Service boundary checklist:
+        - concurrency: single session read + save; last write wins, matching the
+          existing model/effort setters.
+        - memory/request size: raw body capped at 4096 bytes; note max 4000 chars.
+        - timeout: no backend/worker call, only local store/DB persistence.
+        - malformed input: bad JSON/types return 422 with a stable reason.
+        - backing resources: missing session returns 404; DB shadow-write failures
+          follow existing SessionStore JSON-first persistence behavior.
+        """
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > _KEEP_BODY_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
+            except ValueError:
+                raise HTTPException(status_code=400, detail={"ok": False, "reason": "bad_content_length"})
+        raw = await request.body()
+        if len(raw) > _KEEP_BODY_MAX_BYTES:
+            raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
+        try:
+            body = KeepSessionBody.model_validate_json(raw)
+        except Exception:
+            raise HTTPException(status_code=422, detail={"ok": False, "reason": "invalid_keep_payload"})
+        result = orchestrator.session_service.set_keep(
+            session_id,
+            keep_pinned=body.keep_pinned,
+            keep_note=body.keep_note or "",
+        )
         env = _command_envelope(result)
         if not result.ok:
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)

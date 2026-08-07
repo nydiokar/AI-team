@@ -23,11 +23,11 @@ const POLL_MS = 3000;
 // fresher data — 20s is still multiples finer than the underlying signal.
 const SLOW_POLL_MS = 20000;
 
-export function useSessions() {
+export function useSessions(keepPinned?: boolean) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["sessions"],
-    queryFn: async () => toSessions(await api.sessions(token)),
+    queryKey: ["sessions", keepPinned ?? "all"],
+    queryFn: async () => toSessions(await api.sessions(token, 200, keepPinned)),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
     retry: (count, err) =>

@@ -118,13 +118,13 @@ class SessionStore:
         except Exception as e:
             logger.debug("shadow_write_failed session_id=%s err=%s", session.session_id, e)
 
-    def list_all(self, limit: int = 10000) -> List[Session]:
+    def list_all(self, limit: int = 10000, *, keep_pinned: Optional[bool] = None) -> List[Session]:
         # Read from DB first when available (DB is canonical state source).
         try:
             from src.control.db import get_db
             db = get_db()
             if db is not None:
-                rows = db.list_sessions(limit=limit)
+                rows = db.list_sessions(limit=limit, keep_pinned=keep_pinned)
                 sessions = []
                 for row in rows:
                     try:
@@ -144,7 +144,10 @@ class SessionStore:
             if len(sessions) >= limit:
                 break
             try:
-                sessions.append(self._from_dict(json.loads(p.read_text(encoding="utf-8"))))
+                session = self._from_dict(json.loads(p.read_text(encoding="utf-8")))
+                if keep_pinned is not None and bool(session.keep_pinned) != keep_pinned:
+                    continue
+                sessions.append(session)
             except Exception:
                 pass
         return sessions
@@ -270,6 +273,8 @@ class SessionStore:
             "cache_unhealthy_count": s.cache_unhealthy_count,
             "previous_backend_session_ids": s.previous_backend_session_ids or [],
             "continued_from": s.continued_from,
+            "keep_pinned": bool(getattr(s, "keep_pinned", False)),
+            "keep_note": getattr(s, "keep_note", "") or "",
         }
 
     @staticmethod
@@ -329,4 +334,6 @@ class SessionStore:
             case_role=d.get("case_role") or None,
             role_boot=d.get("role_boot") or None,
             continued_from=d.get("continued_from") or None,
+            keep_pinned=bool(d.get("keep_pinned", False)),
+            keep_note=d.get("keep_note") or "",
         )
