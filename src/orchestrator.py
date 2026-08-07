@@ -142,6 +142,25 @@ def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
     return len(output) > len(SALVAGE_ERROR_BANNER)
 
 
+def _reclassify_salvaged_turn_success(result: TaskResult) -> TaskResult:
+    """Flip a salvaged-but-terminally-errored turn to success.
+
+    ``_is_salvaged_backend_finalization_error`` already tells the session layer
+    to resume (``AWAITING_INPUT``) for these turns: the SDK's terminal wrap-up
+    failed *after* the agent finished real, deliverable work. Task status, turn
+    telemetry, session history, and the ``mesh_tasks`` row all key off
+    ``result.success`` independently of that session-status check, so without
+    this fixup they keep surfacing the turn as failed to the operator even
+    though nothing about the agent's or harness's actual outcome failed.
+    ``errors``/``raw_stdout``/``raw_stderr``/``error_class`` are left untouched
+    so the original signal is still there for anyone who inspects the turn —
+    only the terminal success flag changes.
+    """
+    if _is_salvaged_backend_finalization_error(result):
+        result.success = True
+    return result
+
+
 def _session_status_after_result(result: TaskResult, *, cancel_requested: bool = False) -> SessionStatus:
     if result.success or _is_salvaged_backend_finalization_error(result):
         return SessionStatus.AWAITING_INPUT
@@ -495,6 +514,40 @@ class TaskOrchestrator(ITaskOrchestrator):
             if info.get("status") == "rejected":
                 return info
         return None
+
+    @classmethod
+    def _extract_result_terminal_signal(cls, result: TaskResult) -> Tuple[str, Optional[int]]:
+        """Parse the terminal ``{"type": "result", ...}`` NDJSON line for the
+        SDK's own structured ``subtype``/``api_error_status`` fields (mirrored
+        into ``raw_stdout`` by ``claude_driver._outcome_from_result``). These
+        are a precise signal straight from the SDK — prefer them in
+        ``_classify_error`` over guessing the failure reason from free text.
+        Checks ``raw_stderr``/``error_detail`` too (older worker rows mirror
+        the marker there instead of ``raw_stdout``). Returns ("", None) when
+        no structured signal is present.
+        """
+        sources = (
+            getattr(result, "raw_stdout", "") or "",
+            getattr(result, "raw_stderr", "") or "",
+            getattr(result, "error_detail", "") or "",
+        )
+        for source in sources:
+            for line in source.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict) or obj.get("type") != "result":
+                    continue
+                subtype = str(obj.get("subtype") or "")
+                status = obj.get("api_error_status")
+                status = status if isinstance(status, int) else None
+                if subtype or status is not None:
+                    return subtype, status
+        return "", None
 
     @classmethod
     def _session_reply_text(cls, result: TaskResult) -> str:
@@ -946,6 +999,24 @@ class TaskOrchestrator(ITaskOrchestrator):
         if _row is not None and str(_row.get("status") or "").strip().lower() == "blocked":
             return 0
         tick = db.compute_continuation_tick(case_id)
+        # [continuation-review-watermark] Retire one-shot groups the Manager already
+        # drained by reviewing their members out-of-band (a tagged review.*, e.g.
+        # during an operator poke that interleaved before the wake could fire). These
+        # produce no wake — so without this they would dangle 'armed' forever and be
+        # needlessly re-armed on a Manager resume. Discharge the obligation with a
+        # plain wait_resolved marker (NO paid turn, NO round consumed). Idempotent:
+        # once appended, the group carries a wait_resolved and leaves retire_only.
+        for gid in tick.get("retire_only_groups", []) or []:
+            db.append_flow_event(
+                case_id, "worker.wait_resolved", "system",
+                entity_type="wait_group", entity_id=gid,
+                payload={"wait_group_id": gid, "outcome": "drained",
+                         "reason": "reviewed_out_of_band"},
+            )
+            self._emit_event(
+                "case_wait_group_review_drained", None,
+                {"case_id": case_id, "wait_group_id": gid},
+            )
         if not tick.get("satisfied"):
             return 0
 
@@ -3040,6 +3111,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         *,
         verdict: str,
         reason: Optional[str] = None,
+        task_id: Optional[str] = None,
         actor: str = "manager",
     ) -> Dict[str, Any]:
         """[M3.2] Orchestrator seam — record a Manager review verdict as a review.*
@@ -3050,6 +3122,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         event, and returns ``{"ok", ...}``. Returns ``{"ok": False,
         "reason": "db_unavailable"}`` when the db is unavailable and
         ``{"ok": False, "reason": "invalid_verdict"}`` for an unknown verdict.
+
+        When ``task_id`` is supplied the verdict is TAGGED to that worker task
+        (``entity_type='task'``). Beyond richer per-worker audit, a tagged review is
+        read by the Wake-Dispatcher as a consumption signal: a finish the Manager
+        reviewed out-of-band (e.g. during an operator poke) is no longer re-surfaced
+        as a redundant continuation wake (see ``compute_continuation_tick``). Omitting
+        ``task_id`` records a Case-level review exactly as before (no behaviour change).
         """
         from src.control.db import get_db, REVIEW_VERDICT_EVENT_TYPES
         event_type = REVIEW_VERDICT_EVENT_TYPES.get(verdict)
@@ -3060,6 +3139,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"ok": False, "reason": "db_unavailable"}
         event_id = db.append_flow_event(
             flow_run_id, event_type, actor,
+            entity_type="task" if task_id else None,
+            entity_id=task_id or None,
             payload={"verdict": verdict, "reason": reason},
         )
         return {"ok": True, "event_type": event_type, "event_id": event_id}
@@ -4494,7 +4575,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                         if session:
                             session.last_task_id = task.id
                             if not result.success:
-                                full_out = self._short_failure_reason(result) or "(failed)"
+                                # A failed turn may still carry a deliverable reply — e.g. a
+                                # context-overflow turn that salvaged the agent's real progress
+                                # (driver builds banner + bounded work into result.output). Prefer
+                                # that so the session preview shows the work, not just a terse
+                                # reason. Mirrors the same precedence in _mesh_complete_task.
+                                salvaged = (getattr(result, "output", "") or "").strip()
+                                full_out = salvaged or (self._short_failure_reason(result) or "(failed)")
                             else:
                                 full_out = self._session_reply_text(result).strip()
                             # last_result_summary is a short preview used by Telegram
@@ -5066,7 +5153,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                     continue
                 last_result = result
                 break
-            
+            # Retries (if any) for this error class are exhausted at this point —
+            # only now, on the final result, correct a salvaged terminal error to
+            # success (must run after the retry decision above, or a legitimately
+            # retry-eligible usage_limit/rate_limit turn would never get retried).
+            _reclassify_salvaged_turn_success(last_result)
+
             # Step 4: Summarize results with LLAMA — skip for session tasks so
             # Claude's actual response is preserved unmodified in output.
             if not session_id:
@@ -5449,6 +5541,7 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         result.error_class = self._classify_error(result)
         result.retries = 0
+        _reclassify_salvaged_turn_success(result)
 
         # Detached = gateway is shutting down while the remote worker keeps
         # running. Leave the session BUSY (do not touch its status) so startup
@@ -5733,11 +5826,14 @@ created: {task.created}
         """
         default_max = max(0, getattr(config.validation, "max_retries", 2))
         default_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
-        if error_class in ("none", "interactive", "auth", "fatal", "context_overflow"):
+        if error_class in ("none", "interactive", "auth", "fatal", "context_overflow", "max_turns"):
+            # max_turns: resubmitting the identical prompt would just hit the
+            # same turn budget again — not retry-eligible, needs an operator
+            # decision (raise CLAUDE_SDK_MAX_TURNS / split the task).
             return {"max_retries": 0, "initial_delay": 0.0, "backoff_multiplier": 1}
         if error_class == "timeout":
             return {"max_retries": min(1, default_max), "initial_delay": 1.0, "backoff_multiplier": 1}
-        if error_class == "network":
+        if error_class in ("network", "upstream_error"):
             return {"max_retries": max(1, default_max), "initial_delay": 1.5, "backoff_multiplier": default_mult}
         if error_class == "rate_limit":
             return {"max_retries": max(2, default_max), "initial_delay": 2.0, "backoff_multiplier": max(2, default_mult)}
@@ -5767,8 +5863,12 @@ created: {task.created}
                 actions.append("Increase GATEWAY_TASK_TIMEOUT_SEC or reduce task scope.")
         elif ec == "network":
             actions.append("Check connectivity/VPN; retry with backoff.")
+        elif ec == "upstream_error":
+            actions.append("Anthropic's API returned a server-side error (5xx) — transient; retrying automatically.")
         elif ec == "context_overflow":
             actions.append("Session context is full. Run /compact on the session or start a new session.")
+        elif ec == "max_turns":
+            actions.append("Turn limit reached before finishing. Increase CLAUDE_SDK_MAX_TURNS or split the task into smaller steps.")
         elif ec == "auth":
             actions.append("Run 'claude auth status' and re-authenticate if needed.")
         elif ec == "fatal":
@@ -5831,7 +5931,8 @@ created: {task.created}
     def _classify_error(self, result: TaskResult) -> str:
         """Classify error type for retry policy.
 
-        Returns one of: none|interactive|rate_limit|timeout|network|auth|fatal
+        Returns one of: none|interactive|rate_limit|timeout|network|upstream_error|
+        context_overflow|max_turns|auth|fatal
         """
         if result.success:
             return "none"
@@ -5841,6 +5942,22 @@ created: {task.created}
                 return "interactive"
         except Exception:
             pass
+        # Structured SDK signal (the terminal ResultMessage's own subtype /
+        # api_error_status) is more precise than guessing from free text —
+        # prefer it before falling back to keyword matching below. A turn
+        # that hit its max-turns budget is never expressible via the text
+        # markers below (the CLI doesn't put that in prose); an
+        # api_error_status means the turn's own lifecycle finished fine and
+        # the underlying Anthropic API call failed (429 = rate limited,
+        # 5xx = transient server-side failure) — reuse the existing
+        # rate_limit/network retry policies rather than inventing new ones.
+        subtype, api_error_status = self._extract_result_terminal_signal(result)
+        if subtype == "error_max_turns":
+            return "max_turns"
+        if api_error_status == 429:
+            return "rate_limit"
+        if api_error_status is not None and api_error_status >= 500:
+            return "upstream_error"
         if self._extract_rate_limit_info(result) is not None:
             return "rate_limit"
         text = self._failure_text(result)

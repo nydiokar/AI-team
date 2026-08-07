@@ -573,6 +573,20 @@ class TestClassifyErrorText:
         # be misread as a usage cap even if both markers were present.
         assert classify_error_text("prompt is too long") == "context_overflow"
 
+    def test_error_max_turns_subtype_is_max_turns_not_backend_error(self):
+        # error_max_turns never appears as wording in free text — only the
+        # structured `subtype` field carries it. Text-only matching on this
+        # exact string ("error_max_turns" as a fallback error_text) would
+        # otherwise silently collapse into the generic backend_error bucket.
+        assert classify_error_text("error_max_turns", subtype="error_max_turns") == "max_turns"
+
+    def test_api_error_status_wins_over_text_matching(self):
+        # api_error_status is the SDK's own structured signal for "the API
+        # call itself failed" — prefer it over any text in the (possibly
+        # empty or misleading) error string.
+        assert classify_error_text("", api_error_status=529) == "upstream_error"
+        assert classify_error_text("some random failure", api_error_status=500) == "upstream_error"
+
 
 class TestSalvagedReply:
     """The user-facing reply for an error turn must be honest and COMPLETE:
@@ -614,6 +628,19 @@ class TestSalvagedReply:
         reply = _build_salvaged_reply("usage_limit", "", "session limit")
         assert "usage limit" in reply.lower()
         assert "---" not in reply
+
+    def test_upstream_error_banner_is_honest_and_full(self):
+        big = "W" * 50_000
+        reply = _build_salvaged_reply("upstream_error", big, "")
+        assert big in reply
+        assert "transient" in reply.lower()
+        assert "backend error before a final summary" not in reply
+
+    def test_max_turns_banner_names_the_knob(self):
+        reply = _build_salvaged_reply("max_turns", "partial work", "")
+        assert "CLAUDE_SDK_MAX_TURNS" in reply
+        assert "partial work" in reply
+        assert "backend error before a final summary" not in reply
 
 
 class TestErrorResultTurn:

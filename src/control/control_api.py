@@ -100,6 +100,16 @@ _CONTINUE_INLINE_MAX = 48000
 # that, so no realistic caller (web composer, MCP Manager, Manager-internal
 # dispatch) can hit it; it only blunts runaway/accidental oversized posts.
 _MAX_INSTRUCTION_CHARS = 262144
+# [A72 review] Smaller semantic fields on the case write surface. The MCP client
+# already bounds spec body ≤ 8k / title ≤ 512 / uri ≤ 1000 / reviewer ≤ 64, so the
+# server bounds below sit at-or-above every legit caller and only reject bulk that
+# no legit path can produce.
+_REASON_MAX = 8000
+_TITLE_MAX = 1024
+_URI_MAX = 2000
+_ID_STR_MAX = 128
+_KEEP_NOTE_MAX = 4000
+_KEEP_BODY_MAX_BYTES = 4096
 
 
 class UploadedFileAttachment(BaseModel):
@@ -148,6 +158,11 @@ class CreateSessionBody(BaseModel):
     continued_from: Optional[str] = None
 
 
+class KeepSessionBody(BaseModel):
+    keep_pinned: bool
+    keep_note: Optional[str] = Field(default="", max_length=_KEEP_NOTE_MAX)
+
+
 class ManagerInvokeBody(BaseModel):
     """[A38] Boot a Manager session bound to one new Case (M3 Phase 3.1)."""
     objective: str = Field(max_length=_MAX_INSTRUCTION_CHARS)
@@ -182,9 +197,13 @@ class CaseCloseBody(BaseModel):
 
 class CaseReviewBody(BaseModel):
     """[M3.2] Record a Manager review verdict on a Case. ``verdict`` must be one of
-    accepted|rework_requested|waived; ``reason`` is an optional short note."""
+    accepted|rework_requested|waived; ``reason`` is an optional short note.
+    ``task_id`` optionally TAGS the verdict to a specific worker task — richer audit,
+    and the Wake-Dispatcher reads it as a consumption signal so an out-of-band review
+    is not re-surfaced as a redundant continuation wake."""
     verdict: str
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(default=None, max_length=_REASON_MAX)
+    task_id: Optional[str] = Field(default=None, max_length=_ID_STR_MAX)
 
 
 class CaseWaitBody(BaseModel):
@@ -210,29 +229,29 @@ class CasePublishArtifactBody(BaseModel):
     """[A56/M4] Publish a durable artifact onto a Case. ``artifact_id`` names the
     artifact; ``kind`` is a free label (defaults to 'artifact'); ``title``/``uri`` are
     optional; ``metadata`` is verbatim JSON evidence."""
-    artifact_id: str
-    kind: str = "artifact"
-    title: Optional[str] = None
-    uri: Optional[str] = None
+    artifact_id: str = Field(max_length=_ID_STR_MAX)
+    kind: str = Field(default="artifact", max_length=_ID_STR_MAX)
+    title: Optional[str] = Field(default=None, max_length=_TITLE_MAX)
+    uri: Optional[str] = Field(default=None, max_length=_URI_MAX)
     metadata: Optional[Dict[str, Any]] = None
 
 
 class CaseSpecBody(BaseModel):
     """[A56/M4] Author a spec onto a Case (durable evidence). ``spec_id`` names it;
     ``body`` is the authored spec text; ``title`` is an optional short label."""
-    spec_id: str
-    body: str
-    title: Optional[str] = None
+    spec_id: str = Field(max_length=_ID_STR_MAX)
+    body: str = Field(max_length=_MAX_INSTRUCTION_CHARS)
+    title: Optional[str] = Field(default=None, max_length=_TITLE_MAX)
 
 
 class CaseSpecReviewBody(BaseModel):
     """[A56/M4] Score a spec against R1 by a SEPARATE plan-reviewer seat. ``spec_id``
     is the spec being scored; ``scores`` maps each rubric dimension to 0–2; ``reason``
     is an optional note; ``reviewer`` names the (separate) reviewing seat."""
-    spec_id: str
+    spec_id: str = Field(max_length=_ID_STR_MAX)
     scores: Dict[str, Any]
-    reason: Optional[str] = None
-    reviewer: str = "reviewer"
+    reason: Optional[str] = Field(default=None, max_length=_REASON_MAX)
+    reviewer: str = Field(default="reviewer", max_length=_ID_STR_MAX)
 
 
 class CaseDecomposeBody(BaseModel):
@@ -247,7 +266,7 @@ class CaseInterruptBody(BaseModel):
     """[A53] Kill a Case: cancel its in-flight worker task(s), mark it blocked
     (resumable), record flow.interrupted, escalate once. ``reason`` is an optional
     short label for the interruption (defaults to 'operator_kill')."""
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(default=None, max_length=_REASON_MAX)
 
 
 class CaseOpenBody(BaseModel):
@@ -322,7 +341,7 @@ class InspectBody(BaseModel):
 
 class GitCommitBody(BaseModel):
     task_id: str
-    task_description: Optional[str] = None
+    task_description: Optional[str] = Field(default=None, max_length=_REASON_MAX)
     create_branch: bool = True
     push_branch: bool = False
 
@@ -1041,9 +1060,12 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse({"ok": True, "deleted": deleted, "flag": render_runtime_flag(name, db=db)})
 
     @app.get("/api/sessions", dependencies=[Depends(_require_auth)])
-    def api_sessions(limit: int = Query(200, ge=1, le=1000)) -> JSONResponse:
+    def api_sessions(
+        limit: int = Query(200, ge=1, le=1000),
+        keep_pinned: Optional[bool] = Query(default=None),
+    ) -> JSONResponse:
         try:
-            views = orchestrator.session_service.list_views(limit=limit)
+            views = orchestrator.session_service.list_views(limit=limit, keep_pinned=keep_pinned)
             sessions = [v.to_dict() for v in views]
         except Exception as e:
             logger.warning("control_api_sessions_failed err=%s", e)
@@ -1674,7 +1696,8 @@ def build_control_api(orchestrator) -> FastAPI:
                 detail={"ok": False, "reason": "invalid_verdict"},
             )
         result = orchestrator.record_review(
-            case_id, verdict=body.verdict, reason=body.reason, actor="manager",
+            case_id, verdict=body.verdict, reason=body.reason,
+            task_id=body.task_id, actor="manager",
         )
         return JSONResponse(result)
 
@@ -1886,6 +1909,46 @@ def build_control_api(orchestrator) -> FastAPI:
     @app.post("/api/sessions/{session_id}/restore", dependencies=[Depends(_require_auth)])
     def api_restore_session(session_id: str) -> JSONResponse:
         result = orchestrator.session_service.restore_session(session_id)
+        env = _command_envelope(result)
+        if not result.ok:
+            raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
+        return JSONResponse(env)
+
+    @app.post("/api/sessions/{session_id}/keep", dependencies=[Depends(_require_auth)])
+    async def api_keep_session(session_id: str, request: Request) -> JSONResponse:
+        """Set the operator keep marker and searchable note.
+
+        This is not mesh affinity pinning. It only persists operator intent for
+        later retrieval and survives close because it is ordinary session metadata.
+
+        Service boundary checklist:
+        - concurrency: single session read + save; last write wins, matching the
+          existing model/effort setters.
+        - memory/request size: raw body capped at 4096 bytes; note max 4000 chars.
+        - timeout: no backend/worker call, only local store/DB persistence.
+        - malformed input: bad JSON/types return 422 with a stable reason.
+        - backing resources: missing session returns 404; DB shadow-write failures
+          follow existing SessionStore JSON-first persistence behavior.
+        """
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > _KEEP_BODY_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
+            except ValueError:
+                raise HTTPException(status_code=400, detail={"ok": False, "reason": "bad_content_length"})
+        raw = await request.body()
+        if len(raw) > _KEEP_BODY_MAX_BYTES:
+            raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
+        try:
+            body = KeepSessionBody.model_validate_json(raw)
+        except Exception:
+            raise HTTPException(status_code=422, detail={"ok": False, "reason": "invalid_keep_payload"})
+        result = orchestrator.session_service.set_keep(
+            session_id,
+            keep_pinned=body.keep_pinned,
+            keep_note=body.keep_note or "",
+        )
         env = _command_envelope(result)
         if not result.ok:
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)

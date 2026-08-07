@@ -1268,7 +1268,8 @@ class MeshDB:
                         origin,
                         driver_type, driver_status, cache_health, cache_unhealthy_count,
                         previous_backend_session_ids,
-                        current_case_id, case_role, role_boot, continued_from
+                        current_case_id, case_role, role_boot, continued_from,
+                        keep_pinned, keep_note
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
                         :created_at, :updated_at, :machine_id, :backend_session_id, :model,
@@ -1279,7 +1280,8 @@ class MeshDB:
                         :origin,
                         :driver_type, :driver_status, :cache_health, :cache_unhealthy_count,
                         :previous_backend_session_ids,
-                        :current_case_id, :case_role, :role_boot, :continued_from
+                        :current_case_id, :case_role, :role_boot, :continued_from,
+                        :keep_pinned, :keep_note
                     )
                     ON CONFLICT(session_id) DO UPDATE SET
                         backend             = excluded.backend,
@@ -1305,7 +1307,9 @@ class MeshDB:
                         driver_status                = excluded.driver_status,
                         cache_health                 = excluded.cache_health,
                         cache_unhealthy_count        = excluded.cache_unhealthy_count,
-                        previous_backend_session_ids = excluded.previous_backend_session_ids
+                        previous_backend_session_ids = excluded.previous_backend_session_ids,
+                        keep_pinned                 = excluded.keep_pinned,
+                        keep_note                   = excluded.keep_note
                         -- NB: current_case_id / case_role are DELIBERATELY NOT updated
                         -- here. A generic full-session save (e.g. a Manager's own
                         -- turn-end persist of a stale in-memory object) must NEVER
@@ -1352,6 +1356,8 @@ class MeshDB:
                         "case_role":             getattr(session, "case_role", None) or None,
                         "role_boot":             getattr(session, "role_boot", None) or None,
                         "continued_from":        getattr(session, "continued_from", None) or None,
+                        "keep_pinned":           1 if bool(getattr(session, "keep_pinned", False)) else 0,
+                        "keep_note":             getattr(session, "keep_note", "") or "",
                     },
                 )
         except Exception as e:
@@ -1422,6 +1428,7 @@ class MeshDB:
         status: Optional[str] = None,
         backend: Optional[str] = None,
         machine_id: Optional[str] = None,
+        keep_pinned: Optional[bool] = None,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
         clauses, params = [], []
@@ -1434,6 +1441,9 @@ class MeshDB:
         if machine_id:
             clauses.append("machine_id = ?")
             params.append(machine_id)
+        if keep_pinned is not None:
+            clauses.append("COALESCE(keep_pinned, 0) = ?")
+            params.append(1 if keep_pinned else 0)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         rows = self._conn().execute(
@@ -1453,6 +1463,7 @@ class MeshDB:
         AND COALESCE(s.last_files_modified, '[]') IN ('', '[]')
         AND COALESCE(s.task_history, '[]') IN ('', '[]')
         AND COALESCE(s.current_case_id, '') = ''
+        AND COALESCE(s.keep_pinned, 0) = 0
         AND NOT EXISTS (SELECT 1 FROM mesh_tasks t WHERE t.session_id = s.session_id)
         AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.session_id = s.session_id)
         AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.session_id = s.session_id)
@@ -3186,8 +3197,8 @@ class MeshDB:
         """[M3.4] Derive, purely from the ledger, whether a Case has a satisfied
         wait-group this tick and what a wake turn would present.
 
-        Returns ``{satisfied, presented_task_ids, satisfied_groups, generation_next,
-        completed_rounds, watermark}``. ``generation_next`` = completed_rounds + 1
+        Returns ``{satisfied, presented_task_ids, satisfied_groups, retire_only_groups,
+        generation_next, completed_rounds, watermark}``. ``generation_next`` = completed_rounds + 1
         (NOT highest+1): an in-flight round keeps the same generation so a racing
         tick recomputes the SAME continuation id and the atomic claim dedupes it.
         Each satisfied group carries ``{wait_group_id, condition, presented,
@@ -3197,6 +3208,16 @@ class MeshDB:
         groups: Dict[str, Dict[str, Any]] = {}
         resolved: set = set()
         finished: Dict[str, str] = {}
+        # [continuation-review-watermark] task_ids the Manager has ALREADY adjudicated
+        # via a review.* event TAGGED to that task (entity_type='task'). A tagged
+        # review is a consumption signal on par with a continuation ACK: a finish the
+        # Manager reviewed out-of-band (e.g. during an operator poke that interleaved
+        # between the worker finishing and its wake) must NOT be re-surfaced as a
+        # redundant "finished since your last turn" wake — that burned a whole paid
+        # Manager turn to re-conclude "already done". Untagged (Case-level) reviews
+        # carry no entity_id and are ignored here, so pre-tagging behaviour is
+        # byte-identical: the optimisation only engages once a task_id is supplied.
+        reviewed: set = set()
         for e in self.list_flow_events(flow_run_id):
             et = e.get("event_type")
             if e.get("entity_type") == "wait_group":
@@ -3215,10 +3236,19 @@ class MeshDB:
                 tid = e.get("entity_id")
                 if tid:
                     finished[tid] = _event_outcome(e) or "success"
+            elif et in _REVIEW_EVENT_TYPES and e.get("entity_type") == "task":
+                tid = e.get("entity_id")
+                if tid:
+                    reviewed.add(tid)
 
         consumed, completed, _highest = self.continuation_watermark(flow_run_id)
         presented: List[str] = []
         sat_groups: List[Dict[str, Any]] = []
+        # One-shot groups whose finished members are ALL adjudicated but where at
+        # least one was drained by an out-of-band review (not a continuation ACK):
+        # they will never produce a wake, so they must be retired explicitly or they
+        # dangle 'armed' forever and get needlessly re-armed on a Manager resume.
+        retire_only: List[str] = []
         for gid, g in groups.items():
             if gid in resolved:
                 continue
@@ -3226,7 +3256,13 @@ class MeshDB:
             cond = g["condition"]
             if not members:
                 continue
-            finished_unconsumed = [t for t in members if t in finished and t not in consumed]
+            # A member is drained if a continuation ACK recorded it OR the Manager
+            # already reviewed it out-of-band — either way there is nothing new to
+            # present for it.
+            finished_unconsumed = [
+                t for t in members
+                if t in finished and t not in consumed and t not in reviewed
+            ]
             all_finished = all(t in finished for t in members)
             if cond in ("ALL", "NAMED"):
                 ok = all_finished and len(finished_unconsumed) > 0
@@ -3244,10 +3280,19 @@ class MeshDB:
                 for t in finished_unconsumed:
                     if t not in presented:
                         presented.append(t)
+            elif (
+                retire
+                and not finished_unconsumed
+                and any(t in reviewed and t not in consumed for t in members)
+            ):
+                # Fully finished, nothing left to present, and a review (not a
+                # continuation) is what drained it → retire WITHOUT a paid wake.
+                retire_only.append(gid)
         return {
             "satisfied": len(sat_groups) > 0,
             "presented_task_ids": presented,
             "satisfied_groups": sat_groups,
+            "retire_only_groups": retire_only,
             "generation_next": completed + 1,
             "completed_rounds": completed,
             "watermark": sorted(consumed),
@@ -4804,6 +4849,10 @@ def _get_migrations() -> List[tuple]:
                 set_by    TEXT NOT NULL DEFAULT ''
             )
         """),  # Agent-operable feature flag overrides. Missing row => env/default fallback.
+        (29, """
+            ALTER TABLE sessions ADD COLUMN keep_pinned INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE sessions ADD COLUMN keep_note TEXT NOT NULL DEFAULT ''
+        """),  # Operator keep marker + note. Distinct from machine_id affinity pinning.
     ]
 
 

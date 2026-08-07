@@ -23,6 +23,7 @@ import {
   FolderOpen,
   GitFork,
   X,
+  Pin,
 } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SessionStatusChip } from "../components/ui/StatusChip";
@@ -40,6 +41,7 @@ import { JobRow } from "../components/system/JobsPanel";
 import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { EffortPickerSheet } from "../components/sessions/EffortPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
+import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
 import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionUsage, useSessionActivity, useJobs } from "../hooks/useLiveData";
 import { compactTokens } from "../components/timeline/SessionTurns";
 import { useSessionAffiliations } from "../hooks/useWork";
@@ -51,6 +53,7 @@ import {
   useRestoreSession,
   useCompactSession,
   useInspectSession,
+  useKeepSession,
 } from "../hooks/useSessionActions";
 import { cn } from "../lib/cn";
 import { clockLabel } from "../lib/time";
@@ -486,6 +489,25 @@ function SessionInfoTab({
         ))}
       </div>
 
+      <div className="card-elev overflow-hidden rounded-xl">
+        <div className="flex items-start gap-3 px-4 py-3">
+          <Pin
+            className={cn(
+              "mt-0.5 size-4 shrink-0",
+              session.keepPinned ? "fill-current text-accent" : "text-ink-muted",
+            )}
+          />
+          <div className="min-w-0 flex-1">
+            <p className="text-[12px] font-medium text-ink-soft">
+              {session.keepPinned ? "Kept intentionally" : "Not kept"}
+            </p>
+            <p className="mt-1 whitespace-pre-wrap text-[12px] leading-5 text-ink-muted">
+              {session.keepPinned && session.keepNote ? session.keepNote : "No keep note."}
+            </p>
+          </div>
+        </div>
+      </div>
+
       <SessionCostPanel sessionId={sessionId} />
 
       <SessionTurns turns={turns ?? []} loading={turnsLoading} />
@@ -579,6 +601,7 @@ export function SessionDetailScreen() {
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [effortPickerOpen, setEffortPickerOpen] = useState(false);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
+  const [keepSheetOpen, setKeepSheetOpen] = useState(false);
   const [compactConfirm, setCompactConfirm] = useState(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
@@ -709,6 +732,15 @@ export function SessionDetailScreen() {
   const close = useCloseSession();
   const restore = useRestoreSession();
   const compact = useCompactSession();
+  const keep = useKeepSession();
+
+  // Keep from the detail menu: unkept → one-tap optimistic keep; kept → open the
+  // note editor. Mirrors the row's one-tap toggle while offering the richer edit.
+  const onKeepAction = useCallback(() => {
+    if (!session) return;
+    if (session.keepPinned) setKeepSheetOpen(true);
+    else keep.mutate({ sessionId: session.id, keepPinned: true, keepNote: "" });
+  }, [session, keep]);
 
   useEffect(() => {
     if (!statusBanner) return;
@@ -835,6 +867,13 @@ export function SessionDetailScreen() {
                               <GitBranch className="size-4" /> Git
                             </button>
                           )}
+                          <button
+                            onClick={() => act(onKeepAction)}
+                            className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                          >
+                            <Pin className={cn("size-4", session.keepPinned && "fill-current text-accent")} />
+                            {session.keepPinned ? "Edit keep note" : "Keep session"}
+                          </button>
                           <div className="my-1 border-t border-hairline" />
                           {!closed ? (
                             <button
@@ -979,6 +1018,13 @@ export function SessionDetailScreen() {
                                 <GitBranch className="size-4" /> Git
                               </button>
                             )}
+                            <button
+                              onClick={() => act(onKeepAction)}
+                              className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                            >
+                              <Pin className={cn("size-4", session.keepPinned && "fill-current text-accent")} />
+                              {session.keepPinned ? "Edit keep note" : "Keep session"}
+                            </button>
                             {!closed && timeline.length > 0 && (
                               <button
                                 onClick={() => act(startSelectMode)}
@@ -1221,6 +1267,9 @@ export function SessionDetailScreen() {
       )}
       {gitPanelOpen && id && (
         <GitPanelSheet sessionId={id} onClose={() => setGitPanelOpen(false)} />
+      )}
+      {keepSheetOpen && session && (
+        <SessionKeepSheet session={session} onClose={() => setKeepSheetOpen(false)} />
       )}
 
       {forkOpen && forkContext && (

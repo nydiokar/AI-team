@@ -650,6 +650,39 @@ def test_dispatch_tool_call_missing_new_worker_model_is_structured_error(monkeyp
     assert calls == []
 
 
+def test_record_review_forwards_task_id(monkeypatch):
+    """A supplied task_id is forwarded in the POST body so the gateway tags the
+    verdict to that worker task (the Wake-Dispatcher consumption signal)."""
+    calls = []
+
+    def _fake_api(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "event_type": "review.accepted"}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
+    out = mcp_manager._record_review(
+        {"case_id": "case-1", "verdict": "accepted", "reason": "ok", "task_id": "task_xyz"}
+    )
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == "/api/cases/case-1/review"
+    assert calls[0][2] == {"verdict": "accepted", "reason": "ok", "task_id": "task_xyz"}
+    assert "accepted" in out
+
+
+def test_record_review_omits_task_id_when_absent(monkeypatch):
+    """Without task_id the body carries no task_id key — a Case-level review,
+    byte-identical to the pre-tagging contract."""
+    calls = []
+
+    def _fake_api(method, path, payload=None, timeout=20.0):
+        calls.append((method, path, payload))
+        return {"ok": True, "event_type": "review.accepted"}
+
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
+    mcp_manager._record_review({"case_id": "case-1", "verdict": "accepted"})
+    assert "task_id" not in calls[0][2]
+
+
 def test_open_case_tool_posts_to_cases(monkeypatch):
     """[M3.3] open_case posts objective+session_id to POST /api/cases and surfaces
     the new case_id — the seam that lets one session own many Cases."""
