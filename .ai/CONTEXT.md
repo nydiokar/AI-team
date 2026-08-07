@@ -68,6 +68,20 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-08-07 — Typed error classification instead of backend_error catch-all (PR #81, merged, gateway restarted).**
+Follow-up to PR #80. The Claude Agent SDK's terminal `ResultMessage` carries structured `subtype`
+(e.g. `error_max_turns`) and `api_error_status` (HTTP status of the underlying API call — 429/5xx)
+fields that were read but only ever used as free-text fallback for keyword matching — anything not
+matching "rate limit"/"context window" wording collapsed into the generic `backend_error`/`fatal`
+bucket with 0 retries, even when the SDK told us exactly what happened. `classify_error_text()`
+(driver) and `_classify_error()` (orchestrator) now check the structured fields first: `error_max_turns`
+→ new `max_turns` class (0 retries, points at `CLAUDE_SDK_MAX_TURNS`); `api_error_status==429` →
+reuses `rate_limit`; `api_error_status>=500` → new `upstream_error` class (reuses `network`'s retry
+numbers, own accurate suggest_actions text). Deliberately does NOT touch
+`_is_salvaged_backend_finalization_error` (PR #80's session-recovery mechanism) — verified it only
+ever matched the generic banner + literal `error_during_execution` marker, so this is orthogonal.
+110/110 targeted tests pass (5 new). Gateway restarted on merged code; worker untouched.
+
 **2026-08-07 — Salvaged-turn "false failed" badge + truncated reply fixed (PR #80, merged, gateway restarted).**
 Root cause: a turn whose SDK terminal wrap-up errors out AFTER the agent produced a real, complete
 reply (context overflow / usage limit / backend_error — the `SALVAGE_ERROR_BANNER` case) already put
