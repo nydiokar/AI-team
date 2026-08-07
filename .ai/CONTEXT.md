@@ -68,6 +68,19 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-08-07 — Salvaged-turn "false failed" badge + truncated reply fixed (PR #80, merged, gateway restarted).**
+Root cause: a turn whose SDK terminal wrap-up errors out AFTER the agent produced a real, complete
+reply (context overflow / usage limit / backend_error — the `SALVAGE_ERROR_BANNER` case) already put
+the *session* in the correct `AWAITING_INPUT` state, but `TaskResult.success` stayed `False`. Every
+other consumer (task status, turn telemetry, the `mesh_result` SSE event → frontend red "failed"
+badge, `mesh_tasks.status` read by `task_state_truth`) kept surfacing it as failed even though nothing
+about the outcome actually failed — plus `session.last_summary`/`task_history` showed only the terse
+one-line failure reason instead of the salvaged full reply. Fix: `_reclassify_salvaged_turn_success()`
+flips `success=True` on the FINAL result only (after retry-eligibility, so genuine `rate_limit`/
+`usage_limit` turns without salvaged work still retry normally); `last_summary`/`task_history` now
+prefer the salvaged text, mirroring `_mesh_complete_task`'s existing precedence. 26/26 targeted tests
+pass (2 new). Gateway restarted on merged code; worker untouched.
+
 **2026-08-05 — A67 follow-ups dispatched as four small jobs (A72–A75).**
 Operator chose "several jobs / small PRs, gradually" over folding everything into A71. Dispatched:
 A72 input caps (P2-3), A73 node `.env` deploy guard (P1-4 node-side), A74 proactive-turn ownership
