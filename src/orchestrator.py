@@ -142,6 +142,25 @@ def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
     return len(output) > len(SALVAGE_ERROR_BANNER)
 
 
+def _reclassify_salvaged_turn_success(result: TaskResult) -> TaskResult:
+    """Flip a salvaged-but-terminally-errored turn to success.
+
+    ``_is_salvaged_backend_finalization_error`` already tells the session layer
+    to resume (``AWAITING_INPUT``) for these turns: the SDK's terminal wrap-up
+    failed *after* the agent finished real, deliverable work. Task status, turn
+    telemetry, session history, and the ``mesh_tasks`` row all key off
+    ``result.success`` independently of that session-status check, so without
+    this fixup they keep surfacing the turn as failed to the operator even
+    though nothing about the agent's or harness's actual outcome failed.
+    ``errors``/``raw_stdout``/``raw_stderr``/``error_class`` are left untouched
+    so the original signal is still there for anyone who inspects the turn —
+    only the terminal success flag changes.
+    """
+    if _is_salvaged_backend_finalization_error(result):
+        result.success = True
+    return result
+
+
 def _session_status_after_result(result: TaskResult, *, cancel_requested: bool = False) -> SessionStatus:
     if result.success or _is_salvaged_backend_finalization_error(result):
         return SessionStatus.AWAITING_INPUT
@@ -4522,7 +4541,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                         if session:
                             session.last_task_id = task.id
                             if not result.success:
-                                full_out = self._short_failure_reason(result) or "(failed)"
+                                # A failed turn may still carry a deliverable reply — e.g. a
+                                # context-overflow turn that salvaged the agent's real progress
+                                # (driver builds banner + bounded work into result.output). Prefer
+                                # that so the session preview shows the work, not just a terse
+                                # reason. Mirrors the same precedence in _mesh_complete_task.
+                                salvaged = (getattr(result, "output", "") or "").strip()
+                                full_out = salvaged or (self._short_failure_reason(result) or "(failed)")
                             else:
                                 full_out = self._session_reply_text(result).strip()
                             # last_result_summary is a short preview used by Telegram
@@ -5094,7 +5119,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                     continue
                 last_result = result
                 break
-            
+            # Retries (if any) for this error class are exhausted at this point —
+            # only now, on the final result, correct a salvaged terminal error to
+            # success (must run after the retry decision above, or a legitimately
+            # retry-eligible usage_limit/rate_limit turn would never get retried).
+            _reclassify_salvaged_turn_success(last_result)
+
             # Step 4: Summarize results with LLAMA — skip for session tasks so
             # Claude's actual response is preserved unmodified in output.
             if not session_id:
@@ -5477,6 +5507,7 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         result.error_class = self._classify_error(result)
         result.retries = 0
+        _reclassify_salvaged_turn_success(result)
 
         # Detached = gateway is shutting down while the remote worker keeps
         # running. Leave the session BUSY (do not touch its status) so startup
