@@ -31,6 +31,8 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Security, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -39,6 +41,23 @@ from src.core import observability
 
 if TYPE_CHECKING:
     from src.control.db import MeshDB
+
+
+def _scrub_surrogates(obj: Any) -> Any:
+    """Recursively replace lone UTF-16 surrogates in any string within ``obj``.
+
+    A lone surrogate (e.g. ``\\udc81`` from mojibake) cannot be encoded to UTF-8, so
+    it crashes ``JSONResponse.render`` (``ensure_ascii=False`` → ``.encode("utf-8")``).
+    ``backslashreplace`` keeps the audit faithful (the offending code point survives as
+    a printable escape) while making every string safely encodable. Clean strings
+    round-trip byte-identically."""
+    if isinstance(obj, str):
+        return obj.encode("utf-8", "backslashreplace").decode("utf-8")
+    if isinstance(obj, dict):
+        return {_scrub_surrogates(k): _scrub_surrogates(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrub_surrogates(v) for v in obj]
+    return obj
 
 # Map a CommandResult.reason (stable machine code) to an HTTP status. The body
 # always still carries {ok, reason} so the client owns the wording (no prose here).
@@ -853,6 +872,24 @@ def build_control_api(orchestrator) -> FastAPI:
         redoc_url="/redoc" if _docs_on else None,
         openapi_url="/openapi.json" if _docs_on else None,
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """Render 422s safely even when the offending body carries un-encodable text.
+
+        FastAPI's default handler echoes the rejected ``input`` verbatim into a
+        ``JSONResponse``; starlette renders that with ``ensure_ascii=False`` and then
+        ``.encode("utf-8")``. A request body containing a lone UTF-16 surrogate (e.g.
+        mojibake in a Manager review ``reason``) is itself what pydantic rejects — but
+        the echoed surrogate then makes the encode step raise ``UnicodeEncodeError``,
+        turning a would-be 422 into a 500 across the whole write surface. Scrub
+        surrogates from the error payload so malformed input returns a structured 422
+        (§7 service boundary), never a panic."""
+        safe = _scrub_surrogates(jsonable_encoder(exc.errors()))
+        return JSONResponse(status_code=422, content={"detail": safe})
+
     _bearer = HTTPBearer(auto_error=True)
 
     def _require_auth(creds: HTTPAuthorizationCredentials = Security(_bearer)) -> None:

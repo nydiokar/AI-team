@@ -151,6 +151,28 @@ def test_review_route_untagged_is_case_level(monkeypatch, client, db):
     assert ev[0]["entity_id"] is None
 
 
+def test_review_route_surrogate_reason_does_not_500(monkeypatch, client, db):
+    # A reason carrying a lone UTF-16 surrogate (mojibake in a Manager verdict) must
+    # NOT crash the response renderer into a 500. pydantic rejects the un-encodable
+    # string, but the custom RequestValidationError handler renders a clean 422 with
+    # the surrogate scrubbed — never a panic (§7 malformed-input service boundary).
+    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
+    fid = db.open_case("obj", "sess-surrogate")
+    # Faithful wire shape: the MCP client json.dumps() with ensure_ascii=True, so the
+    # surrogate travels as a \\udc81 escape and the server's json.loads reconstructs
+    # the lone surrogate — exactly the path that crashed the default 422 renderer.
+    import json as _json
+    raw = _json.dumps({"verdict": "accepted", "reason": "flow-sizing \udc81 verdict"})
+    r = client.post(
+        f"/api/cases/{fid}/review",
+        content=raw.encode("ascii"),
+        headers={**_auth(), "Content-Type": "application/json"},
+    )
+    assert r.status_code == 422, r.status_code
+    # The response body is itself encodable (the crash was in encoding the echo).
+    assert r.content.decode("utf-8")
+
+
 def test_review_route_invalid_verdict_422(monkeypatch, client, db):
     monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", "sess-x")

@@ -221,6 +221,12 @@ def _bounded_text(value: Any, name: str, max_chars: int, *, required: bool = Tru
         return None
     if not isinstance(value, str):
         raise ValueError(f"{name} must be a string")
+    # Scrub lone UTF-16 surrogates (mojibake in model-authored text): they survive
+    # json.dumps(ensure_ascii=True) over the wire but the control API cannot encode
+    # them to UTF-8 on the way back out, so an un-scrubbed reason/objective would be
+    # rejected (or crash the response renderer). backslashreplace preserves the code
+    # point as a printable escape so the verdict/objective still records intact.
+    value = value.encode("utf-8", "backslashreplace").decode("utf-8")
     text = value.strip()
     if required and not text:
         raise ValueError(f"{name} cannot be empty")
