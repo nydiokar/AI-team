@@ -502,6 +502,49 @@ def test_close_then_restore(client, orch, tmp_path):
     assert rr.status_code == 200 and rr.json()["session"]["status"] == "idle"
 
 
+def test_keep_session_persists_note_through_close(client, orch, tmp_path):
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    sid = res.session.session_id
+    before_updated_at = res.session.updated_at
+
+    rk = client.post(
+        f"/api/sessions/{sid}/keep",
+        headers=_auth(),
+        json={"keep_pinned": True, "keep_note": "follow up on flaky deploy"},
+    )
+    assert rk.status_code == 200
+    assert rk.json()["session"]["keep_pinned"] is True
+    assert rk.json()["session"]["keep_note"] == "follow up on flaky deploy"
+    assert rk.json()["session"]["updated_at"] == before_updated_at
+
+    rc = client.post(f"/api/sessions/{sid}/close", headers=_auth())
+    assert rc.status_code == 200
+    assert rc.json()["session"]["status"] == "closed"
+    assert rc.json()["session"]["keep_pinned"] is True
+    assert rc.json()["session"]["keep_note"] == "follow up on flaky deploy"
+
+    sessions = client.get("/api/sessions", headers=_auth()).json()["sessions"]
+    kept = next(s for s in sessions if s["session_id"] == sid)
+    assert kept["keep_pinned"] is True
+    assert kept["keep_note"] == "follow up on flaky deploy"
+
+    kept_only = client.get("/api/sessions?keep_pinned=true", headers=_auth()).json()["sessions"]
+    assert [s["session_id"] for s in kept_only] == [sid]
+
+
+def test_keep_session_rejects_oversized_body(client, orch, tmp_path):
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    sid = res.session.session_id
+
+    r = client.post(
+        f"/api/sessions/{sid}/keep",
+        headers=_auth(),
+        json={"keep_pinned": True, "keep_note": "x" * 5000},
+    )
+    assert r.status_code == 413
+    assert r.json()["detail"]["reason"] == "payload_too_large"
+
+
 def test_restore_non_closed_is_409(client, orch, tmp_path):
     res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
     r = client.post(f"/api/sessions/{res.session.session_id}/restore", headers=_auth())

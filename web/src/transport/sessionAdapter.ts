@@ -75,6 +75,8 @@ export function toSession(raw: RawSessionView): Session {
     originKind: raw.origin_kind,
     updatedAt: raw.updated_at,
     continuedFrom: raw.continued_from ?? null,
+    keepPinned: Boolean(raw.keep_pinned),
+    keepNote: raw.keep_note ?? "",
   };
 }
 

@@ -216,6 +216,23 @@ export function useRestoreSession() {
   });
 }
 
+/** Set or clear the operator keep marker and note. */
+export function useKeepSession() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { sessionId: string; keepPinned: boolean; keepNote: string }) =>
+      api.keepSession(token, vars.sessionId, vars.keepPinned, vars.keepNote),
+    retry: false,
+    onSettled: (_data, _err, vars) => {
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      if (vars.sessionId) {
+        qc.invalidateQueries({ queryKey: ["session", vars.sessionId] });
+      }
+    },
+  });
+}
+
 /** Upload a file to the session's uploads/ directory. */
 export function useUploadFile() {
   const token = useAuthStore((s) => s.token);

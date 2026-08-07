@@ -26,6 +26,8 @@ const session: Session = {
   originKind: "session",
   updatedAt: "2026-07-01T10:00:00Z",
   continuedFrom: null,
+  keepPinned: false,
+  keepNote: "",
 };
 
 function line(overrides: Partial<LogLine>): LogLine {

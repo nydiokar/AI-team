@@ -1268,7 +1268,8 @@ class MeshDB:
                         origin,
                         driver_type, driver_status, cache_health, cache_unhealthy_count,
                         previous_backend_session_ids,
-                        current_case_id, case_role, role_boot, continued_from
+                        current_case_id, case_role, role_boot, continued_from,
+                        keep_pinned, keep_note
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
                         :created_at, :updated_at, :machine_id, :backend_session_id, :model,
@@ -1279,7 +1280,8 @@ class MeshDB:
                         :origin,
                         :driver_type, :driver_status, :cache_health, :cache_unhealthy_count,
                         :previous_backend_session_ids,
-                        :current_case_id, :case_role, :role_boot, :continued_from
+                        :current_case_id, :case_role, :role_boot, :continued_from,
+                        :keep_pinned, :keep_note
                     )
                     ON CONFLICT(session_id) DO UPDATE SET
                         backend             = excluded.backend,
@@ -1305,7 +1307,9 @@ class MeshDB:
                         driver_status                = excluded.driver_status,
                         cache_health                 = excluded.cache_health,
                         cache_unhealthy_count        = excluded.cache_unhealthy_count,
-                        previous_backend_session_ids = excluded.previous_backend_session_ids
+                        previous_backend_session_ids = excluded.previous_backend_session_ids,
+                        keep_pinned                 = excluded.keep_pinned,
+                        keep_note                   = excluded.keep_note
                         -- NB: current_case_id / case_role are DELIBERATELY NOT updated
                         -- here. A generic full-session save (e.g. a Manager's own
                         -- turn-end persist of a stale in-memory object) must NEVER
@@ -1352,6 +1356,8 @@ class MeshDB:
                         "case_role":             getattr(session, "case_role", None) or None,
                         "role_boot":             getattr(session, "role_boot", None) or None,
                         "continued_from":        getattr(session, "continued_from", None) or None,
+                        "keep_pinned":           1 if bool(getattr(session, "keep_pinned", False)) else 0,
+                        "keep_note":             getattr(session, "keep_note", "") or "",
                     },
                 )
         except Exception as e:
@@ -1422,6 +1428,7 @@ class MeshDB:
         status: Optional[str] = None,
         backend: Optional[str] = None,
         machine_id: Optional[str] = None,
+        keep_pinned: Optional[bool] = None,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
         clauses, params = [], []
@@ -1434,6 +1441,9 @@ class MeshDB:
         if machine_id:
             clauses.append("machine_id = ?")
             params.append(machine_id)
+        if keep_pinned is not None:
+            clauses.append("COALESCE(keep_pinned, 0) = ?")
+            params.append(1 if keep_pinned else 0)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         rows = self._conn().execute(
@@ -1453,6 +1463,7 @@ class MeshDB:
         AND COALESCE(s.last_files_modified, '[]') IN ('', '[]')
         AND COALESCE(s.task_history, '[]') IN ('', '[]')
         AND COALESCE(s.current_case_id, '') = ''
+        AND COALESCE(s.keep_pinned, 0) = 0
         AND NOT EXISTS (SELECT 1 FROM mesh_tasks t WHERE t.session_id = s.session_id)
         AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.session_id = s.session_id)
         AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.session_id = s.session_id)
@@ -4838,6 +4849,10 @@ def _get_migrations() -> List[tuple]:
                 set_by    TEXT NOT NULL DEFAULT ''
             )
         """),  # Agent-operable feature flag overrides. Missing row => env/default fallback.
+        (29, """
+            ALTER TABLE sessions ADD COLUMN keep_pinned INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE sessions ADD COLUMN keep_note TEXT NOT NULL DEFAULT ''
+        """),  # Operator keep marker + note. Distinct from machine_id affinity pinning.
     ]
 
 

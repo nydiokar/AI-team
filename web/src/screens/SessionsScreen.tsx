@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, Inbox, Plus } from "lucide-react";
+import { ChevronDown, Inbox, Pin, Plus, Search } from "lucide-react";
 import { motion } from "framer-motion";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { SessionRow } from "../components/sessions/SessionRow";
 import { NewSessionSheet } from "../components/sessions/NewSessionSheet";
+import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
 import { useSessions } from "../hooks/useLiveData";
 import { useSessionAffiliations } from "../hooks/useWork";
 import type { Session } from "../domain/models";
@@ -30,9 +31,11 @@ function SkeletonCard() {
 function CardList({
   sessions,
   affiliations,
+  onKeep,
 }: {
   sessions: Session[];
   affiliations: Map<string, SessionAffiliation>;
+  onKeep: (session: Session) => void;
 }) {
   return (
     <div className="desktop-card-list px-4">
@@ -43,31 +46,54 @@ function CardList({
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.2) }}
         >
-          <SessionRow session={s} affiliation={affiliations.get(s.id)} />
+          <SessionRow session={s} affiliation={affiliations.get(s.id)} onKeep={onKeep} />
         </motion.div>
       ))}
     </div>
   );
 }
 
+function sessionMatches(session: Session, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return [
+    session.id,
+    session.backend,
+    session.workspace.path,
+    session.workspace.targetId,
+    session.lastSummary,
+    session.keepNote,
+    session.model ?? "",
+    session.defaultModel ?? "",
+  ].some((value) => value.toLowerCase().includes(q));
+}
+
 export function SessionsScreen() {
-  const { data, isLoading, error } = useSessions();
+  const [closedExpanded, setClosedExpanded] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
+  const [keptOnly, setKeptOnly] = useState(false);
+  const [query, setQuery] = useState("");
+  const [keepTarget, setKeepTarget] = useState<Session | null>(null);
+  const { data, isLoading, error } = useSessions(keptOnly ? true : undefined);
   // Authoritative session→case affiliation labels (empty until the Work
   // substrate records links; never inferred). Absent ⇒ session shows standalone.
   const { index: affiliations } = useSessionAffiliations();
-  const [closedExpanded, setClosedExpanded] = useState(false);
-  const [newOpen, setNewOpen] = useState(false);
 
   const groups = useMemo(() => {
-    const all = data ?? [];
+    const all = (data ?? []).filter((s) => (!keptOnly || s.keepPinned) && sessionMatches(s, query));
     return {
       attention: all.filter((s) => s.lifecycle === "open" && s.needsAttention),
       open: all.filter((s) => s.lifecycle === "open" && !s.needsAttention),
       closed: all.filter((s) => s.lifecycle === "closed"),
     };
-  }, [data]);
+  }, [data, keptOnly, query]);
 
   const empty = !isLoading && !error && (data ?? []).length === 0;
+  const filteredEmpty =
+    !isLoading &&
+    !error &&
+    !empty &&
+    groups.attention.length + groups.open.length + groups.closed.length === 0;
 
   return (
     <div className="pb-8">
@@ -86,6 +112,37 @@ export function SessionsScreen() {
       />
 
       {newOpen && <NewSessionSheet onClose={() => setNewOpen(false)} />}
+      {keepTarget && (
+        <SessionKeepSheet session={keepTarget} onClose={() => setKeepTarget(null)} />
+      )}
+
+      {!isLoading && !error && !empty && (
+        <div className="space-y-2 px-4 pt-4">
+          <div className="flex items-center gap-2 rounded-xl border border-hairline bg-surface-1 px-3 py-2">
+            <Search className="size-4 shrink-0 text-ink-muted" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.currentTarget.value)}
+              placeholder={keptOnly ? "Search kept notes and sessions" : "Search sessions"}
+              className="min-w-0 flex-1 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-muted"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => setKeptOnly((v) => !v)}
+            aria-pressed={keptOnly}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium ring-1 ring-inset",
+              keptOnly
+                ? "bg-accent-dim/70 text-accent ring-accent/35"
+                : "bg-surface-1 text-ink-muted ring-hairline hover:text-ink-soft",
+            )}
+          >
+            <Pin className={cn("size-3.5", keptOnly && "fill-current")} />
+            Kept only
+          </button>
+        </div>
+      )}
 
       {/* Loading skeletons */}
       {isLoading && (
@@ -105,14 +162,14 @@ export function SessionsScreen() {
           {groups.attention.length > 0 && (
             <>
               <SectionHeader label="Needs attention" count={groups.attention.length} accent="warn" />
-              <CardList sessions={groups.attention} affiliations={affiliations} />
+              <CardList sessions={groups.attention} affiliations={affiliations} onKeep={setKeepTarget} />
             </>
           )}
 
           {groups.open.length > 0 && (
             <>
               <SectionHeader label="Active" count={groups.open.length} />
-              <CardList sessions={groups.open} affiliations={affiliations} />
+              <CardList sessions={groups.open} affiliations={affiliations} onKeep={setKeepTarget} />
             </>
           )}
 
@@ -134,12 +191,24 @@ export function SessionsScreen() {
                   </button>
                 }
               />
-              {closedExpanded && (
-                <CardList sessions={groups.closed} affiliations={affiliations} />
+              {(closedExpanded || keptOnly) && (
+                <CardList sessions={groups.closed} affiliations={affiliations} onKeep={setKeepTarget} />
               )}
             </>
           )}
         </>
+      )}
+
+      {filteredEmpty && (
+        <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
+          <div className="flex size-14 items-center justify-center rounded-2xl bg-surface-1 ring-1 ring-hairline">
+            <Search className="size-7 text-ink-muted" />
+          </div>
+          <div>
+            <p className="text-[15px] font-medium text-ink-soft">No matching sessions</p>
+            <p className="mt-1 text-sm text-ink-muted">Try another search or clear the kept-only filter.</p>
+          </div>
+        </div>
       )}
 
       {empty && (

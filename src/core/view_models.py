@@ -42,6 +42,8 @@ class SessionView:
     origin_kind: str            # SessionOrigin.kind
     updated_at: str
     continued_from: Optional[str]  # [Session-fork] session this one continues, or None
+    keep_pinned: bool              # operator kept this session for later
+    keep_note: str                 # operator note explaining why it was kept
 
     @classmethod
     def from_session(cls, s: Session) -> "SessionView":
@@ -92,6 +94,8 @@ class SessionView:
             origin_kind=origin.kind if origin else "user",
             updated_at=s.updated_at,
             continued_from=getattr(s, "continued_from", None),
+            keep_pinned=bool(getattr(s, "keep_pinned", False)),
+            keep_note=getattr(s, "keep_note", "") or "",
         )
 
     def to_dict(self) -> Dict[str, Any]:

@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Briefcase, Clock, FileCode2, GitBranch, Pencil } from "lucide-react";
+import { Briefcase, Clock, FileCode2, GitBranch, Pencil, Pin } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { Session } from "../../domain/models";
 import type { SessionAffiliation } from "../../domain/work";
@@ -30,11 +30,13 @@ function relativeTime(iso: string): string {
 export function SessionRow({
   session,
   affiliation,
+  onKeep,
 }: {
   session: Session;
   /** Authoritative case membership from the Work read model; undefined ⇒ shown
    *  as standalone (no chip). Never inferred client-side. */
   affiliation?: SessionAffiliation;
+  onKeep?: (session: Session) => void;
 }) {
   const closed = session.lifecycle === "closed";
   const proj = projectName(session.workspace.path);
@@ -62,15 +64,33 @@ export function SessionRow({
   };
 
   return (
-    <Link
-      to={`/sessions/${session.id}`}
-      onPointerDown={prefetch}
+    <div
       className={cn(
-        "card-elev block rounded-xl px-3.5 py-3 transition-transform active:scale-[0.99]",
+        "card-elev relative rounded-xl transition-transform active:scale-[0.99]",
         session.needsAttention && "attention-glow",
         closed && "opacity-55",
+        session.keepPinned && "ring-1 ring-accent/35",
       )}
     >
+      {onKeep && (
+        <button
+          type="button"
+          onClick={() => onKeep(session)}
+          className={cn(
+            "absolute right-2.5 top-2.5 z-10 flex size-8 items-center justify-center rounded-full hover:bg-surface-2",
+            session.keepPinned ? "text-accent" : "text-ink-muted",
+          )}
+          aria-label={session.keepPinned ? "Edit keep note" : "Keep session"}
+          title={session.keepPinned ? "Edit keep note" : "Keep session"}
+        >
+          <Pin className={cn("size-4", session.keepPinned && "fill-current")} />
+        </button>
+      )}
+      <Link
+        to={`/sessions/${session.id}`}
+        onPointerDown={prefetch}
+        className="block px-3.5 py-3 pr-12"
+      >
       {/* Project and operational state are the primary scan targets. */}
       <div className="flex items-center gap-2">
         <h3 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-ink">
@@ -111,6 +131,13 @@ export function SessionRow({
         <p className="mt-2 text-[13px] leading-snug text-ink-muted italic">No activity yet</p>
       )}
 
+      {session.keepPinned && session.keepNote && (
+        <p className="mt-2 flex min-w-0 items-center gap-1 text-[12px] leading-snug text-accent">
+          <Pin className="size-3 shrink-0 fill-current" />
+          <span className="truncate">{session.keepNote}</span>
+        </p>
+      )}
+
       {/* Case context and changed-file count are useful only when they exist. */}
       {(affiliation || fileCount > 0) && (
         <div className="mt-1.5 flex min-w-0 items-center gap-2 text-[11px]">
@@ -134,6 +161,7 @@ export function SessionRow({
           )}
         </div>
       )}
-    </Link>
+      </Link>
+    </div>
   );
 }
