@@ -5,7 +5,6 @@ import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
 import { SessionRow } from "../components/sessions/SessionRow";
 import { NewSessionSheet } from "../components/sessions/NewSessionSheet";
-import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
 import { useSessions } from "../hooks/useLiveData";
 import { useSessionAffiliations } from "../hooks/useWork";
 import type { Session } from "../domain/models";
@@ -31,11 +30,9 @@ function SkeletonCard() {
 function CardList({
   sessions,
   affiliations,
-  onKeep,
 }: {
   sessions: Session[];
   affiliations: Map<string, SessionAffiliation>;
-  onKeep: (session: Session) => void;
 }) {
   return (
     <div className="desktop-card-list px-4">
@@ -46,7 +43,7 @@ function CardList({
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.2) }}
         >
-          <SessionRow session={s} affiliation={affiliations.get(s.id)} onKeep={onKeep} />
+          <SessionRow session={s} affiliation={affiliations.get(s.id)} />
         </motion.div>
       ))}
     </div>
@@ -70,10 +67,10 @@ function sessionMatches(session: Session, query: string): boolean {
 
 export function SessionsScreen() {
   const [closedExpanded, setClosedExpanded] = useState(false);
+  const [keptExpanded, setKeptExpanded] = useState(true);
   const [newOpen, setNewOpen] = useState(false);
   const [keptOnly, setKeptOnly] = useState(false);
   const [query, setQuery] = useState("");
-  const [keepTarget, setKeepTarget] = useState<Session | null>(null);
   const { data, isLoading, error } = useSessions(keptOnly ? true : undefined);
   // Authoritative session→case affiliation labels (empty until the Work
   // substrate records links; never inferred). Absent ⇒ session shows standalone.
@@ -81,10 +78,17 @@ export function SessionsScreen() {
 
   const groups = useMemo(() => {
     const all = (data ?? []).filter((s) => (!keptOnly || s.keepPinned) && sessionMatches(s, query));
+    // Kept sessions surface in their own top section (messaging-app pinned
+    // convention) and are pulled out of the normal groups so they never appear
+    // twice. In the exhaustive kept-only view everything is kept, so there's no
+    // separate section — the whole list is the kept set.
+    const kept = keptOnly ? [] : all.filter((s) => s.keepPinned);
+    const rest = keptOnly ? all : all.filter((s) => !s.keepPinned);
     return {
-      attention: all.filter((s) => s.lifecycle === "open" && s.needsAttention),
-      open: all.filter((s) => s.lifecycle === "open" && !s.needsAttention),
-      closed: all.filter((s) => s.lifecycle === "closed"),
+      kept,
+      attention: rest.filter((s) => s.lifecycle === "open" && s.needsAttention),
+      open: rest.filter((s) => s.lifecycle === "open" && !s.needsAttention),
+      closed: rest.filter((s) => s.lifecycle === "closed"),
     };
   }, [data, keptOnly, query]);
 
@@ -93,7 +97,7 @@ export function SessionsScreen() {
     !isLoading &&
     !error &&
     !empty &&
-    groups.attention.length + groups.open.length + groups.closed.length === 0;
+    groups.kept.length + groups.attention.length + groups.open.length + groups.closed.length === 0;
 
   return (
     <div className="pb-8">
@@ -112,9 +116,6 @@ export function SessionsScreen() {
       />
 
       {newOpen && <NewSessionSheet onClose={() => setNewOpen(false)} />}
-      {keepTarget && (
-        <SessionKeepSheet session={keepTarget} onClose={() => setKeepTarget(null)} />
-      )}
 
       {!isLoading && !error && !empty && (
         <div className="space-y-2 px-4 pt-4">
@@ -159,17 +160,41 @@ export function SessionsScreen() {
 
       {!isLoading && !error && (
         <>
+          {groups.kept.length > 0 && (
+            <>
+              <SectionHeader
+                label="Kept"
+                count={groups.kept.length}
+                action={
+                  <button
+                    onClick={() => setKeptExpanded((v) => !v)}
+                    aria-expanded={keptExpanded}
+                    className="flex items-center gap-1 text-[11px] text-ink-muted hover:text-ink-soft"
+                  >
+                    {keptExpanded ? "Hide" : "Show"}
+                    <ChevronDown
+                      className={cn("size-3.5 transition-transform", keptExpanded && "rotate-180")}
+                    />
+                  </button>
+                }
+              />
+              {keptExpanded && (
+                <CardList sessions={groups.kept} affiliations={affiliations} />
+              )}
+            </>
+          )}
+
           {groups.attention.length > 0 && (
             <>
               <SectionHeader label="Needs attention" count={groups.attention.length} accent="warn" />
-              <CardList sessions={groups.attention} affiliations={affiliations} onKeep={setKeepTarget} />
+              <CardList sessions={groups.attention} affiliations={affiliations} />
             </>
           )}
 
           {groups.open.length > 0 && (
             <>
               <SectionHeader label="Active" count={groups.open.length} />
-              <CardList sessions={groups.open} affiliations={affiliations} onKeep={setKeepTarget} />
+              <CardList sessions={groups.open} affiliations={affiliations} />
             </>
           )}
 
@@ -192,7 +217,7 @@ export function SessionsScreen() {
                 }
               />
               {(closedExpanded || keptOnly) && (
-                <CardList sessions={groups.closed} affiliations={affiliations} onKeep={setKeepTarget} />
+                <CardList sessions={groups.closed} affiliations={affiliations} />
               )}
             </>
           )}

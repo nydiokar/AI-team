@@ -53,6 +53,7 @@ import {
   useRestoreSession,
   useCompactSession,
   useInspectSession,
+  useKeepSession,
 } from "../hooks/useSessionActions";
 import { cn } from "../lib/cn";
 import { clockLabel } from "../lib/time";
@@ -731,6 +732,15 @@ export function SessionDetailScreen() {
   const close = useCloseSession();
   const restore = useRestoreSession();
   const compact = useCompactSession();
+  const keep = useKeepSession();
+
+  // Keep from the detail menu: unkept → one-tap optimistic keep; kept → open the
+  // note editor. Mirrors the row's one-tap toggle while offering the richer edit.
+  const onKeepAction = useCallback(() => {
+    if (!session) return;
+    if (session.keepPinned) setKeepSheetOpen(true);
+    else keep.mutate({ sessionId: session.id, keepPinned: true, keepNote: "" });
+  }, [session, keep]);
 
   useEffect(() => {
     if (!statusBanner) return;
@@ -858,7 +868,7 @@ export function SessionDetailScreen() {
                             </button>
                           )}
                           <button
-                            onClick={() => act(() => setKeepSheetOpen(true))}
+                            onClick={() => act(onKeepAction)}
                             className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
                           >
                             <Pin className={cn("size-4", session.keepPinned && "fill-current text-accent")} />
@@ -1009,7 +1019,7 @@ export function SessionDetailScreen() {
                               </button>
                             )}
                             <button
-                              onClick={() => act(() => setKeepSheetOpen(true))}
+                              onClick={() => act(onKeepAction)}
                               className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
                             >
                               <Pin className={cn("size-4", session.keepPinned && "fill-current text-accent")} />

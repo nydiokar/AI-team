@@ -14,6 +14,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, newIdempotencyKey } from "../transport/apiClient";
 import { useAuthStore } from "../stores/authStore";
 import { useForkStore } from "../stores/forkStore";
+import type { Session } from "../domain/models";
 
 /** What the UI shows about an in-flight command (spec §9.2). */
 export type DeliveryState = "idle" | "sending" | "acknowledged" | "rejected";
@@ -216,7 +217,14 @@ export function useRestoreSession() {
   });
 }
 
-/** Set or clear the operator keep marker and note. */
+/**
+ * Set or clear the operator keep marker and note.
+ *
+ * Optimistic: the pin is a one-tap toggle, so we patch every cached sessions
+ * list immediately (across the "all" and "kept-only" query variants) and roll
+ * back on error. The card jumps into/out of the Kept section without waiting for
+ * a poll, and the eventual invalidate reconciles with server truth.
+ */
 export function useKeepSession() {
   const token = useAuthStore((s) => s.token);
   const qc = useQueryClient();
@@ -224,11 +232,27 @@ export function useKeepSession() {
     mutationFn: (vars: { sessionId: string; keepPinned: boolean; keepNote: string }) =>
       api.keepSession(token, vars.sessionId, vars.keepPinned, vars.keepNote),
     retry: false,
-    onSettled: (_data, _err, vars) => {
+    onMutate: async (vars) => {
+      await qc.cancelQueries({ queryKey: ["sessions"] });
+      const prev = qc.getQueriesData<Session[]>({ queryKey: ["sessions"] });
+      qc.setQueriesData<Session[]>({ queryKey: ["sessions"] }, (old) =>
+        old?.map((s) =>
+          s.id === vars.sessionId
+            ? {
+                ...s,
+                keepPinned: vars.keepPinned,
+                keepNote: vars.keepPinned ? vars.keepNote : "",
+              }
+            : s,
+        ),
+      );
+      return { prev };
+    },
+    onError: (_err, _vars, ctx) => {
+      ctx?.prev?.forEach(([key, data]) => qc.setQueryData(key, data));
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ["sessions"] });
-      if (vars.sessionId) {
-        qc.invalidateQueries({ queryKey: ["session", vars.sessionId] });
-      }
     },
   });
 }

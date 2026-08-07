@@ -35,15 +35,23 @@ can still render a pin icon.
 4. Add `POST /api/sessions/{session_id}/keep` with a bounded JSON body:
    `{ "keep_pinned": boolean, "keep_note": string | null }`.
 5. Add `SessionService.set_keep(...)` as the transport-neutral lifecycle seam.
-6. Keep normal list ordering unchanged. The frontend only filters when the user
-   selects the kept-only view.
+6. Keep the DB `updated_at DESC` ordering unchanged (`touch=False` on keep
+   writes). Surfacing is a *presentation* concern: the frontend groups kept
+   sessions into a dedicated top section rather than reordering the store.
 7. Prevent empty closed-session pruning from deleting `keep_pinned` sessions.
-8. Frontend:
-   - show a pin/kept marker on session rows;
-   - add a kept-only switch on the Sessions screen;
-   - search should include keep notes;
-   - add a compact note editor reachable from row and detail actions;
-   - show keep note in Info.
+8. Frontend (UX):
+   - the pin is a **one-tap optimistic toggle** on the row and in the detail
+     menu — no modal to keep/unkeep; the cache is patched immediately and rolled
+     back on error;
+   - kept sessions surface in a dedicated collapsible **"Kept" section** at the
+     top of the Sessions screen, pulled out of the normal groups so they never
+     appear twice — this is what makes "find it later" actually work;
+   - the note is an *optional* enrichment edited in a lightweight sheet (no
+     checkbox gate; always-editable textarea; inline error) reached from the
+     detail menu; Save keeps + writes the note, "Remove keep" clears both;
+   - the server-backed **kept-only filter** remains as the exhaustive archive
+     view (includes closed pins beyond the normal page limit);
+   - search includes keep notes; keep note shown in Info.
 
 ## Service Boundary Check
 
@@ -63,8 +71,9 @@ can still render a pin icon.
 - Naming collision avoided: storage does not use `pinned` alone.
 - Ordering preserved: no ORDER BY change and keep-note writes use
   `SessionStore.save(..., touch=False)`, so marking a session kept does not move
-  it to the top. The pin itself does not create a top section unless the
-  kept-only filter is enabled.
+  it to the top of the store. Surfacing is done purely in the frontend as a
+  separate "Kept" section, so the store stays the single ordering authority while
+  the operator still gets one-glance retrieval.
 - Persistence through close is covered because close does not touch keep fields.
 - Empty closed-session cleanup is adjusted so an intentionally kept empty session
   is not pruned.

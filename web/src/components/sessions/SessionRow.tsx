@@ -7,6 +7,7 @@ import { SessionStatusChip } from "../ui/StatusChip";
 import { api } from "../../transport/apiClient";
 import { useAuthStore } from "../../stores/authStore";
 import { useDraftStore } from "../../stores/draftStore";
+import { useKeepSession } from "../../hooks/useSessionActions";
 import { isClosedCaseStatus, roleLabel } from "../../lib/workPresentation";
 import { cn } from "../../lib/cn";
 
@@ -30,13 +31,11 @@ function relativeTime(iso: string): string {
 export function SessionRow({
   session,
   affiliation,
-  onKeep,
 }: {
   session: Session;
   /** Authoritative case membership from the Work read model; undefined ⇒ shown
    *  as standalone (no chip). Never inferred client-side. */
   affiliation?: SessionAffiliation;
-  onKeep?: (session: Session) => void;
 }) {
   const closed = session.lifecycle === "closed";
   const proj = projectName(session.workspace.path);
@@ -47,6 +46,16 @@ export function SessionRow({
 
   const qc = useQueryClient();
   const token = useAuthStore((s) => s.token);
+  const keep = useKeepSession();
+  // One-tap keep toggle. Pinning preserves any existing note; the note editor
+  // lives in the session detail. Optimistic, so the card moves into/out of the
+  // Kept section immediately.
+  const toggleKeep = () =>
+    keep.mutate({
+      sessionId: session.id,
+      keepPinned: !session.keepPinned,
+      keepNote: session.keepNote,
+    });
   // An unsent instruction still sitting in this session's composer. Surfaced in
   // the overview (Telegram-style) so you know there's text waiting before you
   // open it — the whole point of persisting the draft.
@@ -72,20 +81,20 @@ export function SessionRow({
         session.keepPinned && "ring-1 ring-accent/35",
       )}
     >
-      {onKeep && (
-        <button
-          type="button"
-          onClick={() => onKeep(session)}
-          className={cn(
-            "absolute right-2.5 top-2.5 z-10 flex size-8 items-center justify-center rounded-full hover:bg-surface-2",
-            session.keepPinned ? "text-accent" : "text-ink-muted",
-          )}
-          aria-label={session.keepPinned ? "Edit keep note" : "Keep session"}
-          title={session.keepPinned ? "Edit keep note" : "Keep session"}
-        >
-          <Pin className={cn("size-4", session.keepPinned && "fill-current")} />
-        </button>
-      )}
+      <button
+        type="button"
+        onClick={toggleKeep}
+        disabled={keep.isPending}
+        className={cn(
+          "absolute right-2.5 top-2.5 z-10 flex size-8 items-center justify-center rounded-full hover:bg-surface-2 disabled:opacity-60",
+          session.keepPinned ? "text-accent" : "text-ink-muted opacity-70 hover:opacity-100",
+        )}
+        aria-label={session.keepPinned ? "Remove from kept" : "Keep session"}
+        aria-pressed={session.keepPinned}
+        title={session.keepPinned ? "Remove from kept" : "Keep session"}
+      >
+        <Pin className={cn("size-4", session.keepPinned && "fill-current")} />
+      </button>
       <Link
         to={`/sessions/${session.id}`}
         onPointerDown={prefetch}

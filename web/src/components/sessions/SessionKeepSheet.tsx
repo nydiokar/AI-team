@@ -1,10 +1,16 @@
 import { useEffect, useState } from "react";
-import { Loader2, Pin, X } from "lucide-react";
+import { Loader2, Pin, Trash2, X } from "lucide-react";
 import type { Session } from "../../domain/models";
 import { useKeepSession } from "../../hooks/useSessionActions";
 
 const KEEP_NOTE_MAX = 4000;
 
+/**
+ * Keep-note editor. The pin itself is a one-tap toggle on the row / in the
+ * detail menu; this sheet is only for the optional note. Opening it implies the
+ * session is (or is being) kept — Save writes the note and keeps; "Remove keep"
+ * clears both. No checkbox gate: the textarea is always editable.
+ */
 export function SessionKeepSheet({
   session,
   onClose,
@@ -14,20 +20,21 @@ export function SessionKeepSheet({
 }) {
   const keep = useKeepSession();
   const [note, setNote] = useState(session.keepNote);
-  const [enabled, setEnabled] = useState(session.keepPinned);
 
   useEffect(() => {
     setNote(session.keepNote);
-    setEnabled(session.keepPinned);
-  }, [session.id, session.keepNote, session.keepPinned]);
+  }, [session.id, session.keepNote]);
 
   const save = () => {
     keep.mutate(
-      {
-        sessionId: session.id,
-        keepPinned: enabled,
-        keepNote: enabled ? note.slice(0, KEEP_NOTE_MAX) : "",
-      },
+      { sessionId: session.id, keepPinned: true, keepNote: note.slice(0, KEEP_NOTE_MAX) },
+      { onSuccess: onClose },
+    );
+  };
+
+  const removeKeep = () => {
+    keep.mutate(
+      { sessionId: session.id, keepPinned: false, keepNote: "" },
       { onSuccess: onClose },
     );
   };
@@ -43,10 +50,10 @@ export function SessionKeepSheet({
       >
         <div className="mb-4 flex items-center gap-3">
           <div className="flex size-9 items-center justify-center rounded-xl bg-accent-dim/50 text-accent ring-1 ring-accent/25">
-            <Pin className="size-4" />
+            <Pin className="size-4 fill-current" />
           </div>
           <div className="min-w-0 flex-1">
-            <h2 className="text-base font-semibold text-ink">Keep session</h2>
+            <h2 className="text-base font-semibold text-ink">Keep note</h2>
             <p className="truncate font-mono text-[11px] text-ink-muted">{session.id}</p>
           </div>
           <button
@@ -59,50 +66,49 @@ export function SessionKeepSheet({
           </button>
         </div>
 
-        <label className="mb-3 flex items-center justify-between gap-4 rounded-xl border border-hairline bg-surface-1 px-3 py-3">
-          <span className="text-[14px] font-medium text-ink-soft">Marked as kept</span>
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => setEnabled(e.currentTarget.checked)}
-            className="size-5 accent-accent"
-          />
-        </label>
-
         <label className="block">
           <span className="mb-1.5 block text-[12px] font-medium text-ink-muted">
-            Note
+            Why keep this session?
           </span>
           <textarea
             value={note}
             onChange={(e) => setNote(e.currentTarget.value.slice(0, KEEP_NOTE_MAX))}
-            disabled={!enabled}
             rows={5}
-            placeholder="Why should this session be easy to find later?"
-            className="w-full resize-none rounded-xl border border-hairline bg-surface-1 px-3 py-2.5 text-[14px] leading-5 text-ink outline-none placeholder:text-ink-muted focus:border-accent/50 disabled:opacity-50"
+            autoFocus
+            placeholder="e.g. reference implementation for the retry policy"
+            className="w-full resize-none rounded-xl border border-hairline bg-surface-1 px-3 py-2.5 text-[14px] leading-5 text-ink outline-none placeholder:text-ink-muted focus:border-accent/50"
           />
         </label>
-        <div className="mt-1 flex justify-between text-[11px] text-ink-muted">
-          <span>{keep.isError ? String((keep.error as Error).message) : ""}</span>
+        <div className="mt-1 flex justify-end text-[11px] text-ink-muted">
           <span>{note.length}/{KEEP_NOTE_MAX}</span>
         </div>
 
-        <div className="mt-5 flex gap-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="flex-1 rounded-xl border border-hairline bg-surface-1 py-3 text-[14px] font-medium text-ink-soft hover:bg-surface-2"
-          >
-            Cancel
-          </button>
+        {keep.isError && (
+          <p className="mt-2 rounded-lg bg-bad/10 px-3 py-2 text-[12px] text-bad">
+            Couldn't save keep note: {String((keep.error as Error).message)}
+          </p>
+        )}
+
+        <div className="mt-5 flex items-center gap-3">
+          {session.keepPinned && (
+            <button
+              type="button"
+              onClick={removeKeep}
+              disabled={keep.isPending}
+              className="flex items-center gap-1.5 rounded-xl px-3 py-3 text-[14px] font-medium text-bad hover:bg-bad/10 disabled:opacity-60"
+            >
+              <Trash2 className="size-4" />
+              Remove keep
+            </button>
+          )}
           <button
             type="button"
             onClick={save}
             disabled={keep.isPending}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-accent-dim py-3 text-[14px] font-medium text-accent ring-1 ring-accent/30 hover:bg-accent-dim/80 disabled:opacity-60"
+            className="ml-auto flex flex-1 items-center justify-center gap-2 rounded-xl bg-accent-dim py-3 text-[14px] font-medium text-accent ring-1 ring-accent/30 hover:bg-accent-dim/80 disabled:opacity-60"
           >
             {keep.isPending && <Loader2 className="size-4 animate-spin" />}
-            Save
+            {session.keepPinned ? "Save note" : "Keep session"}
           </button>
         </div>
       </div>
