@@ -142,13 +142,30 @@ _USAGE_LIMIT_MARKERS = (
 )
 
 
-def classify_error_text(text: str) -> str:
-    """Map a backend error string to an ExecutionResult.error_class.
+def classify_error_text(
+    text: str, *, subtype: str = "", api_error_status: Optional[int] = None,
+) -> str:
+    """Map a backend error result to an ExecutionResult.error_class.
 
-    Returns ``"context_overflow"`` for context-window errors, ``"usage_limit"`` for
-    a Claude subscription/usage cap (transient, resumes after reset), else
-    ``"backend_error"``.
+    Prefers the SDK's own structured terminal signals over guessing from free
+    text — ``subtype``/``api_error_status`` come straight off the
+    ``ResultMessage`` (see ``_outcome_from_result``) instead of being pattern-
+    matched out of a concatenated error string, which used to collapse every
+    unrecognized case into the generic ``"backend_error"`` bucket even when
+    the SDK told us exactly what happened.
+
+    Returns ``"max_turns"`` when the CLI stopped the turn for hitting its
+    turn budget (not a "wording" case — it never appears in free text);
+    ``"upstream_error"`` when the terminal result carries an ``api_error_status``
+    (429/500/502/503/529 — the turn's own lifecycle finished fine, but the
+    Anthropic API call underneath it failed, almost always transient
+    infra); ``"context_overflow"``/``"usage_limit"`` from free-text markers as
+    before; else the true fallback ``"backend_error"``.
     """
+    if subtype == "error_max_turns":
+        return "max_turns"
+    if api_error_status is not None:
+        return "upstream_error"
     low = (text or "").lower()
     # Precedence is intentional: context_overflow is checked first because it has a
     # SPECIFIC recovery (compact / new session), so on the rare string that carries
@@ -209,6 +226,19 @@ def _build_salvaged_reply(error_class: str, salvaged: str, error_text: str = "")
             f"⏳ Claude usage limit reached{when}. This is NOT a task failure — the "
             f"agent's full response so far is below, and the turn resumes automatically "
             f"once the limit resets."
+        )
+    elif error_class == "upstream_error":
+        banner = (
+            "⚠️ Anthropic's API returned an error while finishing this turn — the "
+            "turn itself ran fine, the failure was in the underlying API call "
+            "(almost always transient). The agent's progress so far is below; "
+            "this retries automatically."
+        )
+    elif error_class == "max_turns":
+        banner = (
+            "⚠️ The turn hit its max-turns limit before writing a final summary. "
+            "The agent's progress so far is below — increase CLAUDE_SDK_MAX_TURNS "
+            "or split the task to let it finish."
         )
     else:
         banner = SALVAGE_ERROR_BANNER
@@ -730,6 +760,13 @@ class _SDKSession:
         subtype = str(getattr(msg, "subtype", "") or "")
         stop_reason = str(getattr(msg, "stop_reason", "") or "") or None
         errors = getattr(msg, "errors", None)
+        # The SDK's own structured signal for "the turn's lifecycle finished
+        # normally but the underlying Anthropic API call itself failed" — set
+        # only when is_error is True and subtype is "success". Prefer this
+        # over guessing the cause from free text (classify_error_text below).
+        api_error_status = getattr(msg, "api_error_status", None)
+        if not isinstance(api_error_status, int):
+            api_error_status = None
         result_text = ""
         r = getattr(msg, "result", None)
         if r and isinstance(r, str):
@@ -752,6 +789,8 @@ class _SDKSession:
             result_line["result"] = result_text
         if isinstance(errors, list) and errors:
             result_line["errors"] = [str(e) for e in errors]
+        if api_error_status is not None:
+            result_line["api_error_status"] = api_error_status
         acc.ndjson_lines.append(json.dumps(result_line))
 
         raw_ndjson = "\n".join(acc.ndjson_lines)
@@ -761,7 +800,7 @@ class _SDKSession:
                 backend_session_id=acc.backend_session_id,
                 raw_ndjson=raw_ndjson,
                 is_error=True,
-                error_class=classify_error_text(error_text),
+                error_class=classify_error_text(error_text, subtype=subtype, api_error_status=api_error_status),
                 error_text=error_text,
                 salvaged_output=acc.last_assistant_text,
             )
