@@ -165,6 +165,27 @@ rounds ≥ cap → `flow.interrupted` + operator escalation. All three already i
 obligation discharged, harness-written) — never the turn ack. The ack is State 4's `mesh_tasks`
 completion.
 
+### 4a. Out-of-band review is also a consumption signal (`continuation-review-watermark`)
+
+The continuation watermark alone advances **only** when a continuation turn returns. But a Manager
+can review a finished worker **out-of-band** — most commonly when an operator poke interleaves
+between the worker finishing and its wake, and the Manager reviews the completion inside that
+operator turn. That review does not advance the continuation watermark, so the next tick still
+presented the already-reviewed finish as a fresh "finished since your last turn" wake — a redundant
+**paid** Manager turn spent only to re-conclude "already done" (observed live 2026-08-06 on the
+`tokens_ingest` ceiling worker, which the Manager rationalised as a "coalesced re-notification").
+
+Fix: a **`review.*` event TAGGED to a task** (`entity_type='task'`, set by `record_review(task_id=…)`)
+is read by `compute_continuation_tick` as a per-task consumption signal, exactly like a continuation
+ACK. So `finished_unconsumed = {task.finished} − watermark − {tagged-reviewed}`.
+- Untagged (Case-level) reviews carry no `entity_id` and are ignored here → pre-tagging behaviour is
+  byte-identical; the optimisation only engages once the Manager passes `task_id`.
+- A one-shot group drained **entirely** by out-of-band reviews (never woken, so never ACK-retired)
+  is surfaced in `tick.retire_only_groups` and retired with a plain `worker.wait_resolved`
+  (`reason: reviewed_out_of_band`) — **no paid turn, no round consumed** — so it neither dangles
+  armed nor gets re-armed on a Manager resume. The `any(member ∈ reviewed ∧ ∉ watermark)` guard
+  keeps this from double-firing on continuation-drained groups.
+
 ---
 
 ## 5. Wait-condition semantics — ANY / ALL / named
