@@ -951,8 +951,11 @@ def _record_review(args: Dict[str, Any]) -> str:
     """Record the Manager's review verdict on a Case as a ``review.*`` flow_event.
 
     ``verdict`` is required and must be one of accepted|rework_requested|waived;
-    ``reason`` is an optional short note. POSTs to /api/cases/{case_id}/review.
-    A 404 means the emitter is disabled on the gateway (REVIEW_EMITTER_ENABLED OFF)."""
+    ``reason`` is an optional short note. Pass ``task_id`` = the worker task you just
+    reviewed so the verdict is tagged to it — this also tells the harness you've
+    already consumed that finish, so it won't re-wake you about it. POSTs to
+    /api/cases/{case_id}/review. A 404 means the emitter is disabled on the gateway
+    (REVIEW_EMITTER_ENABLED OFF)."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     verdict = _bounded_text(args.get("verdict"), "verdict", 32, required=True)
     if verdict not in _REVIEW_VERDICTS:
@@ -960,8 +963,11 @@ def _record_review(args: Dict[str, Any]) -> str:
             f"verdict must be one of {', '.join(_REVIEW_VERDICTS)} (got {verdict!r})"
         )
     reason = _bounded_text(args.get("reason"), "reason", _MAX_OBJECTIVE_CHARS, required=False)
+    task_id = _bounded_text(args.get("task_id"), "task_id", _MAX_ID_CHARS, required=False)
 
     body: Dict[str, Any] = {"verdict": verdict, "reason": reason}
+    if task_id:
+        body["task_id"] = task_id
     result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/review", body)
     ok = bool(result.get("ok"))
     if ok:
@@ -1323,7 +1329,9 @@ _TOOLS = [
             "AFTER reviewing the worker's committed git diff to make the Decision explicit: "
             "'accepted' records approval, 'rework_requested' records that changes are needed "
             "(and blocks close_case until a later accept/waive supersedes it), 'waived' records "
-            "an accepted-as-is with a reason. A 404 means the emitter is disabled on the gateway."
+            "an accepted-as-is with a reason. Pass task_id = the worker task you reviewed to tag "
+            "the verdict to it; this also marks that finish consumed so the harness won't re-wake "
+            "you about an already-reviewed worker. A 404 means the emitter is disabled on the gateway."
         ),
         "inputSchema": {
             "type": "object",
@@ -1331,6 +1339,7 @@ _TOOLS = [
                 "case_id": {"type": "string", "description": "The Case (flow_run) id being reviewed — the Manager's own case."},
                 "verdict": {"type": "string", "enum": list(_REVIEW_VERDICTS), "description": "The review verdict: accepted | rework_requested | waived."},
                 "reason": {"type": "string", "description": "Optional short note explaining the verdict (required in spirit for a waive)."},
+                "task_id": {"type": "string", "description": "The worker task_id this verdict is about (from dispatch_worker / the wake's 'Finished since your last turn' list). Tag it so the harness treats this finish as consumed and won't re-surface it as a redundant wake."},
             },
             "required": ["case_id", "verdict"],
         },

@@ -190,9 +190,13 @@ class CaseCloseBody(BaseModel):
 
 class CaseReviewBody(BaseModel):
     """[M3.2] Record a Manager review verdict on a Case. ``verdict`` must be one of
-    accepted|rework_requested|waived; ``reason`` is an optional short note."""
+    accepted|rework_requested|waived; ``reason`` is an optional short note.
+    ``task_id`` optionally TAGS the verdict to a specific worker task — richer audit,
+    and the Wake-Dispatcher reads it as a consumption signal so an out-of-band review
+    is not re-surfaced as a redundant continuation wake."""
     verdict: str
     reason: Optional[str] = Field(default=None, max_length=_REASON_MAX)
+    task_id: Optional[str] = Field(default=None, max_length=_ID_STR_MAX)
 
 
 class CaseWaitBody(BaseModel):
@@ -1682,7 +1686,8 @@ def build_control_api(orchestrator) -> FastAPI:
                 detail={"ok": False, "reason": "invalid_verdict"},
             )
         result = orchestrator.record_review(
-            case_id, verdict=body.verdict, reason=body.reason, actor="manager",
+            case_id, verdict=body.verdict, reason=body.reason,
+            task_id=body.task_id, actor="manager",
         )
         return JSONResponse(result)
 
