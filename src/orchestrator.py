@@ -946,6 +946,24 @@ class TaskOrchestrator(ITaskOrchestrator):
         if _row is not None and str(_row.get("status") or "").strip().lower() == "blocked":
             return 0
         tick = db.compute_continuation_tick(case_id)
+        # [continuation-review-watermark] Retire one-shot groups the Manager already
+        # drained by reviewing their members out-of-band (a tagged review.*, e.g.
+        # during an operator poke that interleaved before the wake could fire). These
+        # produce no wake — so without this they would dangle 'armed' forever and be
+        # needlessly re-armed on a Manager resume. Discharge the obligation with a
+        # plain wait_resolved marker (NO paid turn, NO round consumed). Idempotent:
+        # once appended, the group carries a wait_resolved and leaves retire_only.
+        for gid in tick.get("retire_only_groups", []) or []:
+            db.append_flow_event(
+                case_id, "worker.wait_resolved", "system",
+                entity_type="wait_group", entity_id=gid,
+                payload={"wait_group_id": gid, "outcome": "drained",
+                         "reason": "reviewed_out_of_band"},
+            )
+            self._emit_event(
+                "case_wait_group_review_drained", None,
+                {"case_id": case_id, "wait_group_id": gid},
+            )
         if not tick.get("satisfied"):
             return 0
 
@@ -3040,6 +3058,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         *,
         verdict: str,
         reason: Optional[str] = None,
+        task_id: Optional[str] = None,
         actor: str = "manager",
     ) -> Dict[str, Any]:
         """[M3.2] Orchestrator seam — record a Manager review verdict as a review.*
@@ -3050,6 +3069,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         event, and returns ``{"ok", ...}``. Returns ``{"ok": False,
         "reason": "db_unavailable"}`` when the db is unavailable and
         ``{"ok": False, "reason": "invalid_verdict"}`` for an unknown verdict.
+
+        When ``task_id`` is supplied the verdict is TAGGED to that worker task
+        (``entity_type='task'``). Beyond richer per-worker audit, a tagged review is
+        read by the Wake-Dispatcher as a consumption signal: a finish the Manager
+        reviewed out-of-band (e.g. during an operator poke) is no longer re-surfaced
+        as a redundant continuation wake (see ``compute_continuation_tick``). Omitting
+        ``task_id`` records a Case-level review exactly as before (no behaviour change).
         """
         from src.control.db import get_db, REVIEW_VERDICT_EVENT_TYPES
         event_type = REVIEW_VERDICT_EVENT_TYPES.get(verdict)
@@ -3060,6 +3086,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             return {"ok": False, "reason": "db_unavailable"}
         event_id = db.append_flow_event(
             flow_run_id, event_type, actor,
+            entity_type="task" if task_id else None,
+            entity_id=task_id or None,
             payload={"verdict": verdict, "reason": reason},
         )
         return {"ok": True, "event_type": event_type, "event_id": event_id}

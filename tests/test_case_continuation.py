@@ -46,6 +46,16 @@ def _finished(db: MeshDB, case_id: str, task_id: str, outcome: str = "success") 
     )
 
 
+def _reviewed(db: MeshDB, case_id: str, task_id: str, verdict: str = "accepted") -> None:
+    """A Manager review verdict TAGGED to a worker task (entity_type='task') — the
+    out-of-band consumption signal the Wake-Dispatcher reads."""
+    db.append_flow_event(
+        case_id, f"review.{verdict}", "manager",
+        entity_type="task", entity_id=task_id,
+        payload={"verdict": verdict, "reason": "ok"},
+    )
+
+
 def _events(db: MeshDB, case_id: str, event_type: str) -> list:
     return [e for e in db.list_flow_events(case_id) if e["event_type"] == event_type]
 
@@ -304,6 +314,99 @@ def test_idle_never_run_session_is_not_woken(tmp_path, monkeypatch):
     orch = _FakeOrch(_FakeStore(session))
     assert _continue(orch, db, fid) == 0
     assert db.list_continuation_rows(fid) == []
+
+
+# --------------------------------------------------------------------------- #
+# [continuation-review-watermark] A finish the Manager already reviewed         #
+# out-of-band (tagged review.*) is a consumption signal: it is NOT re-surfaced  #
+# as a redundant wake, and its one-shot group retires without a paid turn.      #
+# This is the live 2026-08-06 incident: a ceiling worker reviewed during an     #
+# operator poke was re-woken as a "stale re-notification".                      #
+# --------------------------------------------------------------------------- #
+
+def test_reviewed_finish_is_not_re_woken_and_group_retires(tmp_path, monkeypatch):
+    _on(monkeypatch)
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=3)
+    db.arm_wait_group(fid, "batch-3", "ALL", ["t1"])
+    _finished(db, fid, "t1")
+    # Manager reviewed t1 out-of-band (e.g. during an operator turn) BEFORE the wake.
+    _reviewed(db, fid, "t1", "accepted")
+
+    tick = db.compute_continuation_tick(fid)
+    assert tick["satisfied"] is False          # nothing new to present
+    assert tick["presented_task_ids"] == []
+    assert tick["retire_only_groups"] == ["batch-3"]
+
+    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
+    # No paid wake is delivered, but the drained one-shot group is retired.
+    assert _continue(orch, db, fid) == 0
+    assert orch.deliveries == []               # no redundant paid turn
+    assert db.list_continuation_rows(fid) == []
+    resolved = _events(db, fid, "worker.wait_resolved")
+    assert [e["entity_id"] for e in resolved] == ["batch-3"]
+    assert any(n == "case_wait_group_review_drained" for n, _ in orch.emitted)
+
+    # Idempotent: a second tick neither re-retires nor wakes.
+    orch2 = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
+    assert _continue(orch2, db, fid) == 0
+    assert orch2.deliveries == []
+    assert len(_events(db, fid, "worker.wait_resolved")) == 1
+
+
+def test_untagged_case_level_review_does_not_suppress_wake(tmp_path, monkeypatch):
+    # A Case-level review (no task_id / no entity tag) is NOT a per-task consumption
+    # signal — the wake still fires. This keeps pre-tagging behaviour byte-identical.
+    _on(monkeypatch)
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=3)
+    db.arm_wait_group(fid, "g1", "ALL", ["t1"])
+    _finished(db, fid, "t1")
+    db.append_flow_event(fid, "review.accepted", "manager",
+                         payload={"verdict": "accepted"})  # untagged
+
+    tick = db.compute_continuation_tick(fid)
+    assert tick["satisfied"] is True
+    assert tick["presented_task_ids"] == ["t1"]
+    assert tick["retire_only_groups"] == []
+
+    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
+    assert _continue(orch, db, fid) == 1
+    assert len(orch.deliveries) == 1
+
+
+def test_any_group_partial_review_still_waits(tmp_path, monkeypatch):
+    # ANY group [t1, t2]: t1 finished+reviewed out-of-band, t2 not finished. The
+    # reviewed t1 is drained (no wake for it), but the group is NOT retired — it is
+    # still a live obligation on t2. When t2 finishes it wakes normally.
+    _on(monkeypatch)
+    db = _db(tmp_path)
+    db.upsert_node(socket.gethostname(), "", 9001, ["claude"], 2)
+    fid = _open_case(db, round_cap=3)
+    db.arm_wait_group(fid, "g1", "ANY", ["t1", "t2"])
+    _finished(db, fid, "t1")
+    _reviewed(db, fid, "t1", "accepted")
+
+    tick = db.compute_continuation_tick(fid)
+    assert tick["satisfied"] is False
+    assert tick["retire_only_groups"] == []    # t2 still outstanding — not drained
+
+    orch = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
+    assert _continue(orch, db, fid) == 0
+    assert orch.deliveries == []
+    assert _events(db, fid, "worker.wait_resolved") == []
+
+    # t2 finishes → a normal wake presenting ONLY the fresh, unreviewed t2.
+    _finished(db, fid, "t2")
+    tick2 = db.compute_continuation_tick(fid)
+    assert tick2["satisfied"] is True
+    assert tick2["presented_task_ids"] == ["t2"]
+    orch2 = _FakeOrch(_FakeStore(_FakeSession("mgr-sess")))
+    assert _continue(orch2, db, fid) == 1
+    assert "t2" in orch2.deliveries[0]["description"]
+    assert "t1" not in orch2.deliveries[0]["description"]
 
 
 def test_satisfied_case_with_closed_manager_escalates_when_role_off(tmp_path, monkeypatch):
