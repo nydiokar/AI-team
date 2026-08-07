@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Briefcase, Clock, FileCode2, GitBranch, Pencil } from "lucide-react";
+import { Briefcase, Clock, FileCode2, GitBranch, Pencil, Pin } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { Session } from "../../domain/models";
 import type { SessionAffiliation } from "../../domain/work";
@@ -7,6 +7,7 @@ import { SessionStatusChip } from "../ui/StatusChip";
 import { api } from "../../transport/apiClient";
 import { useAuthStore } from "../../stores/authStore";
 import { useDraftStore } from "../../stores/draftStore";
+import { useKeepSession } from "../../hooks/useSessionActions";
 import { isClosedCaseStatus, roleLabel } from "../../lib/workPresentation";
 import { cn } from "../../lib/cn";
 
@@ -45,6 +46,16 @@ export function SessionRow({
 
   const qc = useQueryClient();
   const token = useAuthStore((s) => s.token);
+  const keep = useKeepSession();
+  // One-tap keep toggle. Pinning preserves any existing note; the note editor
+  // lives in the session detail. Optimistic, so the card moves into/out of the
+  // Kept section immediately.
+  const toggleKeep = () =>
+    keep.mutate({
+      sessionId: session.id,
+      keepPinned: !session.keepPinned,
+      keepNote: session.keepNote,
+    });
   // An unsent instruction still sitting in this session's composer. Surfaced in
   // the overview (Telegram-style) so you know there's text waiting before you
   // open it — the whole point of persisting the draft.
@@ -62,17 +73,40 @@ export function SessionRow({
   };
 
   return (
-    <Link
-      to={`/sessions/${session.id}`}
-      onPointerDown={prefetch}
+    <div
       className={cn(
-        "card-elev block rounded-xl px-3.5 py-3 transition-transform active:scale-[0.99]",
+        "card-elev relative rounded-xl transition-transform active:scale-[0.99]",
         session.needsAttention && "attention-glow",
         closed && "opacity-55",
+        session.keepPinned && "ring-1 ring-accent/35",
       )}
     >
+      {/* Keep toggle: a small corner affordance. It overlays the top-right and
+          only the title row yields ~20px to clear it, so the rest of the card
+          keeps full width (no full-height gutter). Subtle until kept. */}
+      <button
+        type="button"
+        onClick={toggleKeep}
+        disabled={keep.isPending}
+        className={cn(
+          "absolute right-1 top-1 z-10 flex size-7 items-center justify-center rounded-full transition-colors hover:bg-surface-2 disabled:opacity-60",
+          session.keepPinned
+            ? "text-accent"
+            : "text-ink-muted/50 hover:text-ink-soft",
+        )}
+        aria-label={session.keepPinned ? "Remove from kept" : "Keep session"}
+        aria-pressed={session.keepPinned}
+        title={session.keepPinned ? "Remove from kept" : "Keep session"}
+      >
+        <Pin className={cn("size-3.5", session.keepPinned && "fill-current")} />
+      </button>
+      <Link
+        to={`/sessions/${session.id}`}
+        onPointerDown={prefetch}
+        className="block px-3.5 py-3"
+      >
       {/* Project and operational state are the primary scan targets. */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 pr-6">
         <h3 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-ink">
           {proj}
         </h3>
@@ -111,6 +145,13 @@ export function SessionRow({
         <p className="mt-2 text-[13px] leading-snug text-ink-muted italic">No activity yet</p>
       )}
 
+      {session.keepPinned && session.keepNote && (
+        <p className="mt-2 flex min-w-0 items-center gap-1 text-[12px] leading-snug text-accent">
+          <Pin className="size-3 shrink-0 fill-current" />
+          <span className="truncate">{session.keepNote}</span>
+        </p>
+      )}
+
       {/* Case context and changed-file count are useful only when they exist. */}
       {(affiliation || fileCount > 0) && (
         <div className="mt-1.5 flex min-w-0 items-center gap-2 text-[11px]">
@@ -134,6 +175,7 @@ export function SessionRow({
           )}
         </div>
       )}
-    </Link>
+      </Link>
+    </div>
   );
 }

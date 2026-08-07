@@ -39,6 +39,10 @@ export interface RawSessionView {
    *  an older cached payload without the field still parses; the adapter normalizes
    *  a missing value to null. */
   continued_from?: string | null;
+  /** Operator keep marker. Optional for older cached payloads. */
+  keep_pinned?: boolean;
+  /** Operator note explaining why the session is kept. Optional for older payloads. */
+  keep_note?: string;
 }
 
 // GET /api/sessions/{id}/usage → per-session token totals + approx USD cost.

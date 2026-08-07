@@ -294,16 +294,34 @@ class SessionService:
         self.store.save(s)
         return CommandResult(True, session=s)
 
+    def set_keep(self, session_id: str, *, keep_pinned: bool, keep_note: str = "") -> CommandResult:
+        """Set the operator keep marker and note for a session.
+
+        This is intentionally separate from mesh affinity pinning (`machine_id`).
+        It is a UI/operator retrieval marker only, and remains valid after close.
+        """
+        s = self.store.get(session_id)
+        if not s:
+            return CommandResult(False, reason="session_not_found")
+        note: str = (keep_note or "").strip()
+        s.keep_pinned = bool(keep_pinned)
+        s.keep_note = note if s.keep_pinned else ""
+        self.store.save(s, touch=False)
+        return CommandResult(True, session=s)
+
     # --- queries (read) — one read shape for every surface (Move C / M2) ---
 
-    def list_views(self, limit: int = 200) -> List[SessionView]:
+    def list_views(self, limit: int = 200, *, keep_pinned: Optional[bool] = None) -> List[SessionView]:
         """Sessions as operator-facing read models (DB-first, newest first).
 
         Bounded by ``limit`` so a polling surface doesn't scan the whole table on
         every request. Sessions come back ordered by ``updated_at`` desc from the
         store, so the bound keeps the most recently active ones.
         """
-        return [SessionView.from_session(s) for s in self.store.list_all(limit=limit)]
+        return [
+            SessionView.from_session(s)
+            for s in self.store.list_all(limit=limit, keep_pinned=keep_pinned)
+        ]
 
     def active_view(self, chat_id: int) -> Optional[SessionView]:
         """The session currently bound to ``chat_id``, or None.

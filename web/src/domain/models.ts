@@ -91,6 +91,10 @@ export interface Session {
   updatedAt: string;
   /** [Session-fork] The session this one continues (fork lineage), or null. */
   continuedFrom: string | null;
+  /** Operator marked this session as intentionally kept for later. */
+  keepPinned: boolean;
+  /** Searchable operator note explaining why the session was kept. */
+  keepNote: string;
 }
 
 // ── Task ─ 🟡 PARTIAL / ❌ MISSING lifecycle (gap-doc §4) ───────────────────

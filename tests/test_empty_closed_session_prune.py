@@ -75,3 +75,19 @@ def test_prune_empty_closed_sessions_keeps_sessions_with_content_or_refs():
     assert svc.store.get(empty_sid) is None
     assert svc.store.get(with_summary) is not None
     assert svc.store.get(with_task) is not None
+
+
+def test_prune_empty_closed_sessions_keeps_operator_kept_sessions():
+    svc = _service()
+    sid = _closed_empty_session(svc)
+    keep = svc.set_keep(sid, keep_pinned=True, keep_note="example to revisit")
+    assert keep.ok
+
+    result = svc.store.prune_empty_closed_sessions(limit=50, dry_run=False)
+
+    assert result["matched"] == 0
+    assert result["deleted"] == 0
+    kept = svc.store.get(sid)
+    assert kept is not None
+    assert kept.keep_pinned is True
+    assert kept.keep_note == "example to revisit"

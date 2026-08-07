@@ -231,6 +231,12 @@ class Session:
     # INSERT-seeded at create time, read-only after. None ⇒ not a continuation.
     continued_from: Optional[str] = None
 
+    # Operator keep marker. This is intentionally NOT mesh affinity pinning
+    # (`machine_id`); it only records that the operator wants this session easy to
+    # find later, with a note explaining why.
+    keep_pinned: bool = False
+    keep_note: str = ""
+
     def __post_init__(self):
         if self.last_files_modified is None:
             self.last_files_modified = []
