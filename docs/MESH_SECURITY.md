@@ -96,15 +96,22 @@ The honest list, adapted from hcom's relay section:
 - **Input caps.** The Manager MCP client bounds its own arguments (`objective` ≤ 8000
   chars, path/id/files caps, `wait_for_worker` timeout ≤ 600 s). The HTTP API bounds
   `continue_inline` (48 000), `continuation_plan` (8 000), and — since 2026-08-05 (PR #73) —
-  the whole write surface (`description`, Manager/Case `objective`,
-  `completion_criteria` ≤ 256 KB; oversized ⇒ 422). No request rate limit is imposed: the
-  Manager can legitimately dispatch several workers in parallel. Uploads are capped only
+  the write surface server-side: `description`, Manager/Case `objective`,
+  `completion_criteria`, M4 case-spec `body` ≤ 256 KB, plus the semantic fields (case/spec
+  `reason`, spec `title`, artifact `title`/`uri`/`kind`, commit `task_description`); oversized ⇒
+  422. These sit at-or-above every legitimate caller (real instruction history max ≈ 38 KB,
+  server-generated Manager boot; user descriptions ≈ 5 KB). No request rate limit is imposed:
+  the Manager can legitimately dispatch several workers in parallel. Uploads are capped only
   when `GATEWAY_UPLOAD_MAX_MB` (control API) or `telegram.upload_max_mb` is set, and the
   `:9002` `/files` staging endpoint has no size cap of its own.
 - **Staged uploads.** Uploaded filenames are sanitized to a safe charset and
   containment-checked against the staging root (hardened 2026-08-05, PR #72) on both the
   control-API and task-server paths, so a hostile filename cannot escape the upload
   directory.
+- **Proactive-turn ownership (2026-08-05, PR #75).** A session pinned to a node accepts
+  proactive turns only from that node (mismatch ⇒ 403); unpinned sessions accept any
+  worker. This closes the forged-turn-in-pinned-session vector under the shared token;
+  the full per-node credential model (A71) is the authoritative fix.
 
 ## Incident response
 

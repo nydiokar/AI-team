@@ -1,7 +1,11 @@
 from src.backends import claude_code
 from src.backends.claude_code import ClaudeCodeBackend
 from src.backends.claude_driver import SALVAGE_ERROR_BANNER
-from src.orchestrator import TaskOrchestrator, _session_status_after_result
+from src.orchestrator import (
+    TaskOrchestrator,
+    _session_status_after_result,
+    _reclassify_salvaged_turn_success,
+)
 from src.core.interfaces import ExecutionResult, Task, TaskType, TaskPriority, TaskStatus, TaskResult, SessionStatus
 import asyncio
 from datetime import datetime
@@ -196,6 +200,67 @@ def test_classify_error_detects_rate_limit_event_from_stream_json():
     assert orch._classify_error(result) == "rate_limit"
 
 
+def test_classify_error_detects_max_turns_from_result_subtype():
+    """error_max_turns never appears as wording in free text — only the
+    structured `subtype` field on the terminal result line carries it. Before
+    threading that field through, this collapsed into the generic 'fatal'
+    bucket with no actionable hint and 0 retries for the wrong reason."""
+    orch = TaskOrchestrator()
+    result = TaskResult(
+        task_id="task_max_turns",
+        success=False,
+        output="",
+        errors=[],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"error_max_turns","is_error":true}',
+        raw_stderr="",
+        return_code=1,
+    )
+
+    assert orch._classify_error(result) == "max_turns"
+    assert orch._get_retry_strategy("max_turns")["max_retries"] == 0
+    assert any("CLAUDE_SDK_MAX_TURNS" in a for a in orch._suggest_actions("max_turns", result))
+
+
+def test_classify_error_detects_upstream_rate_limit_from_api_error_status():
+    orch = TaskOrchestrator()
+    result = TaskResult(
+        task_id="task_api_429",
+        success=False,
+        output="",
+        errors=[],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"success","is_error":true,"api_error_status":429}',
+        raw_stderr="",
+        return_code=1,
+    )
+
+    assert orch._classify_error(result) == "rate_limit"
+
+
+def test_classify_error_detects_upstream_5xx_from_api_error_status():
+    orch = TaskOrchestrator()
+    result = TaskResult(
+        task_id="task_api_529",
+        success=False,
+        output="",
+        errors=[],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"success","is_error":true,"api_error_status":529}',
+        raw_stderr="",
+        return_code=1,
+    )
+
+    assert orch._classify_error(result) == "upstream_error"
+    assert orch._get_retry_strategy("upstream_error")["max_retries"] >= 1
+
+
 def test_classify_error_detects_session_limit_without_rate_limit_event():
     # The live-incident shape: the subscription cap surfaces ONLY as the result
     # text "hit your session limit" — no rate_limit_event stream line. This must
@@ -280,6 +345,55 @@ def test_salvage_banner_without_agent_content_is_not_salvage():
     )
 
     assert _session_status_after_result(result) == SessionStatus.ERROR
+
+
+def test_reclassify_salvaged_turn_success_flips_success_true():
+    """A salvaged terminal error must not surface as 'failed' anywhere
+    downstream (task status, turn telemetry, mesh_tasks row, session history)
+    when the session layer already treats it as fine (AWAITING_INPUT) —
+    otherwise every consumer keyed off `TaskResult.success` still lies."""
+    result = TaskResult(
+        task_id="task_salvaged_backend_error",
+        success=False,
+        output=f"{SALVAGE_ERROR_BANNER}\n\n---\n\nI changed config.py.",
+        errors=["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"],
+        files_modified=["config.py"],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"error_during_execution","is_error":true}',
+        raw_stderr="",
+        return_code=0,
+        error_class="backend_error",
+    )
+
+    out = _reclassify_salvaged_turn_success(result)
+
+    assert out is result
+    assert result.success is True
+    # Audit trail (original error signal) must survive the flip untouched.
+    assert result.error_class == "backend_error"
+    assert result.errors == ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"]
+    assert result.output.startswith(SALVAGE_ERROR_BANNER)
+
+
+def test_reclassify_salvaged_turn_success_leaves_genuine_failure_alone():
+    result = TaskResult(
+        task_id="task_plain_backend_error",
+        success=False,
+        output="backend failed",
+        errors=["backend failed"],
+        files_modified=[],
+        execution_time=1.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","subtype":"error_during_execution","is_error":true}',
+        raw_stderr="",
+        return_code=1,
+        error_class="backend_error",
+    )
+
+    _reclassify_salvaged_turn_success(result)
+
+    assert result.success is False
 
 
 def test_plain_backend_error_still_marks_session_error():

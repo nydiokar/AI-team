@@ -127,9 +127,11 @@ export interface InstructionResponse {
 }
 
 export const api = {
-  async sessions(token: string, limit = 200): Promise<RawSessionView[]> {
+  async sessions(token: string, limit = 200, keepPinned?: boolean): Promise<RawSessionView[]> {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (keepPinned !== undefined) qs.set("keep_pinned", String(keepPinned));
     const data = await get<{ sessions: RawSessionView[] }>(
-      `/api/sessions?limit=${limit}`,
+      `/api/sessions?${qs.toString()}`,
       token,
     );
     return data.sessions ?? [];
@@ -326,6 +328,21 @@ export const api = {
       `/api/sessions/${encodeURIComponent(sessionId)}/restore`,
       token,
       {},
+    );
+  },
+
+  /** Mark/unmark a session as intentionally kept, with a searchable note. */
+  async keepSession(
+    token: string,
+    sessionId: string,
+    keepPinned: boolean,
+    keepNote: string,
+  ): Promise<CommandEnvelope> {
+    return post<CommandEnvelope>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/keep`,
+      token,
+      { keep_pinned: keepPinned, keep_note: keepNote },
+      newIdempotencyKey(),
     );
   },
 

@@ -115,6 +115,42 @@ def test_review_route_appends_event(monkeypatch, client, db, verdict, event_type
     assert events[0]["actor"] == "manager"
 
 
+def test_review_route_tags_task_id(monkeypatch, client, db):
+    # A verdict carrying task_id is TAGGED to that worker task (entity_type='task',
+    # entity_id=task_id) — the consumption signal the Wake-Dispatcher reads — while
+    # the payload stays the same compact {verdict, reason}.
+    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
+    fid = db.open_case("obj", "sess-tag")
+    r = client.post(
+        f"/api/cases/{fid}/review",
+        json={"verdict": "accepted", "reason": "ok", "task_id": "task_abc123"},
+        headers=_auth(),
+    )
+    assert r.status_code == 200, r.text
+    ev = [e for e in db.list_flow_events(fid) if e["event_type"] == "review.accepted"]
+    assert len(ev) == 1
+    assert ev[0]["entity_type"] == "task"
+    assert ev[0]["entity_id"] == "task_abc123"
+    import json as _json
+    assert _json.loads(ev[0]["payload_json"]) == {"verdict": "accepted", "reason": "ok"}
+
+
+def test_review_route_untagged_is_case_level(monkeypatch, client, db):
+    # Omitting task_id records a Case-level review exactly as before — no entity tag,
+    # so pre-tagging behaviour is byte-identical and the wake optimisation is inert.
+    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
+    fid = db.open_case("obj", "sess-notag")
+    r = client.post(
+        f"/api/cases/{fid}/review",
+        json={"verdict": "accepted", "reason": "ok"},
+        headers=_auth(),
+    )
+    assert r.status_code == 200, r.text
+    ev = [e for e in db.list_flow_events(fid) if e["event_type"] == "review.accepted"]
+    assert len(ev) == 1
+    assert ev[0]["entity_id"] is None
+
+
 def test_review_route_invalid_verdict_422(monkeypatch, client, db):
     monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
     fid = db.open_case("obj", "sess-x")
