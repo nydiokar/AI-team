@@ -915,16 +915,25 @@ def _close_case(args: Dict[str, Any]) -> str:
     A REFUSAL (unmet completion_criteria / open child work / pending approval) is a
     normal decision signal, not an error — the Manager must resolve it and retry.
     ``criteria_reconciliation`` is an optional list recording each criterion as met
-    or waived-with-reason."""
+    or waived-with-reason. ``exhaustion_attestation`` is required ONLY when the Case
+    earned no advancement evidence (a single dispatch, no rework) and the advancement
+    gate is active: state mechanistically why this lane is exhausted against the
+    objective and what the next priority is (>=40 chars)."""
     case_id = _bounded_text(args.get("case_id"), "case_id", _MAX_ID_CHARS, required=True)
     outcome = _bounded_text(args.get("outcome"), "outcome", 32, required=False) or "closed"
     continuation_plan = _bounded_text(
         args.get("continuation_plan"), "continuation_plan", _MAX_OBJECTIVE_CHARS,
         required=True,
     )
+    exhaustion_attestation = _bounded_text(
+        args.get("exhaustion_attestation"), "exhaustion_attestation", _MAX_OBJECTIVE_CHARS,
+        required=False,
+    )
     reconciliation = args.get("criteria_reconciliation")
     body: Dict[str, Any] = {"outcome": outcome}
     body["continuation_plan"] = continuation_plan
+    if exhaustion_attestation:
+        body["exhaustion_attestation"] = exhaustion_attestation
     if reconciliation is not None:
         if not isinstance(reconciliation, list):
             raise ValueError("criteria_reconciliation must be a list")
@@ -1321,6 +1330,10 @@ _TOOLS = [
                     "type": "array",
                     "description": "Optional list reconciling each completion criterion. Each entry needs a \"status\": e.g. [{\"criterion\":\"tests green\",\"status\":\"met\"}] or [{\"criterion\":\"docs updated\",\"status\":\"waived\",\"reason\":\"out of scope\"}]. A boolean \"met\" is NOT accepted — the Case will refuse to close.",
                     "items": {"type": "object"},
+                },
+                "exhaustion_attestation": {
+                    "type": "string",
+                    "description": "Required ONLY when the Case earned no advancement evidence (a single dispatch, no rework) and the advancement gate is active: state mechanistically why this lane is exhausted against the objective and what the next priority is (>=40 chars). If you instead went deeper (a second dispatch) or sent rework, this is not needed.",
                 },
             },
             "required": ["case_id", "continuation_plan"],
