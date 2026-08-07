@@ -234,6 +234,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "M4 spec-authoring stage, scored spec-review gate, publish_artifact, and the decomposer.",
     },
+    "MANAGER_ADVANCEMENT_GATE": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Refuse a Manager close_case unless the Case ledger proves the work was advanced (a second dispatch or a rework verdict) OR an explicit exhaustion_attestation is recorded. Turns 'judge contribution + continue the work' from prose into an enforced close gate.",
+    },
     "COST_ALERT_ENFORCE_ENABLED": {
         "default": "0",
         "effect_scope": "live",
@@ -431,6 +437,22 @@ def review_emitter_enabled() -> bool:
     to pre-M3.2 behavior.
     """
     return runtime_flag_enabled("REVIEW_EMITTER_ENABLED")
+
+
+def manager_advancement_gate_enabled() -> bool:
+    """Whether the Manager advancement close-gate is active.
+
+    Canonical read of ``MANAGER_ADVANCEMENT_GATE`` (truthy: 1/true/yes/on);
+    default OFF. Mirrors ``review_emitter_enabled()``. When OFF: ``close_case``
+    applies no advancement check ⇒ byte-identical to the prior behaviour (a
+    manager close still needs only a non-empty ``continuation_plan``). When ON:
+    a ``actor='manager'`` close is refused unless the Case ledger shows the work
+    was actually advanced (≥2 ``task.dispatched`` events, or any
+    ``review.rework_requested``) OR the caller records an explicit
+    ``exhaustion_attestation`` — making 'stop here' a deliberate, recorded
+    decision rather than a momentum default on a single accepted worker.
+    """
+    return runtime_flag_enabled("MANAGER_ADVANCEMENT_GATE")
 
 
 def durable_relay_enabled() -> bool:

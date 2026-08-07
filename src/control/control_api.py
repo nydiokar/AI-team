@@ -212,6 +212,10 @@ class CaseCloseBody(BaseModel):
     outcome: str = "closed"
     criteria_reconciliation: Optional[List[Dict[str, Any]]] = None
     continuation_plan: Optional[str] = Field(default=None, max_length=8000)
+    # Records why a lane is exhausted against the objective when the Case did not
+    # earn advancement evidence (a second dispatch or a rework). Satisfies the
+    # MANAGER_ADVANCEMENT_GATE close gate; ignored when the flag is OFF.
+    exhaustion_attestation: Optional[str] = Field(default=None, max_length=8000)
 
 
 class CaseReviewBody(BaseModel):
@@ -1715,6 +1719,7 @@ def build_control_api(orchestrator) -> FastAPI:
             actor="manager",
             criteria_reconciliation=body.criteria_reconciliation,
             continuation_plan=body.continuation_plan,
+            exhaustion_attestation=body.exhaustion_attestation,
         )
         return JSONResponse(result)
 
