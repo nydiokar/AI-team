@@ -255,6 +255,134 @@ def test_orch_manager_close_requires_and_records_continuation_plan(tmp_path, mon
     assert "A54" in events[-1]["payload_json"]
 
 
+# ---------------------------------------------------------------------------
+# Advancement close-gate (MANAGER_ADVANCEMENT_GATE) — enforced "judge the result
+# + continue the work" gate. Flag-gated ⇒ OFF is byte-identical.
+# ---------------------------------------------------------------------------
+
+def _dispatch(db, fid, n):
+    """Emit ``n`` task.dispatched ledger events on the Case (advancement evidence)."""
+    for _ in range(n):
+        db.append_flow_event(fid, "task.dispatched", "manager")
+
+
+def test_advancement_gate_off_is_byte_identical(tmp_path, monkeypatch):
+    """Flag OFF: a single-dispatch manager close still succeeds on continuation_plan
+    alone — no advancement evidence, no attestation required."""
+    monkeypatch.delenv("MANAGER_ADVANCEMENT_GATE", raising=False)
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    orch.session_store = _StubStore()
+
+    fid = db.open_case("obj", "sess-1", role="manager")
+    _dispatch(db, fid, 1)
+    res = orch.close_case(fid, actor="manager", continuation_plan="named existing job A54 is next")
+    assert res == {"ok": True, "closed": True, "reason": None}
+
+
+def test_advancement_gate_refuses_single_dispatch_no_attestation(tmp_path, monkeypatch):
+    """Flag ON: one dispatch, no rework, no attestation ⇒ close REFUSED with a
+    structured advancement-gate reason (not an exception)."""
+    monkeypatch.setenv("MANAGER_ADVANCEMENT_GATE", "1")
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    orch.session_store = _StubStore()
+
+    fid = db.open_case("obj", "sess-1", role="manager")
+    _dispatch(db, fid, 1)
+    res = orch.close_case(fid, actor="manager", continuation_plan="stop here, null result")
+    assert res["ok"] is False and res["closed"] is False
+    assert "advancement gate" in res["reason"]
+    assert db.get_flow_run(fid)["status"] is None  # still open
+
+
+def test_advancement_gate_passes_on_second_dispatch(tmp_path, monkeypatch):
+    """Flag ON: a second dispatch is ledger proof the Manager went deeper ⇒ close allowed."""
+    monkeypatch.setenv("MANAGER_ADVANCEMENT_GATE", "1")
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    orch.session_store = _StubStore()
+
+    fid = db.open_case("obj", "sess-1", role="manager")
+    _dispatch(db, fid, 2)
+    res = orch.close_case(fid, actor="manager", continuation_plan="two loops run; A55 is the next priority")
+    assert res == {"ok": True, "closed": True, "reason": None}
+
+
+def test_advancement_gate_passes_on_rework_verdict(tmp_path, monkeypatch):
+    """Flag ON: a recorded rework verdict is proof the Manager pushed back ⇒ close allowed."""
+    monkeypatch.setenv("MANAGER_ADVANCEMENT_GATE", "1")
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    orch.session_store = _StubStore()
+
+    fid = db.open_case("obj", "sess-1", role="manager")
+    _dispatch(db, fid, 1)
+    # Realistic rework cycle: pushed back, then the redo was accepted (latest verdict
+    # accepted, so the pre-existing unresolved-rework gate does not block).
+    db.append_flow_event(fid, "review.rework_requested", "manager")
+    db.append_flow_event(fid, "review.accepted", "manager")
+    res = orch.close_case(fid, actor="manager", continuation_plan="reworked then accepted; next: A56")
+    assert res == {"ok": True, "closed": True, "reason": None}
+
+
+def test_advancement_gate_passes_and_records_attestation(tmp_path, monkeypatch):
+    """Flag ON: a genuine one-shot Case closes via an explicit exhaustion_attestation,
+    which is persisted as a durable ledger event."""
+    monkeypatch.setenv("MANAGER_ADVANCEMENT_GATE", "1")
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    orch.session_store = _StubStore()
+
+    fid = db.open_case("obj", "sess-1", role="manager")
+    _dispatch(db, fid, 1)
+    attest = "Lane exhausted: the null is mechanistically final — the config path is unreachable, no downstream lever remains; next priority is A54."
+    res = orch.close_case(
+        fid, actor="manager",
+        continuation_plan="no further loop on this lane; A54 is next",
+        exhaustion_attestation=attest,
+    )
+    assert res == {"ok": True, "closed": True, "reason": None}
+    types_seen = [e["event_type"] for e in db.list_flow_events(fid)]
+    assert "case.exhaustion_attested" in types_seen
+
+
+def test_advancement_gate_rejects_trivial_attestation(tmp_path, monkeypatch):
+    """Flag ON: a stub attestation ('DONE') is below the min length ⇒ still refused —
+    stopping cannot be rubber-stamped."""
+    monkeypatch.setenv("MANAGER_ADVANCEMENT_GATE", "1")
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    orch.session_store = _StubStore()
+
+    fid = db.open_case("obj", "sess-1", role="manager")
+    _dispatch(db, fid, 1)
+    res = orch.close_case(
+        fid, actor="manager", continuation_plan="stop", exhaustion_attestation="DONE",
+    )
+    assert res["ok"] is False and "advancement gate" in res["reason"]
+
+
+def test_advancement_gate_ignores_operator_close(tmp_path, monkeypatch):
+    """The gate is manager-only: an operator close is never subject to it."""
+    monkeypatch.setenv("MANAGER_ADVANCEMENT_GATE", "1")
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    orch.session_store = _StubStore()
+
+    fid = db.open_case("obj", "sess-1", role="manager")
+    _dispatch(db, fid, 1)
+    res = orch.close_case(fid, actor="operator")
+    assert res == {"ok": True, "closed": True, "reason": None}
+
+
 def test_orch_close_case_blocked_returns_reason(tmp_path, monkeypatch):
     db = _db(tmp_path)
     _patch_db(monkeypatch, db)

@@ -3029,6 +3029,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         actor: str = "operator",
         criteria_reconciliation: Optional[List[Dict[str, Any]]] = None,
         continuation_plan: Optional[str] = None,
+        exhaustion_attestation: Optional[str] = None,
         close_worker_sessions: bool = False,
     ) -> Dict[str, Any]:
         """[A37] Orchestrator seam over ``db.close_case`` — authoritative closure.
@@ -3048,7 +3049,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         ``close_worker_sessions=True`` opts back into the legacy PR #22 auto-close for
         callers that genuinely want it; it stays OFF by default.
         """
-        from src.control.db import get_db, CaseCloseBlocked
+        from src.control.db import get_db, CaseCloseBlocked, manager_advancement_gate_enabled
         db = get_db()
         if db is None:
             return {"ok": False, "closed": False, "reason": "db_unavailable"}
@@ -3062,6 +3063,40 @@ class TaskOrchestrator(ITaskOrchestrator):
                     "research forks, or named existing jobs that remain the priority"
                 ),
             }
+        # [Advancement gate] flag-gated ⇒ OFF is byte-identical. A manager close must
+        # be EARNED by evidence in the ledger that the Case was actually advanced —
+        # never rubber-stamped on a single accepted worker. Close is refused unless the
+        # Case shows a second dispatch OR a rework verdict (ledger facts, not prose) OR
+        # the manager records an explicit exhaustion_attestation tying the stop to the
+        # objective. This makes "keep the goal in mind + continue the work" an enforced
+        # gate, not advisory doctrine.
+        attestation = (exhaustion_attestation or "").strip()
+        _MIN_ATTESTATION_CHARS = 40
+        if actor == "manager" and manager_advancement_gate_enabled():
+            try:
+                events = db.list_flow_events(flow_run_id)
+            except Exception:
+                events = []
+            dispatch_count = sum(
+                1 for e in events if e.get("event_type") == "task.dispatched"
+            )
+            had_rework = any(
+                e.get("event_type") == "review.rework_requested" for e in events
+            )
+            advanced = dispatch_count >= 2 or had_rework
+            if not advanced and len(attestation) < _MIN_ATTESTATION_CHARS:
+                return {
+                    "ok": False,
+                    "closed": False,
+                    "reason": (
+                        "advancement gate: this Case shows no interrogation of the result "
+                        "(a single dispatch, no rework). Before closing, either advance the "
+                        "work — re-dispatch/derive the next loop or send the worker back with "
+                        "rework — or record an `exhaustion_attestation` (>=40 chars) stating "
+                        "mechanistically why this lane is exhausted against the objective and "
+                        "what the next priority is."
+                    ),
+                }
         try:
             closed = db.close_case(
                 flow_run_id, outcome=outcome, actor=actor,
@@ -3089,6 +3124,20 @@ class TaskOrchestrator(ITaskOrchestrator):
                     "event=case_affiliation_clear_failed flow_run_id=%s err=%s",
                     flow_run_id, e,
                 )
+            if attestation:
+                try:
+                    db.append_flow_event(
+                        flow_run_id,
+                        "case.exhaustion_attested",
+                        actor,
+                        payload={"exhaustion_attestation": attestation},
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "event=case_exhaustion_attest_append_failed flow_run_id=%s err=%s",
+                        flow_run_id,
+                        e,
+                    )
             if plan:
                 try:
                     db.append_flow_event(
