@@ -422,3 +422,4 @@ tests/fixtures/telemetry/
 # crash coredumps (e.g. codex app-server SIGSEGV)
 core
 core.*
+pm2-ressurect.bat
