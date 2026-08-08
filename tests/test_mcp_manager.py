@@ -1057,3 +1057,126 @@ def test_bootstrap_inserts_repo_root_on_sys_path():
         )
     finally:
         sys.path[:] = saved
+
+
+# --------------------------------------------------------------------------
+# [O1] Skills library — reference-carried skills expanded on the wire, behind
+# the SKILLS_LIBRARY_ENABLED flag (default OFF ⇒ byte-identical dispatch).
+# --------------------------------------------------------------------------
+
+def _fake_ok_request(seen):
+    def fake_request(method, path, payload=None, timeout=20.0):
+        seen.setdefault("calls", []).append((method, path, payload))
+        return {"ok": True, "task_id": "task_o1", "session": {"session_id": "sess_1"}}
+    return fake_request
+
+
+def test_resolve_skills_none_and_empty_return_none():
+    assert mcp_manager._resolve_skills(None) is None
+    assert mcp_manager._resolve_skills([]) is None
+
+
+def test_resolve_skills_resolves_real_seed_library():
+    """The 3 seed skills shipped in skills/ resolve and inject as one block."""
+    block = mcp_manager._resolve_skills(
+        ["no-false-success", "reuse-before-build", "verify-claims-in-git"]
+    )
+    assert block is not None
+    assert block.startswith("SKILLS —")
+    # each seed skill's own H1 header is present in the injected block
+    assert "# no-false-success" in block
+    assert "# reuse-before-build" in block
+    assert "# verify-claims-in-git" in block
+
+
+def test_resolve_skills_unknown_id_is_structured_error_not_silent():
+    with pytest.raises(ValueError, match="unknown skill id"):
+        mcp_manager._resolve_skills(["no-such-skill"])
+
+
+def test_resolve_skills_rejects_traversal_and_bad_charset():
+    # traversal / separators / bad charset are refused before any file is touched
+    for bad in ["../secrets", "a/b", "has_underscore", "trailing-", "-lead", "a..b"]:
+        with pytest.raises(ValueError, match="invalid skill id|resolves outside"):
+            mcp_manager._resolve_skills([bad])
+
+
+def test_resolve_skills_bounds_id_list():
+    with pytest.raises(ValueError, match="too many"):
+        mcp_manager._resolve_skills(["no-false-success"] * (mcp_manager._MAX_SKILLS + 1))
+
+
+def test_resolve_skills_rejects_non_list_and_non_string():
+    with pytest.raises(ValueError, match="must be a list"):
+        mcp_manager._resolve_skills("no-false-success")
+    with pytest.raises(ValueError, match="must be a string"):
+        mcp_manager._resolve_skills([123])
+
+
+def test_resolve_skills_dedupes_repeated_id():
+    block = mcp_manager._resolve_skills(["no-false-success", "no-false-success"])
+    assert block.count("# no-false-success") == 1
+
+
+def test_resolve_skills_rejects_oversized_and_empty_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp_manager, "_SKILLS_DIR", tmp_path)
+    (tmp_path / "big.md").write_text("x" * (mcp_manager._MAX_SKILL_FILE_BYTES + 1))
+    (tmp_path / "empty.md").write_text("   \n")
+    with pytest.raises(ValueError, match="too large"):
+        mcp_manager._resolve_skills(["big"])
+    with pytest.raises(ValueError, match="empty/malformed"):
+        mcp_manager._resolve_skills(["empty"])
+
+
+def test_dispatch_worker_flag_off_is_byte_identical(monkeypatch):
+    """PROOF: with SKILLS_LIBRARY_ENABLED OFF, passing `skills` yields a POST payload
+    byte-identical to the same dispatch WITHOUT skills — the flag-off path is unchanged."""
+    monkeypatch.delenv("SKILLS_LIBRARY_ENABLED", raising=False)
+
+    seen_no_skills = {}
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_ok_request(seen_no_skills))
+    mcp_manager._dispatch_worker({
+        "objective": "Fix the widget", "session_id": "sess_1", "cwd": "/repo",
+    })
+
+    seen_with_skills = {}
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_ok_request(seen_with_skills))
+    mcp_manager._dispatch_worker({
+        "objective": "Fix the widget", "session_id": "sess_1", "cwd": "/repo",
+        "skills": ["no-false-success", "verify-claims-in-git"],
+    })
+
+    # The /api/instructions POST body is identical with and without `skills` when OFF.
+    instr_no = [c for c in seen_no_skills["calls"] if c[1] == "/api/instructions"][0]
+    instr_yes = [c for c in seen_with_skills["calls"] if c[1] == "/api/instructions"][0]
+    assert instr_no[2] == instr_yes[2]
+    assert instr_yes[2]["description"] == "Fix the widget"
+
+
+def test_dispatch_worker_flag_on_expands_skill_text_into_objective(monkeypatch):
+    monkeypatch.setenv("SKILLS_LIBRARY_ENABLED", "1")
+    seen = {}
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_ok_request(seen))
+    out = mcp_manager._dispatch_worker({
+        "objective": "Fix the widget", "session_id": "sess_1", "cwd": "/repo",
+        "skills": ["no-false-success"],
+    })
+    instr = [c for c in seen["calls"] if c[1] == "/api/instructions"][0]
+    desc = instr[2]["description"]
+    assert desc.startswith("SKILLS —")
+    assert "# no-false-success" in desc
+    assert desc.endswith("Fix the widget")
+    assert "expanded into the objective on the wire" in out
+
+
+def test_dispatch_worker_flag_on_unknown_skill_raises_before_dispatch(monkeypatch):
+    monkeypatch.setenv("SKILLS_LIBRARY_ENABLED", "1")
+    seen = {}
+    monkeypatch.setattr(mcp_manager, "_api_request", _fake_ok_request(seen))
+    with pytest.raises(ValueError, match="unknown skill id"):
+        mcp_manager._dispatch_worker({
+            "objective": "Fix the widget", "session_id": "sess_1", "cwd": "/repo",
+            "skills": ["nope"],
+        })
+    # Nothing was dispatched — the error fired before any /api/instructions POST.
+    assert not any(c[1] == "/api/instructions" for c in seen.get("calls", []))
