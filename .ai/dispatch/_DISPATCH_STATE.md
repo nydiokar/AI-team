@@ -5,7 +5,6 @@
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
 | active | AGENT_65_COST_MONITORING_VISIBILITY | 2026-08-03 | 2026-08-03 | — | ✓ |  |
-| active | AGENT_76_SKILLS_LIBRARY_O1 | 2026-08-08 | 2026-08-08 | — | — |  |
 | ready | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-03 | — | — |  |
 | ready | AGENT_62_RUNTIME_FLAG_REGISTRY_NONBOOLEAN | 2026-08-01 | 2026-08-03 | — | — |  |
 | ready | AGENT_63_QUOTA_COORDINATOR_INDEPENDENT_AUDIT | 2026-08-01 | 2026-08-03 | — | — |  |
@@ -67,6 +66,7 @@
 | done | AGENT_67_MESH_SECURITY_REVIEW_THREAT_MODEL | 2026-08-03 | 2026-08-05 | — | ✓ |  |
 | done | AGENT_69_DISPATCH_STATE_HARDENING | 2026-08-04 | 2026-08-04 | — | ✓ |  |
 | done | AGENT_70 | 2026-08-04 | 2026-08-04 | — | ✓ |  |
+| done | AGENT_76_SKILLS_LIBRARY_O1 | 2026-08-08 | 2026-08-08 | — | ✗MISSING | CLAIMED_DONE_NO_PROOF |
 | done | AGENT_77_REPO_READABILITY_INDEX_O4 | 2026-08-08 | 2026-08-08 | — | ✓ |  |
 | done | AGENT_8_OPERATOR_SIGNAL | 2026-07-03 | 2026-08-03 | — | ✓ |  |
 | done | AGENT_9_COMPACT_CONTEXT | 2026-07-03 | 2026-08-03 | — | ✓ |  |

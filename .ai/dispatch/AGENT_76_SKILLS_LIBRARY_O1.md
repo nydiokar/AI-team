@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_76_SKILLS_LIBRARY_O1
 created_at: "2026-08-08T23:19:01.822222+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
+status: done              # ready | active | blocked | done | dead
 owner: worker:e3dba8b45092
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-08T23:21:27.026650+00:00"
+results_ref: DISPATCH_LOG.md → A76 row (done, PR #86)             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: docs/SKILLS_LIBRARY_O1.md,skills/no-false-success.md,skills/reuse-before-build.md,skills/verify-claims-in-git.md,tests/test_mcp_manager.py,scripts/mcp_manager.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-08T23:32:03.989561+00:00"
 ```
 
 # DISPATCH — AGENT_76_SKILLS_LIBRARY_O1
@@ -87,3 +87,42 @@ whole point of O1 as a token lever.**
   to "activate" — the flag stays OFF; activation is a Manager/operator decision.
 - Set `evidence:` to the test report + design doc + PR ref, `results_ref:` to the DISPATCH_LOG row,
   and `status: done`.
+
+## Milestone — delivered (2026-08-09, PR #86 merged to `main`)
+
+**Mechanism decision: ship (A) reference-in-authoring, expanded on the wire; (B) is the follow-up.**
+Grounded in the code: `dispatch_worker` (`scripts/mcp_manager.py`) sends the objective as the
+`description` of `POST /api/instructions`, which is *carried over the wire* to the worker's first
+turn on **any** node. Mechanism (A) resolves the referenced ids against the repo-local `skills/`
+library **on the Manager side** (wherever `mcp_manager.py` runs — the gateway host / Manager's node,
+which always has this repo checkout) and prepends the skill text to the objective. That reaches a
+remote worker (Horse, separate filesystem) too, because the text travels rather than being resolved
+node-side. Mechanism (B) — carry only ids, resolve worker-side for real wire/cache savings + prompt-
+cache stabilisation (ADR-0001) — is the honest **follow-up**: it needs `skills/` provisioned on the
+worker node, which is not true today. Token math + the A-vs-B table + the remote-node caveat are in
+`docs/SKILLS_LIBRARY_O1.md`.
+
+**What shipped**
+- `skills/` — 3 seed skills (`no-false-success`, `reuse-before-build`, `verify-claims-in-git`)
+  **extracted** from `docs/harness/roles/manager.md` + `worker.md` wording (mapping table in the doc).
+- `dispatch_worker(skills=[…])` behind `SKILLS_LIBRARY_ENABLED` (default **OFF**). `_resolve_skills`
+  applies the §7 boundary lens: bounded id list (≤16), charset+containment guard (no `../` traversal),
+  **unknown id ⇒ structured error (never a silent drop)**, oversized (>8 KiB)/empty/non-UTF-8 file
+  rejected early, resolution fails **before** any dispatch.
+- Flag OFF ⇒ the `skills` param is ignored and the `POST /api/instructions` payload is
+  **byte-identical** to today — proven by `test_dispatch_worker_flag_off_is_byte_identical`.
+- `docs/SKILLS_LIBRARY_O1.md` (design + token math) and `docs/ENV_FEATURE_FLAGS.md` (flag registered).
+
+## Closure
+
+- **Verdict:** done. All acceptance criteria met against the merged tree.
+- **Tests:** `.venv/bin/python -m pytest tests/test_mcp_manager.py` → **77 passed** (12 new O1 tests),
+  run on the merged-`main` state. Targeted module only — paid-CLI cost guard respected.
+- **PR:** #86 (`feat/skills-library-o1`) merged to `main`; `b4e4c80` is an ancestor of `origin/main`
+  (verified — `skills/`, `_resolve_skills`, design doc, flag, and tests all present in `origin/main`).
+- **Flag stays OFF.** Live activation (`SKILLS_LIBRARY_ENABLED=1`) and any gateway restart are a
+  Manager/operator decision — not performed here.
+- **What remains:** (1) live activation decision; (2) mechanism (B) once `skills/` is provisioned
+  node-side (deploy or a boot-time fetch endpoint); (3) an activation-time edit to `manager.md`
+  teaching the Manager to *prefer* `skills=[…]` over re-authored attitude prose (kept out so the
+  flag-OFF world is unchanged).
