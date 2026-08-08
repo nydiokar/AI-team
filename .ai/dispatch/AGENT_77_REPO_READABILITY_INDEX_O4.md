@@ -1,19 +1,19 @@
 ```yaml
 job_id: AGENT_77_REPO_READABILITY_INDEX_O4
 created_at: "2026-08-08T23:19:02.923650+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active              # ready | active | blocked | done | dead
-owner: worker:22e50fd3bdac
+status: done              # ready | active | blocked | done | dead
+owner: AGENT_77
 depends_on: []
-results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-08T23:21:28.528038+00:00"
+results_ref: DISPATCH_LOG.md#A77             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: ["docs/REPO_READABILITY_O4.md", "scripts/repo_index/symbol_lookup.py"]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-08-08T23:29:34.179087+00:00"
 ```
 
 # DISPATCH — AGENT_77_REPO_READABILITY_INDEX_O4
 
 **Level:** 2 (research/measurement spike — ships NO gateway-resident service) ·
 **Type:** research/diagnosis + minimal proof-of-concept.
-**Status of this packet:** ready (authored, not executed)
+**Status of this packet:** done — PR #87 merged 2026-08-09
 **Depends on:** — (M3 open question **O4**, `docs/M3_MANAGER_INVOCATION_SPEC.md` §7; operator
 green-lit the O1/O4 token-lane on Case `67b0ec8c…`).
 
@@ -75,3 +75,29 @@ green-lit the O1/O4 token-lane on Case `67b0ec8c…`).
 - PR opened **and merged to `main`** by you (or committed to `main` if docs-only); no dangling branch.
 - Set `evidence:` to the doc + PoC script + example-run output, `results_ref:` to the DISPATCH_LOG
   row, and `status: done`.
+
+## Milestone
+
+- **2026-08-09:** Measured ctags (0.16 s, 9.7 MB RSS, 758 KB, 6,379 tags, zero idle RSS) and
+  codebase-memory-mcp v0.9.0 (105 MB idle RSS, 259 MB binary, resident daemon required) on this
+  host (ARM64 Pi 5, 8 GB).  Assessed tree-sitter (not installed — higher complexity, no readtags
+  equivalent, deferred per YAGNI).  Built and verified `scripts/repo_index/symbol_lookup.py` PoC.
+  PR #87 opened and merged to `main`.
+
+## Closure
+
+**Delivered:**
+- `docs/REPO_READABILITY_O4.md` — candidate comparison, all measured numbers with commands, Pi
+  memory-pressure context (5.1 GB available), deployment recommendation, token-saving argument,
+  recorded example runs.
+- `scripts/repo_index/symbol_lookup.py` — stateless PoC; resolves `symbol → file:line` via
+  ctags + readtags, sorts definitions before imports, `--defs-only` flag, auto-builds index on
+  first call. No Python deps; requires `apt install universal-ctags`.
+- `.gitignore` entry for `.ctags_index`.
+
+**Recommendation (operator decision pending):** per-project, stateless-CLI ctags. ~5,000–12,000
+tokens saved per orientation session. No resident daemon; zero idle RSS.
+
+**Operator-gated follow-up:** installing codebase-memory-mcp as a per-session MCP server is
+feasible (Pi 5 8 GB has headroom) but delivers smaller relative gain given ctags already covers
+100% of Python/TS definitions. Numbers are in the doc.
