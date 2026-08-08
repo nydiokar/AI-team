@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -147,6 +148,117 @@ _MAX_PATH_CHARS = 1000
 _MAX_ID_CHARS = 128
 _MAX_FILES = 100
 _MAX_FILE_CHARS = 1000
+
+# ---------------------------------------------------------------------------
+# [O1] Skills library — named, versioned professional attitudes the Manager
+# attaches to a dispatch BY REFERENCE (skills=[id,…]) instead of re-authoring the
+# same attitude prose in every envelope. See docs/SKILLS_LIBRARY_O1.md.
+#
+# Mechanism shipped here is (A) reference-in-authoring, expanded ON THE WIRE: the
+# ids are resolved against the repo-local skills/ library on the MANAGER side and
+# the skill text is prepended to the objective before POST /api/instructions. That
+# reaches the worker regardless of which node it runs on (the text is carried, not
+# resolved worker-side) — the honest first slice given a remote worker (Horse) has
+# a SEPARATE filesystem that does not hold this library. Mechanism (B) — ids carried
+# and resolved worker-side for real wire/cache savings — is the documented follow-up
+# once the library is provisioned node-side.
+#
+# The whole feature is behind SKILLS_LIBRARY_ENABLED (default OFF). With the flag
+# OFF the `skills` param is ignored and the POST payload is byte-identical to today.
+# ---------------------------------------------------------------------------
+_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+_MAX_SKILLS = 16               # bounded id list (§7 service-boundary lens)
+_MAX_SKILL_ID_CHARS = 64
+_MAX_SKILL_FILE_BYTES = 8192   # bounded skill-file size — oversized rejected early
+# Charset guard: an id maps to skills/<id>.md, so it must NOT be able to carry a
+# path separator or traversal. Lowercase alnum + single hyphens only.
+_SKILL_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def _skills_enabled() -> bool:
+    """SKILLS_LIBRARY_ENABLED flag — default OFF (byte-identical dispatch when OFF)."""
+    return os.environ.get("SKILLS_LIBRARY_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _resolve_skills(value: Any) -> Optional[str]:
+    """Resolve skills=[id,…] to a single injectable text block, or None.
+
+    §7 service-boundary lens (this resolver reads attacker-influenceable ids that
+    map to filesystem paths):
+      * bounded id list          — at most _MAX_SKILLS ids;
+      * charset + containment     — id must match _SKILL_ID_RE and resolve INSIDE
+                                    _SKILLS_DIR, so `../…` / absolute ids are refused
+                                    before any file is touched;
+      * unknown id ⇒ structured error — a missing skills/<id>.md raises ValueError,
+                                    it is NEVER silently dropped;
+      * bounded / malformed file  — oversized (> _MAX_SKILL_FILE_BYTES), empty, or
+                                    non-UTF-8 skill files are rejected early.
+
+    Raises ValueError on any of the above; the tool layer surfaces it as a clean MCP
+    tool error rather than a silent skip. Returns None when no skills are requested."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("skills must be a list of skill ids (strings)")
+    if not value:
+        return None
+    if len(value) > _MAX_SKILLS:
+        raise ValueError(f"skills has too many entries (max {_MAX_SKILLS})")
+
+    library_root = _SKILLS_DIR.resolve()
+    seen: set[str] = set()
+    blocks: List[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            raise ValueError("each skills entry must be a string skill id")
+        sid = raw.strip().lower()
+        if not sid:
+            raise ValueError("skill id cannot be empty")
+        if len(sid) > _MAX_SKILL_ID_CHARS:
+            raise ValueError(f"skill id too long (max {_MAX_SKILL_ID_CHARS}): {raw!r}")
+        if not _SKILL_ID_RE.match(sid):
+            raise ValueError(
+                f"invalid skill id {raw!r}: use lowercase letters, digits and single "
+                "hyphens only (no path separators / traversal)"
+            )
+        if sid in seen:
+            continue  # idempotent — a repeated id injects once
+        seen.add(sid)
+
+        path = (library_root / f"{sid}.md")
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(library_root)
+        except (ValueError, OSError):
+            raise ValueError(f"skill id {sid!r} resolves outside the skills library")
+        if not resolved.is_file():
+            raise ValueError(
+                f"unknown skill id {sid!r}: no skills/{sid}.md in the library — "
+                "refusing to silently drop it (check the id or add the skill file)"
+            )
+        size = resolved.stat().st_size
+        if size > _MAX_SKILL_FILE_BYTES:
+            raise ValueError(
+                f"skill {sid!r} file is too large ({size} bytes > {_MAX_SKILL_FILE_BYTES}) "
+                "— rejecting an oversized skill file early"
+            )
+        try:
+            text = resolved.read_text(encoding="utf-8").strip()
+        except (UnicodeDecodeError, OSError) as exc:
+            raise ValueError(f"skill {sid!r} file is unreadable/malformed: {exc}")
+        if not text:
+            raise ValueError(f"skill {sid!r} file is empty/malformed")
+        blocks.append(text)
+
+    if not blocks:
+        return None
+    header = (
+        "SKILLS — standing professional attitudes attached BY REFERENCE for this task "
+        "(O1 skills library; treat these as binding as the objective below):"
+    )
+    return header + "\n\n" + "\n\n".join(blocks)
 
 # wait_for_worker is an IN-TURN BLOCKING poll: while it runs the Manager session is
 # BUSY and can neither react to other finished workers nor talk to the operator. So
@@ -301,6 +413,15 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
     # model of a reused session_id because the SDK client is cached at boot.
     model = _bounded_text(args.get("model"), "model", _MAX_ID_CHARS, required=False)
 
+    # [O1] Skills-by-reference. Resolve the requested skill ids to an injectable text
+    # block BEFORE any network call so an invalid/unknown id fails fast (never opens a
+    # worker session first). Gated by SKILLS_LIBRARY_ENABLED: with the flag OFF the
+    # `skills` param is ignored entirely and the POST payload is byte-identical to today.
+    skills_block: Optional[str] = None
+    skills_requested = args.get("skills") is not None
+    if _skills_enabled():
+        skills_block = _resolve_skills(args.get("skills"))
+
     # [DROP-2] Observable worker sessions. A worker must be a REAL, openable session
     # (case_role=worker, joined to the Manager's Case) — not a sessionless run_oneoff
     # whose whole transcript is one prompt+reply blob invisible at the session level.
@@ -369,7 +490,12 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         session_id = new_sid
         opened_session = True
 
-    body: Dict[str, Any] = {"description": objective}
+    # [O1] Mechanism (A): expand the referenced skills ON THE WIRE by prepending the
+    # resolved skill text to the objective. `objective` itself (used in the reply
+    # below) stays the Manager's own text. When the flag is OFF skills_block is None ⇒
+    # description == objective ⇒ this payload is byte-identical to today.
+    description = f"{skills_block}\n\n{objective}" if skills_block else objective
+    body: Dict[str, Any] = {"description": description}
     if session_id:
         body["session_id"] = session_id
     if cwd:
@@ -436,6 +562,16 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
                 f"Model:     {model} REQUESTED but NOT applied — a reused session keeps its "
                 f"boot model; open a NEW worker session (omit session_id, pass cwd) to tier the model."
             )
+    if skills_block:
+        lines.append(
+            "Skills:    attached by reference and expanded into the objective on the wire "
+            "(O1, mechanism A)."
+        )
+    elif skills_requested and not _skills_enabled():
+        lines.append(
+            "Skills:    requested but IGNORED — SKILLS_LIBRARY_ENABLED is OFF (flag-off ⇒ "
+            "byte-identical dispatch). Activation is a Manager/operator decision."
+        )
     if case_id:
         lines.append(
             f"case_id: {case_id} — the worker JOINS this (the Manager's) Case as a member "
@@ -1225,6 +1361,7 @@ _TOOLS = [
                 "role": {"type": "string", "description": "Set to 'worker' to boot the NEW worker session with the canonical Worker role (worker.md identity + worker tools), gated by MANAGER_ROLE_ENABLED. Omit for a legacy tier-0 worker. Only applies when a new session is opened (with cwd); it cannot retro-stamp a reused session_id."},
                 "model": {"type": "string", "description": "REQUIRED when opening a NEW worker session (cwd with no session_id): explicitly choose the task-fit boot model. Use 'haiku' for narrow/easy-to-verify work, 'sonnet' for most bounded implementation and fixes, and 'opus' for architecture, high-risk, security-sensitive, or ambiguous work. The choice is sent only to session creation. Ignored when a session_id is reused because that worker keeps its boot model."},
                 "parent_flow_run_id": {"type": "string", "description": "Use ONLY for a genuine child-CASE lineage edge (child→parent in /api/flows). To keep the worker inside the Manager's Case, use case_id instead."},
+                "skills": {"type": "array", "items": {"type": "string"}, "description": "Optional O1 skills-library references (e.g. ['no-false-success','reuse-before-build','verify-claims-in-git']) — named, versioned professional attitudes attached BY REFERENCE instead of re-authored attitude prose. Each id resolves to skills/<id>.md and its text is expanded into the objective on the wire (mechanism A). Unknown id ⇒ structured error (never silently dropped). GATED by SKILLS_LIBRARY_ENABLED (default OFF): with the flag OFF this param is ignored and the dispatch is byte-identical. See docs/SKILLS_LIBRARY_O1.md."},
             },
             "required": ["objective"],
         },
