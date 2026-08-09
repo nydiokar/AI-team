@@ -655,8 +655,8 @@ def test_record_review_forwards_task_id(monkeypatch):
     verdict to that worker task (the Wake-Dispatcher consumption signal)."""
     calls = []
 
-    def _fake_api(method, path, payload=None, timeout=20.0):
-        calls.append((method, path, payload))
+    def _fake_api(method, path, payload=None, timeout=20.0, headers=None):
+        calls.append((method, path, payload, headers))
         return {"ok": True, "event_type": "review.accepted"}
 
     monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
@@ -666,6 +666,7 @@ def test_record_review_forwards_task_id(monkeypatch):
     assert calls[0][0] == "POST"
     assert calls[0][1] == "/api/cases/case-1/review"
     assert calls[0][2] == {"verdict": "accepted", "reason": "ok", "task_id": "task_xyz"}
+    assert calls[0][3]["Idempotency-Key"].startswith("record_review:")
     assert "accepted" in out
 
 
@@ -674,8 +675,8 @@ def test_record_review_omits_task_id_when_absent(monkeypatch):
     byte-identical to the pre-tagging contract."""
     calls = []
 
-    def _fake_api(method, path, payload=None, timeout=20.0):
-        calls.append((method, path, payload))
+    def _fake_api(method, path, payload=None, timeout=20.0, headers=None):
+        calls.append((method, path, payload, headers))
         return {"ok": True, "event_type": "review.accepted"}
 
     monkeypatch.setattr(mcp_manager, "_api_request", _fake_api)
