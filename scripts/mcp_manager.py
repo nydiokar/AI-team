@@ -33,6 +33,7 @@ LINEAGE (A32): POST /api/instructions now accepts an optional parent_flow_run_id
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -283,7 +284,8 @@ _MAX_CONSECUTIVE_POLL_ERRORS = 5
 # ---------------------------------------------------------------------------
 
 def _api_request(method: str, path: str, payload: Optional[Dict[str, Any]] = None,
-                 timeout: float = 20.0) -> Dict[str, Any]:
+                 timeout: float = 20.0,
+                 headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """One bearer-authenticated JSON request to the control API.
 
     Raises RuntimeError with a clean message on any failure (never leaks a bare
@@ -297,12 +299,18 @@ def _api_request(method: str, path: str, payload: Optional[Dict[str, Any]] = Non
         raise RuntimeError("DASHBOARD_TOKEN/WORKER_TOKEN not set — cannot reach control API")
     url = f"{_base_url()}{path}"
     data = json.dumps(payload).encode() if payload is not None else None
+    req_headers = {
+        "Authorization": "",
+        "Content-Type": "application/json",
+        **(headers or {}),
+    }
     last_auth_error: Optional[str] = None
     for token in tokens:
+        req_headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            headers=req_headers,
             method=method,
         )
         try:
@@ -1119,7 +1127,23 @@ def _record_review(args: Dict[str, Any]) -> str:
     body: Dict[str, Any] = {"verdict": verdict, "reason": reason}
     if task_id:
         body["task_id"] = task_id
-    result = _api_request("POST", f"/api/cases/{urllib.parse.quote(case_id)}/review", body)
+    idem_material = json.dumps(
+        {
+            "case_id": case_id,
+            "verdict": verdict,
+            "reason": reason,
+            "task_id": task_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    idempotency_key = "record_review:" + hashlib.sha256(idem_material.encode()).hexdigest()
+    result = _api_request(
+        "POST",
+        f"/api/cases/{urllib.parse.quote(case_id)}/review",
+        body,
+        headers={"Idempotency-Key": idempotency_key},
+    )
     ok = bool(result.get("ok"))
     if ok:
         return (

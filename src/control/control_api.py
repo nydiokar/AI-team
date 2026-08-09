@@ -1724,7 +1724,11 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse(result)
 
     @app.post("/api/cases/{case_id}/review", dependencies=[Depends(_require_auth)])
-    def api_record_review(case_id: str, body: CaseReviewBody) -> JSONResponse:
+    def api_record_review(
+        case_id: str,
+        body: CaseReviewBody,
+        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
         """[M3.2] Record a Manager review verdict (accepted|rework_requested|waived)
         as the canonical ``review.*`` flow_event on the Case audit trail. Gated by
         ``REVIEW_EMITTER_ENABLED``: when OFF this route returns 404 (disabled) so
@@ -1737,10 +1741,31 @@ def build_control_api(orchestrator) -> FastAPI:
                 status_code=422,
                 detail={"ok": False, "reason": "invalid_verdict"},
             )
-        result = orchestrator.record_review(
-            case_id, verdict=body.verdict, reason=body.reason,
-            task_id=body.task_id, actor="manager",
-        )
+        with _idem_guard("record_review", idempotency_key) as cached:
+            if cached is not None:
+                return JSONResponse(cached)
+            try:
+                result = orchestrator.record_review(
+                    case_id, verdict=body.verdict, reason=body.reason,
+                    task_id=body.task_id, actor="manager",
+                )
+            except Exception as exc:
+                logger.exception(
+                    "event=record_review_write_failed flow_run_id=%s task_id=%s verdict=%s",
+                    case_id,
+                    body.task_id,
+                    body.verdict,
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "ok": False,
+                        "reason": "review_write_failed",
+                        "retryable": True,
+                        "error": str(exc)[:500],
+                    },
+                )
+            _idem_put("record_review", idempotency_key, result)
         return JSONResponse(result)
 
     @app.post("/api/cases/{case_id}/waits", dependencies=[Depends(_require_auth)])
