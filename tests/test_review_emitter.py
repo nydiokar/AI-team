@@ -151,6 +151,60 @@ def test_review_route_untagged_is_case_level(monkeypatch, client, db):
     assert ev[0]["entity_id"] is None
 
 
+def test_review_route_idempotency_key_dedupes_retry(monkeypatch, client, db):
+    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
+    fid = db.open_case("obj", "sess-idem")
+    endpoint = next(
+        r.endpoint for r in client.app.routes
+        if getattr(r, "path", "") == "/api/cases/{case_id}/review"
+    )
+    body = control_api.CaseReviewBody(
+        verdict="accepted", reason="ok", task_id="task_abc123",
+    )
+
+    first = endpoint(fid, body, idempotency_key="review-case-task-verdict")
+    second = endpoint(fid, body, idempotency_key="review-case-task-verdict")
+
+    assert first.status_code == 200, first.body
+    assert second.status_code == 200, second.body
+    assert first.body == second.body
+    events = [e for e in db.list_flow_events(fid) if e["event_type"] == "review.accepted"]
+    assert len(events) == 1
+
+
+def test_review_route_db_failure_is_structured_retryable(monkeypatch, db):
+    monkeypatch.setenv("REVIEW_EMITTER_ENABLED", "1")
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    monkeypatch.setattr(control_api, "_db", lambda: db)
+
+    class _FailingOrchestrator(_StubOrchestrator):
+        def record_review(self, *args, **kwargs):
+            raise RuntimeError("database is locked")
+
+    client = TestClient(control_api.build_control_api(_FailingOrchestrator()))
+    fid = db.open_case("obj", "sess-fail")
+
+    endpoint = next(
+        r.endpoint for r in client.app.routes
+        if getattr(r, "path", "") == "/api/cases/{case_id}/review"
+    )
+    r = endpoint(
+        fid,
+        control_api.CaseReviewBody(verdict="accepted", reason="ok"),
+        idempotency_key=None,
+    )
+
+    assert r.status_code == 503
+    import json as _json
+    assert _json.loads(r.body) == {
+        "ok": False,
+        "reason": "review_write_failed",
+        "retryable": True,
+        "error": "database is locked",
+    }
+    assert [e for e in db.list_flow_events(fid) if e["event_type"].startswith("review.")] == []
+
+
 def test_review_route_surrogate_reason_does_not_500(monkeypatch, client, db):
     # A reason carrying a lone UTF-16 surrogate (mojibake in a Manager verdict) must
     # NOT crash the response renderer into a 500. pydantic rejects the un-encodable
