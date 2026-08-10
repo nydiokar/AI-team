@@ -27,8 +27,11 @@ sink. A prebuilt **ctags symbol index** resolves `symbol → file:line` in <1 ms
 that span (±20 lines) instead of the file.
 - Look up a definition: `python scripts/repo_index/symbol_lookup.py --defs-only <Symbol>`
   (drop `--defs-only` to also see imports/references).
-- Rebuild if the tree changed or a known symbol is missing (~0.2 s): add `--build`.
 - Do this **before** `Read`/`Grep` when you can name the class/function/method you want.
+- **Freshness is automatic** — each lookup rebuilds the index first if any source file is newer,
+  so you almost never need `--build` by hand (pass `--no-auto` to skip the check in a tight loop).
+- **A miss suggests the real name.** `dispatch_worker` (wrong) prints `_dispatch_worker` and other
+  near matches instead of a bare "no matches" — read the suggestion, don't jump straight to Grep.
 The index is `.ctags_index` (gitignored, per-repo — each clone builds its own; never committed).
 It is a short-lived CLI, not a service: zero idle cost, nothing to keep running. It is
 regex-based, so it covers every Python/TS definition but can miss dynamically-generated names —
