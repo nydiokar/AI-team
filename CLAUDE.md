@@ -21,6 +21,20 @@ separate on purpose — do not expect your role prompt to name files or repo rul
 Then verify against **git** (`git log`, `git status`, `git show`, `gh pr list`) — never trust
 prose over what the repository actually contains. If they conflict, surface it.
 
+## Orient cheaply — resolve symbols before reading whole files
+Reading a whole module just to find where something is defined is the biggest avoidable token
+sink. A prebuilt **ctags symbol index** resolves `symbol → file:line` in <1 ms; then read only
+that span (±20 lines) instead of the file.
+- Look up a definition: `python scripts/repo_index/symbol_lookup.py --defs-only <Symbol>`
+  (drop `--defs-only` to also see imports/references).
+- Rebuild if the tree changed or a known symbol is missing (~0.2 s): add `--build`.
+- Do this **before** `Read`/`Grep` when you can name the class/function/method you want.
+The index is `.ctags_index` (gitignored, per-repo — each clone builds its own; never committed).
+It is a short-lived CLI, not a service: zero idle cost, nothing to keep running. It is
+regex-based, so it covers every Python/TS definition but can miss dynamically-generated names —
+fall back to `Grep` for those, and for concept ("where do we handle X") rather than exact-symbol
+searches.
+
 ## "Continue the work" — what it means here
 When the objective is open-ended ("continue the project", "advance the work", "do what's next"):
 1. Read CONTEXT.md's **Current Priorities** table + DISPATCH_LOG + recent git — orient yourself.
