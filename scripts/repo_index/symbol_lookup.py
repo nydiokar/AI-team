@@ -11,6 +11,7 @@ Usage
   python scripts/repo_index/symbol_lookup.py _dispatch_worker --defs-only
   python scripts/repo_index/symbol_lookup.py --build TaskResult      # rebuild + look up
   python scripts/repo_index/symbol_lookup.py --stale                 # just report freshness
+  python scripts/repo_index/symbol_lookup.py --dirs                  # print indexed dirs
 
 How it works
 ------------
@@ -20,18 +21,16 @@ No resident daemon: every call is a short-lived subprocess (zero idle RSS).
 
 Flawless-by-default behaviour
 -----------------------------
-- **Auto-staleness rebuild.** Before a lookup, if any source file is newer than the
-  index, it is rebuilt automatically so results are never silently stale. Disable with
-  `--no-auto` (e.g. inside a tight loop where you know the tree is unchanged).
-- **Fuzzy suggestions on a miss.** An exact-name miss (the classic `dispatch_worker`
-  vs `_dispatch_worker` trap) prints the closest real symbol names instead of a bare
-  "(no matches)", so you rarely need a follow-up Grep.
-
-Portability
------------
-- Repo root is found via `git rev-parse --show-toplevel`, else the cwd.
-- Directories to index are auto-detected from a common set, OR taken verbatim from a
-  `.ctags_dirs` file at the repo root (one path per line) if it exists.
+- **Auto-staleness rebuild.** Before a lookup, the index is rebuilt if any source file
+  is newer than it OR any source directory changed shape (add/delete/rename — detected via
+  directory mtimes). Results are never silently stale. Disable with `--no-auto`.
+- **Atomic writes.** The index is built to a per-process temp file and `os.replace`d into
+  place, so concurrent lookups (parallel workers) never read a half-written index.
+- **Auto directory detection.** Indexed dirs = the candidate set that exists UNION any
+  top-level directory that actually contains source files. New source roots are picked up
+  automatically on the next build. Pin an explicit set via a `.ctags_dirs` file if desired.
+- **Fuzzy suggestions on a miss.** An exact-name miss (the classic `dispatch_worker` vs
+  `_dispatch_worker` trap) prints the closest real symbol names.
 
 Requirements
 ------------
@@ -70,11 +69,25 @@ _CANDIDATE_DIRS: list[str] = [
     "scripts", "packages", "server", "backend", "web/src", "frontend/src",
 ]
 
-# Directories never worth walking for staleness (heavy, generated, or VCS).
+# Directories never worth walking (heavy, generated, or VCS). Skipped for both
+# staleness scanning and directory auto-detection.
 _PRUNE_DIRS: frozenset[str] = frozenset(
     {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache",
-     ".pytest_cache", "dist", "build", ".next", ".ctags_index"}
+     ".pytest_cache", ".tox", ".cache", "dist", "build", ".next", "target",
+     "vendor", "coverage", ".idea", ".vscode"}
 )
+
+# Extensions that mark a directory as "source" for auto-detection.
+_SOURCE_EXTS: frozenset[str] = frozenset(
+    {".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".go",
+     ".rs", ".java", ".kt", ".kts", ".c", ".h", ".cc", ".cpp", ".hpp", ".hh",
+     ".cs", ".rb", ".php", ".swift", ".scala", ".sh", ".bash", ".lua", ".ex",
+     ".exs", ".vue", ".svelte", ".m", ".mm", ".pl", ".pm", ".r", ".jl"}
+)
+
+# Bound the per-directory scan during auto-detection so a pathological asset/data
+# directory can't stall a build.
+_DETECT_SCAN_CAP: int = 5000
 
 # ctags kinds treated as "definitions" (class/function/method/variable/interface/…)
 # rather than imports/re-exports. See `ctags --list-kinds=<lang>`.
@@ -94,7 +107,32 @@ def _check_tools() -> None:
         sys.exit(1)
 
 
+def _dir_has_source(path: Path) -> bool:
+    """True if *path* contains any source file (bounded, prune-aware, short-circuits)."""
+    scanned: int = 0
+    for root, dirnames, filenames in os.walk(path):
+        dirnames[:] = [
+            dn for dn in dirnames
+            if dn not in _PRUNE_DIRS and not dn.startswith(".")
+        ]
+        for fn in filenames:
+            if os.path.splitext(fn)[1] in _SOURCE_EXTS:
+                return True
+            scanned += 1
+            if scanned >= _DETECT_SCAN_CAP:
+                return False
+    return False
+
+
 def _source_dirs() -> list[str]:
+    """
+    Directories to index.
+
+    Precedence:
+      1. `.ctags_dirs` (verbatim, if present and any listed dir exists) — explicit pin.
+      2. Otherwise: the candidate set that exists UNION any top-level directory that
+         actually contains source files (so new source roots are picked up automatically).
+    """
     if DIRS_FILE.is_file():
         pinned: list[str] = [
             ln.strip() for ln in DIRS_FILE.read_text().splitlines()
@@ -103,17 +141,57 @@ def _source_dirs() -> list[str]:
         dirs = [d for d in pinned if (REPO_ROOT / d).is_dir()]
         if dirs:
             return dirs
-    return [d for d in _CANDIDATE_DIRS if (REPO_ROOT / d).is_dir()]
+
+    found: set[str] = {d for d in _CANDIDATE_DIRS if (REPO_ROOT / d).is_dir()}
+    try:
+        for entry in os.scandir(REPO_ROOT):
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            name: str = entry.name
+            if name in found or name in _PRUNE_DIRS or name.startswith("."):
+                continue
+            if _dir_has_source(Path(entry.path)):
+                found.add(name)
+    except OSError:
+        pass
+    return _collapse_nested(found)
+
+
+def _collapse_nested(dirs: set[str]) -> list[str]:
+    """Drop any dir nested under another (e.g. 'web/src' when 'web' is present) so files
+    are not indexed twice, producing duplicate tags."""
+    parts: dict[str, tuple[str, ...]] = {d: tuple(Path(d).parts) for d in dirs}
+    kept: list[str] = []
+    for d in sorted(dirs, key=lambda x: len(parts[x])):
+        pd = parts[d]
+        if any(
+            len(parts[k]) < len(pd) and pd[: len(parts[k])] == parts[k]
+            for k in kept
+        ):
+            continue
+        kept.append(d)
+    return sorted(kept)
 
 
 def _is_stale() -> bool:
-    """True if any indexed source file is newer than the index (short-circuits)."""
+    """
+    True if the index is out of date.
+
+    Catches BOTH content edits (a file newer than the index) AND structural changes —
+    add / delete / rename — via directory mtimes (a directory's mtime bumps when an entry
+    is created or removed). Short-circuits on the first evidence of staleness.
+    """
     if not INDEX_FILE.exists():
         return True
     index_mtime: float = INDEX_FILE.stat().st_mtime
     for d in _source_dirs():
         for root, dirnames, filenames in os.walk(REPO_ROOT / d):
             dirnames[:] = [dn for dn in dirnames if dn not in _PRUNE_DIRS]
+            try:
+                if os.stat(root).st_mtime > index_mtime:
+                    return True
+            except OSError:
+                pass
             for fn in filenames:
                 try:
                     if os.stat(os.path.join(root, fn)).st_mtime > index_mtime:
@@ -124,7 +202,7 @@ def _is_stale() -> bool:
 
 
 def build_index(verbose: bool = True) -> None:
-    """Build (or rebuild) the ctags index over the detected/pinned source dirs."""
+    """Build (or rebuild) the ctags index over the detected/pinned source dirs, atomically."""
     _check_tools()
     dirs: list[str] = _source_dirs()
     if not dirs:
@@ -135,19 +213,33 @@ def build_index(verbose: bool = True) -> None:
         )
         sys.exit(1)
 
+    tmp: Path = INDEX_FILE.parent / f".ctags_index.tmp.{os.getpid()}"
+    # ctags -R descends into EVERYTHING under each dir — including vendored/generated
+    # trees (node_modules, dist, …). Exclude them explicitly or the index explodes
+    # (a bare `web/` pulled in web/node_modules -> a 260 MB index in testing).
+    excludes: list[str] = [f"--exclude={d}" for d in sorted(_PRUNE_DIRS)]
     cmd: list[str] = [
         "ctags",
         "--fields=+n",                 # add line: field to every tag
         "--extras=+r",                 # include reference tags
         "-R",                          # recursive
         "--output-format=u-ctags",
-        "-f", str(INDEX_FILE),
+        *excludes,
+        "-f", str(tmp),
         *dirs,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
-    if result.returncode != 0:
-        print(f"ctags error:\n{result.stderr}", file=sys.stderr)
-        sys.exit(result.returncode)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+        if result.returncode != 0:
+            print(f"ctags error:\n{result.stderr}", file=sys.stderr)
+            sys.exit(result.returncode)
+        os.replace(tmp, INDEX_FILE)   # atomic: readers see old-or-new, never a torn file
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     if verbose:
         size_kb: float = INDEX_FILE.stat().st_size / 1024
         print(
@@ -184,9 +276,8 @@ def suggest(symbol: str, limit: int = 10) -> list[str]:
     )
     out: list[str] = substr[:limit]
     if len(out) < limit:
-        fuzzy: list[str] = difflib.get_close_matches(
-            symbol, names, n=limit, cutoff=0.6
-        )
+        pool: list[str] = names if len(names) <= 20000 else names[:20000]
+        fuzzy: list[str] = difflib.get_close_matches(symbol, pool, n=limit, cutoff=0.6)
         for n in fuzzy:
             if n not in out:
                 out.append(n)
@@ -275,7 +366,15 @@ def main() -> None:
         "--stale", action="store_true",
         help="Report whether the index is stale, then exit (no lookup).",
     )
+    p.add_argument(
+        "--dirs", action="store_true",
+        help="Print the directories that would be indexed, then exit.",
+    )
     args = p.parse_args()
+
+    if args.dirs:
+        print("\n".join(_source_dirs()) or "(none — create .ctags_dirs)")
+        return
 
     if args.stale:
         _check_tools()
