@@ -1,6 +1,6 @@
 # AI-Team Gateway — Hot Context
 
-**Last Updated:** 2026-08-05
+**Last Updated:** 2026-08-10
 **Branch policy:** `main` for docs-only; `feat/<slug>` + PR + self-merge for any `src/` or config
 change. Restart the **gateway** freely when deploying merged code. Never restart a worker/node-carrier
 without surfacing it to the operator first.
@@ -67,6 +67,31 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-08-10 — Stale open Case cleanup path + live cleanup.**
+Root cause for "open Cases with no active sessions": Case lifecycle is intentionally separate from
+session lifecycle. `SessionService.close_session()` closes only the runtime session; `close_case()` is
+criteria-gated and is not called automatically, and the Wake-Dispatcher only reacts to satisfied wait
+groups. Result: a Case can remain `flow_runs.status=NULL` after its Manager session is closed/error/
+missing. Cleaned 10 live orphan candidates through the existing `/api/cases/{id}/interrupt` path
+(`reason=manager_session_unavailable`), which marked them `blocked` and cancelled 0 in-flight workers;
+the post-cleanup orphan query was empty. Added `TaskOrchestrator.sweep_orphaned_cases()` plus authenticated
+`POST /api/cases/orphans/sweep` (`dry_run` first, bounded `limit<=500`) and a Work-screen maintenance
+panel that scans before enabling "Block stale". This is deliberately manual/operator-driven, not an
+automatic background closer; cleanup blocks/resumes, never marks work done. Verified: targeted backend
+tests 43 passed, web typecheck clean, web production build clean.
+
+**2026-08-11 — Stale cleanup regression fixed: active/recovered Manager Cases must not be blocked.**
+The 2026-08-10 live cleanup over-blocked two Cases linked to Manager session `3fd71c35a853`: the
+session was later `AWAITING_INPUT` and affiliated to Case `9f2893...`, but both linked Cases stayed
+`blocked`, so `_continue_case_once` correctly short-circuited before wait-group satisfaction and the
+Manager could not be woken. Restored `9f2893...` and `9ad6...` to open with `flow.unblocked` audit
+events. Patch: `manager_session_unavailable` is now a guarded cleanup reason; `interrupt_case` refuses
+it when the Manager session exists and is not terminal, and sweeps no longer treat `ERROR` as enough to
+block because it can be stale/recoverable. Added operator Case state control:
+`POST /api/cases/{id}/state` (`open`/`blocked`) plus Work detail `Block`/`Unblock`, so Case state is no
+longer read-only. Verified: targeted backend tests 49 passed, web typecheck clean, web production build
+clean.
 
 **2026-08-07 — Typed error classification instead of backend_error catch-all (PR #81, merged, gateway restarted).**
 Follow-up to PR #80. The Claude Agent SDK's terminal `ResultMessage` carries structured `subtype`
