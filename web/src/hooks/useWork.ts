@@ -7,11 +7,11 @@
  * see below) since they change far less often. Raw payloads are translated
  * through ../transport/workAdapter so components only see ../domain/work types.
  *
- * Everything here is READ-ONLY: no mutations, no optimistic writes. The Work
- * substrate only populates when the gateway runs with HARNESS_FLOW_DRIVE on;
- * until then these return empty lists — which the UI renders honestly.
+ * Most hooks here are read-only projections. The orphan sweep mutation is the
+ * narrow operator maintenance path for stale open Cases; it writes through the
+ * backend interrupt path and then invalidates these projections.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../transport/apiClient";
 import {
   toWorkList,
@@ -22,6 +22,7 @@ import {
   toSessionAffiliationIndex,
 } from "../transport/workAdapter";
 import type { SessionAffiliation, WorkBucket } from "../domain/work";
+import type { RawCaseOrphanSweepResponse } from "../transport/rawApi";
 import { useAuthStore } from "../stores/authStore";
 
 const EMPTY_AFFILIATIONS = new Map<string, SessionAffiliation>();
@@ -139,4 +140,70 @@ export function useSessionAffiliations(): {
     index: query.data ?? EMPTY_AFFILIATIONS,
     isLoading: query.isLoading,
   };
+}
+
+/** Dry-run or block open Cases whose Manager session is gone/inactive. */
+export function useSweepOrphanedCases() {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation<
+    RawCaseOrphanSweepResponse,
+    ApiError,
+    { dryRun?: boolean; limit?: number; reason?: string }
+  >({
+    mutationFn: (vars) => api.sweepCaseOrphans(token, vars),
+    retry: false,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["work-list"] });
+      qc.invalidateQueries({ queryKey: ["work-detail"] });
+      qc.invalidateQueries({ queryKey: ["work-timeline"] });
+      qc.invalidateQueries({ queryKey: ["work-roster"] });
+      qc.invalidateQueries({ queryKey: ["work-affiliations"] });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
+}
+
+/** Operator state control for one non-terminal Case. */
+export function useSetCaseState(flowRunId: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation<
+    { ok: boolean; changed?: boolean; status: string; reason?: string },
+    ApiError,
+    { state: "open" | "blocked"; reason?: string }
+  >({
+    mutationFn: (vars) => api.setCaseState(token, flowRunId!, vars),
+    retry: false,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["work-list"] });
+      qc.invalidateQueries({ queryKey: ["work-detail", flowRunId] });
+      qc.invalidateQueries({ queryKey: ["work-timeline", flowRunId] });
+      qc.invalidateQueries({ queryKey: ["work-roster", flowRunId] });
+      qc.invalidateQueries({ queryKey: ["work-affiliations"] });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
+}
+
+/** Manual operator close for stale/non-terminal Cases. */
+export function useCloseCaseManually(flowRunId: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation<
+    { ok: boolean; closed: boolean; reason: string | null },
+    ApiError,
+    { reason?: string }
+  >({
+    mutationFn: (vars) => api.closeCaseManually(token, flowRunId!, vars),
+    retry: false,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["work-list"] });
+      qc.invalidateQueries({ queryKey: ["work-detail", flowRunId] });
+      qc.invalidateQueries({ queryKey: ["work-timeline", flowRunId] });
+      qc.invalidateQueries({ queryKey: ["work-roster", flowRunId] });
+      qc.invalidateQueries({ queryKey: ["work-affiliations"] });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
 }
