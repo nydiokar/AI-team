@@ -37,11 +37,16 @@ export interface MessageSelection {
   onToggle: (messageId: string) => void;
 }
 
+/** "3:41 PM", or "Mar 5, 3:41 PM" when `at` isn't today — bubbles from an
+ *  earlier day in the same session keep their date visible. */
 function timeLabel(at: string): string {
   if (!at) return "";
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return at.slice(11, 16) || "";
-  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === new Date().toDateString()) return time;
+  const date = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `${date}, ${time}`;
 }
 
 const NOTICE_ICON = {

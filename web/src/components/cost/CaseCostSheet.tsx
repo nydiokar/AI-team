@@ -4,6 +4,7 @@
  * USD split (with the workers' share as a proportional bar), and one row per
  * session. Data is the live /api/cases/{id}/usage read model.
  */
+import { Link } from "react-router-dom";
 import { X, Briefcase, UsersRound } from "lucide-react";
 import { useCaseUsage } from "../../hooks/useCost";
 import { caseTitle } from "../../transport/workAdapter";
@@ -110,9 +111,10 @@ export function CaseCostSheet({
 
             <div className="mt-3 space-y-1.5">
               {(data?.sessions ?? []).map((s) => (
-                <div
+                <Link
                   key={s.sessionId}
-                  className="flex items-center gap-2 rounded-xl bg-surface-1/60 px-3 py-2 ring-1 ring-hairline/50"
+                  to={`/sessions/${encodeURIComponent(s.sessionId)}`}
+                  className="flex items-center gap-2 rounded-xl bg-surface-1/60 px-3 py-2 ring-1 ring-hairline/50 transition-colors hover:bg-surface-2"
                 >
                   <span
                     className={cn(
@@ -129,7 +131,7 @@ export function CaseCostSheet({
                   <span className="shrink-0 text-[12px] font-semibold tabular-nums text-ink">
                     {formatUsd(s.usd.known)}
                   </span>
-                </div>
+                </Link>
               ))}
             </div>
           </>

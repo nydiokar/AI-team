@@ -36,10 +36,13 @@ export function elapsed(startedAt: string | null): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
-/** "12:13 AM" — used to collapse runs of same-minute log rows. */
+/** "12:13 AM", or "Mar 5, 12:13 AM" when `at` isn't today — used to collapse
+ *  runs of same-minute log rows while still surfacing the date on older ones. */
 export function clockLabel(at: string): string {
   const d = new Date(at);
-  return Number.isNaN(d.getTime())
-    ? ""
-    : d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  if (Number.isNaN(d.getTime())) return "";
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === new Date().toDateString()) return time;
+  const date = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `${date}, ${time}`;
 }
