@@ -1,8 +1,9 @@
 /**
- * WorkDetailScreen — one case, read-only (A28). Full-screen (outside the
- * bottom-nav shell) like SessionDetail. Shows the case header (title + bucket +
- * authoritative stage/status), a compact lineage tree, the case↔entity ledger,
- * and the append-only audit timeline. No actions beyond navigation/drill-down.
+ * WorkDetailScreen — one case. Full-screen (outside the bottom-nav shell) like
+ * SessionDetail. Shows the case header (title + bucket + authoritative
+ * stage/status), a compact lineage tree, the case↔entity ledger, and the
+ * append-only audit timeline. The only write is explicit operator state control
+ * for non-terminal Cases.
  *
  * This is deliberately NOT a second SessionDetail: it renders CASE truth from
  * the Work substrate and links OUT to sessions/artifacts for runtime detail.
@@ -11,12 +12,20 @@ import type { ReactNode } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ChevronLeft, AlertCircle } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
+import { Button } from "../components/ui/Button";
 import { ToneBadge } from "../components/work/ToneBadge";
 import { CaseLineage } from "../components/work/CaseLineage";
 import { CaseLedgerView } from "../components/work/CaseLedgerView";
 import { CaseTimelineView } from "../components/work/CaseTimelineView";
 import { CaseRosterView } from "../components/work/CaseRosterView";
-import { useWorkDetail, useWorkGraph, useWorkTimeline, useWorkRoster } from "../hooks/useWork";
+import {
+  useCloseCaseManually,
+  useSetCaseState,
+  useWorkDetail,
+  useWorkGraph,
+  useWorkTimeline,
+  useWorkRoster,
+} from "../hooks/useWork";
 import { bucketMeta } from "../lib/workPresentation";
 import { ApiError } from "../transport/apiClient";
 
@@ -47,6 +56,8 @@ export function WorkDetailScreen() {
   const graph = useWorkGraph(id);
   const timeline = useWorkTimeline(id);
   const roster = useWorkRoster(id);
+  const caseState = useSetCaseState(id);
+  const closeCase = useCloseCaseManually(id);
 
   const notFound = detail.error instanceof ApiError && detail.error.status === 404;
 
@@ -77,6 +88,32 @@ export function WorkDetailScreen() {
 
   const summary = detail.data?.summary;
   const meta = summary ? bucketMeta(summary.bucket) : null;
+  const isTerminal = summary?.status === "closed" || summary?.status === "cancelled";
+  const isBlocked = summary?.status === "blocked";
+
+  const setState = async (state: "open" | "blocked") => {
+    try {
+      await caseState.mutateAsync({
+        state,
+        reason: state === "open" ? "operator_unblocked" : "operator_blocked",
+      });
+    } catch {
+      // useMutation owns the error state rendered below.
+    }
+  };
+
+  const closeManually = async () => {
+    if (!summary) return;
+    const ok = window.confirm(
+      "Close this case manually? It will move to closed and leave linked sessions warm.",
+    );
+    if (!ok) return;
+    try {
+      await closeCase.mutateAsync({ reason: "operator_manual_close" });
+    } catch {
+      // useMutation owns the error state rendered below.
+    }
+  };
 
   return (
     <div className="desktop-detail mx-auto flex h-full max-w-[480px] flex-col bg-base">
@@ -133,6 +170,35 @@ export function WorkDetailScreen() {
                     </>
                   )}
                 </dl>
+                {!isTerminal && (
+                  <div className="mt-4 flex items-center justify-between gap-3 border-t border-hairline/60 pt-3">
+                    <p className="min-w-0 text-[12px] text-ink-muted">
+                      {closeCase.error
+                        ? `Close failed: ${closeCase.error.message}`
+                        : caseState.error
+                          ? `State failed: ${caseState.error.message}`
+                          : "State"}
+                    </p>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Button
+                        variant={isBlocked ? "outline" : "danger"}
+                        size="sm"
+                        disabled={caseState.isPending || closeCase.isPending}
+                        onClick={() => void setState(isBlocked ? "open" : "blocked")}
+                      >
+                        {isBlocked ? "Unblock" : "Block"}
+                      </Button>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        disabled={caseState.isPending || closeCase.isPending}
+                        onClick={() => void closeManually()}
+                      >
+                        Close
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 

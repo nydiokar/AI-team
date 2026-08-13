@@ -35,6 +35,7 @@ import type {
   RawCaseGraphResponse,
   RawCaseRosterResponse,
   RawSessionAffiliationsResponse,
+  RawCaseOrphanSweepResponse,
   RawWorkBucket,
   RawCostExplorerResponse,
   RawCostTopResponse,
@@ -617,6 +618,55 @@ export const api = {
     return get<RawSessionAffiliationsResponse>(
       "/api/work/affiliations/sessions",
       token,
+    );
+  },
+
+  /** POST /api/cases/orphans/sweep — dry-run or block open Cases whose Manager
+   *  session is gone/inactive. Blocking uses the backend interrupt path, not close. */
+  async sweepCaseOrphans(
+    token: string,
+    opts: { dryRun?: boolean; limit?: number; reason?: string } = {},
+  ): Promise<RawCaseOrphanSweepResponse> {
+    return post<RawCaseOrphanSweepResponse>(
+      "/api/cases/orphans/sweep",
+      token,
+      {
+        dry_run: Boolean(opts.dryRun),
+        limit: opts.limit ?? 200,
+        reason: opts.reason ?? "manager_session_unavailable",
+      },
+    );
+  },
+
+  /** POST /api/cases/{id}/state — operator state control for non-terminal Cases. */
+  async setCaseState(
+    token: string,
+    flowRunId: string,
+    opts: { state: "open" | "blocked"; reason?: string },
+  ): Promise<{ ok: boolean; changed?: boolean; status: string; reason?: string }> {
+    return post(
+      `/api/cases/${encodeURIComponent(flowRunId)}/state`,
+      token,
+      {
+        state: opts.state,
+        reason: opts.reason ?? "operator_state_change",
+      },
+    );
+  },
+
+  /** POST /api/cases/{id}/operator-close — manual operator close for stale Cases. */
+  async closeCaseManually(
+    token: string,
+    flowRunId: string,
+    opts: { reason?: string } = {},
+  ): Promise<{ ok: boolean; closed: boolean; reason: string | null }> {
+    return post(
+      `/api/cases/${encodeURIComponent(flowRunId)}/operator-close`,
+      token,
+      {
+        reason: opts.reason ?? "operator_manual_close",
+        waive_completion_criteria: true,
+      },
     );
   },
 

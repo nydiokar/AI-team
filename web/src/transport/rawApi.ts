@@ -695,6 +695,33 @@ export interface RawSessionAffiliationsResponse {
   total: number;
 }
 
+// POST /api/cases/orphans/sweep → bounded operator cleanup for open Cases whose
+// Manager session is gone/inactive. `dry_run=true` reports candidates only;
+// `dry_run=false` marks them blocked through the backend interrupt path.
+export interface RawCaseOrphanCandidate {
+  case_id: string;
+  manager_session_id: string | null;
+  manager_status: string | null;
+  reason: string;
+  result?: {
+    ok?: boolean;
+    status?: string;
+    already?: boolean;
+    cancelled_tasks?: string[];
+    reason?: string | null;
+  };
+}
+
+export interface RawCaseOrphanSweepResponse {
+  ok: boolean;
+  dry_run: boolean;
+  scanned: number;
+  skipped: number;
+  candidates: RawCaseOrphanCandidate[];
+  cleaned: RawCaseOrphanCandidate[];
+  reason?: string;
+}
+
 // ── Case roster (Cockpit) — work_read_model.build_case_roster ──────────────
 // The live "who is doing what right now" head of a Case: its sessions (manager +
 // workers) with tokens/turns, and the watch_job scripts those sessions own.
