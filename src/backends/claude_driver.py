@@ -327,6 +327,17 @@ class _PendingTurn:
     progress_cb: Any = None
 
 
+class SDKStreamEndedError(RuntimeError):
+    """The SDK message stream ended before a pending turn emitted ResultMessage."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(
+            "SDK session stream closed before the turn completed "
+            f"({reason}; missing terminal ResultMessage)"
+        )
+
+
 def parse_cache_stats_from_ndjson(raw_stdout: str) -> Optional[CacheStats]:
     """Extract first usage stats from NDJSON stream output."""
     for line in raw_stdout.splitlines():
@@ -690,6 +701,7 @@ class _SDKSession:
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock, ThinkingBlock
 
         acc = _TurnAccumulator(backend_session_id=self.backend_session_id)
+        end_reason = "normal EOF from SDK stream"
         try:
             async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
@@ -723,10 +735,12 @@ class _SDKSession:
                     acc = _TurnAccumulator(backend_session_id=self.backend_session_id)
         except asyncio.CancelledError:
             # Session closing. Fall through to `finally` so waiters don't hang.
+            end_reason = "reader task cancelled"
             raise
         except Exception as e:
             # The stream broke (subprocess died, transport closed). Don't leave
             # callers blocked forever — fail every pending turn with the error.
+            end_reason = f"{type(e).__name__}: {e}"
             logger.warning(
                 "event=sdk_reader_stream_ended session_key=%s err=%s",
                 self.session_key, e,
@@ -736,7 +750,7 @@ class _SDKSession:
             # Any turn still waiting when the stream stops will never get a
             # result — reject it rather than block the worker thread forever.
             if self._pending:
-                self._fail_pending(RuntimeError("SDK session stream closed before the turn completed"))
+                self._fail_pending(SDKStreamEndedError(end_reason))
 
     def _outcome_from_result(self, acc: "_TurnAccumulator", msg: Any) -> "TurnOutcome":
         """Build a :class:`TurnOutcome` from the accumulated turn + its terminal
@@ -1227,6 +1241,15 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                     errors=[err_str],
                     error_class="transient",
                     execution_time=elapsed,
+                )
+            if isinstance(e, SDKStreamEndedError):
+                return ExecutionResult(
+                    success=False,
+                    output="",
+                    errors=[err_str],
+                    error_class="sdk_stream_closed",
+                    execution_time=elapsed,
+                    raw_stderr=f"error_class=sdk_stream_closed\nreason={e.reason}",
                 )
             return ExecutionResult(
                 success=False,

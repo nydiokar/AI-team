@@ -5875,10 +5875,13 @@ created: {task.created}
         """
         default_max = max(0, getattr(config.validation, "max_retries", 2))
         default_mult = max(1, getattr(config.validation, "backoff_multiplier", 2))
-        if error_class in ("none", "interactive", "auth", "fatal", "context_overflow", "max_turns"):
+        if error_class in ("none", "interactive", "auth", "fatal", "context_overflow", "max_turns", "sdk_stream_closed"):
             # max_turns: resubmitting the identical prompt would just hit the
             # same turn budget again — not retry-eligible, needs an operator
             # decision (raise CLAUDE_SDK_MAX_TURNS / split the task).
+            # sdk_stream_closed: the SDK/CLI stream ended without a terminal
+            # ResultMessage and may already have applied file edits, so a blind
+            # duplicate retry is not safe.
             return {"max_retries": 0, "initial_delay": 0.0, "backoff_multiplier": 1}
         if error_class == "timeout":
             return {"max_retries": min(1, default_max), "initial_delay": 1.0, "backoff_multiplier": 1}
@@ -5918,6 +5921,8 @@ created: {task.created}
             actions.append("Session context is full. Run /compact on the session or start a new session.")
         elif ec == "max_turns":
             actions.append("Turn limit reached before finishing. Increase CLAUDE_SDK_MAX_TURNS or split the task into smaller steps.")
+        elif ec == "sdk_stream_closed":
+            actions.append("Claude SDK stream ended before a terminal ResultMessage; inspect worker-side Claude/SDK logs and resume from the modified tree, not by blind retry.")
         elif ec == "auth":
             actions.append("Run 'claude auth status' and re-authenticate if needed.")
         elif ec == "fatal":
