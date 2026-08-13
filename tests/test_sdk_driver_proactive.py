@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from src.backends.claude_driver import _SDKSession
+from src.backends.claude_driver import SDKStreamEndedError, _SDKSession
 
 sdk = pytest.importorskip("claude_agent_sdk")
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock  # noqa: E402
@@ -75,6 +75,21 @@ class _FakeClient:
     async def receive_messages(self):
         while True:
             yield await self.q.get()
+
+
+class _ClosingFakeClient(_FakeClient):
+    async def query(self, message: str, session_id: str = "default") -> None:
+        self.queries_sent.append(message)
+        for m in self.replies.get(message, []):
+            self.q.put_nowait(m)
+        self.q.put_nowait(None)
+
+    async def receive_messages(self):
+        while True:
+            msg = await self.q.get()
+            if msg is None:
+                return
+            yield msg
 
 
 def _start_fake_session(fake: _FakeClient) -> _SDKSession:
@@ -167,5 +182,20 @@ def test_error_result_surfaces_salvage_and_error_fields():
         assert r.output == "I made real progress before overflowing."
         assert r.salvaged_output == "I made real progress before overflowing."
         assert r.error_text
+    finally:
+        sess.close()
+
+
+def test_stream_eof_before_result_is_typed_and_diagnostic():
+    fake = _ClosingFakeClient()
+    fake.replies["do the thing"] = [
+        _assistant("I changed files but did not emit a terminal result."),
+    ]
+    sess = _start_fake_session(fake)
+    try:
+        with pytest.raises(SDKStreamEndedError) as exc:
+            sess.send("do the thing")
+        assert "missing terminal ResultMessage" in str(exc.value)
+        assert "normal EOF" in exc.value.reason
     finally:
         sess.close()
