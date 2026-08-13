@@ -138,6 +138,24 @@ class _FakeOrch:
     def _emit_event(self, name, _a, payload):
         self.emitted.append((name, payload))
 
+    def cancel_task(self, task_id):
+        return False
+
+    async def interrupt_case(self, case_id, *, actor="operator", reason="operator_kill"):
+        return await TaskOrchestrator.interrupt_case(
+            self, case_id, actor=actor, reason=reason,
+        )
+
+    async def sweep_orphaned_cases(self, *, limit=200, dry_run=False, reason="manager_session_unavailable"):
+        return await TaskOrchestrator.sweep_orphaned_cases(
+            self, limit=limit, dry_run=dry_run, reason=reason,
+        )
+
+    async def set_case_state(self, case_id, *, state, actor="operator", reason="operator_state_change"):
+        return await TaskOrchestrator.set_case_state(
+            self, case_id, state=state, actor=actor, reason=reason,
+        )
+
     def _manager_role_enabled(self):
         return TaskOrchestrator._manager_role_enabled(self)
 
@@ -679,3 +697,116 @@ def test_blocked_case_is_not_continued(tmp_path, monkeypatch):
     assert _continue(orch, db, fid) == 0
     assert db.list_continuation_rows(fid) == []
     assert orch.deliveries == []
+
+
+# --------------------------------------------------------------------------- #
+# Operator orphan cleanup                                                     #
+# --------------------------------------------------------------------------- #
+
+def test_sweep_orphaned_cases_blocks_missing_manager_case(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.control.db._db_instance", _db(tmp_path))
+    from src.control.db import get_db
+
+    db = get_db()
+    fid = _open_case(db, session_id="missing-manager")
+    orch = _FakeOrch(_FakeStore())
+
+    result = asyncio.run(orch.sweep_orphaned_cases(limit=20))
+
+    assert result["ok"] is True
+    assert [c["case_id"] for c in result["candidates"]] == [fid]
+    assert [c["case_id"] for c in result["cleaned"]] == [fid]
+    assert db.get_flow_run(fid)["status"] == "blocked"
+    interrupts = _events(db, fid, "flow.interrupted")
+    assert len(interrupts) == 1
+
+
+def test_sweep_orphaned_cases_skips_active_manager_and_dry_run_does_not_block(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.control.db._db_instance", _db(tmp_path))
+    from src.control.db import get_db
+
+    db = get_db()
+    active = _FakeSession("active-manager", status=SessionStatus.AWAITING_INPUT)
+    active_case = _open_case(db, session_id=active.session_id)
+    missing_case = _open_case(db, session_id="missing-manager")
+    orch = _FakeOrch(_FakeStore(active))
+
+    result = asyncio.run(orch.sweep_orphaned_cases(limit=20, dry_run=True))
+
+    assert result["dry_run"] is True
+    assert [c["case_id"] for c in result["candidates"]] == [missing_case]
+    assert result["cleaned"] == []
+    assert db.get_flow_run(active_case)["status"] is None
+    assert db.get_flow_run(missing_case)["status"] is None
+
+
+def test_sweep_orphaned_cases_treats_pinned_offline_manager_as_inactive(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.control.db._db_instance", _db(tmp_path))
+    from src.control.db import get_db
+
+    db = get_db()
+    offline = _FakeSession("offline-manager", status=SessionStatus.PINNED_NODE_OFFLINE)
+    fid = _open_case(db, session_id=offline.session_id)
+    orch = _FakeOrch(_FakeStore(offline))
+
+    result = asyncio.run(orch.sweep_orphaned_cases(limit=20, dry_run=True))
+
+    assert [c["case_id"] for c in result["candidates"]] == [fid]
+    assert result["candidates"][0]["reason"] == "manager_session_pinned_node_offline"
+
+
+def test_sweep_orphaned_cases_skips_error_manager_as_recoverable(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.control.db._db_instance", _db(tmp_path))
+    from src.control.db import get_db
+
+    db = get_db()
+    manager = _FakeSession("error-manager", status=SessionStatus.ERROR)
+    fid = _open_case(db, session_id=manager.session_id)
+    orch = _FakeOrch(_FakeStore(manager))
+
+    result = asyncio.run(orch.sweep_orphaned_cases(limit=20, dry_run=True))
+
+    assert result["candidates"] == []
+    assert db.get_flow_run(fid)["status"] is None
+
+
+def test_manager_unavailable_interrupt_refuses_active_manager(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.control.db._db_instance", _db(tmp_path))
+    from src.control.db import get_db
+
+    db = get_db()
+    manager = _FakeSession("active-manager", status=SessionStatus.AWAITING_INPUT)
+    fid = _open_case(db, session_id=manager.session_id)
+    orch = _FakeOrch(_FakeStore(manager))
+
+    result = asyncio.run(orch.interrupt_case(
+        fid,
+        actor="operator",
+        reason="manager_session_unavailable",
+    ))
+
+    assert result["ok"] is False
+    assert result["reason"] == "manager_session_active"
+    assert db.get_flow_run(fid)["status"] is None
+    assert _events(db, fid, "flow.interrupted") == []
+
+
+def test_set_case_state_open_unblocks_case(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.control.db._db_instance", _db(tmp_path))
+    from src.control.db import get_db
+
+    db = get_db()
+    fid = _open_case(db, session_id="mgr")
+    db.update_flow_run(fid, status="blocked")
+    orch = _FakeOrch(_FakeStore())
+
+    result = asyncio.run(orch.set_case_state(
+        fid,
+        state="open",
+        reason="manager_session_active_recovered",
+    ))
+
+    assert result == {"ok": True, "changed": True, "status": "open"}
+    assert db.get_flow_run(fid)["status"] is None
+    unblocked = _events(db, fid, "flow.unblocked")
+    assert len(unblocked) == 1

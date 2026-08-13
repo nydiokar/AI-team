@@ -292,6 +292,37 @@ class CaseInterruptBody(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=_REASON_MAX)
 
 
+class CaseOrphanSweepBody(BaseModel):
+    """Operator cleanup for open Cases whose Manager session is gone or inactive.
+
+    ``dry_run`` reports candidates without changing state. A real sweep marks
+    candidates blocked through the existing interrupt path; it does not close
+    them as complete.
+    """
+    dry_run: bool = False
+    limit: int = Field(default=200, ge=1, le=500)
+    reason: Optional[str] = Field(default="manager_session_unavailable", max_length=64)
+
+
+class CaseStateBody(BaseModel):
+    """Operator Case state control. Non-terminal Cases can be moved between
+    ``open`` and ``blocked``. Terminal close/cancel semantics stay on their
+    dedicated paths."""
+    state: str = Field(max_length=32)
+    reason: Optional[str] = Field(default="operator_state_change", max_length=256)
+
+
+class CaseOperatorCloseBody(BaseModel):
+    """Operator manual Case closure.
+
+    ``reason`` is written into the audit trail. Stored completion criteria are
+    waived by default with that reason, so stale blocked Cases can be closed
+    deliberately without weakening the Manager close contract.
+    """
+    reason: Optional[str] = Field(default="operator_manual_close", max_length=256)
+    waive_completion_criteria: bool = True
+
+
 class CaseOpenBody(BaseModel):
     """[M3.3] Open a NEW Case on an EXISTING Manager session — so one long-lived
     Manager session can own many Cases sequentially instead of spawning a fresh
@@ -1918,6 +1949,100 @@ def build_control_api(orchestrator) -> FastAPI:
         if not result.get("ok"):
             code = 404 if result.get("reason") in ("case_not_found", "case_closed") else 503
             raise HTTPException(status_code=code, detail=result)
+        return JSONResponse(result)
+
+    @app.post("/api/cases/orphans/sweep", dependencies=[Depends(_require_auth)])
+    async def api_sweep_orphaned_cases(body: CaseOrphanSweepBody) -> JSONResponse:
+        """Block stale open Cases that have no active Manager session.
+
+        Service boundary checklist: bounded scan (limit 1..500), tiny JSON body,
+        no unbounded payload reads, malformed body rejected by Pydantic, DB
+        unavailable returns a structured error, and writes reuse ``interrupt_case``
+        so cancellation/status/audit behaviour stays on the existing Case path.
+        """
+        result = await orchestrator.sweep_orphaned_cases(
+            limit=body.limit,
+            dry_run=body.dry_run,
+            reason=body.reason or "manager_session_unavailable",
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=503, detail=result)
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/state", dependencies=[Depends(_require_auth)])
+    async def api_set_case_state(case_id: str, body: CaseStateBody) -> JSONResponse:
+        """Operator Case state control for non-terminal Cases.
+
+        Service boundary checklist: bounded tiny JSON body, no bulk reads, no
+        unbounded payload, malformed state rejected with structured result,
+        dependency failure returns 503, and writes go through orchestrator
+        methods that reuse the established interrupt/unblock audit paths.
+        """
+        result = await orchestrator.set_case_state(
+            case_id,
+            state=body.state,
+            actor="operator",
+            reason=body.reason or "operator_state_change",
+        )
+        if not result.get("ok"):
+            code = 404 if result.get("reason") == "case_not_found" else 409
+            if result.get("reason") == "db_unavailable":
+                code = 503
+            raise HTTPException(status_code=code, detail=result)
+        return JSONResponse(result)
+
+    @app.post("/api/cases/{case_id}/operator-close", dependencies=[Depends(_require_auth)])
+    def api_operator_close_case(case_id: str, body: CaseOperatorCloseBody) -> JSONResponse:
+        """Manual operator close for stale/non-terminal Cases.
+
+        Service boundary checklist: bounded tiny JSON body, one bounded DB row
+        read, no unbounded payload, malformed body rejected by Pydantic, DB
+        unavailable returns structured 503, and closure still goes through the
+        existing authoritative ``close_case`` path.
+        """
+        from src.control.db import _parse_completion_criteria
+
+        note = (body.reason or "operator_manual_close").strip()[:256] or "operator_manual_close"
+        reconciliation = None
+        db = _db()
+        if db is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"ok": False, "closed": False, "reason": "db_unavailable"},
+            )
+        if body.waive_completion_criteria:
+            row = db.get_flow_run(case_id)
+            criteria = _parse_completion_criteria(row.get("completion_criteria")) if row else []
+            if criteria:
+                reconciliation = [
+                    {"criterion": c, "status": "waived", "reason": note}
+                    for c in criteria
+                ]
+        result = orchestrator.close_case(
+            case_id,
+            actor="operator",
+            criteria_reconciliation=reconciliation,
+        )
+        if not result.get("ok"):
+            reason = result.get("reason")
+            code = 404 if reason and str(reason).startswith("unknown case") else 409
+            if reason == "db_unavailable":
+                code = 503
+            raise HTTPException(status_code=code, detail=result)
+        if result.get("closed"):
+            try:
+                db.append_flow_event(
+                    case_id,
+                    "case.operator_closed",
+                    "operator",
+                    payload={"reason": note},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "event=operator_close_audit_failed flow_run_id=%s err=%s",
+                    case_id,
+                    exc,
+                )
         return JSONResponse(result)
 
     @app.post("/api/sessions/{session_id}/bind", dependencies=[Depends(_require_auth)])

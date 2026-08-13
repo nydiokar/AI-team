@@ -20,6 +20,8 @@ class _StubOrchestrator:
         self.calls = []
         self.brief_calls = []
         self.reconcile_calls = []
+        self.sweep_calls = []
+        self.state_calls = []
         self._brief_ok = True
 
     def arm_wait_group(self, case_id, wait_group_id, condition, member_task_ids, *, actor="manager"):
@@ -35,6 +37,14 @@ class _StubOrchestrator:
     def boot_reconcile_case(self, case_id, *, actor="manager"):
         self.reconcile_calls.append((case_id, actor))
         return {"ok": True, "reconciled": {"resolved": []}, "rearmed": []}
+
+    async def sweep_orphaned_cases(self, *, limit=200, dry_run=False, reason="manager_session_unavailable"):
+        self.sweep_calls.append({"limit": limit, "dry_run": dry_run, "reason": reason})
+        return {"ok": True, "dry_run": dry_run, "scanned": limit, "candidates": [], "cleaned": []}
+
+    async def set_case_state(self, case_id, *, state, actor="operator", reason="operator_state_change"):
+        self.state_calls.append({"case_id": case_id, "state": state, "actor": actor, "reason": reason})
+        return {"ok": True, "changed": True, "status": state}
 
 
 @pytest.fixture
@@ -223,3 +233,60 @@ def test_interrupt_not_flag_gated(monkeypatch):
     client = _kill_client(monkeypatch, orch)
     r = client.post("/api/cases/c1/interrupt", json={}, headers=_auth())
     assert r.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# POST /api/cases/orphans/sweep                                                #
+# --------------------------------------------------------------------------- #
+
+def test_orphan_sweep_requires_auth(client):
+    assert client.post("/api/cases/orphans/sweep", json={}).status_code in (401, 403)
+
+
+def test_orphan_sweep_delegates_to_orchestrator(client, orch):
+    r = client.post(
+        "/api/cases/orphans/sweep",
+        json={"dry_run": True, "limit": 7, "reason": "manual_cleanup"},
+        headers=_auth(),
+    )
+    assert r.status_code == 200
+    assert r.json()["dry_run"] is True
+    assert orch.sweep_calls == [{
+        "limit": 7,
+        "dry_run": True,
+        "reason": "manual_cleanup",
+    }]
+
+
+# --------------------------------------------------------------------------- #
+# POST /api/cases/{id}/state                                                   #
+# --------------------------------------------------------------------------- #
+
+def test_case_state_requires_auth(client):
+    assert client.post("/api/cases/c1/state", json={"state": "open"}).status_code in (401, 403)
+
+
+def test_case_state_delegates_to_orchestrator(client, orch):
+    r = client.post(
+        "/api/cases/c1/state",
+        json={"state": "open", "reason": "recovered"},
+        headers=_auth(),
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "open"
+    assert orch.state_calls == [{
+        "case_id": "c1",
+        "state": "open",
+        "actor": "operator",
+        "reason": "recovered",
+    }]
+
+
+def test_case_state_unknown_case_404(monkeypatch):
+    class _StateFailOrchestrator(_StubOrchestrator):
+        async def set_case_state(self, case_id, *, state, actor="operator", reason="operator_state_change"):
+            return {"ok": False, "reason": "case_not_found"}
+
+    client = _kill_client(monkeypatch, _StateFailOrchestrator())
+    r = client.post("/api/cases/nope/state", json={"state": "open"}, headers=_auth())
+    assert r.status_code == 404

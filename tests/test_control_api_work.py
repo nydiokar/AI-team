@@ -21,6 +21,11 @@ TOKEN = "test-control-token"
 class _StubOrchestrator:
     def __init__(self) -> None:
         self.session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
+        self.close_calls = []
+
+    def close_case(self, flow_run_id, **kwargs):
+        self.close_calls.append((flow_run_id, kwargs))
+        return {"ok": True, "closed": True, "reason": None}
 
 
 @pytest.fixture
@@ -29,10 +34,15 @@ def db(tmp_path):
 
 
 @pytest.fixture
-def client(monkeypatch, db):
+def orch():
+    return _StubOrchestrator()
+
+
+@pytest.fixture
+def client(monkeypatch, db, orch):
     monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
     monkeypatch.setattr(control_api, "_db", lambda: db)
-    return TestClient(control_api.build_control_api(_StubOrchestrator()))
+    return TestClient(control_api.build_control_api(orch))
 
 
 def _auth(token=TOKEN):
@@ -52,6 +62,39 @@ def test_work_is_read_only(client):
     # No mutation verbs on the Work surface.
     assert client.post("/api/work", headers=_auth()).status_code == 405
     assert client.delete("/api/work/x", headers=_auth()).status_code == 405
+
+
+def test_operator_close_waives_completion_criteria(client, db, orch):
+    fid = db.open_case("obj", "sess-1", completion_criteria='["tests green", "deployed"]')
+
+    r = client.post(
+        f"/api/cases/{fid}/operator-close",
+        headers=_auth(),
+        json={"reason": "stale blocked cleanup"},
+    )
+
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "closed": True, "reason": None}
+    assert orch.close_calls == [
+        (
+            fid,
+            {
+                "actor": "operator",
+                "criteria_reconciliation": [
+                    {
+                        "criterion": "tests green",
+                        "status": "waived",
+                        "reason": "stale blocked cleanup",
+                    },
+                    {
+                        "criterion": "deployed",
+                        "status": "waived",
+                        "reason": "stale blocked cleanup",
+                    },
+                ],
+            },
+        )
+    ]
 
 
 # --- list ------------------------------------------------------------------

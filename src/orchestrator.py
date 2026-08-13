@@ -1468,6 +1468,30 @@ class TaskOrchestrator(ITaskOrchestrator):
         if status in ("closed", "cancelled"):
             # A terminal Case cannot be interrupted — it is already done.
             return {"ok": False, "reason": "case_closed", "status": status}
+        if reason == "manager_session_unavailable":
+            manager_session_id = db.case_manager_session_id(case_id)
+            if manager_session_id:
+                manager = self.session_store.get(manager_session_id)
+                if manager is not None:
+                    raw_status = getattr(manager, "status", "")
+                    manager_status = (
+                        raw_status.value
+                        if isinstance(raw_status, SessionStatus)
+                        else str(raw_status)
+                    )
+                    terminal_manager_statuses = {
+                        SessionStatus.CLOSED.value,
+                        SessionStatus.CANCELLED.value,
+                        SessionStatus.PINNED_NODE_OFFLINE.value,
+                    }
+                    if manager_status not in terminal_manager_statuses:
+                        return {
+                            "ok": False,
+                            "reason": "manager_session_active",
+                            "status": status or "open",
+                            "manager_session_id": manager_session_id,
+                            "manager_status": manager_status,
+                        }
 
         # Idempotency: has this Case ALREADY been killed? Any prior operator kill
         # (a flow.interrupted whose reason is NOT the round-cap escalation) counts —
@@ -1524,6 +1548,151 @@ class TaskOrchestrator(ITaskOrchestrator):
                 logger.debug("event=interrupt_case_escalate_failed case=%s err=%s", case_id, e)
 
         return {"ok": True, "cancelled_tasks": cancelled, "already": already, "status": "blocked"}
+
+    async def set_case_state(
+        self,
+        case_id: str,
+        *,
+        state: str,
+        actor: str = "operator",
+        reason: str = "operator_state_change",
+    ) -> Dict[str, Any]:
+        """Operator state control for a Case.
+
+        This is deliberately narrower than ``update_flow_run``: operators can
+        move a non-terminal Case between ``open`` and ``blocked``. ``closed`` and
+        ``cancelled`` remain governed by the existing close/interrupt semantics.
+        """
+        from src.control.db import get_db
+
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable"}
+        row = db.get_flow_run(case_id)
+        if row is None:
+            return {"ok": False, "reason": "case_not_found"}
+
+        current = str(row.get("status") or "").strip().lower()
+        target = (state or "").strip().lower()
+        note = (reason or "operator_state_change").strip()[:256] or "operator_state_change"
+
+        if current in ("closed", "cancelled"):
+            return {"ok": False, "reason": "case_terminal", "status": current}
+        if target in ("open", "active", ""):
+            if current == "":
+                return {"ok": True, "changed": False, "status": "open"}
+            db.update_flow_run(case_id, status=None)
+            db.append_flow_event(
+                case_id,
+                "flow.unblocked" if current == "blocked" else "flow.status_changed",
+                actor,
+                from_state=current or "open",
+                to_state="open",
+                payload={"reason": note},
+            )
+            self._emit_event(
+                "case_state_changed", None,
+                {"case_id": case_id, "from": current or "open", "to": "open"},
+            )
+            return {"ok": True, "changed": True, "status": "open"}
+        if target == "blocked":
+            return await self.interrupt_case(case_id, actor=actor, reason=note[:64])
+        return {"ok": False, "reason": "invalid_state", "status": current or "open"}
+
+    async def sweep_orphaned_cases(
+        self,
+        *,
+        limit: int = 200,
+        dry_run: bool = False,
+        reason: str = "manager_session_unavailable",
+    ) -> Dict[str, Any]:
+        """Operator cleanup for open Cases that have no active Manager session.
+
+        ``close_case`` means "done" and is criteria-gated, so an orphaned Case
+        must not be force-closed. The honest cleanup is the existing operator
+        interrupt path: mark it ``blocked`` (resumable), cancel any in-flight
+        worker tasks, and leave an audit event explaining why it left the active
+        set. Read/scan is bounded by ``limit``; writes only happen when
+        ``dry_run`` is false.
+        """
+        from src.control.db import get_db
+
+        db = get_db()
+        if db is None:
+            return {"ok": False, "reason": "db_unavailable", "dry_run": dry_run}
+
+        scan_limit: int = max(1, min(int(limit or 200), 500))
+        cleanup_reason: str = (reason or "manager_session_unavailable").strip()[:64]
+        if not cleanup_reason:
+            cleanup_reason = "manager_session_unavailable"
+
+        candidates: List[Dict[str, Any]] = []
+        cleaned: List[Dict[str, Any]] = []
+        skipped: int = 0
+        inactive_statuses = {
+            SessionStatus.CLOSED.value,
+            SessionStatus.CANCELLED.value,
+            SessionStatus.PINNED_NODE_OFFLINE.value,
+        }
+
+        for row in db.list_open_cases(limit=scan_limit):
+            case_id = str(row.get("flow_run_id") or "").strip()
+            if not case_id:
+                skipped += 1
+                continue
+            status = str(row.get("status") or "").strip().lower()
+            if status == "blocked":
+                skipped += 1
+                continue
+
+            manager_session_id = db.case_manager_session_id(case_id)
+            orphan_reason: Optional[str] = None
+            manager_status: Optional[str] = None
+            if not manager_session_id:
+                orphan_reason = "missing_manager_link"
+            else:
+                session = self.session_store.get(manager_session_id)
+                if session is None:
+                    orphan_reason = "manager_session_missing"
+                else:
+                    raw_status = getattr(session, "status", "")
+                    manager_status = (
+                        raw_status.value
+                        if isinstance(raw_status, SessionStatus)
+                        else str(raw_status)
+                    )
+                    if manager_status in inactive_statuses:
+                        orphan_reason = f"manager_session_{manager_status}"
+
+            if orphan_reason is None:
+                skipped += 1
+                continue
+
+            candidate = {
+                "case_id": case_id,
+                "manager_session_id": manager_session_id,
+                "manager_status": manager_status,
+                "reason": orphan_reason,
+            }
+            candidates.append(candidate)
+            if dry_run:
+                continue
+
+            result = await self.interrupt_case(
+                case_id,
+                actor="operator",
+                reason=cleanup_reason,
+            )
+            cleaned.append({**candidate, "result": result})
+
+        return {
+            "ok": True,
+            "dry_run": dry_run,
+            "scanned": scan_limit,
+            "candidates": candidates,
+            "cleaned": cleaned,
+            "skipped": skipped,
+        }
 
     # ===========================================================================
     # STALE-BUSY RECONCILER & REMOTE TASK REATTACH  (M3 mesh)
