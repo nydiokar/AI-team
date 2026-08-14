@@ -68,6 +68,23 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-08-14 — SDK stream-json poisoning killed sessions on Horse (PR #92, live).**
+`"Failed to decode JSON: JSON message exceeded maximum buffer size of 1048576 bytes"` — 8 incidents on
+the Windows node since 2026-08-13, each killing the whole persistent session (Manager `a0d17eb4100f`
+among them). NOT an oversized message: across 215 CLI transcripts / 7 days on that box the largest line
+is 149 KB. The SDK transport only skips non-JSON stdout when its buffer is EMPTY, so one unparseable
+frame mid-message makes the buffer un-parseable forever, swallowing every later message until the 1 MB
+ceiling raises out of `receive_messages()`. `12bbed2` (classify) and `adc7610`/#91 (salvage) only made
+that failure prettier. Fix: resyncing stdout reader (drop the provably-garbage prefix when the current
+line parses standalone), `max_buffer_size` 16 MB, CLI stderr captured, and — separate real defect —
+respawn after a dead stream now RESUMES the backend conversation instead of booting empty (a Manager
+silently lost its whole Case memory). Deployed: gateway + Horse worker restarted on `9e197c9`,
+`event=sdk_stream_resync_installed` confirmed in Horse's live log. **Open:** the poison bytes themselves
+are still unidentified — the next occurrence logs them as `event=sdk_stream_poison` (head+tail repr).
+Check for that event before theorising further. Falsified already: hook-stdout inheritance (probe hook
+proved the CLI captures hook stdout out-of-band) and a CLI regression (workers run the SDK-*bundled*
+claude 2.1.191 from June, not the box's 2.1.231 — `CLAUDE_SDK_CLI_PATH` now exists to change that).
+
 **2026-08-10 — Stale open Case cleanup path + live cleanup.**
 Root cause for "open Cases with no active sessions": Case lifecycle is intentionally separate from
 session lifecycle. `SessionService.close_session()` closes only the runtime session; `close_case()` is
