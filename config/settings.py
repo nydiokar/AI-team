@@ -112,6 +112,11 @@ class ClaudeConfig:
     # the one-off `max_turns`.
     sdk_max_turns: Optional[int] = None
     sdk_max_budget_usd: Optional[float] = None
+    # Explicit `claude` binary for the persistent SDK driver. None (default) ⇒
+    # the executable bundled inside the installed claude-agent-sdk, which can be
+    # months older than the CLI on the box. Set CLAUDE_SDK_CLI_PATH per node to
+    # run its workers on a specific CLI without touching the SDK dependency.
+    sdk_cli_path: Optional[str] = None
     # Working directory controls
     base_cwd: Optional[str] = None
     allowed_root: Optional[str] = None
@@ -456,6 +461,14 @@ class Config:
             if smb is not None:
                 b = float(smb)
                 self.claude.sdk_max_budget_usd = b if b > 0 else None
+        except Exception:
+            pass
+        # Per-node CLI override. Only accepted when the path actually exists —
+        # a stale value must not make every session fail to spawn.
+        try:
+            cli = (os.getenv("CLAUDE_SDK_CLI_PATH") or "").strip()
+            if cli:
+                self.claude.sdk_cli_path = cli if Path(cli).exists() else None
         except Exception:
             pass
 

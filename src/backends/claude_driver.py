@@ -515,6 +515,152 @@ def _governor_option_kwargs(
     return kw
 
 
+# ---------------------------------------------------------------------------
+# SDK stdout stream resilience  (stream-poisoning → dead session)
+# ---------------------------------------------------------------------------
+#
+# The SDK transport reads the CLI's stream-json stdout by ACCUMULATING text into
+# a buffer and speculatively json.loads()-ing it, because a chunk boundary can
+# split one JSON message. It only skips a non-JSON line when the buffer is
+# EMPTY. So if anything unparseable ever lands while the buffer holds a partial
+# message, that buffer can never parse again: it keeps growing with every
+# following message until it trips `max_buffer_size` (default 1 MB), at which
+# point the transport raises and our reader loop tears the whole session down.
+#
+# Observed live on the Windows node (8 incidents, 2026-08-13/14): NO CLI
+# transcript on that box has a line anywhere near 1 MB (215 transcripts / 7
+# days, max 149 KB), so the overflow was never a legitimately large message —
+# it was a poisoned buffer swallowing the rest of the stream.
+#
+# Two defects, two fixes, both here:
+#   1. ONE bad frame must not kill a live session. Resync instead: when the
+#      current line parses as a complete message on its own, the accumulated
+#      prefix is provably garbage — drop it, keep the session, and carry on.
+#   2. The poison bytes were never recorded, which is why this stayed
+#      unexplained across deploys. Log a bounded sample of the discarded buffer
+#      so the NEXT occurrence names its own cause.
+# The hard ceiling stays as a memory bound, but discards-and-continues instead
+# of raising, and is raised well above any real message.
+
+_STREAM_BUFFER_BYTES = 16 * 1024 * 1024
+_POISON_SAMPLE_CHARS = 500
+_stream_resync_installed = False
+
+
+def _log_stream_poison(discarded: str, reason: str) -> None:
+    """Record a bounded, escaped sample of stdout text that could never parse.
+
+    ``repr`` on purpose: the whole question is WHICH bytes poison the pipe, so
+    control characters, ANSI escapes and \\r must stay visible."""
+    logger.error(
+        "event=sdk_stream_poison reason=%s discarded_chars=%d head=%s tail=%s",
+        reason,
+        len(discarded),
+        repr(discarded[:_POISON_SAMPLE_CHARS]),
+        repr(discarded[-_POISON_SAMPLE_CHARS:]) if len(discarded) > _POISON_SAMPLE_CHARS else "''",
+    )
+
+
+def _resync_stdout_reader(read_lines, max_buffer_size: int):
+    """Return an async iterator of parsed CLI messages that survives poisoning.
+
+    ``read_lines`` is the transport's raw stdout chunk iterator. Pure w.r.t. the
+    SDK (it only needs *something* async-iterating strings), which is what makes
+    the parse contract unit-testable without spawning a CLI."""
+
+    async def _iter():
+        json_buffer = ""
+        async for chunk in read_lines:
+            chunk_str = chunk.strip()
+            if not chunk_str:
+                continue
+            for raw_line in chunk_str.split("\n"):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                # Non-JSON noise while nothing is half-parsed: skip it, exactly
+                # like the SDK does. This is the case that never hurt anyone.
+                if not json_buffer and not line.startswith("{"):
+                    logger.debug("skipping non-JSON CLI stdout line: %s", line[:200])
+                    continue
+                json_buffer += line
+                try:
+                    data = json.loads(json_buffer)
+                except json.JSONDecodeError:
+                    # The buffer is either a genuine partial message (normal —
+                    # keep accumulating) or poisoned. Distinguish them: if THIS
+                    # line is a complete message by itself, everything before it
+                    # is garbage that would otherwise eat the rest of the stream.
+                    if len(json_buffer) > len(line) and line.startswith("{"):
+                        try:
+                            standalone = json.loads(line)
+                        except json.JSONDecodeError:
+                            standalone = None
+                        if standalone is not None:
+                            _log_stream_poison(json_buffer[: -len(line)], "resync")
+                            json_buffer = ""
+                            yield standalone
+                            continue
+                    if len(json_buffer) > max_buffer_size:
+                        # Memory bound. Drop and resync rather than kill the
+                        # session — the SDK's raise here is what ended turns.
+                        _log_stream_poison(json_buffer, "overflow")
+                        json_buffer = ""
+                    continue
+                json_buffer = ""
+                yield data
+
+    return _iter()
+
+
+def _install_sdk_stream_resync() -> None:
+    """Patch the SDK transport's stdout reader with the resyncing one.
+
+    Patching (rather than injecting a custom Transport) is deliberate and
+    minimal: a custom transport bypasses the SDK's own connect path
+    (resume materialisation, exit-code handling), while this replaces exactly
+    the parse loop that is broken and leaves everything else untouched.
+    Idempotent, and a no-op if the SDK internals ever move — the driver must
+    still boot on an SDK whose private module layout changed."""
+    global _stream_resync_installed
+    if _stream_resync_installed:
+        return
+    try:
+        import anyio
+        from claude_agent_sdk._errors import CLIConnectionError, ProcessError
+        from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+    except Exception:  # pragma: no cover - SDK internals unavailable
+        logger.warning("event=sdk_stream_resync_unavailable", exc_info=True)
+        return
+
+    async def _read_messages_impl(self):  # type: ignore[no-untyped-def]
+        if not self._process or not self._stdout_stream:
+            raise CLIConnectionError("Not connected")
+        try:
+            async for data in _resync_stdout_reader(self._stdout_stream, self._max_buffer_size):
+                yield data
+        except anyio.ClosedResourceError:
+            pass
+        except GeneratorExit:
+            pass
+        # Preserved verbatim from the SDK: a non-zero exit is still an error.
+        try:
+            returncode = await self._process.wait()
+        except Exception:
+            returncode = -1
+        if returncode is not None and returncode != 0:
+            self._exit_error = ProcessError(
+                f"Command failed with exit code {returncode}",
+                exit_code=returncode,
+                stderr="Check stderr output for details",
+            )
+            raise self._exit_error
+
+    SubprocessCLITransport._read_messages_impl = _read_messages_impl
+    _stream_resync_installed = True
+    logger.info("event=sdk_stream_resync_installed max_buffer_bytes=%d", _STREAM_BUFFER_BYTES)
+
+
 class _SDKSession:
     """Holds the live async SDK client and its dedicated asyncio event loop,
     both running in a background daemon thread.
@@ -545,6 +691,7 @@ class _SDKSession:
         setting_sources: Optional[List[str]] = None,
         max_turns: Optional[int] = None,
         max_budget_usd: Optional[float] = None,
+        cli_path: Optional[str] = None,
     ):
         self.session_key = session_key
         self.cwd = cwd
@@ -552,6 +699,10 @@ class _SDKSession:
         self.effort = effort
         self.resume = resume
         self.proc_env = proc_env
+        # Explicit CLI binary for this session. None ⇒ the SDK's bundled
+        # claude executable (the legacy path). Set it to run workers on a
+        # newer CLI than the one pinned inside the installed SDK.
+        self.cli_path = cli_path
         # [A53] Governor ceilings for this SDK session (None ⇒ no cap ⇒ legacy).
         self.max_turns = max_turns
         self.max_budget_usd = max_budget_usd
@@ -585,6 +736,19 @@ class _SDKSession:
         # Sink for autonomous turns (background-job continuations). Set by the
         # driver; called as on_proactive(session_key, outcome) off the loop.
         self._on_proactive: Optional[Any] = None
+
+    def _log_cli_stderr(self, line: str) -> None:
+        """Sink for the CLI subprocess's stderr.
+
+        Nothing captured this before, so every stream-death post-mortem ended at
+        "stderr unavailable". Bounded per line; the CLI is normally silent here,
+        so anything that shows up is diagnostic by definition."""
+        text = (line or "").strip()
+        if not text:
+            return
+        logger.warning(
+            "event=sdk_cli_stderr session_key=%s line=%s", self.session_key, text[:500]
+        )
 
     def start(self) -> None:
         """Boot the background event loop and SDK client."""
@@ -622,11 +786,24 @@ class _SDKSession:
 
         tools = self.allowed_tools if self.allowed_tools is not None else _session_allowed_tools()
 
+        # A single unparseable stdout frame used to kill the whole session (and
+        # silently drop its conversation). Install the resyncing reader before
+        # the client spawns anything.
+        _install_sdk_stream_resync()
+
         options = ClaudeAgentOptions(
             cwd=self.cwd,
             allowed_tools=tools,
             permission_mode="bypassPermissions",
             env={k: v for k, v in self.proc_env.items() if k not in os.environ},
+            # Raised far above any real message (observed max on a live node:
+            # 149 KB) so the ceiling is a memory bound, not a failure mode.
+            max_buffer_size=_STREAM_BUFFER_BYTES,
+            # The CLI's own stderr was never captured, which is why every past
+            # incident report ended at "unavailable". Bounded (WARNING-level,
+            # one line per emission) — this stream is normally silent.
+            stderr=self._log_cli_stderr,
+            **({"cli_path": self.cli_path} if self.cli_path else {}),
             **({"model": self.model} if self.model else {}),
             **({"effort": self.effort} if self.effort else {}),
             **({"resume": self.resume} if self.resume else {}),
@@ -1113,11 +1290,27 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 existing = None
             if existing is not None and existing._closed:
                 # A prior turn force-closed this session (its interrupt never
-                # landed — see _SDKSession.cancel_inflight). Handing it to the
-                # next turn would just fail immediately ("loop is not
-                # running"); start clean instead, same as the legacy driver's
-                # `_register_process` replacing a stale Popen for the same
-                # session key before spawning the next one.
+                # landed — see _SDKSession.cancel_inflight), or its stdout
+                # stream died. Handing it to the next turn would just fail
+                # immediately ("loop is not running"); start clean instead,
+                # same as the legacy driver's `_register_process` replacing a
+                # stale Popen for the same session key before spawning the next
+                # one.
+                #
+                # RESUME the backend conversation on that respawn. Without this
+                # the replacement process booted EMPTY: a Manager that lost its
+                # stream came back with no memory of its own Case and no signal
+                # that anything was dropped. The id is the same one the
+                # effort-change branch above uses.
+                resume_id = (
+                    existing.backend_session_id
+                    or getattr(session, "backend_session_id", "")
+                    or None
+                )
+                logger.warning(
+                    "event=sdk_session_respawn session_key=%s resume=%s",
+                    key, bool(resume_id),
+                )
                 self._sessions.pop(key, None)
                 existing = None
             if existing is None:
@@ -1153,10 +1346,12 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 # config glitch must never block a session boot.
                 gov_max_turns: Optional[int] = None
                 gov_max_budget: Optional[float] = None
+                cli_path: Optional[str] = None
                 try:
                     from config import config as _cfg
                     gov_max_turns = getattr(_cfg.claude, "sdk_max_turns", None)
                     gov_max_budget = getattr(_cfg.claude, "sdk_max_budget_usd", None)
+                    cli_path = getattr(_cfg.claude, "sdk_cli_path", None)
                 except Exception:
                     pass
                 sdk_sess = _SDKSession(
@@ -1167,6 +1362,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                     setting_sources=setting_sources,
                     max_turns=gov_max_turns,
                     max_budget_usd=gov_max_budget,
+                    cli_path=cli_path,
                 )
                 sdk_sess._on_proactive = self._on_proactive
                 sdk_sess.start()
