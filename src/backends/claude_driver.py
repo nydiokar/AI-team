@@ -240,6 +240,12 @@ def _build_salvaged_reply(error_class: str, salvaged: str, error_text: str = "")
             "The agent's progress so far is below — increase CLAUDE_SDK_MAX_TURNS "
             "or split the task to let it finish."
         )
+    elif error_class == "sdk_stream_closed":
+        banner = (
+            "⚠️ The connection to the agent closed before it sent a final summary "
+            "(the backend stream dropped). The agent's progress up to that point is "
+            "below; this retries automatically."
+        )
     else:
         banner = SALVAGE_ERROR_BANNER
     if not salvaged:
@@ -328,10 +334,19 @@ class _PendingTurn:
 
 
 class SDKStreamEndedError(RuntimeError):
-    """The SDK message stream ended before a pending turn emitted ResultMessage."""
+    """The SDK message stream ended before a pending turn emitted ResultMessage.
 
-    def __init__(self, reason: str) -> None:
+    ``salvaged`` carries the agent's accumulated assistant text (if any) that
+    the reader built up before the stream died, and ``raw_ndjson`` the partial
+    NDJSON. These let the caller DELIVER the work the agent already produced
+    instead of dropping it — the stream-close analogue of the ``is_error``
+    ResultMessage salvage path.
+    """
+
+    def __init__(self, reason: str, salvaged: str = "", raw_ndjson: str = "") -> None:
         self.reason = reason
+        self.salvaged = (salvaged or "").strip()
+        self.raw_ndjson = raw_ndjson or ""
         super().__init__(
             "SDK session stream closed before the turn completed "
             f"({reason}; missing terminal ResultMessage)"
@@ -748,9 +763,17 @@ class _SDKSession:
             self._closed = True
         finally:
             # Any turn still waiting when the stream stops will never get a
-            # result — reject it rather than block the worker thread forever.
+            # result — fail it rather than block the worker thread forever, but
+            # carry the agent's accumulated text so the caller can DELIVER the
+            # work it already did instead of dropping it.
             if self._pending:
-                self._fail_pending(SDKStreamEndedError(end_reason))
+                self._fail_pending(
+                    SDKStreamEndedError(
+                        end_reason,
+                        salvaged=acc.last_assistant_text,
+                        raw_ndjson="\n".join(acc.ndjson_lines),
+                    )
+                )
 
     def _outcome_from_result(self, acc: "_TurnAccumulator", msg: Any) -> "TurnOutcome":
         """Build a :class:`TurnOutcome` from the accumulated turn + its terminal
@@ -1243,12 +1266,18 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                     execution_time=elapsed,
                 )
             if isinstance(e, SDKStreamEndedError):
+                # The stream died before a terminal ResultMessage, but the agent
+                # may have already produced text. DELIVER that salvaged work with
+                # an honest banner instead of an empty reply — the same contract
+                # as the is_error ResultMessage path.
+                reply = _build_salvaged_reply("sdk_stream_closed", e.salvaged, err_str)
                 return ExecutionResult(
                     success=False,
-                    output="",
+                    output=reply,
                     errors=[err_str],
                     error_class="sdk_stream_closed",
                     execution_time=elapsed,
+                    raw_stdout=e.raw_ndjson,
                     raw_stderr=f"error_class=sdk_stream_closed\nreason={e.reason}",
                 )
             return ExecutionResult(

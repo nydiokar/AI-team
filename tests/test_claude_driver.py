@@ -32,6 +32,7 @@ from src.backends.claude_driver import (
     TurnOutcome,
     classify_error_text,
     _build_salvaged_reply,
+    SDKStreamEndedError,
 )
 
 
@@ -700,6 +701,53 @@ class TestErrorResultTurn:
         # Even with nothing to salvage, the user gets the actionable banner,
         # not a bare "Prompt is too long".
         assert "Context window full" in result.output
+
+
+class TestStreamClosedTurn:
+    """A stream that closes before a terminal ResultMessage must become a
+    FAILURE that STILL delivers whatever text the agent already produced —
+    never an empty reply. Same contract as the is_error salvage path."""
+
+    def test_stream_close_delivers_salvaged_text(self):
+        drv = ClaudeSDKClientDriver()
+        session = _make_session()
+
+        def fake_send(self_inner, message, **_kw):
+            raise SDKStreamEndedError(
+                "normal EOF from SDK stream",
+                salvaged="I refactored the driver and committed abc123.",
+                raw_ndjson='{"type":"assistant","message":{"usage":{}}}',
+            )
+
+        with patch.object(_SDKSession, "send", fake_send):
+            with patch.object(_SDKSession, "start", lambda self_inner: None):
+                result = drv.start_session(session, "do work")
+
+        assert not result.success
+        assert result.error_class == "sdk_stream_closed"
+        # The agent's real work is DELIVERED, not dropped.
+        assert "I refactored the driver and committed abc123." in result.output
+        # The raw error still travels in errors[] for retry classification.
+        assert any("stream closed" in e.lower() for e in result.errors)
+        # Partial NDJSON is preserved for diagnosis.
+        assert '"type":"assistant"' in result.raw_stdout
+
+    def test_stream_close_without_text_still_gives_banner(self):
+        drv = ClaudeSDKClientDriver()
+        session = _make_session()
+
+        def fake_send(self_inner, message, **_kw):
+            raise SDKStreamEndedError("reader task cancelled")
+
+        with patch.object(_SDKSession, "send", fake_send):
+            with patch.object(_SDKSession, "start", lambda self_inner: None):
+                result = drv.start_session(session, "do work")
+
+        assert not result.success
+        assert result.error_class == "sdk_stream_closed"
+        # Even with nothing salvaged, the user gets an honest banner, not "".
+        assert result.output.strip() != ""
+        assert "closed" in result.output.lower()
 
 
 # ---------------------------------------------------------------------------
