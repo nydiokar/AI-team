@@ -1054,6 +1054,9 @@ class _CapturingSDKSession:
         self.effort = kwargs.get("effort")
         self.setting_sources = kwargs.get("setting_sources")
         self.system_prompt = kwargs.get("system_prompt")
+        self.resume = kwargs.get("resume")
+        self.cli_path = kwargs.get("cli_path")
+        self.backend_session_id = ""
         self._closed = False
         self._on_proactive = None
 
@@ -1086,3 +1089,78 @@ def test_non_role_session_leaves_setting_sources_none(monkeypatch):
     # No role (default path) ⇒ setting_sources stays None (byte-identical boot).
     sess = _drive_and_capture(monkeypatch, (None, None))
     assert sess.setting_sources is None
+
+
+# ---------------------------------------------------------------------------
+# SDK stdout stream resilience. The transport accumulates CLI stdout and
+# speculatively parses it; anything unparseable landing mid-buffer used to make
+# that buffer un-parseable FOREVER, swallowing every later message until it hit
+# the 1 MB ceiling and killed the whole session (8 live incidents on the Windows
+# node, none of whose transcripts held a message above 149 KB).
+# ---------------------------------------------------------------------------
+async def _collect(chunks, max_buffer_size=1024):
+    from src.backends.claude_driver import _resync_stdout_reader
+
+    async def _src():
+        for c in chunks:
+            yield c
+
+    return [m async for m in _resync_stdout_reader(_src(), max_buffer_size)]
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_stream_reader_reassembles_a_message_split_across_chunks():
+    # The whole reason the buffer exists: one message can arrive in pieces.
+    msgs = _run(_collect(['{"type": "assis', 'tant", "n": 1}\n']))
+    assert msgs == [{"type": "assistant", "n": 1}]
+
+
+def test_stream_reader_resyncs_instead_of_dying_on_a_poisoned_buffer():
+    # A partial message followed by noise can never parse. The next complete
+    # frame must still be delivered — and every frame after it. Before the fix
+    # this poisoned buffer ate the rest of the stream and killed the session.
+    msgs = _run(_collect([
+        '{"type": "assistant", "part',        # truncated — never completed
+        'GARBAGE not json\n',                 # poison lands mid-buffer
+        '{"type": "result", "n": 2}\n',
+        '{"type": "result", "n": 3}\n',
+    ]))
+    assert msgs == [{"type": "result", "n": 2}, {"type": "result", "n": 3}]
+
+
+def test_stream_reader_discards_at_the_ceiling_and_keeps_the_session_alive():
+    # The hard bound stays (memory), but it drops the junk and carries on
+    # instead of raising SDKJSONDecodeError out of receive_messages().
+    msgs = _run(_collect(
+        ['{"type": "x", "junk": "' + "A" * 200, "B" * 200, '{"type": "result", "ok": true}\n'],
+        max_buffer_size=100,
+    ))
+    assert msgs == [{"type": "result", "ok": True}]
+
+
+def test_stream_reader_still_skips_non_json_noise_between_messages():
+    msgs = _run(_collect(['[SandboxDebug] chatter\n', '{"type": "result", "n": 1}\n']))
+    assert msgs == [{"type": "result", "n": 1}]
+
+
+def test_respawn_after_a_dead_stream_resumes_the_backend_conversation(monkeypatch):
+    # A session whose stream died is replaced on the next turn. It MUST resume
+    # the backend conversation — booting empty silently wiped a Manager's memory
+    # of its own Case with no signal that anything was lost.
+    import src.backends.claude_driver as cd
+
+    monkeypatch.setattr(cd, "_SDKSession", _CapturingSDKSession)
+    driver = cd.ClaudeSDKClientDriver()
+    monkeypatch.setattr(driver, "_role_boot", lambda session: (None, None))
+    session = _make_session(repo_path="/repo")
+
+    live = driver._get_or_create(session, model=None, effort=None, proc_env={})
+    live.backend_session_id = "backend-abc"
+    live._closed = True  # stream died
+
+    respawned = driver._get_or_create(session, model=None, effort=None, proc_env={})
+    assert respawned is not live
+    assert respawned.resume == "backend-abc"
