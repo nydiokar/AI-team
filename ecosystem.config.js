@@ -14,6 +14,17 @@ const inheritedPath = process.env.PATH || process.env.Path || process.env.path |
 const pathParts = [nodeDir, npmDir, inheritedPath].filter(Boolean);
 const workerPath = isWindows ? pathParts.join(path.delimiter) : inheritedPath;
 
+// Env-var prefixes PM2 must NOT capture from the launching shell. See the
+// ai-team-worker block for the full rationale; short version: `pm2 save` writes
+// the captured environment to ~/.pm2/dump.pm2 in PLAINTEXT, so anything a
+// .env-sourced shell held leaks there and is then replayed on every resurrect.
+// Every app loads .env itself, so nothing here needs to be inherited.
+const SECRET_ENV_PREFIXES = [
+  "WORKER_", "MESH_", "CONTROLLER_", "DASHBOARD_", "CLAUDE_", "CLAUDECODE",
+  "VAPID_", "SOLANA_", "SOVA_", "TELEGRAM_", "ANTHROPIC_", "OPENAI_",
+  "GITHUB_", "GH_", "AWS_", "VSCODE_", "WT_", "TERM_PROGRAM",
+];
+
 module.exports = {
   apps: [
     // ---------------------------------------------------------------
@@ -29,10 +40,13 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
+      windowsHide: true,
       min_uptime: "10s",
       max_restarts: 20,
       restart_delay: 2000,
       kill_timeout: 15000,
+      // See the ai-team-worker block below for why these two exist.
+      filter_env: SECRET_ENV_PREFIXES,
       env: {
         PYTHONUNBUFFERED: "1",
         AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
@@ -78,6 +92,8 @@ module.exports = {
       max_restarts: 20,
       restart_delay: 2000,
       kill_timeout: 10000,   // no active execution to drain; just stop serving
+      windowsHide: true,
+      filter_env: SECRET_ENV_PREFIXES,
       env: {
         PYTHONUNBUFFERED: "1",
         AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
@@ -101,6 +117,23 @@ module.exports = {
     //   WORKER_BACKENDS
     // Optional:
     //   WORKER_API_PORT (9001), WORKER_MAX_CONCURRENT (2), WORKER_PROJECTS_ROOT
+    //
+    // windowsHide: PM2 spawns `interpreter` (the venv python.exe) directly. When
+    // the PM2 daemon itself has no console — i.e. after a reboot, when the "PM2
+    // Resurrect" scheduled task runs pm2-ressurect.bat — that child ALLOCATES ITS
+    // OWN console and a stray terminal window pops up on the desktop, titled with
+    // the venv interpreter path. Started by hand from a terminal it inherits that
+    // console instead and stays invisible, which is why this only shows up on
+    // boot-resurrect. windowsHide suppresses the allocation. No-op off Windows.
+    //
+    // filter_env: PM2 snapshots the FULL environment of whatever shell started the
+    // app, and `pm2 save` writes that snapshot into ~/.pm2/dump.pm2 verbatim. A
+    // shell that had .env sourced therefore leaks every secret it held (tokens,
+    // private keys) into that file as plaintext, and `pm2 resurrect` then replays
+    // those STALE values on every boot. Since agent.py:main() calls load_dotenv()
+    // with override=False, inherited vars silently WIN over .env — so a stale dump
+    // both leaks secrets and shadows the real config. Dropping these prefixes at
+    // spawn keeps them out of the snapshot; .env stays the single source of truth.
     // ---------------------------------------------------------------
     {
       name: "ai-team-worker",
@@ -112,10 +145,12 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
+      windowsHide: true,
       min_uptime: "10s",
       max_restarts: 10,
       restart_delay: 5000,
       kill_timeout: 35000,   // > 30s drain window in agent.py
+      filter_env: SECRET_ENV_PREFIXES,
       env: {
         PYTHONUNBUFFERED: "1",
         AI_TEAM_ENV_FILE: path.join(__dirname, ".env"),
