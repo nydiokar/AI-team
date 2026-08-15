@@ -2,8 +2,33 @@ const path = require("path");
 const fs = require("fs");
 
 const isWindows = process.platform === "win32";
+// CONSOLE-WINDOW FIX (2026-08-15), part 2 — see the windowsHide note further down
+// for part 1. windowsHide only covers the process PM2 spawns DIRECTLY, and that is
+// not the process that was creating the window.
+//
+// Measured chain (Win32_Process, worker under PM2):
+//   node.exe Daemon.js
+//     └─ .venv\Scripts\python.exe worker_main.py      pid 23804  ← PM2's child, hidden by windowsHide
+//         └─ Python312\python.exe worker_main.py      pid 28524  ← GRANDCHILD, owns the conhost
+//
+// A venv's python.exe is a ~270KB launcher shim: it resolves `home` from
+// pyvenv.cfg and RE-EXECS the base interpreter. PM2 cannot pass windowsHide to
+// that grandchild, so Windows gives it a console and a black window appears on
+// the desktop. It only shows up after a boot-resurrect because when the worker is
+// started by hand the grandchild inherits the caller's existing console instead.
+// This is the same class of bug (and the same fix shape) as the tsx re-exec
+// documented in tokens_ingest/ and trader/ecosystem.config.cjs.
+//
+// pythonw.exe is the GUI-subsystem build of the interpreter: it CANNOT allocate a
+// console, and its re-exec grandchild is pythonw.exe too, so no window can appear
+// at any depth. Verified: prefix still resolves to .venv, so venv packages load
+// normally. stdout/stderr still reach PM2's log files (they are redirected pipes,
+// which pythonw honours) — only the console device is absent.
+const venvPythonw = path.join(__dirname, ".venv", "Scripts/pythonw.exe");
 const venvPython = path.join(__dirname, ".venv", isWindows ? "Scripts/python.exe" : "bin/python");
-const python = process.env.PM2_PYTHON || (fs.existsSync(venvPython) ? venvPython : (isWindows ? "python" : "python3"));
+const python = process.env.PM2_PYTHON
+  || (isWindows && fs.existsSync(venvPythonw) ? venvPythonw : "")
+  || (fs.existsSync(venvPython) ? venvPython : (isWindows ? "python" : "python3"));
 const defaultNodePath = isWindows ? "C:/Program Files/nodejs/node.exe" : "";
 const nodePath = process.env.CODEX_NODE_PATH
   || process.env.NODE_EXE
