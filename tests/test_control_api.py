@@ -7,6 +7,7 @@ SessionService over an isolated store (conftest), plus the real DB for
 tasks/nodes — mirroring test_dashboard.py's coverage on the new in-process surface.
 """
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 
 from src.control import control_api
@@ -219,8 +220,12 @@ def test_tasks_and_nodes_endpoints_return_lists(client):
     assert rn.status_code == 200 and isinstance(rn.json()["nodes"], list)
 
 
-def test_quota_windows_endpoint_returns_disabled_shape_when_coordinator_not_constructed(client):
-    r = client.get("/api/quota-windows", headers=_auth())
+@pytest.mark.asyncio
+async def test_quota_windows_endpoint_returns_disabled_shape_when_coordinator_not_constructed(monkeypatch, orch):
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    transport = httpx.ASGITransport(app=control_api.build_control_api(orch))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/api/quota-windows", headers=_auth())
 
     assert r.status_code == 200
     assert r.json() == {
@@ -229,10 +234,12 @@ def test_quota_windows_endpoint_returns_disabled_shape_when_coordinator_not_cons
         "adapters": [],
         "buckets": [],
         "latest_snapshots": [],
+        "window_states": [],
     }
 
 
-def test_quota_windows_endpoint_reads_live_coordinator(client, orch):
+@pytest.mark.asyncio
+async def test_quota_windows_endpoint_reads_live_coordinator(monkeypatch, orch):
     class FakeCoordinator:
         def read_status(self):
             return {
@@ -244,8 +251,10 @@ def test_quota_windows_endpoint_reads_live_coordinator(client, orch):
             }
 
     orch.quota_coordinator = FakeCoordinator()
-
-    r = client.get("/api/quota-windows", headers=_auth())
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    transport = httpx.ASGITransport(app=control_api.build_control_api(orch))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/api/quota-windows", headers=_auth())
 
     assert r.status_code == 200
     assert r.json()["enabled"] is True

@@ -418,12 +418,43 @@ export interface RawQuotaSnapshot {
   created_at: string;
 }
 
+export interface RawQuotaWindowState {
+  provider: string;
+  principal_hash: string;
+  bucket_id: string;
+  telemetry_state: string;
+  telemetry_quality: string;
+  window_semantics: string;
+  classification_status: string;
+  used_percent: number | null;
+  observed_at: string | null;
+  window_start_at: string | null;
+  window_start_inferred_at: string | null;
+  window_start_source: string;
+  window_end_at: string | null;
+  active_session_state: "true" | "false" | "unknown" | string;
+  window_known: boolean;
+  automation_ready: boolean;
+  blockers: string[];
+  observed_reset_count: number;
+  current_reset_observed_since: string | null;
+  last_reset_change_at: string | null;
+  reset_boundary_evidence: Array<{
+    reset_at: string;
+    first_seen_at: string;
+    last_seen_at: string;
+    first_used_percent: number | null;
+    last_used_percent: number | null;
+  }>;
+}
+
 export interface RawQuotaWindowsResponse {
   enabled: boolean;
   mode: "observe_only" | string;
   adapters: RawQuotaAdapterStatus[];
   buckets: RawQuotaBucket[];
   latest_snapshots: RawQuotaSnapshot[];
+  window_states?: RawQuotaWindowState[];
 }
 
 // GET /api/approvals → { approvals: RawApproval[] } (Move H).

@@ -16,6 +16,7 @@ _MANAGED_ENV_KEYS = {
     "CLAUDE_DEFAULT_MODEL",
     "CLAUDE_DRIVER_TYPE",
     "CLAUDE_MAX_TURNS",
+    "CLAUDE_SDK_CLI_PATH",
     "CLAUDE_SDK_MAX_BUDGET_USD",
     "CLAUDE_SDK_MAX_TURNS",
     "CLAUDE_SKIP_PERMISSIONS",
@@ -322,8 +323,7 @@ class QuotaConfig:
     observe_interval_sec: int = 300        # QUOTA_OBSERVE_INTERVAL_SEC
     observe_max_interval_sec: int = 21600  # QUOTA_OBSERVE_MAX_INTERVAL_SEC
     reset_probe_lead_sec: int = 900        # QUOTA_RESET_PROBE_LEAD_SEC
-    claude_status_json_path: str = "state/claude_statusline_latest.json"  # CLAUDE_STATUS_LINE_JSON_PATH
-    claude_status_command: str = ""        # CLAUDE_STATUS_LINE_COMMAND
+    claude_get_usage_timeout_sec: float = 60.0  # CLAUDE_GET_USAGE_TIMEOUT_SEC
     claude_principal_key: str = ""         # CLAUDE_QUOTA_PRINCIPAL_KEY
     digest_telegram_enabled: bool = False  # QUOTA_DIGEST_TELEGRAM_ENABLED
     digest_interval_sec: int = 3600        # QUOTA_DIGEST_INTERVAL_SEC
@@ -645,15 +645,9 @@ class Config:
         except Exception:
             pass
         try:
-            v = os.getenv("CLAUDE_STATUS_LINE_JSON_PATH")
-            if v:
-                self.quota.claude_status_json_path = v
-        except Exception:
-            pass
-        try:
-            v = os.getenv("CLAUDE_STATUS_LINE_COMMAND")
-            if v:
-                self.quota.claude_status_command = v
+            v = os.getenv("CLAUDE_GET_USAGE_TIMEOUT_SEC")
+            if v is not None:
+                self.quota.claude_get_usage_timeout_sec = max(1.0, float(v))
         except Exception:
             pass
         try:

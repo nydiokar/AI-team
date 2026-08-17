@@ -11,7 +11,6 @@ import hashlib
 import json
 import logging
 import os
-import shlex
 import sqlite3
 import threading
 import time
@@ -23,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Protocol
 
 logger = logging.getLogger(__name__)
+_SNAPSHOT_STALE_AFTER = timedelta(minutes=15)
 
 
 class WindowSemantics(Enum):
@@ -287,6 +287,7 @@ class QuotaWindowStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._write_lock = threading.Lock()
+        self._journal_initialized = False
         self._init_schema()
 
     def _conn(self) -> sqlite3.Connection:
@@ -294,7 +295,9 @@ class QuotaWindowStore:
         if conn is None:
             conn = sqlite3.connect(str(self._path), check_same_thread=False, isolation_level=None)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL;")
+            if not self._journal_initialized:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                self._journal_initialized = True
             conn.execute("PRAGMA busy_timeout=5000;")
             conn.execute("PRAGMA foreign_keys=ON;")
             self._local.conn = conn
@@ -480,7 +483,24 @@ class QuotaWindowStore:
         ).fetchone()
         return dict(row) if row else None
 
-    def status(self) -> Dict[str, Any]:
+    def latest_usable_snapshot(self, provider: str, principal_hash: str, bucket_id: str) -> Optional[dict]:
+        row = self._conn().execute(
+            """
+            SELECT * FROM snapshots
+            WHERE provider = ?
+              AND principal_hash = ?
+              AND bucket_id = ?
+              AND used_percent IS NOT NULL
+              AND reset_at IS NOT NULL
+              AND telemetry_quality IN ('authoritative', 'partial')
+            ORDER BY observed_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (provider, principal_hash, bucket_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def status(self, *, now: Optional[datetime] = None) -> Dict[str, Any]:
         conn = self._conn()
         adapters = [dict(r) for r in conn.execute("SELECT * FROM adapter_status ORDER BY provider").fetchall()]
         buckets = [dict(r) for r in conn.execute("SELECT * FROM buckets ORDER BY provider, bucket_id").fetchall()]
@@ -502,7 +522,179 @@ class QuotaWindowStore:
                 """
             ).fetchall()
         ]
-        return {"adapters": adapters, "buckets": buckets, "latest_snapshots": snapshots}
+        window_states = _build_window_states(conn, buckets=buckets, snapshots=snapshots, now=now or utc_now())
+        return {"adapters": adapters, "buckets": buckets, "latest_snapshots": snapshots, "window_states": window_states}
+
+
+def _row_key(row: dict) -> tuple[str, str, str]:
+    return (str(row.get("provider") or ""), str(row.get("principal_hash") or ""), str(row.get("bucket_id") or ""))
+
+
+def _reset_history(conn: sqlite3.Connection, *, provider: str, principal_hash: str, bucket_id: str, reset_at: str | None) -> dict:
+    rows = conn.execute(
+        """
+        SELECT reset_at, observed_at, used_percent
+        FROM snapshots
+        WHERE provider = ?
+          AND principal_hash = ?
+          AND bucket_id = ?
+          AND reset_at IS NOT NULL
+        ORDER BY observed_at ASC, created_at ASC
+        """,
+        (provider, principal_hash, bucket_id),
+    ).fetchall()
+    reset_windows: dict[str, dict] = {}
+    for row in rows:
+        key = str(row["reset_at"])
+        item = reset_windows.setdefault(
+            key,
+            {
+                "reset_at": key,
+                "first_seen_at": row["observed_at"],
+                "last_seen_at": row["observed_at"],
+                "first_used_percent": row["used_percent"],
+                "last_used_percent": row["used_percent"],
+            },
+        )
+        item["last_seen_at"] = row["observed_at"]
+        item["last_used_percent"] = row["used_percent"]
+    history = sorted(reset_windows.values(), key=lambda item: (str(item["last_seen_at"]), str(item["reset_at"])), reverse=True)
+    current_since = None
+    for item in history:
+        if item["reset_at"] == reset_at:
+            current_since = item["first_seen_at"]
+            break
+    observed_count = len(history)
+    return {
+        "observed_reset_count": observed_count,
+        "current_reset_observed_since": current_since,
+        "last_reset_change_at": history[0]["first_seen_at"] if observed_count > 1 else None,
+        "reset_boundary_evidence": history,
+    }
+
+
+def _window_state_for(bucket: Optional[dict], snapshot: dict, *, now: datetime, history: dict) -> dict:
+    provider = str(snapshot.get("provider") or (bucket.get("provider") if bucket else ""))
+    principal_hash = str(snapshot.get("principal_hash") or (bucket.get("principal_hash") if bucket else ""))
+    bucket_id = str(snapshot.get("bucket_id") or (bucket.get("bucket_id") if bucket else ""))
+    quality = str(snapshot.get("telemetry_quality") or (bucket.get("telemetry_quality") if bucket else TelemetryQuality.UNAVAILABLE.value))
+    semantics = str(bucket.get("window_semantics") if bucket else WindowSemantics.UNKNOWN.value)
+    reset_at = normalize_utc(snapshot.get("reset_at"))
+    observed_at = normalize_utc(snapshot.get("observed_at"))
+    used_percent = snapshot.get("used_percent")
+    reason = str(snapshot.get("unavailable_reason") or "")
+    duration = snapshot.get("window_duration_seconds") or (bucket.get("window_duration_seconds") if bucket else None)
+    active_session_state = "unknown"
+    blockers: list[str] = []
+
+    observation_stale = observed_at is not None and now - observed_at > _SNAPSHOT_STALE_AFTER
+
+    if quality == TelemetryQuality.UNSUPPORTED.value:
+        telemetry_state = "unsupported"
+        blockers.append("telemetry_unsupported")
+    elif quality in (TelemetryQuality.UNAVAILABLE.value, TelemetryQuality.MALFORMED.value):
+        telemetry_state = quality
+        blockers.append(f"telemetry_{quality}")
+    elif observation_stale:
+        telemetry_state = "stale"
+        blockers.append("observation_stale")
+    elif reason == "reset_at_stale" or reason.startswith("claude_get_usage_stale_after_") or _is_stale_reset(reset_at, now):
+        telemetry_state = "stale"
+        blockers.append(reason or "reset_at_stale")
+    elif reset_at is None or used_percent is None:
+        telemetry_state = "partial"
+        blockers.append("telemetry_incomplete")
+    else:
+        telemetry_state = "current"
+
+    if telemetry_state != "current" and "telemetry_not_current" not in blockers:
+        blockers.append("telemetry_not_current")
+    if quality != TelemetryQuality.AUTHORITATIVE.value:
+        blockers.append("telemetry_not_authoritative")
+    if semantics == WindowSemantics.UNKNOWN.value:
+        blockers.append("window_semantics_unclassified")
+    elif semantics != WindowSemantics.ANCHORED.value:
+        blockers.append(f"window_semantics_{semantics}")
+    if not principal_hash or principal_hash.endswith(":unknown"):
+        blockers.append("principal_unknown")
+    if active_session_state == "unknown":
+        blockers.append("active_session_state_unknown")
+    elif active_session_state == "true":
+        blockers.append("active_session_active")
+
+    window_start_inferred_at = None
+    if semantics == WindowSemantics.ANCHORED.value and reset_at is not None and isinstance(duration, int):
+        window_start_inferred_at = utc_iso(reset_at - timedelta(seconds=duration))
+
+    classification_status = _classification_status(semantics=semantics, observed_reset_count=int(history.get("observed_reset_count") or 0))
+    unique_blockers = list(dict.fromkeys(blockers))
+    window_known = (
+        telemetry_state == "current"
+        and quality == TelemetryQuality.AUTHORITATIVE.value
+        and semantics == WindowSemantics.ANCHORED.value
+        and window_start_inferred_at is not None
+        and reset_at is not None
+    )
+    automation_ready = (
+        telemetry_state == "current"
+        and quality == TelemetryQuality.AUTHORITATIVE.value
+        and semantics == WindowSemantics.ANCHORED.value
+        and principal_hash != ""
+        and active_session_state == "false"
+        and not unique_blockers
+    )
+    return {
+        "provider": provider,
+        "principal_hash": principal_hash,
+        "bucket_id": bucket_id,
+        "telemetry_state": telemetry_state,
+        "telemetry_quality": quality,
+        "window_semantics": semantics,
+        "classification_status": classification_status,
+        "used_percent": used_percent,
+        "observed_at": utc_iso(observed_at) or None,
+        "window_start_at": window_start_inferred_at,
+        "window_start_inferred_at": window_start_inferred_at,
+        "window_start_source": "inferred_from_reset_duration" if window_start_inferred_at else "unknown",
+        "window_end_at": utc_iso(reset_at) or None,
+        "active_session_state": active_session_state,
+        "window_known": window_known,
+        "automation_ready": automation_ready,
+        "blockers": unique_blockers,
+        **history,
+    }
+
+
+def _classification_status(*, semantics: str, observed_reset_count: int) -> str:
+    if semantics == WindowSemantics.ANCHORED.value:
+        return "proven_anchored"
+    if semantics == WindowSemantics.FIXED.value:
+        return "proven_fixed"
+    if semantics == WindowSemantics.SLIDING.value:
+        return "proven_sliding"
+    if observed_reset_count >= 3:
+        return "eligible_for_manual_probe"
+    if observed_reset_count > 0:
+        return "collecting"
+    return "unknown"
+
+
+def _build_window_states(conn: sqlite3.Connection, *, buckets: list[dict], snapshots: list[dict], now: datetime) -> list[dict]:
+    bucket_by_key = {_row_key(bucket): bucket for bucket in buckets}
+    states: list[dict] = []
+    for snapshot in snapshots:
+        key = _row_key(snapshot)
+        bucket = bucket_by_key.get(key)
+        reset_at = snapshot.get("reset_at")
+        history = _reset_history(
+            conn,
+            provider=key[0],
+            principal_hash=key[1],
+            bucket_id=key[2],
+            reset_at=str(reset_at) if reset_at else None,
+        )
+        states.append(_window_state_for(bucket, snapshot, now=now, history=history))
+    return states
 
 
 class UnsupportedQuotaAdapter:
@@ -550,55 +742,61 @@ class UnsupportedQuotaAdapter:
         )
 
 
-class ClaudeStatusLineQuotaAdapter:
-    """Observe Claude Code quota from captured status-line JSON.
-
-    Claude Code passes status-line data to the configured statusLine command on
-    stdin. This adapter reads the latest captured JSON (or an operator-provided
-    read command) and never starts a Claude model turn.
-    """
+class ClaudeGetUsageQuotaAdapter:
+    """Canonical Claude subscription quota reader via SDK ``get_usage`` control request."""
 
     provider = "claude"
-    adapter_version = "claude-statusline-v1"
-    schema_version = "claude-statusline-rate-limits-v1"
+    adapter_version = "claude-get-usage-v1"
+    schema_version = "claude-get-usage-rate-limits-v1"
 
     def __init__(
         self,
         *,
-        status_json_path: str | Path = "state/claude_statusline_latest.json",
-        status_command: str = "",
         principal_key: str = "",
-        timeout_sec: float = 2.0,
+        cwd: str | Path | None = None,
+        cli_path: str | Path | None = None,
+        timeout_sec: float = 60.0,
+        cache_ttl_sec: float = 60.0,
         now: Callable[[], datetime] = utc_now,
+        read_usage: Optional[Callable[[], Any]] = None,
+        claude_code_version_value: str | None = None,
     ) -> None:
-        self.status_json_path = Path(status_json_path)
-        self.status_command = status_command.strip()
         self.principal_key = principal_key.strip()
-        self.timeout_sec = max(0.1, float(timeout_sec))
+        self.cwd = Path(cwd).resolve() if cwd is not None else None
+        self.cli_path = Path(cli_path) if cli_path is not None else None
+        self.timeout_sec = max(1.0, float(timeout_sec))
+        self.cache_ttl_sec = max(1.0, float(cache_ttl_sec))
         self._now = now
-        self._cached_status: Optional[Dict[str, Any]] = None
-        self._cached_status_at: float = 0.0
+        self._read_usage = read_usage
+        self._claude_code_version_value = claude_code_version_value
+        self._cached_snapshot: Any | None = None
+        self._cached_snapshot_at: float = 0.0
+        self._last_successful_snapshot: Any | None = None
         self.model_invocations = 0
 
     async def identify_principal(self) -> QuotaPrincipal:
         key = self.principal_key or os.getenv("CLAUDE_QUOTA_PRINCIPAL_KEY", "").strip()
-        label = key or "principal_unknown"
+        cached = await self._read_snapshot()
+        subscription = getattr(cached, "subscription_type", None)
+        label = key or (f"claude-{subscription}" if subscription else "principal_unknown")
         return QuotaPrincipal(
             provider=self.provider,
-            principal_hash=_principal_hash(self.provider, key),
+            principal_hash=_principal_hash(self.provider, key or label),
             label=label,
-            authentication_mode="claude_code_status_line",
+            authentication_mode="claude_code_get_usage",
         )
 
     async def discover_buckets(self) -> list[QuotaBucket]:
         principal = await self.identify_principal()
-        return [
+        snapshot = await self._read_snapshot()
+        buckets: list[QuotaBucket] = [
             QuotaBucket(
                 provider=self.provider,
                 bucket_id="five_hour",
                 bucket_name="Claude 5-hour session limit",
                 principal_hash=principal.principal_hash,
-                telemetry_quality=TelemetryQuality.PARTIAL,
+                window_semantics=WindowSemantics.ANCHORED,
+                telemetry_quality=TelemetryQuality.AUTHORITATIVE,
                 window_duration_seconds=5 * 60 * 60,
             ),
             QuotaBucket(
@@ -606,59 +804,88 @@ class ClaudeStatusLineQuotaAdapter:
                 bucket_id="seven_day",
                 bucket_name="Claude 7-day rolling limit",
                 principal_hash=principal.principal_hash,
-                telemetry_quality=TelemetryQuality.PARTIAL,
+                window_semantics=WindowSemantics.ANCHORED,
+                telemetry_quality=TelemetryQuality.AUTHORITATIVE,
                 window_duration_seconds=7 * 24 * 60 * 60,
             ),
         ]
+        for limit in getattr(snapshot, "scoped_limits", []):
+            if getattr(limit, "kind", None) != "weekly_scoped":
+                continue
+            display = getattr(limit, "model_display_name", None) or "scoped"
+            bucket_id = f"weekly_scoped:{_slug(display)}"
+            buckets.append(
+                QuotaBucket(
+                    provider=self.provider,
+                    bucket_id=bucket_id,
+                    bucket_name=f"Claude weekly scoped limit: {display}",
+                    principal_hash=principal.principal_hash,
+                    window_semantics=WindowSemantics.ANCHORED,
+                    telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+                    window_duration_seconds=7 * 24 * 60 * 60,
+                )
+            )
+        return buckets
 
     async def observe(self, bucket_id: str) -> QuotaSnapshot:
         principal = await self.identify_principal()
-        try:
-            status = await self._read_status_json()
-        except QuotaAdapterError as e:
+        snapshot = await self._read_snapshot()
+        snapshot_status = getattr(snapshot, "status", None)
+        if snapshot_status not in ("valid", "stale"):
             return QuotaSnapshot(
                 provider=self.provider,
                 principal_hash=principal.principal_hash,
                 bucket_id=bucket_id,
-                observed_at=self._now(),
-                telemetry_quality=e.quality,
-                raw_status="unavailable",
-                unavailable_reason=e.reason,
-            )
-
-        rate_limits = status.get("rate_limits") if isinstance(status, dict) else None
-        bucket = rate_limits.get(bucket_id) if isinstance(rate_limits, dict) else None
-        if not isinstance(bucket, dict):
-            return QuotaSnapshot(
-                provider=self.provider,
-                principal_hash=principal.principal_hash,
-                bucket_id=bucket_id,
-                observed_at=self._now(),
+                observed_at=getattr(snapshot, "observed_at", None) or self._now(),
                 telemetry_quality=TelemetryQuality.UNAVAILABLE,
-                raw_status="status_line",
-                unavailable_reason="rate_limit_bucket_absent",
+                raw_status=self._raw_status(snapshot),
+                unavailable_reason=getattr(snapshot, "unavailable_reason", "") or "claude_get_usage_unavailable",
             )
 
-        used_percent = _coerce_percent(bucket.get("used_percentage"))
-        reset_at = _coerce_reset_at(bucket.get("resets_at"))
-        observed_at = self._now()
-        reason = ""
-        if _is_stale_reset(reset_at, observed_at):
+        used_percent: float | None
+        reset_at: datetime | None
+        duration: int | None
+        if bucket_id == "five_hour":
+            used_percent = getattr(snapshot, "five_hour_utilization", None)
+            reset_at = getattr(snapshot, "five_hour_resets_at", None)
+            duration = 5 * 60 * 60
+        elif bucket_id == "seven_day":
+            used_percent = getattr(snapshot, "seven_day_utilization", None)
+            reset_at = getattr(snapshot, "seven_day_resets_at", None)
+            duration = 7 * 24 * 60 * 60
+        elif bucket_id.startswith("weekly_scoped:"):
+            limit = self._scoped_limit(snapshot, bucket_id)
+            used_percent = getattr(limit, "percent", None) if limit is not None else None
+            reset_at = getattr(limit, "resets_at", None) if limit is not None else None
+            duration = 7 * 24 * 60 * 60
+        else:
+            used_percent = None
             reset_at = None
+            duration = None
+
+        reason = ""
+        quality = TelemetryQuality.AUTHORITATIVE
+        if snapshot_status == "stale":
+            quality = TelemetryQuality.PARTIAL
+            reason = getattr(snapshot, "unavailable_reason", "") or "claude_get_usage_stale_after_failure"
+        if used_percent is None or reset_at is None:
+            quality = TelemetryQuality.PARTIAL
+            reason = "quota_bucket_incomplete"
+        if _is_stale_reset(reset_at, getattr(snapshot, "observed_at", self._now())):
+            reset_at = None
+            quality = TelemetryQuality.PARTIAL
             reason = "reset_at_stale"
-        quality = TelemetryQuality.AUTHORITATIVE if used_percent is not None and reset_at is not None else TelemetryQuality.PARTIAL
-        limit_reached = None if used_percent is None else used_percent >= 100.0
         return QuotaSnapshot(
             provider=self.provider,
             principal_hash=principal.principal_hash,
             bucket_id=bucket_id,
-            observed_at=observed_at,
+            observed_at=getattr(snapshot, "observed_at", None) or self._now(),
             telemetry_quality=quality,
             used_percent=used_percent,
             reset_at=reset_at,
-            limit_reached=limit_reached,
-            window_duration_seconds=5 * 60 * 60 if bucket_id == "five_hour" else 7 * 24 * 60 * 60,
-            raw_status="status_line",
+            limit_reached=None if used_percent is None else used_percent >= 100.0,
+            window_duration_seconds=duration,
+            raw_status=self._raw_status(snapshot),
             unavailable_reason=reason,
         )
 
@@ -672,57 +899,86 @@ class ClaudeStatusLineQuotaAdapter:
             schema_version=self.schema_version,
             can_observe=True,
             supports_active_session_detection=False,
-            telemetry_quality=TelemetryQuality.PARTIAL,
-            notes="reads captured Claude Code status-line JSON; no model request",
+            telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            notes="canonical server-backed Claude Code get_usage control request",
         )
 
-    async def _read_status_json(self) -> Dict[str, Any]:
+    async def _read_snapshot(self) -> Any:
         now = time.monotonic()
-        if self._cached_status is not None and now - self._cached_status_at < 1.0:
-            return self._cached_status
-        if self.status_command:
-            data = await self._read_status_command()
-            self._cached_status = data
-            self._cached_status_at = now
-            return data
+        if self._cached_snapshot is not None and now - self._cached_snapshot_at < self.cache_ttl_sec:
+            return self._cached_snapshot
         try:
-            raw = self.status_json_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            raise QuotaAdapterError("claude_status_line_json_missing", quality=TelemetryQuality.UNAVAILABLE)
-        except OSError:
-            raise QuotaAdapterError("claude_status_line_json_unreadable", quality=TelemetryQuality.UNAVAILABLE)
-        data = self._parse_status_json(raw)
-        self._cached_status = data
-        self._cached_status_at = now
-        return data
-
-    async def _read_status_command(self) -> Dict[str, Any]:
-        args = shlex.split(self.status_command)
-        if not args:
-            raise QuotaAdapterError("claude_status_line_command_empty", quality=TelemetryQuality.UNAVAILABLE)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            from src.services.claude_usage_control import (
+                claude_code_version,
+                normalize_claude_quota,
+                read_claude_usage_raw_with_new_client,
             )
-            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout_sec)
-        except asyncio.TimeoutError:
-            raise QuotaAdapterError("claude_status_line_command_timeout", quality=TelemetryQuality.UNAVAILABLE)
-        except OSError:
-            raise QuotaAdapterError("claude_status_line_command_failed", quality=TelemetryQuality.UNAVAILABLE)
-        if proc.returncode != 0:
-            raise QuotaAdapterError("claude_status_line_command_nonzero", quality=TelemetryQuality.UNAVAILABLE)
-        return self._parse_status_json(stdout.decode("utf-8", errors="replace"))
 
-    def _parse_status_json(self, raw: str) -> Dict[str, Any]:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            raise QuotaAdapterError("claude_status_line_json_malformed", quality=TelemetryQuality.MALFORMED)
-        if not isinstance(data, dict):
-            raise QuotaAdapterError("claude_status_line_json_not_object", quality=TelemetryQuality.MALFORMED)
-        return data
+            if self._read_usage is not None:
+                raw = await self._read_usage()
+            else:
+                raw = await read_claude_usage_raw_with_new_client(
+                    cwd=self.cwd,
+                    cli_path=self.cli_path,
+                    timeout=self.timeout_sec,
+                )
+            version_value = self._claude_code_version_value or claude_code_version(
+                cli_path=self.cli_path,
+                timeout_sec=2.0,
+            )
+            snapshot = normalize_claude_quota(
+                raw,
+                observed_at=self._now(),
+                claude_version=version_value,
+            )
+            if getattr(snapshot, "status", None) == "valid":
+                self._last_successful_snapshot = snapshot
+            elif self._last_successful_snapshot is not None:
+                snapshot = self._last_successful_snapshot.model_copy(
+                    update={
+                        "status": "stale",
+                        "unavailable_reason": f"claude_get_usage_stale_after_unavailable:{getattr(snapshot, 'unavailable_reason', '') or 'empty_rate_limits'}",
+                    }
+                )
+        except Exception as exc:
+            from src.services.claude_usage_control import ClaudeQuotaSnapshot
+
+            reason = f"claude_get_usage_failed:{type(exc).__name__}"
+            if self._last_successful_snapshot is not None:
+                snapshot = self._last_successful_snapshot.model_copy(
+                    update={
+                        "status": "stale",
+                        "unavailable_reason": f"claude_get_usage_stale_after_failure:{reason}",
+                    }
+                )
+            else:
+                snapshot = ClaudeQuotaSnapshot(
+                    status="unavailable",
+                    observed_at=self._now(),
+                    unavailable_reason=reason,
+                )
+        self._cached_snapshot = snapshot
+        self._cached_snapshot_at = now
+        return snapshot
+
+    def _scoped_limit(self, snapshot: Any, bucket_id: str) -> Any | None:
+        for limit in getattr(snapshot, "scoped_limits", []):
+            display = getattr(limit, "model_display_name", None) or "scoped"
+            if bucket_id == f"weekly_scoped:{_slug(display)}":
+                return limit
+        return None
+
+    def _raw_status(self, snapshot: Any) -> str:
+        sdk = getattr(snapshot, "sdk_version", None) or "unknown"
+        claude_code = getattr(snapshot, "claude_code_version", None) or "unknown"
+        return f"claude_get_usage sdk={sdk} claude_code={claude_code}"
+
+
+def _slug(value: str) -> str:
+    chars: list[str] = []
+    for ch in value.lower():
+        chars.append(ch if ch.isalnum() else "_")
+    return "_".join(part for part in "".join(chars).split("_") if part) or "scoped"
 
 
 class FakeQuotaAdapter:
@@ -839,7 +1095,7 @@ class QuotaWindowCoordinator:
         self._task = None
 
     def read_status(self) -> Dict[str, Any]:
-        data = self.store.status()
+        data = self.store.status(now=self._now())
         data["enabled"] = self.enabled
         data["mode"] = "observe_only"
         return data
@@ -954,6 +1210,7 @@ class QuotaWindowCoordinator:
                     raw_status="unavailable",
                     unavailable_reason=e.reason,
                 )
+            snapshot = self._retain_previous_success_as_stale(snapshot)
             inserted = self.store.insert_snapshot(snapshot)
             event_name = "quota.observed" if inserted else "quota.duplicate_snapshot"
             self._record_event(
@@ -971,6 +1228,38 @@ class QuotaWindowCoordinator:
                     "active_user_session": active_label,
                 },
             )
+
+    def _retain_previous_success_as_stale(self, snapshot: QuotaSnapshot) -> QuotaSnapshot:
+        if snapshot.telemetry_quality != TelemetryQuality.UNAVAILABLE:
+            return snapshot
+        if not snapshot.raw_status.startswith("claude_get_usage"):
+            return snapshot
+        previous = self.store.latest_usable_snapshot(
+            snapshot.provider,
+            snapshot.principal_hash,
+            snapshot.bucket_id,
+        )
+        if previous is None:
+            return snapshot
+        observed_at = normalize_utc(previous.get("observed_at"))
+        reset_at = normalize_utc(previous.get("reset_at"))
+        used = previous.get("used_percent")
+        if observed_at is None or reset_at is None or not isinstance(used, (int, float)):
+            return snapshot
+        reason = snapshot.unavailable_reason or "claude_get_usage_unavailable"
+        return QuotaSnapshot(
+            provider=snapshot.provider,
+            principal_hash=snapshot.principal_hash,
+            bucket_id=snapshot.bucket_id,
+            observed_at=observed_at,
+            telemetry_quality=TelemetryQuality.PARTIAL,
+            used_percent=float(used),
+            reset_at=reset_at,
+            limit_reached=bool(previous.get("limit_reached")) if previous.get("limit_reached") is not None else None,
+            window_duration_seconds=previous.get("window_duration_seconds"),
+            raw_status=str(previous.get("raw_status") or snapshot.raw_status),
+            unavailable_reason=f"claude_get_usage_stale_after_unavailable:{reason}",
+        )
 
     def _record_event(self, name: str, *, provider: str = "", principal_hash: str = "", bucket_id: str = "", reason: str = "", payload: Optional[dict] = None) -> None:
         self.store.add_event(name, provider=provider, principal_hash=principal_hash, bucket_id=bucket_id, reason=reason, payload=payload)
@@ -1006,10 +1295,11 @@ def build_default_quota_adapters() -> list[QuotaAdapter]:
     quota_cfg = getattr(config, "quota", None)
     return [
         UnsupportedQuotaAdapter("codex", "codex_quota_telemetry_not_validated_phase1"),
-        ClaudeStatusLineQuotaAdapter(
-            status_json_path=getattr(quota_cfg, "claude_status_json_path", "state/claude_statusline_latest.json"),
-            status_command=getattr(quota_cfg, "claude_status_command", ""),
+        ClaudeGetUsageQuotaAdapter(
             principal_key=getattr(quota_cfg, "claude_principal_key", ""),
+            cwd=getattr(getattr(config, "claude", None), "base_cwd", None),
+            cli_path=getattr(getattr(config, "claude", None), "sdk_cli_path", None),
+            timeout_sec=getattr(quota_cfg, "claude_get_usage_timeout_sec", 60.0),
         ),
         UnsupportedQuotaAdapter("opencode", "opencode_is_provider_router_no_phase1_quota_owner"),
     ]

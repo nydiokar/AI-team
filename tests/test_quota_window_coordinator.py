@@ -1,21 +1,25 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from src.services.quota_window_coordinator import (
     AdapterCapability,
-    ClaudeStatusLineQuotaAdapter,
+    ClaudeGetUsageQuotaAdapter,
     FakeQuotaAdapter,
+    QuotaBucket,
     QuotaAdapterError,
+    QuotaPrincipal,
     QuotaSnapshot,
     QuotaWindowCoordinator,
     QuotaWindowStore,
     TelemetryQuality,
     UnsupportedQuotaAdapter,
+    WindowSemantics,
+    build_default_quota_adapters,
     utc_iso,
 )
 from src.services.quota_digest import QuotaTelegramDigestSubscriber
@@ -37,6 +41,50 @@ def _snapshot(*, provider="fake", bucket="five-hour", principal="fake-principal"
         limit_reached=False,
         raw_status="observed",
     )
+
+
+def _get_usage_response(
+    *,
+    five: float | None = 2.0,
+    five_reset: str | None = "2026-08-17T02:20:00.119493+00:00",
+    seven: float | None = 40.0,
+    seven_reset: str | None = "2026-08-20T22:00:00.119518+00:00",
+    available: bool = True,
+) -> dict:
+    return {
+        "subscription_type": "max",
+        "rate_limits_available": available,
+        "rate_limits": {
+            "five_hour": {"utilization": five, "resets_at": five_reset},
+            "seven_day": {"utilization": seven, "resets_at": seven_reset},
+            "limits": [
+                {
+                    "kind": "session",
+                    "group": "session",
+                    "percent": five,
+                    "resets_at": five_reset,
+                    "scope": None,
+                    "is_active": False,
+                },
+                {
+                    "kind": "weekly_all",
+                    "group": "weekly",
+                    "percent": seven,
+                    "resets_at": seven_reset,
+                    "scope": None,
+                    "is_active": True,
+                },
+                {
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 5,
+                    "resets_at": seven_reset,
+                    "scope": {"model": {"id": None, "display_name": "Fable"}},
+                    "is_active": False,
+                },
+            ],
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -69,23 +117,25 @@ async def test_duplicate_snapshot_handling_is_idempotent(tmp_path):
     assert "quota.duplicate_snapshot" in events
 
 
-@pytest.mark.asyncio
-async def test_concurrent_reads_and_writes(tmp_path):
+def test_concurrent_reads_and_writes(tmp_path):
     store = _store(tmp_path)
     base = datetime(2026, 6, 23, 8, 0, tzinfo=timezone.utc)
     snaps = [_snapshot(observed=base + timedelta(seconds=i), used=float(i)) for i in range(20)]
     adapter = FakeQuotaAdapter(snapshots={"five-hour": snaps})
     coord = QuotaWindowCoordinator(store=store, adapters=[adapter], enabled=True)
 
-    async def writer():
+    def writer():
         for _ in range(20):
-            await coord.observe_once()
+            asyncio.run(coord.observe_once())
 
-    async def reader():
+    def reader():
         for _ in range(20):
-            await asyncio.to_thread(coord.read_status)
+            coord.read_status()
 
-    await asyncio.gather(writer(), reader(), reader())
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(writer), pool.submit(reader), pool.submit(reader)]
+        for future in futures:
+            future.result(timeout=10)
     assert coord.read_status()["latest_snapshots"]
 
 
@@ -233,75 +283,303 @@ async def test_observation_never_invokes_model(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_claude_status_line_adapter_records_authoritative_buckets_without_model_call(tmp_path):
-    status_path = tmp_path / "claude_status.json"
-    status_path.write_text(
-        json.dumps(
-            {
-                "rate_limits": {
-                    "five_hour": {"used_percentage": 42.5, "resets_at": "2026-07-29T09:00:00Z"},
-                    "seven_day": {"used_percentage": 12, "resets_at": "2026-08-04T10:00:00Z"},
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    adapter = ClaudeStatusLineQuotaAdapter(
-        status_json_path=status_path,
+async def test_claude_get_usage_adapter_records_canonical_buckets_and_scoped_limits(tmp_path):
+    now = datetime(2026, 8, 16, 22, 51, tzinfo=timezone.utc)
+    calls = 0
+
+    async def read_usage():
+        nonlocal calls
+        calls += 1
+        return _get_usage_response()
+
+    adapter = ClaudeGetUsageQuotaAdapter(
         principal_key="claude-max-nyd",
-        now=lambda: datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc),
+        read_usage=read_usage,
+        claude_code_version_value="2.1.191 (Claude Code)",
+        now=lambda: now,
     )
     store = _store(tmp_path)
-    coord = QuotaWindowCoordinator(store=store, adapters=[adapter], enabled=True)
+    coord = QuotaWindowCoordinator(store=store, adapters=[adapter], enabled=True, now=lambda: now)
 
     await coord.observe_once()
 
     snapshots = {row["bucket_id"]: row for row in coord.read_status()["latest_snapshots"]}
-    assert snapshots["five_hour"]["used_percent"] == 42.5
-    assert snapshots["five_hour"]["reset_at"] == "2026-07-29T09:00:00Z"
-    assert snapshots["five_hour"]["telemetry_quality"] == "authoritative"
-    assert snapshots["seven_day"]["used_percent"] == 12.0
-    assert adapter.model_invocations == 0
+    assert snapshots["five_hour"]["used_percent"] == 2.0
+    assert snapshots["five_hour"]["reset_at"] == "2026-08-17T02:20:00.119493Z"
+    assert snapshots["five_hour"]["raw_status"].startswith("claude_get_usage sdk=")
+    assert snapshots["seven_day"]["used_percent"] == 40.0
+    assert snapshots["weekly_scoped:fable"]["used_percent"] == 5.0
+    assert snapshots["weekly_scoped:fable"]["reset_at"] == "2026-08-20T22:00:00.119518Z"
+    assert calls == 1
 
 
 @pytest.mark.asyncio
-async def test_claude_status_line_adapter_missing_file_is_honest_unavailable_snapshot(tmp_path):
-    adapter = ClaudeStatusLineQuotaAdapter(status_json_path=tmp_path / "missing.json", principal_key="claude-max-nyd")
-    store = _store(tmp_path)
-    coord = QuotaWindowCoordinator(store=store, adapters=[adapter], enabled=True)
+async def test_claude_get_usage_adapter_preserves_zero_and_unknown_distinctly(tmp_path):
+    now = datetime(2026, 8, 16, 22, 51, tzinfo=timezone.utc)
 
-    await coord.observe_once()
+    async def read_usage():
+        return _get_usage_response(five=0.0, five_reset=None, seven=None)
 
-    snapshot = coord.read_status()["latest_snapshots"][0]
-    assert snapshot["telemetry_quality"] == "unavailable"
-    assert snapshot["unavailable_reason"] == "claude_status_line_json_missing"
-
-
-@pytest.mark.asyncio
-async def test_claude_status_line_adapter_downgrades_stale_reset_at(tmp_path):
-    status_path = tmp_path / "claude_status.json"
-    status_path.write_text(
-        json.dumps(
-            {
-                "rate_limits": {
-                    "five_hour": {"used_percentage": 46, "resets_at": "2026-07-17T18:10:00Z"},
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    adapter = ClaudeStatusLineQuotaAdapter(
-        status_json_path=status_path,
+    adapter = ClaudeGetUsageQuotaAdapter(
         principal_key="claude-max-nyd",
-        now=lambda: datetime(2026, 7, 31, 16, 53, tzinfo=timezone.utc),
+        read_usage=read_usage,
+        now=lambda: now,
+    )
+    snapshots = {}
+    for bucket in await adapter.discover_buckets():
+        snapshots[bucket.bucket_id] = await adapter.observe(bucket.bucket_id)
+
+    assert snapshots["five_hour"].used_percent == 0.0
+    assert snapshots["five_hour"].reset_at is None
+    assert snapshots["five_hour"].telemetry_quality == TelemetryQuality.PARTIAL
+    assert snapshots["seven_day"].used_percent is None
+    assert snapshots["seven_day"].telemetry_quality == TelemetryQuality.PARTIAL
+
+
+@pytest.mark.asyncio
+async def test_claude_get_usage_adapter_failure_is_unavailable_not_zero(tmp_path):
+    now = datetime(2026, 8, 16, 22, 51, tzinfo=timezone.utc)
+
+    async def read_usage():
+        raise RuntimeError("boom")
+
+    adapter = ClaudeGetUsageQuotaAdapter(
+        principal_key="claude-max-nyd",
+        read_usage=read_usage,
+        now=lambda: now,
     )
 
     snapshot = await adapter.observe("five_hour")
 
-    assert snapshot.used_percent == 46.0
+    assert snapshot.used_percent is None
     assert snapshot.reset_at is None
-    assert snapshot.telemetry_quality == TelemetryQuality.PARTIAL
-    assert snapshot.unavailable_reason == "reset_at_stale"
+    assert snapshot.telemetry_quality == TelemetryQuality.UNAVAILABLE
+    assert snapshot.unavailable_reason.startswith("claude_get_usage_failed:")
+
+
+@pytest.mark.asyncio
+async def test_claude_get_usage_adapter_returns_last_success_as_stale_after_failure(tmp_path):
+    now = datetime(2026, 8, 16, 22, 51, tzinfo=timezone.utc)
+    fail = False
+
+    async def read_usage():
+        if fail:
+            raise RuntimeError("boom")
+        return _get_usage_response(five=10.0)
+
+    adapter = ClaudeGetUsageQuotaAdapter(
+        principal_key="claude-max-nyd",
+        read_usage=read_usage,
+        now=lambda: now,
+    )
+
+    first = await adapter.observe("five_hour")
+    fail = True
+    adapter._cached_snapshot_at = 0.0
+    second = await adapter.observe("five_hour")
+
+    assert first.used_percent == 10.0
+    assert second.used_percent == 10.0
+    assert second.reset_at == first.reset_at
+    assert second.telemetry_quality == TelemetryQuality.PARTIAL
+    assert second.unavailable_reason.startswith("claude_get_usage_stale_after_failure:")
+
+
+@pytest.mark.asyncio
+async def test_claude_get_usage_adapter_returns_last_success_as_stale_after_empty_rate_limits(tmp_path):
+    now = datetime(2026, 8, 16, 22, 51, tzinfo=timezone.utc)
+    empty = False
+
+    async def read_usage():
+        if empty:
+            return {
+                "subscription_type": "max",
+                "rate_limits_available": True,
+                "rate_limits": None,
+            }
+        return _get_usage_response(five=10.0)
+
+    adapter = ClaudeGetUsageQuotaAdapter(
+        principal_key="claude-max-nyd",
+        read_usage=read_usage,
+        now=lambda: now,
+    )
+
+    first = await adapter.observe("five_hour")
+    empty = True
+    adapter._cached_snapshot_at = 0.0
+    second = await adapter.observe("five_hour")
+
+    assert first.used_percent == 10.0
+    assert second.used_percent == 10.0
+    assert second.reset_at == first.reset_at
+    assert second.telemetry_quality == TelemetryQuality.PARTIAL
+    assert second.unavailable_reason.startswith("claude_get_usage_stale_after_unavailable:")
+
+
+@pytest.mark.asyncio
+async def test_claude_get_usage_adapter_rate_limits_unavailable_is_not_zero(tmp_path):
+    now = datetime(2026, 8, 16, 22, 51, tzinfo=timezone.utc)
+
+    async def read_usage():
+        return _get_usage_response(available=False)
+
+    adapter = ClaudeGetUsageQuotaAdapter(
+        principal_key="claude-max-nyd",
+        read_usage=read_usage,
+        now=lambda: now,
+    )
+
+    snapshot = await adapter.observe("five_hour")
+
+    assert snapshot.used_percent is None
+    assert snapshot.reset_at is None
+    assert snapshot.telemetry_quality == TelemetryQuality.UNAVAILABLE
+    assert snapshot.unavailable_reason == "claude_rate_limits_unavailable_or_empty"
+
+
+def test_default_claude_quota_adapter_is_get_usage_not_statusline(monkeypatch):
+    from config import config
+
+    monkeypatch.setattr(config.quota, "claude_principal_key", "principal")
+    adapters = build_default_quota_adapters()
+
+    claude_adapters = [a for a in adapters if getattr(a, "provider", "") == "claude"]
+    assert claude_adapters
+    assert all(isinstance(adapter, ClaudeGetUsageQuotaAdapter) for adapter in claude_adapters)
+    assert all("statusline" not in getattr(a, "adapter_version", "") for a in claude_adapters)
+
+
+def test_old_statusline_snapshot_cannot_override_canonical_get_usage(tmp_path):
+    now = datetime(2026, 8, 16, 22, 51, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    store.upsert_principal(QuotaPrincipal(provider="claude", principal_hash="principal", label="principal", authentication_mode="test"))
+    store.upsert_bucket(
+        QuotaBucket(
+            provider="claude",
+            bucket_id="five_hour",
+            bucket_name="Claude 5-hour session limit",
+            principal_hash="principal",
+            window_semantics=WindowSemantics.ANCHORED,
+            telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            window_duration_seconds=5 * 60 * 60,
+        ),
+        "principal",
+    )
+    store.insert_snapshot(
+        QuotaSnapshot(
+            provider="claude",
+            principal_hash="principal",
+            bucket_id="five_hour",
+            observed_at=now - timedelta(minutes=2),
+            telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            used_percent=88.0,
+            reset_at=datetime(2026, 8, 17, 1, 20, tzinfo=timezone.utc),
+            raw_status="claude_status_line",
+        )
+    )
+    store.insert_snapshot(
+        QuotaSnapshot(
+            provider="claude",
+            principal_hash="principal",
+            bucket_id="five_hour",
+            observed_at=now,
+            telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            used_percent=2.0,
+            reset_at=datetime(2026, 8, 17, 2, 20, tzinfo=timezone.utc),
+            raw_status="claude_get_usage sdk=0.2.110 claude_code=2.1.191",
+        )
+    )
+
+    latest = store.status(now=now)["latest_snapshots"][0]
+
+    assert latest["used_percent"] == 2.0
+    assert latest["reset_at"] == "2026-08-17T02:20:00Z"
+    assert latest["raw_status"].startswith("claude_get_usage")
+
+
+@pytest.mark.asyncio
+async def test_coordinator_retains_persisted_get_usage_success_as_stale(tmp_path):
+    now = datetime(2026, 8, 16, 22, 51, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    principal = QuotaPrincipal(provider="claude", principal_hash="principal", label="principal", authentication_mode="test")
+    store.upsert_principal(principal)
+    store.upsert_bucket(
+        QuotaBucket(
+            provider="claude",
+            bucket_id="five_hour",
+            bucket_name="Claude 5-hour session limit",
+            principal_hash="principal",
+            window_semantics=WindowSemantics.ANCHORED,
+            telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            window_duration_seconds=5 * 60 * 60,
+        ),
+        "principal",
+    )
+    store.insert_snapshot(
+        QuotaSnapshot(
+            provider="claude",
+            principal_hash="principal",
+            bucket_id="five_hour",
+            observed_at=now - timedelta(minutes=20),
+            telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            used_percent=12.0,
+            reset_at=datetime(2026, 8, 17, 2, 20, tzinfo=timezone.utc),
+            raw_status="claude_get_usage sdk=0.2.110 claude_code=2.1.191",
+        )
+    )
+
+    class EmptyGetUsageAdapter:
+        async def capabilities(self):
+            return AdapterCapability(
+                provider="claude",
+                adapter_version="claude-get-usage-v1",
+                schema_version="claude-get-usage-rate-limits-v1",
+                can_observe=True,
+                telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            )
+
+        async def identify_principal(self):
+            return principal
+
+        async def discover_buckets(self):
+            return [
+                QuotaBucket(
+                    provider="claude",
+                    bucket_id="five_hour",
+                    bucket_name="Claude 5-hour session limit",
+                    principal_hash="principal",
+                    window_semantics=WindowSemantics.ANCHORED,
+                    telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+                    window_duration_seconds=5 * 60 * 60,
+                )
+            ]
+
+        async def observe(self, bucket_id):
+            return QuotaSnapshot(
+                provider="claude",
+                principal_hash="principal",
+                bucket_id=bucket_id,
+                observed_at=now,
+                telemetry_quality=TelemetryQuality.UNAVAILABLE,
+                raw_status="claude_get_usage sdk=0.2.110 claude_code=2.1.191",
+                unavailable_reason="claude_rate_limits_unavailable_or_empty",
+            )
+
+        async def detect_active_user_session(self):
+            return None
+
+    coord = QuotaWindowCoordinator(store=store, adapters=[EmptyGetUsageAdapter()], enabled=True, now=lambda: now)
+
+    await coord.observe_once()
+
+    latest = coord.read_status()["latest_snapshots"][0]
+    state = coord.read_status()["window_states"][0]
+    assert latest["used_percent"] == 12.0
+    assert latest["reset_at"] == "2026-08-17T02:20:00Z"
+    assert latest["telemetry_quality"] == "partial"
+    assert latest["unavailable_reason"].startswith("claude_get_usage_stale_after_unavailable:")
+    assert state["telemetry_state"] == "stale"
 
 
 def test_adaptive_cadence_backs_off_until_reset_probe_window(tmp_path):
@@ -335,6 +613,211 @@ def test_adaptive_cadence_uses_tight_polling_when_limit_reached(tmp_path):
 
     assert coord.next_observe_delay_sec() == 300
 
+
+@pytest.mark.asyncio
+async def test_read_status_blocks_current_unclassified_window_from_automation(tmp_path):
+    now = datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    adapter = FakeQuotaAdapter(
+        provider="claude",
+        principal_hash="principal",
+        snapshots={
+            "five-hour": [
+                _snapshot(
+                    provider="claude",
+                    bucket="five-hour",
+                    principal="principal",
+                    observed=now,
+                    used=12.0,
+                    reset=datetime(2026, 7, 29, 13, 0, tzinfo=timezone.utc),
+                )
+            ]
+        },
+    )
+    coord = QuotaWindowCoordinator(store=store, adapters=[adapter], enabled=True, now=lambda: now)
+
+    await coord.observe_once()
+
+    state = coord.read_status()["window_states"][0]
+    assert state["telemetry_state"] == "current"
+    assert state["window_end_at"] == "2026-07-29T13:00:00Z"
+    assert state["window_start_at"] is None
+    assert state["window_known"] is False
+    assert state["automation_ready"] is False
+    assert "window_semantics_unclassified" in state["blockers"]
+
+
+def test_read_status_marks_stale_reset_state_not_actionable(tmp_path):
+    now = datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    adapter = FakeQuotaAdapter(
+        provider="claude",
+        principal_hash="principal",
+        snapshots={
+            "five-hour": [
+                QuotaSnapshot(
+                    provider="claude",
+                    bucket_id="five-hour",
+                    principal_hash="principal",
+                    observed_at=now,
+                    telemetry_quality=TelemetryQuality.PARTIAL,
+                    used_percent=18.0,
+                    reset_at=None,
+                    raw_status="status_line",
+                    unavailable_reason="reset_at_stale",
+                )
+            ]
+        },
+    )
+    coord = QuotaWindowCoordinator(store=store, adapters=[adapter], enabled=True, now=lambda: now)
+
+    asyncio.run(coord.observe_once())
+
+    state = coord.read_status()["window_states"][0]
+    assert state["telemetry_state"] == "stale"
+    assert state["window_end_at"] is None
+    assert state["window_known"] is False
+    assert state["automation_ready"] is False
+    assert "reset_at_stale" in state["blockers"]
+
+
+def test_read_status_marks_old_observation_stale_not_actionable(tmp_path):
+    now = datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    store.upsert_principal(QuotaPrincipal(provider="claude", principal_hash="principal", label="principal", authentication_mode="test"))
+    store.upsert_bucket(
+        QuotaBucket(
+            provider="claude",
+            bucket_id="five_hour",
+            bucket_name="Claude 5-hour session limit",
+            principal_hash="principal",
+            window_semantics=WindowSemantics.ANCHORED,
+            telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            window_duration_seconds=5 * 60 * 60,
+        ),
+        "principal",
+    )
+    store.insert_snapshot(
+        QuotaSnapshot(
+            provider="claude",
+            principal_hash="principal",
+            bucket_id="five_hour",
+            observed_at=now - timedelta(minutes=16),
+            telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+            used_percent=18.0,
+            reset_at=datetime(2026, 7, 29, 13, 0, tzinfo=timezone.utc),
+            raw_status="claude_get_usage sdk=0.2.110 claude_code=2.1.191",
+        )
+    )
+
+    state = store.status(now=now)["window_states"][0]
+
+    assert state["telemetry_state"] == "stale"
+    assert state["window_known"] is False
+    assert state["automation_ready"] is False
+    assert "observation_stale" in state["blockers"]
+
+
+def test_read_status_tracks_reset_boundary_history(tmp_path):
+    now = datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    store.insert_snapshot(
+        _snapshot(
+            observed=datetime(2026, 7, 29, 1, 0, tzinfo=timezone.utc),
+            reset=datetime(2026, 7, 29, 6, 0, tzinfo=timezone.utc),
+            used=10.0,
+        )
+    )
+    store.insert_snapshot(
+        _snapshot(
+            observed=datetime(2026, 7, 29, 7, 0, tzinfo=timezone.utc),
+            reset=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+            used=1.0,
+        )
+    )
+    store.insert_snapshot(
+        _snapshot(
+            observed=datetime(2026, 7, 29, 7, 30, tzinfo=timezone.utc),
+            reset=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+            used=2.0,
+        )
+    )
+
+    state = store.status(now=now)["window_states"][0]
+
+    assert state["observed_reset_count"] == 2
+    assert state["classification_status"] == "collecting"
+    assert state["current_reset_observed_since"] == "2026-07-29T07:00:00Z"
+    assert state["last_reset_change_at"] == "2026-07-29T07:00:00Z"
+    assert state["reset_boundary_evidence"][0]["reset_at"] == "2026-07-29T12:00:00Z"
+    assert state["reset_boundary_evidence"][0]["first_used_percent"] == 1.0
+    assert state["reset_boundary_evidence"][0]["last_used_percent"] == 2.0
+
+
+def test_single_reset_timestamp_cannot_classify_anchored(tmp_path):
+    now = datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    store.insert_snapshot(
+        _snapshot(
+            observed=datetime(2026, 7, 29, 7, 0, tzinfo=timezone.utc),
+            reset=datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc),
+            used=1.0,
+        )
+    )
+
+    state = store.status(now=now)["window_states"][0]
+
+    assert state["observed_reset_count"] == 1
+    assert state["classification_status"] == "collecting"
+    assert state["window_semantics"] == "unknown"
+    assert state["automation_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_read_status_marks_anchored_current_window_as_preautomation_candidate(tmp_path):
+    now = datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    adapter = FakeQuotaAdapter(
+        provider="claude",
+        principal_hash="principal",
+        buckets=[
+            QuotaBucket(
+                provider="claude",
+                bucket_id="five-hour",
+                bucket_name="Five hour",
+                principal_hash="principal",
+                window_semantics=WindowSemantics.ANCHORED,
+                telemetry_quality=TelemetryQuality.AUTHORITATIVE,
+                window_duration_seconds=5 * 60 * 60,
+            )
+        ],
+        snapshots={
+            "five-hour": [
+                _snapshot(
+                    provider="claude",
+                    bucket="five-hour",
+                    principal="principal",
+                    observed=now,
+                    used=12.0,
+                    reset=datetime(2026, 7, 29, 13, 0, tzinfo=timezone.utc),
+                )
+            ]
+        },
+    )
+    coord = QuotaWindowCoordinator(store=store, adapters=[adapter], enabled=True, now=lambda: now)
+
+    await coord.observe_once()
+
+    state = coord.read_status()["window_states"][0]
+    assert state["telemetry_state"] == "current"
+    assert state["window_start_at"] == "2026-07-29T08:00:00Z"
+    assert state["window_start_inferred_at"] == "2026-07-29T08:00:00Z"
+    assert state["window_start_source"] == "inferred_from_reset_duration"
+    assert state["window_end_at"] == "2026-07-29T13:00:00Z"
+    assert state["active_session_state"] == "unknown"
+    assert state["window_known"] is True
+    assert state["automation_ready"] is False
+    assert state["blockers"] == ["active_session_state_unknown"]
 
 @pytest.mark.asyncio
 async def test_quota_digest_subscriber_aggregates_and_uses_notifier():
