@@ -239,7 +239,7 @@ def test_classify_error_detects_upstream_rate_limit_from_api_error_status():
         return_code=1,
     )
 
-    assert orch._classify_error(result) == "rate_limit"
+    assert orch._classify_error(result) == "usage_limit"
 
 
 def test_classify_error_detects_upstream_5xx_from_api_error_status():
@@ -264,7 +264,7 @@ def test_classify_error_detects_upstream_5xx_from_api_error_status():
 def test_classify_error_detects_session_limit_without_rate_limit_event():
     # The live-incident shape: the subscription cap surfaces ONLY as the result
     # text "hit your session limit" — no rate_limit_event stream line. This must
-    # still classify as rate_limit (retry-eligible / auto-resume), NOT fatal.
+    # still classify as usage_limit (retry-eligible / auto-resume), NOT fatal.
     orch = TaskOrchestrator()
     result = TaskResult(
         task_id="task_session_limit",
@@ -280,7 +280,7 @@ def test_classify_error_detects_session_limit_without_rate_limit_event():
         return_code=1,
     )
 
-    assert orch._classify_error(result) == "rate_limit"
+    assert orch._classify_error(result) == "usage_limit"
 
 
 def test_salvaged_backend_finalization_error_keeps_session_awaiting_input():
@@ -345,6 +345,48 @@ def test_salvage_banner_without_agent_content_is_not_salvage():
     )
 
     assert _session_status_after_result(result) == SessionStatus.ERROR
+
+
+def test_quota_only_failure_keeps_session_awaiting_input():
+    """A usage_limit / rate_limit failure is NOT a real execution failure — the
+    session must stay alive (AWAITING_INPUT) so it can resume when the quota
+    resets, even when the agent produced no salvageable work."""
+    result = TaskResult(
+        task_id="task_quota_only",
+        success=False,
+        output="⏳ Claude usage limit reached — resets 4:30pm (Europe/Kiev). This is NOT a task failure.",
+        errors=["You've hit your session limit · resets 4:30pm (Europe/Kiev)"],
+        files_modified=[],
+        execution_time=97.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='{"type":"result","is_error":true,"api_error_status":429}',
+        raw_stderr="",
+        return_code=1,
+        error_class="usage_limit",
+    )
+
+    assert _session_status_after_result(result) == SessionStatus.AWAITING_INPUT
+    # error_class is preserved — the audit trail is untouched.
+    assert result.error_class == "usage_limit"
+
+
+def test_quota_failure_via_text_markers_keeps_session_alive():
+    """Text-based usage-limit detection (no structured api_error_status) must
+    also keep the session alive."""
+    result = TaskResult(
+        task_id="task_quota_text",
+        success=False,
+        output="You've hit your session limit · resets 4:30pm (Europe/Kiev)",
+        errors=["You've hit your session limit"],
+        files_modified=[],
+        execution_time=10.0,
+        timestamp=datetime.now().isoformat(),
+        raw_stdout='',
+        raw_stderr="",
+        return_code=1,
+    )
+
+    assert _session_status_after_result(result) == SessionStatus.AWAITING_INPUT
 
 
 def test_reclassify_salvaged_turn_success_flips_success_true():

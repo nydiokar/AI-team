@@ -100,21 +100,26 @@ logger = logging.getLogger(__name__)
 
 
 def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
-    """True when a backend failed its terminal wrap-up after producing useful work.
+    """True when a backend failed its terminal wrap-up after producing useful work,
+    OR when the failure is a quota/rate limit (not a real execution failure).
 
     The task still failed for audit/review purposes. The distinction is only for
     the reusable session status: do not leave the session in ERROR when the
-    operator has a salvaged reply/file evidence to inspect and can continue.
+    operator has a salvaged reply/file evidence to inspect and can continue,
+    or when the failure is merely a quota pause that will self-resolve.
 
-    Gates (all three must hold):
-      - the terminal result is a backend ``error_during_execution`` — the SDK
-        ends the turn normally after the agent's work, so this is NOT a hard
-        execution failure. The marker lives in the raw transcript (raw_stdout),
-        or in the diagnostic tail (raw_stderr / error_detail) for older rows
-        where the gateway mirrored raw_stdout=output;
-      - ``output`` is the driver's honest salvaged reply, i.e. it starts with the
-        salvage banner AND carries agent content beyond that banner (a bare
-        error string like "backend failed" is not salvage).
+    Two independent gates (either triggers True):
+      A. QUOTA / RATE LIMIT — the turn's output carries a usage-limit or
+         rate-limit message (detected via the driver's ``error_class`` or
+         free-text markers). This is NOT a hard execution failure; the session
+         stays alive so it can resume when the quota resets.
+      B. SALVAGED WORK — the terminal result is a backend
+         ``error_during_execution`` AND the output carries the driver's honest
+         salvaged reply (banner + real agent content). The marker lives in the
+         raw transcript (raw_stdout), or in the diagnostic tail (raw_stderr /
+         error_detail) for older rows where the gateway mirrored
+         raw_stdout=output.
+
     Deliberately does NOT depend on ``error_class == "backend_error"``: every
     call site reclassifies via ``_classify_error`` (which never returns that
     value) — the original gate could never fire. And it does NOT require
@@ -126,6 +131,23 @@ def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
     output = (result.output or "").strip()
     if not output:
         return False
+
+    # Gate A: quota / rate limit — not a real execution failure.  The session
+    # must stay alive so it resumes when the quota window resets.
+    ec = str(getattr(result, "error_class", "") or "").lower()
+    if ec in ("usage_limit", "rate_limit"):
+        return True
+    # Fallback text detection when error_class was not set or was reclassified:
+    # check the output for usage-limit / rate-limit markers that the driver
+    # would have classified as "usage_limit".
+    _usage_markers = ("usage limit", "rate limit", "rate-limit", "hit your limit",
+                      "hit your session limit", "session limit", "too many requests")
+    out_lower = output.lower()
+    if any(m in out_lower for m in _usage_markers):
+        return True
+
+    # Gate B: salvaged work — backend failed its terminal wrap-up after the
+    # agent produced real, deliverable work.
     raw = (
         f"{result.raw_stdout or ''}\n{result.raw_stderr or ''}\n"
         f"{getattr(result, 'error_detail', '') or ''}"
@@ -147,7 +169,8 @@ def _reclassify_salvaged_turn_success(result: TaskResult) -> TaskResult:
 
     ``_is_salvaged_backend_finalization_error`` already tells the session layer
     to resume (``AWAITING_INPUT``) for these turns: the SDK's terminal wrap-up
-    failed *after* the agent finished real, deliverable work. Task status, turn
+    failed *after* the agent finished real, deliverable work, OR the failure is
+    a quota/rate limit (not a real execution failure). Task status, turn
     telemetry, session history, and the ``mesh_tasks`` row all key off
     ``result.success`` independently of that session-status check, so without
     this fixup they keep surfacing the turn as failed to the operator even
@@ -6224,7 +6247,7 @@ created: {task.created}
             return {"max_retries": min(1, default_max), "initial_delay": 1.0, "backoff_multiplier": 1}
         if error_class in ("network", "upstream_error"):
             return {"max_retries": max(1, default_max), "initial_delay": 1.5, "backoff_multiplier": default_mult}
-        if error_class == "rate_limit":
+        if error_class in ("rate_limit", "usage_limit"):
             return {"max_retries": max(2, default_max), "initial_delay": 2.0, "backoff_multiplier": max(2, default_mult)}
         return {"max_retries": default_max, "initial_delay": 1.0, "backoff_multiplier": default_mult}
 
@@ -6234,7 +6257,7 @@ created: {task.created}
         ec = (error_class or "").lower()
         if ec == "interactive":
             actions.append("Enable skip-permissions or trust the folder; ensure non-interactive flags.")
-        elif ec == "rate_limit":
+        elif ec in ("rate_limit", "usage_limit"):
             info = self._extract_rate_limit_info(result)
             if info and info.get("resetsAt"):
                 try:
@@ -6322,7 +6345,7 @@ created: {task.created}
     def _classify_error(self, result: TaskResult) -> str:
         """Classify error type for retry policy.
 
-        Returns one of: none|interactive|rate_limit|timeout|network|upstream_error|
+        Returns one of: none|interactive|rate_limit|usage_limit|timeout|network|upstream_error|
         context_overflow|max_turns|auth|fatal
         """
         if result.success:
@@ -6346,7 +6369,7 @@ created: {task.created}
         if subtype == "error_max_turns":
             return "max_turns"
         if api_error_status == 429:
-            return "rate_limit"
+            return "usage_limit"
         if api_error_status is not None and api_error_status >= 500:
             return "upstream_error"
         if self._extract_rate_limit_info(result) is not None:
@@ -6354,7 +6377,7 @@ created: {task.created}
         text = self._failure_text(result)
         text_lower = text.lower()
         if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "hit your limit", "hit your session limit", "session limit", "usage limit", "you've hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
-            return "rate_limit"
+            return "usage_limit"
         if any(s in text_lower for s in ("timeout", "timed out", "inactivity")):
             return "timeout"
         if any(s in text_lower for s in ("connection reset", "connection aborted", "network error", "503", "504", "temporarily unavailable", "terminated process", "cannot write to")):
