@@ -164,6 +164,8 @@ def classify_error_text(
     """
     if subtype == "error_max_turns":
         return "max_turns"
+    if api_error_status == 429:
+        return "usage_limit"
     if api_error_status is not None:
         return "upstream_error"
     low = (text or "").lower()
