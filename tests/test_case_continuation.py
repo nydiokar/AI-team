@@ -36,6 +36,9 @@ def _db(tmp_path) -> MeshDB:
 
 def _on(monkeypatch) -> None:
     monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+    # This file asserts the dead-session RESPAWN branch itself, so the operator
+    # approval gate in front of it stays OFF here (covered in test_case_respawn.py).
+    monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
 
 
 def _finished(db: MeshDB, case_id: str, task_id: str, outcome: str = "success") -> None:
@@ -166,10 +169,24 @@ class _FakeOrch:
             sess.case_role = role
         self.affiliations.append((sid, case_id, role))
 
-    async def _respawn_manager_for_case(self, db, case_id, generation, dead_sid):
-        return await TaskOrchestrator._respawn_manager_for_case(
+    async def _do_respawn_manager_for_case(self, db, case_id, generation, dead_sid):
+        return await TaskOrchestrator._do_respawn_manager_for_case(
             self, db, case_id, generation, dead_sid,
         )
+
+    async def _handle_dead_manager_session(self, db, case_id, generation, dead_sid):
+        # The approval gate in front of the respawn. These tests assert the
+        # dead-session BRANCH of the tick, so they run it with the gate OFF
+        # (see _on) — the gate itself is covered in test_case_respawn.py.
+        return await TaskOrchestrator._handle_dead_manager_session(
+            self, db, case_id, generation, dead_sid,
+        )
+
+    async def _handle_quota_paused_case(self, db, case_id):
+        # Inert for every Case here (none carries a `flow.quota_paused` event);
+        # the real method is delegated rather than stubbed so that inertness is
+        # proven, not assumed. Covered on its own in test_case_quota_resume.py.
+        return await TaskOrchestrator._handle_quota_paused_case(self, db, case_id)
 
     def _render_respawn_turn(self, case_id, objective):
         return TaskOrchestrator._render_respawn_turn(self, case_id, objective)

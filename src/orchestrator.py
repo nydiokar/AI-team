@@ -72,8 +72,8 @@ import socket
 import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional, Tuple
-from datetime import datetime
-from src.core.timeutil import now_iso
+from datetime import datetime, timezone
+from src.core.timeutil import now_iso, parse_iso
 import uuid
 import random
 import contextlib
@@ -99,26 +99,82 @@ from src.validation.engine import ValidationEngine
 logger = logging.getLogger(__name__)
 
 
+#: [quota-resume] The error classes that mean "the provider refused the turn
+#: because the account's quota/rate window is spent" — a PAUSE, not a failure of
+#: the agent or the harness. The single vocabulary every quota-aware branch reads
+#: (session status, Case pause record, resume proposal, retry policy).
+QUOTA_PAUSE_ERROR_CLASSES: Tuple[str, ...] = ("usage_limit", "rate_limit")
+
+#: Approval ``action`` vocabulary for the two Case-level operator decisions.
+#: Both are Case-scoped (no task_id, no session_id) — see ApprovalService.request's
+#: ``case_id`` argument.
+CASE_RESPAWN_APPROVAL_ACTION = "case_manager_respawn"
+CASE_RESUME_APPROVAL_ACTION = "case_resume"
+
+#: [quota-resume] How a paused Case comes back.
+#:   ``in_place``      — one turn into the SAME (still alive, AWAITING_INPUT)
+#:                       Manager session. Keeps the full conversation; the
+#:                       provider re-writes the whole prompt cache because the
+#:                       cache TTL expired hours ago, which is the expensive part.
+#:   ``fresh_manager`` — a NEW role-full Manager session on the SAME Case,
+#:                       reconstructed from the Case ledger (get_case_brief). The
+#:                       cheap path: it carries the objective, criteria, worker
+#:                       verdicts and open waits, not the transcript. This is the
+#:                       ONLY correct choice when the old session is dead.
+#: Neither is a fork: both stay on the same ``flow_run_id`` and never re-open or
+#: re-scope the objective.
+CASE_RESUME_MODES: Tuple[str, ...] = ("in_place", "fresh_manager")
+
+
+def _parse_iso_utc(value: Any) -> Optional[datetime]:
+    """[quota-resume] Tolerant ISO → tz-aware UTC datetime, ``None`` on anything
+    unparseable. Quota telemetry is an EXTERNAL reading: a missing/garbage
+    timestamp must degrade the decision, never raise into a dispatcher tick."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return parse_iso(value.strip().replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def is_quota_pause_result(result: TaskResult) -> bool:
+    """[quota-resume] True when a turn ended because the quota window is spent.
+
+    Keyed ONLY on the structured ``error_class`` that ``_classify_error`` /
+    ``classify_error_text`` already derive from the SDK's ``api_error_status``
+    (429) and the provider's limit wording. Deliberately NOT a second free-text
+    scan of ``output``: the agent's own reply legitimately contains phrases like
+    "rate limit" when it is *writing code about* rate limiting, and a text gate
+    there would silently convert a genuine hard failure into a "paused" Case.
+    One classifier, one vocabulary.
+    """
+    if result.success:
+        return False
+    return str(getattr(result, "error_class", "") or "").lower() in QUOTA_PAUSE_ERROR_CLASSES
+
+
 def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
-    """True when a backend failed its terminal wrap-up after producing useful work,
-    OR when the failure is a quota/rate limit (not a real execution failure).
+    """True when a backend failed its terminal wrap-up after producing useful work.
 
     The task still failed for audit/review purposes. The distinction is only for
     the reusable session status: do not leave the session in ERROR when the
-    operator has a salvaged reply/file evidence to inspect and can continue,
-    or when the failure is merely a quota pause that will self-resolve.
+    operator has a salvaged reply/file evidence to inspect and can continue.
 
-    Two independent gates (either triggers True):
-      A. QUOTA / RATE LIMIT — the turn's output carries a usage-limit or
-         rate-limit message (detected via the driver's ``error_class`` or
-         free-text markers). This is NOT a hard execution failure; the session
-         stays alive so it can resume when the quota resets.
-      B. SALVAGED WORK — the terminal result is a backend
-         ``error_during_execution`` AND the output carries the driver's honest
-         salvaged reply (banner + real agent content). The marker lives in the
-         raw transcript (raw_stdout), or in the diagnostic tail (raw_stderr /
-         error_detail) for older rows where the gateway mirrored
-         raw_stdout=output.
+    Gates (all must hold):
+      - the terminal result is a backend ``error_during_execution`` — the SDK
+        ends the turn normally after the agent's work, so this is NOT a hard
+        execution failure. The marker lives in the raw transcript (raw_stdout),
+        or in the diagnostic tail (raw_stderr / error_detail) for older rows
+        where the gateway mirrored raw_stdout=output;
+      - ``output`` is the driver's honest salvaged reply, i.e. it starts with the
+        salvage banner AND carries agent content beyond that banner (a bare
+        error string like "backend failed" is not salvage).
+
+    A quota pause is NOT salvage and is deliberately not handled here: it keeps
+    the session alive via :func:`is_quota_pause_result` in
+    :func:`_session_status_after_result`, but it must keep reporting the turn as
+    failed (no work was produced) — see :func:`_reclassify_salvaged_turn_success`.
 
     Deliberately does NOT depend on ``error_class == "backend_error"``: every
     call site reclassifies via ``_classify_error`` (which never returns that
@@ -131,23 +187,6 @@ def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
     output = (result.output or "").strip()
     if not output:
         return False
-
-    # Gate A: quota / rate limit — not a real execution failure.  The session
-    # must stay alive so it resumes when the quota window resets.
-    ec = str(getattr(result, "error_class", "") or "").lower()
-    if ec in ("usage_limit", "rate_limit"):
-        return True
-    # Fallback text detection when error_class was not set or was reclassified:
-    # check the output for usage-limit / rate-limit markers that the driver
-    # would have classified as "usage_limit".
-    _usage_markers = ("usage limit", "rate limit", "rate-limit", "hit your limit",
-                      "hit your session limit", "session limit", "too many requests")
-    out_lower = output.lower()
-    if any(m in out_lower for m in _usage_markers):
-        return True
-
-    # Gate B: salvaged work — backend failed its terminal wrap-up after the
-    # agent produced real, deliverable work.
     raw = (
         f"{result.raw_stdout or ''}\n{result.raw_stderr or ''}\n"
         f"{getattr(result, 'error_detail', '') or ''}"
@@ -169,8 +208,7 @@ def _reclassify_salvaged_turn_success(result: TaskResult) -> TaskResult:
 
     ``_is_salvaged_backend_finalization_error`` already tells the session layer
     to resume (``AWAITING_INPUT``) for these turns: the SDK's terminal wrap-up
-    failed *after* the agent finished real, deliverable work, OR the failure is
-    a quota/rate limit (not a real execution failure). Task status, turn
+    failed *after* the agent finished real, deliverable work. Task status, turn
     telemetry, session history, and the ``mesh_tasks`` row all key off
     ``result.success`` independently of that session-status check, so without
     this fixup they keep surfacing the turn as failed to the operator even
@@ -185,7 +223,12 @@ def _reclassify_salvaged_turn_success(result: TaskResult) -> TaskResult:
 
 
 def _session_status_after_result(result: TaskResult, *, cancel_requested: bool = False) -> SessionStatus:
-    if result.success or _is_salvaged_backend_finalization_error(result):
+    # [quota-resume] A quota pause keeps the session REUSABLE: nothing about the
+    # session broke, the provider simply refused the turn until the window
+    # resets, so ERROR would be a lie that also makes the Case unresumable
+    # (the Wake-Dispatcher only ever wakes an AWAITING_INPUT Manager). The turn
+    # itself still reports failed — see is_quota_pause_result.
+    if result.success or _is_salvaged_backend_finalization_error(result) or is_quota_pause_result(result):
         return SessionStatus.AWAITING_INPUT
     if cancel_requested or any("cancelled" in str(error).lower() for error in (result.errors or [])):
         return SessionStatus.CANCELLED
@@ -1024,6 +1067,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         _row = db.get_flow_run(case_id)
         if _row is not None and str(_row.get("status") or "").strip().lower() == "blocked":
             return 0
+        # [quota-resume] A quota-PAUSED Case is not a normal Case this tick: while
+        # the window is spent a wake would only burn another refused turn, and
+        # once it reopens the RESUME (proposed/approved/auto) is what continues
+        # it. Checked before satisfaction on purpose — the defect being fixed is
+        # precisely that a paused Case could only ever come back if a wait-group
+        # happened to satisfy later, at an unrelated moment.
+        if await self._handle_quota_paused_case(db, case_id):
+            return 0
         tick = db.compute_continuation_tick(case_id)
         # [continuation-review-watermark] Retire one-shot groups the Manager already
         # drained by reviewing their members out-of-band (a tagged review.*, e.g.
@@ -1195,30 +1246,47 @@ class TaskOrchestrator(ITaskOrchestrator):
             return
         from src.services.approval_service import ApprovalService
         self.approval_service = ApprovalService(
-            db, on_approve=self._on_case_respawn_approval_resolved,
+            db, on_approve=self._on_case_approval_resolved,
         )
 
-    async def _on_case_respawn_approval_resolved(self, row: Dict[str, Any]) -> None:
-        """ApprovalService on_approve callback: fires the actual respawn once an
-        operator has approved a `case_manager_respawn` request. Any other action
-        on the (shared) approval service is not ours — ignore it."""
-        if str(row.get("action") or "") != "case_manager_respawn":
+    async def _on_case_approval_resolved(self, row: Dict[str, Any]) -> None:
+        """ApprovalService on_approve callback: the operator's decision is what
+        RUNS the gated Case action (the service is a durable queue, not a blocked
+        coroutine). Routes by ``action``; anything else on the shared approval
+        service is not ours — ignore it."""
+        action = str(row.get("action") or "")
+        if action not in (CASE_RESPAWN_APPROVAL_ACTION, CASE_RESUME_APPROVAL_ACTION):
             return
         try:
             payload = json.loads(row.get("payload") or "{}")
         except Exception:
             payload = {}
         case_id = str(payload.get("case_id") or "")
+        if not case_id:
+            logger.warning(
+                "event=case_approval_payload_invalid action=%s approval_id=%s",
+                action, row.get("id"),
+            )
+            return
+        if action == CASE_RESUME_APPROVAL_ACTION:
+            await self.resume_case(
+                case_id,
+                mode=str(payload.get("mode") or "") or None,
+                actor="operator_approval",
+                paused_task_id=str(payload.get("paused_task_id") or "") or None,
+            )
+            return
         generation = payload.get("generation")
-        dead_session_id = payload.get("dead_session_id")
-        if not case_id or generation is None:
+        if generation is None:
             logger.warning(
                 "event=respawn_approval_payload_invalid approval_id=%s", row.get("id"),
             )
             return
         from src.control.db import get_db
         db = get_db()
-        await self._do_respawn_manager_for_case(db, case_id, int(generation), dead_session_id)
+        await self._do_respawn_manager_for_case(
+            db, case_id, int(generation), payload.get("dead_session_id"),
+        )
 
     def _find_case_generation_approval(
         self, action: str, case_id: str, generation: int,
@@ -1240,29 +1308,636 @@ class TaskOrchestrator(ITaskOrchestrator):
                 return row
         return None
 
-    def _quota_still_exhausted_for_claude(self) -> bool:
-        """True ONLY when we have positive, current telemetry that a Claude quota
-        window is still exhausted. Any absence/staleness of that evidence (no
-        coordinator, QUOTA_COORDINATOR_ENABLED off, stale reading) returns False —
-        fail OPEN to asking the operator rather than silently waiting forever on
-        an instrument that may never report again."""
+    def quota_window_state(self, provider: str = "claude") -> Dict[str, Any]:
+        """[quota-resume] The harness's honest answer to "is this provider's quota
+        window spent, and when does it reopen?".
+
+        Reads the quota coordinator's LATEST SNAPSHOTS (not ``window_states``):
+        the snapshot row is the only place ``limit_reached`` — the provider's own
+        "you are cut off" bit — survives, and it also carries ``reset_at``.
+        ``window_states`` derives a stricter ``telemetry_state`` used for
+        AUTOMATION READINESS; using it here would call quota "restored" merely
+        because the observer is between polls.
+
+        Uses the store's bounded ``latest_snapshots()`` (one indexed row per
+        bucket) rather than ``status()``, which additionally builds per-bucket
+        reset HISTORY — fine for the diagnostics endpoint, far too heavy for a
+        path that runs on every Wake-Dispatcher tick.
+
+        Returns ``{exhausted, reset_at, observed_at, used_percent, bucket_id,
+        evidence}``. ``evidence`` names WHY, and is what the UI shows the
+        operator:
+          * ``limit_reached``     — provider says the window is spent (authoritative)
+          * ``reset_at_future``   — spent, and the recorded reset is still ahead
+          * ``below_limit``       — observed under the limit ⇒ usable
+          * ``reset_elapsed``     — the last spent reading's reset time has passed
+          * ``no_telemetry``      — coordinator off/unavailable: NOT exhausted
+        A missing instrument returns ``exhausted=False``: waiting forever on an
+        instrument that may never report again is worse than proposing a resume
+        the operator can decline.
+        """
+        out: Dict[str, Any] = {
+            "provider": provider, "exhausted": False, "reset_at": None,
+            "observed_at": None, "used_percent": None, "bucket_id": None,
+            "evidence": "no_telemetry",
+        }
         coord = getattr(self, "quota_coordinator", None)
         store = getattr(coord, "store", None) if coord is not None else None
         if store is None:
-            return False
+            return out
         try:
-            window_states = store.status().get("window_states") or []
+            reader = getattr(store, "latest_snapshots", None)
+            snapshots = (
+                reader() if callable(reader)
+                else (store.status().get("latest_snapshots") or [])
+            )
         except Exception:
+            return out
+        now = datetime.now(timezone.utc)
+        best: Optional[Dict[str, Any]] = None
+        for s in snapshots:
+            if s.get("provider") != provider:
+                continue
+            spent = bool(s.get("limit_reached")) or (
+                isinstance(s.get("used_percent"), (int, float)) and s["used_percent"] >= 100
+            )
+            if not spent:
+                if best is None:
+                    best = {**s, "_spent": False}
+                continue
+            # A spent bucket always wins: ANY exhausted window blocks the account.
+            if best is None or not best.get("_spent"):
+                best = {**s, "_spent": True}
+        if best is None:
+            return out
+        reset_at = _parse_iso_utc(best.get("reset_at"))
+        out.update({
+            "reset_at": best.get("reset_at"),
+            "observed_at": best.get("observed_at"),
+            "used_percent": best.get("used_percent"),
+            "bucket_id": best.get("bucket_id"),
+        })
+        if not best.get("_spent"):
+            out["evidence"] = "below_limit"
+            return out
+        if reset_at is not None and reset_at <= now:
+            # The spent reading is older than its own reset time — the window has
+            # rolled over even if the observer has not polled since.
+            out["evidence"] = "reset_elapsed"
+            return out
+        out["exhausted"] = True
+        out["evidence"] = "limit_reached" if best.get("limit_reached") else "reset_at_future"
+        return out
+
+    def _quota_still_exhausted_for_claude(self) -> bool:
+        """True ONLY when telemetry positively says a Claude window is still spent.
+        Absence/staleness of that evidence returns False — fail OPEN to asking the
+        operator rather than waiting forever on a silent instrument."""
+        return bool(self.quota_window_state("claude").get("exhausted"))
+
+    # =======================================================================
+    # [quota-resume] QUOTA PAUSE → RESTORE → RESUME
+    #
+    # A Manager turn that dies on `usage_limit` is not a failure of anything:
+    # the provider refused the turn until the account's window reopens. Before
+    # this seam the harness had exactly ONE resume trigger — a satisfied
+    # wait-group — so a quota-killed Case either stalled silently forever (no
+    # workers in flight) or came back at an unrelated random moment (whenever
+    # some worker happened to finish). Neither is a decision anyone made.
+    #
+    # The seam splits that into three honest parts:
+    #   1. PAUSE     — durable, on the Case ledger (`flow.quota_paused`), so it
+    #                  survives a gateway restart and is visible in the UI.
+    #   2. RESTORE   — a telemetry fact (quota_window_state), not a timer.
+    #   3. RESUME    — an ECONOMIC decision, because resuming a fat Manager
+    #                  session re-writes its whole prompt cache (observed
+    #                  200-300k tokens ≈ real money) and may buy nothing but the
+    #                  words "case is closed". So restore does not resume: it
+    #                  PROPOSES, with a cost estimate, and the operator decides
+    #                  (or CASE_QUOTA_RESUME_AUTO decides, under a USD ceiling).
+    #
+    # Every entry point — auto-restore, approval, the operator's Resume button —
+    # funnels into ONE leased `resume_case`, which is what structurally prevents
+    # the observed "operator started a session, then the engine started another".
+    # =======================================================================
+
+    def _rate_limit_reset_iso(self, result: TaskResult) -> Optional[str]:
+        """The reset instant the PROVIDER attached to its own refusal
+        (``rate_limit_event.rate_limit_info.resetsAt``, epoch seconds), as UTC
+        ISO — or None. This is ground truth about one account's window and needs
+        no observer running."""
+        info = self._extract_rate_limit_info(result) or {}
+        raw = info.get("resetsAt")
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+
+    def _record_quota_pause(self, task: "Task", result: TaskResult) -> None:
+        """Record a Manager turn's quota death as a durable Case pause.
+
+        Best-effort/isolated exactly like ``_flow_terminal_outcome`` (whose call
+        site this mirrors): a ledger write can NEVER raise into task execution.
+        No-op unless the flag is ON, the turn is a real quota pause, the task
+        belongs to a Case, and the session that ran it IS that Case's Manager —
+        a worker hitting quota is the worker's own retry problem, not a reason to
+        propose bringing a Manager back.
+        """
+        try:
+            from src.control.db import case_quota_resume_enabled, get_db
+            if not self._harness_flow_drive_enabled() or not case_quota_resume_enabled():
+                return
+            if not is_quota_pause_result(result):
+                return
+            meta = getattr(task, "metadata", None) or {}
+            case_id = meta.get(self._FLOW_RUN_META_KEY) or meta.get(self._CASE_ID_META_KEY)
+            session_id = str(meta.get("session_id") or "").strip()
+            if not case_id or not session_id:
+                return
+            db = get_db()
+            if db is None:
+                return
+            if db.case_manager_session_id(case_id) != session_id:
+                return
+            if db.case_quota_pause(case_id) is not None:
+                # Already paused (a second turn can fail the same way before the
+                # window reopens) — one open pause per Case, keyed on the FIRST
+                # paused task so the resume lease stays deterministic.
+                return
+            quota = self.quota_window_state(str(getattr(result, "backend", "") or "claude"))
+            # The provider's own reset time rides on the refusal itself
+            # (rate_limit_event.resetsAt). Prefer telemetry, but keep this as the
+            # fallback: it is the only reset signal available when the quota
+            # observer is off or has never reported, and without it a pause with
+            # no telemetry would be proposed for resume immediately.
+            reset_at = quota.get("reset_at") or self._rate_limit_reset_iso(result)
+            db.append_flow_event(
+                case_id, "flow.quota_paused", "system",
+                entity_type="task", entity_id=getattr(task, "id", None),
+                payload={
+                    "session_id": session_id,
+                    "paused_task_id": getattr(task, "id", None),
+                    "error_class": str(getattr(result, "error_class", "") or ""),
+                    "provider": quota.get("provider") or "claude",
+                    "reset_at": reset_at,
+                    "quota_evidence": quota.get("evidence"),
+                    "reason": self._short_failure_reason(result)[:256],
+                },
+            )
+            self._emit_event(
+                "case_quota_paused", task,
+                {"case_id": case_id, "session_id": session_id, "reset_at": reset_at},
+            )
+            logger.info(
+                "event=case_quota_paused case=%s session=%s task=%s reset_at=%s",
+                case_id, session_id, getattr(task, "id", "?"), reset_at,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=case_quota_pause_record_failed task_id=%s err=%s",
+                getattr(task, "id", "?"), e,
+            )
+
+    def estimate_case_resume_cost(self, session_id: Optional[str]) -> Dict[str, Any]:
+        """[quota-resume] What resuming THIS session is likely to cost, and how we
+        know — the number that turns "resume?" into a decision.
+
+        The dominant cost of resuming hours later is the prompt-cache REWRITE:
+        the provider's cache TTL (~1h) has long expired, so the entire
+        conversation is billed again at the cache-write rate. We do not have
+        per-request context telemetry (``usage_granularity='invocation_total'``,
+        ``usage_coverage='aggregate_only'``), so the context size is NOT directly
+        observable. What IS observed is the largest ``cache_creation_tokens``
+        this session recently wrote — see ``MeshDB.recent_cache_write``. That is
+        used as the estimate and labelled as such
+        (``basis='max_recent_turn_cache_creation'``), never dressed up as a
+        measurement.
+
+        Honesty rules: an unpriceable model or absent telemetry yields
+        ``known=False`` + a reason, never a fabricated number.
+        """
+        out: Dict[str, Any] = {
+            "known": False, "reason": "no_telemetry", "session_id": session_id,
+            "model": None, "cache_creation_tokens": None, "usd": None,
+            "basis": "max_recent_turn_cache_creation",
+        }
+        if not session_id:
+            out["reason"] = "no_session"
+            return out
+        try:
+            from src.control.db import get_db
+            from src.services.pricing import TokenTotals, estimate_cost
+            db = get_db()
+            if db is None:
+                out["reason"] = "db_unavailable"
+                return out
+            row = db.recent_cache_write(session_id)
+            session = self.session_store.get(session_id)
+            model = getattr(session, "model", None) if session is not None else None
+            out["model"] = model
+            if row is None:
+                out["reason"] = "no_recorded_turn"
+                return out
+            tokens = int(row.get("cache_creation") or 0)
+            out["cache_creation_tokens"] = tokens
+            out["observed_at"] = row.get("observed_at")
+            cost = estimate_cost(model or row.get("model"), TokenTotals(cache_creation=tokens))
+            if not getattr(cost, "known", False):
+                out["reason"] = getattr(cost, "reason", "model_not_priced") or "model_not_priced"
+                return out
+            out["known"] = True
+            out["reason"] = ""
+            out["usd"] = getattr(cost, "usd_cache_write", None)
+            return out
+        except Exception as e:
+            logger.debug("event=resume_estimate_failed session=%s err=%s", session_id, e)
+            out["reason"] = "estimate_failed"
+            return out
+
+    def _recommended_resume_mode(self, session_id: Optional[str]) -> str:
+        """Which resume mode the harness would pick: ``fresh_manager`` whenever
+        the old session cannot carry the work (gone, closed, cancelled, errored),
+        else ``in_place``. A live AWAITING_INPUT Manager still holds the richest
+        state; a dead one must be reconstructed from the ledger."""
+        session = self.session_store.get(session_id) if session_id else None
+        if session is None or session.status in (
+            SessionStatus.CLOSED, SessionStatus.CANCELLED, SessionStatus.ERROR,
+        ):
+            return "fresh_manager"
+        return "in_place"
+
+    def _find_case_pause_approval(
+        self, case_id: str, paused_task_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Any prior resume approval (pending OR resolved) for this exact pause.
+        Keyed on the paused task: checking only 'pending' would let a REJECTED
+        proposal be re-raised on the very next tick."""
+        if self.approval_service is None:
+            return None
+        for row in self.approval_service.list(limit=200):
+            if row.get("action") != CASE_RESUME_APPROVAL_ACTION:
+                continue
+            try:
+                payload = json.loads(row.get("payload") or "{}")
+            except Exception:
+                continue
+            if (
+                payload.get("case_id") == case_id
+                and str(payload.get("paused_task_id") or "") == paused_task_id
+            ):
+                return row
+        return None
+
+    def case_resume_state(self, case_id: str) -> Dict[str, Any]:
+        """[quota-resume] Everything the operator needs to decide about ONE Case:
+        is it paused, why, when does quota come back, what would a resume cost,
+        which mode is recommended, and is a decision already pending. Read-only —
+        the UI panel and the ``/api/cases/{id}/resume-state`` endpoint.
+        """
+        from src.control.db import (
+            case_quota_resume_auto, case_quota_resume_enabled, get_db,
+        )
+        state: Dict[str, Any] = {
+            "case_id": case_id, "paused": False, "pause": None,
+            "quota": self.quota_window_state("claude"),
+            "manager_session_id": None, "manager_session_status": None,
+            "recommended_mode": "fresh_manager", "estimate": None,
+            "pending_approval": None, "auto": case_quota_resume_auto(),
+            "enabled": case_quota_resume_enabled(),
+            "modes": list(CASE_RESUME_MODES),
+        }
+        db = get_db()
+        if db is None:
+            return state
+        session_id = db.case_manager_session_id(case_id)
+        session = self.session_store.get(session_id) if session_id else None
+        state["manager_session_id"] = session_id
+        state["manager_session_status"] = (
+            session.status.value if session is not None else None
+        )
+        state["recommended_mode"] = self._recommended_resume_mode(session_id)
+        state["estimate"] = self.estimate_case_resume_cost(session_id)
+        pause = db.case_quota_pause(case_id)
+        if pause is None:
+            return state
+        state["paused"] = True
+        state["pause"] = pause
+        try:
+            self._ensure_approval_service(db)
+            existing = self._find_case_pause_approval(
+                case_id, str(pause.get("paused_task_id") or ""),
+            )
+        except Exception:
+            existing = None
+        if existing is not None:
+            state["pending_approval"] = {
+                "id": existing.get("id"), "status": existing.get("status"),
+                "created_at": existing.get("created_at"),
+                "resolved_at": existing.get("resolved_at"),
+            }
+        return state
+
+    async def _handle_quota_paused_case(self, db, case_id: str) -> bool:
+        """One Wake-Dispatcher pass over a Case's quota pause.
+
+        Returns True iff the pause OWNS this Case this tick — the caller must
+        then skip the normal wake path: while the window is spent, delivering a
+        wake turn only burns another refused turn, and once it is restored the
+        resume (not a wake) is the thing that continues the Case.
+
+        Branches, in order:
+          * flag OFF / no open pause      → False (pre-feature behaviour)
+          * quota still spent             → True, silent (nothing to decide yet)
+          * restored + decision pending   → True, silent (already asked)
+          * restored + decision rejected  → close the pause, return False (the
+            Case goes back to ordinary behaviour; the operator can still press
+            Resume, or Block the Case if they want it to stop)
+          * restored + approved           → resume (safety net if the on-approve
+            dispatch was lost mid-crash; the lease makes it idempotent)
+          * restored, auto ON, under the
+            USD ceiling                   → resume
+          * otherwise                     → propose (approval + event) → True
+        """
+        from src.control.db import (
+            case_quota_resume_auto, case_quota_resume_auto_max_usd,
+            case_quota_resume_enabled,
+        )
+        if not case_quota_resume_enabled():
             return False
-        for w in window_states:
-            if w.get("provider") != "claude":
-                continue
-            if w.get("telemetry_state") != "current":
-                continue
-            used = w.get("used_percent")
-            if isinstance(used, (int, float)) and used >= 100:
+        pause = db.case_quota_pause(case_id)
+        if pause is None:
+            return False
+        paused_task_id = str(pause.get("paused_task_id") or "")
+        quota = self.quota_window_state(str(pause.get("provider") or "claude"))
+        if quota.get("exhausted"):
+            return True
+        if quota.get("evidence") == "no_telemetry":
+            # No observer. Fall back to the reset instant the provider itself
+            # attached to the refusal: proposing a resume before that time would
+            # just buy another refused turn. Once it passes, propose — a missing
+            # instrument must not park a Case forever.
+            recorded_reset = _parse_iso_utc(pause.get("reset_at"))
+            if recorded_reset is not None and recorded_reset > datetime.now(timezone.utc):
                 return True
-        return False
+
+        try:
+            self._ensure_approval_service(db)
+            existing = self._find_case_pause_approval(case_id, paused_task_id)
+            if existing is not None:
+                status = str(existing.get("status") or "")
+                if status == "pending":
+                    return True
+                if status == "approved":
+                    await self.resume_case(
+                        case_id, actor="approval_recovery",
+                        paused_task_id=paused_task_id,
+                    )
+                    return True
+                # rejected/expired — the operator said no to THIS pause. Close it
+                # so the pause does not silently disable the Case forever.
+                db.append_flow_event(
+                    case_id, "flow.quota_pause_declined", "operator",
+                    entity_type="task", entity_id=paused_task_id or None,
+                    payload={"approval_id": existing.get("id"), "status": status},
+                )
+                self._emit_event(
+                    "case_quota_resume_declined", None,
+                    {"case_id": case_id, "approval_id": existing.get("id")},
+                )
+                return False
+
+            estimate = self.estimate_case_resume_cost(pause.get("session_id"))
+            mode = self._recommended_resume_mode(pause.get("session_id"))
+            ceiling = case_quota_resume_auto_max_usd()
+            usd = estimate.get("usd")
+            under_ceiling = (
+                ceiling <= 0 or (isinstance(usd, (int, float)) and usd <= ceiling)
+            )
+            if case_quota_resume_auto() and under_ceiling:
+                await self.resume_case(
+                    case_id, mode=mode, actor="quota_restore_auto",
+                    paused_task_id=paused_task_id,
+                )
+                return True
+
+            brief = db.get_case_brief(case_id) or {}
+            result = self.approval_service.request(
+                action=CASE_RESUME_APPROVAL_ACTION, risk="medium", reversible=True,
+                requested_by="system", case_id=case_id,
+                payload={
+                    "case_id": case_id,
+                    "paused_task_id": paused_task_id,
+                    "session_id": pause.get("session_id"),
+                    "mode": mode,
+                    "cause": "quota_restored",
+                    "paused_at": pause.get("paused_at"),
+                    "reset_at": pause.get("reset_at"),
+                    "quota_evidence": quota.get("evidence"),
+                    "estimate_usd": usd,
+                    "estimate_known": bool(estimate.get("known")),
+                    "objective_excerpt": str(brief.get("objective") or "")[:400],
+                },
+            )
+            if not getattr(result, "ok", False):
+                raise RuntimeError(f"approval_request_failed:{getattr(result, 'reason', '')}")
+            self._emit_event(
+                "case_resume_proposed", None,
+                {"case_id": case_id, "mode": mode, "estimate_usd": usd,
+                 "paused_task_id": paused_task_id},
+            )
+            logger.info(
+                "event=case_resume_proposed case=%s mode=%s estimate_usd=%s",
+                case_id, mode, usd,
+            )
+            return True
+        except Exception as e:
+            # A failure in the DECISION layer must not strand the Case: fall
+            # through to the ordinary tick (which is what would have happened
+            # before this seam existed).
+            logger.warning("event=quota_resume_gate_failed case=%s err=%s", case_id, e)
+            return False
+
+    async def resume_case(
+        self,
+        case_id: str,
+        *,
+        mode: Optional[str] = None,
+        actor: str = "operator",
+        paused_task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[quota-resume] THE resume path. One function, one lease, three callers
+        (operator button, approved proposal, auto-restore).
+
+        This is a genuine CONTINUATION, never a fork: both modes stay on the same
+        ``flow_run_id``, keep the objective locked, and re-arm the existing waits.
+
+        ``mode`` defaults to :meth:`_recommended_resume_mode`. ``in_place`` is
+        refused (and downgraded to ``fresh_manager``) when the bound session
+        cannot take a turn, because silently doing nothing is the failure this
+        whole seam exists to remove.
+
+        Returns ``{ok, reason, mode, case_id, session_id}``. ``reason`` codes:
+        ``case_not_found`` / ``case_terminal`` / ``continuation_disabled`` /
+        ``manager_busy`` / ``resume_in_flight`` / ``no_manager_link`` /
+        ``respawn_failed`` / ``deliver_failed`` / ``db_unavailable``.
+        """
+        from src.control.db import (
+            CONTINUATION_MACHINE_SENTINEL, QUOTA_RESUME_ACTION,
+            case_continuation_enabled, get_db, quota_resume_task_id,
+        )
+        out: Dict[str, Any] = {
+            "ok": False, "reason": "", "case_id": case_id,
+            "mode": mode or "", "session_id": None,
+        }
+        db = get_db()
+        if db is None:
+            out["reason"] = "db_unavailable"
+            return out
+        row = db.get_flow_run(case_id)
+        if row is None:
+            out["reason"] = "case_not_found"
+            return out
+        if str(row.get("status") or "").strip().lower() in ("closed", "cancelled"):
+            out["reason"] = "case_terminal"
+            return out
+        if not case_continuation_enabled():
+            # Without the continuation substrate a resumed Manager has no wake
+            # path at all — resuming would produce one orphan turn. Refuse
+            # visibly instead.
+            out["reason"] = "continuation_disabled"
+            return out
+
+        # LEASE KEY. A resume of a PAUSE is keyed on the paused task — one pause,
+        # one resume, whichever entry point gets there first. A manual resume with
+        # no open pause is an ordinary operator poke and must stay repeatable
+        # later, so it is keyed on how many resumes this Case has already
+        # recorded: two rapid clicks compute the same key (one wins), while a
+        # deliberate poke after the previous resume landed gets a fresh one.
+        pause = db.case_quota_pause(case_id)
+        if not paused_task_id:
+            paused_task_id = str((pause or {}).get("paused_task_id") or "")
+        if not paused_task_id:
+            resumes = sum(
+                1 for e in db.list_flow_events(case_id, limit=1000)
+                if e.get("event_type") == "flow.quota_resumed"
+            )
+            paused_task_id = f"manual:{resumes}"
+        session_id = db.case_manager_session_id(case_id)
+        if not session_id:
+            out["reason"] = "no_manager_link"
+            return out
+        session = self.session_store.get(session_id)
+        if session is not None and session.status == SessionStatus.BUSY:
+            # A turn is already running on this Manager — the Case is not stuck.
+            out["reason"] = "manager_busy"
+            return out
+
+        chosen = (mode or "").strip().lower() or self._recommended_resume_mode(session_id)
+        if chosen not in CASE_RESUME_MODES:
+            chosen = self._recommended_resume_mode(session_id)
+        if chosen == "in_place" and (
+            session is None
+            or session.status in (SessionStatus.CLOSED, SessionStatus.CANCELLED)
+        ):
+            chosen = "fresh_manager"
+        out["mode"] = chosen
+
+        # SINGLE-FLIGHT: the same atomic claim the continuation/respawn leases
+        # use. This is what makes "operator pressed Resume" and "quota came back"
+        # unable to start two Managers on one Case — whoever claims first owns it.
+        resume_id = quota_resume_task_id(case_id, paused_task_id)
+        db.enqueue_task(
+            resume_id,
+            session_id=None,
+            machine_id=CONTINUATION_MACHINE_SENTINEL,
+            backend=(getattr(session, "backend", None) or "claude"),
+            action=QUOTA_RESUME_ACTION,
+            payload={"case_id": case_id, "paused_task_id": paused_task_id,
+                     "mode": chosen, "actor": actor},
+        )
+        if not db.claim_task(resume_id, socket.gethostname()):
+            out["reason"] = "resume_in_flight"
+            return out
+
+        try:
+            if chosen == "fresh_manager":
+                generation = int(
+                    db.compute_continuation_tick(case_id).get("generation_next") or 1
+                )
+                spawned = await self._do_respawn_manager_for_case(
+                    db, case_id, generation, session_id,
+                )
+                if not spawned:
+                    db.release_task(resume_id, socket.gethostname())
+                    out["reason"] = "respawn_failed"
+                    return out
+                out["session_id"] = db.case_manager_session_id(case_id)
+            else:
+                # In place: the session is alive and idle. A resume turn is an
+                # ordinary instruction — the SAME conversation, not a fork.
+                if session is not None and session.status == SessionStatus.ERROR:
+                    session.status = SessionStatus.AWAITING_INPUT
+                    self.session_store.save(session)
+                try:
+                    await self.submit_instruction(
+                        description=self._render_quota_resume_turn(case_id, row),
+                        session_id=session_id,
+                        cwd=getattr(session, "repo_path", None),
+                        source="manager_quota_resume",
+                    )
+                except Exception as e:
+                    logger.warning("event=quota_resume_deliver_failed case=%s err=%s", case_id, e)
+                    db.release_task(resume_id, socket.gethostname())
+                    out["reason"] = "deliver_failed"
+                    return out
+                out["session_id"] = session_id
+
+            db.append_flow_event(
+                case_id, "flow.quota_resumed", actor,
+                entity_type="session", entity_id=out["session_id"],
+                payload={"mode": chosen, "paused_task_id": paused_task_id,
+                         "actor": actor, "resumed_session_id": out["session_id"]},
+            )
+            db.complete_task(resume_id, result={"mode": chosen, "session_id": out["session_id"]})
+            self._emit_event(
+                "case_resumed", None,
+                {"case_id": case_id, "mode": chosen, "actor": actor,
+                 "session_id": out["session_id"]},
+            )
+            logger.info(
+                "event=case_resumed case=%s mode=%s actor=%s session=%s",
+                case_id, chosen, actor, out["session_id"],
+            )
+            out["ok"] = True
+            return out
+        except Exception as e:
+            logger.warning("event=case_resume_failed case=%s err=%s", case_id, e)
+            try:
+                db.release_task(resume_id, socket.gethostname())
+            except Exception:
+                pass
+            out["reason"] = "resume_failed"
+            return out
+
+    def _render_quota_resume_turn(self, case_id: str, case_row: Dict[str, Any]) -> str:
+        """The in-place resume turn. Deliberately points the Manager at the LEDGER
+        first: after a multi-hour pause its in-context picture of the Case is the
+        stalest thing in the room, and re-deriving state from get_case_brief is
+        cheaper than re-reasoning from the transcript."""
+        objective = str(case_row.get("objective") or "").strip()
+        return (
+            "[quota-resume] The quota window that interrupted this Case has reopened, "
+            f"and the operator authorised continuing it. Case: {case_id}. Objective "
+            f"(unchanged — do NOT re-open or re-scope it): {objective}\n"
+            "FIRST call get_case_brief / get_case to re-derive the CURRENT state from the "
+            "ledger (dispatched workers, verdicts already recorded, open waits, rounds "
+            "used) — hours may have passed since your last turn, so trust the ledger over "
+            "your recollection. THEN do the single next thing that advances the objective: "
+            "review a finished worker's committed diff, dispatch the next task, wait on "
+            "outstanding workers, or close the Case if its completion_criteria are met. "
+            "Do NOT restate the plan or summarise history back to the operator — this turn "
+            "is expensive; spend it on work, not narration."
+        )
 
     async def _handle_dead_manager_session(
         self, db, case_id: str, generation: int, dead_session_id: Optional[str],
@@ -4945,6 +5620,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                     success=bool(result.success),
                     error_class=str(getattr(result, "error_class", "") or ""),
                 )
+                # [quota-resume] A Manager turn refused for quota PAUSES its Case
+                # durably, so the reopening window (not an unrelated worker
+                # finishing) is what brings it back. No-op for every other turn.
+                self._record_quota_pause(task, result)
 
                 # Send notification via the central notification dispatcher
                 try:
@@ -6247,7 +6926,14 @@ created: {task.created}
             return {"max_retries": min(1, default_max), "initial_delay": 1.0, "backoff_multiplier": 1}
         if error_class in ("network", "upstream_error"):
             return {"max_retries": max(1, default_max), "initial_delay": 1.5, "backoff_multiplier": default_mult}
-        if error_class in ("rate_limit", "usage_limit"):
+        if error_class == "usage_limit":
+            # [quota-resume] A spent subscription window reopens hours later, so
+            # retrying the SAME turn seconds later is guaranteed to fail again
+            # and only re-sends a large prompt. Not retry-eligible: the Case is
+            # PAUSED and resumes through the quota-restore path instead
+            # (_handle_quota_paused_case), which is timed off real telemetry.
+            return {"max_retries": 0, "initial_delay": 0.0, "backoff_multiplier": 1}
+        if error_class == "rate_limit":
             return {"max_retries": max(2, default_max), "initial_delay": 2.0, "backoff_multiplier": max(2, default_mult)}
         return {"max_retries": default_max, "initial_delay": 1.0, "backoff_multiplier": default_mult}
 
@@ -6373,7 +7059,12 @@ created: {task.created}
         if api_error_status is not None and api_error_status >= 500:
             return "upstream_error"
         if self._extract_rate_limit_info(result) is not None:
-            return "rate_limit"
+            # A rejected rate_limit_event IS the subscription window (it carries
+            # rateLimitType five_hour/daily + resetsAt) — the same condition the
+            # 429 above reports, so it must land in the same class. Splitting it
+            # off as "rate_limit" would give the identical failure two retry
+            # policies and hide half the quota pauses from the resume path.
+            return "usage_limit"
         text = self._failure_text(result)
         text_lower = text.lower()
         if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "hit your limit", "hit your session limit", "session limit", "usage limit", "you've hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):

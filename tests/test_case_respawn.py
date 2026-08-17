@@ -180,6 +180,13 @@ class _FakeOrch:
             self, db, case_id, generation, dead_sid,
         )
 
+    async def _handle_quota_paused_case(self, db, case_id):
+        # The quota-pause branch of the tick. Inert here (no Case in this file
+        # carries a `flow.quota_paused` event) — it is covered on its own in
+        # test_case_quota_resume.py. Delegating to the REAL method keeps that
+        # inertness honest rather than asserting it with a stub.
+        return await TaskOrchestrator._handle_quota_paused_case(self, db, case_id)
+
 
 def _continue(orch, db, case_id) -> int:
     return asyncio.run(TaskOrchestrator._continue_case_once(orch, db, case_id))

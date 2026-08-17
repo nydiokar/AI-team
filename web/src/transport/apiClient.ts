@@ -36,6 +36,8 @@ import type {
   RawCaseRosterResponse,
   RawSessionAffiliationsResponse,
   RawCaseOrphanSweepResponse,
+  RawCaseResumeResponse,
+  RawCaseResumeState,
   RawWorkBucket,
   RawCostExplorerResponse,
   RawCostTopResponse,
@@ -618,6 +620,30 @@ export const api = {
     return get<RawSessionAffiliationsResponse>(
       "/api/work/affiliations/sessions",
       token,
+    );
+  },
+
+  /** GET /api/cases/{id}/resume-state — is this Case quota-paused, when does the
+   *  window reopen, what would resuming cost, and is a decision already pending. */
+  async caseResumeState(token: string, caseId: string): Promise<RawCaseResumeState> {
+    return get<RawCaseResumeState>(
+      `/api/cases/${encodeURIComponent(caseId)}/resume-state`,
+      token,
+    );
+  },
+
+  /** POST /api/cases/{id}/resume — resume the Case NOW. A continuation, never a
+   *  fork: same Case, same objective. Server-side single-flight, so this and the
+   *  automatic quota-restore path can never start two Managers. */
+  async resumeCase(
+    token: string,
+    caseId: string,
+    opts: { mode?: string } = {},
+  ): Promise<RawCaseResumeResponse> {
+    return post<RawCaseResumeResponse>(
+      `/api/cases/${encodeURIComponent(caseId)}/resume`,
+      token,
+      { mode: opts.mode ?? null },
     );
   },
 
