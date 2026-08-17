@@ -826,3 +826,96 @@ def test_events_endpoint(client, monkeypatch, tmp_path):
     assert any(e["event"] == "dispatch" for e in body["events"])
     r2 = client.get(f"/api/events?since={body['offset']}", headers=_auth())
     assert r2.json()["events"] == []
+
+
+# --- [quota-resume] Case resume endpoints ------------------------------------
+
+class _ResumeOrchestrator(_StubOrchestrator):
+    """Records what the API layer asked the orchestrator to do. The resume logic
+    itself is covered in test_case_quota_resume.py; what matters HERE is the
+    seam: the operator's request reaches ``resume_case`` with the right mode, and
+    a refusal maps to a status code the UI can act on (not a blanket 500)."""
+
+    def __init__(self, resume_result=None, state=None) -> None:
+        super().__init__()
+        self.calls: list = []
+        self._resume_result = resume_result or {
+            "ok": True, "reason": "", "case_id": "c1",
+            "mode": "in_place", "session_id": "mgr-1",
+        }
+        self._state = state or {"case_id": "c1", "paused": False}
+
+    def case_resume_state(self, case_id):
+        return {**self._state, "case_id": case_id}
+
+    async def resume_case(self, case_id, *, mode=None, actor="operator", paused_task_id=None):
+        self.calls.append({"case_id": case_id, "mode": mode, "actor": actor})
+        return self._resume_result
+
+
+def _resume_client(monkeypatch, orch):
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    return TestClient(control_api.build_control_api(orch))
+
+
+def test_case_resume_state_is_served(monkeypatch):
+    orch = _ResumeOrchestrator(state={
+        "paused": True, "quota": {"exhausted": True, "evidence": "limit_reached"},
+    })
+    c = _resume_client(monkeypatch, orch)
+
+    r = c.get("/api/cases/case-42/resume-state", headers=_auth())
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["case_id"] == "case-42" and body["paused"] is True
+    assert body["quota"]["evidence"] == "limit_reached"
+
+
+def test_case_resume_passes_the_operator_mode_through(monkeypatch):
+    orch = _ResumeOrchestrator()
+    c = _resume_client(monkeypatch, orch)
+
+    r = c.post("/api/cases/c1/resume", headers=_auth(), json={"mode": "fresh_manager"})
+
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert orch.calls == [{"case_id": "c1", "mode": "fresh_manager", "actor": "operator"}]
+
+
+def test_case_resume_without_a_mode_lets_the_harness_choose(monkeypatch):
+    orch = _ResumeOrchestrator()
+    c = _resume_client(monkeypatch, orch)
+
+    assert c.post("/api/cases/c1/resume", headers=_auth(), json={}).status_code == 200
+    assert orch.calls[0]["mode"] is None
+
+
+def test_case_resume_conflict_is_409_not_500(monkeypatch):
+    """A lost single-flight race is a normal outcome the UI explains ('already
+    running'), not a server error."""
+    orch = _ResumeOrchestrator(resume_result={
+        "ok": False, "reason": "resume_in_flight", "case_id": "c1",
+        "mode": "in_place", "session_id": None,
+    })
+    c = _resume_client(monkeypatch, orch)
+
+    r = c.post("/api/cases/c1/resume", headers=_auth(), json={})
+
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "resume_in_flight"
+
+
+def test_case_resume_unknown_case_is_404(monkeypatch):
+    orch = _ResumeOrchestrator(resume_result={
+        "ok": False, "reason": "case_not_found", "case_id": "nope",
+        "mode": "", "session_id": None,
+    })
+    c = _resume_client(monkeypatch, orch)
+
+    assert c.post("/api/cases/nope/resume", headers=_auth(), json={}).status_code == 404
+
+
+def test_case_resume_requires_auth(monkeypatch):
+    c = _resume_client(monkeypatch, _ResumeOrchestrator())
+    assert c.post("/api/cases/c1/resume", json={}).status_code in (401, 403)
+    assert c.get("/api/cases/c1/resume-state").status_code in (401, 403)

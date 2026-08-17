@@ -240,6 +240,18 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Gate M3.4 crash-respawn (a dead Manager session on a satisfied Case) behind an operator approval instead of auto-spawning. Quota-caused deaths wait for confirmed-restored telemetry before even requesting approval.",
     },
+    "CASE_QUOTA_RESUME_ENABLED": {
+        "default": "1",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Record a Manager Case as quota-PAUSED when its turn dies on usage_limit, and propose a resume as soon as quota telemetry says the window reopened. OFF ⇒ no pause record, no proposal (pre-feature behaviour: the Case only ever resumes if a wait-group happens to satisfy later).",
+    },
+    "CASE_QUOTA_RESUME_AUTO": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "On quota restore, resume the paused Case immediately instead of asking the operator. Default OFF: resuming a fat Manager session re-writes its whole prompt cache (observed 200-300k tokens), so spending that is an operator decision. When ON, the env knob CASE_QUOTA_RESUME_AUTO_MAX_USD (0 = no ceiling) still holds back any resume whose estimated cost exceeds it.",
+    },
     "MANAGER_ADVANCEMENT_GATE": {
         "default": "0",
         "effect_scope": "live",
@@ -498,6 +510,45 @@ def case_respawn_requires_approval() -> bool:
     return runtime_flag_enabled("CASE_RESPAWN_REQUIRES_APPROVAL")
 
 
+def case_quota_resume_enabled() -> bool:
+    """[quota-resume] Whether a Manager Case is recorded as quota-PAUSED and gets
+    a resume proposal when the window reopens.
+
+    Canonical read of ``CASE_QUOTA_RESUME_ENABLED``; default ON — a Case silently
+    stalling until some unrelated worker finish happened to satisfy a wait-group
+    was the reported defect. OFF ⇒ no ``flow.quota_paused`` is written and the
+    quota branch of the Wake-Dispatcher tick returns immediately, byte-identical
+    to pre-feature behaviour.
+    """
+    return runtime_flag_enabled("CASE_QUOTA_RESUME_ENABLED")
+
+
+def case_quota_resume_auto() -> bool:
+    """[quota-resume] Whether a restored quota resumes the paused Case WITHOUT an
+    operator approval.
+
+    Canonical read of ``CASE_QUOTA_RESUME_AUTO``; default OFF (the resume spends
+    real money re-writing the session's prompt cache — see
+    ``CASE_QUOTA_RESUME_AUTO_MAX_USD``).
+    """
+    return runtime_flag_enabled("CASE_QUOTA_RESUME_AUTO")
+
+
+def case_quota_resume_auto_max_usd() -> float:
+    """[quota-resume] Ceiling (USD) under which an auto-resume may fire without
+    asking. ``0`` (the default) means "no ceiling" — every restore auto-resumes
+    when ``CASE_QUOTA_RESUME_AUTO`` is ON.
+
+    An env knob rather than a registry flag because the registry is boolean-only
+    (numeric knobs are A62's scope); a malformed value degrades to 0.0 rather
+    than raising into a tick.
+    """
+    try:
+        return max(0.0, float(os.environ.get("CASE_QUOTA_RESUME_AUTO_MAX_USD", "0") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def spec_authoring_enabled() -> bool:
     """[A56/M4] Whether the spec-authoring stage + scored review gate + decomposer
     are active.
@@ -626,6 +677,12 @@ CONTINUATION_ACTION = "manager_continuation"
 # as the continuation lease — NO second lock model. Only the ``action`` and the
 # id namespace differ so a respawn token never collides with a ``cont:`` wake row.
 RESPAWN_ACTION = "manager_respawn"
+# [quota-resume] The quota-restore resume single-flight action. Same reserved
+# sentinel + same ``claim_task`` lease as the two above (no third lock model);
+# only the action and id namespace differ. The lease is what makes the AUTOMATIC
+# resume and the operator's manual "Resume now" button structurally unable to
+# start two Managers on one Case — they both claim this one row.
+QUOTA_RESUME_ACTION = "manager_quota_resume"
 # Default round cap when a Case's completion_criteria does not carry an explicit
 # ``round_cap`` — a backstop against a runaway continuation loop, not a tuning knob.
 DEFAULT_CONTINUATION_ROUND_CAP = 50
@@ -654,6 +711,20 @@ def respawn_task_id(case_id: str, generation: int) -> str:
     ``cont:`` wake-delivery row for the same (case, generation).
     """
     return f"respawn:{case_id}:{int(generation)}"
+
+
+def quota_resume_task_id(case_id: str, paused_task_id: str) -> str:
+    """[quota-resume] Deterministic single-flight token for resuming ONE quota
+    pause of a Case.
+
+    Keyed on the PAUSED TASK, not on a generation: a quota pause is not a
+    continuation round (no wait-group satisfaction happened), and the round
+    generation does not advance while the Case sits paused — keying on it would
+    let the same pause be resumed again and again. One pause ⇒ one resume, for
+    every entry point (auto-restore, approval, operator button), because all of
+    them claim this row.
+    """
+    return f"qresume:{case_id}:{paused_task_id}"
 
 
 def flow_drive_enabled() -> bool:
@@ -3415,6 +3486,46 @@ class MeshDB:
             return None
         return str(links[-1].get("entity_id") or "") or None
 
+    def case_quota_pause(self, flow_run_id: str) -> Optional[Dict[str, Any]]:
+        """[quota-resume] The Case's OPEN quota pause, or None.
+
+        A pause opens with ``flow.quota_paused`` (written when a Manager turn on
+        this Case died on ``usage_limit``) and closes with the next
+        ``flow.quota_resumed`` / ``flow.quota_pause_declined`` /
+        ``case.manager_respawned`` — a Case that already got a Manager back, or
+        whose resume the operator declined, is no longer waiting on quota. Reading
+        it back off the append-only ledger (rather than a new status column)
+        keeps the pause on the same substrate as every other Case fact and makes
+        it survive a gateway restart for free.
+
+        ONE bounded query over the three relevant event types, newest first —
+        deliberately not ``list_flow_events`` (which is ``ORDER BY id ASC LIMIT
+        500``, i.e. the OLDEST 500 events: on a long-running Case the pause we
+        need is exactly what that window drops). Returns the payload of the
+        newest still-open pause, enriched with ``paused_at``/``event_id`` so
+        callers can build a deterministic resume id.
+        """
+        rows = self._conn().execute(
+            """
+            SELECT * FROM flow_events
+            WHERE flow_run_id = ?
+              AND event_type IN ('flow.quota_paused', 'flow.quota_resumed',
+                                 'flow.quota_pause_declined', 'case.manager_respawned')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (flow_run_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        newest = dict(rows[0])
+        if str(newest.get("event_type") or "") != "flow.quota_paused":
+            return None
+        return {
+            **(_event_payload(newest) or {}),
+            "paused_at": newest.get("created_at"),
+            "event_id": newest.get("id"),
+        }
+
     def case_round_cap(self, flow_run_id: str) -> int:
         """[M3.4] The continuation round cap for a Case. Carried in
         ``completion_criteria`` as JSON ``{"round_cap": N}`` when present; otherwise
@@ -4199,6 +4310,45 @@ class MeshDB:
             )
             out[d["session_id"]] = d
         return out
+
+    def recent_cache_write(self, session_id: str, turns: int = 5) -> Optional[Dict[str, Any]]:
+        """[quota-resume] The LARGEST prompt-cache write observed in this
+        session's last ``turns`` turns — the only observed quantity that answers
+        "what does resuming this conversation cost?".
+
+        Resuming hours later re-writes the whole prompt cache (the provider's TTL
+        is ~1h), so the cost scales with the conversation, not with the next
+        prompt. Context size itself is NOT recorded (rows carry
+        ``usage_granularity='invocation_total'`` /
+        ``usage_coverage='aggregate_only'``), so the estimate uses the biggest
+        cache write the session actually performed recently. The MAXIMUM, not the
+        last one: the turn that died on quota often wrote almost nothing (the
+        provider refused it), and quoting that would tell the operator a 250k
+        resume costs a cent.
+
+        ONE bounded read over the newest ``turns`` turns; ``is_duplicate=0`` so a
+        retried invocation cannot double-count. Returns
+        ``{cache_creation, model, observed_at}`` or None."""
+        rows = self._conn().execute(
+            """
+            SELECT r.cache_creation_tokens AS cache_creation,
+                   r.model                 AS model,
+                   COALESCE(t.ended_at, t.created_at) AS observed_at
+            FROM (
+                SELECT turn_id, ended_at, created_at FROM llm_turns
+                WHERE session_id = ?
+                ORDER BY COALESCE(ended_at, created_at) DESC
+                LIMIT ?
+            ) t
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            WHERE r.is_duplicate = 0
+            """,
+            (session_id, max(1, int(turns))),
+        ).fetchall()
+        if not rows:
+            return None
+        best = max(rows, key=lambda r: int(r["cache_creation"] or 0))
+        return dict(best)
 
     # ------------------------------------------------------------------
     # A65 cost read-model — bounded SQL aggregates over the same

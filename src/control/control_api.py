@@ -312,6 +312,16 @@ class CaseStateBody(BaseModel):
     reason: Optional[str] = Field(default="operator_state_change", max_length=256)
 
 
+class CaseResumeBody(BaseModel):
+    """[quota-resume] Operator-triggered Case resume.
+
+    ``mode`` is optional: omitted (or unknown) means "let the harness pick"
+    (``_recommended_resume_mode``). Bounded tiny body — the resume itself is
+    single-flight leased server-side, so a double-click cannot start two
+    Managers."""
+    mode: Optional[str] = Field(default=None, max_length=32)
+
+
 class CaseOperatorCloseBody(BaseModel):
     """Operator manual Case closure.
 
@@ -1988,6 +1998,42 @@ def build_control_api(orchestrator) -> FastAPI:
             code = 404 if result.get("reason") == "case_not_found" else 409
             if result.get("reason") == "db_unavailable":
                 code = 503
+            raise HTTPException(status_code=code, detail=result)
+        return JSONResponse(result)
+
+    @app.get("/api/cases/{case_id}/resume-state", dependencies=[Depends(_require_auth)])
+    def api_case_resume_state(case_id: str) -> JSONResponse:
+        """[quota-resume] Is this Case quota-paused, when does quota return, what
+        would resuming cost, and is a decision already pending?
+
+        Service boundary checklist: read-only; three bounded indexed reads (the
+        pause event, the manager link, the session's last turn) keyed on one path
+        id; no unbounded payload; no scarce resource held; a missing DB or absent
+        quota instrument degrades to an honest ``paused=false`` / ``known=false``
+        answer rather than a fabricated one.
+        """
+        return JSONResponse(orchestrator.case_resume_state(case_id))
+
+    @app.post("/api/cases/{case_id}/resume", dependencies=[Depends(_require_auth)])
+    async def api_case_resume(case_id: str, body: CaseResumeBody) -> JSONResponse:
+        """[quota-resume] Resume a Case NOW — the operator's manual equivalent of
+        the automatic quota-restore path, deliberately the SAME leased
+        ``resume_case`` call so the two can never race into two Managers.
+
+        This is a continuation, not a fork: same Case, same objective, existing
+        waits re-armed. 409 on a refusal the operator can act on (a busy Manager,
+        a resume already in flight, a terminal Case), 404 on an unknown Case.
+        """
+        result = await orchestrator.resume_case(
+            case_id, mode=body.mode, actor="operator",
+        )
+        if not result.get("ok"):
+            code = {
+                "case_not_found": 404, "db_unavailable": 503,
+                "no_manager_link": 409, "manager_busy": 409,
+                "resume_in_flight": 409, "case_terminal": 409,
+                "continuation_disabled": 409,
+            }.get(str(result.get("reason") or ""), 500)
             raise HTTPException(status_code=code, detail=result)
         return JSONResponse(result)
 

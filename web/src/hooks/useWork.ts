@@ -22,7 +22,10 @@ import {
   toSessionAffiliationIndex,
 } from "../transport/workAdapter";
 import type { SessionAffiliation, WorkBucket } from "../domain/work";
-import type { RawCaseOrphanSweepResponse } from "../transport/rawApi";
+import type {
+  RawCaseOrphanSweepResponse,
+  RawCaseResumeResponse,
+} from "../transport/rawApi";
 import { useAuthStore } from "../stores/authStore";
 
 const EMPTY_AFFILIATIONS = new Map<string, SessionAffiliation>();
@@ -205,5 +208,68 @@ export function useCloseCaseManually(flowRunId: string | undefined) {
       qc.invalidateQueries({ queryKey: ["work-affiliations"] });
       qc.invalidateQueries({ queryKey: ["sessions"] });
     },
+  });
+}
+
+/**
+ * [quota-resume] One Case's resume state: is it paused on quota, when does the
+ * window reopen, what would resuming cost, and is a decision already pending.
+ *
+ * Polls on the LIVE tier, not the gentle detail tier: while a Case is paused
+ * this is the surface the operator is watching for "can I go now?", and the
+ * backing read is three bounded indexed queries.
+ */
+export function useCaseResumeState(caseId: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["case-resume-state", caseId],
+    queryFn: () => api.caseResumeState(token, caseId!),
+    enabled: Boolean(token) && Boolean(caseId),
+    refetchInterval: LIVE_POLL_MS,
+    placeholderData: (prev) => prev,
+    retry,
+  });
+}
+
+/**
+ * [quota-resume] Resume a Case now. The SAME server-side leased path the
+ * automatic quota-restore uses, which is what makes "I resumed it myself and
+ * then the engine resumed it too" structurally impossible — the loser gets
+ * `resume_in_flight` (409) instead of a second Manager.
+ */
+export function useResumeCase(caseId: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  const qc = useQueryClient();
+  return useMutation<RawCaseResumeResponse, ApiError, { mode?: string }>({
+    mutationFn: (vars) => api.resumeCase(token, caseId!, vars),
+    retry: false,
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["case-resume-state", caseId] });
+      qc.invalidateQueries({ queryKey: ["work-detail", caseId] });
+      qc.invalidateQueries({ queryKey: ["work-timeline", caseId] });
+      qc.invalidateQueries({ queryKey: ["work-roster", caseId] });
+      qc.invalidateQueries({ queryKey: ["approvals"] });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
+}
+
+/**
+ * [quota-resume] Pending Case-level resume proposals, RAW.
+ *
+ * Deliberately not `useApprovals` (which maps to the domain ApprovalRequest and
+ * drops `payload`): the decision the operator makes here — resume this Case or
+ * not — is carried entirely in that payload (case id, objective excerpt, cost
+ * estimate, quota reset). One shared endpoint, no per-case fanout.
+ */
+export function useCaseResumeApprovals() {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["approvals", "pending", "case_resume"],
+    queryFn: async () =>
+      (await api.approvals(token, "pending")).filter((a) => a.action === "case_resume"),
+    enabled: Boolean(token),
+    refetchInterval: POLL_MS,
+    retry,
   });
 }
