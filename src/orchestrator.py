@@ -7068,8 +7068,18 @@ created: {task.created}
             return "usage_limit"
         text = self._failure_text(result)
         text_lower = text.lower()
-        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "hit your limit", "hit your session limit", "session limit", "usage limit", "you've hit your limit", "\"error\":\"rate_limit\"", "overagestatus")):
+        # SUBSCRIPTION-WINDOW wording ("you've hit your limit", "session limit",
+        # "usage limit", the overage banner) means the ACCOUNT's window is spent:
+        # it reopens hours later, so it is a quota PAUSE with no quick retry.
+        if any(s in text_lower for s in ("hit your limit", "hit your session limit", "session limit", "usage limit", "you've hit your limit", "overagestatus")):
             return "usage_limit"
+        # GENERIC burst wording ("rate limit exceeded, please retry later", "too
+        # many requests") is NOT evidence of a spent window — it is the classic
+        # transient the retry policy exists for. Kept in its own class so a burst
+        # still gets its two quick retries. Both classes still PAUSE a Case if
+        # they end up terminal (QUOTA_PAUSE_ERROR_CLASSES covers both).
+        if any(s in text_lower for s in ("rate limit", "rate-limit", "too many requests", "\"error\":\"rate_limit\"")):
+            return "rate_limit"
         if any(s in text_lower for s in ("timeout", "timed out", "inactivity")):
             return "timeout"
         if any(s in text_lower for s in ("connection reset", "connection aborted", "network error", "503", "504", "temporarily unavailable", "terminated process", "cannot write to")):

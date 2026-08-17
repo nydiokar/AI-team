@@ -565,9 +565,15 @@ class TestClassifyErrorText:
             == "usage_limit"
         )
 
-    def test_usage_and_rate_limit_variants_are_usage_limit(self):
+    def test_account_window_wording_is_usage_limit(self):
         assert classify_error_text("Claude usage limit reached") == "usage_limit"
-        assert classify_error_text("429 too many requests") == "usage_limit"
+
+    def test_generic_throttle_wording_is_rate_limit_not_a_spent_window(self):
+        # "too many requests" / "rate limit exceeded" is a burst throttle: worth a
+        # couple of quick retries. A spent five-hour window is not, and it PAUSES
+        # the Case — so the two must not share a class.
+        assert classify_error_text("429 too many requests") == "rate_limit"
+        assert classify_error_text("Rate limit exceeded. Please retry later.") == "rate_limit"
 
     def test_context_overflow_wins_over_usage_limit(self):
         # A context-window error is the recoverable-by-compaction case; it must not
