@@ -68,6 +68,32 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-08-17 — Quota-paused Cases now pause, propose, and resume on purpose (PR #97).**
+A Manager turn killed by the account's quota window used to leave no durable trace, and the harness
+had exactly ONE resume trigger: a satisfied wait-group. So a quota-killed Case either stalled
+silently (no workers in flight) or came back at an unrelated random moment — and since there was no
+operator-triggered continuation, an operator who started their own session ended up with TWO
+Managers once the engine caught up. Now: a quota death writes `flow.quota_paused` on the Case
+ledger (Manager sessions only; survives restart); the Wake-Dispatcher checks that BEFORE
+satisfaction, so a paused Case is never woken into another refused turn; restore is a telemetry
+fact (`quota_window_state` reads `limit_reached`/`used_percent`/`reset_at`, falling back to the
+`resetsAt` the provider attaches to its own 429 when no observer is running); and restore does not
+spend — it raises a `case_resume` approval carrying a cost estimate, because resuming a fat Manager
+re-writes its whole prompt cache (200–300k tokens observed). `CASE_QUOTA_RESUME_AUTO` (default OFF,
++ `CASE_QUOTA_RESUME_AUTO_MAX_USD` env ceiling) skips the ask. Both resume modes stay on the SAME
+Case — `in_place` (one turn into the live session) and `fresh_manager` (a Manager rebuilt from the
+Case brief: the cheap path, and the only one when the session is dead) — never a fork. Auto,
+approval and the new operator button (`POST /api/cases/{id}/resume`, Case detail panel + Work-screen
+prompt) all funnel through ONE leased `resume_case`, which is what structurally kills the
+two-Managers-on-one-Case failure. Also corrected: a quota turn keeps reporting FAILED (the previous
+branch state flipped it to success via the salvage path) while still leaving the session
+AWAITING_INPUT; 429 / `rate_limit_event` / limit wording all classify as ONE `usage_limit` class
+with 0 immediate retries (a 5-hour window will not clear in 2 seconds); and
+`QuotaWindowStore.status()`'s un-indexed correlated subquery — **>120 s** on this host at 53k
+snapshot rows — is now 0.11 s. 262 targeted backend tests + 130 web tests green; full flow
+rehearsed against COPIES of the live mesh/quota DBs (real Case rows, real telemetry, zero paid
+calls). Remaining telemetry debt is dispatched as **A78**.
+
 **2026-08-14 — SDK stream-json poisoning killed sessions on Horse (PR #92, live).**
 `"Failed to decode JSON: JSON message exceeded maximum buffer size of 1048576 bytes"` — 8 incidents on
 the Windows node since 2026-08-13, each killing the whole persistent session (Manager `a0d17eb4100f`

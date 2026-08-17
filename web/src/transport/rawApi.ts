@@ -753,6 +753,75 @@ export interface RawCaseOrphanSweepResponse {
   reason?: string;
 }
 
+// ── Case resume (quota pause → restore → resume) ───────────────────────────
+// GET /api/cases/{id}/resume-state → orchestrator.case_resume_state.
+// "Is this Case paused on quota, when does quota come back, what would resuming
+// cost, and is a decision already pending?" Every field is honest-or-null: an
+// absent quota instrument reports evidence="no_telemetry", and an unpriceable /
+// untelemetered session reports estimate.known=false with a reason — never a
+// fabricated number.
+export interface RawCaseQuotaPause {
+  session_id?: string | null;
+  paused_task_id?: string | null;
+  error_class?: string | null;
+  provider?: string | null;
+  reset_at?: string | null;
+  quota_evidence?: string | null;
+  reason?: string | null;
+  paused_at?: string | null;
+}
+
+export interface RawCaseResumeQuota {
+  provider: string;
+  exhausted: boolean;
+  reset_at: string | null;
+  observed_at: string | null;
+  used_percent: number | null;
+  bucket_id: string | null;
+  // limit_reached | reset_at_future | below_limit | reset_elapsed | no_telemetry
+  evidence: string;
+}
+
+export interface RawCaseResumeEstimate {
+  known: boolean;
+  reason: string;
+  session_id: string | null;
+  model: string | null;
+  cache_creation_tokens: number | null;
+  usd: number | null;
+  basis: string;
+  observed_at?: string | null;
+}
+
+export interface RawCaseResumeState {
+  case_id: string;
+  paused: boolean;
+  pause: RawCaseQuotaPause | null;
+  quota: RawCaseResumeQuota;
+  manager_session_id: string | null;
+  manager_session_status: string | null;
+  recommended_mode: string; // in_place | fresh_manager
+  estimate: RawCaseResumeEstimate | null;
+  pending_approval: {
+    id: string;
+    status: string;
+    created_at?: string | null;
+    resolved_at?: string | null;
+  } | null;
+  auto: boolean;
+  enabled: boolean;
+  modes: string[];
+}
+
+// POST /api/cases/{id}/resume → orchestrator.resume_case (single-flight leased).
+export interface RawCaseResumeResponse {
+  ok: boolean;
+  reason: string;
+  case_id: string;
+  mode: string;
+  session_id: string | null;
+}
+
 // ── Case roster (Cockpit) — work_read_model.build_case_roster ──────────────
 // The live "who is doing what right now" head of a Case: its sessions (manager +
 // workers) with tokens/turns, and the watch_job scripts those sessions own.

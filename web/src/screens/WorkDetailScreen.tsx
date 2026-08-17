@@ -18,6 +18,7 @@ import { CaseLineage } from "../components/work/CaseLineage";
 import { CaseLedgerView } from "../components/work/CaseLedgerView";
 import { CaseTimelineView } from "../components/work/CaseTimelineView";
 import { CaseRosterView } from "../components/work/CaseRosterView";
+import { CaseResumePanel } from "../components/work/CaseResumePanel";
 import {
   useCloseCaseManually,
   useSetCaseState,
@@ -201,6 +202,12 @@ export function WorkDetailScreen() {
                 )}
               </div>
             </div>
+
+            {/* Continuation control — shown ONLY when there is something to
+                decide (quota-paused, or the Manager is gone). It is the first
+                thing after the header because a paused Case is not "running":
+                nothing below moves until this is resolved. */}
+            {!isTerminal && id && <CaseResumePanel caseId={id} />}
 
             {/* Live roster — the operational head: who is working now + running
                 scripts. Placed first because "what's happening right now" is the

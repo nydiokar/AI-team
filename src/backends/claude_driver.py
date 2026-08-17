@@ -125,17 +125,25 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "too many tokens",
 )
 
-# Phrases that mean "the Claude account hit its subscription/usage cap". This is a
-# TRANSIENT, self-healing condition (it resets at a known time) — NOT a hard backend
-# failure — so it earns its own class and an honest, non-alarming banner. Keep in
-# sync with the rate-limit markers in src/orchestrator.py (_classify_error /
-# _short_failure_reason), which map this class to the retry-eligible "rate_limit".
+# Phrases that mean "the Claude ACCOUNT hit its subscription/usage cap". This is a
+# TRANSIENT, self-healing condition (it reopens at a known time) — NOT a hard backend
+# failure — so it earns its own class and an honest, non-alarming banner. It is also
+# what PAUSES a Manager's Case until the window reopens (orchestrator
+# `_record_quota_pause`), so keep it to wording that really means the account window.
+# Kept in sync with src/orchestrator.py `_classify_error`.
 _USAGE_LIMIT_MARKERS = (
     "usage limit",
     "session limit",
     "hit your limit",
     "hit your session limit",
     "you've hit your limit",
+)
+
+# Generic burst/throttle wording. NOT evidence that the account's window is spent —
+# "Rate limit exceeded. Please retry later." is the classic transient a couple of
+# quick retries fix. Kept in its own class so the orchestrator's retry policy can
+# treat the two differently (2 quick retries here, none for a five-hour window).
+_RATE_LIMIT_MARKERS = (
     "rate limit",
     "rate-limit",
     "too many requests",
@@ -180,6 +188,8 @@ def classify_error_text(
         return "context_overflow"
     if any(m in low for m in _USAGE_LIMIT_MARKERS):
         return "usage_limit"
+    if any(m in low for m in _RATE_LIMIT_MARKERS):
+        return "rate_limit"
     return "backend_error"
 
 
