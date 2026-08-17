@@ -72,6 +72,7 @@ them.
 | `CLAUDE_TIMEOUT_SEC` | ✅ YES | (settings default) | Per-task wall-clock timeout. | `config/settings.py:318` |
 | `CLAUDE_DEFAULT_MODEL` | ✅ YES | (settings default) | Default Claude model string. | `config/settings.py:532` |
 | `CLAUDE_DRIVER_TYPE` | ✅ YES | (settings default) | `cli` or `sdk` driver. | `config/settings.py:324` |
+| `CLAUDE_SDK_CLI_PATH` | ✅ YES | "" | Optional Claude CLI binary used by SDK sessions instead of the SDK-bundled CLI. Use this to keep gateway sessions on the installed Claude Code version. | `config/settings.py` |
 | `CLAUDE_ALLOWED_ROOT` | ✅ YES | (settings default) | Filesystem root Claude is permitted to write. | `config/settings.py:438` |
 | `CLAUDE_BASE_CWD` | ✅ YES | (settings default) | Default working directory for Claude. | `config/settings.py:433` |
 | `MAX_CONCURRENT_TASKS` | ✅ YES | (settings default) | Gateway worker-slot count. | `config/settings.py:452` |
@@ -125,8 +126,8 @@ them.
 | `QUOTA_OBSERVE_INTERVAL_SEC` | ✅ YES | 300 | Tight polling interval for unknown/unavailable/limit-reached quota telemetry. | `config/settings.py`, `quota_window_coordinator.py` |
 | `QUOTA_OBSERVE_MAX_INTERVAL_SEC` | ✅ YES | 21600 | Maximum adaptive sleep once reset telemetry is known. | `config/settings.py`, `quota_window_coordinator.py` |
 | `QUOTA_RESET_PROBE_LEAD_SEC` | ✅ YES | 900 | Resume probing this many seconds before a known reset boundary. | `config/settings.py`, `quota_window_coordinator.py` |
-| `CLAUDE_STATUS_LINE_JSON_PATH` | ✅ YES | `state/claude_statusline_latest.json` | Sanitized Claude Code status-line JSON captured by `scripts/claude_statusline_capture.py`. | `config/settings.py`, `quota_window_coordinator.py` |
-| `CLAUDE_STATUS_LINE_COMMAND` | ✅ YES | "" | Optional read command that prints sanitized status-line JSON; no model command. | `config/settings.py`, `quota_window_coordinator.py` |
+| `CLAUDE_GET_USAGE_TIMEOUT_SEC` | ✅ YES | 60.0 | Timeout for the canonical Claude quota read: a Python Agent SDK control request with subtype `get_usage`. This is server-backed subscription quota telemetry, not token estimation or status-line parsing. | `config/settings.py`, `quota_window_coordinator.py`, `claude_usage_control.py` |
+| `CLAUDE_STATUS_LINE_JSON_PATH` | ⚠ NO | `state/claude_statusline_latest.json` | **Not a quota knob.** Output path for the terminal status-line capture script, read via `os.getenv` by the script itself (it is a Claude Code `statusLine` command, not gateway code). The quota coordinator does not read this file — `get_usage` is the only quota source. | `scripts/claude_statusline_capture.py` |
 | `CLAUDE_QUOTA_PRINCIPAL_KEY` | ✅ YES | "" | Operator-provided stable account label used only to derive `principal_hash`. | `config/settings.py`, `quota_window_coordinator.py` |
 | `QUOTA_DIGEST_TELEGRAM_ENABLED` | ✅ YES | false | Temporary Telegram digest subscriber for quota observations; separate from the coordinator. | `orchestrator.py`, `quota_digest.py` |
 | `QUOTA_DIGEST_INTERVAL_SEC` | ✅ YES | 3600 | Minimum digest aggregation interval after the first state-change message. | `config/settings.py`, `quota_digest.py` |

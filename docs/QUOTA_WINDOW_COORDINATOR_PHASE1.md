@@ -19,7 +19,7 @@ The coordinator is constructed during `TaskOrchestrator` initialization after co
 
 Verified against the tree on 2026-07-31:
 
-- Claude is no longer an unsupported placeholder. `ClaudeStatusLineQuotaAdapter` reads captured Claude Code status-line JSON from `CLAUDE_STATUS_LINE_JSON_PATH` or an operator-provided read command, records `rate_limits.five_hour` and `rate_limits.seven_day`, and never starts a model turn.
+- Claude is no longer an unsupported placeholder. `ClaudeGetUsageQuotaAdapter` issues a Python Agent SDK control request with subtype `get_usage`, records the server-reported `five_hour` / `seven_day` buckets, and never starts a model turn. (The earlier `ClaudeStatusLineQuotaAdapter` was removed once `get_usage` proved canonical — status-line scraping was a local estimate, `get_usage` is server-backed.)
 - Codex remains `UnsupportedQuotaAdapter("codex", "codex_quota_telemetry_not_validated_phase1")`; the Codex telemetry surface is still unverified.
 - OpenCode remains unsupported as a quota owner; provider-specific adapters must own provider quota telemetry.
 - `GET /api/quota-windows` is wired in `src/control/control_api.py`, bearer-protected, and reads the live in-process coordinator when constructed. With the coordinator flag off, it returns the explicit disabled observe-only shape without constructing the quota store.
@@ -61,9 +61,8 @@ QUOTA_OBSERVE_MAX_INTERVAL_SEC=21600
 # How long before reset to resume tight probing.
 QUOTA_RESET_PROBE_LEAD_SEC=900
 
-# Claude status-line capture path. Configure Claude Code statusLine to run
-# scripts/claude_statusline_capture.py or provide an equivalent sanitized file.
-CLAUDE_STATUS_LINE_JSON_PATH=state/claude_statusline_latest.json
+# Timeout for the canonical quota read (SDK control request, subtype get_usage).
+CLAUDE_GET_USAGE_TIMEOUT_SEC=60
 
 # Stable local account label for principal hashing; no raw account id is stored.
 CLAUDE_QUOTA_PRINCIPAL_KEY=claude-max-nyd
@@ -113,8 +112,17 @@ Quota windows are shown in the System tab, directly after backend token-usage ca
 
 ## Claude Telemetry Notes
 
-- Claude Code status-line JSON is the telemetry source. The official status-line mechanism runs locally and does not consume API tokens; the included capture script only stores sanitized `rate_limits` fields.
-- The adapter reports `authoritative` only when `used_percentage` and `resets_at` are both present for a bucket. Missing files or missing buckets become explicit unavailable snapshots.
+- Quota telemetry has exactly one source: a Python Agent SDK control request with subtype `get_usage`
+  (`src/services/claude_usage_control.py`). It is server-backed subscription quota, not a local estimate,
+  and it never starts a model turn.
+- Status-line capture (`scripts/claude_statusline_capture.py`, `CLAUDE_STATUS_LINE_JSON_PATH`) is **not** a
+  quota source. It exists only to render the operator's terminal status line, and the coordinator never
+  reads its output. The script owns a sync check for the user-scope Claude Code `statusLine` setting:
+  `.venv/bin/python scripts/claude_statusline_capture.py --check-statusline-settings` fails on drift, and
+  `--sync-statusline-settings` repairs it idempotently.
+- The adapter reports `authoritative` only when both `utilization` and `resets_at` are present for a bucket.
+  Missing or empty `rate_limits` becomes an explicit unavailable snapshot.
+- Snapshot freshness is judged from each stored snapshot's own `observed_at`, not from a file mtime.
 - `resets_at` is observation only. It is not treated as proof of anchored windows.
 - Principal identity uses `CLAUDE_QUOTA_PRINCIPAL_KEY` when configured and stores only a hash plus a human-safe label.
 

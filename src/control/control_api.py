@@ -927,7 +927,7 @@ def build_control_api(orchestrator) -> FastAPI:
 
     _bearer = HTTPBearer(auto_error=True)
 
-    def _require_auth(creds: HTTPAuthorizationCredentials = Security(_bearer)) -> None:
+    async def _require_auth(creds: HTTPAuthorizationCredentials = Security(_bearer)) -> None:
         if not _dashboard_token():
             raise HTTPException(status_code=500, detail="DASHBOARD_TOKEN not configured")
         if not _token_accepted(creds.credentials):
@@ -2459,7 +2459,7 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse(result)
 
     @app.get("/api/quota-windows", dependencies=[Depends(_require_auth)])
-    def api_quota_windows() -> JSONResponse:
+    async def api_quota_windows() -> JSONResponse:
         coordinator = getattr(orchestrator, "quota_coordinator", None)
         if coordinator is None:
             return JSONResponse({
@@ -2468,6 +2468,7 @@ def build_control_api(orchestrator) -> FastAPI:
                 "adapters": [],
                 "buckets": [],
                 "latest_snapshots": [],
+                "window_states": [],
             })
         try:
             return JSONResponse(coordinator.read_status())

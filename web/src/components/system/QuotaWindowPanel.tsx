@@ -4,12 +4,25 @@ import { useQuotaWindows } from "../../hooks/useLiveData";
 import type {
   RawQuotaBucket,
   RawQuotaSnapshot,
+  RawQuotaWindowState,
   RawQuotaWindowsResponse,
 } from "../../transport/rawApi";
 import { relAgeFrom } from "../../lib/time";
 
 function pct(value: number | null): string {
   return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}%` : "unknown";
+}
+
+function localTimeLabel(value: string | null): string {
+  if (!value) return "unknown";
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return "unknown";
+  return d.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function resetLabel(value: string | null): string {
@@ -50,7 +63,7 @@ function toneClasses(tone: "ok" | "warn" | "bad" | "idle"): string {
   }
 }
 
-function bucketKey(row: Pick<RawQuotaBucket | RawQuotaSnapshot, "provider" | "principal_hash" | "bucket_id">): string {
+function bucketKey(row: Pick<RawQuotaBucket | RawQuotaSnapshot | RawQuotaWindowState, "provider" | "principal_hash" | "bucket_id">): string {
   return `${row.provider}\u0000${row.principal_hash}\u0000${row.bucket_id}`;
 }
 
@@ -58,17 +71,22 @@ function snapshotMap(rows: RawQuotaSnapshot[]): Map<string, RawQuotaSnapshot> {
   return new Map(rows.map((row) => [bucketKey(row), row]));
 }
 
-function rowsFrom(data: RawQuotaWindowsResponse): Array<{ bucket: RawQuotaBucket | null; snapshot: RawQuotaSnapshot }> {
+function stateMap(rows: RawQuotaWindowState[] = []): Map<string, RawQuotaWindowState> {
+  return new Map(rows.map((row) => [bucketKey(row), row]));
+}
+
+function rowsFrom(data: RawQuotaWindowsResponse): Array<{ bucket: RawQuotaBucket | null; snapshot: RawQuotaSnapshot; state: RawQuotaWindowState | null }> {
   const snapshots = snapshotMap(data.latest_snapshots);
-  const rows: Array<{ bucket: RawQuotaBucket | null; snapshot: RawQuotaSnapshot }> = [];
+  const states = stateMap(data.window_states);
+  const rows: Array<{ bucket: RawQuotaBucket | null; snapshot: RawQuotaSnapshot; state: RawQuotaWindowState | null }> = [];
   for (const bucket of data.buckets) {
     const snapshot = snapshots.get(bucketKey(bucket));
-    if (snapshot && snapshot.telemetry_quality !== "unsupported") rows.push({ bucket, snapshot });
+    if (snapshot && snapshot.telemetry_quality !== "unsupported") rows.push({ bucket, snapshot, state: states.get(bucketKey(snapshot)) || null });
   }
   const bucketKeys = new Set(data.buckets.map(bucketKey));
   for (const snapshot of data.latest_snapshots) {
     if (snapshot.telemetry_quality !== "unsupported" && !bucketKeys.has(bucketKey(snapshot))) {
-      rows.push({ bucket: null, snapshot });
+      rows.push({ bucket: null, snapshot, state: states.get(bucketKey(snapshot)) || null });
     }
   }
   return rows;
@@ -83,13 +101,18 @@ function adapterLine(data: RawQuotaWindowsResponse): string {
   return `${ready} ready · ${unavailable} unavailable`;
 }
 
-function QuotaRow({ bucket, snapshot }: { bucket: RawQuotaBucket | null; snapshot: RawQuotaSnapshot }) {
+function blockerLabel(blocker: string): string {
+  return blocker.replace(/_/g, " ");
+}
+
+function QuotaRow({ bucket, snapshot, state }: { bucket: RawQuotaBucket | null; snapshot: RawQuotaSnapshot; state: RawQuotaWindowState | null }) {
   const quality = snapshot.telemetry_quality || bucket?.telemetry_quality || "unavailable";
-  const tone = qualityTone(quality);
+  const telemetryState = state?.telemetry_state || quality;
+  const tone = telemetryState === "current" ? qualityTone(quality) : telemetryState === "stale" ? "warn" : qualityTone(quality);
   const used = snapshot.used_percent;
   const width = typeof used === "number" && Number.isFinite(used) ? Math.max(0, Math.min(100, used)) : 0;
   const label = bucket?.bucket_name || snapshot.bucket_id.replace(/_/g, " ");
-  const reason = snapshot.unavailable_reason || "";
+  const blockers = state?.blockers || (snapshot.unavailable_reason ? [snapshot.unavailable_reason] : []);
 
   return (
     <div className="card-elev rounded-xl px-4 py-3">
@@ -100,11 +123,11 @@ function QuotaRow({ bucket, snapshot }: { bucket: RawQuotaBucket | null; snapsho
             {snapshot.provider} · {label}
           </div>
           <div className="mt-0.5 truncate text-[11px] text-ink-muted">
-            {snapshot.bucket_id} · {bucket?.window_semantics || "unknown"}
+            {snapshot.bucket_id} · {state?.window_semantics || bucket?.window_semantics || "unknown"}
           </div>
         </div>
         <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-medium ${toneClasses(tone)}`}>
-          {quality}
+          {telemetryState}
         </span>
       </div>
 
@@ -116,7 +139,14 @@ function QuotaRow({ bucket, snapshot }: { bucket: RawQuotaBucket | null; snapsho
           <div className="mt-1 flex items-center gap-1.5 text-[11px] text-ink-muted">
             <Clock3 className="size-3" />
             <span className="truncate">
-              {resetLabel(snapshot.reset_at)} · observed {relAgeFrom(snapshot.observed_at)}
+              {resetLabel(state?.window_end_at || snapshot.reset_at)}
+              {" · "}
+              {localTimeLabel(state?.window_end_at || snapshot.reset_at)}
+              {" · observed "}
+              {localTimeLabel(state?.observed_at || snapshot.observed_at)}
+              {" ("}
+              {relAgeFrom(state?.observed_at || snapshot.observed_at)}
+              {")"}
             </span>
           </div>
         </div>
@@ -126,10 +156,10 @@ function QuotaRow({ bucket, snapshot }: { bucket: RawQuotaBucket | null; snapsho
         </div>
       </div>
 
-      {reason && (
+      {blockers.length > 0 && (
         <div className="mt-2 flex items-center gap-1.5 text-[11px] text-ink-muted">
           <AlertTriangle className="size-3 text-warn" />
-          <span className="min-w-0 truncate">{reason}</span>
+          <span className="min-w-0 truncate">{blockers.slice(0, 3).map(blockerLabel).join(" · ")}</span>
         </div>
       )}
     </div>
@@ -177,8 +207,8 @@ export function QuotaWindowPanel() {
           </div>
         )}
 
-        {rows.map(({ bucket, snapshot }) => (
-          <QuotaRow key={bucketKey(snapshot)} bucket={bucket} snapshot={snapshot} />
+        {rows.map(({ bucket, snapshot, state }) => (
+          <QuotaRow key={bucketKey(snapshot)} bucket={bucket} snapshot={snapshot} state={state} />
         ))}
       </div>
     </>
