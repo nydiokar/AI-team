@@ -187,23 +187,6 @@ def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
     output = (result.output or "").strip()
     if not output:
         return False
-
-    # Gate A: quota / rate limit — not a real execution failure.  The session
-    # must stay alive so it resumes when the quota window resets.
-    ec = str(getattr(result, "error_class", "") or "").lower()
-    if ec in ("usage_limit", "rate_limit"):
-        return True
-    # Fallback text detection when error_class was not set or was reclassified:
-    # check the output for usage-limit / rate-limit markers that the driver
-    # would have classified as "usage_limit".
-    _usage_markers = ("usage limit", "rate limit", "rate-limit", "hit your limit",
-                      "hit your session limit", "session limit", "too many requests")
-    out_lower = output.lower()
-    if any(m in out_lower for m in _usage_markers):
-        return True
-
-    # Gate B: salvaged work — backend failed its terminal wrap-up after the
-    # agent produced real, deliverable work.
     raw = (
         f"{result.raw_stdout or ''}\n{result.raw_stderr or ''}\n"
         f"{getattr(result, 'error_detail', '') or ''}"
