@@ -296,6 +296,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.file_watcher = AsyncFileWatcher(config.system.tasks_dir)
         self.llama_mediator = LlamaMediator()
         self.session_store = SessionStore()
+        # Lazily constructed on first use (mirrors self.quota_coordinator) — DB
+        # readiness at __init__ time is not guaranteed. See _ensure_approval_service.
+        self.approval_service = None
         self.session_service = SessionService(
             self.session_store,
             remote_close_dispatcher=self._dispatch_remote_close,
@@ -1076,7 +1079,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             # role-full Manager back ON THE SAME Case (reconstruct via A54's
             # get_case_brief, re-arm waits/groups, resume) under a strict
             # single-flight lease so a racing tick never double-respawns.
-            if await self._respawn_manager_for_case(db, case_id, generation, session_id):
+            if await self._handle_dead_manager_session(db, case_id, generation, session_id):
                 # A respawn is owned for this Case this tick — either THIS tick won
                 # the single-flight and respawned, or a concurrent tick did and we
                 # lost the atomic claim. Either way a role-full Manager is (being)
@@ -1162,11 +1165,176 @@ class TaskOrchestrator(ITaskOrchestrator):
             "harness — treat it exactly like an operator poke to continue the Case."
         )
 
-    async def _respawn_manager_for_case(
+    def _ensure_approval_service(self, db) -> None:
+        """Lazily construct self.approval_service (DB readiness at __init__ time
+        is not guaranteed — mirrors the quota_coordinator lazy-init pattern)."""
+        if self.approval_service is not None:
+            return
+        from src.services.approval_service import ApprovalService
+        self.approval_service = ApprovalService(
+            db, on_approve=self._on_case_respawn_approval_resolved,
+        )
+
+    async def _on_case_respawn_approval_resolved(self, row: Dict[str, Any]) -> None:
+        """ApprovalService on_approve callback: fires the actual respawn once an
+        operator has approved a `case_manager_respawn` request. Any other action
+        on the (shared) approval service is not ours — ignore it."""
+        if str(row.get("action") or "") != "case_manager_respawn":
+            return
+        try:
+            payload = json.loads(row.get("payload") or "{}")
+        except Exception:
+            payload = {}
+        case_id = str(payload.get("case_id") or "")
+        generation = payload.get("generation")
+        dead_session_id = payload.get("dead_session_id")
+        if not case_id or generation is None:
+            logger.warning(
+                "event=respawn_approval_payload_invalid approval_id=%s", row.get("id"),
+            )
+            return
+        from src.control.db import get_db
+        db = get_db()
+        await self._do_respawn_manager_for_case(db, case_id, int(generation), dead_session_id)
+
+    def _find_case_generation_approval(
+        self, action: str, case_id: str, generation: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Find any prior approval (pending OR resolved) for this exact
+        (case_id, generation) — dedup key. Checking only 'pending' would let a
+        REJECTED approval get silently re-requested on the very next tick, since
+        nothing advances `generation` while the Manager stays dead."""
+        if self.approval_service is None:
+            return None
+        for row in self.approval_service.list(limit=200):
+            if row.get("action") != action:
+                continue
+            try:
+                payload = json.loads(row.get("payload") or "{}")
+            except Exception:
+                continue
+            if payload.get("case_id") == case_id and payload.get("generation") == generation:
+                return row
+        return None
+
+    def _quota_still_exhausted_for_claude(self) -> bool:
+        """True ONLY when we have positive, current telemetry that a Claude quota
+        window is still exhausted. Any absence/staleness of that evidence (no
+        coordinator, QUOTA_COORDINATOR_ENABLED off, stale reading) returns False —
+        fail OPEN to asking the operator rather than silently waiting forever on
+        an instrument that may never report again."""
+        coord = getattr(self, "quota_coordinator", None)
+        store = getattr(coord, "store", None) if coord is not None else None
+        if store is None:
+            return False
+        try:
+            window_states = store.status().get("window_states") or []
+        except Exception:
+            return False
+        for w in window_states:
+            if w.get("provider") != "claude":
+                continue
+            if w.get("telemetry_state") != "current":
+                continue
+            used = w.get("used_percent")
+            if isinstance(used, (int, float)) and used >= 100:
+                return True
+        return False
+
+    async def _handle_dead_manager_session(
+        self, db, case_id: str, generation: int, dead_session_id: Optional[str],
+    ) -> bool:
+        """[Case-respawn approval gate] Decide whether to respawn now, wait, or
+        ask the operator first. Same return contract as the respawn it wraps:
+        True = a respawn is owned/being handled this tick (don't escalate a
+        strand); False = fall through to the pre-gate escalation.
+
+        CASE_RESPAWN_REQUIRES_APPROVAL OFF ⇒ byte-identical to pre-gate M3.4 Job 3
+        (respawns immediately). ON: a quota-caused death (error_class rate_limit/
+        usage_limit on the dead session's last task) waits — silently, no
+        approval request yet — until telemetry confirms the quota window is no
+        longer exhausted, THEN asks. A non-quota death (or no task to classify)
+        asks immediately. Any failure in this gate FAILS OPEN to the unconditional
+        respawn — a bug here must never regress below pre-gate behavior."""
+        from src.control.db import case_continuation_enabled, case_respawn_requires_approval
+        if not case_respawn_requires_approval():
+            return await self._do_respawn_manager_for_case(db, case_id, generation, dead_session_id)
+        # Mirror _do_respawn_manager_for_case's own defensive re-gate BEFORE ever
+        # asking the operator: an approval the eventual respawn would refuse
+        # anyway (continuation off, or a naked tool-less Manager with role off)
+        # is worse than no approval — it would sit "approved" with nothing
+        # happening. Let these fall straight through to strand-escalation, same
+        # as pre-gate behavior.
+        if not case_continuation_enabled() or not self._manager_role_enabled():
+            return False
+
+        action = "case_manager_respawn"
+        try:
+            self._ensure_approval_service(db)
+            existing = self._find_case_generation_approval(action, case_id, generation)
+            if existing is not None:
+                status = str(existing.get("status") or "")
+                if status == "approved":
+                    # Safety net: approved but the on_approve callback never
+                    # fired/completed (e.g. a crash between commit and dispatch).
+                    return await self._do_respawn_manager_for_case(
+                        db, case_id, generation, dead_session_id,
+                    )
+                # 'pending' → already asked, don't spam. 'rejected' → operator
+                # declined, stand down for this generation (no re-ask, no
+                # escalation — the case just stays open until manual action).
+                return True
+
+            error_class = ""
+            if dead_session_id:
+                last = db.list_tasks(session_id=dead_session_id, limit=1)
+                if last:
+                    error_class = str(last[0].get("error_class") or "")
+            cause = "crash"
+            if error_class in ("rate_limit", "usage_limit"):
+                if self._quota_still_exhausted_for_claude():
+                    # Confirmed still down — wait for a future tick, don't nag
+                    # with an approval the operator can't usefully act on yet.
+                    return True
+                cause = "quota_restored"
+
+            objective_excerpt = ""
+            try:
+                brief = db.get_case_brief(case_id) or {}
+                objective_excerpt = str(brief.get("objective") or "")[:400]
+            except Exception:
+                pass
+            result = self.approval_service.request(
+                action=action, risk="medium", reversible=True, requested_by="system",
+                case_id=case_id,
+                payload={
+                    "case_id": case_id, "generation": generation,
+                    "dead_session_id": dead_session_id, "cause": cause,
+                    "error_class": error_class, "objective_excerpt": objective_excerpt,
+                },
+            )
+            if not getattr(result, "ok", False):
+                raise RuntimeError(f"approval_request_failed:{getattr(result, 'reason', '')}")
+            self._emit_event(
+                "case_respawn_approval_requested", None,
+                {"case_id": case_id, "generation": generation, "cause": cause},
+            )
+            return True
+        except Exception as e:
+            logger.warning("event=respawn_approval_gate_failed case=%s err=%s", case_id, e)
+            return await self._do_respawn_manager_for_case(db, case_id, generation, dead_session_id)
+
+    async def _do_respawn_manager_for_case(
         self, db, case_id: str, generation: int, dead_session_id: Optional[str],
     ) -> bool:
         """[A55 / M3.4 Job 3] Bring a role-full Manager back on a SATISFIED Case whose
         bound Manager session is dead — on the SAME Case, exactly once, never new work.
+
+        Unconditional — actually performs the respawn. Callers that want the
+        approval gate (CASE_RESPAWN_REQUIRES_APPROVAL) go through
+        ``_handle_dead_manager_session`` instead, which calls this only once an
+        operator has approved (or the flag is OFF). This method is also the
+        ``on_approve`` target invoked from the approval-resolution path.
 
         Returns True iff a respawn is owned for this Case this tick (this tick won the
         single-flight and (re)spawned, OR a concurrent tick won and this one lost the

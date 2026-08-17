@@ -234,6 +234,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "M4 spec-authoring stage, scored spec-review gate, publish_artifact, and the decomposer.",
     },
+    "CASE_RESPAWN_REQUIRES_APPROVAL": {
+        "default": "1",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Gate M3.4 crash-respawn (a dead Manager session on a satisfied Case) behind an operator approval instead of auto-spawning. Quota-caused deaths wait for confirmed-restored telemetry before even requesting approval.",
+    },
     "MANAGER_ADVANCEMENT_GATE": {
         "default": "0",
         "effect_scope": "live",
@@ -477,6 +483,19 @@ def case_continuation_enabled() -> bool:
     byte-identical to pre-M3.4 behavior.
     """
     return runtime_flag_enabled("CASE_CONTINUATION_ENABLED")
+
+
+def case_respawn_requires_approval() -> bool:
+    """[Case-respawn approval gate] Whether M3.4 crash-respawn requires an
+    operator-resolved approval before spawning a fresh Manager session.
+
+    Canonical read of ``CASE_RESPAWN_REQUIRES_APPROVAL`` (truthy: 1/true/yes/on);
+    default ON (unlike most flags here — silent/inconsistent auto-respawn was the
+    reported problem this gate exists to fix). When OFF, the dead-session branch
+    of the Wake-Dispatcher tick spawns immediately, byte-identical to pre-gate
+    M3.4 Job 3 behavior.
+    """
+    return runtime_flag_enabled("CASE_RESPAWN_REQUIRES_APPROVAL")
 
 
 def spec_authoring_enabled() -> bool:
