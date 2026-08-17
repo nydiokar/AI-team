@@ -588,6 +588,12 @@ class TestClassifyErrorText:
         assert classify_error_text("", api_error_status=529) == "upstream_error"
         assert classify_error_text("some random failure", api_error_status=500) == "upstream_error"
 
+    def test_api_error_status_429_is_usage_limit(self):
+        # 429 = quota / rate limit, not an upstream error.  Must align with
+        # the orchestrator's _classify_error which also maps 429 → usage_limit.
+        assert classify_error_text("", api_error_status=429) == "usage_limit"
+        assert classify_error_text("some text", api_error_status=429) == "usage_limit"
+
 
 class TestSalvagedReply:
     """The user-facing reply for an error turn must be honest and COMPLETE:
