@@ -68,7 +68,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-08-17 — Quota-paused Cases now pause, propose, and resume on purpose (PR #96).**
+**2026-08-17 — Quota-paused Cases now pause, propose, and resume on purpose (PR #97).**
 A Manager turn killed by the account's quota window used to leave no durable trace, and the harness
 had exactly ONE resume trigger: a satisfied wait-group. So a quota-killed Case either stalled
 silently (no workers in flight) or came back at an unrelated random moment — and since there was no
