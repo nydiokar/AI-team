@@ -197,7 +197,9 @@ def test_classify_error_detects_rate_limit_event_from_stream_json():
         return_code=1,
     )
 
-    assert orch._classify_error(result) == "rate_limit"
+    # A rejected rate_limit_event IS the subscription window (same condition a
+    # 429 reports), so it lands in the one quota class the resume path reads.
+    assert orch._classify_error(result) == "usage_limit"
 
 
 def test_classify_error_detects_max_turns_from_result_subtype():
@@ -368,11 +370,18 @@ def test_quota_only_failure_keeps_session_awaiting_input():
     assert _session_status_after_result(result) == SessionStatus.AWAITING_INPUT
     # error_class is preserved — the audit trail is untouched.
     assert result.error_class == "usage_limit"
+    # ...and the turn itself keeps reporting FAILED: no work was produced, so
+    # flipping success here would lie to task status, telemetry and the operator.
+    assert _reclassify_salvaged_turn_success(result).success is False
 
 
-def test_quota_failure_via_text_markers_keeps_session_alive():
-    """Text-based usage-limit detection (no structured api_error_status) must
-    also keep the session alive."""
+def test_text_only_usage_limit_reaches_the_session_layer_as_a_quota_pause():
+    """A limit that surfaces ONLY as wording (no api_error_status, no
+    rate_limit_event) must still keep the session alive — but via the ONE
+    classifier, not a second text scan inside the session-status check. This
+    drives the real pipeline order: _classify_error stamps error_class, then the
+    session layer reads it."""
+    orch = TaskOrchestrator()
     result = TaskResult(
         task_id="task_quota_text",
         success=False,
@@ -386,6 +395,9 @@ def test_quota_failure_via_text_markers_keeps_session_alive():
         return_code=1,
     )
 
+    result.error_class = orch._classify_error(result)
+
+    assert result.error_class == "usage_limit"
     assert _session_status_after_result(result) == SessionStatus.AWAITING_INPUT
 
 

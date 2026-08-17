@@ -500,28 +500,41 @@ class QuotaWindowStore:
         ).fetchone()
         return dict(row) if row else None
 
+    def latest_snapshots(self) -> List[Dict[str, Any]]:
+        """The newest snapshot per (provider, principal_hash, bucket) — the cheap
+        read for "is the window spent right now?".
+
+        ONE indexed ``LIMIT 1`` per known bucket (a handful), NOT a correlated
+        subquery over the whole snapshot history. The previous form
+        (``WHERE snapshot_id = (SELECT … WHERE i.provider = s.provider …)``) had
+        no usable index for its correlation, so SQLite re-scanned the table for
+        every row: at 53k rows that is ~2.8 BILLION row reads, measured at over
+        two minutes on the gateway host. Any caller on a per-tick path (the
+        Case quota-resume gate) must use this, not ``status()``.
+        """
+        conn = self._conn()
+        # Keys come from the SNAPSHOTS themselves, not from `buckets`: an
+        # observation can be recorded for a bucket that was never upserted
+        # (adapter discovery failing after an observe, a replayed row), and
+        # dropping it here would silently hide a spent window.
+        keys = conn.execute(
+            "SELECT DISTINCT provider, principal_hash, bucket_id FROM snapshots "
+            "ORDER BY provider, bucket_id"
+        ).fetchall()
+        rows: List[Dict[str, Any]] = []
+        for key in keys:
+            row = self.latest_snapshot(
+                str(key["provider"]), str(key["principal_hash"]), str(key["bucket_id"]),
+            )
+            if row is not None:
+                rows.append(row)
+        return rows
+
     def status(self, *, now: Optional[datetime] = None) -> Dict[str, Any]:
         conn = self._conn()
         adapters = [dict(r) for r in conn.execute("SELECT * FROM adapter_status ORDER BY provider").fetchall()]
         buckets = [dict(r) for r in conn.execute("SELECT * FROM buckets ORDER BY provider, bucket_id").fetchall()]
-        snapshots = [
-            dict(r)
-            for r in conn.execute(
-                """
-                SELECT s.* FROM snapshots s
-                WHERE s.snapshot_id = (
-                    SELECT i.snapshot_id
-                    FROM snapshots i
-                    WHERE i.provider = s.provider
-                      AND i.principal_hash = s.principal_hash
-                      AND i.bucket_id = s.bucket_id
-                    ORDER BY i.observed_at DESC, i.created_at DESC, i.snapshot_id DESC
-                    LIMIT 1
-                )
-                ORDER BY s.provider, s.bucket_id
-                """
-            ).fetchall()
-        ]
+        snapshots = self.latest_snapshots()
         window_states = _build_window_states(conn, buckets=buckets, snapshots=snapshots, now=now or utc_now())
         return {"adapters": adapters, "buckets": buckets, "latest_snapshots": snapshots, "window_states": window_states}
 
