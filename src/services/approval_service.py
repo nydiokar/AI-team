@@ -78,8 +78,13 @@ class ApprovalService:
         requested_by: str = "",
         payload: Optional[Dict[str, Any]] = None,
         expires_at: Optional[str] = None,
+        case_id: Optional[str] = None,
     ) -> CommandResult:
         """Record a pending approval and emit ``approval.requested``.
+
+        ``case_id`` links the approval directly to a Case's ledger when the
+        gated action has no ``task_id`` to derive one from (e.g. a Case-level
+        decision like crash-respawn) — see ``_record_approval_flow``.
 
         Returns CommandResult(ok, reason) with the new id in ``reason`` is wrong —
         ``reason`` is for codes; the id rides on the returned approval dict via
@@ -112,7 +117,7 @@ class ApprovalService:
         # link approval→flow + append `approval.requested`. Best-effort/isolated
         # and flag-guarded — it can NEVER affect the approval gate itself.
         self._record_approval_flow(
-            approval_id=approval_id, task_id=task_id,
+            approval_id=approval_id, task_id=task_id, case_id=case_id,
             event_type="approval.requested", actor="system",
             to_state="pending",
         )
@@ -130,22 +135,24 @@ class ApprovalService:
         event_type: str,
         actor: str,
         to_state: Optional[str] = None,
+        case_id: Optional[str] = None,
     ) -> None:
         """Best-effort Work-substrate record for an approval lifecycle change.
 
         Links the approval to the case that owns its task (via the task's
-        flow_run) and appends an append-only case event. Flag-guarded (no-op when
-        HARNESS_FLOW_DRIVE is OFF) and fully isolated: any failure logs and
-        returns — an approval must resolve/persist regardless. SHADOW only —
-        nothing reads these rows to drive execution. Missing task/flow ⇒ no-op
-        (never inferred)."""
+        flow_run), or directly to ``case_id`` when the gated action is a
+        Case-level decision with no owning task, and appends an append-only
+        case event. Flag-guarded (no-op when HARNESS_FLOW_DRIVE is OFF) and
+        fully isolated: any failure logs and returns — an approval must
+        resolve/persist regardless. SHADOW only — nothing reads these rows to
+        drive execution. Missing task/flow/case_id ⇒ no-op (never inferred)."""
         try:
-            if not _flow_drive_enabled() or not task_id:
+            if not _flow_drive_enabled():
                 return
-            runs = self._db.list_flow_runs(task_id=task_id, limit=1)
-            if not runs:
-                return
-            flow_run_id = runs[0].get("flow_run_id")
+            flow_run_id = case_id
+            if not flow_run_id and task_id:
+                runs = self._db.list_flow_runs(task_id=task_id, limit=1)
+                flow_run_id = runs[0].get("flow_run_id") if runs else None
             if not flow_run_id:
                 return
             # Idempotent link (unique-keyed); safe to repeat across request/resolve.
@@ -205,9 +212,17 @@ class ApprovalService:
 
         # [A29] Append the terminal `approval.resolved` case event (deferred A26
         # seam). Actor is the operator who decided; to_state carries the decision.
-        # Best-effort/isolated/flag-guarded — never affects the gate.
+        # Best-effort/isolated/flag-guarded — never affects the gate. case_id (if
+        # any) travels in the payload for Case-level approvals with no task_id.
+        resolved_case_id = None
+        try:
+            import json as _json
+            resolved_case_id = _json.loads(existing.get("payload") or "{}").get("case_id")
+        except Exception:
+            resolved_case_id = None
         self._record_approval_flow(
             approval_id=approval_id, task_id=existing.get("task_id"),
+            case_id=resolved_case_id,
             event_type="approval.resolved", actor="operator",
             to_state=decision,
         )

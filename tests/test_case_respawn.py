@@ -9,7 +9,7 @@ waits/groups, and resumes toward closure — under a strict single-flight lease
 (the SAME atomic ``mesh_tasks`` claim the continuation lease uses) so a racing
 tick never double-respawns.
 
-These tests drive the GENUINE ``TaskOrchestrator._respawn_manager_for_case`` /
+These tests drive the GENUINE ``TaskOrchestrator._do_respawn_manager_for_case`` /
 ``_continue_case_once`` against a real ``MeshDB`` with a duck-typed ``self`` — no
 paid CLI, no live backend. Flags ``CASE_CONTINUATION_ENABLED`` +
 ``MANAGER_ROLE_ENABLED`` gate the respawn.
@@ -40,6 +40,10 @@ def _on(monkeypatch) -> None:
     monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
+    # These tests drive the GENUINE unconditional respawn machinery directly —
+    # the approval gate in front of it (CASE_RESPAWN_REQUIRES_APPROVAL, default
+    # ON) is covered separately in test_case_respawn_approval_gate.py.
+    monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
 
 
 def _finished(db: MeshDB, case_id: str, task_id: str, outcome: str = "success") -> None:
@@ -97,7 +101,7 @@ class _CreateResult:
 
 class _FakeSessionService:
     """Spawns a fresh AWAITING_INPUT session and registers it in the store — the
-    minimum ``_respawn_manager_for_case`` needs. ``fail=True`` simulates a spawn
+    minimum ``_do_respawn_manager_for_case`` needs. ``fail=True`` simulates a spawn
     failure AFTER the single-flight claim (recovery path)."""
 
     def __init__(self, store, fail=False):
@@ -166,8 +170,13 @@ class _FakeOrch:
     async def _escalate_case_continuation_cap(self, case_id, cap, generation):
         return await TaskOrchestrator._escalate_case_continuation_cap(self, case_id, cap, generation)
 
-    async def _respawn_manager_for_case(self, db, case_id, generation, dead_sid):
-        return await TaskOrchestrator._respawn_manager_for_case(
+    async def _do_respawn_manager_for_case(self, db, case_id, generation, dead_sid):
+        return await TaskOrchestrator._do_respawn_manager_for_case(
+            self, db, case_id, generation, dead_sid,
+        )
+
+    async def _handle_dead_manager_session(self, db, case_id, generation, dead_sid):
+        return await TaskOrchestrator._handle_dead_manager_session(
             self, db, case_id, generation, dead_sid,
         )
 
@@ -280,8 +289,8 @@ def test_concurrent_ticks_respawn_exactly_one_manager(tmp_path, monkeypatch):
     async def _race():
         # generation is 1 (no rounds consumed yet) — both compute the SAME respawn id
         return await asyncio.gather(
-            orchA._respawn_manager_for_case(db, case_id, 1, dead_sid),
-            orchB._respawn_manager_for_case(db, case_id, 1, dead_sid),
+            orchA._do_respawn_manager_for_case(db, case_id, 1, dead_sid),
+            orchB._do_respawn_manager_for_case(db, case_id, 1, dead_sid),
         )
 
     resA, resB = asyncio.run(_race())
@@ -313,7 +322,7 @@ def test_second_claim_on_respawn_row_loses(tmp_path, monkeypatch):
 
     store = _FakeStore()
     orch = _FakeOrch(store)
-    assert asyncio.run(orch._respawn_manager_for_case(db, case_id, 1, dead_sid)) is True
+    assert asyncio.run(orch._do_respawn_manager_for_case(db, case_id, 1, dead_sid)) is True
 
     # the deterministic respawn row is claimed/completed — a fresh claim loses
     assert db.claim_task(respawn_task_id(case_id, 1), socket.gethostname()) is False
@@ -336,7 +345,7 @@ def test_respawn_preserves_flow_run_id_and_creates_no_new_case(tmp_path, monkeyp
 
     store = _FakeStore()
     orch = _FakeOrch(store)
-    assert asyncio.run(orch._respawn_manager_for_case(db, case_id, 1, dead_sid)) is True
+    assert asyncio.run(orch._do_respawn_manager_for_case(db, case_id, 1, dead_sid)) is True
 
     # NO new Case: the open-case set is UNCHANGED after the respawn.
     open_after = {c["flow_run_id"] for c in db.list_open_cases()}
