@@ -944,3 +944,45 @@ def test_without_telemetry_an_elapsed_reset_proposes(tmp_path, monkeypatch):
     assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is True
     assert len([a for a in orch.approval_service.list(limit=50)
                 if a["action"] == CASE_RESUME_APPROVAL_ACTION]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 10. Burst rate-limit vs spent subscription window are NOT the same thing     #
+# --------------------------------------------------------------------------- #
+
+def _text_failure(text: str) -> TaskResult:
+    return TaskResult(
+        task_id="t-text-class", success=False, output="", errors=[text],
+        files_modified=[], execution_time=1.0, timestamp=_iso(_now()),
+        raw_stdout="", raw_stderr=text, return_code=1,
+    )
+
+
+def test_generic_burst_wording_stays_retry_eligible():
+    """"Rate limit exceeded. Please retry later." is the classic transient the
+    retry policy exists for — it is NOT evidence that the account's five-hour
+    window is spent, and collapsing the two would silently stop retrying real
+    transients."""
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    ec = TaskOrchestrator._classify_error(orch, _text_failure("Rate limit exceeded. Please retry later."))
+    assert ec == "rate_limit"
+    assert TaskOrchestrator._get_retry_strategy(orch, ec)["max_retries"] >= 1
+
+
+def test_subscription_window_wording_is_a_quota_pause():
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    for text in (
+        "You've hit your session limit · resets 4:30pm",
+        "Claude usage limit reached",
+        "You've hit your limit",
+    ):
+        ec = TaskOrchestrator._classify_error(orch, _text_failure(text))
+        assert ec == "usage_limit", text
+        assert TaskOrchestrator._get_retry_strategy(orch, ec)["max_retries"] == 0
+
+
+def test_both_classes_pause_a_case():
+    """Whichever class a terminal quota failure lands in, the Case must pause —
+    a burst that never clears is still the Case sitting on a spent provider."""
+    for ec in ("usage_limit", "rate_limit"):
+        assert is_quota_pause_result(_quota_result(error_class=ec)) is True
