@@ -196,8 +196,10 @@ class _Orch:
     def estimate_case_resume_cost(self, session_id):
         return TaskOrchestrator.estimate_case_resume_cost(self, session_id)
 
-    def _recommended_resume_mode(self, session_id):
-        return TaskOrchestrator._recommended_resume_mode(self, session_id)
+    def _recommended_resume_mode(self, session_id, *, paused_at=None):
+        return TaskOrchestrator._recommended_resume_mode(
+            self, session_id, paused_at=paused_at,
+        )
 
     def _ensure_approval_service(self, db):
         return TaskOrchestrator._ensure_approval_service(self, db)
@@ -986,3 +988,141 @@ def test_both_classes_pause_a_case():
     a burst that never clears is still the Case sitting on a spent provider."""
     for ec in ("usage_limit", "rate_limit"):
         assert is_quota_pause_result(_quota_result(error_class=ec)) is True
+
+
+# --------------------------------------------------------------------------- #
+# 11. STALE telemetry must not fake a restore (the live defect)                #
+# --------------------------------------------------------------------------- #
+
+def _stale_healthy_snapshot(age_hours: float = 4.0):
+    """The live shape on this host: the observer legitimately sleeps for hours
+    (next_observe_delay_sec backs off to the next known reset), so its last
+    reading can say "0% used" long after the window was actually spent."""
+    return [{
+        "provider": "claude", "bucket_id": "five_hour", "used_percent": 0.0,
+        "limit_reached": 0,
+        "observed_at": _iso(_now() - timedelta(hours=age_hours)),
+        "reset_at": _iso(_now() - timedelta(hours=age_hours) + timedelta(hours=2)),
+        "telemetry_quality": "authoritative",
+    }]
+
+
+def test_stale_below_limit_telemetry_does_not_propose_before_the_real_reset(tmp_path, monkeypatch):
+    """THE defect this fixes: a healthy-but-hours-old snapshot is neither
+    `exhausted` nor `no_telemetry`, so the pause used to be proposed for resume
+    on the very next 30s tick — hours before quota returned. The reset instant
+    the provider attached to its own refusal governs instead."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_stale_healthy_snapshot())
+    case_id = _case(db, "mgr-1")
+    orch._record_quota_pause(
+        _Task("paused-turn", case_id, "mgr-1"),
+        _rate_limited_result(int((_now() + timedelta(hours=3)).timestamp())),
+    )
+
+    assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is True
+    assert orch.approval_service is None or not orch.approval_service.list(limit=50)
+
+
+def test_telemetry_observed_after_the_pause_can_release_it_early(tmp_path, monkeypatch):
+    """Corrigible, not a blind clock: if the observer reads a HEALTHY window
+    after the pause was recorded (Anthropic re-anchored or reset the limits),
+    that overrules the recorded boundary and the resume is proposed."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=None)
+    case_id = _case(db, "mgr-1")
+    orch._record_quota_pause(
+        _Task("paused-turn", case_id, "mgr-1"),
+        _rate_limited_result(int((_now() + timedelta(hours=3)).timestamp())),
+    )
+    orch.quota_coordinator = _FakeCoordinator([{
+        "provider": "claude", "bucket_id": "five_hour", "used_percent": 4.0,
+        "limit_reached": 0, "observed_at": _iso(_now() + timedelta(seconds=30)),
+        "reset_at": _iso(_now() + timedelta(hours=5)),
+        "telemetry_quality": "authoritative",
+    }])
+
+    assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is True
+    assert len([a for a in orch.approval_service.list(limit=50)
+                if a["action"] == CASE_RESUME_APPROVAL_ACTION]) == 1
+
+
+def test_pause_ignores_a_healthy_windows_reset_at(tmp_path, monkeypatch):
+    """A healthy reading carries a reset_at too ("12% used, resets in 4h"). That
+    boundary never blocked anything, so it must not become the wait-until."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_restored_snapshot())
+    case_id = _case(db, "mgr-1")
+
+    _pause(orch, db, case_id, "mgr-1")          # refusal carries no resetsAt
+
+    assert db.case_quota_pause(case_id)["reset_at"] is None
+
+
+# --------------------------------------------------------------------------- #
+# 12. Resume mode is decided by the prompt cache, not by taste                 #
+# --------------------------------------------------------------------------- #
+
+def test_mode_is_in_place_while_the_cache_is_still_warm(tmp_path, monkeypatch):
+    """Inside the provider's ~1h cache TTL a resume re-writes nothing, so the
+    live session wins however fat it is."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
+    _record_cache_write(db, "mgr-1", 250_000)
+
+    assert orch._recommended_resume_mode(
+        "mgr-1", paused_at=_iso(_now() - timedelta(minutes=20)),
+    ) == "in_place"
+
+
+def test_mode_is_fresh_manager_for_a_cold_fat_session(tmp_path, monkeypatch):
+    """Past the TTL, a 250k-token conversation is exactly the 200-300k rewrite
+    this seam exists to avoid."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
+    _record_cache_write(db, "mgr-1", 250_000)
+
+    assert orch._recommended_resume_mode(
+        "mgr-1", paused_at=_iso(_now() - timedelta(hours=4)),
+    ) == "fresh_manager"
+
+
+def test_mode_is_in_place_for_a_cold_but_small_session(tmp_path, monkeypatch):
+    """A cold rewrite of a small conversation is cheap, and the transcript is
+    worth more than the tokens."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
+    _record_cache_write(db, "mgr-1", 20_000)
+
+    assert orch._recommended_resume_mode(
+        "mgr-1", paused_at=_iso(_now() - timedelta(hours=4)),
+    ) == "in_place"
+
+
+def test_mode_is_fresh_manager_when_the_session_size_is_unknown(tmp_path, monkeypatch):
+    """No recorded turn ⇒ no measurement. Assume the expensive case: fresh_manager
+    loses transcript detail, never money."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
+
+    assert orch._recommended_resume_mode(
+        "mgr-1", paused_at=_iso(_now() - timedelta(hours=4)),
+    ) == "fresh_manager"
+
+
+def test_dead_session_is_always_fresh_manager(tmp_path, monkeypatch):
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1", status=SessionStatus.CLOSED)))
+    _record_cache_write(db, "mgr-1", 1_000)
+
+    assert orch._recommended_resume_mode(
+        "mgr-1", paused_at=_iso(_now()),
+    ) == "fresh_manager"

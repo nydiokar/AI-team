@@ -131,6 +131,19 @@ them.
 | `CLAUDE_QUOTA_PRINCIPAL_KEY` | ✅ YES | "" | Operator-provided stable account label used only to derive `principal_hash`. | `config/settings.py`, `quota_window_coordinator.py` |
 | `QUOTA_DIGEST_TELEGRAM_ENABLED` | ✅ YES | false | Temporary Telegram digest subscriber for quota observations; separate from the coordinator. | `orchestrator.py`, `quota_digest.py` |
 | `QUOTA_DIGEST_INTERVAL_SEC` | ✅ YES | 3600 | Minimum digest aggregation interval after the first state-change message. | `config/settings.py`, `quota_digest.py` |
+| `QUOTA_PREWARM_ENABLED` | ✅ YES | false | **The only path in the gateway that spends without a user asking.** When telemetry shows NO open 5-hour window, spend one minimal `haiku` turn to start one, then re-observe to VERIFY a window actually opened. Requires `QUOTA_COORDINATOR_ENABLED` (reads/activates through its adapter). Deliberately has **no quiet hours** — see the deviation note below. | `orchestrator.py`, `quota_window_prewarmer.py` |
+| `QUOTA_PREWARM_MODEL` | ✅ YES | `haiku` | Model for the activation turn. Cheapest tier on purpose, and it keeps the opus/fable weekly-scoped buckets out of it. | `config/settings.py`, `quota_window_coordinator.py` |
+| `QUOTA_PREWARM_MIN_INTERVAL_SEC` | ✅ YES | 3600 | Floor between two activations, independent of what telemetry says. | `config/settings.py`, `quota_window_prewarmer.py` |
+| `QUOTA_PREWARM_MAX_PER_DAY` | ✅ YES | 8 | Hard daily activation budget (a 5-hour rhythm needs ~5). | `config/settings.py`, `quota_window_prewarmer.py` |
+| `QUOTA_PREWARM_DELAY_AFTER_RESET_SEC` | ✅ YES | 120 | How long after a window's `reset_at` to re-check and open the next one. | `config/settings.py`, `quota_window_prewarmer.py` |
+
+**Deviation from `docs/SESSION_WINDOW_WARMING_SPEC.md` §10 (operator decision, 2026-08-19).** The spec
+requires a work-horizon / quiet-hours gate for auto-activation. The prewarmer deliberately runs around
+the clock instead: the entire value is that the window is ALREADY running when the operator starts, so
+a warm-up that waits for them to be awake is indistinguishable from them typing one word themselves.
+The spec's other activation gates are kept (telemetry-driven scheduling, one activation per observed
+window, isolated/bounded activation environment, verification against provider telemetry, daily budget,
+circuit breaker). `automation_ready` is NOT consulted — it is structurally unreachable today (A78 §1).
 
 ---
 
