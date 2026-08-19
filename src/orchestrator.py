@@ -73,6 +73,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from src.core.timeutil import now_iso, parse_iso
 import uuid
 import random
@@ -167,6 +168,77 @@ CASE_RESUME_MODES: Tuple[str, ...] = ("in_place", "fresh_manager")
 #: reason that mode exists.
 RESUME_IN_PLACE_CACHE_WARM_SEC: int = 3600
 RESUME_IN_PLACE_MAX_CACHE_TOKENS: int = 100_000
+
+
+#: [quota-resume] The wall-clock reset instant the provider states IN WORDS on its
+#: own refusal: "You've hit your session limit · resets 8:20pm (Europe/Kiev)".
+#: Requires an explicit IANA zone in parentheses ON PURPOSE — a bare "resets
+#: 4:30pm" is printed in the timezone of whatever machine ran the CLI (often a
+#: remote node, not this gateway), so interpreting it here would silently invent a
+#: boundary hours off. Unqualified wording stays unparsed, exactly as before.
+_LIMIT_RESET_CLOCK_RE = re.compile(
+    r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\s*\(([A-Za-z]+/[A-Za-z_\-+]+)\)",
+    re.IGNORECASE,
+)
+
+#: A five-hour window can never reopen more than ~5h out, and no quota refusal
+#: names a boundary a day away. Anything beyond this is a misparse, not a reset.
+_LIMIT_RESET_MAX_AHEAD = timedelta(hours=25)
+
+#: [quota-resume] How long a pause with NO recorded reset instant may wait for a
+#: telemetry reading younger than itself before it gives up and asks anyway.
+#: Longer than the five-hour window, short of the weekly one: past this, quota is
+#: either back or the instrument is dead, and both mean "ask the operator".
+_QUOTA_BLIND_WAIT_MAX = timedelta(hours=5, minutes=30)
+
+#: Tolerance for the ordinary race where the observer polls in the same moment
+#: the provider refuses the turn — such a reading is contemporaneous, not stale.
+_QUOTA_RESTORE_READING_GRACE = timedelta(seconds=60)
+
+
+def _reset_at_from_limit_text(text: str, *, now: Optional[datetime] = None) -> Optional[str]:
+    """[quota-resume] The provider's own reset instant, recovered from the WORDS of
+    its refusal, as a UTC ISO string — or ``None``.
+
+    This exists because the structured ``rate_limit_event.resetsAt`` is NOT
+    present on every path (notably a turn executed on a remote mesh node), while
+    the human-readable phrase is. Live on 2026-08-19 the harness held
+    "resets 8:20pm (Europe/Kiev)" — i.e. 17:20Z, the correct answer to the second
+    — and used it only to render a label, so the Case recorded ``reset_at: null``
+    and proposed a resume an hour before quota actually returned.
+
+    The named zone is authoritative; the DATE is not stated, so the next
+    occurrence of that wall-clock time is taken (a small grace window means a
+    boundary that just passed reads as "now", not "tomorrow").
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    match = _LIMIT_RESET_CLOCK_RE.search(text)
+    if match is None:
+        return None
+    hour_s, minute_s, meridiem, zone_name = match.groups()
+    try:
+        zone = ZoneInfo(zone_name)
+    except Exception:
+        return None
+    try:
+        hour = int(hour_s)
+        minute = int(minute_s or 0)
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= hour <= 12) or not (0 <= minute <= 59):
+        return None
+    if meridiem.lower() == "p":
+        hour = hour if hour == 12 else hour + 12
+    elif hour == 12:
+        hour = 0
+    current = (now or datetime.now(timezone.utc)).astimezone(zone)
+    candidate = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate < current - timedelta(minutes=5):
+        candidate += timedelta(days=1)
+    if candidate - current > _LIMIT_RESET_MAX_AHEAD:
+        return None
+    return candidate.astimezone(timezone.utc).isoformat()
 
 
 def _parse_iso_utc(value: Any) -> Optional[datetime]:
@@ -1573,19 +1645,38 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # paused task so the resume lease stays deterministic.
                 return
             quota = self.quota_window_state(str(getattr(result, "backend", "") or "claude"))
-            # The provider's own reset time rides on the refusal itself
-            # (rate_limit_event.resetsAt) and is EXACT at the instant the window
-            # was actually hit. Telemetry is a poll — on this host the observer
-            # legitimately sleeps up to 6h between reads (next_observe_delay_sec
-            # backs off to the next known reset), so its reset_at can be hours
-            # stale or belong to a different bucket. Prefer the refusal; keep
-            # telemetry as the fallback for refusals that carry no resetsAt.
-            # Telemetry's reset_at only MEANS "spent until X" when that same
-            # reading was itself exhausted. A healthy window ("12% used, resets
-            # in 4h") carries a reset_at too, and recording it here would park
-            # the Case until a boundary that never blocked anything.
-            reset_at = self._rate_limit_reset_iso(result) or (
-                quota.get("reset_at") if quota.get("exhausted") else None
+            reason = self._short_failure_reason(result)[:256]
+            # THREE INDEPENDENT SOURCES NAME THE SAME INSTANT. Take whichever is
+            # present, in descending order of directness — on 2026-08-19 all
+            # three said 17:20:00Z and the Case still recorded `reset_at: null`,
+            # which is what proposed a resume an hour early:
+            #   1. the structured refusal (`rate_limit_event.resetsAt`) — exact,
+            #      needs no observer, but ABSENT on the mesh/remote-node path;
+            #   2. the refusal's own words ("resets 8:20pm (Europe/Kiev)") — the
+            #      same fact, and the only one available when 1 is missing;
+            #   3. the observer's five-hour `reset_at`.
+            #
+            # Source 3 used to be gated on `quota["exhausted"]`, on the theory
+            # that a healthy reading's reset_at would "park the Case until a
+            # boundary that never blocked anything". That was the live defect: an
+            # ANCHORED window's boundary does not move when utilisation changes,
+            # so the healthy 15:39 reading (68% used) and the exhausted 17:05 one
+            # named the SAME 17:20:00Z. What makes a boundary blocking is the
+            # provider refusing this turn — which just happened — not whether our
+            # last poll happened to catch 100%. A future reset instant is
+            # therefore taken as-is; a past one is discarded (it belongs to a
+            # window that has already rolled over).
+            telemetry_parsed = _parse_iso_utc(quota.get("reset_at"))
+            telemetry_reset = (
+                quota.get("reset_at")
+                if telemetry_parsed is not None
+                and telemetry_parsed > datetime.now(timezone.utc)
+                else None
+            )
+            reset_at = (
+                self._rate_limit_reset_iso(result)
+                or _reset_at_from_limit_text(reason)
+                or telemetry_reset
             )
             db.append_flow_event(
                 case_id, "flow.quota_paused", "system",
@@ -1597,7 +1688,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     "provider": quota.get("provider") or "claude",
                     "reset_at": reset_at,
                     "quota_evidence": quota.get("evidence"),
-                    "reason": self._short_failure_reason(result)[:256],
+                    "reason": reason,
                 },
             )
             self._emit_event(
@@ -1946,6 +2037,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
             if not reopened_early:
                 return True
+        elif recorded_reset is None and not self._restore_reading_is_usable(quota, pause):
+            # NO instant on record (a refusal that named none, with the observer
+            # off or hours behind). The only thing left that could release the
+            # pause is a telemetry reading — and a reading taken BEFORE the
+            # provider refused cannot possibly know the window is spent. Waiting
+            # is bounded below, not indefinite: past the longest window a Claude
+            # account has, the pause fails OPEN and asks (see the helper).
+            return True
 
         try:
             self._ensure_approval_service(db)
@@ -2052,6 +2151,32 @@ class TaskOrchestrator(ITaskOrchestrator):
             # before this seam existed).
             logger.warning("event=quota_resume_gate_failed case=%s err=%s", case_id, e)
             return False
+
+    def _restore_reading_is_usable(self, quota: Dict[str, Any], pause: Dict[str, Any]) -> bool:
+        """[quota-resume] May THIS telemetry reading release a pause that carries no
+        recorded reset instant?
+
+        Only when the reading is not meaningfully older than the refusal it is
+        supposed to overrule. The live shape (2026-08-19): the observer's last
+        poll was 35 minutes stale and said "68% used, below_limit", so the pause
+        was proposed for resume on the next 30s tick — an hour before quota came
+        back. A reading from before the pause has no information about it.
+
+        A small grace absorbs the ordinary race where the observer polls in the
+        same moment the turn is refused. Past ``_QUOTA_BLIND_WAIT_MAX`` — longer
+        than any window this provider runs — the answer is True regardless: a
+        silent instrument must never park a Case forever (the same fail-open
+        posture ``quota_window_state`` takes for a missing instrument).
+        """
+        paused_at = _parse_iso_utc(pause.get("paused_at"))
+        if paused_at is None:
+            return True
+        if datetime.now(timezone.utc) - paused_at >= _QUOTA_BLIND_WAIT_MAX:
+            return True
+        observed_at = _parse_iso_utc(quota.get("observed_at"))
+        if observed_at is None:
+            return False
+        return observed_at >= paused_at - _QUOTA_RESTORE_READING_GRACE
 
     async def _handle_transient_paused_case(self, db, case_id: str) -> bool:
         """[transient-resume] One Wake-Dispatcher pass over a Case's transient-5xx
