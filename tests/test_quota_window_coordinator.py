@@ -606,12 +606,53 @@ def test_adaptive_cadence_backs_off_until_reset_probe_window(tmp_path):
 
 
 def test_adaptive_cadence_uses_tight_polling_when_limit_reached(tmp_path):
+    """Spent, and the boundary it names has already passed: nothing tells us when
+    the window reopens, so poll at the base interval."""
     store = _store(tmp_path)
     snap = _snapshot(used=100.0, reset=datetime(2026, 7, 29, 13, 0, tzinfo=timezone.utc))
     store.insert_snapshot(QuotaSnapshot(**{**snap.__dict__, "limit_reached": True}))
     coord = QuotaWindowCoordinator(store=store, adapters=[], enabled=True, observe_interval_sec=300)
 
     assert coord.next_observe_delay_sec() == 300
+
+
+def test_spent_window_sleeps_to_its_own_reset_instead_of_re_asking(tmp_path):
+    """THE waste this fixes. LIVE 2026-08-19: the five-hour bucket read
+    `limit_reached=1, reset_at=17:20:00Z` and the observer then re-asked every
+    60s — 16 consecutive probes, each spawning a Claude CLI subprocess — to
+    re-learn an instant it already had. The provider named the boundary; sleep to
+    it (plus a settle margin, since the read ON the boundary still shows the old
+    window)."""
+    now = datetime(2026, 8, 19, 17, 5, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    snap = _snapshot(
+        observed=now, used=100.0,
+        reset=datetime(2026, 8, 19, 17, 20, tzinfo=timezone.utc),
+    )
+    store.insert_snapshot(QuotaSnapshot(**{**snap.__dict__, "limit_reached": True}))
+    coord = QuotaWindowCoordinator(
+        store=store, adapters=[], enabled=True,
+        observe_interval_sec=60, now=lambda: now,
+    )
+
+    assert coord.next_observe_delay_sec() == 15 * 60 + 30
+
+
+def test_spent_window_with_no_known_reset_still_polls(tmp_path):
+    """No boundary on record ⇒ the only way to learn the window reopened is to
+    ask; the base interval stays."""
+    store = _store(tmp_path)
+    now = datetime(2026, 8, 19, 17, 5, tzinfo=timezone.utc)
+    snap = _snapshot(observed=now, used=100.0)
+    store.insert_snapshot(
+        QuotaSnapshot(**{**snap.__dict__, "limit_reached": True, "reset_at": None})
+    )
+    coord = QuotaWindowCoordinator(
+        store=store, adapters=[], enabled=True,
+        observe_interval_sec=60, now=lambda: now,
+    )
+
+    assert coord.next_observe_delay_sec() == 60
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,11 @@ from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Pro
 logger = logging.getLogger(__name__)
 _SNAPSHOT_STALE_AFTER = timedelta(minutes=15)
 
+#: Grace added when sleeping to a SPENT window's reset instant: a read taken
+#: exactly on the boundary still reports the closing window (observed live —
+#: 17:20:00Z reset, first clean reading at 17:20:30Z).
+_EXHAUSTED_SETTLE_SEC = 30
+
 
 class WindowSemantics(Enum):
     ANCHORED = "anchored"
@@ -1157,7 +1162,23 @@ class QuotaWindowCoordinator:
         known_reset_delays: list[int] = []
         for row in snapshots:
             if row.get("limit_reached") == 1:
-                return self.observe_interval_sec
+                # SPENT — and the provider says exactly when that ends. Sleep to
+                # the boundary (plus a settle margin, because the reading right
+                # ON it still shows the old window) instead of re-asking every
+                # interval: on 2026-08-19 that cadence spent 16 consecutive
+                # probes, each spawning a CLI subprocess, to re-learn a 17:20:00Z
+                # instant already held since 15:39. Only an UNKNOWN or already
+                # elapsed boundary justifies polling blind.
+                spent_reset_at = normalize_utc(row.get("reset_at"))
+                if spent_reset_at is None:
+                    return self.observe_interval_sec
+                seconds_until_reset = int((spent_reset_at - now).total_seconds())
+                if seconds_until_reset <= 0:
+                    return self.observe_interval_sec
+                return min(
+                    seconds_until_reset + _EXHAUSTED_SETTLE_SEC,
+                    self.observe_max_interval_sec,
+                )
             reset_at = normalize_utc(row.get("reset_at"))
             used_percent = row.get("used_percent")
             quality = row.get("telemetry_quality")
