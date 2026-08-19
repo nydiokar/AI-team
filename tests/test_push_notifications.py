@@ -305,3 +305,112 @@ def test_fanout_warns_when_subscribers_exist_but_misconfigured(db, caplog):
         asyncio.run(svc.fanout({"title": "t", "body": "b", "url": "/"}))
     assert any("push_fanout_skipped" in r.message and "subscribers=1" in r.message
                for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Case-resume proposal: two channels, one decision surface
+# ---------------------------------------------------------------------------
+
+class _FakeTelegram:
+    def __init__(self):
+        self.sent = []
+
+    async def notify_completion(self, task_id, text, success=True, chat_id=None):
+        self.sent.append({"task_id": task_id, "text": text, "chat_id": chat_id})
+
+
+class _OrchStub:
+    def __init__(self, telegram):
+        self.telegram_interface = telegram
+
+
+def _notifier_with(monkeypatch, telegram):
+    """NotificationService whose push half is captured instead of sent."""
+    from src.services import notification_service as ns
+
+    svc = ns.NotificationService(orchestrator=_OrchStub(telegram))
+    captured: list = []
+    monkeypatch.setattr(
+        svc, "_maybe_push_case_resume",
+        lambda **kw: captured.append(kw),
+    )
+    return svc, captured
+
+
+def test_resume_proposal_notifies_both_channels(monkeypatch):
+    tg = _FakeTelegram()
+    svc, pushes = _notifier_with(monkeypatch, tg)
+
+    asyncio.run(svc.notify_case_resume_proposal(
+        case_id="abcdef1234567890", mode="fresh_manager", estimate_usd=0.42,
+        estimate_known=True, reset_at="2026-08-19T17:20:00Z",
+        objective="Ship the thing", chat_id=42,
+    ))
+
+    assert len(pushes) == 1 and len(tg.sent) == 1
+    assert "abcdef12" in pushes[0]["body"]
+    assert "$0.42" in pushes[0]["body"]
+
+
+def test_telegram_is_notification_only_and_points_at_the_web_ui(monkeypatch):
+    """Approving spends real money, so the decision surface stays the
+    authenticated Web UI. Telegram carries no approve/decline affordance."""
+    tg = _FakeTelegram()
+    svc, _ = _notifier_with(monkeypatch, tg)
+
+    asyncio.run(svc.notify_case_resume_proposal(
+        case_id="abcdef1234567890", mode="in_place", estimate_usd=None,
+        estimate_known=False, chat_id=42,
+    ))
+
+    text = tg.sent[0]["text"]
+    assert "/work/abcdef1234567890" in text
+    assert "cost unknown" in text
+    assert "/approve" not in text and "/resume" not in text
+
+
+def test_push_deep_links_to_the_case(monkeypatch):
+    """The push must land on the Case, not the session list — the decision has a
+    location."""
+    from src.services import notification_service as ns
+
+    built: dict = {}
+    monkeypatch.setattr(ns.NotificationService, "_maybe_push_case_resume",
+                        lambda self, **kw: built.update(kw))
+    svc = ns.NotificationService(orchestrator=_OrchStub(None))
+
+    asyncio.run(svc.notify_case_resume_proposal(
+        case_id="case-xyz", mode="in_place", estimate_usd=1.0, estimate_known=True,
+    ))
+
+    assert built["case_id"] == "case-xyz"
+    assert "resume" in built["title"].lower()
+
+
+def test_auto_resume_notification_is_framed_as_already_done(monkeypatch):
+    tg = _FakeTelegram()
+    svc, pushes = _notifier_with(monkeypatch, tg)
+
+    asyncio.run(svc.notify_case_resume_proposal(
+        case_id="abcdef1234567890", mode="fresh_manager", estimate_usd=0.10,
+        estimate_known=True, auto=True, chat_id=42,
+    ))
+
+    assert "automatically" in tg.sent[0]["text"]
+    assert "CASE_QUOTA_RESUME_AUTO" in tg.sent[0]["text"]
+    assert "resumed automatically" in pushes[0]["title"].lower()
+
+
+def test_notification_is_best_effort_when_telegram_is_dead(monkeypatch):
+    class _DeadTelegram:
+        async def notify_completion(self, *a, **kw):
+            raise RuntimeError("bot down")
+
+    svc, pushes = _notifier_with(monkeypatch, _DeadTelegram())
+
+    asyncio.run(svc.notify_case_resume_proposal(       # must not raise
+        case_id="c1", mode="in_place", estimate_usd=None, estimate_known=False,
+        chat_id=42,
+    ))
+
+    assert len(pushes) == 1                            # push still went out

@@ -79,8 +79,15 @@ class PrewarmState:
     activation_day: str = ""
     last_activation_at: Optional[datetime] = None
     consecutive_failures: int = 0
+    cost_spikes: int = 0
     circuit_open: bool = False
+    circuit_reason: str = ""
     last_outcome: str = ""
+    last_cost_percent: Optional[float] = None
+    #: Newest ``reset_at`` seen for a window believed to still be running — the
+    #: baseline for anchor-drift detection (spec §7's mandatory second reading).
+    seen_reset_at: Optional[datetime] = None
+    semantics_suspect: bool = False
     history: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -103,6 +110,7 @@ class QuotaWindowPrewarmer:
         delay_after_reset_sec: int = 120,
         poll_interval_sec: int = 300,
         max_consecutive_failures: int = 3,
+        max_activation_percent: float = 2.0,
         now: Callable[[], datetime] = utc_now,
         event_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> None:
@@ -114,6 +122,10 @@ class QuotaWindowPrewarmer:
         self.delay_after_reset_sec = max(0, int(delay_after_reset_sec))
         self.poll_interval_sec = max(60, int(poll_interval_sec))
         self.max_consecutive_failures = max(1, int(max_consecutive_failures))
+        #: Spec §13: prompt length is NOT a cost guarantee — an agent turn can
+        #: silently load settings, MCP schemas and project rules. The only honest
+        #: measure is the provider's own utilization delta across the activation.
+        self.max_activation_percent = max(0.0, float(max_activation_percent))
         self._now = now
         self._event_sink = event_sink
         self.state = PrewarmState()
@@ -180,6 +192,52 @@ class QuotaWindowPrewarmer:
                 return row
         return None
 
+    def note_anchor_drift(self, snapshot: Optional[Dict[str, Any]]) -> bool:
+        """Spec §7/§16: falsify the anchored-window premise continuously.
+
+        An ANCHORED window's boundary is fixed once the window starts — later
+        interactions must not move it. A SLIDING one moves its boundary as usage
+        continues, and prewarming a sliding window is worthless. The operator's
+        own traffic supplies the "second request" the spec requires, so all we
+        have to do is notice: a ``reset_at`` that moves FORWARD while the
+        previously-seen boundary had not yet elapsed is drift.
+
+        Returns True when drift was observed on this reading. Drift stops
+        activation (circuit) rather than degrading it — "any ambiguity disables
+        automation" (spec §18).
+        """
+        if snapshot is None:
+            return False
+        reset_at = normalize_utc(snapshot.get("reset_at"))
+        if reset_at is None:
+            self.state.seen_reset_at = None       # window closed — no baseline
+            return False
+        previous = self.state.seen_reset_at
+        self.state.seen_reset_at = reset_at
+        if previous is None:
+            return False
+        now = self._now()
+        moved = (reset_at - previous).total_seconds()
+        # Tolerance: the provider re-reports the same boundary with sub-second
+        # jitter (observed: 12:30:00.057Z vs 12:30:00.157Z).
+        if moved <= 60:
+            return False
+        if previous <= now:
+            return False                          # the old window simply ended
+        self.state.semantics_suspect = True
+        self.state.circuit_open = True
+        self.state.circuit_reason = "anchor_drift"
+        self._emit("prewarm.anchor_drift", {
+            "previous_reset_at": utc_iso(previous), "reset_at": utc_iso(reset_at),
+            "moved_seconds": int(moved),
+        })
+        logger.warning(
+            "event=quota_prewarm_anchor_drift previous=%s now=%s moved=%ds "
+            "(window may not be first-use anchored; activation disabled)",
+            utc_iso(previous), utc_iso(reset_at), int(moved),
+        )
+        return True
+
     def decide(self, snapshot: Optional[Dict[str, Any]]) -> PrewarmDecision:
         """Pure decision from ONE observation. No I/O — this is the part worth
         asserting exhaustively.
@@ -194,7 +252,7 @@ class QuotaWindowPrewarmer:
         if self.state.circuit_open:
             return PrewarmDecision(
                 action="skip_circuit_open",
-                reason=f"consecutive_failures>={self.max_consecutive_failures}",
+                reason=self.state.circuit_reason or "circuit_open",
                 next_check_at=now + timedelta(seconds=self.poll_interval_sec),
             )
         if snapshot is None:
@@ -250,7 +308,9 @@ class QuotaWindowPrewarmer:
         of firing on a clock that used to be right.
         """
         await self._observe()
-        decision = self.decide(self._latest_five_hour())
+        before = self._latest_five_hour()
+        self.note_anchor_drift(before)
+        decision = self.decide(before)
         if decision.action != "activate":
             self._emit(f"prewarm.{decision.action}", {
                 "reason": decision.reason, "reset_at": utc_iso(decision.reset_at),
@@ -263,7 +323,16 @@ class QuotaWindowPrewarmer:
                 action="skip_no_telemetry", reason="no_activatable_adapter",
                 next_check_at=self._now() + timedelta(seconds=self.poll_interval_sec),
             )
+        if not await self._principal_known(adapter):
+            # Spec §9A: without a known quota-owning identity we cannot tell
+            # whose window we would be starting — observe only.
+            self._emit("prewarm.skip_principal_unknown", {})
+            return PrewarmDecision(
+                action="skip_no_telemetry", reason="principal_unknown",
+                next_check_at=self._now() + timedelta(seconds=self.poll_interval_sec),
+            )
 
+        percent_before = _percent(before)
         self._emit("prewarm.activation_started", {})
         result: Dict[str, Any] = await adapter.activate(FIVE_HOUR_BUCKET)
         now = self._now()
@@ -276,6 +345,30 @@ class QuotaWindowPrewarmer:
         verified = self._latest_five_hour()
         opened_reset_at = normalize_utc((verified or {}).get("reset_at"))
         opened = opened_reset_at is not None and opened_reset_at > now
+        self.state.seen_reset_at = opened_reset_at   # new baseline for drift
+
+        # COST, measured the only honest way (spec §13): the provider's own
+        # utilization delta across the activation, not the prompt we sent.
+        cost_percent = _delta(percent_before, _percent(verified))
+        self.state.last_cost_percent = cost_percent
+        result = {**result, "cost_percent": cost_percent}
+        if (cost_percent is not None and self.max_activation_percent > 0
+                and cost_percent > self.max_activation_percent):
+            self.state.cost_spikes += 1
+            self._emit("prewarm.cost_exceeded", {
+                "cost_percent": cost_percent, "limit": self.max_activation_percent,
+            })
+            logger.warning(
+                "event=quota_prewarm_cost_exceeded delta_percent=%.2f limit=%.2f spikes=%d",
+                cost_percent, self.max_activation_percent, self.state.cost_spikes,
+            )
+            if self.state.cost_spikes >= 2:
+                # Spec §13: two unexplained spikes ⇒ open the circuit and require
+                # manual revalidation. A "minimal" turn that is not minimal means
+                # the activation environment is not what we think it is.
+                self.state.circuit_open = True
+                self.state.circuit_reason = "cost_exceeded"
+                self._emit("prewarm.circuit_opened", {"reason": "cost_exceeded"})
 
         if bool(result.get("ok")) and opened:
             self.state.consecutive_failures = 0
@@ -301,6 +394,7 @@ class QuotaWindowPrewarmer:
         self._record(now, self.state.last_outcome, result, opened_reset_at)
         if self.state.consecutive_failures >= self.max_consecutive_failures:
             self.state.circuit_open = True
+            self.state.circuit_reason = "consecutive_failures"
             self._emit("prewarm.circuit_opened", {
                 "failures": self.state.consecutive_failures,
                 "last_outcome": self.state.last_outcome,
@@ -329,6 +423,19 @@ class QuotaWindowPrewarmer:
         except Exception as e:
             logger.debug("event=quota_prewarm_observe_failed err=%s", e)
 
+    async def _principal_known(self, adapter: Any) -> bool:
+        """Spec §9A: activation requires a known quota-owning identity. The read
+        is cached inside the adapter, so this costs nothing."""
+        identify = getattr(adapter, "identify_principal", None)
+        if identify is None:
+            return True
+        try:
+            principal = await identify()
+        except Exception:
+            return False
+        label = str(getattr(principal, "label", "") or "")
+        return bool(label) and label != "principal_unknown"
+
     def _adapter(self) -> Optional[Any]:
         for adapter in getattr(self.coordinator, "adapters", []) or []:
             if getattr(adapter, "provider", "") != self.provider:
@@ -344,6 +451,7 @@ class QuotaWindowPrewarmer:
     ) -> None:
         self.state.history.append({
             "at": utc_iso(when), "outcome": outcome, "usd": result.get("usd"),
+            "cost_percent": result.get("cost_percent"),
             "reset_at": utc_iso(reset_at), "error": result.get("error") or "",
         })
         del self.state.history[:-50]
@@ -371,10 +479,30 @@ class QuotaWindowPrewarmer:
             "activations_today": self.state.activations_today,
             "last_activation_at": utc_iso(self.state.last_activation_at),
             "last_outcome": self.state.last_outcome,
+            "last_cost_percent": self.state.last_cost_percent,
             "consecutive_failures": self.state.consecutive_failures,
+            "cost_spikes": self.state.cost_spikes,
             "circuit_open": self.state.circuit_open,
+            "circuit_reason": self.state.circuit_reason,
+            # False until something falsifies the anchored-window premise; the
+            # spec's classification question, answered continuously.
+            "semantics_suspect": self.state.semantics_suspect,
             "history": list(self.state.history[-10:]),
         }
+
+
+def _percent(snapshot: Optional[Dict[str, Any]]) -> Optional[float]:
+    value = (snapshot or {}).get("used_percent")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _delta(before: Optional[float], after: Optional[float]) -> Optional[float]:
+    """Utilization consumed by the activation. A window that did not exist before
+    reads as 0%, so a missing ``before`` is treated as zero — but a missing
+    ``after`` yields None rather than a fabricated number."""
+    if after is None:
+        return None
+    return round(after - (before if before is not None else 0.0), 3)
 
 
 def build_prewarmer_from_config(
@@ -390,6 +518,7 @@ def build_prewarmer_from_config(
         min_interval_sec=int(getattr(quota, "prewarm_min_interval_sec", 3600)),
         max_per_day=int(getattr(quota, "prewarm_max_per_day", 8)),
         delay_after_reset_sec=int(getattr(quota, "prewarm_delay_after_reset_sec", 120)),
+        max_activation_percent=float(getattr(quota, "prewarm_max_activation_percent", 2.0)),
         poll_interval_sec=int(getattr(quota, "observe_interval_sec", 300)),
         event_sink=event_sink,
     )
