@@ -1,6 +1,8 @@
 ﻿# Quota Window Coordinator Specification
 
-Status: proposal only - no implementation in this document
+Status: **IMPLEMENTED 2026-08-19** — items 1-7 and 9 built; 8 replaced by continuous falsification and
+10 deliberately dropped. Divergences and per-criterion status are recorded in §19; this document
+remains the owner of the design, and §0-§16 stay as originally proposed.
 Owner: Nyd
 Date: 2026-06-23
 Source review:
@@ -647,10 +649,14 @@ The feature is ready only when all of these hold:
 4. Implement observe-only Codex adapter using locally verified app-server or CLI telemetry. Deferred; Codex telemetry remains unverified and the adapter stays explicitly unsupported.
 5. Implement observe-only Claude adapter using status-line or supported CLI telemetry. Done for captured Claude Code status-line JSON; it reads `rate_limits.five_hour` and `rate_limits.seven_day` without starting a model turn.
 6. Add read-only Control API status. Done at bearer-protected `GET /api/quota-windows` in `src/control/control_api.py`.
-7. Add manual activation for one provider behind policy/version gates.
-8. Run the classification protocol across at least three cycles.
-9. Add AUTO_ACTIVATE only for a classified anchored bucket.
-10. Add work-horizon scheduling.
+7. Add manual activation for one provider behind policy/version gates. **Done 2026-08-19** —
+   `ClaudeGetUsageQuotaAdapter.activate()` + `claude_usage_control.open_claude_window_with_minimal_turn`
+   (isolated per §12), gated by principal identity (§9A), cost (§13) and version (§8).
+8. Run the classification protocol across at least three cycles. **Replaced by continuous
+   falsification** — see §19.1.
+9. Add AUTO_ACTIVATE only for a classified anchored bucket. **Done 2026-08-19** —
+   `src/services/quota_window_prewarmer.py`, flag `QUOTA_PREWARM_ENABLED` (default OFF).
+10. Add work-horizon scheduling. **Deliberately NOT built** — see §19.2.
 
 ---
 
@@ -665,4 +671,90 @@ The feature is ready only when all of these hold:
 - Work horizons prevent waste.
 - Any ambiguity disables automation.
 
+---
 
+## 19. Conformance Record (implementation, 2026-08-19)
+
+Status: **implemented and live behind `QUOTA_PREWARM_ENABLED`** (`src/services/quota_window_prewarmer.py`,
+`tests/test_quota_window_prewarmer.py`). This section records where the build differs from the
+proposal and why — nothing here was skipped silently.
+
+### 19.1 Continuous falsification instead of a one-off classification (§7, §16-1/3)
+
+The spec asks for a controlled two-request experiment repeated over three cycles, then permanent
+`ANCHORED` status. The build does something strictly stronger and cheaper: **every activation is
+verified, and every observation is checked for drift, forever.**
+
+- After each activation the provider is re-observed; if no window appeared, the activation is
+  recorded as a FAILURE (`no_window_observed`) even though the turn succeeded.
+- `note_anchor_drift()` watches for the boundary moving FORWARD while the previously observed
+  boundary had not yet elapsed — the signature of a SLIDING window. The operator's own traffic
+  supplies the "mandatory second request" §7 requires, so the experiment runs itself, for free.
+- Drift sets `semantics_suspect` and OPENS THE CIRCUIT: ambiguity disables automation (§18), and it
+  disables it at the moment the premise breaks rather than at a classification run months earlier.
+
+This is the better trade: a three-cycle classification proves the premise held *last week*. Anthropic
+has changed limit anchoring before; the premise must be under test permanently.
+
+### 19.2 No work horizon / quiet hours (§10) — deliberate, operator's decision
+
+The spec requires a work-horizon gate and forbids activating around the clock. **The build runs 24/7
+on purpose.** The entire value of prewarming exists *before* the operator starts: if activation waits
+for a declared work window (or for the operator to be awake), the window anchors at the moment work
+begins, which is exactly the outcome §1 sets out to avoid. Concretely: a boundary at 04:00 means an
+08:30 start spends 30 minutes of an old window and gets a fresh five hours at 09:00 — two windows of
+headroom for one morning. A quiet-hours gate destroys precisely that.
+
+The cost of removing the gate is bounded and small, because the schedule is derived from the
+provider's own `reset_at` rather than from a clock: at most one activation per observed window
+(≈5/day), each a `haiku` "Return only: 0" with no tools, no MCP and no settings sources, and bounded
+again by `QUOTA_PREWARM_MAX_PER_DAY` / `QUOTA_PREWARM_MIN_INTERVAL_SEC`. §10's other rules are all
+kept: observe before acting, schedule from provider timestamps, one activation per bucket per
+observed window, respect provider backoff, enforce budgets, open a circuit on ambiguity.
+
+### 19.3 Active-session protection, simplified (§11)
+
+§11 lists seven pre-activation checks for foreground/streaming/lock state. The build relies on the
+one signal that actually settles the question: **an open window.** Any active session has already
+anchored the window, so `skip_window_open` covers the real hazard (double-anchoring). What §11 also
+guards against — activation racing a user's session — cannot apply here: activation is a one-shot
+process in an empty temp directory with no session persistence and no shared state.
+
+### 19.4 Cross-node locking not needed (§9A)
+
+The prewarmer is constructed only inside the gateway process (`TaskOrchestrator._build_quota_prewarmer`),
+and worker daemons never construct one. Activation is therefore a singleton by architecture rather
+than by lease. `principal_unknown` still disables activation, as §9A requires. If a second gateway
+ever runs against the same account, the DB-backed lock in §9A becomes required — that is the trigger
+to build it.
+
+### 19.5 `automation_ready` is not consulted (§16)
+
+It is structurally unreachable today (`active_session_state` is a local literal — A78 §1), so gating
+on it would mean gating on `False` forever. The gates that DO run are the ones with real inputs:
+telemetry freshness, window state, principal identity, cost delta, drift, budget, circuit.
+
+### 19.6 Acceptance criteria (§16) — where each one stands
+
+| §16 criterion | Status |
+|---|---|
+| Semantics reproduced across three cycles | Replaced by continuous verification + drift detection (§19.1) |
+| Activation produces the expected reset timestamp | Enforced — a missing window is a failure |
+| A later interaction does not move the timestamp | Watched permanently (`note_anchor_drift`) |
+| Activation consumes ≤ threshold | Measured as `used_percent` delta; 2 breaches open the circuit |
+| Exactly one model turn | `max_turns=1` + `max_budget_usd` |
+| No tools invoked | `tools=[]`, `allowed_tools=[]`, `mcp_servers={}` |
+| No filesystem mutation | Empty temp cwd, no tools, no session persistence |
+| No user project/conversation/session touched | Never runs in a repo; one-shot `query()` |
+| Duplicate scheduler executions idempotent | Single guarded task + min-interval + per-window schedule |
+| Restart preserves the correct next action | State re-derived from provider telemetry on the first tick |
+| Clock change / sleep / resume do not duplicate | Telemetry-driven schedule + min-interval + daily budget |
+| Provider outage → backoff, not retries | Failure backoff then circuit breaker |
+| Schema/CLI version change disables the adapter | Existing coordinator version gate |
+| Unknown principal disables activation | `_principal_known()` gate |
+| Shared-store failure disables AUTO in multi-node | N/A by architecture — see §19.4 |
+| Unsupported auth modes rejected | Adapter is `claude_code_get_usage` only |
+| Sliding/fixed/token-bucket/unknown stay observe-only | Drift ⇒ circuit open |
+| Provider automation terms reviewed | Official Agent SDK path, honest client id (`CLAUDE_AGENT_SDK_CLIENT_APP`), deterministic prompt, sparse and logged, operator kill switch (§6A) |
+
+---

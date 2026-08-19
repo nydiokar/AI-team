@@ -136,14 +136,15 @@ them.
 | `QUOTA_PREWARM_MIN_INTERVAL_SEC` | ✅ YES | 3600 | Floor between two activations, independent of what telemetry says. | `config/settings.py`, `quota_window_prewarmer.py` |
 | `QUOTA_PREWARM_MAX_PER_DAY` | ✅ YES | 8 | Hard daily activation budget (a 5-hour rhythm needs ~5). | `config/settings.py`, `quota_window_prewarmer.py` |
 | `QUOTA_PREWARM_DELAY_AFTER_RESET_SEC` | ✅ YES | 120 | How long after a window's `reset_at` to re-check and open the next one. | `config/settings.py`, `quota_window_prewarmer.py` |
+| `QUOTA_PREWARM_MAX_ACTIVATION_PERCENT` | ✅ YES | 2.0 | Spec §13 cost gate: max `used_percent` the activation itself may consume, measured as the provider's own delta across it. Two breaches open the circuit. | `config/settings.py`, `quota_window_prewarmer.py` |
 
-**Deviation from `docs/SESSION_WINDOW_WARMING_SPEC.md` §10 (operator decision, 2026-08-19).** The spec
-requires a work-horizon / quiet-hours gate for auto-activation. The prewarmer deliberately runs around
-the clock instead: the entire value is that the window is ALREADY running when the operator starts, so
-a warm-up that waits for them to be awake is indistinguishable from them typing one word themselves.
-The spec's other activation gates are kept (telemetry-driven scheduling, one activation per observed
-window, isolated/bounded activation environment, verification against provider telemetry, daily budget,
-circuit breaker). `automation_ready` is NOT consulted — it is structurally unreachable today (A78 §1).
+**Spec conformance.** The full record — what was built, what diverges, and why — lives in
+`docs/SESSION_WINDOW_WARMING_SPEC.md` §19 (that document owns this design). The headline divergence:
+**no work horizon / quiet hours** (§10), a deliberate operator decision, because the value only exists
+before work starts. Every other activation gate is kept and several are stronger than proposed:
+verification after every activation, permanent anchor-drift detection (drift ⇒ circuit open), a cost
+gate measured from the provider's own utilization delta, and a principal-identity gate.
+`automation_ready` is NOT consulted — it is structurally unreachable today (A78 §1).
 
 ---
 
