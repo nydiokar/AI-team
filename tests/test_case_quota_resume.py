@@ -271,6 +271,11 @@ class _Orch:
     async def _handle_quota_paused_case(self, db, case_id):
         return await TaskOrchestrator._handle_quota_paused_case(self, db, case_id)
 
+    async def _handle_transient_paused_case(self, db, case_id):
+        # Inert here (no Case carries a `flow.transient_paused` event); covered on
+        # its own in test_case_transient_resume.py. Delegated to the REAL method.
+        return await TaskOrchestrator._handle_transient_paused_case(self, db, case_id)
+
     async def resume_case(self, case_id, *, mode=None, actor="operator", paused_task_id=None):
         return await TaskOrchestrator.resume_case(
             self, case_id, mode=mode, actor=actor, paused_task_id=paused_task_id,
