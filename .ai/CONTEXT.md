@@ -68,6 +68,36 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-08-19 — Quota windows: keep the rhythm ticking, and resume on the provider's own clock.**
+Two halves of the same problem. **(1) The 5-hour window now gets kept alive.**
+`SESSION_WINDOW_WARMING_SPEC.md` items 1-6 were built long ago; 7-10 (activation, classification,
+auto-activate, scheduling) never were — nothing in the tree ever opened a window. New
+`QuotaWindowPrewarmer` (`QUOTA_PREWARM_ENABLED`, default OFF, needs the coordinator): when telemetry
+shows **no** open five-hour window (the live signal is a five_hour bucket with no `reset_at` — seen
+on this host at 04:25Z) it spends ONE minimal `haiku` turn — no tools, no MCP, no settings sources,
+empty temp cwd, `max_turns=1` + budget cap — then **re-observes to verify a window actually opened**.
+An activation that opens nothing counts as a failure, and 3 consecutive failures open a circuit
+rather than retrying: the anchored-window premise is checked every cycle, never assumed. Schedules
+off the provider's own `reset_at`, so ≤ ~5 activations/day, bounded again by
+`QUOTA_PREWARM_MAX_PER_DAY`/`MIN_INTERVAL_SEC`. **Deliberate spec deviation: no quiet hours** — the
+value only exists before the operator starts work (see `ENV_FEATURE_FLAGS.md` §D). Status rides on
+`GET /api/quota-windows` under `prewarm`.
+**(2) The quota-resume gate keyed on stale telemetry.** PR #97's restore check only consulted the
+429's own `resetsAt` when evidence was exactly `no_telemetry`. But this host's observer legitimately
+sleeps up to 6h (`next_observe_delay_sec` backs off to the next known reset), so its last reading is
+usually a *healthy* one — neither `exhausted` nor `no_telemetry` — and a paused Case was proposed for
+resume on the next 30s tick, hours early; approving it bought another refused turn. Now the reset
+instant the provider attached to its own refusal **is** the schedule (it is exact and needs no
+observer), and only telemetry OBSERVED AFTER the pause can release it early (Anthropic does re-anchor
+limits). A healthy window's `reset_at` is no longer recorded as a pause boundary at all.
+**(3) Resume mode is now decided by the prompt cache, not by liveness**: `in_place` while the pause is
+younger than the ~1h cache TTL (nothing to rewrite) **or** the session's recent cache writes are
+under 100k; otherwise `fresh_manager` from the Case brief — an unmeasured session assumes the
+expensive case. Previously a quota-killed Manager (which stays `AWAITING_INPUT`) always recommended
+`in_place`, i.e. the 200-300k rewrite this seam exists to avoid. 134 targeted tests green
+(`test_case_quota_resume` +8, new `test_quota_window_prewarmer` 14, control API, coordinator).
+Still open from A78: the 429 is not yet written into the quota store as an event-derived snapshot.
+
 **2026-08-17 — Quota-paused Cases now pause, propose, and resume on purpose (PR #97).**
 A Manager turn killed by the account's quota window used to leave no durable trace, and the harness
 had exactly ONE resume trigger: a satisfied wait-group. So a quota-killed Case either stalled

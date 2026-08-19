@@ -125,6 +125,17 @@ CASE_RESUME_APPROVAL_ACTION = "case_resume"
 #: re-scope the objective.
 CASE_RESUME_MODES: Tuple[str, ...] = ("in_place", "fresh_manager")
 
+#: [quota-resume] When ``in_place`` is the ECONOMICALLY right resume, despite the
+#: cache-rewrite risk. Either condition is sufficient:
+#:   * the pause is younger than the provider's prompt-cache TTL (~1h) ⇒ the cache
+#:     is still warm, so resuming the live session re-writes nothing;
+#:   * the session's recent cache writes are small ⇒ even a cold rewrite is cheap,
+#:     and keeping the full conversation is worth more than the tokens.
+#: Otherwise ``fresh_manager`` — rebuilt from the Case brief, which is the whole
+#: reason that mode exists.
+RESUME_IN_PLACE_CACHE_WARM_SEC: int = 3600
+RESUME_IN_PLACE_MAX_CACHE_TOKENS: int = 100_000
+
 
 def _parse_iso_utc(value: Any) -> Optional[datetime]:
     """[quota-resume] Tolerant ISO → tz-aware UTC datetime, ``None`` on anything
@@ -520,6 +531,32 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception as e:
             logger.warning(f"Failed to initialize quota coordinator: {e}")
             self.quota_coordinator = None
+        self._build_quota_prewarmer()
+
+    def _build_quota_prewarmer(self) -> None:
+        """Initialize the window prewarmer (QUOTA_PREWARM_ENABLED flag).
+
+        Strictly downstream of the coordinator: it reads telemetry from the
+        coordinator's store and activates through the coordinator's adapter, so
+        with the coordinator off there is nothing to build. Off ⇒ no object, no
+        task, no model turn — the same zero-side-effect posture as above.
+        """
+        self.quota_prewarmer = None
+        if self.quota_coordinator is None:
+            return
+        try:
+            from src.control.db import runtime_flag_enabled
+            if not runtime_flag_enabled("QUOTA_PREWARM_ENABLED"):
+                return
+            from src.services.quota_window_prewarmer import build_prewarmer_from_config
+            self.quota_prewarmer = build_prewarmer_from_config(
+                coordinator=self.quota_coordinator,
+                enabled=True,
+                event_sink=lambda name, payload: self._emit_event(name, None, payload),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize quota prewarmer: {e}")
+            self.quota_prewarmer = None
 
     # ===========================================================================
     # RESULT PARSING & TEXT EXTRACTION
@@ -1467,11 +1504,19 @@ class TaskOrchestrator(ITaskOrchestrator):
                 return
             quota = self.quota_window_state(str(getattr(result, "backend", "") or "claude"))
             # The provider's own reset time rides on the refusal itself
-            # (rate_limit_event.resetsAt). Prefer telemetry, but keep this as the
-            # fallback: it is the only reset signal available when the quota
-            # observer is off or has never reported, and without it a pause with
-            # no telemetry would be proposed for resume immediately.
-            reset_at = quota.get("reset_at") or self._rate_limit_reset_iso(result)
+            # (rate_limit_event.resetsAt) and is EXACT at the instant the window
+            # was actually hit. Telemetry is a poll — on this host the observer
+            # legitimately sleeps up to 6h between reads (next_observe_delay_sec
+            # backs off to the next known reset), so its reset_at can be hours
+            # stale or belong to a different bucket. Prefer the refusal; keep
+            # telemetry as the fallback for refusals that carry no resetsAt.
+            # Telemetry's reset_at only MEANS "spent until X" when that same
+            # reading was itself exhausted. A healthy window ("12% used, resets
+            # in 4h") carries a reset_at too, and recording it here would park
+            # the Case until a boundary that never blocked anything.
+            reset_at = self._rate_limit_reset_iso(result) or (
+                quota.get("reset_at") if quota.get("exhausted") else None
+            )
             db.append_flow_event(
                 case_id, "flow.quota_paused", "system",
                 entity_type="task", entity_id=getattr(task, "id", None),
@@ -1555,15 +1600,43 @@ class TaskOrchestrator(ITaskOrchestrator):
             out["reason"] = "estimate_failed"
             return out
 
-    def _recommended_resume_mode(self, session_id: Optional[str]) -> str:
-        """Which resume mode the harness would pick: ``fresh_manager`` whenever
-        the old session cannot carry the work (gone, closed, cancelled, errored),
-        else ``in_place``. A live AWAITING_INPUT Manager still holds the richest
-        state; a dead one must be reconstructed from the ledger."""
+    def _recommended_resume_mode(
+        self, session_id: Optional[str], *, paused_at: Optional[str] = None,
+    ) -> str:
+        """Which resume mode the harness would pick.
+
+        ``fresh_manager`` whenever the old session cannot carry the work (gone,
+        closed, cancelled, errored) — a dead session must be reconstructed from
+        the ledger, there is nothing to decide.
+
+        For a LIVE session the choice is economic, and the deciding quantity is
+        the prompt cache. Resuming ``in_place`` costs nothing extra while the
+        provider's cache is still warm (~1h TTL), and stays cheap for a small
+        conversation even after it goes cold. It becomes the expensive mode
+        exactly when a fat session is resumed hours later — the 200-300k-token
+        rewrite this seam exists to avoid. So: in_place when the pause is younger
+        than the cache TTL **or** the session's recent cache writes are small;
+        otherwise fresh_manager, rebuilt from the Case brief.
+
+        ``paused_at`` is the pause's ledger timestamp; without it (an ordinary
+        operator poke, no pause) only the size rule applies.
+        """
         session = self.session_store.get(session_id) if session_id else None
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED, SessionStatus.ERROR,
         ):
+            return "fresh_manager"
+        paused_dt = _parse_iso_utc(paused_at)
+        if paused_dt is not None:
+            age_sec = (datetime.now(timezone.utc) - paused_dt).total_seconds()
+            if 0 <= age_sec < RESUME_IN_PLACE_CACHE_WARM_SEC:
+                return "in_place"          # cache still warm — nothing to rewrite
+        tokens = self.estimate_case_resume_cost(session_id).get("cache_creation_tokens")
+        if isinstance(tokens, int) and tokens > RESUME_IN_PLACE_MAX_CACHE_TOKENS:
+            return "fresh_manager"         # cold + fat ⇒ the expensive case
+        if tokens is None:
+            # Unmeasured session: assume the expensive case rather than spend on
+            # an unknown. fresh_manager loses transcript detail, never money.
             return "fresh_manager"
         return "in_place"
 
@@ -1616,9 +1689,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         state["manager_session_status"] = (
             session.status.value if session is not None else None
         )
-        state["recommended_mode"] = self._recommended_resume_mode(session_id)
-        state["estimate"] = self.estimate_case_resume_cost(session_id)
         pause = db.case_quota_pause(case_id)
+        state["recommended_mode"] = self._recommended_resume_mode(
+            session_id, paused_at=(pause or {}).get("paused_at"),
+        )
+        state["estimate"] = self.estimate_case_resume_cost(session_id)
         if pause is None:
             return state
         state["paused"] = True
@@ -1672,13 +1747,30 @@ class TaskOrchestrator(ITaskOrchestrator):
         quota = self.quota_window_state(str(pause.get("provider") or "claude"))
         if quota.get("exhausted"):
             return True
-        if quota.get("evidence") == "no_telemetry":
-            # No observer. Fall back to the reset instant the provider itself
-            # attached to the refusal: proposing a resume before that time would
-            # just buy another refused turn. Once it passes, propose — a missing
-            # instrument must not park a Case forever.
-            recorded_reset = _parse_iso_utc(pause.get("reset_at"))
-            if recorded_reset is not None and recorded_reset > datetime.now(timezone.utc):
+        # THE RESET INSTANT ON THE REFUSAL IS THE SCHEDULE. The provider told us,
+        # at the moment it refused, exactly when this account's window reopens.
+        # Nothing that arrives later is more accurate about that boundary, so it
+        # gates the proposal — and only telemetry OBSERVED AFTER THE PAUSE may
+        # overrule it (the window can genuinely reopen early if Anthropic resets
+        # or re-anchors limits; a reading from before the pause obviously cannot
+        # know the pause happened).
+        #
+        # This is the fix for the real hole: the observer's last poll can be
+        # hours old and say `below_limit`, which is neither `exhausted` nor
+        # `no_telemetry` — so a paused Case used to be proposed for resume on the
+        # very next 30s tick, hours before quota actually returned, and approving
+        # it bought another refused turn.
+        recorded_reset = _parse_iso_utc(pause.get("reset_at"))
+        if recorded_reset is not None and recorded_reset > datetime.now(timezone.utc):
+            observed_at = _parse_iso_utc(quota.get("observed_at"))
+            paused_at = _parse_iso_utc(pause.get("paused_at"))
+            reopened_early = (
+                quota.get("evidence") == "below_limit"
+                and observed_at is not None
+                and paused_at is not None
+                and observed_at > paused_at
+            )
+            if not reopened_early:
                 return True
 
         try:
@@ -1708,7 +1800,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                 return False
 
             estimate = self.estimate_case_resume_cost(pause.get("session_id"))
-            mode = self._recommended_resume_mode(pause.get("session_id"))
+            mode = self._recommended_resume_mode(
+                pause.get("session_id"), paused_at=pause.get("paused_at"),
+            )
             ceiling = case_quota_resume_auto_max_usd()
             usd = estimate.get("usd")
             under_ceiling = (
@@ -1833,9 +1927,12 @@ class TaskOrchestrator(ITaskOrchestrator):
             out["reason"] = "manager_busy"
             return out
 
-        chosen = (mode or "").strip().lower() or self._recommended_resume_mode(session_id)
+        paused_at = (pause or {}).get("paused_at")
+        chosen = (mode or "").strip().lower() or self._recommended_resume_mode(
+            session_id, paused_at=paused_at,
+        )
         if chosen not in CASE_RESUME_MODES:
-            chosen = self._recommended_resume_mode(session_id)
+            chosen = self._recommended_resume_mode(session_id, paused_at=paused_at)
         if chosen == "in_place" and (
             session is None
             or session.status in (SessionStatus.CLOSED, SessionStatus.CANCELLED)
@@ -3224,6 +3321,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Quota observation is disabled by default and observe-only when enabled.
         if self.quota_coordinator is not None:
             await self.quota_coordinator.start()
+        # The prewarmer is the one path that may SPEND without a user asking —
+        # separately flagged, off by default, and never built without the
+        # coordinator it verifies against.
+        if getattr(self, "quota_prewarmer", None) is not None:
+            await self.quota_prewarmer.start()
 
         # Start the embedded control API (read surface for the Web UI)
         await self._start_embedded_control_api()
@@ -3319,6 +3421,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception as e:
                 logger.error(f"Failed to stop Telegram interface: {e}")
         
+        if getattr(self, "quota_prewarmer", None) is not None:
+            await self.quota_prewarmer.stop()
         if self.quota_coordinator is not None:
             await self.quota_coordinator.stop()
         # Stop file watcher

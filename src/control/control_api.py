@@ -2517,7 +2517,15 @@ def build_control_api(orchestrator) -> FastAPI:
                 "window_states": [],
             })
         try:
-            return JSONResponse(coordinator.read_status())
+            status = coordinator.read_status()
+            # The prewarmer's own view (is a window running, when does it end,
+            # what did the last activation do) rides on the same read — one
+            # place to answer "what is the window rhythm right now?".
+            prewarmer = getattr(orchestrator, "quota_prewarmer", None)
+            status["prewarm"] = (
+                prewarmer.read_status() if prewarmer is not None else {"enabled": False}
+            )
+            return JSONResponse(status)
         except Exception:
             raise HTTPException(status_code=503, detail={"ok": False, "reason": "quota_store_unavailable"})
 

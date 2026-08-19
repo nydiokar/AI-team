@@ -773,7 +773,9 @@ class ClaudeGetUsageQuotaAdapter:
         now: Callable[[], datetime] = utc_now,
         read_usage: Optional[Callable[[], Any]] = None,
         claude_code_version_value: str | None = None,
+        activation_model: str = "haiku",
     ) -> None:
+        self.activation_model = activation_model
         self.principal_key = principal_key.strip()
         self.cwd = Path(cwd).resolve() if cwd is not None else None
         self.cli_path = Path(cli_path) if cli_path is not None else None
@@ -904,6 +906,27 @@ class ClaudeGetUsageQuotaAdapter:
 
     async def detect_active_user_session(self) -> bool | None:
         return None
+
+    async def activate(self, bucket_id: str = "five_hour") -> dict[str, Any]:
+        """Start a window by spending the smallest turn the provider accepts
+        (spec §8 ``QuotaAdapter.activate``). The scheduler asks the ADAPTER —
+        provider contact never leaves this boundary.
+
+        Invalidates the read cache afterwards so the very next ``observe`` sees
+        the post-activation window rather than the pre-activation reading it
+        would otherwise serve for ``cache_ttl_sec``.
+        """
+        from src.services.claude_usage_control import open_claude_window_with_minimal_turn
+
+        result = await open_claude_window_with_minimal_turn(
+            model=self.activation_model,
+            cli_path=self.cli_path,
+            timeout=self.timeout_sec,
+        )
+        self.model_invocations += 1
+        self._cached_snapshot = None
+        self._cached_snapshot_at = 0.0
+        return result
 
     async def capabilities(self) -> AdapterCapability:
         return AdapterCapability(
@@ -1313,6 +1336,7 @@ def build_default_quota_adapters() -> list[QuotaAdapter]:
             cwd=getattr(getattr(config, "claude", None), "base_cwd", None),
             cli_path=getattr(getattr(config, "claude", None), "sdk_cli_path", None),
             timeout_sec=getattr(quota_cfg, "claude_get_usage_timeout_sec", 60.0),
+            activation_model=getattr(quota_cfg, "prewarm_model", "haiku"),
         ),
         UnsupportedQuotaAdapter("opencode", "opencode_is_provider_router_no_phase1_quota_owner"),
     ]

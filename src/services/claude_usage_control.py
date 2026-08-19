@@ -7,6 +7,7 @@ SDK transport.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -221,6 +222,78 @@ async def read_claude_quota_snapshot(
             unavailable_reason=f"claude_get_usage_failed:{type(exc).__name__}",
         )
     return normalize_claude_quota(raw, observed_at=_utc_now())
+
+
+async def open_claude_window_with_minimal_turn(
+    *,
+    model: str = "haiku",
+    cli_path: str | Path | None = None,
+    timeout: float = 120.0,
+    max_budget_usd: float = 0.05,
+) -> dict[str, object]:
+    """Send ONE isolated, minimal model turn — the cheapest thing that can start
+    a subscription window.
+
+    This is the only place in the repo that spends tokens without a user asking
+    for work, so every knob here is a containment decision, per
+    ``docs/SESSION_WINDOW_WARMING_SPEC.md`` §12:
+
+      * ``setting_sources=[]`` + ``mcp_servers={}`` — no user/project settings, no
+        CLAUDE.md, no MCP schemas. Those are what make a "tiny prompt" expensive.
+      * ``allowed_tools=[]`` / ``tools=[]`` — one turn, no tool loop.
+      * an EMPTY temp directory as cwd — never a user repository.
+      * ``max_turns=1`` + ``max_budget_usd`` — bounded twice.
+      * no session persistence: a one-shot ``query()``, never a resumable session.
+
+    Returns ``{ok, usd, session_id, subtype, error}``. Never raises: the caller is
+    a background scheduler and a failed activation is a skipped window, not an
+    incident.
+    """
+    import tempfile
+
+    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+
+    out: dict[str, object] = {"ok": False, "usd": None, "session_id": None,
+                              "subtype": None, "error": ""}
+    try:
+        with tempfile.TemporaryDirectory(prefix="ai-team-quota-prewarm-") as tmp:
+            options = ClaudeAgentOptions(
+                model=model,
+                cwd=tmp,
+                tools=[],
+                allowed_tools=[],
+                mcp_servers={},
+                setting_sources=[],
+                permission_mode="dontAsk",
+                max_turns=1,
+                max_budget_usd=max_budget_usd,
+                effort="low",
+                env={
+                    **os.environ,
+                    "CLAUDE_AGENT_SDK_CLIENT_APP": "ai-team-quota-prewarmer/0",
+                },
+                **({"cli_path": str(cli_path)} if cli_path else {}),
+            )
+
+            async def _run() -> None:
+                async for message in query(prompt=_ACTIVATION_PROMPT, options=options):
+                    if isinstance(message, ResultMessage):
+                        out["ok"] = not bool(getattr(message, "is_error", False))
+                        out["usd"] = getattr(message, "total_cost_usd", None)
+                        out["session_id"] = getattr(message, "session_id", None)
+                        out["subtype"] = getattr(message, "subtype", None)
+                        return
+
+            await asyncio.wait_for(_run(), timeout=max(5.0, timeout))
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}"
+    return out
+
+
+#: Deterministic and boring on purpose (spec §6A): a provider inspecting this
+#: traffic should see a user-authorized scheduler, not something imitating a
+#: person.
+_ACTIVATION_PROMPT: str = "Return only: 0. Do not use tools."
 
 
 async def read_claude_usage_raw_with_new_client(
