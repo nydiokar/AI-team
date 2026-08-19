@@ -94,8 +94,20 @@ limits). A healthy window's `reset_at` is no longer recorded as a pause boundary
 younger than the ~1h cache TTL (nothing to rewrite) **or** the session's recent cache writes are
 under 100k; otherwise `fresh_manager` from the Case brief — an unmeasured session assumes the
 expensive case. Previously a quota-killed Manager (which stays `AWAITING_INPUT`) always recommended
-`in_place`, i.e. the 200-300k rewrite this seam exists to avoid. 134 targeted tests green
-(`test_case_quota_resume` +8, new `test_quota_window_prewarmer` 14, control API, coordinator).
+`in_place`, i.e. the 200-300k rewrite this seam exists to avoid. **(4) The spec is now closed out, and the proposal is notified on two channels.**
+`SESSION_WINDOW_WARMING_SPEC.md` carries a **§19 Conformance Record**: items 1-7 + 9 built, item 8
+(three-cycle classification) replaced by *continuous* falsification, item 10 (work horizons)
+deliberately dropped. Three gates were added to close §7/§9A/§13 honestly: **anchor-drift detection**
+(a `reset_at` that moves forward while the old boundary has not elapsed = sliding window ⇒ circuit
+open, i.e. ambiguity disables automation), **cost measured as the provider's own `used_percent`
+delta** across the activation (2 breaches ⇒ circuit), and a **principal-identity gate**. Cross-node
+locking (§9A) is N/A by architecture — only the gateway constructs a prewarmer, never a worker.
+The resume proposal now reaches the operator on **Web Push + Telegram**: push deep-links to
+`/work/{case_id}`, Telegram is **notification-only by design** (no approve affordance — approving
+spends real money, so the decision stays on the authenticated Web UI). AUTO resumes notify too,
+framed as already-done. Both channels are best-effort and isolated: a dead bot never undoes a
+proposal already on the ledger. 190 targeted tests green (`test_case_quota_resume` 50,
+`test_quota_window_prewarmer` 21, push 26, coordinator, control API).
 Still open from A78: the 429 is not yet written into the quota store as an event-derived snapshot.
 
 **2026-08-17 — Quota-paused Cases now pause, propose, and resume on purpose (PR #97).**

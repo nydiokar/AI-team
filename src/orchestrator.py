@@ -1813,6 +1813,19 @@ class TaskOrchestrator(ITaskOrchestrator):
                     case_id, mode=mode, actor="quota_restore_auto",
                     paused_task_id=paused_task_id,
                 )
+                # Auto spends without asking, so the operator must LEARN of it as
+                # it happens — same two channels, framed as a fait accompli.
+                try:
+                    if self.notifier is not None:
+                        await self.notifier.notify_case_resume_proposal(
+                            case_id=case_id, mode=mode, estimate_usd=usd,
+                            estimate_known=bool(estimate.get("known")),
+                            reset_at=pause.get("reset_at"),
+                            objective=str((db.get_case_brief(case_id) or {}).get("objective") or ""),
+                            auto=True,
+                        )
+                except Exception as e:
+                    logger.warning("event=case_resume_notify_failed case=%s err=%s", case_id, e)
                 return True
 
             brief = db.get_case_brief(case_id) or {}
@@ -1840,6 +1853,20 @@ class TaskOrchestrator(ITaskOrchestrator):
                 {"case_id": case_id, "mode": mode, "estimate_usd": usd,
                  "paused_task_id": paused_task_id},
             )
+            # The proposal is worthless if nobody sees it: quota returns hours
+            # later, typically when the operator is not on the dashboard. Push +
+            # Telegram, best-effort and isolated — a notification failure must
+            # never undo a proposal that is already on the ledger.
+            try:
+                if self.notifier is not None:
+                    await self.notifier.notify_case_resume_proposal(
+                        case_id=case_id, mode=mode, estimate_usd=usd,
+                        estimate_known=bool(estimate.get("known")),
+                        reset_at=pause.get("reset_at"),
+                        objective=str(brief.get("objective") or ""),
+                    )
+            except Exception as e:
+                logger.warning("event=case_resume_notify_failed case=%s err=%s", case_id, e)
             logger.info(
                 "event=case_resume_proposed case=%s mode=%s estimate_usd=%s",
                 case_id, mode, usd,

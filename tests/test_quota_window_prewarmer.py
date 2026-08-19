@@ -224,3 +224,105 @@ def test_sleep_delay_is_clamped_to_a_sane_range():
     assert warmer._delay_until(_now() + timedelta(seconds=5)) == 60
     assert warmer._delay_until(_now() + timedelta(days=3)) == 6 * 60 * 60
     assert warmer._delay_until(None) == warmer.poll_interval_sec
+
+
+# --------------------------------------------------------------------------- #
+# 4. The spec's own falsification tests, run continuously                       #
+# --------------------------------------------------------------------------- #
+
+def test_anchor_drift_disables_activation():
+    """Spec §7/§16: an ANCHORED window's boundary does not move once the window
+    starts. If it moves forward while the previous boundary had NOT elapsed, the
+    window is sliding — prewarming it is worthless, so activation stops."""
+    warmer, _ = _mk([])
+    first = _snapshot(reset_in_hours=4)
+    second = _snapshot(reset_in_hours=5)          # boundary moved, old not elapsed
+
+    assert warmer.note_anchor_drift(first) is False
+    assert warmer.note_anchor_drift(second) is True
+    assert warmer.state.semantics_suspect is True
+    assert warmer.decide(second).action == "skip_circuit_open"
+
+
+def test_an_ordinary_window_rollover_is_not_drift():
+    """The boundary moving AFTER the old one elapsed is just the next window —
+    the normal case, and it must not trip the detector."""
+    warmer, _ = _mk([])
+    warmer.note_anchor_drift(_snapshot(reset_in_hours=-0.1))   # window just ended
+    assert warmer.note_anchor_drift(_snapshot(reset_in_hours=5)) is False
+    assert warmer.state.circuit_open is False
+
+
+def test_sub_second_jitter_on_the_same_boundary_is_not_drift():
+    """Observed live: the same boundary is re-reported as 12:30:00.057Z and
+    12:30:00.157Z."""
+    warmer, _ = _mk([])
+    base = _now() + timedelta(hours=3)
+    warmer.note_anchor_drift({"reset_at": _iso(base)})
+    assert warmer.note_anchor_drift({"reset_at": _iso(base + timedelta(seconds=1))}) is False
+
+
+def test_activation_cost_is_measured_from_provider_utilization():
+    """Spec §13: prompt length is not a cost guarantee — the delta is."""
+    warmer, coord = _mk(_closed_window())
+
+    asyncio.run(warmer.tick_once())
+
+    assert warmer.state.last_cost_percent is not None
+    assert warmer.read_status()["history"][-1]["cost_percent"] is not None
+
+
+def test_two_cost_spikes_open_the_circuit():
+    """A 'minimal' turn that burns real quota means the activation environment is
+    not what we think it is — stop, don't tune."""
+    class _FatAdapter(_FakeAdapter):
+        async def activate(self, bucket_id="five_hour"):
+            self.calls += 1
+            self.store.rows = [_snapshot(reset_in_hours=5, used_percent=40.0)]
+            return {"ok": True, "usd": 5.0, "error": ""}
+
+    coord = _FakeCoordinator(_closed_window())
+    coord.adapters = [_FatAdapter(coord.store)]
+    warmer = QuotaWindowPrewarmer(coordinator=coord, enabled=True, min_interval_sec=0,
+                                  max_activation_percent=2.0)
+
+    asyncio.run(warmer.tick_once())
+    assert warmer.state.cost_spikes == 1
+    coord.store.rows = _closed_window()
+    warmer.state.seen_reset_at = None
+    asyncio.run(warmer.tick_once())
+
+    assert warmer.state.cost_spikes == 2
+    assert warmer.state.circuit_open is True
+    assert warmer.state.circuit_reason == "cost_exceeded"
+
+
+def test_unknown_principal_never_activates():
+    """Spec §9A: without a known quota-owning identity we do not know whose
+    window we would be starting."""
+    class _AnonAdapter(_FakeAdapter):
+        async def identify_principal(self):
+            return type("P", (), {"label": "principal_unknown"})()
+
+    coord = _FakeCoordinator(_closed_window())
+    coord.adapters = [_AnonAdapter(coord.store)]
+    warmer = QuotaWindowPrewarmer(coordinator=coord, enabled=True)
+
+    decision = asyncio.run(warmer.tick_once())
+
+    assert decision.reason == "principal_unknown"
+    assert coord.adapters[0].calls == 0
+
+
+def test_a_known_principal_activates_normally():
+    class _NamedAdapter(_FakeAdapter):
+        async def identify_principal(self):
+            return type("P", (), {"label": "local-claude-account"})()
+
+    coord = _FakeCoordinator(_closed_window())
+    coord.adapters = [_NamedAdapter(coord.store)]
+    warmer = QuotaWindowPrewarmer(coordinator=coord, enabled=True)
+
+    asyncio.run(warmer.tick_once())
+
+    assert coord.adapters[0].calls == 1

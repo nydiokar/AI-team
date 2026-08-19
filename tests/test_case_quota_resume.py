@@ -153,9 +153,13 @@ class _FakeSessionService:
 class _FakeNotifier:
     def __init__(self):
         self.errors = []
+        self.resume_notices = []
 
     async def notify_error(self, message, **kw):
         self.errors.append(message)
+
+    async def notify_case_resume_proposal(self, **kw):
+        self.resume_notices.append(kw)
 
 
 class _Orch:
@@ -1126,3 +1130,59 @@ def test_dead_session_is_always_fresh_manager(tmp_path, monkeypatch):
     assert orch._recommended_resume_mode(
         "mgr-1", paused_at=_iso(_now()),
     ) == "fresh_manager"
+
+
+# --------------------------------------------------------------------------- #
+# 13. The decision must REACH the operator (push + Telegram)                    #
+# --------------------------------------------------------------------------- #
+
+def test_a_proposal_notifies_the_operator(tmp_path, monkeypatch):
+    """Quota returns hours later, usually with nobody watching the dashboard. A
+    proposal nobody sees is the same silence this whole seam removed."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_restored_snapshot())
+    case_id = _case(db, "mgr-1")
+    _pause(orch, db, case_id, "mgr-1")
+
+    asyncio.run(orch._handle_quota_paused_case(db, case_id))
+
+    assert len(orch.notifier.resume_notices) == 1
+    notice = orch.notifier.resume_notices[0]
+    assert notice["case_id"] == case_id
+    assert notice["mode"] in ("in_place", "fresh_manager")
+    assert notice.get("auto") in (False, None)
+
+
+def test_auto_resume_also_notifies(tmp_path, monkeypatch):
+    """AUTO spends without asking — the operator must learn of it as it happens,
+    not from a bill."""
+    _flags(monkeypatch, auto="1")
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_restored_snapshot())
+    case_id = _case(db, "mgr-1")
+    _pause(orch, db, case_id, "mgr-1")
+
+    asyncio.run(orch._handle_quota_paused_case(db, case_id))
+
+    assert len(orch.notifier.resume_notices) == 1
+    assert orch.notifier.resume_notices[0]["auto"] is True
+
+
+def test_a_notification_failure_never_undoes_the_proposal(tmp_path, monkeypatch):
+    """The ledger fact outranks the delivery: a dead Telegram/push must not lose
+    the approval that was already recorded."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_restored_snapshot())
+    case_id = _case(db, "mgr-1")
+    _pause(orch, db, case_id, "mgr-1")
+
+    async def _boom(**kw):
+        raise RuntimeError("telegram down")
+
+    orch.notifier.notify_case_resume_proposal = _boom
+
+    assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is True
+    assert len([a for a in orch.approval_service.list(limit=50)
+                if a["action"] == CASE_RESUME_APPROVAL_ACTION]) == 1
