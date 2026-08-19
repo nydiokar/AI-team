@@ -300,6 +300,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Observe-only quota coordinator construction at gateway startup.",
     },
+    "QUOTA_PREWARM_ENABLED": {
+        "default": "0",
+        "effect_scope": "startup",
+        "registry_writable": "1",
+        "description": "Keep the Claude 5-hour window ticking: when telemetry shows NO open window, spend one minimal haiku turn to start one, then verify against the provider that a window actually opened. Runs around the clock on purpose — an already-running window is only worth anything before work starts. Requires QUOTA_COORDINATOR_ENABLED (it reads and activates through the coordinator's adapter). Bounded by QUOTA_PREWARM_MAX_PER_DAY / QUOTA_PREWARM_MIN_INTERVAL_SEC and a consecutive-failure circuit breaker.",
+    },
     "QUOTA_DIGEST_TELEGRAM_ENABLED": {
         "default": "0",
         "effect_scope": "startup",
