@@ -334,6 +334,11 @@ class QuotaConfig:
     prewarm_min_interval_sec: int = 3600     # QUOTA_PREWARM_MIN_INTERVAL_SEC
     prewarm_max_per_day: int = 8             # QUOTA_PREWARM_MAX_PER_DAY
     prewarm_delay_after_reset_sec: int = 120  # QUOTA_PREWARM_DELAY_AFTER_RESET_SEC
+    # Spec §13 cost gate: max utilization the activation itself may consume,
+    # measured as the provider's used_percent delta across it. Two breaches open
+    # the circuit — a "minimal" turn that is not minimal means the activation
+    # environment is not what we think it is.
+    prewarm_max_activation_percent: float = 2.0  # QUOTA_PREWARM_MAX_ACTIVATION_PERCENT
 
 class Config:
     """Main configuration class"""
@@ -631,6 +636,12 @@ class Config:
             v = os.getenv("QUOTA_DB_PATH")
             if v:
                 self.quota.db_path = v
+        except Exception:
+            pass
+        try:
+            v = os.getenv("QUOTA_PREWARM_MAX_ACTIVATION_PERCENT")
+            if v is not None:
+                self.quota.prewarm_max_activation_percent = max(0.0, float(v))
         except Exception:
             pass
         try:

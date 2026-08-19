@@ -230,6 +230,123 @@ class NotificationService:
             except Exception as e:
                 logger.warning("notify_error failed err=%s", e)
 
+    async def notify_case_resume_proposal(
+        self,
+        *,
+        case_id: str,
+        mode: str,
+        estimate_usd: Optional[float],
+        estimate_known: bool,
+        reset_at: Optional[str] = None,
+        objective: str = "",
+        auto: bool = False,
+        chat_id: Optional[int] = None,
+    ) -> None:
+        """[quota-resume] Tell the operator their quota came back and a Case is
+        waiting on a decision — on BOTH channels, because this is the one moment
+        the harness genuinely needs a human and it usually arrives hours later,
+        when nobody is looking at the dashboard.
+
+        Channel split is deliberate:
+          * **Web Push** — a real browser notification (works with the tab
+            closed), deep-linking to the Case where the decision lives.
+          * **Telegram** — notification ONLY. It carries no approve/decline
+            affordance on purpose: approving spends real money and the decision
+            surface stays the authenticated Web UI, which is where the estimate,
+            the mode choice and the Case evidence are.
+
+        Best-effort on both: a notification failure must never block or alter the
+        proposal that was already recorded.
+        """
+        from src.core.observability import emit_event
+
+        emit_event("case_resume_notification", session_id=None)
+
+        cost = (
+            f"~${estimate_usd:.2f}" if estimate_known and isinstance(estimate_usd, (int, float))
+            else "cost unknown"
+        )
+        short_case = case_id[:8]
+        # AUTO mode still notifies — louder, if anything: money was spent without
+        # being asked, so the operator learns about it at the moment it happens
+        # rather than from a bill.
+        title = (
+            "▶ Quota restored — Case resumed automatically" if auto
+            else "⏸ Quota restored — resume this Case?"
+        )
+        summary = " ".join((objective or "").split())[:120]
+        body = f"[{short_case}] {mode} · {cost}" + (f" · {summary}" if summary else "")
+
+        self._maybe_push_case_resume(case_id=case_id, title=title, body=body)
+
+        tg = self._telegram
+        target = chat_id
+        if target is None:
+            try:
+                from config import config as _cfg
+                target = getattr(getattr(_cfg, "telegram", None), "notification_chat_id", None)
+            except Exception:
+                target = None
+        if target and tg:
+            head = (
+                f"▶ *Quota restored* — Case `{short_case}` was resumed automatically."
+                if auto else
+                f"⏸ *Quota restored* — Case `{short_case}` is paused and waiting."
+            )
+            tail = (
+                "\n\nCASE_QUOTA_RESUME_AUTO is ON — no approval was asked. Open the "
+                "Web UI to watch it → /work/"
+                if auto else
+                "\n\nApprove or decline in the Web UI → /work/"
+            )
+            text = (
+                head + "\n"
+                + (f"Mode: `{mode}` · estimated {cost}" if auto
+                   else f"Recommended: `{mode}` · estimated {cost}")
+                + (f"\nReset: {reset_at}" if reset_at else "")
+                + (f"\n{summary}" if summary else "")
+                + tail + case_id
+            )
+            try:
+                await tg.notify_completion(
+                    f"case-resume-{short_case}", text, success=True, chat_id=target,
+                )
+            except Exception as e:
+                logger.warning("notify_case_resume_proposal telegram failed case=%s err=%s", case_id, e)
+
+    def _maybe_push_case_resume(self, *, case_id: str, title: str, body: str) -> None:
+        """Detached Web Push for a resume proposal. Mirrors ``_maybe_push_outcome``
+        (same bounded fan-out, same never-raise contract); only the deep link and
+        the payload identity differ — the Case, not a task."""
+        import asyncio
+
+        try:
+            from config import config as _cfg
+            from src.control.db import get_db
+            from src.services.push_service import PushService, build_task_payload
+
+            svc = PushService(_cfg, get_db())
+            ok, _reason = svc.available()
+            if not ok:
+                return
+            payload = build_task_payload(
+                title=title, body=body, task_id=None, session_id=None,
+                url=f"/work/{case_id}",
+            )
+
+            async def _run() -> None:
+                try:
+                    await svc.fanout(payload)
+                except Exception as e:
+                    logger.debug("push fanout case_resume case=%s err=%s", case_id, e)
+
+            try:
+                asyncio.get_running_loop().create_task(_run())
+            except RuntimeError:
+                logger.debug("no running loop for case_resume push case=%s", case_id)
+        except Exception as e:
+            logger.debug("maybe_push_case_resume failed case=%s err=%s", case_id, e)
+
     async def notify_quota_digest(self, message: str, *, chat_id: Optional[int] = None) -> None:
         """Deliver a temporary quota coordinator digest through notification seams."""
         from src.core.observability import emit_event
