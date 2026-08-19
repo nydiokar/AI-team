@@ -58,6 +58,36 @@ class _FakeAdapter:
         return {"ok": self.ok, "usd": 0.001, "error": "" if self.ok else "TimeoutError"}
 
 
+class _LaggingStore:
+    """Provider telemetry that TRAILS the activation: the freshly opened window
+    is invisible on the first read after it and only surfaces on the next one."""
+
+    def __init__(self):
+        self.rows = [_snapshot(reset_in_hours=None)]
+        self.opened = False
+        self.reads_after_open = 0
+
+    def latest_snapshots(self):
+        if self.opened:
+            self.reads_after_open += 1
+            if self.reads_after_open >= 2:
+                self.rows = [_snapshot(reset_in_hours=5)]
+        return self.rows
+
+
+class _LaggingAdapter:
+    provider = "claude"
+
+    def __init__(self, store):
+        self.store = store
+        self.calls = 0
+
+    async def activate(self, bucket_id="five_hour"):
+        self.calls += 1
+        self.store.opened = True
+        return {"ok": True, "usd": 0.001, "error": ""}
+
+
 class _FakeCoordinator:
     def __init__(self, rows, **adapter_kw):
         self.store = _FakeStore(rows)
@@ -88,6 +118,9 @@ def _closed_window():
 
 def _mk(rows, **kw):
     coordinator = _FakeCoordinator(rows, **kw.pop("adapter", {}))
+    # verify_delay_sec=0: the re-read that absorbs telemetry lag must not make the
+    # suite wait for it. Its timing is asserted on its own below.
+    kw.setdefault("verify_delay_sec", 0)
     return QuotaWindowPrewarmer(coordinator=coordinator, enabled=True, **kw), coordinator
 
 
@@ -141,14 +174,32 @@ def test_activation_is_verified_by_re_observing():
 
 def test_a_turn_that_opens_no_window_is_a_failure_not_a_success():
     """The anchored-window premise is not assumed. If the provider took the turn
-    and no window appeared, the mechanism is wrong about this account and must
-    not keep firing on schedule."""
+    and no window appeared — and still has not on the re-read — the mechanism is
+    wrong about this account and must not keep firing on schedule."""
     warmer, coord = _mk(_closed_window(), adapter={"opens_window": False})
 
     asyncio.run(warmer.tick_once())
 
     assert warmer.state.last_outcome == "no_window_observed"
     assert warmer.state.consecutive_failures == 1
+
+
+def test_telemetry_lag_is_re_read_before_the_activation_is_called_a_failure():
+    """LIVE 2026-08-19T17:22Z: the activation worked, but the verification read
+    4s later still showed no window — the boundary only surfaced ~15 minutes
+    later. Judging on the first read alone walks a HEALTHY prewarmer toward a
+    circuit breaker that then needs manual revalidation."""
+    coord = _FakeCoordinator(_closed_window())
+    coord.store = _LaggingStore()
+    coord.adapters = [_LaggingAdapter(coord.store)]
+    warmer = QuotaWindowPrewarmer(coordinator=coord, enabled=True, verify_delay_sec=0)
+
+    decision = asyncio.run(warmer.tick_once())
+
+    assert coord.store.reads_after_open >= 2       # it looked again
+    assert decision.reason == "opened"
+    assert warmer.state.last_outcome == "opened"
+    assert warmer.state.consecutive_failures == 0
 
 
 def test_a_failed_turn_counts_as_a_failure():

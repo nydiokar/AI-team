@@ -26,6 +26,7 @@ duck-typed ``self`` — no paid CLI, no live backend, no network.
 import asyncio
 import socket
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -42,6 +43,7 @@ from src.orchestrator import (
     CASE_RESUME_APPROVAL_ACTION,
     TaskOrchestrator,
     _parse_iso_utc,
+    _reset_at_from_limit_text,
     _session_status_after_result,
     is_quota_pause_result,
 )
@@ -95,9 +97,14 @@ def _spent_snapshot(reset_in_minutes=60, provider="claude"):
 
 
 def _restored_snapshot(provider="claude"):
+    """"The observer has SINCE seen the window healthy." ``observed_at`` is stamped
+    just ahead of now on purpose: these fixtures are built before the pause they
+    are meant to release, and a reading older than the refusal proves nothing
+    about it (that confusion is exactly what proposed a resume 66 minutes early
+    on 2026-08-19)."""
     return [{
         "provider": provider, "bucket_id": "five_hour", "used_percent": 12.0,
-        "limit_reached": 0, "observed_at": _iso(_now()),
+        "limit_reached": 0, "observed_at": _iso(_now() + timedelta(seconds=5)),
         "reset_at": _iso(_now() + timedelta(hours=4)),
         "telemetry_quality": "authoritative",
     }]
@@ -267,6 +274,9 @@ class _Orch:
         return await TaskOrchestrator._handle_dead_manager_session(
             self, db, case_id, generation, dead_sid,
         )
+
+    def _restore_reading_is_usable(self, quota, pause):
+        return TaskOrchestrator._restore_reading_is_usable(self, quota, pause)
 
     async def _handle_quota_paused_case(self, db, case_id):
         return await TaskOrchestrator._handle_quota_paused_case(self, db, case_id)
@@ -1034,6 +1044,51 @@ def test_stale_below_limit_telemetry_does_not_propose_before_the_real_reset(tmp_
     assert orch.approval_service is None or not orch.approval_service.list(limit=50)
 
 
+def test_a_reading_older_than_the_refusal_cannot_release_a_pause(tmp_path, monkeypatch):
+    """EXACTLY the live shape at 16:14Z: no reset instant anywhere on the pause,
+    and the observer's newest reading is 35 minutes old and says "68% used,
+    below_limit". That is neither `exhausted` nor `no_telemetry`, so it used to
+    fall straight through to a proposal. A reading taken BEFORE the provider
+    refused the turn cannot know the window is spent."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=[{
+        "provider": "claude", "bucket_id": "five_hour", "used_percent": 68.0,
+        "limit_reached": 0, "observed_at": _iso(_now() - timedelta(minutes=35)),
+        "reset_at": None, "telemetry_quality": "authoritative",
+    }])
+    case_id = _case(db, "mgr-1")
+    _pause(orch, db, case_id, "mgr-1")
+
+    assert db.case_quota_pause(case_id)["reset_at"] is None      # nothing to wait on
+    assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is True
+    assert orch.approval_service is None or not orch.approval_service.list(limit=50)
+
+
+def test_a_blind_pause_still_asks_once_the_longest_window_has_passed(tmp_path, monkeypatch):
+    """...but a silent instrument must never park a Case forever: with no reset
+    instant and no reading younger than the pause, the wait is bounded by the
+    longest window this provider runs, then it asks anyway."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=[{
+        "provider": "claude", "bucket_id": "five_hour", "used_percent": 68.0,
+        "limit_reached": 0, "observed_at": _iso(_now() - timedelta(hours=12)),
+        "reset_at": None, "telemetry_quality": "authoritative",
+    }])
+    case_id = _case(db, "mgr-1")
+    _pause(orch, db, case_id, "mgr-1")
+    db._conn().execute(
+        "UPDATE flow_events SET created_at = ? WHERE event_type = 'flow.quota_paused'",
+        (_iso(_now() - timedelta(hours=6)),),
+    )
+    db._conn().commit()
+
+    assert asyncio.run(orch._handle_quota_paused_case(db, case_id)) is True
+    assert len([a for a in orch.approval_service.list(limit=50)
+                if a["action"] == CASE_RESUME_APPROVAL_ACTION]) == 1
+
+
 def test_telemetry_observed_after_the_pause_can_release_it_early(tmp_path, monkeypatch):
     """Corrigible, not a blind clock: if the observer reads a HEALTHY window
     after the pause was recorded (Anthropic re-anchored or reset the limits),
@@ -1058,9 +1113,17 @@ def test_telemetry_observed_after_the_pause_can_release_it_early(tmp_path, monke
                 if a["action"] == CASE_RESUME_APPROVAL_ACTION]) == 1
 
 
-def test_pause_ignores_a_healthy_windows_reset_at(tmp_path, monkeypatch):
-    """A healthy reading carries a reset_at too ("12% used, resets in 4h"). That
-    boundary never blocked anything, so it must not become the wait-until."""
+def test_pause_takes_the_current_windows_reset_from_the_last_reading(tmp_path, monkeypatch):
+    """THE live defect (2026-08-19). Telemetry's reset_at used to be accepted only
+    when that same reading was ITSELF at 100%, on the theory that a healthy
+    window's boundary "never blocked anything". But an ANCHORED window's boundary
+    does not move with utilisation: the 15:39 reading (68% used) and the 17:05 one
+    (100%, spent) both named 17:20:00Z. Discarding the first left the pause with
+    `reset_at: null` — and a null boundary is what proposed a resume an hour
+    early. What makes a boundary blocking is the provider refusing THIS turn.
+
+    Corrigible, not a blind clock: a reading taken after the pause that shows the
+    window healthy still releases it early (see the `reopened_early` tests)."""
     _flags(monkeypatch)
     db = _mk_db(tmp_path, monkeypatch)
     orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=_restored_snapshot())
@@ -1068,7 +1131,100 @@ def test_pause_ignores_a_healthy_windows_reset_at(tmp_path, monkeypatch):
 
     _pause(orch, db, case_id, "mgr-1")          # refusal carries no resetsAt
 
+    recorded = _parse_iso_utc(db.case_quota_pause(case_id)["reset_at"])
+    assert recorded is not None
+    assert timedelta(hours=3, minutes=55) < recorded - _now() < timedelta(hours=4, minutes=5)
+
+
+def test_pause_ignores_a_reset_that_has_already_passed(tmp_path, monkeypatch):
+    """A boundary in the past belongs to a window that already rolled over — it
+    cannot be what we are waiting for, and recording it would be a no-op wait."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=[{
+        "provider": "claude", "bucket_id": "five_hour", "used_percent": 30.0,
+        "limit_reached": 0, "observed_at": _iso(_now() - timedelta(hours=6)),
+        "reset_at": _iso(_now() - timedelta(hours=1)),
+        "telemetry_quality": "authoritative",
+    }])
+    case_id = _case(db, "mgr-1")
+
+    _pause(orch, db, case_id, "mgr-1")
+
     assert db.case_quota_pause(case_id)["reset_at"] is None
+
+
+# --------------------------------------------------------------------------- #
+# 11b. The refusal states the reset IN WORDS — parse it, don't just print it    #
+# --------------------------------------------------------------------------- #
+
+def _worded_result(text: str) -> TaskResult:
+    """A refusal with NO structured resetsAt — the live shape of a turn executed
+    on a remote mesh node, where `rate_limit_event` never reaches the gateway."""
+    return TaskResult(
+        task_id="paused-turn", success=False, output="", errors=[text],
+        files_modified=[], execution_time=5.0, timestamp=_iso(_now()),
+        raw_stdout="", raw_stderr=text, return_code=1, error_class="usage_limit",
+    )
+
+
+def test_worded_reset_on_the_refusal_becomes_the_recorded_instant(tmp_path, monkeypatch):
+    """LIVE 2026-08-19T16:14Z, verbatim: the harness held
+    "resets 8:20pm (Europe/Kiev)" — 17:20:00Z, correct to the second, and the
+    same instant telemetry reported — and used it ONLY to render a label. The
+    Case recorded `reset_at: null` and was proposed for resume 66 minutes early."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=None)   # no observer
+    case_id = _case(db, "mgr-1")
+    target = (_now().astimezone(ZoneInfo("Europe/Kiev")) + timedelta(hours=2)).replace(
+        minute=20, second=0, microsecond=0,
+    )
+    words = f"You've hit your session limit · resets {target.strftime('%-I:%M%p').lower()} (Europe/Kiev)"
+
+    orch._record_quota_pause(_Task("paused-turn", case_id, "mgr-1"), _worded_result(words))
+
+    recorded = _parse_iso_utc(db.case_quota_pause(case_id)["reset_at"])
+    assert recorded == target.astimezone(timezone.utc)
+
+
+def test_unqualified_reset_wording_is_not_guessed(tmp_path, monkeypatch):
+    """"resets 4:30pm" with no zone is printed in the timezone of whatever
+    machine ran the CLI — often a remote node, not this gateway. Inventing a
+    boundary hours off is worse than having none, so it stays unparsed."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")), snapshots=None)
+    case_id = _case(db, "mgr-1")
+
+    orch._record_quota_pause(
+        _Task("paused-turn", case_id, "mgr-1"),
+        _worded_result("You've hit your session limit · resets 4:30pm"),
+    )
+
+    assert db.case_quota_pause(case_id)["reset_at"] is None
+
+
+def test_worded_reset_parser_handles_the_clock_forms():
+    kiev = ZoneInfo("Europe/Kiev")
+    now = datetime(2026, 8, 19, 16, 14, tzinfo=timezone.utc)          # 19:14 Kiev
+
+    # The live string: later today.
+    assert _reset_at_from_limit_text(
+        "· resets 8:20pm (Europe/Kiev)", now=now,
+    ) == datetime(2026, 8, 19, 17, 20, tzinfo=timezone.utc).isoformat()
+    # A morning time already past today means TOMORROW morning.
+    assert _parse_iso_utc(_reset_at_from_limit_text(
+        "resets 5:20am (Europe/Kiev)", now=now,
+    )) == datetime(2026, 8, 20, 5, 20, tzinfo=kiev).astimezone(timezone.utc)
+    # Midnight/noon are the two the 12-hour clock gets wrong.
+    assert _parse_iso_utc(_reset_at_from_limit_text(
+        "resets 12:00am (Europe/Kiev)", now=now,
+    )) == datetime(2026, 8, 20, 0, 0, tzinfo=kiev).astimezone(timezone.utc)
+    # Not a reset instant at all.
+    assert _reset_at_from_limit_text("resets in 4 hours", now=now) is None
+    assert _reset_at_from_limit_text("resets 8:20pm (Middle/Earth)", now=now) is None
+    assert _reset_at_from_limit_text("", now=now) is None
 
 
 # --------------------------------------------------------------------------- #

@@ -109,6 +109,7 @@ class QuotaWindowPrewarmer:
         max_per_day: int = 8,
         delay_after_reset_sec: int = 120,
         poll_interval_sec: int = 300,
+        verify_delay_sec: int = 90,
         max_consecutive_failures: int = 3,
         max_activation_percent: float = 2.0,
         now: Callable[[], datetime] = utc_now,
@@ -121,6 +122,9 @@ class QuotaWindowPrewarmer:
         self.max_per_day = max(0, int(max_per_day))
         self.delay_after_reset_sec = max(0, int(delay_after_reset_sec))
         self.poll_interval_sec = max(60, int(poll_interval_sec))
+        #: Wait before the SECOND verification read when the first sees no window
+        #: yet — the provider's telemetry trails an activation (see tick_once).
+        self.verify_delay_sec = max(0, int(verify_delay_sec))
         self.max_consecutive_failures = max(1, int(max_consecutive_failures))
         #: Spec §13: prompt length is NOT a cost guarantee — an agent turn can
         #: silently load settings, MCP schemas and project rules. The only honest
@@ -345,6 +349,18 @@ class QuotaWindowPrewarmer:
         verified = self._latest_five_hour()
         opened_reset_at = normalize_utc((verified or {}).get("reset_at"))
         opened = opened_reset_at is not None and opened_reset_at > now
+        if bool(result.get("ok")) and not opened:
+            # The turn succeeded but no window is visible YET. Live on
+            # 2026-08-19 that was pure telemetry lag — the boundary the read at
+            # +4s could not see was there 15 minutes later — and scoring it as a
+            # failure walks a healthy prewarmer toward a circuit breaker that
+            # requires manual revalidation. Re-read once, after a bounded wait,
+            # before judging. Free: `get_usage` is a control request, not a turn.
+            await asyncio.sleep(self.verify_delay_sec)
+            await self._observe()
+            verified = self._latest_five_hour()
+            opened_reset_at = normalize_utc((verified or {}).get("reset_at"))
+            opened = opened_reset_at is not None and opened_reset_at > now
         self.state.seen_reset_at = opened_reset_at   # new baseline for drift
 
         # COST, measured the only honest way (spec §13): the provider's own
