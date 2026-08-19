@@ -72,7 +72,7 @@ import socket
 import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from src.core.timeutil import now_iso, parse_iso
 import uuid
 import random
@@ -104,6 +104,38 @@ logger = logging.getLogger(__name__)
 #: the agent or the harness. The single vocabulary every quota-aware branch reads
 #: (session status, Case pause record, resume proposal, retry policy).
 QUOTA_PAUSE_ERROR_CLASSES: Tuple[str, ...] = ("usage_limit", "rate_limit")
+
+#: [transient-resume] Error classes that mean "a transient PROVIDER-side failure,
+#: not a broken session or a spent quota" — an Anthropic 5xx (``api_error_status
+#: >= 500`` ⇒ ``upstream_error``, which is exactly what a 529 Overloaded lands as;
+#: see ``_classify_error``). Deliberately NOT ``network``: that class mixes local
+#: driver deaths (``terminated process``, ``cannot write to``) that are not a
+#: provider overload and must not be auto-retried into a loop. A turn in one of
+#: these classes that goes terminal (its in-process burst retries exhausted) keeps
+#: the session REUSABLE and PAUSES the Case on a short escalating backoff.
+TRANSIENT_PAUSE_ERROR_CLASSES: Tuple[str, ...] = ("upstream_error",)
+
+#: [transient-resume] The escalating fixed backoff (seconds) between auto-retries
+#: of a transient-paused Case. A 529 carries no ``resetsAt`` — the provider gives
+#: no reopen instant — so unlike the quota seam this is a timer, bounded by its own
+#: length: the Nth pause in the rolling window waits ``[N-1]`` seconds, and once N
+#: exceeds ``len(...)`` the retry budget is spent (``flow.transient_pause_exhausted``
+#: + escalate). Four attempts spanning ~8.5 min covers a typical overload window.
+TRANSIENT_PAUSE_BACKOFF_SEC: Tuple[int, ...] = (30, 60, 120, 300)
+
+#: [transient-resume] Rolling window over which consecutive transient pauses are
+#: counted to pick the backoff / detect budget exhaustion. Long enough to hold the
+#: whole escalating sequence, short enough that an unrelated 529 hours later starts
+#: fresh at attempt 1 — so the bound self-resets without a 'retry finally
+#: succeeded' hook (worker task.finished events on the same Case cannot be used as
+#: that signal, they are not the Manager's own turn).
+TRANSIENT_PAUSE_WINDOW_SEC: int = 900
+
+#: [transient-resume] Cap on how much of the failed turn's instruction is stored on
+#: the pause ledger so the retry can re-run the EXACT turn. A Manager continuation/
+#: operator instruction is modest; anything larger falls back to a generic
+#: re-derive-from-ledger retry rather than bloating flow_events.
+_TRANSIENT_FAILED_PROMPT_CAP: int = 16_000
 
 #: Approval ``action`` vocabulary for the two Case-level operator decisions.
 #: Both are Case-scoped (no task_id, no session_id) — see ApprovalService.request's
@@ -163,6 +195,24 @@ def is_quota_pause_result(result: TaskResult) -> bool:
     if result.success:
         return False
     return str(getattr(result, "error_class", "") or "").lower() in QUOTA_PAUSE_ERROR_CLASSES
+
+
+def is_transient_provider_pause_result(result: TaskResult) -> bool:
+    """[transient-resume] True when a turn ended on a terminal transient
+    provider-side failure (an Anthropic 5xx / 529 Overloaded ⇒ ``upstream_error``).
+
+    Keyed ONLY on the structured ``error_class`` the classifier already derived
+    from the SDK's ``api_error_status`` — never a second free-text scan (same
+    discipline as :func:`is_quota_pause_result`: the agent's own reply can contain
+    the words "server error" while writing code, and a text gate there would
+    silently pause a genuine hard failure). By the time this is read the in-process
+    burst retries have already been spent, so reaching here means the overload
+    outlived the quick-retry budget and the Case should pause on the longer
+    backoff.
+    """
+    if result.success:
+        return False
+    return str(getattr(result, "error_class", "") or "").lower() in TRANSIENT_PAUSE_ERROR_CLASSES
 
 
 def _is_salvaged_backend_finalization_error(result: TaskResult) -> bool:
@@ -242,6 +292,19 @@ def _session_status_after_result(result: TaskResult, *, cancel_requested: bool =
     # itself still reports failed — see is_quota_pause_result.
     if result.success or _is_salvaged_backend_finalization_error(result) or is_quota_pause_result(result):
         return SessionStatus.AWAITING_INPUT
+    # [transient-resume] A terminal transient provider 5xx (529 Overloaded) did not
+    # break the session — the provider refused the turn while overloaded — so ERROR
+    # would be a lie that also strands the Case (the Wake-Dispatcher only ever wakes
+    # an AWAITING_INPUT Manager). Flag-gated so OFF ⇒ byte-identical (ERROR as
+    # before); the flag read only fires on the rare transient turn, never per
+    # result. The turn itself still reports failed — see is_transient_provider_pause_result.
+    if is_transient_provider_pause_result(result):
+        try:
+            from src.control.db import transient_provider_resume_enabled
+            if transient_provider_resume_enabled():
+                return SessionStatus.AWAITING_INPUT
+        except Exception:
+            pass
     if cancel_requested or any("cancelled" in str(error).lower() for error in (result.errors or [])):
         return SessionStatus.CANCELLED
     return SessionStatus.ERROR
@@ -1113,6 +1176,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         # happened to satisfy later, at an unrelated moment.
         if await self._handle_quota_paused_case(db, case_id):
             return 0
+        # [transient-resume] A transient-PAUSED Case (a Manager turn that died on a
+        # 529 Overloaded) is not a normal Case this tick either: while the short
+        # backoff is running a wake would just burn another overloaded turn, and
+        # once it elapses the retry (not a wake) is what continues it. Checked
+        # before satisfaction for the same reason the quota check is.
+        if await self._handle_transient_paused_case(db, case_id):
+            return 0
         tick = db.compute_continuation_tick(case_id)
         # [continuation-review-watermark] Retire one-shot groups the Manager already
         # drained by reviewing their members out-of-band (a tagged review.*, e.g.
@@ -1544,6 +1614,110 @@ class TaskOrchestrator(ITaskOrchestrator):
                 getattr(task, "id", "?"), e,
             )
 
+    def _record_transient_pause(self, task: "Task", result: TaskResult) -> None:
+        """[transient-resume] Record a Manager turn's terminal transient-5xx death
+        as a durable, bounded, self-healing Case pause.
+
+        Mirrors ``_record_quota_pause`` (same call site, same Manager-only scope,
+        same best-effort/isolated contract — a ledger write can NEVER raise into
+        task execution). Differences, all because a 529 is an ephemeral overload
+        rather than a spent window:
+
+          * restore is a short escalating FIXED backoff (no ``resetsAt`` exists),
+            and the retry is automatic + free (no cache-rewrite cost, no approval);
+          * the retry is BOUNDED — the attempt number is counted over a rolling
+            window; once it exceeds the backoff schedule the budget is spent, so a
+            provider that is down for real escalates instead of looping forever.
+
+        The failed turn's own instruction is captured (capped) so the retry
+        re-runs the EXACT turn — a fresh operator instruction that 529'd must not
+        be silently replaced by a generic 'continue from the ledger' turn.
+        """
+        try:
+            from src.control.db import get_db, transient_provider_resume_enabled
+            if not self._harness_flow_drive_enabled() or not transient_provider_resume_enabled():
+                return
+            if not is_transient_provider_pause_result(result):
+                return
+            meta = getattr(task, "metadata", None) or {}
+            case_id = meta.get(self._FLOW_RUN_META_KEY) or meta.get(self._CASE_ID_META_KEY)
+            session_id = str(meta.get("session_id") or "").strip()
+            if not case_id or not session_id:
+                return
+            db = get_db()
+            if db is None:
+                return
+            if db.case_manager_session_id(case_id) != session_id:
+                # A worker (not this Case's Manager) hitting a 5xx is the worker's
+                # own retry problem, not a reason to pause a Manager Case.
+                return
+            if db.transient_pause(case_id) is not None:
+                # One open pause per Case: a second turn can fail the same way
+                # before the backoff fires — the first pause already owns the retry.
+                return
+            now = datetime.now(timezone.utc)
+            since_iso = (now - timedelta(seconds=TRANSIENT_PAUSE_WINDOW_SEC)).isoformat()
+            prior = db.recent_transient_pause_count(case_id, since_iso)
+            attempt = prior + 1
+            ceiling = len(TRANSIENT_PAUSE_BACKOFF_SEC)
+            task_id = getattr(task, "id", None)
+            error_class = str(getattr(result, "error_class", "") or "")
+            if attempt > ceiling:
+                # Retry budget spent for this window — the overload is not
+                # transient. Stop auto-retrying, escalate ONCE, and leave the
+                # session AWAITING_INPUT so the operator can still poke it manually.
+                db.append_flow_event(
+                    case_id, "flow.transient_pause_exhausted", "system",
+                    entity_type="task", entity_id=task_id,
+                    payload={
+                        "session_id": session_id, "attempts": prior,
+                        "error_class": error_class,
+                        "reason": self._short_failure_reason(result)[:256],
+                    },
+                )
+                self._emit_event(
+                    "case_transient_pause_exhausted", task,
+                    {"case_id": case_id, "session_id": session_id, "attempts": prior},
+                )
+                logger.warning(
+                    "event=case_transient_pause_exhausted case=%s session=%s attempts=%s",
+                    case_id, session_id, prior,
+                )
+                return
+            backoff = TRANSIENT_PAUSE_BACKOFF_SEC[min(attempt - 1, ceiling - 1)]
+            retry_at = (now + timedelta(seconds=backoff)).isoformat()
+            failed_prompt = str(getattr(task, "description", "") or "")
+            truncated = len(failed_prompt) > _TRANSIENT_FAILED_PROMPT_CAP
+            db.append_flow_event(
+                case_id, "flow.transient_paused", "system",
+                entity_type="task", entity_id=task_id,
+                payload={
+                    "session_id": session_id,
+                    "paused_task_id": task_id,
+                    "error_class": error_class,
+                    "attempt": attempt,
+                    "backoff_sec": backoff,
+                    "retry_at": retry_at,
+                    "failed_prompt": failed_prompt[:_TRANSIENT_FAILED_PROMPT_CAP],
+                    "failed_prompt_truncated": truncated,
+                    "reason": self._short_failure_reason(result)[:256],
+                },
+            )
+            self._emit_event(
+                "case_transient_paused", task,
+                {"case_id": case_id, "session_id": session_id,
+                 "attempt": attempt, "retry_at": retry_at, "backoff_sec": backoff},
+            )
+            logger.info(
+                "event=case_transient_paused case=%s session=%s task=%s attempt=%s retry_at=%s",
+                case_id, session_id, task_id, attempt, retry_at,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=case_transient_pause_record_failed task_id=%s err=%s",
+                getattr(task, "id", "?"), e,
+            )
+
     def estimate_case_resume_cost(self, session_id: Optional[str]) -> Dict[str, Any]:
         """[quota-resume] What resuming THIS session is likely to cost, and how we
         know — the number that turns "resume?" into a decision.
@@ -1878,6 +2052,141 @@ class TaskOrchestrator(ITaskOrchestrator):
             # before this seam existed).
             logger.warning("event=quota_resume_gate_failed case=%s err=%s", case_id, e)
             return False
+
+    async def _handle_transient_paused_case(self, db, case_id: str) -> bool:
+        """[transient-resume] One Wake-Dispatcher pass over a Case's transient-5xx
+        pause. Returns True iff the pause OWNS this Case this tick (caller then
+        skips the normal wake path).
+
+        Branches, in order:
+          * flag OFF / no open pause         → False (pre-feature behaviour)
+          * backoff not yet elapsed          → True, silent (still overloaded)
+          * bound session dead/closed        → close the pause, False (let the
+            dead-manager/respawn path handle it, don't retry into a corpse)
+          * bound session BUSY / not waiting → True (a turn is already running —
+            an operator poke or the prior retry; not stuck, don't double-drive)
+          * elapsed + session AWAITING_INPUT → deliver ONE retry of the exact
+            failed turn under a single-flight lease, close the pause, return True
+
+        The retry is automatic and free — a 529 does not re-write the prompt cache
+        the way a multi-hour quota pause does — so there is no cost estimate and no
+        approval, unlike ``_handle_quota_paused_case``.
+        """
+        from src.control.db import (
+            CONTINUATION_MACHINE_SENTINEL, TRANSIENT_RESUME_ACTION,
+            transient_provider_resume_enabled, transient_resume_task_id,
+        )
+        if not transient_provider_resume_enabled():
+            return False
+        pause = db.transient_pause(case_id)
+        if pause is None:
+            return False
+        retry_at = _parse_iso_utc(pause.get("retry_at"))
+        if retry_at is not None and retry_at > datetime.now(timezone.utc):
+            return True  # backoff still running — holding, nothing to decide yet
+
+        paused_task_id = str(pause.get("paused_task_id") or "")
+        session_id = str(pause.get("session_id") or "") or db.case_manager_session_id(case_id)
+        session = self.session_store.get(session_id) if session_id else None
+        if session is None or session.status in (
+            SessionStatus.CLOSED, SessionStatus.CANCELLED,
+        ):
+            # The session that hit the 529 is gone. Close the pause so it stops
+            # owning the Case, and hand back to the ordinary tick — the dead-manager
+            # branch (crash-respawn) is the right owner of a dead session, not a
+            # blind retry into it.
+            db.append_flow_event(
+                case_id, "flow.transient_resumed", "system",
+                entity_type="session", entity_id=session_id or None,
+                payload={"paused_task_id": paused_task_id,
+                         "attempt": pause.get("attempt"),
+                         "outcome": "session_unavailable"},
+            )
+            return False
+        if session.status != SessionStatus.AWAITING_INPUT:
+            # BUSY (a turn — operator poke or the prior retry — is in flight) or a
+            # transient IDLE/just-restored state: not stuck, resolves on its own.
+            return True
+
+        # SINGLE-FLIGHT: the same reserved sentinel + atomic claim the continuation/
+        # respawn/quota-resume leases use (no new lock model). Keyed on attempt so a
+        # later retry never collides with this one's completed row.
+        attempt = int(pause.get("attempt") or 1)
+        retry_id = transient_resume_task_id(case_id, paused_task_id, attempt)
+        db.enqueue_task(
+            retry_id,
+            session_id=None,
+            machine_id=CONTINUATION_MACHINE_SENTINEL,
+            backend=(getattr(session, "backend", None) or "claude"),
+            action=TRANSIENT_RESUME_ACTION,
+            payload={"case_id": case_id, "paused_task_id": paused_task_id,
+                     "attempt": attempt, "session_id": session_id},
+        )
+        if not db.claim_task(retry_id, socket.gethostname()):
+            return True  # a concurrent tick owns this retry — done for this Case
+
+        description = self._render_transient_retry_turn(db, case_id, pause)
+        try:
+            await self.submit_instruction(
+                description=description,
+                session_id=session_id,
+                cwd=getattr(session, "repo_path", None),
+                source="manager_transient_resume",
+            )
+        except Exception as e:
+            logger.warning("event=transient_resume_deliver_failed case=%s err=%s", case_id, e)
+            db.release_task(retry_id, socket.gethostname())
+            return True
+        db.append_flow_event(
+            case_id, "flow.transient_resumed", "system",
+            entity_type="session", entity_id=session_id,
+            payload={"paused_task_id": paused_task_id, "attempt": attempt,
+                     "outcome": "retried"},
+        )
+        db.complete_task(retry_id, result={"attempt": attempt, "session_id": session_id})
+        self._emit_event(
+            "case_transient_resumed", None,
+            {"case_id": case_id, "session_id": session_id, "attempt": attempt},
+        )
+        logger.info(
+            "event=case_transient_resumed case=%s session=%s attempt=%s",
+            case_id, session_id, attempt,
+        )
+        return True
+
+    def _render_transient_retry_turn(
+        self, db, case_id: str, pause: Dict[str, Any],
+    ) -> str:
+        """The auto-retry turn for a transient-paused Case.
+
+        Prefers re-running the EXACT instruction that was refused (captured on the
+        pause), so a fresh operator turn that 529'd is retried faithfully rather
+        than silently replaced. Falls back to a generic re-derive-from-ledger turn
+        only when the original was too large to store — mirroring the quota
+        in-place resume's 'trust the ledger' framing.
+        """
+        attempt = int(pause.get("attempt") or 1)
+        failed_prompt = str(pause.get("failed_prompt") or "")
+        truncated = bool(pause.get("failed_prompt_truncated"))
+        if failed_prompt and not truncated:
+            return (
+                "[transient-retry] The previous attempt at this turn was refused by a "
+                "transient provider error (5xx / 529 Overloaded) and is being retried "
+                f"automatically (attempt {attempt}). No state changed. The original "
+                "instruction follows verbatim — carry it out now:\n\n"
+                f"{failed_prompt}"
+            )
+        objective = str((db.get_case_brief(case_id) or {}).get("objective") or "").strip()
+        return (
+            "[transient-retry] The previous turn on this Case was refused by a transient "
+            f"provider error (5xx / 529 Overloaded) and is being retried automatically "
+            f"(attempt {attempt}). Case: {case_id}. Objective (unchanged — do NOT re-open "
+            f"or re-scope it): {objective}\n"
+            "FIRST call get_case_brief / get_case to re-derive the CURRENT state from the "
+            "ledger (dispatched workers, verdicts recorded, open waits), THEN do the single "
+            "next thing that advances the objective. This turn was delivered autonomously "
+            "by the harness — treat it exactly like an operator poke to continue the Case."
+        )
 
     async def resume_case(
         self,
@@ -5756,6 +6065,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # durably, so the reopening window (not an unrelated worker
                 # finishing) is what brings it back. No-op for every other turn.
                 self._record_quota_pause(task, result)
+                # [transient-resume] A Manager turn that outlived its burst retries
+                # on a transient provider 5xx (529 Overloaded) PAUSES its Case on a
+                # short backoff so the Wake-Dispatcher self-heals it. No-op for
+                # every other turn (and byte-identical when the flag is OFF).
+                self._record_transient_pause(task, result)
 
                 # Send notification via the central notification dispatcher
                 try:

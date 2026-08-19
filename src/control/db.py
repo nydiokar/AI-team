@@ -252,6 +252,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "On quota restore, resume the paused Case immediately instead of asking the operator. Default OFF: resuming a fat Manager session re-writes its whole prompt cache (observed 200-300k tokens), so spending that is an operator decision. When ON, the env knob CASE_QUOTA_RESUME_AUTO_MAX_USD (0 = no ceiling) still holds back any resume whose estimated cost exceeds it.",
     },
+    "TRANSIENT_PROVIDER_RESUME_ENABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Self-heal a Manager Case whose turn died on a terminal transient provider 5xx (e.g. Anthropic 529 Overloaded, error_class=upstream_error) after in-process burst retries were exhausted. When ON: the session stays AWAITING_INPUT (not ERROR), the Case is recorded as transient-PAUSED with a short escalating fixed backoff (30/60/120/300s), and the Wake-Dispatcher auto-retries the failed turn once the backoff elapses — bounded (4 attempts per 15-min window, then flow.transient_pause_exhausted + escalate). Default OFF: a rare failure the operator wants to observe before enabling. OFF ⇒ transient turns fail as before (session ERROR), byte-identical.",
+    },
     "MANAGER_ADVANCEMENT_GATE": {
         "default": "0",
         "effect_scope": "live",
@@ -555,6 +561,22 @@ def case_quota_resume_auto_max_usd() -> float:
         return 0.0
 
 
+def transient_provider_resume_enabled() -> bool:
+    """[transient-resume] Whether a Manager Case whose turn died on a terminal
+    transient provider 5xx (e.g. Anthropic 529 Overloaded ⇒ ``error_class ==
+    upstream_error``) self-heals via a short-backoff auto-retry.
+
+    Canonical read of ``TRANSIENT_PROVIDER_RESUME_ENABLED``; default OFF. When OFF
+    the session-status transient branch, ``_record_transient_pause`` and the
+    Wake-Dispatcher transient branch are all no-ops ⇒ the turn fails exactly as it
+    did before the feature (session ERROR), byte-identical. Distinct from the
+    quota seam: a 529 carries no ``resetsAt`` and reopens in seconds-to-minutes,
+    so restore is a fixed escalating backoff, not telemetry, and the retry is
+    automatic and free (no cache-rewrite cost estimate, no operator approval).
+    """
+    return runtime_flag_enabled("TRANSIENT_PROVIDER_RESUME_ENABLED")
+
+
 def spec_authoring_enabled() -> bool:
     """[A56/M4] Whether the spec-authoring stage + scored review gate + decomposer
     are active.
@@ -689,6 +711,11 @@ RESPAWN_ACTION = "manager_respawn"
 # resume and the operator's manual "Resume now" button structurally unable to
 # start two Managers on one Case — they both claim this one row.
 QUOTA_RESUME_ACTION = "manager_quota_resume"
+# [transient-resume] The transient-5xx self-heal retry single-flight action. Same
+# reserved sentinel + same ``claim_task`` lease as the three above (no new lock
+# model); only the action and id namespace differ. The lease keeps two overlapping
+# Wake-Dispatcher passes from delivering the same retry turn twice.
+TRANSIENT_RESUME_ACTION = "manager_transient_resume"
 # Default round cap when a Case's completion_criteria does not carry an explicit
 # ``round_cap`` — a backstop against a runaway continuation loop, not a tuning knob.
 DEFAULT_CONTINUATION_ROUND_CAP = 50
@@ -731,6 +758,21 @@ def quota_resume_task_id(case_id: str, paused_task_id: str) -> str:
     them claim this row.
     """
     return f"qresume:{case_id}:{paused_task_id}"
+
+
+def transient_resume_task_id(case_id: str, paused_task_id: str, attempt: int) -> str:
+    """[transient-resume] Deterministic single-flight token for auto-retrying ONE
+    transient-5xx pause of a Case.
+
+    Keyed on the paused task AND the attempt number: unlike a quota pause (one
+    pause ⇒ one resume), a transient pause can legitimately retry several times in
+    a row (each failed retry opens a fresh pause at the next attempt), so the
+    token must be distinct per attempt or the second retry would collide with the
+    first's completed row and never claim. Two overlapping ticks at the SAME
+    attempt compute the SAME id ⇒ the UNIQUE constraint + atomic claim elect one
+    winner.
+    """
+    return f"tresume:{case_id}:{paused_task_id}:{int(attempt)}"
 
 
 def flow_drive_enabled() -> bool:
@@ -3531,6 +3573,61 @@ class MeshDB:
             "paused_at": newest.get("created_at"),
             "event_id": newest.get("id"),
         }
+
+    def transient_pause(self, flow_run_id: str) -> Optional[Dict[str, Any]]:
+        """[transient-resume] The Case's OPEN transient-provider pause, or None.
+
+        Mirrors :meth:`case_quota_pause` exactly (same append-only substrate, same
+        newest-first bounded query, survives a gateway restart for free). A pause
+        opens with ``flow.transient_paused`` (a Manager turn on this Case died on a
+        terminal transient 5xx) and closes with the next ``flow.transient_resumed``
+        (the retry was delivered), ``flow.transient_pause_exhausted`` (the bounded
+        retry budget ran out) or ``case.manager_respawned`` (the Case already got a
+        Manager back a different way). Returns the newest still-open pause's
+        payload, enriched with ``paused_at``/``event_id``.
+        """
+        rows = self._conn().execute(
+            """
+            SELECT * FROM flow_events
+            WHERE flow_run_id = ?
+              AND event_type IN ('flow.transient_paused', 'flow.transient_resumed',
+                                 'flow.transient_pause_exhausted', 'case.manager_respawned')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (flow_run_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        newest = dict(rows[0])
+        if str(newest.get("event_type") or "") != "flow.transient_paused":
+            return None
+        return {
+            **(_event_payload(newest) or {}),
+            "paused_at": newest.get("created_at"),
+            "event_id": newest.get("id"),
+        }
+
+    def recent_transient_pause_count(self, flow_run_id: str, since_iso: str) -> int:
+        """[transient-resume] How many ``flow.transient_paused`` events this Case
+        has recorded at or after ``since_iso`` (a UTC ISO-8601 string).
+
+        Used to derive the current attempt number over a rolling window: a burst
+        of transient failures escalates the backoff, but a lone 529 hours later
+        starts fresh because the old pauses fall outside the window — so the bound
+        self-resets without needing a 'the retry finally succeeded' hook.
+        ISO-8601 UTC strings compare correctly lexicographically, matching how
+        ``created_at`` is stored and how ``case_quota_pause`` treats it.
+        """
+        row = self._conn().execute(
+            """
+            SELECT COUNT(*) AS n FROM flow_events
+            WHERE flow_run_id = ?
+              AND event_type = 'flow.transient_paused'
+              AND created_at >= ?
+            """,
+            (flow_run_id, since_iso),
+        ).fetchone()
+        return int((dict(row) if row else {}).get("n") or 0)
 
     def case_round_cap(self, flow_run_id: str) -> int:
         """[M3.4] The continuation round cap for a Case. Carried in

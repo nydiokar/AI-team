@@ -187,6 +187,13 @@ class _FakeOrch:
         # inertness honest rather than asserting it with a stub.
         return await TaskOrchestrator._handle_quota_paused_case(self, db, case_id)
 
+    async def _handle_transient_paused_case(self, db, case_id):
+        # The transient-5xx pause branch of the tick. Inert here (no Case carries a
+        # `flow.transient_paused` event) — covered on its own in
+        # test_case_transient_resume.py. Delegated to the REAL method so the
+        # inertness is proven, not assumed.
+        return await TaskOrchestrator._handle_transient_paused_case(self, db, case_id)
+
 
 def _continue(orch, db, case_id) -> int:
     return asyncio.run(TaskOrchestrator._continue_case_once(orch, db, case_id))
