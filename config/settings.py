@@ -327,6 +327,13 @@ class QuotaConfig:
     claude_principal_key: str = ""         # CLAUDE_QUOTA_PRINCIPAL_KEY
     digest_telegram_enabled: bool = False  # QUOTA_DIGEST_TELEGRAM_ENABLED
     digest_interval_sec: int = 3600        # QUOTA_DIGEST_INTERVAL_SEC
+    # Window prewarming (QUOTA_PREWARM_ENABLED flag; runs around the clock by
+    # design — the value of an already-ticking window only exists before work
+    # starts). One activation per window at most; these are the extra bounds.
+    prewarm_model: str = "haiku"             # QUOTA_PREWARM_MODEL — cheapest tier
+    prewarm_min_interval_sec: int = 3600     # QUOTA_PREWARM_MIN_INTERVAL_SEC
+    prewarm_max_per_day: int = 8             # QUOTA_PREWARM_MAX_PER_DAY
+    prewarm_delay_after_reset_sec: int = 120  # QUOTA_PREWARM_DELAY_AFTER_RESET_SEC
 
 class Config:
     """Main configuration class"""
@@ -626,6 +633,23 @@ class Config:
                 self.quota.db_path = v
         except Exception:
             pass
+        try:
+            v = os.getenv("QUOTA_PREWARM_MODEL")
+            if v:
+                self.quota.prewarm_model = v.strip()
+        except Exception:
+            pass
+        for _env, _attr, _floor in (
+            ("QUOTA_PREWARM_MIN_INTERVAL_SEC", "prewarm_min_interval_sec", 0),
+            ("QUOTA_PREWARM_MAX_PER_DAY", "prewarm_max_per_day", 0),
+            ("QUOTA_PREWARM_DELAY_AFTER_RESET_SEC", "prewarm_delay_after_reset_sec", 0),
+        ):
+            try:
+                v = os.getenv(_env)
+                if v is not None:
+                    setattr(self.quota, _attr, max(_floor, int(v)))
+            except Exception:
+                pass
         try:
             v = os.getenv("QUOTA_OBSERVE_INTERVAL_SEC")
             if v is not None:
