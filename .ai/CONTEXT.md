@@ -68,6 +68,26 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-08-19 — Transient provider 5xx (529 Overloaded) now self-heals (flag OFF by default).**
+The gap: a Manager turn refused by an Anthropic server-side overload classifies as
+`error_class=upstream_error` (`api_error_status>=500`, PR #81) and its in-process burst retries are
+spent in seconds — so a multi-minute overload went terminal → session `ERROR` → the Case stalled
+(exactly the pre-PR#97 quota hole, but for transient errors, which never self-healed). Fix mirrors the
+proven quota-pause seam, timed off a short **escalating fixed backoff** instead of a `resetsAt` a 529
+does not carry: `TRANSIENT_PROVIDER_RESUME_ENABLED` (default **OFF**, registry-writable). When ON,
+`_session_status_after_result` keeps the session `AWAITING_INPUT`; `_record_transient_pause` writes a
+durable `flow.transient_paused` (Manager-only, one open pause) with `retry_at = now + backoff`
+(30/60/120/300s); `_handle_transient_paused_case` in the Wake-Dispatcher tick (checked before
+satisfaction, right after the quota branch) holds while the backoff runs, then AUTO-retries the
+**exact** failed turn verbatim — free, no approval, single-flight via the same `claim_task` lease.
+**Bounded:** attempts counted over a 15-min rolling window (self-resets for an unrelated later 529
+without a success hook); once the 4-step schedule is spent it escalates `flow.transient_pause_exhausted`
+instead of looping. OFF ⇒ byte-identical (transient → `ERROR`). Touched only `orchestrator.py` +
+`control/db.py`; 17 new targeted tests + the three adjacent suites (quota/continuation/respawn, whose
+duck-typed fakes gained the new tick-branch delegation) green. **Known boundary (documented, observe
+first):** an operator manually re-sending the failed instruction while a pause is open can still race
+the one auto-retry — single-flight guards the dispatcher, not the operator. `feat/transient-provider-self-heal`.
+
 **2026-08-19 — Quota windows: keep the rhythm ticking, and resume on the provider's own clock.**
 Two halves of the same problem. **(1) The 5-hour window now gets kept alive.**
 `SESSION_WINDOW_WARMING_SPEC.md` items 1-6 were built long ago; 7-10 (activation, classification,
