@@ -44,6 +44,7 @@ import type {
   RawCostProjectsResponse,
   RawCaseUsageResponse,
   RawCostAlertsResponse,
+  RawSystemAlertsResponse,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -810,6 +811,12 @@ export const api = {
    *  enforcement surface. Read-only; fires only when a budget knob is set. */
   async costAlerts(token: string): Promise<RawCostAlertsResponse> {
     return get<RawCostAlertsResponse>(`/api/cost/alerts`, token);
+  },
+
+  /** GET /api/system-alerts — recent gateway-liveness outages recorded by the
+   *  external healthcheck probe (see ~/scripts/aiteam-healthcheck.sh). */
+  async systemAlerts(token: string): Promise<RawSystemAlertsResponse> {
+    return get<RawSystemAlertsResponse>(`/api/system-alerts`, token);
   },
 };
 
