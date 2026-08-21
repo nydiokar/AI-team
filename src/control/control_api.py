@@ -2504,6 +2504,19 @@ def build_control_api(orchestrator) -> FastAPI:
         }
         return JSONResponse(result)
 
+    @app.get("/api/system-alerts", dependencies=[Depends(_require_auth)])
+    def api_system_alerts(
+        limit: int = Query(20, ge=1, le=100),
+    ) -> JSONResponse:
+        """Recent gateway-liveness outages recorded by the external
+        ``aiteam-healthcheck.sh`` probe (source of truth: ``system_alerts``
+        table). Read-only — the gateway never writes this table, only the
+        out-of-process healthcheck script does, so an outage is recorded
+        even when the gateway itself is unresponsive."""
+        db = _db()
+        rows = db.list_recent_system_alerts(limit=limit) if db is not None else []
+        return JSONResponse({"ok": True, "alerts": rows})
+
     @app.get("/api/quota-windows", dependencies=[Depends(_require_auth)])
     async def api_quota_windows() -> JSONResponse:
         coordinator = getattr(orchestrator, "quota_coordinator", None)

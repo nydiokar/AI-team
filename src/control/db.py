@@ -4938,6 +4938,22 @@ class MeshDB:
         except Exception as e:
             logger.debug("event=db_mark_push_error_failed err=%s", e)
 
+    def list_recent_system_alerts(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Read-only surface for ``system_alerts`` — written by the external
+        ``aiteam-healthcheck.sh`` liveness probe, which runs OUTSIDE this
+        process on purpose (it must still work when the gateway itself is
+        unresponsive). This process never writes the table, only reads it."""
+        try:
+            rows = self._conn().execute(
+                "SELECT id, source, kind, message, detail, opened_at, resolved_at "
+                "FROM system_alerts ORDER BY opened_at DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.debug("event=db_list_system_alerts_failed err=%s", e)
+            return []
+
     # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
@@ -5175,6 +5191,25 @@ def _get_migrations() -> List[tuple]:
             ALTER TABLE sessions ADD COLUMN keep_pinned INTEGER NOT NULL DEFAULT 0;
             ALTER TABLE sessions ADD COLUMN keep_note TEXT NOT NULL DEFAULT ''
         """),  # Operator keep marker + note. Distinct from machine_id affinity pinning.
+        (30, """
+            CREATE TABLE IF NOT EXISTS system_alerts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                source      TEXT NOT NULL DEFAULT 'healthcheck',
+                kind        TEXT NOT NULL,
+                message     TEXT NOT NULL,
+                detail      TEXT NOT NULL DEFAULT '',
+                opened_at   TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_system_alerts_opened_at
+                ON system_alerts(opened_at DESC)
+        """),  # Durable liveness-outage log. Written by ~/scripts/aiteam-healthcheck.sh
+               # (a process OUTSIDE the gateway, deliberately — it must record an
+               # outage even when the gateway itself is unresponsive), not by this
+               # process. The gateway only ever reads it, for the Web UI banner and
+               # Telegram alert history. Schema is duplicated defensively in the
+               # healthcheck script's own CREATE TABLE IF NOT EXISTS so a fresh host
+               # can alert before its first post-migration gateway boot.
     ]
 
 
