@@ -1215,3 +1215,57 @@ def test_latest_snapshots_stays_indexed_on_volume(tmp_path):
         ).fetchall()
     )
     assert "USING INDEX" in plan and "SCAN" not in plan.replace("SEARCH", "").replace("USING INDEX", "")
+
+
+def test_prune_snapshots_stays_fast_on_volume(tmp_path):
+    """Regression guard for the 2026-08-21 live incident: prune_snapshots used a
+    per-row correlated EXISTS subquery that effectively re-scanned each
+    candidate row's whole bucket per row. Against the live 54k-row table it ran
+    synchronously on the gateway's event loop for 4+ minutes (never finished),
+    freezing health checks / worker heartbeats / fetch_pending the whole time.
+    Seeded here at a comparable scale+shape (many buckets, mostly-old rows, one
+    reset_at anchor + many redundant confirmations per bucket — the case the
+    correlated subquery handled worst): must stay well under a second and keep
+    exactly the same keep/delete semantics as the correctness test above."""
+    import sqlite3
+    import time
+
+    store = _store(tmp_path)
+    conn = sqlite3.connect(str(store._path))
+    now = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
+    old_base = now - timedelta(days=30)
+    rows = []
+    for bucket in range(10):
+        reset_at = utc_iso(datetime(2026, 8, 20, 22, 0, tzinfo=timezone.utc))
+        for i in range(2000):  # first sighting (i=0) + 1999 redundant old confirmations
+            at = utc_iso(old_base + timedelta(minutes=i))
+            rows.append((
+                f"b{bucket}-{i}", "fake", f"p-{bucket}", "five-hour", at,
+                "authoritative", 50.0, reset_at, 0, None, "observed", "", at,
+            ))
+        # one recent row per bucket — must always survive pruning.
+        recent_at = utc_iso(now - timedelta(hours=1))
+        rows.append((
+            f"b{bucket}-recent", "fake", f"p-{bucket}", "five-hour", recent_at,
+            "authoritative", 50.0, reset_at, 0, None, "observed", "", recent_at,
+        ))
+    conn.executemany(
+        "INSERT OR IGNORE INTO snapshots(snapshot_id, provider, principal_hash, bucket_id,"
+        " observed_at, telemetry_quality, used_percent, reset_at, limit_reached,"
+        " window_duration_seconds, raw_status, unavailable_reason, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    total_before = len(rows)
+
+    started = time.perf_counter()
+    pruned = store.prune_snapshots(retention_days=14, now=now)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 2.0, f"prune_snapshots took {elapsed:.3f}s — regression"
+    # Per bucket: keep the first sighting (i=0) + the recent row; delete the rest.
+    assert pruned == total_before - (10 * 2)
+    remaining = store._conn().execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+    assert remaining == 10 * 2

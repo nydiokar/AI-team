@@ -1005,3 +1005,20 @@ export interface RawCostAlertsResponse {
     governor_sdk_max_budget_usd: number | null;
   };
 }
+
+// GET /api/system-alerts → recorded by ~/scripts/aiteam-healthcheck.sh (external
+// liveness probe; the gateway only reads this table, never writes it).
+export interface RawSystemAlert {
+  id: number;
+  source: string;
+  kind: string;
+  message: string;
+  detail: string;
+  opened_at: string;
+  resolved_at: string | null;
+}
+
+export interface RawSystemAlertsResponse {
+  ok: boolean;
+  alerts: RawSystemAlert[];
+}
