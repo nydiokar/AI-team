@@ -298,6 +298,9 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE INDEX IF NOT EXISTS idx_snapshots_bucket_observed
     ON snapshots(provider, principal_hash, bucket_id, observed_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_snapshots_observed_at
+    ON snapshots(observed_at);
+
 CREATE TABLE IF NOT EXISTS adapter_status (
     provider TEXT PRIMARY KEY,
     enabled INTEGER NOT NULL,
@@ -557,18 +560,24 @@ class QuotaWindowStore:
             return 0
         cutoff = utc_iso((normalize_utc(now) or utc_now()) - timedelta(days=int(retention_days)))
         with self._write() as conn:
+            # Anchors (first sighting per provider/principal/bucket/reset_at boundary)
+            # computed in one pass via ROW_NUMBER(), then excluded from the delete.
+            # A per-row correlated EXISTS subquery here previously re-scanned each
+            # row's whole bucket once per candidate row (near-quadratic on this
+            # table); this is a single sort + scan instead.
             cur = conn.execute(
                 """
                 DELETE FROM snapshots WHERE observed_at < ?
-                  AND EXISTS (
-                    SELECT 1 FROM snapshots earlier
-                    WHERE earlier.provider = snapshots.provider
-                      AND earlier.principal_hash = snapshots.principal_hash
-                      AND earlier.bucket_id = snapshots.bucket_id
-                      AND earlier.reset_at IS snapshots.reset_at
-                      AND (earlier.observed_at < snapshots.observed_at
-                           OR (earlier.observed_at = snapshots.observed_at
-                               AND earlier.created_at < snapshots.created_at))
+                  AND snapshot_id NOT IN (
+                    SELECT snapshot_id FROM (
+                      SELECT snapshot_id,
+                             ROW_NUMBER() OVER (
+                               PARTITION BY provider, principal_hash, bucket_id, reset_at
+                               ORDER BY observed_at ASC, created_at ASC
+                             ) AS rn
+                      FROM snapshots
+                    )
+                    WHERE rn = 1
                   )
                 """,
                 (cutoff,),
@@ -1399,21 +1408,23 @@ class QuotaWindowCoordinator:
         try:
             while True:
                 await self.observe_once()
-                self._prune_once_daily()
+                await self._prune_once_daily()
                 await asyncio.sleep(self.next_observe_delay_sec())
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.warning("quota_observe_loop_stopped err=%s", e)
 
-    def _prune_once_daily(self) -> None:
+    async def _prune_once_daily(self) -> None:
         """Bounded history (A78 §4): prune redundant old snapshots at most once
-        per UTC day, best-effort — a failed prune must never kill the loop."""
+        per UTC day, best-effort — a failed prune must never kill the loop.
+        Runs off the event loop thread: the DELETE can scan tens of thousands
+        of rows and must never block heartbeats/HTTP handling while it runs."""
         try:
             today = utc_iso(self._now())[:10]
             if self._last_prune_day == today or self.snapshot_retention_days <= 0:
                 return
-            pruned = self.store.prune_snapshots(retention_days=self.snapshot_retention_days)
+            pruned = await asyncio.to_thread(self.store.prune_snapshots, retention_days=self.snapshot_retention_days)
             self._last_prune_day = today
             if pruned:
                 logger.info("event=quota_snapshots_pruned rows=%d retention_days=%d", pruned, self.snapshot_retention_days)
