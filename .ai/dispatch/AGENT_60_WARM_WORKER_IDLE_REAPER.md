@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_60_WARM_WORKER_IDLE_REAPER
 created_at: "2026-07-30T03:07:45+03:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: active              # ready | active | blocked | done | dead
+owner: "claude"
 depends_on: []
 results_ref: null             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-08-03T13:20:22.819046+00:00"
+evidence: ["tests/test_warm_worker_idle_reaper.py"]
+updated_at: "2026-08-21T15:10:00.000000+00:00"
 ```
 
 # DISPATCH — A60 · Warm-worker idle-reaper (§7 resource leak)
@@ -93,15 +93,49 @@ autonomous run's idle profile rather than guessed — hence deferring the build 
 Turn/cost governor (A53); wake-dispatch (A52); any change to the warm-keep *policy* itself (A48 stands).
 
 ## TRAIL / EVIDENCE (fill at close)
-- Branch / PR · pytest output · TTL knob name + default · the reaper seam reused.
+- Branch `feat/warm-worker-idle-reaper` · PR: TBD at close.
+- TTL knob: `MESH_WARM_WORKER_IDLE_TTL_SEC` → `config.mesh.warm_worker_idle_ttl_sec`, default `3600`
+  (1h), `0` disables (`config/settings.py`).
+- Reaper seam reused: `_stale_busy_reconciliation_loop` (`src/orchestrator.py`) — added a second
+  best-effort call to `_reap_idle_warm_workers_once()` after the existing stale-busy pass each sweep.
+  No second scheduler.
+- DB query: `MeshDB.list_idle_warm_workers(idle_before_iso)` (`src/control/db.py`) — mirrors
+  `list_stale_busy_sessions`' shape; `LEFT JOIN flow_runs` so `current_case_id IS NULL` (never
+  joined) or `flow_runs.status IN _CLOSED_STATUSES` both qualify, an OPEN Case never does.
+  `status IN ('idle', 'awaiting_input')` only — a `busy` (mid-turn) session is excluded by the
+  query itself, not filtered after.
+- Close path: `_reap_idle_warm_workers_once` re-checks the live in-memory session (status +
+  case_role + a live re-read of the flow_run status) before calling
+  `session_service.close_session(...)` — same guard shape as `_close_worker_session_on_case_close`.
+  Remote-worker teardown already exists via `session_service`'s injected `_dispatch_remote_close`
+  (enqueues a `close_session` mesh task to the owning node); this reaper is a new *caller* of that
+  existing path, not a new close mechanism.
+- **Motivating incident (2026-08-21):** found 3 real orphaned `claude.exe` SDK sessions on this
+  operator's `tokens_ingest` worker node, pooled since 2026-08-17/18/20 — each with live CPU ticks,
+  a child Python/MCP process tree, one with a bound TCP port. Root cause: sessions were closed on
+  the gateway side but `_dispatch_remote_close`'s claim that "the worker's boot reaper reclaims the
+  process on restart regardless, so no leak survives" only holds if the worker restarts — this
+  worker daemon had 6 days uptime with zero restarts, so the boot reaper never ran. Confirms the §7
+  deferral this packet describes is not hypothetical.
+- Idempotent by construction: `close_session` sets `status = CLOSED`; the query only matches
+  `idle`/`awaiting_input`, so a second sweep over an already-reaped session is a natural no-op —
+  no separate dedup needed.
+- pytest: `tests/test_warm_worker_idle_reaper.py` (8 new, DB-query + orchestrator-sweep coverage) +
+  `tests/test_mesh_reconcile_spool.py` + `tests/test_session_affiliations.py` — 22/22 green,
+  targeted run only (test-cost guard — no e2e, no full suite).
 
 ---
 ## Milestone (burndown)
-- [ ] idle warm-worker reaper on the existing sweep loop (TTL-bounded)
-- [ ] never reaps open-Case-joined / mid-turn / non-worker sessions
-- [ ] idempotent + configurable TTL + safe default
-- [ ] targeted pytest green
+- [x] idle warm-worker reaper on the existing sweep loop (TTL-bounded)
+- [x] never reaps open-Case-joined / mid-turn / non-worker sessions
+- [x] idempotent + configurable TTL + safe default
+- [x] targeted pytest green
 - [ ] PR opened + merged
 
 ## Closure (fill on completion)
-_(verdict + evidence)_
+Pulled forward from "ready" (deferred pending live M3.4 load) after directly observing the leak it
+predicts: 3 real orphaned worker sessions on a 6-day-uptime worker daemon, confirming
+`_dispatch_remote_close`'s restart-reclaim assumption does not hold without an actual restart.
+Implemented as scoped in SEAM MAP: reused `_stale_busy_reconciliation_loop`, no new scheduler; reuses
+`session_service.close_session` + `_clear_session_case_affiliation`, no new close mechanism. PR open
+next.
