@@ -3152,6 +3152,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                     await self._reconcile_stale_busy_sessions_once()
                 except Exception as e:
                     logger.debug("event=stale_busy_reconcile_failed err=%s", e)
+                try:
+                    await self._reap_idle_warm_workers_once()
+                except Exception as e:
+                    logger.debug("event=idle_warm_worker_reap_failed err=%s", e)
                 await asyncio.sleep(interval_sec)
         except asyncio.CancelledError:
             logger.info("event=stale_busy_reconciler_stopped")
@@ -3230,6 +3234,83 @@ class TaskOrchestrator(ITaskOrchestrator):
             reconciled += 1
 
         return reconciled
+
+    async def _reap_idle_warm_workers_once(self) -> int:
+        """[A60] Close warm WORKER sessions idle beyond the configured TTL.
+
+        A48/PR#26 deliberately keeps a joined worker session warm after its Case
+        closes (held backend slot, for cheap re-dialogue) — closed only by an
+        explicit Manager ``release_worker``, with no idle bound. That is a written
+        §7 resource leak once a worker session sits idle indefinitely (observed
+        directly: SDK ``claude`` child processes pooled for days with no owning
+        Case and no activity). This sweep reclaims them the same way Case-close
+        already does — ``session_service.close_session`` — after TTL, never before.
+
+        ``warm_worker_idle_ttl_sec <= 0`` disables the reaper entirely (default
+        3600s / 1h, sized so it never fights normal re-dialogue latency). Reuses
+        ``_stale_busy_reconciliation_loop``'s cadence — no second scheduler.
+        """
+        ttl = int(getattr(config.mesh, "warm_worker_idle_ttl_sec", 0) or 0)
+        if ttl <= 0:
+            return 0
+        try:
+            from src.control.db import get_db
+            db = get_db()
+        except Exception:
+            db = None
+        if db is None:
+            return 0
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=ttl)).isoformat()
+        rows = await asyncio.to_thread(db.list_idle_warm_workers, cutoff)
+        reaped = 0
+        for row in rows:
+            session_id = row.get("session_id", "")
+            # Re-check the live in-memory session, not just the DB row snapshot —
+            # mirrors _close_worker_session_on_case_close's guard so a turn that
+            # started between the query and this loop iteration is never reaped.
+            session = self.session_store.get(session_id)
+            if session is None:
+                continue
+            if session.status not in (SessionStatus.IDLE, SessionStatus.AWAITING_INPUT):
+                continue
+            if getattr(session, "case_role", None) != "worker":
+                continue
+            case_id = getattr(session, "current_case_id", None)
+            if case_id:
+                flow_run = db.get_flow_run(case_id) if hasattr(db, "get_flow_run") else None
+                if flow_run and (flow_run.get("status") or "") not in db._CLOSED_STATUSES:
+                    continue  # joined to an OPEN Case — never reap
+            try:
+                result = self.session_service.close_session(
+                    session_id, backends=getattr(self, "_backends", {}),
+                )
+            except Exception as e:
+                logger.warning(
+                    "event=idle_warm_worker_reap_close_failed session_id=%s err=%s",
+                    session_id, e,
+                )
+                continue
+            if case_id:
+                self._clear_session_case_affiliation(session_id, case_id)
+            self._emit_event(
+                "idle_warm_worker_reaped",
+                None,
+                {
+                    "session_id": session_id,
+                    "machine_id": row.get("machine_id", ""),
+                    "backend": row.get("backend", ""),
+                    "idle_ttl_sec": ttl,
+                },
+            )
+            logger.warning(
+                "event=idle_warm_worker_reaped session_id=%s node=%s ttl=%ds ok=%s",
+                session_id, row.get("machine_id", ""), ttl,
+                getattr(result, "success", None),
+            )
+            reaped += 1
+
+        return reaped
 
     async def _reattach_remote_task(self, session: Any, task_row: Dict[str, Any]) -> None:
         """Reattach to a remote task still in-flight after a gateway restart.

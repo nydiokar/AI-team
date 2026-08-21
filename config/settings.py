@@ -250,6 +250,12 @@ class MeshConfig:
     claim_lease_sec: int = 300              # MESH_CLAIM_LEASE_SEC — stale-claim reaper threshold (T4)
     claim_max_runtime_sec: int = 36000      # MESH_CLAIM_MAX_RUNTIME_SEC — hard cap for active claimed tasks (10 hours)
     session_reconcile_interval_sec: int = 60  # MESH_SESSION_RECONCILE_INTERVAL_SEC — 0 disables M3 loop
+    # A60 — §7 warm-worker idle-reaper. A65/A48 keep worker sessions warm (backend
+    # slot held) after a Case closes, for re-dialogue. Idle beyond this TTL with no
+    # open Case affiliation ⇒ reaped on the same reconciliation sweep. Generous
+    # default so it never fights normal re-dialogue latency; 0 disables the reaper
+    # entirely (byte-identical to pre-A60 behavior).
+    warm_worker_idle_ttl_sec: int = 3600     # MESH_WARM_WORKER_IDLE_TTL_SEC — 0 disables
     routing_freshness_wait_sec: float = 2.0  # MESH_ROUTING_FRESHNESS_WAIT_SEC — pre-route nudge wait; 0 disables
     routing_live_state_max_age_sec: int = 90  # MESH_ROUTING_LIVE_STATE_MAX_AGE_SEC — stale state is ignored for slot routing
     shadow_write: bool = True               # always mirror to DB even when mesh routing is off
@@ -810,6 +816,12 @@ class Config:
             v = os.getenv("MESH_ROUTING_FRESHNESS_WAIT_SEC")
             if v is not None:
                 self.mesh.routing_freshness_wait_sec = max(0.0, float(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_WARM_WORKER_IDLE_TTL_SEC")
+            if v is not None:
+                self.mesh.warm_worker_idle_ttl_sec = max(0, int(v))
         except Exception:
             pass
         try:
