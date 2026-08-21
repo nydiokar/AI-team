@@ -1711,6 +1711,34 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_idle_warm_workers(self, idle_before_iso: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """[A60] Return warm WORKER sessions eligible for the idle-reaper.
+
+        A session qualifies when ALL hold: ``case_role = 'worker'`` · status is
+        ``idle`` or ``awaiting_input`` (never ``busy`` — a mid-turn worker is
+        never reaped) · ``updated_at`` is older than ``idle_before_iso`` · its
+        Case is either unset (``current_case_id IS NULL``) or closed
+        (``flow_runs.status`` in ``_CLOSED_STATUSES``). A worker still joined to
+        an OPEN Case is excluded by the join predicate, not filtered after the
+        fact — mirrors ``list_stale_busy_sessions``' shape.
+        """
+        placeholders = ",".join("?" for _ in self._CLOSED_STATUSES)
+        rows = self._conn().execute(
+            f"""
+            SELECT s.*
+            FROM sessions s
+            LEFT JOIN flow_runs fr ON fr.flow_run_id = s.current_case_id
+            WHERE s.case_role = 'worker'
+              AND s.status IN ('idle', 'awaiting_input')
+              AND s.updated_at < ?
+              AND (s.current_case_id IS NULL OR fr.status IN ({placeholders}))
+            ORDER BY s.updated_at ASC
+            LIMIT ?
+            """,
+            (idle_before_iso, *self._CLOSED_STATUSES, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ------------------------------------------------------------------
     # Mesh tasks
     # ------------------------------------------------------------------
