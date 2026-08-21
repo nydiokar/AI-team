@@ -1613,6 +1613,33 @@ class TaskOrchestrator(ITaskOrchestrator):
         except (TypeError, ValueError, OSError, OverflowError):
             return None
 
+    def _usage_limit_class(self, result: TaskResult) -> str:
+        """Classify as ``usage_limit`` AND teach the quota store the boundary the
+        provider attached to its own refusal (A78 §3). A 429 is the most exact
+        quota signal that exists — it used to be thrown away, leaving the store
+        to infer boundaries from polls. Best-effort/isolated: a telemetry write
+        must never alter error classification or task execution. Idempotent per
+        boundary inside the store."""
+        try:
+            from src.services.quota_window_coordinator import normalize_utc
+            reset_iso = self._rate_limit_reset_iso(result)
+            if reset_iso:
+                coord = getattr(self, "quota_coordinator", None)
+                store = getattr(coord, "store", None) if coord is not None else None
+                if store is not None and hasattr(store, "record_refusal_snapshot"):
+                    stored = store.record_refusal_snapshot(
+                        provider=str(getattr(result, "backend", "") or "claude").lower(),
+                        reset_at=normalize_utc(reset_iso),
+                    )
+                    if stored:
+                        logger.info(
+                            "event=quota_refusal_recorded backend=%s reset_at=%s",
+                            getattr(result, "backend", "") or "claude", reset_iso,
+                        )
+        except Exception as e:
+            logger.warning("event=quota_refusal_record_failed err=%s", e)
+        return "usage_limit"
+
     def _record_quota_pause(self, task: "Task", result: TaskResult) -> None:
         """Record a Manager turn's quota death as a durable Case pause.
 
@@ -7626,7 +7653,7 @@ created: {task.created}
         if subtype == "error_max_turns":
             return "max_turns"
         if api_error_status == 429:
-            return "usage_limit"
+            return self._usage_limit_class(result)
         if api_error_status is not None and api_error_status >= 500:
             return "upstream_error"
         if self._extract_rate_limit_info(result) is not None:
@@ -7635,7 +7662,7 @@ created: {task.created}
             # 429 above reports, so it must land in the same class. Splitting it
             # off as "rate_limit" would give the identical failure two retry
             # policies and hide half the quota pauses from the resume path.
-            return "usage_limit"
+            return self._usage_limit_class(result)
         text = self._failure_text(result)
         text_lower = text.lower()
         # SUBSCRIPTION-WINDOW wording ("you've hit your limit", "session limit",

@@ -15,7 +15,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -28,6 +28,30 @@ _SNAPSHOT_STALE_AFTER = timedelta(minutes=15)
 #: exactly on the boundary still reports the closing window (observed live —
 #: 17:20:00Z reset, first clean reading at 17:20:30Z).
 _EXHAUSTED_SETTLE_SEC = 30
+
+#: Grace added ON TOP of the observer's own next scheduled probe time when
+#: deciding whether an observation counts as stale. The adaptive cadence
+#: deliberately sleeps up to ``observe_max_interval_sec`` until just before
+#: the next known reset (A78 §2), so a healthy reading is EXPECTED to be hours
+#: old — labelling that "stale" told every consumer the instrument was blind
+#: when it was merely operating on schedule. An observation is stale only once
+#: the poll that should have replaced it is overdue.
+_STALE_SCHEDULE_GRACE = timedelta(minutes=5)
+
+#: ``reset_boundary_evidence`` bounding (A78 §4): the API response carries the
+#: most recent boundaries only; full history stays in the store.
+_EVIDENCE_LIMIT = 12
+_EVIDENCE_SCAN_MAX_ROWS = 5000
+#: The provider reports ``reset_at`` with sub-second jitter (live:
+#: 21:59:59.523–22:00:00.48 all naming ONE weekly boundary), which used to
+#: split a single window into dozens of evidence entries. Boundaries closer
+#: than this are one window.
+_BOUNDARY_JITTER = timedelta(seconds=2)
+
+#: Retention default (A78 §4): redundant confirmation snapshots older than this
+#: are pruned; the FIRST sighting of each boundary is always kept (it is the
+#: anchored-window evidence), as is everything newer than the cutoff.
+_SNAPSHOT_RETENTION_DAYS = 14
 
 
 class WindowSemantics(Enum):
@@ -44,6 +68,10 @@ class TelemetryQuality(Enum):
     UNAVAILABLE = "unavailable"
     MALFORMED = "malformed"
     UNSUPPORTED = "unsupported"
+    #: A refusal the PROVIDER handed us (429 / rate_limit_event with its own
+    #: ``resetsAt``) recorded as telemetry — event-derived, not observed by a
+    #: poll. Exact at ``observed_at``, carries ``limit_reached`` (A78 §3).
+    EVENT_DERIVED = "event_derived"
 
 
 @dataclass(frozen=True)
@@ -78,6 +106,11 @@ class QuotaSnapshot:
     window_duration_seconds: Optional[int] = None
     raw_status: str = ""
     unavailable_reason: str = ""
+    #: The adapter's live "is an interactive user session active right now"
+    #: reading at observation time ("true"/"false"/None=unknown). Threaded
+    #: through to the read model so ``automation_ready`` is reachable (A78 §1)
+    #: instead of dying as a local literal in ``_window_state_for``.
+    active_session_state: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +195,7 @@ def _snapshot_identity(snapshot: QuotaSnapshot) -> str:
         snapshot.telemetry_quality.value,
         snapshot.raw_status,
         snapshot.unavailable_reason,
+        snapshot.active_session_state or "",
     ]
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
@@ -213,7 +247,7 @@ def _coerce_reset_at(value: Any) -> Optional[datetime]:
     return None
 
 
-_CURRENT_VERSION = 1
+_CURRENT_VERSION = 2
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -257,6 +291,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     window_duration_seconds INTEGER,
     raw_status TEXT NOT NULL DEFAULT '',
     unavailable_reason TEXT NOT NULL DEFAULT '',
+    active_session_state TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -323,7 +358,17 @@ class QuotaWindowStore:
     def _init_schema(self) -> None:
         conn = self._conn()
         conn.executescript(_DDL)
+        # v1 -> v2: ``active_session_state`` on snapshots (A78 §1). Existing
+        # stores get the column via a guarded ALTER inside the write
+        # transaction (concurrent openers race the check, not the ALTER);
+        # fresh stores already have it from _DDL.
         with self._write() as tx:
+            if not any(row[1] == "active_session_state" for row in tx.execute("PRAGMA table_info(snapshots)").fetchall()):
+                try:
+                    tx.execute("ALTER TABLE snapshots ADD COLUMN active_session_state TEXT")
+                except sqlite3.OperationalError as exc:  # lost the race — column is there
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
             row = tx.execute("SELECT MAX(version) FROM schema_version").fetchone()
             current = row[0] or 0
             if current < _CURRENT_VERSION:
@@ -402,6 +447,7 @@ class QuotaWindowStore:
             window_duration_seconds=snapshot.window_duration_seconds,
             raw_status=snapshot.raw_status,
             unavailable_reason=snapshot.unavailable_reason,
+            active_session_state=snapshot.active_session_state,
         )
         snapshot_id = _snapshot_identity(snap)
         with self._write() as conn:
@@ -410,8 +456,9 @@ class QuotaWindowStore:
                 INSERT OR IGNORE INTO snapshots(
                     snapshot_id, provider, principal_hash, bucket_id, observed_at,
                     telemetry_quality, used_percent, reset_at, limit_reached,
-                    window_duration_seconds, raw_status, unavailable_reason, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    window_duration_seconds, raw_status, unavailable_reason,
+                    active_session_state, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot_id,
@@ -426,10 +473,107 @@ class QuotaWindowStore:
                     snap.window_duration_seconds,
                     snap.raw_status,
                     snap.unavailable_reason,
+                    snap.active_session_state,
                     utc_iso(utc_now()),
                 ),
             )
             return cur.rowcount > 0
+
+    def record_refusal_snapshot(
+        self,
+        *,
+        provider: str,
+        reset_at: Optional[datetime],
+        observed_at: Optional[datetime] = None,
+    ) -> bool:
+        """Record a provider refusal (429 / rate_limit_event) as an event-derived
+        snapshot — the exact window boundary at the instant it was crossed, no
+        polling and no cost (A78 §3).
+
+        The refusal arrives without a quota-identity, so attribution reuses the
+        principal(s) already known for ``provider`` that own a five_hour-style
+        account bucket; an unattributable refusal records a
+        ``quota.refusal_unattributed`` event instead of inventing identity.
+        Idempotent per boundary: a repeat refusal naming the same reset instant
+        does not write a second row. Returns True iff a snapshot was stored.
+        """
+        if reset_at is None:
+            return False
+        when = normalize_utc(observed_at) or utc_now()
+        keys = [
+            (str(row.get("provider") or ""), str(row.get("principal_hash") or ""), str(row.get("bucket_id") or ""))
+            for row in self.latest_snapshots()
+        ]
+        targets = [k for k in keys if k[0] == provider and "five_hour" in k[2]]
+        if not targets:
+            self.add_event(
+                "quota.refusal_unattributed",
+                provider=provider,
+                reason="no_known_five_hour_principal",
+                payload={"reset_at": utc_iso(reset_at)},
+            )
+            return False
+        stored = False
+        for prov, principal_hash, bucket_id in targets:
+            latest = self.latest_snapshot(prov, principal_hash, bucket_id)
+            latest_reset = normalize_utc(latest.get("reset_at")) if latest else None
+            if (
+                latest is not None
+                and latest.get("telemetry_quality") == TelemetryQuality.EVENT_DERIVED.value
+                and latest_reset is not None
+                and abs((latest_reset - reset_at).total_seconds()) <= _BOUNDARY_JITTER.total_seconds()
+            ):
+                continue  # same boundary already learned from a prior refusal
+            stored = self.insert_snapshot(
+                QuotaSnapshot(
+                    provider=prov,
+                    principal_hash=principal_hash,
+                    bucket_id=bucket_id,
+                    observed_at=when,
+                    telemetry_quality=TelemetryQuality.EVENT_DERIVED,
+                    used_percent=None,
+                    reset_at=reset_at,
+                    limit_reached=True,
+                    raw_status="rate_limit_event",
+                )
+            ) or stored
+        if stored:
+            self.add_event(
+                "quota.refusal_recorded",
+                provider=provider,
+                reason="rate_limit_event",
+                payload={"reset_at": utc_iso(reset_at)},
+            )
+        return stored
+
+    def prune_snapshots(self, *, retention_days: int = _SNAPSHOT_RETENTION_DAYS, now: Optional[datetime] = None) -> int:
+        """Bounded history (A78 §4): delete redundant confirmation snapshots
+        older than the cutoff while ALWAYS keeping (a) everything newer than
+        the cutoff and (b) the FIRST sighting of each window boundary — that
+        row is the anchored-window evidence; losing it would falsify
+        classification. ``retention_days <= 0`` disables pruning entirely.
+        Returns the number of rows removed."""
+        if retention_days is None or int(retention_days) <= 0:
+            return 0
+        cutoff = utc_iso((normalize_utc(now) or utc_now()) - timedelta(days=int(retention_days)))
+        with self._write() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM snapshots WHERE observed_at < ?
+                  AND EXISTS (
+                    SELECT 1 FROM snapshots earlier
+                    WHERE earlier.provider = snapshots.provider
+                      AND earlier.principal_hash = snapshots.principal_hash
+                      AND earlier.bucket_id = snapshots.bucket_id
+                      AND earlier.reset_at IS snapshots.reset_at
+                      AND (earlier.observed_at < snapshots.observed_at
+                           OR (earlier.observed_at = snapshots.observed_at
+                               AND earlier.created_at < snapshots.created_at))
+                  )
+                """,
+                (cutoff,),
+            )
+            return cur.rowcount
 
     def set_adapter_status(self, status: QuotaAdapterStatus) -> None:
         checked = utc_iso(status.last_checked_at or utc_now())
@@ -535,12 +679,20 @@ class QuotaWindowStore:
                 rows.append(row)
         return rows
 
-    def status(self, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    def status(
+        self,
+        *,
+        now: Optional[datetime] = None,
+        next_observe_due_at: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
         conn = self._conn()
         adapters = [dict(r) for r in conn.execute("SELECT * FROM adapter_status ORDER BY provider").fetchall()]
         buckets = [dict(r) for r in conn.execute("SELECT * FROM buckets ORDER BY provider, bucket_id").fetchall()]
         snapshots = self.latest_snapshots()
-        window_states = _build_window_states(conn, buckets=buckets, snapshots=snapshots, now=now or utc_now())
+        window_states = _build_window_states(
+            conn, buckets=buckets, snapshots=snapshots, now=now or utc_now(),
+            next_observe_due_at=next_observe_due_at,
+        )
         return {"adapters": adapters, "buckets": buckets, "latest_snapshots": snapshots, "window_states": window_states}
 
 
@@ -549,49 +701,89 @@ def _row_key(row: dict) -> tuple[str, str, str]:
 
 
 def _reset_history(conn: sqlite3.Connection, *, provider: str, principal_hash: str, bucket_id: str, reset_at: str | None) -> dict:
-    rows = conn.execute(
+    """Boundary history for ONE bucket, bounded for the API (A78 §4).
+
+    The store keeps everything; the read model must not ship all of it. This
+    scans only the most recent ``_EVIDENCE_SCAN_MAX_ROWS`` rows (the bucket's
+    index makes that a range scan), clusters boundaries whose instants sit
+    within ``_BOUNDARY_JITTER`` of each other — the provider reports
+    ``reset_at`` with sub-second drift, which used to split ONE window into
+    dozens of evidence entries — and returns at most the
+    ``_EVIDENCE_LIMIT`` most recent clusters. Counts are exact for what was
+    scanned; when the scan hit its cap the older tail is summarised honestly
+    in ``history_truncated`` instead of being silently dropped.
+    """
+    recent = conn.execute(
         """
-        SELECT reset_at, observed_at, used_percent
-        FROM snapshots
-        WHERE provider = ?
-          AND principal_hash = ?
-          AND bucket_id = ?
-          AND reset_at IS NOT NULL
-        ORDER BY observed_at ASC, created_at ASC
+        SELECT reset_at, observed_at, used_percent FROM (
+            SELECT reset_at, observed_at, used_percent
+            FROM snapshots
+            WHERE provider = ? AND principal_hash = ? AND bucket_id = ?
+              AND reset_at IS NOT NULL
+            ORDER BY observed_at DESC, created_at DESC
+            LIMIT ?
+        ) ORDER BY observed_at ASC, used_percent ASC
         """,
-        (provider, principal_hash, bucket_id),
+        (provider, principal_hash, bucket_id, _EVIDENCE_SCAN_MAX_ROWS),
     ).fetchall()
-    reset_windows: dict[str, dict] = {}
-    for row in rows:
-        key = str(row["reset_at"])
-        item = reset_windows.setdefault(
-            key,
-            {
-                "reset_at": key,
-                "first_seen_at": row["observed_at"],
-                "last_seen_at": row["observed_at"],
-                "first_used_percent": row["used_percent"],
-                "last_used_percent": row["used_percent"],
-            },
-        )
-        item["last_seen_at"] = row["observed_at"]
-        item["last_used_percent"] = row["used_percent"]
-    history = sorted(reset_windows.values(), key=lambda item: (str(item["last_seen_at"]), str(item["reset_at"])), reverse=True)
+    scanned_total = conn.execute(
+        "SELECT COUNT(*) FROM snapshots WHERE provider = ? AND principal_hash = ? AND bucket_id = ? AND reset_at IS NOT NULL",
+        (provider, principal_hash, bucket_id),
+    ).fetchone()[0]
+
+    # Cluster ascending by boundary instant; a gap > jitter starts a new window.
+    clusters: list[dict] = []
+    for row in recent:
+        instant = normalize_utc(row["reset_at"])
+        if instant is None:
+            continue
+        if clusters and (instant - clusters[-1]["_max_instant"]) <= _BOUNDARY_JITTER:
+            cluster = clusters[-1]
+            cluster["_max_instant"] = max(cluster["_max_instant"], instant)
+            cluster["last_seen_at"] = row["observed_at"]
+            cluster["last_used_percent"] = row["used_percent"]
+            continue
+        clusters.append({
+            "_max_instant": instant,
+            "reset_at": utc_iso(instant),
+            "first_seen_at": row["observed_at"],
+            "last_seen_at": row["observed_at"],
+            "first_used_percent": row["used_percent"],
+            "last_used_percent": row["used_percent"],
+        })
+
     current_since = None
-    for item in history:
-        if item["reset_at"] == reset_at:
-            current_since = item["first_seen_at"]
-            break
-    observed_count = len(history)
+    current_instant = normalize_utc(reset_at)
+    if current_instant is not None:
+        for cluster in clusters:
+            canonical = normalize_utc(cluster["reset_at"])
+            if canonical is not None and abs((canonical - current_instant).total_seconds()) <= _BOUNDARY_JITTER.total_seconds():
+                current_since = cluster["first_seen_at"]
+                break
+
+    history = sorted(clusters, key=lambda c: (str(c["last_seen_at"]), str(c["reset_at"])), reverse=True)
+    evidence_truncated = len(history) > _EVIDENCE_LIMIT or len(recent) >= _EVIDENCE_SCAN_MAX_ROWS
     return {
-        "observed_reset_count": observed_count,
+        "observed_reset_count": len(clusters),
         "current_reset_observed_since": current_since,
-        "last_reset_change_at": history[0]["first_seen_at"] if observed_count > 1 else None,
-        "reset_boundary_evidence": history,
+        "last_reset_change_at": history[0]["first_seen_at"] if len(history) > 1 else None,
+        "reset_boundary_evidence": [
+            {k: item[k] for k in ("reset_at", "first_seen_at", "last_seen_at", "first_used_percent", "last_used_percent")}
+            for item in history[:_EVIDENCE_LIMIT]
+        ],
+        "history_rows_scanned": scanned_total,
+        "evidence_truncated": evidence_truncated,
     }
 
 
-def _window_state_for(bucket: Optional[dict], snapshot: dict, *, now: datetime, history: dict) -> dict:
+def _window_state_for(
+    bucket: Optional[dict],
+    snapshot: dict,
+    *,
+    now: datetime,
+    history: dict,
+    next_observe_due_at: Optional[datetime] = None,
+) -> dict:
     provider = str(snapshot.get("provider") or (bucket.get("provider") if bucket else ""))
     principal_hash = str(snapshot.get("principal_hash") or (bucket.get("principal_hash") if bucket else ""))
     bucket_id = str(snapshot.get("bucket_id") or (bucket.get("bucket_id") if bucket else ""))
@@ -602,10 +794,35 @@ def _window_state_for(bucket: Optional[dict], snapshot: dict, *, now: datetime, 
     used_percent = snapshot.get("used_percent")
     reason = str(snapshot.get("unavailable_reason") or "")
     duration = snapshot.get("window_duration_seconds") or (bucket.get("window_duration_seconds") if bucket else None)
-    active_session_state = "unknown"
+    # Threaded from the adapter at observation time (A78 §1); absent on old
+    # rows and error snapshots ⇒ "unknown", which blocks automation honestly.
+    active_session_state = str(snapshot.get("active_session_state") or "unknown")
     blockers: list[str] = []
 
-    observation_stale = observed_at is not None and now - observed_at > _SNAPSHOT_STALE_AFTER
+    age = (now - observed_at) if observed_at is not None else None
+    limit_reached = bool(snapshot.get("limit_reached"))
+    # Staleness that respects the observer's OWN contract (A78 §2): the
+    # adaptive cadence deliberately sleeps until just before the next known
+    # reset, so a reading stays current until its REPLACEMENT is due (+grace)
+    # — not merely older than a fixed 15 minutes. And a SPENT reading remains
+    # meaningful until its own reset instant passes: "the window is exhausted
+    # until T" does not decay into "unknown" with age.
+    stale_after = _SNAPSHOT_STALE_AFTER
+    if next_observe_due_at is not None and observed_at is not None:
+        # Freshness ends when the scheduled replacement is overdue, never at
+        # "now": an overdue poll means stale, not an ever-extending lease.
+        scheduled_end = next_observe_due_at + _STALE_SCHEDULE_GRACE
+        stale_after = max(stale_after, scheduled_end - observed_at)
+        observation_stale = now > scheduled_end and age > _SNAPSHOT_STALE_AFTER
+    else:
+        observation_stale = age is not None and age > stale_after
+    spent_until_reset = (
+        limit_reached
+        and reset_at is not None
+        and reset_at > now
+    )
+    if spent_until_reset:
+        observation_stale = False
 
     if quality == TelemetryQuality.UNSUPPORTED.value:
         telemetry_state = "unsupported"
@@ -667,10 +884,17 @@ def _window_state_for(bucket: Optional[dict], snapshot: dict, *, now: datetime, 
         "bucket_id": bucket_id,
         "telemetry_state": telemetry_state,
         "telemetry_quality": quality,
+        # Provenance: an EVENT_DERIVED row is the provider's own refusal, not
+        # an observer poll — consumers weighting evidence should know.
+        "telemetry_source": "event_derived" if quality == TelemetryQuality.EVENT_DERIVED.value else "observed",
         "window_semantics": semantics,
         "classification_status": classification_status,
         "used_percent": used_percent,
+        "limit_reached": bool(limit_reached),
         "observed_at": utc_iso(observed_at) or None,
+        "observed_age_sec": int(age.total_seconds()) if age is not None else None,
+        "stale_after_sec": int(stale_after.total_seconds()),
+        "next_observe_due_at": utc_iso(next_observe_due_at) or None,
         "window_start_at": window_start_inferred_at,
         "window_start_inferred_at": window_start_inferred_at,
         "window_start_source": "inferred_from_reset_duration" if window_start_inferred_at else "unknown",
@@ -697,7 +921,14 @@ def _classification_status(*, semantics: str, observed_reset_count: int) -> str:
     return "unknown"
 
 
-def _build_window_states(conn: sqlite3.Connection, *, buckets: list[dict], snapshots: list[dict], now: datetime) -> list[dict]:
+def _build_window_states(
+    conn: sqlite3.Connection,
+    *,
+    buckets: list[dict],
+    snapshots: list[dict],
+    now: datetime,
+    next_observe_due_at: Optional[datetime] = None,
+) -> list[dict]:
     bucket_by_key = {_row_key(bucket): bucket for bucket in buckets}
     states: list[dict] = []
     for snapshot in snapshots:
@@ -711,7 +942,9 @@ def _build_window_states(conn: sqlite3.Connection, *, buckets: list[dict], snaps
             bucket_id=key[2],
             reset_at=str(reset_at) if reset_at else None,
         )
-        states.append(_window_state_for(bucket, snapshot, now=now, history=history))
+        states.append(_window_state_for(
+            bucket, snapshot, now=now, history=history, next_observe_due_at=next_observe_due_at,
+        ))
     return states
 
 
@@ -1106,6 +1339,7 @@ class QuotaWindowCoordinator:
         expected_schema_versions: Optional[Dict[str, str]] = None,
         now: Callable[[], datetime] = utc_now,
         event_handlers: Optional[Iterable[QuotaEventHandler]] = None,
+        snapshot_retention_days: int = _SNAPSHOT_RETENTION_DAYS,
     ) -> None:
         self.store = store
         self.adapters = list(adapters)
@@ -1114,10 +1348,12 @@ class QuotaWindowCoordinator:
         self.observe_max_interval_sec = max(self.observe_interval_sec, int(observe_max_interval_sec))
         self.reset_probe_lead_sec = max(0, int(reset_probe_lead_sec))
         self.expected_schema_versions = expected_schema_versions or {}
+        self.snapshot_retention_days = int(snapshot_retention_days)
         self._now = now
         self._event_handlers = list(event_handlers or [])
         self._task: Optional[asyncio.Task] = None
         self._last_now: Optional[datetime] = None
+        self._last_prune_day: Optional[str] = None
 
     async def start(self) -> None:
         if not self.enabled:
@@ -1136,7 +1372,20 @@ class QuotaWindowCoordinator:
         self._task = None
 
     def read_status(self) -> Dict[str, Any]:
-        data = self.store.status(now=self._now())
+        now = self._now()
+        # The schedule the observer is actually keeping is part of honest
+        # staleness (A78 §2): a reading is not "blind" while the next poll is
+        # still in the future. Reuse ONE latest_snapshots fetch for both the
+        # delay computation and the read model — status() on a full store is
+        # the expensive call; paying it twice per request would be waste.
+        try:
+            delay = self.next_observe_delay_sec()
+        except Exception:
+            delay = self.observe_interval_sec
+        data = self.store.status(
+            now=now,
+            next_observe_due_at=(normalize_utc(now) or utc_now()) + timedelta(seconds=delay),
+        )
         data["enabled"] = self.enabled
         data["mode"] = "observe_only"
         return data
@@ -1150,15 +1399,31 @@ class QuotaWindowCoordinator:
         try:
             while True:
                 await self.observe_once()
+                self._prune_once_daily()
                 await asyncio.sleep(self.next_observe_delay_sec())
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.warning("quota_observe_loop_stopped err=%s", e)
 
-    def next_observe_delay_sec(self) -> int:
+    def _prune_once_daily(self) -> None:
+        """Bounded history (A78 §4): prune redundant old snapshots at most once
+        per UTC day, best-effort — a failed prune must never kill the loop."""
+        try:
+            today = utc_iso(self._now())[:10]
+            if self._last_prune_day == today or self.snapshot_retention_days <= 0:
+                return
+            pruned = self.store.prune_snapshots(retention_days=self.snapshot_retention_days)
+            self._last_prune_day = today
+            if pruned:
+                logger.info("event=quota_snapshots_pruned rows=%d retention_days=%d", pruned, self.snapshot_retention_days)
+        except Exception as e:
+            logger.warning("event=quota_snapshot_prune_failed err=%s", e)
+
+    def next_observe_delay_sec(self, *, snapshots: Optional[List[Dict[str, Any]]] = None) -> int:
         now = normalize_utc(self._now()) or utc_now()
-        snapshots = self.store.status().get("latest_snapshots", [])
+        if snapshots is None:
+            snapshots = self.store.status().get("latest_snapshots", [])
         known_reset_delays: list[int] = []
         for row in snapshots:
             if row.get("limit_reached") == 1:
@@ -1268,6 +1533,11 @@ class QuotaWindowCoordinator:
                     unavailable_reason=e.reason,
                 )
             snapshot = self._retain_previous_success_as_stale(snapshot)
+            if snapshot.active_session_state is None:
+                # Thread the adapter's live reading into the stored observation
+                # (A78 §1) — event payloads alone made automation_ready
+                # structurally unreachable.
+                snapshot = replace(snapshot, active_session_state=active_label)
             inserted = self.store.insert_snapshot(snapshot)
             event_name = "quota.observed" if inserted else "quota.duplicate_snapshot"
             self._record_event(
@@ -1316,6 +1586,7 @@ class QuotaWindowCoordinator:
             window_duration_seconds=previous.get("window_duration_seconds"),
             raw_status=str(previous.get("raw_status") or snapshot.raw_status),
             unavailable_reason=f"claude_get_usage_stale_after_unavailable:{reason}",
+            active_session_state=previous.get("active_session_state"),
         )
 
     def _record_event(self, name: str, *, provider: str = "", principal_hash: str = "", bucket_id: str = "", reason: str = "", payload: Optional[dict] = None) -> None:
@@ -1376,6 +1647,7 @@ def build_quota_coordinator_from_config(
     interval = int(getattr(quota_cfg, "observe_interval_sec", 300))
     max_interval = int(getattr(quota_cfg, "observe_max_interval_sec", 21600))
     lead = int(getattr(quota_cfg, "reset_probe_lead_sec", 900))
+    retention = int(getattr(quota_cfg, "snapshot_retention_days", _SNAPSHOT_RETENTION_DAYS))
     return QuotaWindowCoordinator(
         store=QuotaWindowStore(db_path),
         adapters=build_default_quota_adapters(),
@@ -1384,4 +1656,5 @@ def build_quota_coordinator_from_config(
         observe_max_interval_sec=max_interval,
         reset_probe_lead_sec=lead,
         event_handlers=event_handlers,
+        snapshot_retention_days=retention,
     )
