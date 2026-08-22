@@ -17,6 +17,7 @@ Run locally (no Tailscale required):
 """
 
 import asyncio
+import faulthandler
 import json
 import logging
 import os
@@ -1683,11 +1684,30 @@ def main() -> None:
     _cfg = WorkerConfig.from_env()
     init_logging(node_id=_cfg.node_id, level="INFO")
 
+    # Diagnosability: the worker has died silently (exit code 1, no traceback)
+    # while running long turns — see docs/INCIDENTS/HORSE_WORKER_RESTARTS.md.
+    # faulthandler dumps a native-level traceback to stderr (→ PM2 error log)
+    # even for hard faults the normal Python excepthook would miss.
+    try:
+        faulthandler.enable()
+    except (ValueError, RuntimeError):  # stderr not a real file (rare)
+        pass
+
     agent = WorkerAgent()
     try:
         asyncio.run(agent.run())
     except KeyboardInterrupt:
         pass
+    except BaseException:
+        # Never let the daemon exit without leaving a trace of WHY. This turns a
+        # silent PM2 auto-restart into a diagnosable event on the next occurrence.
+        logger.exception("event=worker_fatal_exit node_id=%s", _cfg.node_id)
+        for _h in logging.getLogger().handlers:
+            try:
+                _h.flush()
+            except Exception:
+                pass
+        raise
 
 
 if __name__ == "__main__":
