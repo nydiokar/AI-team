@@ -9,9 +9,13 @@
  * the Work substrate and links OUT to sessions/artifacts for runtime detail.
  */
 import type { ReactNode } from "react";
+import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ChevronLeft, AlertCircle } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { ChevronLeft, AlertCircle, RefreshCw } from "lucide-react";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
+import { ConnectionBanner } from "../components/shell/ConnectionBanner";
+import { SystemAlertBanner } from "../components/shell/SystemAlertBanner";
 import { Button } from "../components/ui/Button";
 import { ToneBadge } from "../components/work/ToneBadge";
 import { CaseLineage } from "../components/work/CaseLineage";
@@ -29,6 +33,8 @@ import {
 } from "../hooks/useWork";
 import { bucketMeta } from "../lib/workPresentation";
 import { ApiError } from "../transport/apiClient";
+import { invalidateRouteTarget } from "../lib/liveInvalidation";
+import { cn } from "../lib/cn";
 
 function Section({ title, count, children }: {
   title: string;
@@ -53,6 +59,9 @@ function Section({ title, count, children }: {
 export function WorkDetailScreen() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
   const detail = useWorkDetail(id);
   const graph = useWorkGraph(id);
   const timeline = useWorkTimeline(id);
@@ -72,9 +81,33 @@ export function WorkDetailScreen() {
     </button>
   );
 
+  const refreshNow = async () => {
+    if (!id || refreshing) return;
+    setRefreshing(true);
+    setRefreshMessage("Refreshing…");
+    try {
+      invalidateRouteTarget(queryClient, `/work/${encodeURIComponent(id)}`);
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ["work-detail", id] }),
+        queryClient.refetchQueries({ queryKey: ["work-timeline", id] }),
+        queryClient.refetchQueries({ queryKey: ["work-graph", id] }),
+        queryClient.refetchQueries({ queryKey: ["work-roster", id] }),
+        queryClient.refetchQueries({ queryKey: ["case-resume-state", id] }),
+      ]);
+      setRefreshMessage("Case refreshed.");
+    } catch (e) {
+      setRefreshMessage(`Refresh failed: ${String((e as Error)?.message ?? "unknown")}`);
+    } finally {
+      setRefreshing(false);
+      window.setTimeout(() => setRefreshMessage(null), 3500);
+    }
+  };
+
   if (notFound) {
     return (
       <div className="desktop-detail mx-auto flex h-full max-w-[480px] flex-col bg-base">
+        <ConnectionBanner />
+        <SystemAlertBanner />
         <CompactTopBar title="Case" left={back} />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
           <AlertCircle className="size-8 text-ink-muted" />
@@ -118,11 +151,29 @@ export function WorkDetailScreen() {
 
   return (
     <div className="desktop-detail mx-auto flex h-full max-w-[480px] flex-col bg-base">
+      <ConnectionBanner />
+      <SystemAlertBanner />
       <CompactTopBar
         title={summary?.title ?? "Case"}
         subtitle={summary?.currentStage ?? (detail.isLoading ? "Loading…" : "no stage")}
         left={back}
+        right={
+          <button
+            onClick={() => void refreshNow()}
+            disabled={refreshing}
+            className="flex size-8 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2 disabled:opacity-50"
+            aria-label="Refresh case"
+            title="Refresh case"
+          >
+            <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
+          </button>
+        }
       />
+      {refreshMessage && (
+        <div className="border-b border-hairline bg-surface-1 px-4 py-2 text-[12px] text-ink-soft">
+          {refreshMessage}
+        </div>
+      )}
 
       <main className="flex-1 overflow-y-auto overscroll-contain pb-10">
         {detail.isLoading && !summary && (

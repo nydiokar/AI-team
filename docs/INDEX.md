@@ -92,6 +92,7 @@ v0.6 automation; the file said the operator may delete it). Both existed only in
 | [`SESSION_STATE_TIMELINE_ARCHITECTURE_REVIEW.md`](SESSION_STATE_TIMELINE_ARCHITECTURE_REVIEW.md) | 🟢 | Adversarial review of Web UI session/job/task/artifact/telemetry state honesty (2026-07-01). |
 | [`SESSION_STATE_TIMELINE_EXECUTION_PLAN.md`](SESSION_STATE_TIMELINE_EXECUTION_PLAN.md) | 🟢 | Implementation-ready roadmap that followed the review above. Cross-check `.ai/CONTEXT.md` Shipped Ledger for what's actually landed. |
 | [`LLM_TURN_OBSERVABILITY_SPEC.md`](LLM_TURN_OBSERVABILITY_SPEC.md) | 🟢 | Turn-observability/usage-accounting spec (M1–M4). M1/M2/M3 shipped per `.ai/CONTEXT.md`; M4 (OpenCode) deferred. |
+| [`SESSION_CACHE_HEARTBEAT_SPEC.md`](SESSION_CACHE_HEARTBEAT_SPEC.md) | 🔵 | Proposed session-keyed Claude Code prompt-cache heartbeat for durable long waits; default-OFF, bounded paid automation. |
 | [`DEFERRED.md`](DEFERRED.md) | 🟢 | Web UI/Cockpit items deliberately not built, with why. |
 
 ## Runbooks — operational procedures

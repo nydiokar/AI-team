@@ -7,12 +7,14 @@
  * shell + the first screen; the others fetch on navigation. A single Suspense
  * boundary covers both the outer detail routes and the shell's inner tabs.
  */
-import { Suspense, lazy } from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Suspense, lazy, useEffect } from "react";
+import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { MobileAppShell } from "./components/shell/MobileAppShell";
 import { TokenGate } from "./components/shell/TokenGate";
 import { useAuthStore } from "./stores/authStore";
 import { EventStreamProvider } from "./hooks/eventStreamContext";
+import { invalidateRouteTarget } from "./lib/liveInvalidation";
 
 const SessionsScreen = lazy(() =>
   import("./screens/SessionsScreen").then((m) => ({ default: m.SessionsScreen })),
@@ -43,6 +45,24 @@ function ScreenFallback() {
 
 export function App() {
   const hasToken = useAuthStore((s) => s.hasToken);
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: unknown; url?: unknown } | null;
+      if (!data || data.type !== "ai-team:notification-click") return;
+      if (typeof data.url !== "string" || !data.url.startsWith("/")) return;
+      const url = new URL(data.url, window.location.origin);
+      if (url.origin !== window.location.origin) return;
+      const target = `${url.pathname}${url.search}${url.hash}`;
+      navigate(target);
+      invalidateRouteTarget(queryClient, url.pathname);
+    };
+
+    navigator.serviceWorker?.addEventListener("message", onMessage);
+    return () => navigator.serviceWorker?.removeEventListener("message", onMessage);
+  }, [navigate, queryClient]);
 
   if (!hasToken) {
     return (

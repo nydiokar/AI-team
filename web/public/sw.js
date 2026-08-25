@@ -1,4 +1,4 @@
-const CACHE = "ai-team-shell-v5";
+const CACHE = "ai-team-shell-v6";
 const SHELL = ["/", "/index.html"];
 
 self.addEventListener("install", (e) => {
@@ -74,11 +74,14 @@ self.addEventListener("notificationclick", (e) => {
   e.notification.close();
   const target = (e.notification.data && e.notification.data.url) || "/";
   e.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
-      // Focus an existing tab if one is already open, else open a new one.
+    self.clients.matchAll({ type: "window" }).then((clients) => {
+      // Prefer handing the deep link to an already-running app. The React app
+      // performs in-SPA navigation and immediate query invalidation, so a tap
+      // does not wait for the next poll cycle before showing fresh state.
       for (const client of clients) {
         if ("focus" in client) {
-          client.navigate && client.navigate(target);
+          client.postMessage &&
+            client.postMessage({ type: "ai-team:notification-click", url: target });
           return client.focus();
         }
       }

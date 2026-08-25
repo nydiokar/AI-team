@@ -9,26 +9,43 @@ export function CompactTopBar({
   subtitle,
   left,
   right,
+  onTitleClick,
 }: {
   title: string;
   subtitle?: ReactNode;
   left?: ReactNode;
   right?: ReactNode;
+  onTitleClick?: () => void;
 }) {
+  const titleBlock = (
+    <>
+      <h1 className="truncate text-[15px] font-semibold tracking-tight text-ink">
+        {title}
+      </h1>
+      {subtitle && (
+        <p className="truncate text-xs text-ink-muted">{subtitle}</p>
+      )}
+    </>
+  );
+
   return (
     <header
       className="sticky top-0 z-20 flex items-center gap-3 border-b border-hairline bg-base/70 px-4 py-3 backdrop-blur-xl"
       style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}
     >
       {left}
-      <div className="min-w-0 flex-1">
-        <h1 className="truncate text-[15px] font-semibold tracking-tight text-ink">
-          {title}
-        </h1>
-        {subtitle && (
-          <p className="truncate text-xs text-ink-muted">{subtitle}</p>
-        )}
-      </div>
+      {onTitleClick ? (
+        <button
+          type="button"
+          onClick={onTitleClick}
+          className="min-w-0 flex-1 text-left"
+          aria-label="Open session info"
+        >
+          {titleBlock}
+        </button>
+      ) : (
+        <div className="min-w-0 flex-1">{titleBlock}</div>
+      )}
       {right}
     </header>
   );

@@ -3,9 +3,9 @@ import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ChevronLeft,
   MoreVertical,
-  Square,
   Archive,
   RotateCcw,
+  RefreshCw,
   Minimize2,
   Sliders,
   GitBranch,
@@ -25,7 +25,10 @@ import {
   X,
   Pin,
 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
+import { ConnectionBanner } from "../components/shell/ConnectionBanner";
+import { SystemAlertBanner } from "../components/shell/SystemAlertBanner";
 import { SessionStatusChip } from "../components/ui/StatusChip";
 import { SessionAffiliationLink } from "../components/work/SessionAffiliationLabel";
 import { SessionTimeline, userAnchorId } from "../components/timeline/SessionTimeline";
@@ -48,7 +51,6 @@ import { useSessionAffiliations } from "../hooks/useWork";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
 import { useTaskActivity } from "../hooks/useTaskActivity";
 import {
-  useStopSession,
   useCloseSession,
   useRestoreSession,
   useCompactSession,
@@ -56,6 +58,7 @@ import {
   useKeepSession,
 } from "../hooks/useSessionActions";
 import { cn } from "../lib/cn";
+import { invalidateRouteTarget } from "../lib/liveInvalidation";
 import { clockLabel } from "../lib/time";
 import {
   activityKindLabel,
@@ -65,18 +68,18 @@ import {
 import type { Artifact, RemoteFile, SessionActivityItem } from "../domain/models";
 import type { RawJob } from "../transport/rawApi";
 
-type SessionTab = "chat" | "files" | "info";
+type SessionTab = "chat" | "info";
 
 function projectName(p: string): string {
   const parts = p.split(/[/\\]/).filter(Boolean);
   return parts[parts.length - 1] || p;
 }
 
-/** Display the running model — the explicit one, or which model is the default. */
+/** Display the concrete model the session uses; avoid UI-only "default" labels. */
 function modelLabel(model: string | null, defaultModel: string | null): string {
   if (model) return model;
-  if (defaultModel) return `${defaultModel} (default)`;
-  return "(backend default)";
+  if (defaultModel) return defaultModel;
+  return "(model unavailable)";
 }
 
 // ── Session-scoped Files tab ──────────────────────────────────────────────────
@@ -428,16 +431,15 @@ function SessionCostPanel({ sessionId }: { sessionId: string }) {
 
 function SessionInfoTab({
   sessionId,
-  onOpenFiles,
 }: {
   sessionId: string;
-  onOpenFiles?: () => void;
 }) {
   const { data: sessions } = useSessions();
   const session = sessions?.find((s) => s.id === sessionId);
   const [dirs, setDirs] = useState<string[] | null>(null);
   const [dirsPath, setDirsPath] = useState<string>("");
   const [dirsExpanded, setDirsExpanded] = useState(false);
+  const [filesExpanded, setFilesExpanded] = useState(false);
   const inspect = useInspectSession();
   const { data: turns, isLoading: turnsLoading } = useSessionTurns(sessionId);
 
@@ -480,6 +482,10 @@ function SessionInfoTab({
 
   return (
     <div className="px-4 py-4 space-y-4">
+      <SessionCostPanel sessionId={sessionId} />
+
+      <SessionTurns turns={turns ?? []} loading={turnsLoading} />
+
       <div className="card-elev overflow-hidden rounded-xl divide-y divide-hairline">
         {rows.map(({ label, value }) => (
           <div key={label} className="flex items-start gap-3 px-4 py-3">
@@ -508,11 +514,21 @@ function SessionInfoTab({
         </div>
       </div>
 
-      <SessionCostPanel sessionId={sessionId} />
+      <div>
+        <button
+          onClick={() => setFilesExpanded((v) => !v)}
+          className="flex w-full items-center gap-1.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-ink-muted hover:text-ink-soft"
+          aria-expanded={filesExpanded}
+        >
+          <ChevronDown
+            className={cn("size-3.5 transition-transform", filesExpanded && "rotate-180")}
+          />
+          Files
+        </button>
+        {filesExpanded && <SessionFilesTab sessionId={sessionId} />}
+      </div>
 
-      <SessionTurns turns={turns ?? []} loading={turnsLoading} />
-
-      <SessionStateSequence sessionId={sessionId} onOpenFiles={onOpenFiles} />
+      <SessionStateSequence sessionId={sessionId} onOpenFiles={() => setFilesExpanded(true)} />
 
       <SessionJobsSection sessionId={sessionId} />
 
@@ -558,6 +574,7 @@ function SessionInfoTab({
 export function SessionDetailScreen() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { data, isLoading: sessionsLoading } = useSessions();
   const session = data?.find((s) => s.id === id);
   // Authoritative case membership for this session (Work substrate). undefined ⇒
@@ -594,7 +611,7 @@ export function SessionDetailScreen() {
   const [searchParams] = useSearchParams();
   const initialTab = ((): SessionTab => {
     const t = searchParams.get("tab");
-    return t === "files" || t === "info" ? t : "chat";
+    return t === "files" || t === "info" ? "info" : "chat";
   })();
   const [tab, setTab] = useState<SessionTab>(initialTab);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -604,6 +621,7 @@ export function SessionDetailScreen() {
   const [keepSheetOpen, setKeepSheetOpen] = useState(false);
   const [compactConfirm, setCompactConfirm] = useState(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   // [Session-fork] Message multi-select → fork. Select mode is entered DELIBERATELY
   // from the ⋮ menu ("Fork from messages"), NOT a long-press, so native text
@@ -728,7 +746,6 @@ export function SessionDetailScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 
-  const stop = useStopSession();
   const close = useCloseSession();
   const restore = useRestoreSession();
   const compact = useCompactSession();
@@ -749,6 +766,26 @@ export function SessionDetailScreen() {
   }, [statusBanner]);
 
   const act = (fn: () => void) => { setMenuOpen(false); fn(); };
+
+  const refreshNow = useCallback(async () => {
+    if (!id || refreshing) return;
+    setRefreshing(true);
+    setStatusBanner("Refreshing…");
+    try {
+      invalidateRouteTarget(queryClient, `/sessions/${encodeURIComponent(id)}`);
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ["sessions"] }),
+        queryClient.refetchQueries({ queryKey: ["session-messages", id] }),
+        queryClient.refetchQueries({ queryKey: ["session-activity", id] }),
+        queryClient.refetchQueries({ queryKey: ["session-turns", id] }),
+      ]);
+      setStatusBanner("Session refreshed.");
+    } catch (e) {
+      setStatusBanner(`Refresh failed: ${String((e as Error)?.message ?? "unknown")}`);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [id, queryClient, refreshing]);
 
   const proj = session ? projectName(session.workspace.path) : null;
 
@@ -774,17 +811,19 @@ export function SessionDetailScreen() {
 
   const TABS: { key: SessionTab; label: string; Icon: React.ElementType }[] = [
     { key: "chat", label: "Chat", Icon: MessagesSquare },
-    { key: "files", label: "Files", Icon: FolderGit2 },
     { key: "info", label: "Info", Icon: Info },
   ];
 
   return (
     <div className="desktop-detail mx-auto flex h-full max-w-[480px] flex-col bg-base">
+      <ConnectionBanner />
+      <SystemAlertBanner />
       {/* ── On non-chat tabs, header is outside scroll ── */}
       {tab !== "chat" && (
         <>
           <CompactTopBar
             title={proj ?? session?.id ?? id ?? "Session"}
+            onTitleClick={session ? () => setTab("info") : undefined}
             subtitle={
               session ? (
                 <span className="font-mono text-[11px] text-ink-muted">
@@ -807,6 +846,15 @@ export function SessionDetailScreen() {
             right={
               session ? (
                 <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => void refreshNow()}
+                    disabled={refreshing}
+                    className="flex size-8 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2 disabled:opacity-50"
+                    aria-label="Refresh session"
+                    title="Refresh session"
+                  >
+                    <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
+                  </button>
                   <SessionStatusChip state={session.opState} closed={closed} />
                   <div className="relative">
                     <button
@@ -835,14 +883,6 @@ export function SessionDetailScreen() {
                             </button>
                           ))}
                           <div className="my-1 border-t border-hairline" />
-                          {running && (
-                            <button
-                              onClick={() => act(() => id && stop.mutate(id))}
-                              className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-bad hover:bg-surface-2"
-                            >
-                              <Square className="size-4" /> Stop task
-                            </button>
-                          )}
                           {!closed && !running && (
                             <button
                               onClick={() => act(() => setCompactConfirm(true))}
@@ -901,6 +941,12 @@ export function SessionDetailScreen() {
               ) : null
             }
           />
+          {session && (
+            <div className="flex items-center gap-2 border-b border-hairline bg-base/60 px-4 py-2 backdrop-blur-xl">
+              <span className="text-[11px] text-ink-muted">Affiliation</span>
+              <SessionAffiliationLink affiliation={affiliation} />
+            </div>
+          )}
           <button
             onClick={() => setTab("chat")}
             className="flex items-center gap-2 border-b border-hairline bg-base/80 px-4 py-2.5 text-[12px] font-medium text-ink-soft backdrop-blur-sm hover:bg-surface-2"
@@ -928,6 +974,7 @@ export function SessionDetailScreen() {
           >
             <CompactTopBar
               title={proj ?? session?.id ?? id ?? "Session"}
+              onTitleClick={session ? () => setTab("info") : undefined}
               subtitle={
                 session ? (
                   <span className="font-mono text-[11px] text-ink-muted">
@@ -950,6 +997,15 @@ export function SessionDetailScreen() {
               right={
                 session ? (
                   <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => void refreshNow()}
+                      disabled={refreshing}
+                      className="flex size-8 items-center justify-center rounded-full text-ink-soft hover:bg-surface-2 disabled:opacity-50"
+                      aria-label="Refresh session"
+                      title="Refresh session"
+                    >
+                      <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
+                    </button>
                     <SessionStatusChip state={session.opState} closed={closed} />
                     <div className="relative">
                       <button
@@ -978,14 +1034,6 @@ export function SessionDetailScreen() {
                               </button>
                             ))}
                             <div className="my-1 border-t border-hairline" />
-                            {running && (
-                              <button
-                                onClick={() => act(() => id && stop.mutate(id))}
-                                className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-bad hover:bg-surface-2"
-                              >
-                                <Square className="size-4" /> Stop task
-                              </button>
-                            )}
                             {!closed && !running && (
                               <button
                                 onClick={() => act(() => setCompactConfirm(true))}
@@ -1060,16 +1108,13 @@ export function SessionDetailScreen() {
                 ) : null
               }
             />
+            {session && (
+              <div className="flex items-center gap-2 border-b border-hairline bg-base/60 px-4 py-2 backdrop-blur-xl">
+                <span className="text-[11px] text-ink-muted">Affiliation</span>
+                <SessionAffiliationLink affiliation={affiliation} />
+              </div>
+            )}
           </div>
-
-          {/* Authoritative Work affiliation: which case owns this session, and
-              in what role. Absent ⇒ standalone. Links out to the case. */}
-          {session && (
-            <div className="flex items-center gap-2 border-b border-hairline bg-base/40 px-4 py-2">
-              <span className="text-[11px] text-ink-muted">Affiliation</span>
-              <SessionAffiliationLink affiliation={affiliation} />
-            </div>
-          )}
 
           {/* [Session-fork] Lineage: this session was forked from another one. A
               pure session→session link (navigable thread), independent of Cases. */}
@@ -1236,15 +1281,9 @@ export function SessionDetailScreen() {
         </div>
       )}
 
-      {tab === "files" && id && (
-        <div className="flex-1 overflow-y-auto overscroll-contain">
-          <SessionFilesTab sessionId={id} />
-        </div>
-      )}
-
       {tab === "info" && id && (
         <div className="flex-1 overflow-y-auto overscroll-contain">
-          <SessionInfoTab sessionId={id} onOpenFiles={() => setTab("files")} />
+          <SessionInfoTab sessionId={id} />
         </div>
       )}
 
