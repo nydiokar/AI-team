@@ -26,6 +26,8 @@ import type { GatewayEvent } from "../domain/events";
 import type { RawEvent } from "../transport/rawApi";
 import { useAuthStore } from "../stores/authStore";
 import type { ConnectionState } from "../domain/status";
+import { collectLiveInvalidationTargets, invalidateLiveTargets } from "../lib/liveInvalidation";
+import { useQueryClient } from "@tanstack/react-query";
 
 /** Max events retained in the rolling client log (bounded memory). */
 const MAX_EVENTS = 500;
@@ -51,6 +53,7 @@ interface StreamState {
  */
 export function useEventStream(): StreamState {
   const token = useAuthStore((s) => s.token);
+  const queryClient = useQueryClient();
   const [events, setEvents] = useState<StampedEvent[]>([]);
   const [connection, setConnection] = useState<ConnectionState>("offline");
 
@@ -63,6 +66,7 @@ export function useEventStream(): StreamState {
   const ingest = useCallback((raws: RawEvent[]) => {
     // reconnect-replay dedupe (pure, tested in eventDedupe.test.ts)
     const novel = dedupeRawEvents(raws, seen.current);
+    invalidateLiveTargets(queryClient, collectLiveInvalidationTargets(novel));
     const fresh: StampedEvent[] = [];
     for (const raw of novel) {
       const adapted = adaptEvent(raw);
@@ -83,7 +87,7 @@ export function useEventStream(): StreamState {
       }
       return next;
     });
-  }, []);
+  }, [queryClient]);
 
   useEffect(() => {
     if (!token) {
