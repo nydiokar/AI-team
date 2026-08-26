@@ -481,12 +481,12 @@ def test_orchestrator_lists_local_and_remote_jobs(monkeypatch):
     jobs = orch.list_watched_jobs(limit=20)
 
     assert jobs["running"] == [
-        {"id": "local-running", "status": "running"},
-        {"id": "remote-running", "status": "running"},
+        {"id": "local-running", "status": "running", "orphaned": 0},
+        {"id": "remote-running", "status": "running", "orphaned": 0},
     ]
     assert jobs["recent"] == [
-        {"id": "local-done", "status": "done"},
-        {"id": "remote-done", "status": "done"},
+        {"id": "local-done", "status": "done", "orphaned": 0},
+        {"id": "remote-done", "status": "done", "orphaned": 0},
     ]
 
 
@@ -550,8 +550,6 @@ def test_orchestrator_filters_local_and_remote_jobs_by_unowned(monkeypatch):
     class _FakeClient:
         def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20):
             calls.append(("remote", status, session_id, ownership, limit))
-            if ownership != "unowned":
-                return []
             if status == "running":
                 return [{"id": "remote-unowned-running", "status": "running", "session_id": None}]
             return [{"id": "remote-unowned-done", "status": "done", "session_id": None}]
@@ -571,7 +569,48 @@ def test_orchestrator_filters_local_and_remote_jobs_by_unowned(monkeypatch):
         "local-unowned-done",
         "remote-unowned-done",
     ]
-    assert all(call[3] == "unowned" for call in calls)
+    assert all(call[3] == "unowned" for call in calls if call[0] == "local")
+    assert all(call[3] is None for call in calls if call[0] == "remote")
+
+
+def test_orchestrator_reconciles_remote_orphan_flag_against_gateway_sessions(monkeypatch):
+    import src.control.db as db_mod
+    from src.orchestrator import TaskOrchestrator
+
+    calls = []
+
+    class _FakeDB:
+        def list_jobs(self, status=None, session_id=None, ownership=None, limit=20):
+            calls.append(("local", status, session_id, ownership, limit))
+            return []
+
+        def get_session(self, session_id):
+            return {"session_id": session_id} if session_id == "sess_live" else None
+
+    class _FakeClient:
+        def list_jobs(self, node_id=None, status=None, session_id=None, ownership=None, limit=20):
+            calls.append(("remote", status, session_id, ownership, limit))
+            if status == "running":
+                return [{
+                    "id": "remote-attached",
+                    "status": "running",
+                    "session_id": "sess_live",
+                    "orphaned": 1,
+                }]
+            return []
+
+    monkeypatch.setattr(db_mod, "get_db", lambda: _FakeDB())
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch._remote_jobs_client = lambda: _FakeClient()
+    orch.session_store = {}
+
+    all_jobs = orch.list_watched_jobs(limit=10)
+    assert all_jobs["running"][0]["orphaned"] == 0
+
+    unowned_jobs = orch.list_watched_jobs(limit=10, ownership="unowned")
+    assert unowned_jobs["running"] == []
+    assert all(call[3] is None for call in calls if call[0] == "remote")
 
 
 def test_orchestrator_returns_cached_remote_jobs_when_fetch_in_progress():

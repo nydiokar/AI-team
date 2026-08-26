@@ -3515,6 +3515,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         running: List[Dict[str, Any]] = []
         recent: List[Dict[str, Any]] = []
+        local_ownership = ownership
+        remote_ownership = None if ownership == "unowned" else ownership
+        remote_limit = max(limit, 50) if ownership == "unowned" else limit
         try:
             from src.control.db import get_db
             db = get_db()
@@ -3523,14 +3526,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                     db.list_jobs(
                         status="running",
                         session_id=session_id,
-                        ownership=ownership,
+                        ownership=local_ownership,
                         limit=limit,
                     )
                 )
                 recent.extend(
                     db.list_jobs(
                         session_id=session_id,
-                        ownership=ownership,
+                        ownership=local_ownership,
                         limit=limit,
                     )
                 )
@@ -3538,17 +3541,60 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.debug("event=local_jobs_list_failed err=%s", e)
 
         remote = self._cached_remote_watched_jobs(
-            limit=limit,
+            limit=remote_limit,
             session_id=session_id,
-            ownership=ownership,
+            ownership=remote_ownership,
         )
         running.extend(remote["running"])
         recent.extend(remote["recent"])
+        running = self._normalize_job_ownership(running)
+        recent = self._normalize_job_ownership(recent)
+        if ownership == "unowned":
+            running = [j for j in running if not j.get("session_id") or bool(j.get("orphaned"))]
+            recent = [j for j in recent if not j.get("session_id") or bool(j.get("orphaned"))]
 
         return {
             "running": self._dedupe_jobs(running, limit),
             "recent": self._dedupe_jobs(recent, limit),
         }
+
+    def _normalize_job_ownership(self, jobs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Recompute UI reachability for watched-job session links.
+
+        A remote task server can only compare a job's ``session_id`` against its
+        own SQLite ``sessions`` table. The web gateway is the place that knows
+        whether that session is reachable in this UI, so remote ``orphaned``
+        flags are advisory until reconciled here.
+        """
+        out: List[Dict[str, Any]] = []
+        for job in jobs:
+            item = dict(job)
+            session_id = str(item.get("session_id") or "").strip()
+            if not session_id:
+                item["orphaned"] = 0
+            elif self._job_session_reachable(session_id):
+                item["orphaned"] = 0
+            else:
+                item["orphaned"] = 1
+            out.append(item)
+        return out
+
+    def _job_session_reachable(self, session_id: str) -> bool:
+        store = getattr(self, "session_store", None)
+        if store is not None:
+            try:
+                if store.get(session_id) is not None:
+                    return True
+            except Exception:
+                pass
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is not None and db.get_session(session_id):
+                return True
+        except Exception:
+            pass
+        return False
 
     def _cached_remote_watched_jobs(
         self,

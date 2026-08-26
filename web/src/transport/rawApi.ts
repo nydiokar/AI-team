@@ -308,6 +308,14 @@ export interface RawJob {
   label: string | null;
   status: string; // running|done|failed|lost
   pid: number | null;
+  pgid?: number | null;
+  command?: string | null;
+  cwd?: string | null;
+  log_path?: string | null;
+  tail?: string | null;
+  started_at: string | null;
+  started_epoch: number | null;
+  finished_at: string | null;
   last_checked_at: string | null;
   last_probe_error: string | null;
   exit_code: number | null;
