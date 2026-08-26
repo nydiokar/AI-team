@@ -2619,7 +2619,7 @@ def build_control_api(orchestrator) -> FastAPI:
     @app.get("/api/jobs", dependencies=[Depends(_require_auth)])
     def api_jobs(
         limit: int = Query(20, ge=1, le=50),
-        session_id: Optional[str] = Query(default=None),
+        session_id: Optional[str] = Query(default=None, max_length=_ID_STR_MAX),
         ownership: Optional[str] = Query(default=None, pattern="^(all|unowned)$"),
     ) -> JSONResponse:
         ownership_filter = None if ownership in (None, "all") else ownership
