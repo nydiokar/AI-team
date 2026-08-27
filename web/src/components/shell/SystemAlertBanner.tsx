@@ -75,15 +75,31 @@ export function SystemAlertBanner() {
         >
           <Icon className="size-3.5 shrink-0" />
           <span className="truncate">{headline}</span>
-          {latest.detail && (
+          {(latest.detail || !ongoing) && (
             <ChevronDown
               className={`size-3 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
             />
           )}
         </button>
-        {expanded && latest.detail && (
+        {expanded && (ongoing ? latest.detail : true) && (
           <div className="border-t border-current/10 px-4 py-2 text-left font-mono text-[10px] leading-snug opacity-80">
-            {latest.detail}
+            {ongoing ? (
+              latest.detail
+            ) : (
+              <div className="flex flex-col gap-1">
+                <span className="text-bad line-through opacity-70">{latest.message}</span>
+                <span className="text-ok">
+                  Recovered at {fmtTime(latest.resolvedAt as string)} — the gateway is healthy
+                  again. This banner clears automatically.
+                </span>
+                {latest.detail && (
+                  <details className="mt-1">
+                    <summary className="cursor-pointer">Show outage diagnostic</summary>
+                    <pre className="mt-1 whitespace-pre-wrap">{latest.detail}</pre>
+                  </details>
+                )}
+              </div>
+            )}
           </div>
         )}
       </motion.div>
