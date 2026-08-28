@@ -45,6 +45,7 @@ import type {
   RawCaseUsageResponse,
   RawCostAlertsResponse,
   RawSystemAlertsResponse,
+  RawCacheHeartbeat,
 } from "./rawApi";
 
 export class ApiError extends Error {
@@ -108,6 +109,24 @@ async function post<T>(
   return data as T;
 }
 
+async function del<T>(path: string, token: string): Promise<T> {
+  const res = await fetch(path, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const data = await res.json();
+      message = data?.detail?.reason || data?.reason || message;
+    } catch {
+      // keep status text
+    }
+    throw new ApiError(res.status, message);
+  }
+  return (await res.json()) as T;
+}
+
 /** A fresh idempotency key for one logical mutation attempt (retries reuse it). */
 export function newIdempotencyKey(): string {
   return (
@@ -139,6 +158,20 @@ export const api = {
       token,
     );
     return data.sessions ?? [];
+  },
+
+  async cacheHeartbeats(
+    token: string,
+    sessionId?: string,
+    limit = 100,
+  ): Promise<RawCacheHeartbeat[]> {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (sessionId) qs.set("session_id", sessionId);
+    const data = await get<{ ok: boolean; heartbeats: RawCacheHeartbeat[] }>(
+      `/api/cache-heartbeats?${qs.toString()}`,
+      token,
+    );
+    return data.heartbeats ?? [];
   },
 
   async nodes(token: string): Promise<RawNode[]> {
@@ -537,6 +570,28 @@ export const api = {
       `/api/sessions/${encodeURIComponent(sessionId)}/inspect`,
       token,
       { op, ...params },
+    );
+  },
+
+  async enableCacheHeartbeat(
+    token: string,
+    sessionId: string,
+    body: { reason: string; duration_sec?: number; max_beats?: number },
+  ): Promise<{ ok: boolean; heartbeat: RawCacheHeartbeat }> {
+    return post(
+      `/api/sessions/${encodeURIComponent(sessionId)}/cache-heartbeat`,
+      token,
+      body,
+    );
+  },
+
+  async stopCacheHeartbeat(
+    token: string,
+    sessionId: string,
+  ): Promise<{ ok: boolean; stopped: number }> {
+    return del(
+      `/api/sessions/${encodeURIComponent(sessionId)}/cache-heartbeat`,
+      token,
     );
   },
 

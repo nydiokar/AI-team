@@ -315,6 +315,8 @@ class RegisterJobPayload(BaseModel):
     log_path: Optional[str] = None
     notify: bool = True
     notify_agent: bool = False
+    expected_runtime_sec: Optional[int] = Field(default=None, ge=0, le=86400)
+    cache_heartbeat: str = Field(default="auto", max_length=8)
 
 
 class JobDonePayload(BaseModel):
@@ -935,6 +937,9 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
+    hb_mode = str(payload.cache_heartbeat or "auto").strip().lower()
+    if hb_mode not in ("auto", "on", "off"):
+        raise HTTPException(status_code=422, detail={"ok": False, "reason": "invalid_cache_heartbeat"})
     job_id = f"job_{uuid.uuid4().hex[:12]}"
     db.register_job(
         job_id=job_id,
@@ -947,6 +952,14 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
         notify=payload.notify,
         notify_agent=payload.notify_agent,
     )
+    if payload.session_id and payload.notify_agent and hb_mode != "off":
+        db.ensure_cache_heartbeat_owner(
+            payload.session_id,
+            reason="watched_job",
+            owner_type="job",
+            owner_id=job_id,
+            expected_runtime_sec=payload.expected_runtime_sec,
+        )
     if payload.attach_pid is not None:
         # Record the PID immediately so the worker watcher monitors it without spawning.
         db.start_job(job_id, pid=payload.attach_pid, pgid=0, log_path=payload.log_path)

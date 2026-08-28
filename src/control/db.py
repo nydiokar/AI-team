@@ -258,6 +258,18 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "Self-heal a Manager Case whose turn died on a terminal transient provider 5xx (e.g. Anthropic 529 Overloaded, error_class=upstream_error) after in-process burst retries were exhausted. When ON: the session stays AWAITING_INPUT (not ERROR), the Case is recorded as transient-PAUSED with a short escalating fixed backoff (30/60/120/300s), and the Wake-Dispatcher auto-retries the failed turn once the backoff elapses — bounded (4 attempts per 15-min window, then flow.transient_pause_exhausted + escalate). Default OFF: a rare failure the operator wants to observe before enabling. OFF ⇒ transient turns fail as before (session ERROR), byte-identical.",
     },
+    "CACHE_HEARTBEAT_OBSERVE": {
+        "default": "1",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Observe session-cache heartbeat candidates for durable waits/jobs without sending paid heartbeat turns. Default ON so long waits can be measured immediately.",
+    },
+    "CACHE_HEARTBEAT_ACTIVE": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "Send paid session-cache heartbeat turns for eligible observed controllers. Default OFF; switch ON to move from observe-only to acting.",
+    },
     "MANAGER_ADVANCEMENT_GATE": {
         "default": "0",
         "effect_scope": "live",
@@ -577,6 +589,57 @@ def transient_provider_resume_enabled() -> bool:
     return runtime_flag_enabled("TRANSIENT_PROVIDER_RESUME_ENABLED")
 
 
+def cache_heartbeat_observe_enabled() -> bool:
+    """Whether heartbeat producers should record durable observe-only intent."""
+    return runtime_flag_enabled("CACHE_HEARTBEAT_OBSERVE")
+
+
+def cache_heartbeat_active_enabled() -> bool:
+    """Whether due eligible heartbeat controllers may send paid keepalive turns."""
+    return runtime_flag_enabled("CACHE_HEARTBEAT_ACTIVE")
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default)) or default))
+    except (TypeError, ValueError):
+        return max(minimum, int(default))
+
+
+def _parse_datetime_utc(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def cache_heartbeat_ttl_sec() -> int:
+    return _env_int("CACHE_HEARTBEAT_TTL_SEC", 3600, 60)
+
+
+def cache_heartbeat_interval_sec() -> int:
+    ttl = cache_heartbeat_ttl_sec()
+    configured = _env_int("CACHE_HEARTBEAT_INTERVAL_SEC", 2700, 60)
+    return min(configured, max(60, int(ttl * 0.75)))
+
+
+def cache_heartbeat_max_beats_default() -> int:
+    return _env_int("CACHE_HEARTBEAT_MAX_BEATS_DEFAULT", 6, 1)
+
+
+def cache_heartbeat_hard_max_beats() -> int:
+    return _env_int("CACHE_HEARTBEAT_MAX_BEATS_HARD", 15, 1)
+
+
+def cache_heartbeat_min_cache_tokens() -> int:
+    return _env_int("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", 100_000, 0)
+
+
 def spec_authoring_enabled() -> bool:
     """[A56/M4] Whether the spec-authoring stage + scored review gate + decomposer
     are active.
@@ -716,6 +779,11 @@ QUOTA_RESUME_ACTION = "manager_quota_resume"
 # model); only the action and id namespace differ. The lease keeps two overlapping
 # Wake-Dispatcher passes from delivering the same retry turn twice.
 TRANSIENT_RESUME_ACTION = "manager_transient_resume"
+# [session-cache-heartbeat] The heartbeat single-flight action. It uses a
+# distinct sentinel so worker scans never claim heartbeat lease rows as normal
+# work; the gateway claims the row before sending a paid heartbeat turn.
+CACHE_HEARTBEAT_MACHINE_SENTINEL = "__cache_heartbeat__"
+CACHE_HEARTBEAT_ACTION = "cache_heartbeat"
 # Default round cap when a Case's completion_criteria does not carry an explicit
 # ``round_cap`` — a backstop against a runaway continuation loop, not a tuning knob.
 DEFAULT_CONTINUATION_ROUND_CAP = 50
@@ -773,6 +841,11 @@ def transient_resume_task_id(case_id: str, paused_task_id: str, attempt: int) ->
     winner.
     """
     return f"tresume:{case_id}:{paused_task_id}:{int(attempt)}"
+
+
+def cache_heartbeat_task_id(session_id: str, slot_epoch: int) -> str:
+    """Deterministic lease id for one session-cache heartbeat due slot."""
+    return f"cachehb:{session_id}:{int(slot_epoch)}"
 
 
 def flow_drive_enabled() -> bool:
@@ -990,6 +1063,52 @@ CREATE INDEX IF NOT EXISTS idx_jobs_node_status
 
 CREATE INDEX IF NOT EXISTS idx_jobs_session
     ON jobs(session_id);
+
+CREATE TABLE IF NOT EXISTS session_cache_heartbeats (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    ttl_sec INTEGER NOT NULL,
+    interval_sec INTEGER NOT NULL,
+    next_due_at TEXT,
+    expires_at TEXT,
+    beat_count INTEGER NOT NULL DEFAULT 0,
+    max_beats INTEGER NOT NULL,
+    hard_max_beats INTEGER NOT NULL,
+    last_beat_task_id TEXT,
+    last_cache_touch_at TEXT,
+    last_cache_read_tokens INTEGER,
+    last_cache_creation_tokens INTEGER,
+    circuit_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_cache_heartbeats_active
+    ON session_cache_heartbeats(session_id)
+    WHERE status IN ('observe_only', 'active');
+CREATE INDEX IF NOT EXISTS idx_session_cache_heartbeats_due
+    ON session_cache_heartbeats(status, next_due_at);
+
+CREATE TABLE IF NOT EXISTS session_cache_heartbeat_owners (
+    id TEXT PRIMARY KEY,
+    heartbeat_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    owner_type TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    expected_runtime_sec INTEGER,
+    started_at TEXT NOT NULL,
+    expires_at TEXT,
+    stop_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_cache_heartbeat_owners_active
+    ON session_cache_heartbeat_owners(session_id, reason, owner_type, owner_id)
+    WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_session_cache_heartbeat_owners_hb
+    ON session_cache_heartbeat_owners(heartbeat_id, status);
 
 -- FlowRun record (v0.4 §13 item 1) — one row per dispatch flow.
 -- This is a RECORD, not a stage machine: nothing reads current_stage to decide
@@ -3329,7 +3448,7 @@ class MeshDB:
                 existing = None
         if existing is not None:
             return int(existing["id"])
-        return self.append_flow_event(
+        event_id = self.append_flow_event(
             flow_run_id, "worker.wait_pending", actor,
             entity_type="wait_group", entity_id=wait_group_id,
             payload={
@@ -3338,6 +3457,22 @@ class MeshDB:
                 "member_task_ids": list(member_task_ids or []),
             },
         )
+        try:
+            session_id = self.case_manager_session_id(flow_run_id)
+            if session_id:
+                self.ensure_cache_heartbeat_owner(
+                    session_id,
+                    reason="case_wait_group",
+                    owner_type="wait_group",
+                    owner_id=f"{flow_run_id}:{wait_group_id}",
+                    expected_runtime_sec=None,
+                )
+        except Exception as e:
+            logger.debug(
+                "event=cache_heartbeat_wait_group_owner_failed case=%s wait_group=%s err=%s",
+                flow_run_id, wait_group_id, e,
+            )
+        return event_id
 
     def list_continuation_rows(self, case_id: str) -> List[Dict[str, Any]]:
         """[M3.4] The continuation ``mesh_tasks`` rows for a Case, oldest generation
@@ -4955,6 +5090,421 @@ class MeshDB:
             return []
 
     # ------------------------------------------------------------------
+    # Session cache heartbeats (A80)
+    # ------------------------------------------------------------------
+
+    def recent_cache_evidence(self, session_id: str, turns: int = 5) -> Optional[Dict[str, Any]]:
+        """Newest bounded cache-token evidence for one session.
+
+        Returns the strongest cache-bearing request from the last ``turns`` turns:
+        ``{cache_read_tokens, cache_creation_tokens, observed_at, task_id, model}``.
+        Read-only and bounded by a small turn subquery so scheduler ticks do not
+        scan the telemetry table.
+        """
+        rows = self._conn().execute(
+            """
+            SELECT r.cache_read_tokens, r.cache_creation_tokens, r.model,
+                   COALESCE(t.ended_at, t.created_at) AS observed_at,
+                   t.task_id
+            FROM (
+                SELECT turn_id, task_id, ended_at, created_at FROM llm_turns
+                WHERE session_id = ?
+                ORDER BY COALESCE(ended_at, created_at) DESC
+                LIMIT ?
+            ) t
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            WHERE r.is_duplicate = 0
+            """,
+            (session_id, max(1, int(turns))),
+        ).fetchall()
+        if not rows:
+            return None
+        best = max(
+            rows,
+            key=lambda r: int(r["cache_read_tokens"] or 0) + int(r["cache_creation_tokens"] or 0),
+        )
+        return dict(best)
+
+    def _cache_heartbeat_next_due(self, last_touch: Optional[str], interval_sec: int) -> str:
+        base = _parse_datetime_utc(last_touch) or datetime.now(timezone.utc)
+        return (base + timedelta(seconds=max(60, int(interval_sec)))).isoformat()
+
+    def ensure_cache_heartbeat_owner(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        owner_type: str,
+        owner_id: str,
+        expected_runtime_sec: Optional[int] = None,
+        expires_at: Optional[str] = None,
+        max_beats: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Create/update a heartbeat controller owner.
+
+        Observe-only is default-on; paid active mode requires
+        ``CACHE_HEARTBEAT_ACTIVE``. Adding a second owner to an active episode
+        reuses the controller and does not reset its beat count.
+        """
+        if not (cache_heartbeat_observe_enabled() or cache_heartbeat_active_enabled()):
+            return None
+        sid = str(session_id or "").strip()
+        oid = str(owner_id or "").strip()
+        if not sid or not oid:
+            return None
+        reason_s = str(reason or "").strip()[:64]
+        owner_type_s = str(owner_type or "").strip()[:64]
+        if reason_s not in ("case_wait_group", "watched_job", "manual", "agent_requested"):
+            return None
+        if not owner_type_s:
+            return None
+        now = _now()
+        ttl = cache_heartbeat_ttl_sec()
+        interval = cache_heartbeat_interval_sec()
+        hard = cache_heartbeat_hard_max_beats()
+        maxb = min(max(1, int(max_beats or cache_heartbeat_max_beats_default())), hard)
+        default_exp = (
+            datetime.now(timezone.utc) + timedelta(seconds=(interval * maxb) + ttl)
+        ).isoformat()
+        exp = expires_at or default_exp
+        evidence = self.recent_cache_evidence(sid)
+        last_touch = (evidence or {}).get("observed_at") or now
+        status = "active" if cache_heartbeat_active_enabled() else "observe_only"
+        heartbeat_id = ""
+        try:
+            with self._write() as conn:
+                row = conn.execute(
+                    """
+                    SELECT * FROM session_cache_heartbeats
+                    WHERE session_id = ? AND status IN ('observe_only', 'active')
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (sid,),
+                ).fetchone()
+                if row is None:
+                    heartbeat_id = f"schb_{uuid.uuid4().hex[:12]}"
+                    conn.execute(
+                        """
+                        INSERT INTO session_cache_heartbeats (
+                            id, session_id, status, ttl_sec, interval_sec,
+                            next_due_at, expires_at, beat_count, max_beats,
+                            hard_max_beats, last_cache_touch_at,
+                            last_cache_read_tokens, last_cache_creation_tokens,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            heartbeat_id, sid, status, ttl, interval,
+                            self._cache_heartbeat_next_due(str(last_touch), interval),
+                            exp, maxb, hard, str(last_touch),
+                            int((evidence or {}).get("cache_read_tokens") or 0),
+                            int((evidence or {}).get("cache_creation_tokens") or 0),
+                            now, now,
+                        ),
+                    )
+                else:
+                    current = dict(row)
+                    heartbeat_id = str(current["id"])
+                    next_status = "active" if cache_heartbeat_active_enabled() else current["status"]
+                    conn.execute(
+                        """
+                        UPDATE session_cache_heartbeats
+                        SET status = ?, ttl_sec = ?, interval_sec = ?,
+                            expires_at = MAX(COALESCE(expires_at, ''), ?),
+                            max_beats = MAX(max_beats, ?),
+                            hard_max_beats = MAX(hard_max_beats, ?),
+                            last_cache_touch_at = COALESCE(last_cache_touch_at, ?),
+                            last_cache_read_tokens = COALESCE(last_cache_read_tokens, ?),
+                            last_cache_creation_tokens = COALESCE(last_cache_creation_tokens, ?),
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            next_status, ttl, interval, exp, maxb, hard,
+                            str(last_touch),
+                            int((evidence or {}).get("cache_read_tokens") or 0),
+                            int((evidence or {}).get("cache_creation_tokens") or 0),
+                            now, heartbeat_id,
+                        ),
+                    )
+                owner_row = conn.execute(
+                    """
+                    SELECT * FROM session_cache_heartbeat_owners
+                    WHERE session_id = ? AND reason = ? AND owner_type = ?
+                      AND owner_id = ? AND status = 'active'
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (sid, reason_s, owner_type_s, oid),
+                ).fetchone()
+                if owner_row is None:
+                    conn.execute(
+                        """
+                        INSERT INTO session_cache_heartbeat_owners (
+                            id, heartbeat_id, session_id, reason, owner_type,
+                            owner_id, status, expected_runtime_sec, started_at,
+                            expires_at, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            f"schbo_{uuid.uuid4().hex[:12]}",
+                            heartbeat_id, sid, reason_s, owner_type_s, oid,
+                            int(expected_runtime_sec) if expected_runtime_sec is not None else None,
+                            now, expires_at, now, now,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE session_cache_heartbeat_owners
+                        SET heartbeat_id = ?, expected_runtime_sec = COALESCE(?, expected_runtime_sec),
+                            expires_at = COALESCE(?, expires_at), updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            heartbeat_id,
+                            int(expected_runtime_sec) if expected_runtime_sec is not None else None,
+                            expires_at, now, owner_row["id"],
+                        ),
+                    )
+            return self.get_cache_heartbeat(heartbeat_id)
+        except Exception as e:
+            logger.warning("event=db_cache_heartbeat_owner_failed session_id=%s err=%s", sid, e)
+            return None
+
+    def get_cache_heartbeat(self, heartbeat_id: str) -> Optional[Dict[str, Any]]:
+        row = self._conn().execute(
+            "SELECT * FROM session_cache_heartbeats WHERE id = ?",
+            (heartbeat_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["owners"] = self.list_cache_heartbeat_owners(str(out["id"]))
+        return out
+
+    def list_cache_heartbeat_owners(
+        self, heartbeat_id: str, *, active_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        where = "WHERE heartbeat_id = ?"
+        params: List[Any] = [heartbeat_id]
+        if active_only:
+            where += " AND status = 'active'"
+        rows = self._conn().execute(
+            f"SELECT * FROM session_cache_heartbeat_owners {where} ORDER BY created_at ASC",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_cache_heartbeats(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(max(1, min(int(limit), 500)))
+        rows = self._conn().execute(
+            f"SELECT * FROM session_cache_heartbeats {where} ORDER BY updated_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        out = [dict(r) for r in rows]
+        if len(out) <= 50:
+            for hb in out:
+                hb["owners"] = self.list_cache_heartbeat_owners(str(hb["id"]))
+        return out
+
+    def due_cache_heartbeats(self, limit: int = 20) -> List[Dict[str, Any]]:
+        rows = self._conn().execute(
+            """
+            SELECT * FROM session_cache_heartbeats
+            WHERE status = 'active'
+              AND next_due_at IS NOT NULL
+              AND next_due_at <= ?
+            ORDER BY next_due_at ASC LIMIT ?
+            """,
+            (_now(), max(1, min(int(limit), 100))),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def stop_cache_heartbeat_owner(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        owner_type: str,
+        owner_id: str,
+        stop_reason: str,
+    ) -> int:
+        now = _now()
+        with self._write() as conn:
+            conn.execute(
+                """
+                UPDATE session_cache_heartbeat_owners
+                SET status = 'stopped', stop_reason = ?, updated_at = ?
+                WHERE session_id = ? AND reason = ? AND owner_type = ?
+                  AND owner_id = ? AND status = 'active'
+                """,
+                (stop_reason[:256], now, session_id, reason, owner_type, owner_id),
+            )
+            changed = int(conn.execute("SELECT changes()").fetchone()[0])
+        self.stop_cache_heartbeats_without_owners()
+        return changed
+
+    def stop_cache_heartbeat(self, heartbeat_id: str, stop_reason: str) -> bool:
+        now = _now()
+        with self._write() as conn:
+            conn.execute(
+                """
+                UPDATE session_cache_heartbeats
+                SET status = 'stopped', circuit_reason = COALESCE(?, circuit_reason),
+                    updated_at = ?
+                WHERE id = ? AND status IN ('observe_only', 'active')
+                """,
+                (stop_reason[:256], now, heartbeat_id),
+            )
+            changed = int(conn.execute("SELECT changes()").fetchone()[0])
+            conn.execute(
+                """
+                UPDATE session_cache_heartbeat_owners
+                SET status = 'stopped', stop_reason = ?, updated_at = ?
+                WHERE heartbeat_id = ? AND status = 'active'
+                """,
+                (stop_reason[:256], now, heartbeat_id),
+            )
+        return changed > 0
+
+    def stop_cache_heartbeats_without_owners(self) -> int:
+        now = _now()
+        with self._write() as conn:
+            rows = conn.execute(
+                """
+                SELECT h.id FROM session_cache_heartbeats h
+                WHERE h.status IN ('observe_only', 'active')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM session_cache_heartbeat_owners o
+                    WHERE o.heartbeat_id = h.id AND o.status = 'active'
+                  )
+                """
+            ).fetchall()
+            ids = [str(r["id"]) for r in rows]
+            for heartbeat_id in ids:
+                conn.execute(
+                    """
+                    UPDATE session_cache_heartbeats
+                    SET status = 'stopped', circuit_reason = COALESCE(circuit_reason, 'no_active_owners'),
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, heartbeat_id),
+                )
+        return len(ids)
+
+    def record_cache_heartbeat_sent(self, heartbeat_id: str, task_id: str) -> None:
+        now = _now()
+        with self._write() as conn:
+            conn.execute(
+                """
+                UPDATE session_cache_heartbeats
+                SET last_beat_task_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (task_id, now, heartbeat_id),
+            )
+
+    def record_cache_heartbeat_result(
+        self,
+        heartbeat_id: str,
+        task_id: str,
+        *,
+        success: bool,
+        output: str = "",
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        error_class: str = "",
+    ) -> None:
+        """Record one heartbeat turn outcome and advance/stop the controller."""
+        row = self.get_cache_heartbeat(heartbeat_id)
+        if row is None:
+            return
+        now = _now()
+        read_tokens = max(0, int(cache_read_tokens or 0))
+        creation_tokens = max(0, int(cache_creation_tokens or 0))
+        beat_count = int(row.get("beat_count") or 0) + 1
+        status = str(row.get("status") or "active")
+        circuit: Optional[str] = None
+        if "STOP_CACHE_HEARTBEAT" in str(output or ""):
+            status = "stopped"
+            circuit = "agent_requested_stop"
+        elif error_class in ("usage_limit", "rate_limit", "upstream_error"):
+            status = "stopped"
+            circuit = f"heartbeat_{error_class}"
+        elif not success:
+            status = "stopped"
+            circuit = "heartbeat_failed"
+        elif creation_tokens >= cache_heartbeat_min_cache_tokens() and read_tokens < creation_tokens:
+            status = "circuit_open"
+            circuit = "cache_miss_rewrite"
+        elif beat_count >= min(int(row.get("max_beats") or 0), int(row.get("hard_max_beats") or 0)):
+            status = "stopped"
+            circuit = "max_beats_reached"
+        next_due = self._cache_heartbeat_next_due(now, int(row.get("interval_sec") or 2700))
+        if status not in ("active", "observe_only"):
+            next_due = None
+        with self._write() as conn:
+            conn.execute(
+                """
+                UPDATE session_cache_heartbeats
+                SET beat_count = ?, last_beat_task_id = ?,
+                    last_cache_touch_at = CASE WHEN ? > 0 THEN ? ELSE last_cache_touch_at END,
+                    last_cache_read_tokens = ?, last_cache_creation_tokens = ?,
+                    next_due_at = ?, status = ?, circuit_reason = COALESCE(?, circuit_reason),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    beat_count, task_id, read_tokens, now, read_tokens, creation_tokens,
+                    next_due, status, circuit, now, heartbeat_id,
+                ),
+            )
+
+    def expire_cache_heartbeat_state(self) -> int:
+        """Stop expired owners/controllers and return changed rows count."""
+        now = _now()
+        changed = 0
+        with self._write() as conn:
+            conn.execute(
+                """
+                UPDATE session_cache_heartbeat_owners
+                SET status = 'stopped', stop_reason = 'expired', updated_at = ?
+                WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?
+                """,
+                (now, now),
+            )
+            changed += int(conn.execute("SELECT changes()").fetchone()[0])
+            conn.execute(
+                """
+                UPDATE session_cache_heartbeats
+                SET status = 'stopped', circuit_reason = COALESCE(circuit_reason, 'expired'),
+                    updated_at = ?
+                WHERE status IN ('observe_only', 'active')
+                  AND expires_at IS NOT NULL AND expires_at <= ?
+                """,
+                (now, now),
+            )
+            changed += int(conn.execute("SELECT changes()").fetchone()[0])
+        changed += self.stop_cache_heartbeats_without_owners()
+        return changed
+
+    # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
 
@@ -5210,6 +5760,52 @@ def _get_migrations() -> List[tuple]:
                # Telegram alert history. Schema is duplicated defensively in the
                # healthcheck script's own CREATE TABLE IF NOT EXISTS so a fresh host
                # can alert before its first post-migration gateway boot.
+        (31, """
+            CREATE TABLE IF NOT EXISTS session_cache_heartbeats (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                ttl_sec INTEGER NOT NULL,
+                interval_sec INTEGER NOT NULL,
+                next_due_at TEXT,
+                expires_at TEXT,
+                beat_count INTEGER NOT NULL DEFAULT 0,
+                max_beats INTEGER NOT NULL,
+                hard_max_beats INTEGER NOT NULL,
+                last_beat_task_id TEXT,
+                last_cache_touch_at TEXT,
+                last_cache_read_tokens INTEGER,
+                last_cache_creation_tokens INTEGER,
+                circuit_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_cache_heartbeats_active
+                ON session_cache_heartbeats(session_id)
+                WHERE status IN ('observe_only', 'active');
+            CREATE INDEX IF NOT EXISTS idx_session_cache_heartbeats_due
+                ON session_cache_heartbeats(status, next_due_at);
+            CREATE TABLE IF NOT EXISTS session_cache_heartbeat_owners (
+                id TEXT PRIMARY KEY,
+                heartbeat_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                owner_type TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                expected_runtime_sec INTEGER,
+                started_at TEXT NOT NULL,
+                expires_at TEXT,
+                stop_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_cache_heartbeat_owners_active
+                ON session_cache_heartbeat_owners(session_id, reason, owner_type, owner_id)
+                WHERE status = 'active';
+            CREATE INDEX IF NOT EXISTS idx_session_cache_heartbeat_owners_hb
+                ON session_cache_heartbeat_owners(heartbeat_id, status)
+        """),  # A80 session-cache heartbeat controllers and owner records.
     ]
 
 
