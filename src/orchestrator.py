@@ -1339,7 +1339,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             session_id = str(hb.get("session_id") or "")
             ok, reason, session = self._cache_heartbeat_session_eligible(db, hb)
             if not ok:
-                if reason in {"session_missing", "backend_not_claude", "driver_not_sdk", "missing_backend_session_id", "cache_below_threshold"}:
+                if reason in {"session_missing", "backend_not_claude", "driver_not_sdk", "missing_backend_session_id"}:
                     db.stop_cache_heartbeat(heartbeat_id, reason)
                 continue
             interval = max(60, int(hb.get("interval_sec") or 2700))

@@ -952,7 +952,7 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
         notify=payload.notify,
         notify_agent=payload.notify_agent,
     )
-    if payload.session_id and payload.notify_agent and hb_mode != "off":
+    if payload.session_id and hb_mode != "off" and (payload.notify_agent or hb_mode == "on"):
         db.ensure_cache_heartbeat_owner(
             payload.session_id,
             reason="watched_job",

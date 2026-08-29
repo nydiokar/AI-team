@@ -415,6 +415,27 @@ logs/events.ndjson                    system-wide event log
 | 25 | Approvals automation | durable gate exists but inert; belongs to a future workflow-automation track |
 | 35 | Per-project "Current Focus" panel | reads CONTEXT.md as source of truth; defer until workflow settled |
 
+## Deferred — A80 session cache heartbeat follow-ups
+
+Adversarial review of `feat/session-cache-heartbeat` (2026-08-29) confirmed 9 findings; 6 were
+fixed pre-merge (wait-group re-arm losing heartbeat coverage after Manager respawn, orphaned
+owner rows on stop, `cache_below_threshold` permanently killing a heartbeat instead of retrying,
+`notify_agent=false` silently dropping an explicit `cache_heartbeat="on"`, and the `list_cache_heartbeats`
+N+1). Deferred, not built into this PR:
+- `_finalize_cache_heartbeat`'s 180s poll (`src/orchestrator.py:1401`) treats a still-running
+  (non-terminal) heartbeat turn as a failure and permanently stops the controller — needs a
+  distinct "timed out, retry" outcome instead of `heartbeat_failed`.
+- `_cache_heartbeat_owner_live`'s `case_wait_group` branch (`src/orchestrator.py:1263`) scans
+  `list_flow_events` (N+1 per owner, 500-row window) with resolution logic that can diverge from
+  `compute_continuation_tick`'s sticky/monotonic resolution on the same event stream — needs a
+  shared helper.
+- `ensure_cache_heartbeat_owner` (`src/control/db.py:5270`) swallows genuine DB errors the same
+  way as "flag off," masking infra failures behind a generic 409.
+- `watch_job`'s `cache_heartbeat="auto"` + `expected_runtime_sec` are documented as
+  runtime-aware but behave identically to `"on"` — either implement the threshold or fix the docs.
+Feature stays flag-gated (`CACHE_HEARTBEAT_ACTIVE` default OFF), so blast radius is zero until an
+operator opts in. Revisit before turning `CACHE_HEARTBEAT_ACTIVE` on broadly.
+
 ## Deferred — runtime / lower priority
 
 - Backend lifecycle hooks (session-ID detection, PreToolUse security, PostToolUse quality gates) — `docs/TBD/BACKEND_HOOKS_STRATEGY.md`.

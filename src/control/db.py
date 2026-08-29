@@ -3447,16 +3447,17 @@ class MeshDB:
             elif e.get("event_type") == "worker.wait_resolved":
                 existing = None
         if existing is not None:
-            return int(existing["id"])
-        event_id = self.append_flow_event(
-            flow_run_id, "worker.wait_pending", actor,
-            entity_type="wait_group", entity_id=wait_group_id,
-            payload={
-                "wait_group_id": wait_group_id,
-                "condition": cond,
-                "member_task_ids": list(member_task_ids or []),
-            },
-        )
+            event_id = int(existing["id"])
+        else:
+            event_id = self.append_flow_event(
+                flow_run_id, "worker.wait_pending", actor,
+                entity_type="wait_group", entity_id=wait_group_id,
+                payload={
+                    "wait_group_id": wait_group_id,
+                    "condition": cond,
+                    "member_task_ids": list(member_task_ids or []),
+                },
+            )
         try:
             session_id = self.case_manager_session_id(flow_run_id)
             if session_id:
@@ -5317,9 +5318,18 @@ class MeshDB:
             params,
         ).fetchall()
         out = [dict(r) for r in rows]
-        if len(out) <= 50:
+        if out and len(out) <= 50:
+            ids = [str(hb["id"]) for hb in out]
+            placeholders = ",".join("?" for _ in ids)
+            owner_rows = self._conn().execute(
+                f"SELECT * FROM session_cache_heartbeat_owners WHERE heartbeat_id IN ({placeholders}) ORDER BY created_at ASC",
+                ids,
+            ).fetchall()
+            owners_by_hb: Dict[str, List[Dict[str, Any]]] = {hb_id: [] for hb_id in ids}
+            for r in owner_rows:
+                owners_by_hb.setdefault(str(r["heartbeat_id"]), []).append(dict(r))
             for hb in out:
-                hb["owners"] = self.list_cache_heartbeat_owners(str(hb["id"]))
+                hb["owners"] = owners_by_hb.get(str(hb["id"]), [])
         return out
 
     def due_cache_heartbeats(self, limit: int = 20) -> List[Dict[str, Any]]:
@@ -5475,6 +5485,15 @@ class MeshDB:
                     next_due, status, circuit, now, heartbeat_id,
                 ),
             )
+            if status not in ("active", "observe_only"):
+                conn.execute(
+                    """
+                    UPDATE session_cache_heartbeat_owners
+                    SET status = 'stopped', stop_reason = ?, updated_at = ?
+                    WHERE heartbeat_id = ? AND status = 'active'
+                    """,
+                    (circuit or status, now, heartbeat_id),
+                )
 
     def expire_cache_heartbeat_state(self) -> int:
         """Stop expired owners/controllers and return changed rows count."""

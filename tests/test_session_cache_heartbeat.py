@@ -119,6 +119,10 @@ class _Orch:
     active_tasks = {}
     task_results = {}
     _CONTINUATION_TERMINAL_STATUSES = TaskOrchestrator._CONTINUATION_TERMINAL_STATUSES
+    _sync_cache_heartbeat_state = TaskOrchestrator._sync_cache_heartbeat_state
+    _cache_heartbeat_owner_live = TaskOrchestrator._cache_heartbeat_owner_live
+    _cache_heartbeat_session_eligible = TaskOrchestrator._cache_heartbeat_session_eligible
+    _finalize_cache_heartbeat = TaskOrchestrator._finalize_cache_heartbeat
 
     def __init__(self, session: Session):
         self.session_store = _Store(session)
