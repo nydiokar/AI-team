@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_80_SESSION_CACHE_HEARTBEAT
 created_at: "2026-08-26T01:00:00+03:00"
-status: active
+status: done
 owner: "codex"
 depends_on: []
-results_ref: ".ai/dispatch/AGENT_80_SESSION_CACHE_HEARTBEAT.md#closure"
-evidence: []
-updated_at: "2026-08-26T01:00:00+03:00"
+results_ref: https://github.com/nydiokar/AI-team/pull/111#closure"
+evidence: ["tests/test_session_cache_heartbeat.py","tests/test_mcp_jobs.py"]
+updated_at: "2026-08-29T08:47:43.975071+00:00"
 ```
 
 # A80 — Session Cache Heartbeat
