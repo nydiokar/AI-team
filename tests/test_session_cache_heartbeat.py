@@ -106,6 +106,34 @@ def test_watched_job_registers_owner_when_notify_agent(tmp_path, monkeypatch) ->
     assert hb["owners"][0]["reason"] == "watched_job"
 
 
+def test_auto_policy_skips_arming_for_jobs_shorter_than_interval(tmp_path, monkeypatch) -> None:
+    from src.control import task_server
+
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "0")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _cache_evidence(db)
+    monkeypatch.setattr(task_server, "get_db", lambda: db)
+
+    task_server.register_job(task_server.RegisterJobPayload(
+        node_id="node", label="quick", session_id="sess_hb",
+        notify_agent=True, cache_heartbeat="auto", expected_runtime_sec=10,
+    ))
+    assert db.list_cache_heartbeats(session_id="sess_hb") == []
+
+    task_server.register_job(task_server.RegisterJobPayload(
+        node_id="node", label="long", session_id="sess_hb",
+        notify_agent=True, cache_heartbeat="auto", expected_runtime_sec=5000,
+    ))
+    assert len(db.list_cache_heartbeats(session_id="sess_hb")) == 1
+
+    task_server.register_job(task_server.RegisterJobPayload(
+        node_id="node", label="quick-explicit", session_id="sess_hb",
+        notify_agent=True, cache_heartbeat="on", expected_runtime_sec=10,
+    ))
+    hb = db.list_cache_heartbeats(session_id="sess_hb")[0]
+    assert len(hb["owners"]) == 2
+
+
 class _Store:
     def __init__(self, session: Session):
         self.session = session
@@ -189,3 +217,42 @@ def test_busy_session_is_skipped_not_interrupted(tmp_path, monkeypatch) -> None:
 
     assert delivered == 0
     assert orch.submitted == []
+
+
+def test_finalize_timeout_does_not_stop_the_controller(tmp_path, monkeypatch) -> None:
+    import src.orchestrator as orch_mod
+
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    session = _session()
+    db.upsert_session(session)
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+    heartbeat_id = str(hb["id"])
+    lease_id = "cache_heartbeat_lease_test"
+    db.enqueue_task(
+        lease_id, session_id=None, machine_id=CACHE_HEARTBEAT_MACHINE_SENTINEL,
+        backend="claude", action=CACHE_HEARTBEAT_ACTION, payload={},
+    )
+    db.claim_task(lease_id, "host")
+    orch = _Orch(session)
+
+    # _finalize_cache_heartbeat resolves get_db() itself rather than taking a db
+    # argument — point it at our tmp_path db, not the process-global instance.
+    monkeypatch.setattr(db_mod, "get_db", lambda: db)
+
+    # The wake turn never reaches a terminal status inside the 180s poll window —
+    # this must NOT be treated as a heartbeat failure.
+    times = iter([0.0, 500.0])
+    monkeypatch.setattr(orch_mod.time, "time", lambda: next(times, 500.0))
+
+    asyncio.run(TaskOrchestrator._finalize_cache_heartbeat(
+        orch, heartbeat_id, lease_id, "task_never_lands", "sess_hb",
+    ))
+
+    row = db.get_cache_heartbeat(heartbeat_id)
+    assert row["status"] in ("active", "observe_only")
+    assert row["beat_count"] == 0
+    task_row = db.get_task(lease_id)
+    assert task_row["status"] == "completed"
