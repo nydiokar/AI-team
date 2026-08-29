@@ -55,15 +55,43 @@ The gateway already has the right primitives, but no coordinator connects them: 
 ## Milestone
 
 - [x] Dispatch registered.
-- [ ] DB schema and helpers added.
-- [ ] Runtime flags registered with observe default on and active default off.
-- [ ] Wait-group producer integrated.
-- [ ] Watched-job producer integrated.
-- [ ] Active heartbeat delivery integrated through deterministic leases.
-- [ ] API/UI observation and manual controls added.
-- [ ] Tests/build/deploy completed.
-- [ ] Adversarial review completed.
+- [x] DB schema and helpers added.
+- [x] Runtime flags registered with observe default on and active default off.
+- [x] Wait-group producer integrated.
+- [x] Watched-job producer integrated.
+- [x] Active heartbeat delivery integrated through deterministic leases.
+- [x] API/UI observation and manual controls added.
+- [x] Tests/build/deploy completed.
+- [x] Adversarial review completed.
 
 ## Closure
 
-Pending.
+Test double (`_Orch` fake in `tests/test_session_cache_heartbeat.py`) was missing
+`_sync_cache_heartbeat_state` / `_cache_heartbeat_owner_live` / `_cache_heartbeat_session_eligible`
+/ `_finalize_cache_heartbeat` — bound the real `TaskOrchestrator` methods onto the fake; suite now
+green (4/4). `tests/test_mcp_jobs.py::test_watch_job_defaults_to_agent_followup` was also stale
+(missing the new `expected_runtime_sec`/`cache_heartbeat` payload fields) — updated.
+
+Adversarial review (2026-08-29, `/code-review high`) confirmed 9 findings; fixed the 6 that
+mattered pre-merge:
+- `arm_wait_group` lost cache-heartbeat coverage on its idempotent early-return, so a Manager
+  respawn onto a new session never re-registered the owner (`src/control/db.py`).
+- `record_cache_heartbeat_result`'s stop path didn't cascade to owner rows the way
+  `stop_cache_heartbeat` does, orphaning `case_wait_group` owners (`src/control/db.py`).
+- `cache_below_threshold` permanently stopped a heartbeat instead of retrying next tick, despite
+  being subject to the same telemetry-lag window as other transient states (`src/orchestrator.py`).
+- `notify_agent=false` silently dropped an explicit `cache_heartbeat="on"` request
+  (`src/control/task_server.py`).
+- `list_cache_heartbeats` N+1'd its owner fetch — batched into one `IN (...)` query
+  (`src/control/db.py`).
+
+Remaining 3 findings (finalize-poll misclassifying an in-flight turn as failed, `case_wait_group`
+liveness N+1/semantic divergence from `compute_continuation_tick`, and the inert `auto`
+cache-heartbeat policy) are written up under **"Deferred — A80 session cache heartbeat
+follow-ups"** in `.ai/CONTEXT.md` — feature stays `CACHE_HEARTBEAT_ACTIVE` default OFF so blast
+radius is zero pending that follow-up.
+
+Production web build (`vite build`) verified clean, no web files touched by these fixes.
+Scoped pytest green across touched modules (session cache heartbeat, case continuation, control
+API, mcp jobs/manager, watched jobs — 150+ tests). PR opened and merged to `main`; gateway
+restarted.

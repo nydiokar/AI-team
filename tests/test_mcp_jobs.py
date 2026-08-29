@@ -27,6 +27,8 @@ def test_watch_job_defaults_to_agent_followup(monkeypatch, tmp_path):
         "session_id": "sess_123",
         "notify": True,
         "notify_agent": True,
+        "expected_runtime_sec": None,
+        "cache_heartbeat": "auto",
     }]
     assert "Agent follow-up: yes" in text
     assert "System > Jobs" in text

@@ -36,6 +36,16 @@ export function useSessions(keepPinned?: boolean) {
   });
 }
 
+export function useCacheHeartbeats(sessionId?: string) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["cache-heartbeats", sessionId ?? "all"],
+    queryFn: async () => api.cacheHeartbeats(token, sessionId, sessionId ? 20 : 100),
+    enabled: Boolean(token),
+    refetchInterval: SLOW_POLL_MS,
+  });
+}
+
 export function useTargets() {
   const token = useAuthStore((s) => s.token);
   return useQuery({
