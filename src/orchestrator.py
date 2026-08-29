@@ -1398,13 +1398,31 @@ class TaskOrchestrator(ITaskOrchestrator):
             return
         deadline = time.time() + 180.0
         row: Optional[Dict[str, Any]] = None
+        timed_out = True
         while self.running and time.time() < deadline:
             await asyncio.sleep(2)
             row = db.get_task(wake_task_id)
             if row is not None and row.get("status") in self._CONTINUATION_TERMINAL_STATUSES:
+                timed_out = False
                 break
             if row is None and wake_task_id not in self.active_tasks and wake_task_id in self.task_results:
+                timed_out = False
                 break
+        if timed_out:
+            # Still in flight past the poll window — this is not a failure, the
+            # turn may land seconds later. Close out this lease without touching
+            # heartbeat controller state so it isn't marked "failed" and stopped;
+            # the deterministic slot_epoch lease bounds how often we retry.
+            db.complete_task(
+                lease_id,
+                {"heartbeat_id": heartbeat_id, "wake_task_id": wake_task_id, "timed_out": True},
+            )
+            self._emit_event(
+                "cache_heartbeat_poll_timeout",
+                None,
+                {"heartbeat_id": heartbeat_id, "session_id": session_id, "task_id": wake_task_id},
+            )
+            return
         result_dict: Dict[str, Any] = {}
         if row and row.get("result"):
             try:

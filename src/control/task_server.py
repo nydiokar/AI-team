@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
-from src.control.db import get_db
+from src.control.db import cache_heartbeat_interval_sec, get_db
 from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
 from src.control.telemetry_store import TelemetryStore
@@ -952,13 +952,24 @@ def register_job(payload: RegisterJobPayload) -> Dict[str, Any]:
         notify=payload.notify,
         notify_agent=payload.notify_agent,
     )
-    if payload.session_id and hb_mode != "off" and (payload.notify_agent or hb_mode == "on"):
+    runtime_sec = payload.expected_runtime_sec
+    auto_below_interval = (
+        hb_mode == "auto"
+        and runtime_sec is not None
+        and runtime_sec < cache_heartbeat_interval_sec()
+    )
+    if (
+        payload.session_id
+        and hb_mode != "off"
+        and (payload.notify_agent or hb_mode == "on")
+        and not auto_below_interval
+    ):
         db.ensure_cache_heartbeat_owner(
             payload.session_id,
             reason="watched_job",
             owner_type="job",
             owner_id=job_id,
-            expected_runtime_sec=payload.expected_runtime_sec,
+            expected_runtime_sec=runtime_sec,
         )
     if payload.attach_pid is not None:
         # Record the PID immediately so the worker watcher monitors it without spawning.
