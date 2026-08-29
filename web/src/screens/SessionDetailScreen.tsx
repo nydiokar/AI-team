@@ -25,7 +25,7 @@ import {
   X,
   Pin,
 } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { ConnectionBanner } from "../components/shell/ConnectionBanner";
 import { SystemAlertBanner } from "../components/shell/SystemAlertBanner";
@@ -45,7 +45,7 @@ import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { EffortPickerSheet } from "../components/sessions/EffortPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
 import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
-import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionUsage, useSessionActivity, useJobs } from "../hooks/useLiveData";
+import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionUsage, useSessionActivity, useJobs, useCacheHeartbeats } from "../hooks/useLiveData";
 import { compactTokens } from "../components/timeline/SessionTurns";
 import { useSessionAffiliations } from "../hooks/useWork";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
@@ -60,13 +60,15 @@ import {
 import { cn } from "../lib/cn";
 import { invalidateRouteTarget } from "../lib/liveInvalidation";
 import { clockLabel } from "../lib/time";
+import { useAuthStore } from "../stores/authStore";
+import { api } from "../transport/apiClient";
 import {
   activityKindLabel,
   activityStatusView,
   type ActivityTone,
 } from "../lib/sessionActivityPresentation";
 import type { Artifact, RemoteFile, SessionActivityItem } from "../domain/models";
-import type { RawJob } from "../transport/rawApi";
+import type { RawCacheHeartbeat, RawJob } from "../transport/rawApi";
 
 type SessionTab = "chat" | "info";
 
@@ -429,6 +431,13 @@ function SessionCostPanel({ sessionId }: { sessionId: string }) {
   );
 }
 
+function cacheHeartbeatLabel(hb?: RawCacheHeartbeat) {
+  if (!hb) return null;
+  const owners = hb.owners?.filter((o) => o.status === "active").length ?? 0;
+  const mode = hb.status === "active" ? "active" : hb.status === "observe_only" ? "observing" : hb.status;
+  return `${mode} · ${hb.beat_count}/${hb.max_beats} beats · ${owners} owner${owners === 1 ? "" : "s"}`;
+}
+
 function SessionInfoTab({
   sessionId,
 }: {
@@ -575,8 +584,13 @@ export function SessionDetailScreen() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const token = useAuthStore((s) => s.token);
   const { data, isLoading: sessionsLoading } = useSessions();
   const session = data?.find((s) => s.id === id);
+  const { data: cacheHeartbeats } = useCacheHeartbeats(id);
+  const activeHeartbeat = (cacheHeartbeats ?? []).find((h) =>
+    h.status === "active" || h.status === "observe_only",
+  );
   // Authoritative case membership for this session (Work substrate). undefined ⇒
   // standalone; never inferred from task adjacency.
   const { index: affiliations } = useSessionAffiliations();
@@ -750,6 +764,32 @@ export function SessionDetailScreen() {
   const restore = useRestoreSession();
   const compact = useCompactSession();
   const keep = useKeepSession();
+  const enableCacheHeartbeat = useMutation({
+    mutationFn: async () => {
+      if (!id) throw new Error("missing session id");
+      return api.enableCacheHeartbeat(token, id, {
+        reason: "Manual operator heartbeat from Session detail",
+        duration_sec: 21600,
+        max_beats: 6,
+      });
+    },
+    onSuccess: () => {
+      setStatusBanner("Cache heartbeat armed.");
+      queryClient.invalidateQueries({ queryKey: ["cache-heartbeats", id] });
+    },
+    onError: (e) => setStatusBanner(`Cache heartbeat failed: ${String((e as Error)?.message ?? "unknown")}`),
+  });
+  const stopCacheHeartbeat = useMutation({
+    mutationFn: async () => {
+      if (!id) throw new Error("missing session id");
+      return api.stopCacheHeartbeat(token, id);
+    },
+    onSuccess: () => {
+      setStatusBanner("Cache heartbeat stopped.");
+      queryClient.invalidateQueries({ queryKey: ["cache-heartbeats", id] });
+    },
+    onError: (e) => setStatusBanner(`Stop heartbeat failed: ${String((e as Error)?.message ?? "unknown")}`),
+  });
 
   // Keep from the detail menu: unkept → one-tap optimistic keep; kept → open the
   // note editor. Mirrors the row's one-tap toggle while offering the richer edit.
@@ -778,6 +818,7 @@ export function SessionDetailScreen() {
         queryClient.refetchQueries({ queryKey: ["session-messages", id] }),
         queryClient.refetchQueries({ queryKey: ["session-activity", id] }),
         queryClient.refetchQueries({ queryKey: ["session-turns", id] }),
+        queryClient.refetchQueries({ queryKey: ["cache-heartbeats", id] }),
       ]);
       setStatusBanner("Session refreshed.");
     } catch (e) {
@@ -1073,6 +1114,23 @@ export function SessionDetailScreen() {
                               <Pin className={cn("size-4", session.keepPinned && "fill-current text-accent")} />
                               {session.keepPinned ? "Edit keep note" : "Keep session"}
                             </button>
+                            {!closed && (
+                              activeHeartbeat ? (
+                                <button
+                                  onClick={() => act(() => stopCacheHeartbeat.mutate())}
+                                  className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                                >
+                                  <Activity className="size-4" /> Stop cache heartbeat
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => act(() => enableCacheHeartbeat.mutate())}
+                                  className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-ink-soft hover:bg-surface-2"
+                                >
+                                  <Activity className="size-4" /> Arm cache heartbeat
+                                </button>
+                              )
+                            )}
                             {!closed && timeline.length > 0 && (
                               <button
                                 onClick={() => act(startSelectMode)}
@@ -1109,10 +1167,19 @@ export function SessionDetailScreen() {
               }
             />
             {session && (
-              <div className="flex items-center gap-2 border-b border-hairline bg-base/60 px-4 py-2 backdrop-blur-xl">
-                <span className="text-[11px] text-ink-muted">Affiliation</span>
-                <SessionAffiliationLink affiliation={affiliation} />
-              </div>
+              <>
+                <div className="flex items-center gap-2 border-b border-hairline bg-base/60 px-4 py-2 backdrop-blur-xl">
+                  <span className="text-[11px] text-ink-muted">Affiliation</span>
+                  <SessionAffiliationLink affiliation={affiliation} />
+                </div>
+                {activeHeartbeat && (
+                  <div className="flex items-center gap-2 border-b border-hairline bg-surface-1 px-4 py-2 text-[11px] text-ink-soft">
+                    <Activity className="size-3.5 text-accent" />
+                    <span>Cache heartbeat</span>
+                    <span className="font-mono text-ink-muted">{cacheHeartbeatLabel(activeHeartbeat)}</span>
+                  </div>
+                )}
+              </>
             )}
           </div>
 

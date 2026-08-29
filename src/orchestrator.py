@@ -144,6 +144,15 @@ _TRANSIENT_FAILED_PROMPT_CAP: int = 16_000
 CASE_RESPAWN_APPROVAL_ACTION = "case_manager_respawn"
 CASE_RESUME_APPROVAL_ACTION = "case_resume"
 
+CACHE_HEARTBEAT_PROMPT = (
+    "[cache-heartbeat]\n"
+    "The gateway is waking this session only to keep the Claude Code prompt cache warm\n"
+    "while you are waiting on durable long-running work.\n\n"
+    "Do not call tools. Do not inspect files. Do not make decisions.\n"
+    "Reply exactly CACHE_HEARTBEAT_OK.\n\n"
+    "If you are not actually waiting on useful work, reply exactly STOP_CACHE_HEARTBEAT."
+)
+
 #: [quota-resume] How a paused Case comes back.
 #:   ``in_place``      — one turn into the SAME (still alive, AWAITING_INPUT)
 #:                       Manager session. Keeps the full conversation; the
@@ -1177,9 +1186,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         """Start the periodic Wake-Dispatcher loop (mirrors the stale-busy
         reconciler). No-op unless mesh routing is active AND the continuation flag
         is ON — so with the flag OFF this is byte-identical to no loop at all."""
-        from src.control.db import case_continuation_enabled
+        from src.control.db import cache_heartbeat_active_enabled, case_continuation_enabled
         interval = int(getattr(config.mesh, "case_continuation_tick_interval_sec", 30) or 0)
-        if not config.mesh.enabled or interval <= 0 or not case_continuation_enabled():
+        if (
+            not config.mesh.enabled
+            or interval <= 0
+            or not (case_continuation_enabled() or cache_heartbeat_active_enabled())
+        ):
             return
         if self._wake_dispatcher_task and not self._wake_dispatcher_task.done():
             return
@@ -1203,8 +1216,10 @@ class TaskOrchestrator(ITaskOrchestrator):
     async def _wake_dispatcher_tick_once(self) -> int:
         """One Wake-Dispatcher pass over every open Case. Returns the number of
         proactive wake turns delivered this tick. Flag-gated (OFF ⇒ 0)."""
-        from src.control.db import case_continuation_enabled, get_db
-        if not case_continuation_enabled():
+        from src.control.db import cache_heartbeat_active_enabled, case_continuation_enabled, get_db
+        continuation_enabled = case_continuation_enabled()
+        heartbeat_active = cache_heartbeat_active_enabled()
+        if not continuation_enabled and not heartbeat_active:
             return 0
         try:
             db = get_db()
@@ -1213,15 +1228,222 @@ class TaskOrchestrator(ITaskOrchestrator):
         if db is None:
             return 0
         delivered = 0
-        for case in db.list_open_cases():
-            case_id = str(case.get("flow_run_id") or "")
-            if not case_id:
+        if continuation_enabled:
+            for case in db.list_open_cases():
+                case_id = str(case.get("flow_run_id") or "")
+                if not case_id:
+                    continue
+                try:
+                    delivered += await self._continue_case_once(db, case_id)
+                except Exception as e:
+                    logger.debug("event=wake_dispatcher_case_failed case=%s err=%s", case_id, e)
+        if heartbeat_active:
+            try:
+                delivered += await self._process_due_cache_heartbeats(db)
+            except Exception as e:
+                logger.debug("event=cache_heartbeat_tick_failed err=%s", e)
+        return delivered
+
+    def _cache_heartbeat_owner_live(self, db, owner: Dict[str, Any]) -> bool:
+        reason = str(owner.get("reason") or "")
+        owner_id = str(owner.get("owner_id") or "")
+        if reason == "manual" or reason == "agent_requested":
+            return True
+        if reason == "watched_job":
+            job = db.get_job(owner_id)
+            return bool(job and str(job.get("status") or "") == "running")
+        if reason == "case_wait_group":
+            case_id, _, wait_group_id = owner_id.partition(":")
+            if not case_id or not wait_group_id:
+                return False
+            row = db.get_flow_run(case_id)
+            if row is not None and str(row.get("status") or "").strip().lower() in {"closed", "completed", "cancelled", "blocked"}:
+                return False
+            live = False
+            for event in db.list_flow_events(case_id):
+                if event.get("entity_type") != "wait_group" or event.get("entity_id") != wait_group_id:
+                    continue
+                if event.get("event_type") == "worker.wait_pending":
+                    live = True
+                elif event.get("event_type") == "worker.wait_resolved":
+                    live = False
+            return live
+        return False
+
+    def _sync_cache_heartbeat_state(self, db) -> None:
+        db.expire_cache_heartbeat_state()
+        for hb in db.list_cache_heartbeats(limit=50):
+            if str(hb.get("status") or "") not in {"observe_only", "active"}:
+                continue
+            for owner in hb.get("owners") or []:
+                if str(owner.get("status") or "") != "active":
+                    continue
+                if self._cache_heartbeat_owner_live(db, owner):
+                    continue
+                db.stop_cache_heartbeat_owner(
+                    str(owner.get("session_id") or ""),
+                    reason=str(owner.get("reason") or ""),
+                    owner_type=str(owner.get("owner_type") or ""),
+                    owner_id=str(owner.get("owner_id") or ""),
+                    stop_reason="owner_no_longer_live",
+                )
+
+    def _cache_heartbeat_session_eligible(self, db, hb: Dict[str, Any]) -> Tuple[bool, str, Any]:
+        session_id = str(hb.get("session_id") or "")
+        session = self.session_store.get(session_id)
+        if session is None:
+            return False, "session_missing", None
+        if session.backend != "claude":
+            return False, "backend_not_claude", session
+        if session.driver_type != "sdk":
+            return False, "driver_not_sdk", session
+        if not session.backend_session_id:
+            return False, "missing_backend_session_id", session
+        if session.status != SessionStatus.AWAITING_INPUT:
+            return False, "session_not_idle", session
+        machine_id = str(getattr(session, "machine_id", "") or "")
+        if machine_id:
+            try:
+                nodes = {str(n.get("node_id") or ""): n for n in db.list_nodes()}
+                node = nodes.get(machine_id)
+                if node is None or str(node.get("status") or "") != "online":
+                    return False, "pinned_node_unavailable", session
+            except Exception:
+                return False, "pinned_node_unverified", session
+        evidence = db.recent_cache_evidence(session_id)
+        min_tokens = 0
+        try:
+            from src.control.db import cache_heartbeat_min_cache_tokens
+            min_tokens = cache_heartbeat_min_cache_tokens()
+        except Exception:
+            min_tokens = 100_000
+        token_sum = int((evidence or {}).get("cache_read_tokens") or 0) + int((evidence or {}).get("cache_creation_tokens") or 0)
+        if token_sum < min_tokens:
+            return False, "cache_below_threshold", session
+        return True, "", session
+
+    async def _process_due_cache_heartbeats(self, db) -> int:
+        from src.control.db import (
+            CACHE_HEARTBEAT_ACTION,
+            CACHE_HEARTBEAT_MACHINE_SENTINEL,
+            cache_heartbeat_active_enabled,
+            cache_heartbeat_task_id,
+        )
+        if not cache_heartbeat_active_enabled():
+            return 0
+        self._sync_cache_heartbeat_state(db)
+        delivered = 0
+        host = socket.gethostname()
+        for hb in db.due_cache_heartbeats(limit=20):
+            heartbeat_id = str(hb.get("id") or "")
+            session_id = str(hb.get("session_id") or "")
+            ok, reason, session = self._cache_heartbeat_session_eligible(db, hb)
+            if not ok:
+                if reason in {"session_missing", "backend_not_claude", "driver_not_sdk", "missing_backend_session_id"}:
+                    db.stop_cache_heartbeat(heartbeat_id, reason)
+                continue
+            interval = max(60, int(hb.get("interval_sec") or 2700))
+            slot_epoch = int(time.time() // interval) * interval
+            lease_id = cache_heartbeat_task_id(session_id, slot_epoch)
+            db.enqueue_task(
+                lease_id,
+                session_id=None,
+                machine_id=CACHE_HEARTBEAT_MACHINE_SENTINEL,
+                backend="claude",
+                action=CACHE_HEARTBEAT_ACTION,
+                payload={"heartbeat_id": heartbeat_id, "session_id": session_id, "slot_epoch": slot_epoch},
+            )
+            if not db.claim_task(lease_id, host):
                 continue
             try:
-                delivered += await self._continue_case_once(db, case_id)
+                beat_number = int(hb.get("beat_count") or 0) + 1
+                wake_task_id = await self.submit_instruction(
+                    CACHE_HEARTBEAT_PROMPT,
+                    session_id=session_id,
+                    cwd=getattr(session, "repo_path", None),
+                    source="cache_heartbeat",
+                    extra_metadata={
+                        "heartbeat_id": heartbeat_id,
+                        "beat_number": beat_number,
+                        "source": "cache_heartbeat",
+                    },
+                )
             except Exception as e:
-                logger.debug("event=wake_dispatcher_case_failed case=%s err=%s", case_id, e)
+                logger.warning("event=cache_heartbeat_deliver_failed heartbeat=%s err=%s", heartbeat_id, e)
+                db.release_task(lease_id, host)
+                continue
+            db.record_cache_heartbeat_sent(heartbeat_id, wake_task_id)
+            asyncio.create_task(self._finalize_cache_heartbeat(heartbeat_id, lease_id, wake_task_id, session_id))
+            self._emit_event(
+                "cache_heartbeat_delivered",
+                None,
+                {"heartbeat_id": heartbeat_id, "session_id": session_id, "task_id": wake_task_id},
+            )
+            delivered += 1
         return delivered
+
+    async def _finalize_cache_heartbeat(
+        self,
+        heartbeat_id: str,
+        lease_id: str,
+        wake_task_id: str,
+        session_id: str,
+    ) -> None:
+        from src.control.db import get_db
+        try:
+            db = get_db()
+        except Exception:
+            db = None
+        if db is None:
+            return
+        deadline = time.time() + 180.0
+        row: Optional[Dict[str, Any]] = None
+        while self.running and time.time() < deadline:
+            await asyncio.sleep(2)
+            row = db.get_task(wake_task_id)
+            if row is not None and row.get("status") in self._CONTINUATION_TERMINAL_STATUSES:
+                break
+            if row is None and wake_task_id not in self.active_tasks and wake_task_id in self.task_results:
+                break
+        result_dict: Dict[str, Any] = {}
+        if row and row.get("result"):
+            try:
+                result_dict = json.loads(row.get("result") or "{}")
+            except Exception:
+                result_dict = {}
+        result_obj = self.task_results.get(wake_task_id)
+        usage = result_dict.get("usage") if isinstance(result_dict.get("usage"), dict) else {}
+        if not usage and result_obj is not None and isinstance(getattr(result_obj, "usage", None), dict):
+            usage = getattr(result_obj, "usage")
+        success = bool(result_dict.get("success")) if result_dict else bool(getattr(result_obj, "success", False))
+        output = str(result_dict.get("output") or getattr(result_obj, "output", "") or "")
+        error_class = str(result_dict.get("error_class") or getattr(result_obj, "error_class", "") or "")
+        cache_read = int((usage or {}).get("cache_read_input_tokens") or (usage or {}).get("cache_read") or 0)
+        cache_creation = int((usage or {}).get("cache_creation_input_tokens") or (usage or {}).get("cache_creation") or 0)
+        db.record_cache_heartbeat_result(
+            heartbeat_id,
+            wake_task_id,
+            success=success,
+            output=output,
+            cache_read_tokens=cache_read,
+            cache_creation_tokens=cache_creation,
+            error_class=error_class,
+        )
+        db.complete_task(
+            lease_id,
+            {
+                "heartbeat_id": heartbeat_id,
+                "wake_task_id": wake_task_id,
+                "success": success,
+                "cache_read_tokens": cache_read,
+                "cache_creation_tokens": cache_creation,
+            },
+        )
+        self._emit_event(
+            "cache_heartbeat_recorded",
+            None,
+            {"heartbeat_id": heartbeat_id, "session_id": session_id, "task_id": wake_task_id, "success": success},
+        )
 
     async def _continue_case_once(self, db, case_id: str) -> int:
         """Evaluate one Case: if a wait-group is satisfied, schedule + atomically

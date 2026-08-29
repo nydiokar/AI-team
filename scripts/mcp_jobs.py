@@ -72,6 +72,8 @@ _TOOLS = [
             "The task turn ends immediately after registration; the job runs independently "
             "and does NOT hold the session busy or consume a task slot. By default, the "
             "agent is notified in-session when the job finishes so it can continue. "
+            "For long waits tied to a Claude SDK session, the gateway can also observe "
+            "or preserve the session prompt cache while the detached job runs. "
             "\n\n"
             "Commands run on the worker OS shell. On Windows workers, use cmd/PowerShell "
             "syntax, not POSIX shell syntax. Do NOT use for short commands."
@@ -99,6 +101,18 @@ _TOOLS = [
                     "type": "boolean",
                     "description": "Whether to submit a follow-up instruction to the same session when the job finishes. Defaults to true.",
                     "default": True,
+                },
+                "expected_runtime_sec": {
+                    "type": "integer",
+                    "description": "Optional expected runtime in seconds. Helps the gateway decide when a cache heartbeat is worth arming.",
+                    "minimum": 0,
+                    "maximum": 86400,
+                },
+                "cache_heartbeat": {
+                    "type": "string",
+                    "description": "Session cache heartbeat policy for this detached job: auto, on, or off. Defaults to auto.",
+                    "enum": ["auto", "on", "off"],
+                    "default": "auto",
                 },
             },
             "required": ["command", "label"],
@@ -198,6 +212,13 @@ def _watch_job(args: Dict[str, Any]) -> str:
     )
     label = _bounded_text(args.get("label"), "label", _MAX_LABEL_CHARS) or ""
     notify_agent = _coerce_bool(args.get("notify_agent"), True)
+    expected_runtime_raw = args.get("expected_runtime_sec")
+    expected_runtime_sec = None
+    if expected_runtime_raw is not None:
+        expected_runtime_sec = max(0, min(86400, int(expected_runtime_raw)))
+    cache_heartbeat = str(args.get("cache_heartbeat") or "auto").strip().lower()
+    if cache_heartbeat not in {"auto", "on", "off"}:
+        raise ValueError("cache_heartbeat must be auto, on, or off")
 
     result = _post_job({
         "node_id": node,
@@ -207,6 +228,8 @@ def _watch_job(args: Dict[str, Any]) -> str:
         "session_id": session,
         "notify": True,
         "notify_agent": notify_agent,
+        "expected_runtime_sec": expected_runtime_sec,
+        "cache_heartbeat": cache_heartbeat,
     })
 
     job_id = result.get("job_id", "?")
@@ -218,6 +241,7 @@ def _watch_job(args: Dict[str, Any]) -> str:
         f"Node:    {node}\n"
         f"Session: {session or '(none)'}\n"
         f"Agent follow-up: {'yes' if notify_agent else 'no'}\n"
+        f"Cache heartbeat: {cache_heartbeat}\n"
         f"\n"
         f"The worker will spawn it now and capture its output.\n"
         f"You can watch it in System > Jobs. When it finishes, the result is posted "

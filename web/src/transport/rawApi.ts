@@ -69,6 +69,43 @@ export interface RawSessionUsage {
   };
 }
 
+export interface RawCacheHeartbeatOwner {
+  id: string;
+  heartbeat_id: string;
+  session_id: string;
+  reason: string;
+  owner_type: string;
+  owner_id: string;
+  status: string;
+  expected_runtime_sec: number | null;
+  started_at: string;
+  expires_at: string | null;
+  stop_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RawCacheHeartbeat {
+  id: string;
+  session_id: string;
+  status: string;
+  ttl_sec: number;
+  interval_sec: number;
+  next_due_at: string | null;
+  expires_at: string | null;
+  beat_count: number;
+  max_beats: number;
+  hard_max_beats: number;
+  last_beat_task_id: string | null;
+  last_cache_touch_at: string | null;
+  last_cache_read_tokens: number | null;
+  last_cache_creation_tokens: number | null;
+  circuit_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  owners?: RawCacheHeartbeatOwner[];
+}
+
 // GET /api/nodes → { nodes: RawNode[] }
 // db.list_nodes() rows + dashboard._annotate_node_liveness() derived fields.
 // NOTE: trust `live` + `heartbeat_age_sec` (derived per-request), NOT `status`

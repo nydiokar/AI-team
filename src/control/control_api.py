@@ -359,6 +359,12 @@ class RuntimeFlagBody(BaseModel):
     set_by: Optional[str] = Field(default=None, max_length=128)
 
 
+class CacheHeartbeatBody(BaseModel):
+    reason: str = Field(max_length=500)
+    duration_sec: Optional[int] = Field(default=None, gt=0, le=86400)
+    max_beats: int = Field(default=6, gt=0, le=15)
+
+
 class ModelBody(BaseModel):
     model: Optional[str] = None
 
@@ -1153,6 +1159,55 @@ def build_control_api(orchestrator) -> FastAPI:
             logger.warning("control_api_sessions_failed err=%s", e)
             sessions = []
         return JSONResponse({"sessions": sessions})
+
+    @app.get("/api/cache-heartbeats", dependencies=[Depends(_require_auth)])
+    def api_cache_heartbeats(
+        session_id: Optional[str] = Query(default=None, max_length=_ID_STR_MAX),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> JSONResponse:
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        return JSONResponse({
+            "ok": True,
+            "heartbeats": db.list_cache_heartbeats(session_id=session_id, limit=limit),
+        })
+
+    @app.post("/api/sessions/{session_id}/cache-heartbeat", dependencies=[Depends(_require_auth)])
+    def api_enable_cache_heartbeat(session_id: str, body: CacheHeartbeatBody) -> JSONResponse:
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        session = orchestrator.session_store.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "session_not_found"})
+        expires_at = None
+        if body.duration_sec:
+            from datetime import datetime, timedelta, timezone
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=body.duration_sec)).isoformat()
+        hb = db.ensure_cache_heartbeat_owner(
+            session_id,
+            reason="manual",
+            owner_type="operator",
+            owner_id="manual",
+            expected_runtime_sec=body.duration_sec,
+            expires_at=expires_at,
+            max_beats=body.max_beats,
+        )
+        if hb is None:
+            raise HTTPException(status_code=409, detail={"ok": False, "reason": "cache_heartbeat_not_enabled"})
+        return JSONResponse({"ok": True, "heartbeat": hb})
+
+    @app.delete("/api/sessions/{session_id}/cache-heartbeat", dependencies=[Depends(_require_auth)])
+    def api_stop_cache_heartbeat(session_id: str) -> JSONResponse:
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        changed = 0
+        for hb in db.list_cache_heartbeats(session_id=session_id, limit=20):
+            if str(hb.get("status") or "") in {"observe_only", "active"}:
+                changed += 1 if db.stop_cache_heartbeat(str(hb.get("id") or ""), "operator_disabled") else 0
+        return JSONResponse({"ok": True, "stopped": changed})
 
     @app.get("/api/tasks", dependencies=[Depends(_require_auth)])
     def api_tasks(
