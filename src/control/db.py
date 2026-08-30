@@ -5126,9 +5126,114 @@ class MeshDB:
         )
         return dict(best)
 
+    def latest_cache_evidence(self, session_id: str, turns: int = 5) -> Optional[Dict[str, Any]]:
+        """Latest successful cache-token evidence for one session.
+
+        ``recent_cache_evidence`` intentionally returns the strongest request in
+        a bounded window. Heartbeat scheduling needs freshness instead: the most
+        recent successful turn that actually touched prompt-cache accounting.
+        """
+        rows = self._conn().execute(
+            """
+            SELECT t.task_id, t.observed_at, MAX(r.model) AS model,
+                   COALESCE(SUM(r.cache_read_tokens), 0) AS cache_read_tokens,
+                   COALESCE(SUM(r.cache_creation_tokens), 0) AS cache_creation_tokens
+            FROM (
+                SELECT turn_id, task_id, ended_at, created_at,
+                       COALESCE(ended_at, created_at) AS observed_at
+                FROM llm_turns
+                WHERE session_id = ?
+                  AND COALESCE(final_status, 'success') IN ('success', 'completed')
+                ORDER BY COALESCE(ended_at, created_at) DESC
+                LIMIT ?
+            ) t
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            WHERE r.is_duplicate = 0
+            GROUP BY t.turn_id, t.task_id, t.observed_at
+            ORDER BY t.observed_at DESC
+            """,
+            (session_id, max(1, int(turns))),
+        ).fetchall()
+        for row in rows:
+            token_sum = int(row["cache_read_tokens"] or 0) + int(row["cache_creation_tokens"] or 0)
+            if token_sum > 0:
+                return dict(row)
+        return None
+
     def _cache_heartbeat_next_due(self, last_touch: Optional[str], interval_sec: int) -> str:
         base = _parse_datetime_utc(last_touch) or datetime.now(timezone.utc)
         return (base + timedelta(seconds=max(60, int(interval_sec)))).isoformat()
+
+    def refresh_cache_heartbeat_from_recent_evidence(self, session_id: str) -> bool:
+        """Advance an active heartbeat controller from authoritative turn data."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        evidence = self.latest_cache_evidence(sid)
+        observed_at = str((evidence or {}).get("observed_at") or "").strip()
+        observed_dt = _parse_datetime_utc(observed_at)
+        if evidence is None or observed_dt is None:
+            return False
+        read_tokens = int(evidence.get("cache_read_tokens") or 0)
+        creation_tokens = int(evidence.get("cache_creation_tokens") or 0)
+        now = _now()
+        changed = False
+        with self._write() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, last_cache_touch_at, interval_sec
+                FROM session_cache_heartbeats
+                WHERE session_id = ? AND status IN ('observe_only', 'active')
+                """,
+                (sid,),
+            ).fetchall()
+            for row in rows:
+                last_dt = _parse_datetime_utc(row["last_cache_touch_at"])
+                if last_dt is not None and observed_dt <= last_dt:
+                    continue
+                next_due = self._cache_heartbeat_next_due(
+                    observed_at,
+                    int(row["interval_sec"] or cache_heartbeat_interval_sec()),
+                )
+                conn.execute(
+                    """
+                    UPDATE session_cache_heartbeats
+                    SET last_cache_touch_at = ?, last_cache_read_tokens = ?,
+                        last_cache_creation_tokens = ?, next_due_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (observed_at, read_tokens, creation_tokens, next_due, now, row["id"]),
+                )
+                changed = True
+        return changed
+
+    def refresh_cache_heartbeats_from_recent_evidence(self, limit: int = 100) -> int:
+        """Refresh active heartbeat clocks before evaluating due work."""
+        rows = self._conn().execute(
+            """
+            SELECT session_id FROM session_cache_heartbeats
+            WHERE status IN ('observe_only', 'active')
+            ORDER BY
+                CASE
+                    WHEN next_due_at IS NOT NULL AND next_due_at <= ? THEN 0
+                    ELSE 1
+                END,
+                COALESCE(next_due_at, updated_at) ASC,
+                updated_at DESC
+            LIMIT ?
+            """,
+            (_now(), max(1, min(int(limit), 500))),
+        ).fetchall()
+        changed = 0
+        seen: set[str] = set()
+        for row in rows:
+            session_id = str(row["session_id"] or "")
+            if not session_id or session_id in seen:
+                continue
+            seen.add(session_id)
+            changed += 1 if self.refresh_cache_heartbeat_from_recent_evidence(session_id) else 0
+        return changed
 
     def ensure_cache_heartbeat_owner(
         self,
@@ -5168,7 +5273,7 @@ class MeshDB:
             datetime.now(timezone.utc) + timedelta(seconds=(interval * maxb) + ttl)
         ).isoformat()
         exp = expires_at or default_exp
-        evidence = self.recent_cache_evidence(sid)
+        evidence = self.latest_cache_evidence(sid)
         last_touch = (evidence or {}).get("observed_at") or now
         status = "active" if cache_heartbeat_active_enabled() else "observe_only"
         heartbeat_id = ""
@@ -5207,6 +5312,16 @@ class MeshDB:
                     current = dict(row)
                     heartbeat_id = str(current["id"])
                     next_status = "active" if cache_heartbeat_active_enabled() else current["status"]
+                    current_touch = _parse_datetime_utc(current.get("last_cache_touch_at"))
+                    evidence_touch = _parse_datetime_utc(str(last_touch))
+                    should_refresh_touch = evidence_touch is not None and (
+                        current_touch is None or evidence_touch > current_touch
+                    )
+                    next_due = (
+                        self._cache_heartbeat_next_due(str(last_touch), interval)
+                        if should_refresh_touch
+                        else current.get("next_due_at")
+                    )
                     conn.execute(
                         """
                         UPDATE session_cache_heartbeats
@@ -5214,18 +5329,21 @@ class MeshDB:
                             expires_at = MAX(COALESCE(expires_at, ''), ?),
                             max_beats = MAX(max_beats, ?),
                             hard_max_beats = MAX(hard_max_beats, ?),
-                            last_cache_touch_at = COALESCE(last_cache_touch_at, ?),
-                            last_cache_read_tokens = COALESCE(last_cache_read_tokens, ?),
-                            last_cache_creation_tokens = COALESCE(last_cache_creation_tokens, ?),
-                            updated_at = ?
+                            last_cache_touch_at = CASE WHEN ? THEN ? ELSE last_cache_touch_at END,
+                            last_cache_read_tokens = CASE WHEN ? THEN ? ELSE last_cache_read_tokens END,
+                            last_cache_creation_tokens = CASE WHEN ? THEN ? ELSE last_cache_creation_tokens END,
+                            next_due_at = COALESCE(?, next_due_at), updated_at = ?
                         WHERE id = ?
                         """,
                         (
                             next_status, ttl, interval, exp, maxb, hard,
+                            1 if should_refresh_touch else 0,
                             str(last_touch),
+                            1 if should_refresh_touch else 0,
                             int((evidence or {}).get("cache_read_tokens") or 0),
+                            1 if should_refresh_touch else 0,
                             int((evidence or {}).get("cache_creation_tokens") or 0),
-                            now, heartbeat_id,
+                            next_due, now, heartbeat_id,
                         ),
                     )
                 owner_row = conn.execute(
