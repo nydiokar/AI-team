@@ -29,27 +29,35 @@ def _session(status: SessionStatus = SessionStatus.AWAITING_INPUT) -> Session:
     )
 
 
-def _cache_evidence(db: MeshDB, session_id: str = "sess_hb", cache_read: int = 120_000) -> None:
-    now = _iso()
+def _cache_evidence(
+    db: MeshDB,
+    session_id: str = "sess_hb",
+    cache_read: int = 120_000,
+    *,
+    task_id: str = "task_real",
+    turn_id: str = "turn_hb",
+    offset_sec: int = 0,
+) -> str:
+    now = _iso(offset_sec)
     conn = db._conn()
     conn.execute(
         """
         INSERT INTO llm_turns (
             turn_id, session_id, task_id, backend, started_at, ended_at,
             final_status, created_at, updated_at
-        ) VALUES ('turn_hb', ?, 'task_real', 'claude', ?, ?, 'completed', ?, ?)
+        ) VALUES (?, ?, ?, 'claude', ?, ?, 'completed', ?, ?)
         """,
-        (session_id, now, now, now, now),
+        (turn_id, session_id, task_id, now, now, now, now),
     )
     conn.execute(
         """
         INSERT INTO llm_invocations (
             invocation_id, turn_id, attempt, spawn_reason, action, node_id,
             backend, started_at, ended_at, status
-        ) VALUES ('inv_hb', 'turn_hb', 1, 'initial', 'resume_session', 'node',
+        ) VALUES (?, ?, 1, 'initial', 'resume_session', 'node',
                   'claude', ?, ?, 'completed')
         """,
-        (now, now),
+        (f"inv_{turn_id}", turn_id, now, now),
     )
     conn.execute(
         """
@@ -58,12 +66,13 @@ def _cache_evidence(db: MeshDB, session_id: str = "sess_hb", cache_read: int = 1
             started_at, ended_at, status, input_tokens, output_tokens,
             cache_read_tokens, cache_creation_tokens, input_token_semantics,
             usage_granularity, usage_coverage, is_duplicate
-        ) VALUES ('req_hb', 'inv_hb', 'turn_hb', 1, 'agent', ?, ?, 'ok',
+        ) VALUES (?, ?, ?, 1, 'agent', ?, ?, 'ok',
                   10, 1, ?, 0, 'exclusive_cache', 'invocation_total',
                   'aggregate_only', 0)
         """,
-        (now, now, cache_read),
+        (f"req_{turn_id}", f"inv_{turn_id}", turn_id, now, now, cache_read),
     )
+    return now
 
 
 def test_observe_default_creates_one_controller_for_overlapping_owners(tmp_path, monkeypatch) -> None:
@@ -217,6 +226,144 @@ def test_busy_session_is_skipped_not_interrupted(tmp_path, monkeypatch) -> None:
 
     assert delivered == 0
     assert orch.submitted == []
+
+
+def test_due_heartbeat_uses_real_turn_cache_touch_before_delivering(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", "100")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    old_touch = _cache_evidence(db, cache_read=1000, turn_id="turn_old", offset_sec=-3600)
+    session = _session()
+    db.upsert_session(session)
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+    assert hb is not None
+    assert hb["last_cache_touch_at"] == old_touch
+    fresh_touch = _cache_evidence(
+        db, cache_read=1000, task_id="task_fresh", turn_id="turn_fresh", offset_sec=-10,
+    )
+    with db._write() as conn:
+        conn.execute(
+            "UPDATE session_cache_heartbeats SET next_due_at = ? WHERE id = ?",
+            (_iso(-10), hb["id"]),
+        )
+    orch = _Orch(session)
+
+    delivered = asyncio.run(TaskOrchestrator._process_due_cache_heartbeats(orch, db))
+
+    row = db.get_cache_heartbeat(str(hb["id"]))
+    assert delivered == 0
+    assert orch.submitted == []
+    assert row["last_cache_touch_at"] == fresh_touch
+    assert datetime.fromisoformat(row["next_due_at"]) > datetime.now(timezone.utc)
+
+
+def test_rearming_owner_refreshes_stale_cache_touch_from_real_turn(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    old_touch = _cache_evidence(db, turn_id="turn_old", offset_sec=-3600)
+    first = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+    assert first is not None
+    assert first["last_cache_touch_at"] == old_touch
+    fresh_touch = _cache_evidence(
+        db, task_id="task_fresh", turn_id="turn_fresh", offset_sec=-30,
+    )
+
+    second = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="watched_job", owner_type="job", owner_id="job_1",
+    )
+
+    assert second is not None
+    assert second["id"] == first["id"]
+    assert second["last_cache_touch_at"] == fresh_touch
+    assert datetime.fromisoformat(second["next_due_at"]) > datetime.now(timezone.utc)
+
+
+def test_controller_creation_uses_latest_cache_touch_not_largest_recent_hit(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _cache_evidence(db, cache_read=5000, turn_id="turn_old", offset_sec=-3600)
+    fresh_touch = _cache_evidence(
+        db, cache_read=1000, task_id="task_fresh", turn_id="turn_fresh", offset_sec=-20,
+    )
+
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+
+    assert hb is not None
+    assert hb["last_cache_touch_at"] == fresh_touch
+    assert hb["last_cache_read_tokens"] == 1000
+
+
+def test_bulk_refresh_prioritizes_due_stale_controllers(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    due_old_touch = _cache_evidence(
+        db, session_id="sess_due", turn_id="turn_due_old", offset_sec=-3600,
+    )
+    due_hb = db.ensure_cache_heartbeat_owner(
+        "sess_due", reason="manual", owner_type="operator", owner_id="manual_due",
+    )
+    assert due_hb is not None
+    assert due_hb["last_cache_touch_at"] == due_old_touch
+    due_fresh_touch = _cache_evidence(
+        db,
+        session_id="sess_due",
+        task_id="task_due_fresh",
+        turn_id="turn_due_fresh",
+        offset_sec=-10,
+    )
+    _cache_evidence(db, session_id="sess_not_due", turn_id="turn_not_due", offset_sec=-20)
+    not_due_hb = db.ensure_cache_heartbeat_owner(
+        "sess_not_due", reason="manual", owner_type="operator", owner_id="manual_not_due",
+    )
+    assert not_due_hb is not None
+    with db._write() as conn:
+        conn.execute(
+            "UPDATE session_cache_heartbeats SET next_due_at = ?, updated_at = ? WHERE id = ?",
+            (_iso(-5), _iso(-3600), due_hb["id"]),
+        )
+
+    changed = db.refresh_cache_heartbeats_from_recent_evidence(limit=1)
+
+    due_row = db.get_cache_heartbeat(str(due_hb["id"]))
+    not_due_row = db.get_cache_heartbeat(str(not_due_hb["id"]))
+    assert changed == 1
+    assert due_row["last_cache_touch_at"] == due_fresh_touch
+    assert not_due_row["last_cache_touch_at"] == not_due_hb["last_cache_touch_at"]
+
+
+def test_eligibility_rechecks_refreshed_due_time_from_real_turn(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", "100")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _cache_evidence(db, cache_read=1000, turn_id="turn_old", offset_sec=-3600)
+    session = _session()
+    db.upsert_session(session)
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+    assert hb is not None
+    stale_hb = dict(hb)
+    with db._write() as conn:
+        conn.execute(
+            "UPDATE session_cache_heartbeats SET next_due_at = ? WHERE id = ?",
+            (_iso(-10), hb["id"]),
+        )
+    _cache_evidence(db, cache_read=1000, task_id="task_fresh", turn_id="turn_fresh", offset_sec=-5)
+    orch = _Orch(session)
+
+    ok, reason, eligible_session = TaskOrchestrator._cache_heartbeat_session_eligible(orch, db, stale_hb)
+
+    assert ok is False
+    assert reason == "cache_fresh"
+    assert eligible_session is session
 
 
 def test_finalize_timeout_does_not_stop_the_controller(tmp_path, monkeypatch) -> None:

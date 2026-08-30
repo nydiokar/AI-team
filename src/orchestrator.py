@@ -1290,6 +1290,7 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     def _cache_heartbeat_session_eligible(self, db, hb: Dict[str, Any]) -> Tuple[bool, str, Any]:
         session_id = str(hb.get("session_id") or "")
+        heartbeat_id = str(hb.get("id") or "")
         session = self.session_store.get(session_id)
         if session is None:
             return False, "session_missing", None
@@ -1299,6 +1300,15 @@ class TaskOrchestrator(ITaskOrchestrator):
             return False, "driver_not_sdk", session
         if not session.backend_session_id:
             return False, "missing_backend_session_id", session
+        db.refresh_cache_heartbeat_from_recent_evidence(session_id)
+        if heartbeat_id:
+            refreshed = db.get_cache_heartbeat(heartbeat_id)
+            next_due_at = str((refreshed or {}).get("next_due_at") or "")
+            try:
+                if next_due_at and parse_iso(next_due_at) > datetime.now(timezone.utc):
+                    return False, "cache_fresh", session
+            except Exception:
+                pass
         if session.status != SessionStatus.AWAITING_INPUT:
             return False, "session_not_idle", session
         machine_id = str(getattr(session, "machine_id", "") or "")
@@ -1331,6 +1341,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         )
         if not cache_heartbeat_active_enabled():
             return 0
+        db.refresh_cache_heartbeats_from_recent_evidence(limit=100)
         self._sync_cache_heartbeat_state(db)
         delivered = 0
         host = socket.gethostname()
