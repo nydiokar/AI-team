@@ -5127,14 +5127,14 @@ class MeshDB:
         return dict(best)
 
     def latest_cache_evidence(self, session_id: str, turns: int = 5) -> Optional[Dict[str, Any]]:
-        """Latest cache-token evidence for one session.
+        """Latest successful cache-token evidence for one session.
 
         ``recent_cache_evidence`` intentionally returns the strongest request in
         a bounded window. Heartbeat scheduling needs freshness instead: the most
-        recent completed or failed turn that actually touched prompt-cache
-        accounting. Quota/provider refusals can still carry cache-read telemetry;
-        that is real evidence that the provider saw the cached prefix, so it must
-        reset the heartbeat clock even though the conversational turn failed.
+        recent successful turn that actually touched prompt-cache accounting.
+        Quota refusals are not useful cache-preservation work: when quota is
+        exhausted, heartbeat delivery must be blocked by quota state instead of
+        pretending the refusal refreshed the session.
         """
         rows = self._conn().execute(
             """
@@ -5146,7 +5146,7 @@ class MeshDB:
                        COALESCE(ended_at, created_at) AS observed_at
                 FROM llm_turns
                 WHERE session_id = ?
-                  AND COALESCE(final_status, 'success') IN ('success', 'completed', 'failed')
+                  AND COALESCE(final_status, 'success') IN ('success', 'completed')
                 ORDER BY COALESCE(ended_at, created_at) DESC
                 LIMIT ?
             ) t
