@@ -8,6 +8,7 @@ from src.control.db import (
     MeshDB,
 )
 from src.core.interfaces import Session, SessionStatus
+from src.core.interfaces import Task, TaskPriority, TaskStatus, TaskType
 from src.orchestrator import TaskOrchestrator
 
 
@@ -37,6 +38,7 @@ def _cache_evidence(
     task_id: str = "task_real",
     turn_id: str = "turn_hb",
     offset_sec: int = 0,
+    final_status: str = "completed",
 ) -> str:
     now = _iso(offset_sec)
     conn = db._conn()
@@ -45,9 +47,9 @@ def _cache_evidence(
         INSERT INTO llm_turns (
             turn_id, session_id, task_id, backend, started_at, ended_at,
             final_status, created_at, updated_at
-        ) VALUES (?, ?, ?, 'claude', ?, ?, 'completed', ?, ?)
+        ) VALUES (?, ?, ?, 'claude', ?, ?, ?, ?, ?)
         """,
-        (turn_id, session_id, task_id, now, now, now, now),
+        (turn_id, session_id, task_id, now, now, final_status, now, now),
     )
     conn.execute(
         """
@@ -159,6 +161,8 @@ class _Orch:
     _sync_cache_heartbeat_state = TaskOrchestrator._sync_cache_heartbeat_state
     _cache_heartbeat_owner_live = TaskOrchestrator._cache_heartbeat_owner_live
     _cache_heartbeat_session_eligible = TaskOrchestrator._cache_heartbeat_session_eligible
+    _cache_heartbeat_session_has_inflight_work = TaskOrchestrator._cache_heartbeat_session_has_inflight_work
+    _cache_heartbeat_blocked_by_case_pause = TaskOrchestrator._cache_heartbeat_blocked_by_case_pause
     _finalize_cache_heartbeat = TaskOrchestrator._finalize_cache_heartbeat
 
     def __init__(self, session: Session):
@@ -171,6 +175,22 @@ class _Orch:
 
     def _emit_event(self, *args, **kwargs):
         return None
+
+
+def _active_task(task_id: str, session_id: str) -> Task:
+    return Task(
+        id=task_id,
+        type=TaskType.ANALYZE,
+        priority=TaskPriority.MEDIUM,
+        status=TaskStatus.PROCESSING,
+        created=_iso(),
+        title="active",
+        target_files=[],
+        prompt="work",
+        success_criteria=[],
+        context="",
+        metadata={"session_id": session_id},
+    )
 
 
 def test_due_heartbeat_claims_one_lease_and_submits_turn(tmp_path, monkeypatch) -> None:
@@ -202,6 +222,184 @@ def test_due_heartbeat_claims_one_lease_and_submits_turn(tmp_path, monkeypatch) 
     assert len(rows) == 1
     assert rows[0]["machine_id"] == CACHE_HEARTBEAT_MACHINE_SENTINEL
     assert rows[0]["status"] == "claimed"
+
+
+def test_quota_paused_case_skips_due_heartbeat(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", "100")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _cache_evidence(db, cache_read=1000)
+    session = _session()
+    db.upsert_session(session)
+    case_id = db.create_flow_run("task_case", "execution")
+    db.append_flow_event(
+        case_id,
+        "worker.wait_pending",
+        "manager",
+        entity_type="wait_group",
+        entity_id="wg",
+        payload={"wait_group_id": "wg", "condition": "ALL", "member_task_ids": ["worker-task"]},
+    )
+    db.append_flow_event(
+        case_id,
+        "flow.quota_paused",
+        "system",
+        entity_type="task",
+        entity_id="paused-turn",
+        payload={
+            "session_id": "sess_hb",
+            "paused_task_id": "paused-turn",
+            "provider": "claude",
+            "reset_at": _iso(3600),
+        },
+    )
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb",
+        reason="case_wait_group",
+        owner_type="wait_group",
+        owner_id=f"{case_id}:wg",
+    )
+    assert hb is not None
+    with db._write() as conn:
+        conn.execute(
+            "UPDATE session_cache_heartbeats SET next_due_at = ? WHERE id = ?",
+            (_iso(-10), hb["id"]),
+        )
+    orch = _Orch(session)
+
+    delivered = asyncio.run(TaskOrchestrator._process_due_cache_heartbeats(orch, db))
+
+    assert delivered == 0
+    assert orch.submitted == []
+    row = db.get_cache_heartbeat(str(hb["id"]))
+    assert row["status"] == "active"
+
+
+def test_inflight_session_work_skips_due_heartbeat(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", "100")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _cache_evidence(db, cache_read=1000)
+    session = _session()
+    session.last_task_id = "task_real_work"
+    db.upsert_session(session)
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+    assert hb is not None
+    with db._write() as conn:
+        conn.execute(
+            "UPDATE session_cache_heartbeats SET next_due_at = ? WHERE id = ?",
+            (_iso(-10), hb["id"]),
+        )
+    orch = _Orch(session)
+    orch.active_tasks = {"task_real_work": _active_task("task_real_work", "sess_hb")}
+
+    delivered = asyncio.run(TaskOrchestrator._process_due_cache_heartbeats(orch, db))
+
+    assert delivered == 0
+    assert orch.submitted == []
+
+
+def test_lost_driver_stops_due_heartbeat(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", "100")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _cache_evidence(db, cache_read=1000)
+    session = _session()
+    session.driver_status = "lost"
+    db.upsert_session(session)
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+    assert hb is not None
+    with db._write() as conn:
+        conn.execute(
+            "UPDATE session_cache_heartbeats SET next_due_at = ? WHERE id = ?",
+            (_iso(-10), hb["id"]),
+        )
+    orch = _Orch(session)
+
+    delivered = asyncio.run(TaskOrchestrator._process_due_cache_heartbeats(orch, db))
+
+    assert delivered == 0
+    assert orch.submitted == []
+    row = db.get_cache_heartbeat(str(hb["id"]))
+    assert row["status"] == "stopped"
+    assert row["circuit_reason"] == "driver_not_live"
+
+
+def test_failed_turn_with_cache_evidence_refreshes_heartbeat_clock(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    old_touch = _cache_evidence(db, cache_read=1000, turn_id="turn_old", offset_sec=-3600)
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+    assert hb is not None
+    assert hb["last_cache_touch_at"] == old_touch
+    quota_touch = _cache_evidence(
+        db,
+        cache_read=1000,
+        task_id="task_quota",
+        turn_id="turn_quota",
+        offset_sec=-60,
+        final_status="failed",
+    )
+
+    changed = db.refresh_cache_heartbeat_from_recent_evidence("sess_hb")
+
+    row = db.get_cache_heartbeat(str(hb["id"]))
+    assert changed is True
+    assert row["last_cache_touch_at"] == quota_touch
+    assert datetime.fromisoformat(row["next_due_at"]) > datetime.now(timezone.utc)
+
+
+def test_finalize_uses_db_cache_evidence_when_result_usage_is_sparse(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", "100")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _cache_evidence(db, cache_read=1000)
+    session = _session()
+    db.upsert_session(session)
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+    assert hb is not None
+    heartbeat_id = str(hb["id"])
+    lease_id = "cache_heartbeat_lease_sparse_usage"
+    wake_task_id = "task_wake_sparse"
+    db.enqueue_task(
+        lease_id, session_id=None, machine_id=CACHE_HEARTBEAT_MACHINE_SENTINEL,
+        backend="claude", action=CACHE_HEARTBEAT_ACTION, payload={},
+    )
+    db.claim_task(lease_id, "host")
+    db.enqueue_task(
+        wake_task_id, session_id="sess_hb", machine_id="",
+        backend="claude", action="resume_session", payload={},
+    )
+    db.complete_task(wake_task_id, {"success": True, "output": "CACHE_HEARTBEAT_OK", "usage": {}})
+    observed_at = _cache_evidence(
+        db,
+        cache_read=1000,
+        task_id=wake_task_id,
+        turn_id="turn_wake_sparse",
+        offset_sec=0,
+    )
+    orch = _Orch(session)
+    monkeypatch.setattr(db_mod, "get_db", lambda: db)
+
+    asyncio.run(TaskOrchestrator._finalize_cache_heartbeat(
+        orch, heartbeat_id, lease_id, wake_task_id, "sess_hb",
+    ))
+
+    row = db.get_cache_heartbeat(heartbeat_id)
+    assert row["beat_count"] == 1
+    assert datetime.fromisoformat(row["last_cache_touch_at"]) >= datetime.fromisoformat(
+        observed_at.replace("Z", "+00:00")
+    )
+    assert row["last_cache_read_tokens"] == 1000
+    assert row["status"] == "active"
 
 
 def test_busy_session_is_skipped_not_interrupted(tmp_path, monkeypatch) -> None:
