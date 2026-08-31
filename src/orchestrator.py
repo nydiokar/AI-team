@@ -1288,6 +1288,41 @@ class TaskOrchestrator(ITaskOrchestrator):
                     stop_reason="owner_no_longer_live",
                 )
 
+    def _cache_heartbeat_session_has_inflight_work(self, session_id: str, session: Any) -> bool:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        last_task_id = str(getattr(session, "last_task_id", "") or "").strip()
+        if last_task_id and last_task_id in self.active_tasks:
+            return True
+        for task in self.active_tasks.values():
+            metadata = getattr(task, "metadata", None) or {}
+            if str(metadata.get("session_id") or "").strip() == sid:
+                return True
+        return False
+
+    def _cache_heartbeat_blocked_by_case_pause(self, db, hb: Dict[str, Any]) -> bool:
+        """A Case pause owns the Manager; heartbeat must not race that machinery."""
+        for owner in hb.get("owners") or []:
+            if str(owner.get("status") or "") != "active":
+                continue
+            if str(owner.get("reason") or "") != "case_wait_group":
+                continue
+            case_id, _, _wait_group_id = str(owner.get("owner_id") or "").partition(":")
+            if not case_id:
+                continue
+            try:
+                if db.case_quota_pause(case_id) is not None:
+                    return True
+            except Exception:
+                return True
+            try:
+                if db.transient_pause(case_id) is not None:
+                    return True
+            except Exception:
+                return True
+        return False
+
     def _cache_heartbeat_session_eligible(self, db, hb: Dict[str, Any]) -> Tuple[bool, str, Any]:
         session_id = str(hb.get("session_id") or "")
         heartbeat_id = str(hb.get("id") or "")
@@ -1300,9 +1335,15 @@ class TaskOrchestrator(ITaskOrchestrator):
             return False, "driver_not_sdk", session
         if not session.backend_session_id:
             return False, "missing_backend_session_id", session
+        if session.driver_status and session.driver_status != "live":
+            return False, "driver_not_live", session
+        if self._cache_heartbeat_session_has_inflight_work(session_id, session):
+            return False, "session_work_in_flight", session
         db.refresh_cache_heartbeat_from_recent_evidence(session_id)
         if heartbeat_id:
             refreshed = db.get_cache_heartbeat(heartbeat_id)
+            if refreshed and self._cache_heartbeat_blocked_by_case_pause(db, refreshed):
+                return False, "case_pause_active", session
             next_due_at = str((refreshed or {}).get("next_due_at") or "")
             try:
                 if next_due_at and parse_iso(next_due_at) > datetime.now(timezone.utc):
@@ -1350,7 +1391,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             session_id = str(hb.get("session_id") or "")
             ok, reason, session = self._cache_heartbeat_session_eligible(db, hb)
             if not ok:
-                if reason in {"session_missing", "backend_not_claude", "driver_not_sdk", "missing_backend_session_id"}:
+                if reason in {"session_missing", "backend_not_claude", "driver_not_sdk", "missing_backend_session_id", "driver_not_live"}:
                     db.stop_cache_heartbeat(heartbeat_id, reason)
                 continue
             interval = max(60, int(hb.get("interval_sec") or 2700))
@@ -1449,6 +1490,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         error_class = str(result_dict.get("error_class") or getattr(result_obj, "error_class", "") or "")
         cache_read = int((usage or {}).get("cache_read_input_tokens") or (usage or {}).get("cache_read") or 0)
         cache_creation = int((usage or {}).get("cache_creation_input_tokens") or (usage or {}).get("cache_creation") or 0)
+        if cache_read <= 0 and cache_creation <= 0:
+            try:
+                evidence = db.cache_evidence_for_task(session_id, wake_task_id)
+            except Exception:
+                evidence = None
+            if evidence:
+                cache_read = int(evidence.get("cache_read_tokens") or 0)
+                cache_creation = int(evidence.get("cache_creation_tokens") or 0)
         db.record_cache_heartbeat_result(
             heartbeat_id,
             wake_task_id,
