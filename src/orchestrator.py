@@ -1323,6 +1323,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                 return True
         return False
 
+    def _cache_heartbeat_quota_available(self) -> bool:
+        try:
+            return not bool(self.quota_window_state("claude").get("exhausted"))
+        except Exception:
+            return True
+
     def _cache_heartbeat_session_eligible(self, db, hb: Dict[str, Any]) -> Tuple[bool, str, Any]:
         session_id = str(hb.get("session_id") or "")
         heartbeat_id = str(hb.get("id") or "")
@@ -1339,6 +1345,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             return False, "driver_not_live", session
         if self._cache_heartbeat_session_has_inflight_work(session_id, session):
             return False, "session_work_in_flight", session
+        if not self._cache_heartbeat_quota_available():
+            return False, "quota_exhausted", session
         db.refresh_cache_heartbeat_from_recent_evidence(session_id)
         if heartbeat_id:
             refreshed = db.get_cache_heartbeat(heartbeat_id)
