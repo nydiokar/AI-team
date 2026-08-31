@@ -163,11 +163,14 @@ class _Orch:
     _cache_heartbeat_session_eligible = TaskOrchestrator._cache_heartbeat_session_eligible
     _cache_heartbeat_session_has_inflight_work = TaskOrchestrator._cache_heartbeat_session_has_inflight_work
     _cache_heartbeat_blocked_by_case_pause = TaskOrchestrator._cache_heartbeat_blocked_by_case_pause
+    _cache_heartbeat_quota_available = TaskOrchestrator._cache_heartbeat_quota_available
+    quota_window_state = TaskOrchestrator.quota_window_state
     _finalize_cache_heartbeat = TaskOrchestrator._finalize_cache_heartbeat
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, quota_snapshots: list[dict] | None = None) -> None:
         self.session_store = _Store(session)
         self.submitted = []
+        self.quota_coordinator = _QuotaCoordinator(quota_snapshots) if quota_snapshots is not None else None
 
     async def submit_instruction(self, description, **kwargs):
         self.submitted.append((description, kwargs))
@@ -191,6 +194,31 @@ def _active_task(task_id: str, session_id: str) -> Task:
         context="",
         metadata={"session_id": session_id},
     )
+
+
+class _QuotaStore:
+    def __init__(self, snapshots: list[dict]) -> None:
+        self._snapshots = snapshots
+
+    def latest_snapshots(self) -> list[dict]:
+        return self._snapshots
+
+
+class _QuotaCoordinator:
+    def __init__(self, snapshots: list[dict]) -> None:
+        self.store = _QuotaStore(snapshots)
+
+
+def _spent_quota_snapshot() -> list[dict]:
+    now = datetime.now(timezone.utc)
+    return [{
+        "provider": "claude",
+        "bucket_id": "five_hour",
+        "used_percent": 100.0,
+        "limit_reached": 1,
+        "observed_at": now.isoformat(),
+        "reset_at": (now + timedelta(minutes=50)).isoformat(),
+    }]
 
 
 def test_due_heartbeat_claims_one_lease_and_submits_turn(tmp_path, monkeypatch) -> None:
@@ -329,7 +357,9 @@ def test_lost_driver_stops_due_heartbeat(tmp_path, monkeypatch) -> None:
     assert row["circuit_reason"] == "driver_not_live"
 
 
-def test_failed_turn_with_cache_evidence_refreshes_heartbeat_clock(tmp_path, monkeypatch) -> None:
+def test_quota_failed_turn_with_cache_evidence_does_not_refresh_heartbeat_clock(
+    tmp_path, monkeypatch,
+) -> None:
     monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
     db = MeshDB(str(tmp_path / "mesh.db"))
     old_touch = _cache_evidence(db, cache_read=1000, turn_id="turn_old", offset_sec=-3600)
@@ -350,9 +380,35 @@ def test_failed_turn_with_cache_evidence_refreshes_heartbeat_clock(tmp_path, mon
     changed = db.refresh_cache_heartbeat_from_recent_evidence("sess_hb")
 
     row = db.get_cache_heartbeat(str(hb["id"]))
-    assert changed is True
-    assert row["last_cache_touch_at"] == quota_touch
-    assert datetime.fromisoformat(row["next_due_at"]) > datetime.now(timezone.utc)
+    assert quota_touch != old_touch
+    assert changed is False
+    assert row["last_cache_touch_at"] == old_touch
+
+
+def test_exhausted_quota_skips_due_heartbeat(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "1")
+    monkeypatch.setenv("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", "100")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _cache_evidence(db, cache_read=1000)
+    session = _session()
+    db.upsert_session(session)
+    hb = db.ensure_cache_heartbeat_owner(
+        "sess_hb", reason="manual", owner_type="operator", owner_id="manual",
+    )
+    assert hb is not None
+    with db._write() as conn:
+        conn.execute(
+            "UPDATE session_cache_heartbeats SET next_due_at = ? WHERE id = ?",
+            (_iso(-10), hb["id"]),
+        )
+    orch = _Orch(session, quota_snapshots=_spent_quota_snapshot())
+
+    delivered = asyncio.run(TaskOrchestrator._process_due_cache_heartbeats(orch, db))
+
+    assert delivered == 0
+    assert orch.submitted == []
+    row = db.get_cache_heartbeat(str(hb["id"]))
+    assert row["status"] == "active"
 
 
 def test_finalize_uses_db_cache_evidence_when_result_usage_is_sparse(tmp_path, monkeypatch) -> None:
