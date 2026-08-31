@@ -5127,11 +5127,14 @@ class MeshDB:
         return dict(best)
 
     def latest_cache_evidence(self, session_id: str, turns: int = 5) -> Optional[Dict[str, Any]]:
-        """Latest successful cache-token evidence for one session.
+        """Latest cache-token evidence for one session.
 
         ``recent_cache_evidence`` intentionally returns the strongest request in
         a bounded window. Heartbeat scheduling needs freshness instead: the most
-        recent successful turn that actually touched prompt-cache accounting.
+        recent completed or failed turn that actually touched prompt-cache
+        accounting. Quota/provider refusals can still carry cache-read telemetry;
+        that is real evidence that the provider saw the cached prefix, so it must
+        reset the heartbeat clock even though the conversational turn failed.
         """
         rows = self._conn().execute(
             """
@@ -5143,14 +5146,14 @@ class MeshDB:
                        COALESCE(ended_at, created_at) AS observed_at
                 FROM llm_turns
                 WHERE session_id = ?
-                  AND COALESCE(final_status, 'success') IN ('success', 'completed')
+                  AND COALESCE(final_status, 'success') IN ('success', 'completed', 'failed')
                 ORDER BY COALESCE(ended_at, created_at) DESC
                 LIMIT ?
             ) t
             JOIN llm_model_requests r ON r.turn_id = t.turn_id
             WHERE r.is_duplicate = 0
             GROUP BY t.turn_id, t.task_id, t.observed_at
-            ORDER BY t.observed_at DESC
+            ORDER BY observed_at DESC
             """,
             (session_id, max(1, int(turns))),
         ).fetchall()
@@ -5159,6 +5162,35 @@ class MeshDB:
             if token_sum > 0:
                 return dict(row)
         return None
+
+    def cache_evidence_for_task(self, session_id: str, task_id: str) -> Optional[Dict[str, Any]]:
+        """Cache-token evidence for one task in one session, if telemetry landed."""
+        sid = str(session_id or "").strip()
+        tid = str(task_id or "").strip()
+        if not sid or not tid:
+            return None
+        row = self._conn().execute(
+            """
+            SELECT t.task_id, COALESCE(t.ended_at, t.created_at) AS observed_at,
+                   MAX(r.model) AS model,
+                   COALESCE(SUM(r.cache_read_tokens), 0) AS cache_read_tokens,
+                   COALESCE(SUM(r.cache_creation_tokens), 0) AS cache_creation_tokens
+            FROM llm_turns t
+            JOIN llm_model_requests r ON r.turn_id = t.turn_id
+            WHERE t.session_id = ?
+              AND t.task_id = ?
+              AND r.is_duplicate = 0
+            GROUP BY t.task_id, COALESCE(t.ended_at, t.created_at)
+            ORDER BY observed_at DESC
+            LIMIT 1
+            """,
+            (sid, tid),
+        ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        token_sum = int(out.get("cache_read_tokens") or 0) + int(out.get("cache_creation_tokens") or 0)
+        return out if token_sum > 0 else None
 
     def _cache_heartbeat_next_due(self, last_touch: Optional[str], interval_sec: int) -> str:
         base = _parse_datetime_utc(last_touch) or datetime.now(timezone.utc)
