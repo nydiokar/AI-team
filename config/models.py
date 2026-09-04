@@ -12,8 +12,8 @@ picker all read from this module.
 
 Validation policy (see MODEL_PICKER_PLAN.md R5/R6):
   - claude: STRICT. Its model aliases are global and stable.
-  - codex: ADVISORY. The installed Codex CLI advertises the machine's current
-    model catalog, which can change independently of this gateway.
+  - codex: ADVISORY. The target worker's installed Codex CLI advertises the
+    machine/account model catalog, which can change independently of this gateway.
   - opencode / opencode-server: ADVISORY. Available models depend on the local
     opencode.json providers (which differ per worker node), so the gateway cannot
     know the full set. Unknown names are passed through with a warning, never
@@ -85,10 +85,9 @@ BACKEND_MODELS: Dict[str, List[ModelOption]] = {
         ModelOption("haiku"),
         ModelOption("fable"),
     ],
-    "codex": [
-        ModelOption("gpt-5.5", is_default=True),
-        ModelOption("gpt-5.2-codex"),
-    ],
+    # Codex is node-owned and discovered from that node's CLI. There is no
+    # gateway fallback catalog: an empty list means discovery is unavailable.
+    "codex": [],
     "opencode": _OPENCODE_MODELS,
     "opencode-server": _OPENCODE_MODELS,
 }
@@ -192,24 +191,14 @@ _CODEX_MODEL_CACHE_LOCK = threading.Lock()
 
 
 def _merge_codex_options(discovered: List[ModelOption]) -> List[ModelOption]:
-    merged: list[ModelOption] = list(discovered)
-    known: set[str] = {item.name for item in merged}
-    for item in options("codex"):
-        if item.name not in known:
-            merged.append(item)
-    return merged
-
-
-def _is_static_codex_fallback(items: List[ModelOption]) -> bool:
-    return list(items) == list(options("codex"))
+    return list(discovered)
 
 
 def available_options(backend: str) -> List[ModelOption]:
     """Return picker options, discovering Codex models from the local CLI.
 
-    The static catalog remains as a compatibility fallback and is merged with
-    the advertised list so existing aliases do not disappear during a CLI
-    upgrade or downgrade.
+    There is deliberately no static fallback. The worker/node that owns the
+    session is the authority for what its account and CLI can use.
     """
     if backend != "codex":
         return options(backend)
@@ -229,21 +218,22 @@ def available_options(backend: str) -> List[ModelOption]:
                 previous: list[ModelOption] = list(_CODEX_MODEL_CACHE[1])
                 if discovered:
                     merged = _merge_codex_options(discovered)
-                elif previous and not _is_static_codex_fallback(previous):
+                elif previous:
                     merged = previous
                     logger.warning("event=codex_model_discovery_empty keeping_last_good_catalog=true")
                 else:
-                    merged = list(options(backend))
+                    merged = []
                 _CODEX_MODEL_CACHE = (now, merged)
     return _CODEX_MODEL_CACHE[1]
 
 
 def default_model(backend: str) -> Optional[str]:
     """Return the catalog default model name for a backend, or None."""
-    for opt in options(backend):
+    catalog = available_options(backend) if backend == "codex" else options(backend)
+    for opt in catalog:
         if opt.is_default:
             return opt.name
-    opts = options(backend)
+    opts = catalog
     return opts[0].name if opts else None
 
 

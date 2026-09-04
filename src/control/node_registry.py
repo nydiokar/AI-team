@@ -22,6 +22,8 @@ class NodeCapabilities:
     max_concurrent: int = 2
     projects_root: str = ""
     repos: List[dict] = field(default_factory=list)  # [{name, path}] snapshot from worker
+    # Backend-owned model descriptors: {backend: [{name, is_default, efforts}]}
+    models: Dict[str, List[dict]] = field(default_factory=dict)
 
 
 @dataclass
@@ -45,6 +47,7 @@ class NodeInfo:
             max_concurrent=int(caps_raw.get("max_concurrent") or 2),
             projects_root=caps_raw.get("projects_root") or "",
             repos=list(caps_raw.get("repos") or []),
+            models=dict(caps_raw.get("models") or {}),
         )
         return cls(
             node_id=d["node_id"],
@@ -63,6 +66,7 @@ class NodeInfo:
                 "max_concurrent": self.capabilities.max_concurrent,
                 "projects_root": self.capabilities.projects_root,
                 "repos": self.capabilities.repos,
+                "models": self.capabilities.models,
             },
             "status": self.status,
             "last_heartbeat": self.last_heartbeat.isoformat() if self.last_heartbeat else None,
@@ -135,7 +139,12 @@ class NodeRegistry:
             self._db_mark_offline(node_id)
             logger.info("event=node_deregistered node_id=%s", node_id)
 
-    def heartbeat(self, node_id: str, live_state: Optional[dict] = None) -> bool:
+    def heartbeat(
+        self,
+        node_id: str,
+        live_state: Optional[dict] = None,
+        models: Optional[Dict[str, List[dict]]] = None,
+    ) -> bool:
         """Update last_heartbeat and optional live_state. Returns False if node is unknown."""
         node = self._nodes.get(node_id)
         if node is None:
@@ -145,7 +154,9 @@ class NodeRegistry:
         if live_state is not None:
             node.live_state = live_state
             node.live_state_updated_at = node.last_heartbeat
-        self._db_heartbeat(node_id, live_state)
+        if models is not None:
+            node.capabilities.models = dict(models)
+        self._db_heartbeat(node_id, live_state, models)
         return True
 
     # ------------------------------------------------------------------
@@ -300,6 +311,7 @@ class NodeRegistry:
                     status="online",
                     projects_root=node.capabilities.projects_root,
                     repos=node.capabilities.repos,
+                    models=node.capabilities.models,
                     incarnation_id=node.incarnation_id,
                 )
                 node.incarnation_id = incarnation_id
@@ -308,7 +320,12 @@ class NodeRegistry:
             logger.debug("event=db_node_upsert_err node_id=%s err=%s", node.node_id, e)
         return None, node.incarnation_id
 
-    def _db_heartbeat(self, node_id: str, live_state: Optional[dict] = None) -> None:
+    def _db_heartbeat(
+        self,
+        node_id: str,
+        live_state: Optional[dict] = None,
+        models: Optional[Dict[str, List[dict]]] = None,
+    ) -> None:
         try:
             from src.control.db import get_db
             db = get_db()
@@ -316,6 +333,7 @@ class NodeRegistry:
                 db.heartbeat_node(
                     node_id,
                     live_state=json.dumps(live_state) if live_state is not None else None,
+                    model_capabilities=json.dumps(models) if models is not None else None,
                 )
         except Exception as e:
             logger.debug("event=db_heartbeat_err node_id=%s err=%s", node_id, e)
