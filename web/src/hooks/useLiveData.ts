@@ -232,16 +232,15 @@ export function useProjects(nodeId = "__local__") {
 }
 
 /**
- * Model catalog for a backend — drives the web model picker (parity with /model).
- * Static server-side catalog; stale forever (never changes at runtime).
+ * Model catalog advertised by the selected execution node.
  */
-export function useModels(backend: string | undefined) {
+export function useModels(backend: string | undefined, nodeId = "__local__") {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["models", backend],
-    queryFn: () => api.models(token, backend!),
+    queryKey: ["models", backend, nodeId],
+    queryFn: () => api.models(token, backend!, nodeId),
     enabled: Boolean(token) && Boolean(backend),
-    staleTime: Infinity,
+    refetchInterval: 30_000,
   });
 }
 

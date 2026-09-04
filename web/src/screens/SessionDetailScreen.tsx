@@ -1359,6 +1359,7 @@ export function SessionDetailScreen() {
           sessionId={id}
           currentModel={session.model}
           backend={session.backend}
+          nodeId={session.workspace.targetId}
           onClose={() => setModelPickerOpen(false)}
         />
       )}
@@ -1368,6 +1369,7 @@ export function SessionDetailScreen() {
           backend={session.backend}
           currentEffort={session.effort}
           currentModel={session.model ?? session.defaultModel}
+          nodeId={session.workspace.targetId}
           onClose={() => setEffortPickerOpen(false)}
         />
       )}

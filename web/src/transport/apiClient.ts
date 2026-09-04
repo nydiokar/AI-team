@@ -493,10 +493,10 @@ export const api = {
     return data.projects ?? [];
   },
 
-  /** GET /api/models — model catalog for a backend (config/models.py). */
-  async models(token: string, backend: string): Promise<RawModelOption[]> {
+  /** GET /api/models — model catalog advertised by the target node. */
+  async models(token: string, backend: string, nodeId = "__local__"): Promise<RawModelOption[]> {
     const data = await get<{ backend: string; models: RawModelOption[] }>(
-      `/api/models?backend=${encodeURIComponent(backend)}`,
+      `/api/models?backend=${encodeURIComponent(backend)}&node_id=${encodeURIComponent(nodeId)}`,
       token,
     );
     return data.models ?? [];
