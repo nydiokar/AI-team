@@ -133,7 +133,7 @@ class _FakeHTTP:
     def __init__(self):
         self.posts = []
 
-    def post(self, path, body=None):
+    def post(self, path, body=None, timeout=10):
         self.posts.append((path, body))
         return {}
 
