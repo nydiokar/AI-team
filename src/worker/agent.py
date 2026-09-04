@@ -44,6 +44,8 @@ from src.core.process_utils import (
 )
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+_REGISTRATION_TIMEOUT_SECONDS = 30
+_REGISTRATION_RETRY_MAX_SECONDS = 30.0
 
 logger = logging.getLogger(__name__)
 
@@ -1035,9 +1037,36 @@ class WorkerAgent:
                 "projects_root": self.cfg.projects_root,
                 "repos": self.cfg.list_repos(),
             },
-        })
+        }, timeout=_REGISTRATION_TIMEOUT_SECONDS)
         logger.info("event=registered node_id=%s controller=%s projects_root=%s",
                     self.cfg.node_id, self.cfg.controller_url, self.cfg.projects_root or "(none)")
+
+    async def _wait_for_registration_retry(self, delay: float) -> None:
+        """Wait for retry delay, waking early when shutdown was requested."""
+        try:
+            await asyncio.wait_for(self._shutdown.wait(), timeout=delay)
+        except TimeoutError:
+            pass
+
+    async def _register_until_success(self) -> None:
+        """Keep this daemon alive while the controller is temporarily unavailable."""
+        delay = 5.0
+        failures = 0
+        while not self._shutdown.is_set():
+            try:
+                await asyncio.to_thread(self._register)
+                return
+            except Exception as e:
+                failures += 1
+                logger.warning(
+                    "event=startup_registration_failed node_id=%s failures=%d retry_in_sec=%.0f err=%s",
+                    self.cfg.node_id,
+                    failures,
+                    delay,
+                    e,
+                )
+                await self._wait_for_registration_retry(delay)
+                delay = min(delay * 2, _REGISTRATION_RETRY_MAX_SECONDS)
 
     def _deregister(self) -> None:
         try:
@@ -1578,9 +1607,23 @@ class WorkerAgent:
     # Run
     # ------------------------------------------------------------------
 
+    def _install_signal_handler(self) -> None:
+        """Install the shutdown handler before startup retries begin."""
+        loop = asyncio.get_running_loop()
+        try:
+            loop.add_signal_handler(signal.SIGTERM, self._on_sigterm)
+        except (NotImplementedError, OSError):
+            try:
+                signal.signal(signal.SIGTERM, lambda *_: self._on_sigterm())
+            except (OSError, ValueError):
+                pass
+
     async def run(self) -> None:
         self._reap_stale_backend_children()
-        self._register()
+        self._install_signal_handler()
+        await self._register_until_success()
+        if self._shutdown.is_set():
+            return
 
         nudge_listener = asyncio.create_task(
             _run_nudge_listener(
@@ -1598,19 +1641,6 @@ class WorkerAgent:
         else:
             poller = asyncio.create_task(self._poll_loop())
             job_watcher = asyncio.create_task(self._job_watcher_loop())
-
-        # Install SIGTERM handler — loop.add_signal_handler is Unix-only.
-        # On Windows fall back to signal.signal; if SIGTERM isn't supported
-        # at all (Windows), skip silently — Ctrl+C (KeyboardInterrupt) is the
-        # shutdown path there.
-        loop = asyncio.get_running_loop()
-        try:
-            loop.add_signal_handler(signal.SIGTERM, self._on_sigterm)
-        except (NotImplementedError, OSError):
-            try:
-                signal.signal(signal.SIGTERM, lambda *_: self._on_sigterm())
-            except (OSError, ValueError):
-                pass
 
         try:
             await self._shutdown.wait()
