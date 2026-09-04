@@ -377,6 +377,45 @@ class _HTTP:
             return json.loads(resp.read())
 
 
+async def _post_result_until_accepted(
+    http: _HTTP,
+    path: str,
+    payload: Dict[str, Any],
+    *,
+    label: str,
+    max_runtime_sec: int = 600,
+) -> bool:
+    """Retry an idempotent terminal result POST during controller outages.
+
+    Losing a result after successful backend execution leaves the gateway's
+    task claimed forever until its dispatch timeout. The task-server terminal
+    result endpoint is idempotent, so delivery can safely retry with bounded
+    exponential backoff while the worker remains alive.
+    """
+    deadline = time.monotonic() + max(1, max_runtime_sec)
+    delay_sec = 1.0
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        try:
+            await asyncio.to_thread(http.post, path, payload, timeout=10)
+            if attempt > 1:
+                logger.info("event=%s_recovered attempts=%d", label, attempt)
+            return True
+        except Exception as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            logger.warning(
+                "event=%s_failed attempt=%d retry_in=%.1fs err=%s",
+                label, attempt, min(delay_sec, remaining), exc,
+            )
+            await asyncio.sleep(min(delay_sec, remaining))
+            delay_sec = min(delay_sec * 2, 30.0)
+    logger.error("event=%s_exhausted max_runtime_sec=%d", label, max_runtime_sec)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Nudge listener — tiny asyncio HTTP server, just accepts POST /nudge
 # ---------------------------------------------------------------------------
@@ -1486,20 +1525,21 @@ class WorkerAgent:
             pass
 
     async def _fetch_pending(self) -> List[Dict[str, Any]]:
-        try:
-            return await asyncio.to_thread(
-                self._http.get,
-                "/tasks/pending",
-                {
-                    "node_id": self.cfg.node_id,
-                    "backends": ",".join(self.cfg.backends),
-                    "limit": str(self.cfg.max_concurrent * 2),
-                    "accept_unpinned": "true" if self.cfg.accept_unpinned else "false",
-                },
-            )
-        except Exception as e:
-            logger.warning("event=fetch_pending_failed err=%s", e)
-            return []
+        params = {
+            "node_id": self.cfg.node_id,
+            "backends": ",".join(self.cfg.backends),
+            "limit": str(self.cfg.max_concurrent * 2),
+            "accept_unpinned": "true" if self.cfg.accept_unpinned else "false",
+        }
+        for attempt in range(1, 3):
+            try:
+                return await asyncio.to_thread(self._http.get, "/tasks/pending", params)
+            except Exception as exc:
+                if attempt == 2:
+                    logger.warning("event=fetch_pending_failed attempts=%d err=%s", attempt, exc)
+                else:
+                    await asyncio.sleep(1)
+        return []
 
     # ------------------------------------------------------------------
     # Task handling
@@ -1559,11 +1599,14 @@ class WorkerAgent:
 
                 # Post result
                 try:
-                    await asyncio.to_thread(
-                        self._http.post,
+                    delivered = await _post_result_until_accepted(
+                        self._http,
                         f"/tasks/{task_id}/result",
                         {"node_id": self.cfg.node_id, **result},
+                        label="result_post",
                     )
+                    if not delivered:
+                        raise RuntimeError("controller_unreachable_until_delivery_deadline")
                     logger.info(
                         "task_result_posted success=%s elapsed=%.1fs",
                         result["success"], result["execution_time"],
@@ -1633,11 +1676,14 @@ class WorkerAgent:
             node_id=self.cfg.node_id,
         )
         try:
-            await asyncio.to_thread(
-                self._http.post,
+            delivered = await _post_result_until_accepted(
+                self._http,
                 f"/tasks/{task_id}/result",
                 {"node_id": self.cfg.node_id, **result},
+                label="close_result_post",
             )
+            if not delivered:
+                raise RuntimeError("controller_unreachable_until_delivery_deadline")
         except Exception as e:
             logger.error("close_result_post_failed err=%s", e)
 
