@@ -2613,21 +2613,35 @@ def build_control_api(orchestrator) -> FastAPI:
     @app.get("/api/models", dependencies=[Depends(_require_auth)])
     def api_models(
         backend: Optional[str] = Query(default=None),
+        node_id: str = Query("__local__"),
     ) -> JSONResponse:
-        """Model catalog for a backend (or all backends). Drives the web model picker
-        (parity with Telegram /model). Codex is discovered from its local CLI."""
+        """Return the catalog advertised by the selected execution node."""
         from config.models import BACKEND_MODELS, available_options as _options
+        node_models: dict[str, list[dict[str, Any]]] = {}
+        if node_id != "__local__":
+            db = _db()
+            row = db.get_node(node_id) if db is not None else None
+            if row:
+                try:
+                    node_models = json.loads(row.get("model_capabilities") or "{}")
+                except (TypeError, ValueError):
+                    node_models = {}
+
+        def serialize(model_backend: str) -> list[dict[str, Any]]:
+            if node_id != "__local__":
+                return list(node_models.get(model_backend) or [])
+            return [{"name": o.name, "is_default": o.is_default, "efforts": list(o.supported_efforts or [])} for o in _options(model_backend)]
+
         if backend:
-            opts = _options(backend)
             return JSONResponse({
                 "backend": backend,
-                "models": [{"name": o.name, "is_default": o.is_default, "efforts": list(o.supported_efforts or [])} for o in opts],
+                "node_id": node_id,
+                "models": serialize(backend),
             })
         result = {}
         for be in BACKEND_MODELS:
-            opts_list = _options(be)
-            result[be] = [{"name": o.name, "is_default": o.is_default, "efforts": list(o.supported_efforts or [])} for o in opts_list]
-        return JSONResponse({"models": result})
+            result[be] = serialize(be)
+        return JSONResponse({"node_id": node_id, "models": result})
 
     @app.post("/api/sessions/{session_id}/upload", dependencies=[Depends(_require_auth)])
     async def api_upload_file(

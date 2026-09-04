@@ -12,11 +12,12 @@ interface Props {
   sessionId: string;
   currentModel: string | null;
   backend: string;
+  nodeId: string;
   onClose: () => void;
 }
 
-export function ModelPickerSheet({ sessionId, currentModel, backend, onClose }: Props) {
-  const { data: models, isLoading } = useModels(backend);
+export function ModelPickerSheet({ sessionId, currentModel, backend, nodeId, onClose }: Props) {
+  const { data: models, isLoading } = useModels(backend, nodeId);
   const setModel = useSetModel();
 
   const pick = (name: string | null) => {

@@ -223,6 +223,7 @@ class _Capabilities(BaseModel):
     max_concurrent: int = 2
     projects_root: str = ""
     repos: List[Dict[str, str]] = Field(default_factory=list)
+    models: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
 
 
 class NodeRegisterPayload(BaseModel):
@@ -248,6 +249,7 @@ class LiveStatePayload(BaseModel):
 class HeartbeatPayload(BaseModel):
     node_id: str
     live_state: Optional[LiveStatePayload] = None
+    models: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
 
 
 class DeregisterPayload(BaseModel):
@@ -531,6 +533,7 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
             max_concurrent=payload.capabilities.max_concurrent,
             projects_root=payload.capabilities.projects_root,
             repos=list(payload.capabilities.repos),
+            models=dict(payload.capabilities.models),
         ),
         incarnation_id=payload.incarnation_id or None,
     )
@@ -541,7 +544,7 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
 @app.post("/nodes/heartbeat", dependencies=[Depends(_require_auth)])
 def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
     live_state = payload.live_state.model_dump() if payload.live_state is not None else None
-    ok = get_registry().heartbeat(payload.node_id, live_state=live_state)
+    ok = get_registry().heartbeat(payload.node_id, live_state=live_state, models=payload.models)
     if not ok:
         # Unknown node — prompt re-register instead of silently failing
         raise HTTPException(status_code=404, detail="Node not found; send /nodes/register first")

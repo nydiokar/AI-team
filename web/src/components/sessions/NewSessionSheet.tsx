@@ -17,7 +17,7 @@
  *                     marked-message digest onto its first instruction. It is a pure
  *                     SESSION action — it never touches Case membership or role.
  */
-import { useState, useRef, useLayoutEffect } from "react";
+import { useState, useRef, useLayoutEffect, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { X, ChevronRight, FolderOpen } from "lucide-react";
 import { Button } from "../ui/Button";
@@ -25,7 +25,7 @@ import {
   useCreateSession,
   useInvokeManager,
 } from "../../hooks/useSessionActions";
-import { useProjects, useTargets } from "../../hooks/useLiveData";
+import { useModels, useProjects, useTargets } from "../../hooks/useLiveData";
 import { useForkStore } from "../../stores/forkStore";
 import { useManagerBootStore } from "../../stores/managerBootStore";
 import { cn } from "../../lib/cn";
@@ -112,6 +112,7 @@ export function NewSessionSheet({
   const [backend, setBackend] = useState<string>(fork?.backend ?? "claude");
   const [nodeId, setNodeId] = useState<string>(fork?.nodeId ?? "__local__");
   const [repoPath, setRepoPath] = useState<string>(fork?.repoPath ?? "");
+  const [model, setModel] = useState<string | null>(fork?.model ?? null);
   // Role is ORTHOGONAL to fork. A fork carries prior context (lineage + marked
   // digest); the role (bare / worker / manager) is a separate behavioral+tools axis.
   // Any role can be forked — bare/worker via the create pipeline, manager via
@@ -129,6 +130,13 @@ export function NewSessionSheet({
   const hasRemoteNodes = liveRemoteNodes.length > 0;
 
   const { data: projects, isLoading: projectsLoading } = useProjects(nodeId);
+  const { data: modelOptions, isLoading: modelsLoading } = useModels(backend, nodeId);
+
+  useEffect(() => {
+    if (!modelOptions?.length) return;
+    if (modelOptions.some((option) => option.name === model)) return;
+    setModel(modelOptions.find((option) => option.is_default)?.name ?? modelOptions[0].name);
+  }, [model, modelOptions]);
 
   const isManager = role === "manager";
   const pending = create.isPending || invoke.isPending;
@@ -138,7 +146,7 @@ export function NewSessionSheet({
   // Only a Manager needs an explicit confirm (it also needs an intent), so tapping a
   // repo only SELECTS it there. Bare / Worker / Fork keep the one-tap "pick repo =
   // go" flow — a fork carries its context automatically, so no extra input.
-  const needsExplicitSubmit = isManager || manualMode;
+  const needsExplicitSubmit = isManager || manualMode || modelsLoading || modelOptions !== undefined;
 
   // Progressive disclosure: for a Manager the big repo list is only useful UNTIL a
   // repo is picked. Once one is chosen from the list, collapse it to a one-line chip
@@ -183,6 +191,7 @@ export function NewSessionSheet({
           objective: obj,
           repoPath: p,
           backend,
+          model: model ?? undefined,
           nodeId,
           completionCriteria: criteria.trim() || undefined,
           continuedFrom: isFork ? fork!.sourceSessionId : undefined,
@@ -218,7 +227,7 @@ export function NewSessionSheet({
         backend,
         repoPath: p,
         nodeId,
-        model: isFork ? fork!.model ?? undefined : undefined,
+        model: model ?? undefined,
         roleBoot: role === "worker" ? "worker" : undefined,
         continuedFrom: isFork ? fork!.sourceSessionId : undefined,
       },
@@ -235,7 +244,7 @@ export function NewSessionSheet({
 
   const submit = () => submitWith(repoPath);
   const submitDisabled =
-    !repoPath.trim() || pending || (isManager && !objective.trim());
+    !repoPath.trim() || pending || modelsLoading || !model || (isManager && !objective.trim());
 
   const backendLabel = BACKENDS.find((b) => b.id === backend)?.label ?? backend;
   const headerTitle = isFork
@@ -408,6 +417,31 @@ export function NewSessionSheet({
                   >
                     <span className="font-medium">{r.label}</span>
                     <span className="ml-1 text-[10px] text-ink-muted">{r.hint}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mb-3">
+              <p className="mb-1.5 text-xs text-ink-muted">Model on {nodeId}</p>
+              {modelsLoading && <p className="py-2 text-sm text-ink-muted">Discovering models…</p>}
+              {!modelsLoading && (modelOptions ?? []).length === 0 && (
+                <p className="py-2 text-sm text-bad">This node has not advertised any models.</p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                {(modelOptions ?? []).map((option) => (
+                  <button
+                    key={option.name}
+                    onClick={() => setModel(option.name)}
+                    className={cn(
+                      "rounded-xl border px-3 py-2 text-left text-[12px] transition",
+                      model === option.name
+                        ? "border-accent/40 bg-accent-dim/40 text-ink ring-1 ring-accent/30"
+                        : "border-hairline bg-surface-1 text-ink hover:bg-surface-2",
+                    )}
+                  >
+                    <span className="font-mono">{option.name}</span>
+                    {option.is_default && <span className="ml-1 text-ink-muted">(default)</span>}
                   </button>
                 ))}
               </div>

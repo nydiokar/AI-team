@@ -52,7 +52,8 @@ def _resolve_effort(session: Session) -> Optional[str]:
     """Resolve the optional per-session Codex reasoning effort."""
     try:
         from config.models import validate_effort
-        return validate_effort("codex", getattr(session, "effort", None))
+        requested = getattr(session, "effort", None) or os.getenv("CODEX_DEFAULT_EFFORT", "medium")
+        return validate_effort("codex", requested)
     except Exception:
         return None
 

@@ -30,6 +30,9 @@ def _mk(backend, model=None):
 def test_every_backend_has_exactly_one_default():
     for backend in BACKEND_MODELS:
         defaults = [o for o in options(backend) if o.is_default]
+        if backend == "codex":
+            assert defaults == []
+            continue
         assert len(defaults) == 1, f"{backend} must have exactly one default"
         assert default_model(backend) == defaults[0].name
 
@@ -58,13 +61,13 @@ def test_validation_policy_strict_vs_advisory():
     assert is_advisory("opencode")
     # known names pass through on any backend
     assert validate("claude", "opus") == "opus"
-    assert is_known("codex", "gpt-5.5")
+    assert not is_known("codex", "gpt-5.5")
     # empty/None → None
     assert validate("claude", None) is None
     assert validate("claude", "   ") is None
 
 
-def test_codex_picker_merges_machine_catalog_with_legacy_aliases(monkeypatch):
+def test_codex_picker_uses_only_machine_catalog(monkeypatch):
     monkeypatch.setattr(
         models_module,
         "_read_codex_model_list",
@@ -78,8 +81,7 @@ def test_codex_picker_merges_machine_catalog_with_legacy_aliases(monkeypatch):
 
     names = [item.name for item in available_options("codex")]
     assert names[:3] == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
-    assert "gpt-5.5" in names
-    assert "gpt-5.2-codex" in names
+    assert names == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
 
 
 def test_codex_picker_keeps_last_good_catalog_on_refresh_failure(monkeypatch):
@@ -101,7 +103,7 @@ def test_codex_picker_keeps_last_good_catalog_on_refresh_failure(monkeypatch):
     monkeypatch.setattr(models_module, "_CODEX_MODEL_CACHE", (0.0, list(models_module._CODEX_MODEL_CACHE[1])))
     second = [item.name for item in available_options("codex")]
     assert second[:2] == ["gpt-5.6-sol", "gpt-5.6-terra"]
-    assert "gpt-5.5" in second
+    assert second == ["gpt-5.6-sol", "gpt-5.6-terra"]
 
 
 def test_effort_catalog_is_backend_specific_and_optional():
