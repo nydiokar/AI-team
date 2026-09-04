@@ -4185,6 +4185,7 @@ class MeshDB:
         status: str = "online",
         projects_root: str = "",
         repos: Optional[List[dict]] = None,
+        models: Optional[Dict[str, List[dict]]] = None,
         incarnation_id: Optional[str] = None,
     ) -> str:
         """Upsert a node record and return the new incarnation_id.
@@ -4204,8 +4205,8 @@ class MeshDB:
                     INSERT INTO nodes
                         (node_id, tailscale_ip, api_port, backends, max_concurrent,
                          status, last_heartbeat, registered_at, updated_at,
-                         projects_root, repos, incarnation_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         projects_root, repos, model_capabilities, incarnation_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(node_id) DO UPDATE SET
                         tailscale_ip   = excluded.tailscale_ip,
                         api_port       = excluded.api_port,
@@ -4216,6 +4217,7 @@ class MeshDB:
                         updated_at     = excluded.updated_at,
                         projects_root  = excluded.projects_root,
                         repos          = excluded.repos,
+                        model_capabilities = excluded.model_capabilities,
                         incarnation_id = excluded.incarnation_id
                     """,
                     (
@@ -4230,6 +4232,7 @@ class MeshDB:
                         now,
                         projects_root,
                         json.dumps(repos or []),
+                        json.dumps(models or {}),
                         incarnation_id,
                     ),
                 )
@@ -4237,7 +4240,12 @@ class MeshDB:
             logger.warning("event=db_upsert_node_failed node_id=%s err=%s", node_id, e)
         return incarnation_id
 
-    def heartbeat_node(self, node_id: str, live_state: Optional[str] = None) -> None:
+    def heartbeat_node(
+        self,
+        node_id: str,
+        live_state: Optional[str] = None,
+        model_capabilities: Optional[str] = None,
+    ) -> None:
         now = _now()
         try:
             with self._write() as conn:
@@ -4246,10 +4254,11 @@ class MeshDB:
                     UPDATE nodes
                     SET last_heartbeat = ?, status = 'online', updated_at = ?,
                         live_state = COALESCE(?, live_state),
-                        live_state_updated_at = CASE WHEN ? IS NOT NULL THEN ? ELSE live_state_updated_at END
+                        live_state_updated_at = CASE WHEN ? IS NOT NULL THEN ? ELSE live_state_updated_at END,
+                        model_capabilities = COALESCE(?, model_capabilities)
                     WHERE node_id = ?
                     """,
-                    (now, now, live_state, live_state, now, node_id),
+                    (now, now, live_state, live_state, now, model_capabilities, node_id),
                 )
         except Exception as e:
             logger.warning("event=db_heartbeat_node_failed node_id=%s err=%s", node_id, e)
@@ -5975,6 +5984,7 @@ def _get_migrations() -> List[tuple]:
             CREATE INDEX IF NOT EXISTS idx_session_cache_heartbeat_owners_hb
                 ON session_cache_heartbeat_owners(heartbeat_id, status)
         """),  # A80 session-cache heartbeat controllers and owner records.
+        (32, "ALTER TABLE nodes ADD COLUMN model_capabilities TEXT NOT NULL DEFAULT '{}'"),
     ]
 
 

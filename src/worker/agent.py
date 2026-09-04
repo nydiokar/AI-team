@@ -437,6 +437,32 @@ def _make_backends() -> Dict[str, Any]:
     return build_backends()
 
 
+def _discover_node_models(backends: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """Discover model descriptors from the CLIs installed on this worker.
+
+    The gateway must not invent or merge model names: an empty result means the
+    worker did not advertise a usable catalog and the UI should show that state.
+    Codex exposes the authoritative account/node catalog through app-server.
+    """
+    discovered: Dict[str, List[Dict[str, Any]]] = {}
+    if "codex" in backends:
+        try:
+            from config.models import _read_codex_model_list
+
+            discovered["codex"] = [
+                {
+                    "name": option.name,
+                    "is_default": option.is_default,
+                    "efforts": list(option.supported_efforts or ()),
+                }
+                for option in _read_codex_model_list()
+            ]
+        except Exception:
+            logger.warning("event=node_model_discovery_failed backend=codex", exc_info=True)
+            discovered["codex"] = []
+    return discovered
+
+
 # ---------------------------------------------------------------------------
 # Session helper
 # ---------------------------------------------------------------------------
@@ -935,6 +961,8 @@ class WorkerAgent:
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
         self._canary = (os.getenv("WORKER_CANARY") or "").lower() in {"1", "true", "yes"}
         self._incarnation_id = uuid.uuid4().hex
+        self._model_capabilities = _discover_node_models(self.cfg.backends)
+        self._model_capabilities_at = time.monotonic()
         # Stamp our node + incarnation into the environment so every backend child
         # we spawn (the Claude SDK `claude` process inherits os.environ) carries
         # both. A later worker boot reaps children stamped with OUR node id but a
@@ -1036,6 +1064,7 @@ class WorkerAgent:
                 "max_concurrent": self.cfg.max_concurrent,
                 "projects_root": self.cfg.projects_root,
                 "repos": self.cfg.list_repos(),
+                "models": _discover_node_models(self.cfg.backends),
             },
         }, timeout=_REGISTRATION_TIMEOUT_SECONDS)
         logger.info("event=registered node_id=%s controller=%s projects_root=%s",
@@ -1142,8 +1171,17 @@ class WorkerAgent:
             while not self._shutdown.is_set():
                 self._heartbeat_now.clear()
                 try:
+                    if time.monotonic() - self._model_capabilities_at >= 300:
+                        self._model_capabilities = await asyncio.to_thread(
+                            _discover_node_models, self.cfg.backends
+                        )
+                        self._model_capabilities_at = time.monotonic()
                     live = self._live_state()
-                    payload = {"node_id": self.cfg.node_id, "live_state": live}
+                    payload = {
+                        "node_id": self.cfg.node_id,
+                        "live_state": live,
+                        "models": self._model_capabilities,
+                    }
                     await asyncio.to_thread(
                         self._http.post, "/nodes/heartbeat", payload
                     )

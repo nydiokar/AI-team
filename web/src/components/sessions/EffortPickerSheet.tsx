@@ -13,12 +13,13 @@ interface Props {
   backend: string;
   currentEffort: string | null;
   currentModel: string | null;
+  nodeId: string;
   onClose: () => void;
 }
 
-export function EffortPickerSheet({ sessionId, backend, currentEffort, currentModel, onClose }: Props) {
+export function EffortPickerSheet({ sessionId, backend, currentEffort, currentModel, nodeId, onClose }: Props) {
   const setEffort = useSetEffort();
-  const { data: models } = useModels(backend);
+  const { data: models } = useModels(backend, nodeId);
   const selected = models?.find((model) => model.name === currentModel);
   const choices = selected?.efforts?.length ? selected.efforts : (EFFORTS[backend] ?? []);
   const pick = (effort: string | null) => setEffort.mutate({ sessionId, effort }, { onSuccess: onClose });
