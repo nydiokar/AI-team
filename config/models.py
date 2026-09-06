@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import json
 import os
-import select
+import queue
 import shutil
 import subprocess
 import threading
@@ -155,14 +155,28 @@ def _read_codex_model_list() -> List[ModelOption]:
         process.stdin.flush()
 
         assert process.stdout is not None
+        # Windows select() accepts sockets only, not a subprocess stdout pipe
+        # (WinError 10038). Read the JSONL pipe on a daemon thread and consume
+        # its bounded queue on every platform instead.
+        output_lines: queue.Queue[Optional[str]] = queue.Queue()
+
+        def read_stdout() -> None:
+            try:
+                for output_line in process.stdout:
+                    output_lines.put(output_line)
+            finally:
+                output_lines.put(None)
+
+        reader = threading.Thread(target=read_stdout, name="codex-model-reader", daemon=True)
+        reader.start()
         deadline: float = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             remaining: float = max(0.0, deadline - time.monotonic())
-            readable, _, _ = select.select([process.stdout], [], [], remaining)
-            if not readable:
+            try:
+                line = output_lines.get(timeout=remaining)
+            except queue.Empty:
                 break
-            line: str = process.stdout.readline()
-            if not line:
+            if line is None:
                 break
             try:
                 message = json.loads(line)
