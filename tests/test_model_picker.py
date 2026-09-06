@@ -8,7 +8,7 @@ Covers (MODEL_PICKER_PLAN.md):
   - Session ↔ store dict round-trip + DB round-trip carries model
   - mesh payload round-trips model (gateway → worker)           [R1]
 """
-import json
+import io
 import pytest
 
 from config import models as models_module
@@ -104,6 +104,41 @@ def test_codex_picker_keeps_last_good_catalog_on_refresh_failure(monkeypatch):
     second = [item.name for item in available_options("codex")]
     assert second[:2] == ["gpt-5.6-sol", "gpt-5.6-terra"]
     assert second == ["gpt-5.6-sol", "gpt-5.6-terra"]
+
+
+def test_codex_model_discovery_uses_node_repaired_environment(monkeypatch):
+    """The app-server must inherit the same Windows Node PATH repair as exec."""
+    captured: dict[str, object] = {}
+    stdout = io.StringIO(
+        '{"id": 1, "result": {}}\n'
+        '{"id": 2, "result": {"data": [{"model": "gpt-test", "isDefault": true}]}}\n'
+    )
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = io.StringIO()
+            self.stdout = stdout
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> None:
+            pass
+
+    def popen(*args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs.get("env")
+        return Process()
+
+    monkeypatch.setattr(models_module, "ensure_node_on_path", lambda: {"PATH": "repaired"})
+    monkeypatch.setattr(models_module.shutil, "which", lambda *_args, **_kwargs: "codex")
+    monkeypatch.setattr(models_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(models_module.select, "select", lambda *_args: ([stdout], [], []))
+
+    models = models_module._read_codex_model_list()
+
+    assert [model.name for model in models] == ["gpt-test"]
+    assert captured["env"] == {"PATH": "repaired"}
 
 
 def test_effort_catalog_is_backend_specific_and_optional():
