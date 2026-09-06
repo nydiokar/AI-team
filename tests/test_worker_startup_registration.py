@@ -77,6 +77,7 @@ def test_registration_allows_for_gateway_side_sqlite_work() -> None:
         list_repos=lambda: [],
     )
     worker._incarnation_id = "incarnation"
+    worker._model_capabilities = {"codex": [{"name": "gpt-test", "is_default": True, "efforts": []}]}
     posted: list[tuple[str, dict, int]] = []
 
     class _Http:
@@ -89,3 +90,4 @@ def test_registration_allows_for_gateway_side_sqlite_work() -> None:
 
     assert posted[0][0] == "/nodes/register"
     assert posted[0][2] == agent_mod._REGISTRATION_TIMEOUT_SECONDS == 30
+    assert posted[0][1]["capabilities"]["models"] == worker._model_capabilities

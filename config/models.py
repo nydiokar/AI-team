@@ -32,6 +32,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from src.core.process_utils import ensure_node_on_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,13 +107,23 @@ def _read_codex_model_list() -> List[ModelOption]:
     best-effort: a missing CLI, an old CLI, or an unavailable auth service must
     not make the gateway's model picker unusable.
     """
-    executable = shutil.which("codex")
+    # Codex is an npm CLI. Its Windows shim needs node.exe on PATH; normal
+    # Codex execution already repairs that inherited PM2 environment through
+    # this helper. Model discovery must use the identical environment for both
+    # locating the shim and launching its app-server.
+    process_env = ensure_node_on_path()
+    executable = shutil.which("codex", path=process_env.get("PATH") or process_env.get("Path"))
     if not executable:
+        logger.warning("event=codex_model_discovery_unavailable reason=executable_not_found")
         return []
 
-    timeout_seconds: float = 3.0
+    # A cold app-server start on a Windows worker can exceed three seconds,
+    # particularly when PM2 restored with a cold npm/Node environment. This is
+    # a background catalog read, not a task execution, so a bounded ten-second
+    # default keeps first registration reliable without affecting task timeouts.
+    timeout_seconds: float = 10.0
     try:
-        timeout_seconds = max(0.5, float(os.getenv("CODEX_MODEL_DISCOVERY_TIMEOUT_SEC", "3")))
+        timeout_seconds = max(0.5, float(os.getenv("CODEX_MODEL_DISCOVERY_TIMEOUT_SEC", "10")))
     except ValueError:
         pass
 
@@ -136,6 +148,7 @@ def _read_codex_model_list() -> List[ModelOption]:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            env=process_env,
         )
         assert process.stdin is not None
         process.stdin.write("\n".join(messages) + "\n")
@@ -174,7 +187,7 @@ def _read_codex_model_list() -> List[ModelOption]:
                     ))
             return discovered
     except (OSError, ValueError, subprocess.SubprocessError):
-        logger.debug("event=codex_model_discovery_failed", exc_info=True)
+        logger.warning("event=codex_model_discovery_failed", exc_info=True)
     finally:
         if process is not None:
             process.terminate()
@@ -183,6 +196,7 @@ def _read_codex_model_list() -> List[ModelOption]:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+    logger.warning("event=codex_model_discovery_empty reason=no_model_list_response")
     return []
 
 
