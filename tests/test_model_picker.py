@@ -133,7 +133,6 @@ def test_codex_model_discovery_uses_node_repaired_environment(monkeypatch):
     monkeypatch.setattr(models_module, "ensure_node_on_path", lambda: {"PATH": "repaired"})
     monkeypatch.setattr(models_module.shutil, "which", lambda *_args, **_kwargs: "codex")
     monkeypatch.setattr(models_module.subprocess, "Popen", popen)
-    monkeypatch.setattr(models_module.select, "select", lambda *_args: ([stdout], [], []))
 
     models = models_module._read_codex_model_list()
 
