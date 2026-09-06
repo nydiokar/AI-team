@@ -489,13 +489,23 @@ def _discover_node_models(backends: List[str]) -> Dict[str, List[Dict[str, Any]]
         try:
             from config.models import _read_codex_model_list
 
+            options = _read_codex_model_list()
+            configured_default = (os.getenv("CODEX_DEFAULT_MODEL") or "").strip()
+            use_configured_default = any(option.name == configured_default for option in options)
             discovered["codex"] = [
                 {
                     "name": option.name,
-                    "is_default": option.is_default,
+                    # The node configuration controls the model it will
+                    # actually execute. Reflect it in the advertised catalog
+                    # so the picker does not claim the account default wins.
+                    "is_default": (
+                        option.name == configured_default
+                        if use_configured_default
+                        else option.is_default
+                    ),
                     "efforts": list(option.supported_efforts or ()),
                 }
-                for option in _read_codex_model_list()
+                for option in options
             ]
         except Exception:
             logger.warning("event=node_model_discovery_failed backend=codex", exc_info=True)
