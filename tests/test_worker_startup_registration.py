@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 
 import src.worker.agent as agent_mod
+from config.models import ModelOption
 
 
 def _worker() -> agent_mod.WorkerAgent:
@@ -91,3 +92,18 @@ def test_registration_allows_for_gateway_side_sqlite_work() -> None:
     assert posted[0][0] == "/nodes/register"
     assert posted[0][2] == agent_mod._REGISTRATION_TIMEOUT_SECONDS == 30
     assert posted[0][1]["capabilities"]["models"] == worker._model_capabilities
+
+
+def test_codex_advertisement_marks_configured_default(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_DEFAULT_MODEL", "gpt-5.6-terra")
+    monkeypatch.setattr(
+        "config.models._read_codex_model_list",
+        lambda: [
+            ModelOption("gpt-6-astra", is_default=True),
+            ModelOption("gpt-5.6-terra"),
+        ],
+    )
+
+    advertised = agent_mod._discover_node_models(["codex"])["codex"]
+
+    assert [item["name"] for item in advertised if item["is_default"]] == ["gpt-5.6-terra"]
