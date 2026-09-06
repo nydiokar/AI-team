@@ -46,6 +46,7 @@ from src.core.process_utils import (
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 _REGISTRATION_TIMEOUT_SECONDS = 30
 _REGISTRATION_RETRY_MAX_SECONDS = 30.0
+_MODEL_CAPABILITIES_REFRESH_SECONDS = 24 * 60 * 60
 
 logger = logging.getLogger(__name__)
 
@@ -1103,7 +1104,10 @@ class WorkerAgent:
                 "max_concurrent": self.cfg.max_concurrent,
                 "projects_root": self.cfg.projects_root,
                 "repos": self.cfg.list_repos(),
-                "models": _discover_node_models(self.cfg.backends),
+                # Publish the retained catalog. A separate probe here used to
+                # overwrite a good startup result with an intermittent empty
+                # app-server read before the first heartbeat.
+                "models": self._model_capabilities,
             },
         }, timeout=_REGISTRATION_TIMEOUT_SECONDS)
         logger.info("event=registered node_id=%s controller=%s projects_root=%s",
@@ -1210,10 +1214,21 @@ class WorkerAgent:
             while not self._shutdown.is_set():
                 self._heartbeat_now.clear()
                 try:
-                    if time.monotonic() - self._model_capabilities_at >= 300:
-                        self._model_capabilities = await asyncio.to_thread(
+                    if time.monotonic() - self._model_capabilities_at >= _MODEL_CAPABILITIES_REFRESH_SECONDS:
+                        discovered_models = await asyncio.to_thread(
                             _discover_node_models, self.cfg.backends
                         )
+                        # Codex model discovery is best-effort. Once this
+                        # worker has advertised a usable catalog, retain it
+                        # through a transient CLI/auth failure rather than
+                        # making the picker disappear.
+                        if discovered_models.get("codex") or not self._model_capabilities.get("codex"):
+                            self._model_capabilities = discovered_models
+                        else:
+                            logger.warning(
+                                "event=node_model_discovery_empty keeping_last_good_catalog=true node_id=%s",
+                                self.cfg.node_id,
+                            )
                         self._model_capabilities_at = time.monotonic()
                     live = self._live_state()
                     payload = {
