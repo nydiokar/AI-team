@@ -94,6 +94,7 @@ from src.services import (
 )
 from src.bridges import LlamaMediator
 from src.backends.registry import build_backends
+from src.core.session_task_queue import SessionTaskQueue
 from config import config
 from src.validation.engine import ValidationEngine
 
@@ -539,7 +540,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 replay()
         
         # Task management
-        self.task_queue = asyncio.Queue(maxsize=config.system.max_queue_size)
+        self.task_queue = SessionTaskQueue(config.system.max_queue_size, self._codex_queue_key)
+        self._codex_task_locks: dict[str, asyncio.Lock] = {}
         self.active_tasks: Dict[str, Task] = {}
         self.task_results: Dict[str, TaskResult] = {}
         
@@ -6478,6 +6480,11 @@ class TaskOrchestrator(ITaskOrchestrator):
     # Workers are cancelled during stop() after the queue drains.
     # ===========================================================================
 
+    def _codex_queue_key(self, task: Task) -> str:
+        session_id = str((task.metadata or {}).get("session_id") or "").strip()
+        session = self.session_store.get(session_id) if session_id else None
+        return session_id if session and session.backend == "codex" else ""
+
     async def _task_worker(self, worker_name: str):
         """Worker coroutine that processes tasks from the queue.
 
@@ -6486,12 +6493,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info(f"Task worker {worker_name} started")
         
         while self.running:
+            queued_task: Optional[Task] = None
             try:
                 # Get task from queue with timeout
                 task = await asyncio.wait_for(
                     self.task_queue.get(), 
                     timeout=1.0
                 )
+                queued_task = task
                 
                 # Ensure cancel event exists for this task
                 cancel_ev = self._task_cancel_events.get(task.id)
@@ -6519,7 +6528,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                         },
                         flush=True,
                     )
-                    self.task_queue.task_done()
+                    self._task_cancel_events.pop(task.id, None)
+                    self.active_tasks.pop(task.id, None)
                     # Release inflight locks and pending state, similar to completion path
                     try:
                         if getattr(task, "metadata", None):
@@ -6582,7 +6592,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                             self._inflight_paths.discard(task.metadata.get("__file_path", ""))
                     except Exception:
                         pass
-                    self.task_queue.task_done()
                     continue
 
                 # Store result
@@ -6772,7 +6781,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                 except Exception:
                     pass
                 # Mark task as done in queue
-                self.task_queue.task_done()
                 
             except asyncio.TimeoutError:
                 # No tasks available, continue
@@ -6784,6 +6792,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                 logger.error(f"Worker {worker_name} error: {e}")
                 # Continue processing other tasks
                 continue
+            finally:
+                if queued_task is not None:
+                    self.task_queue.task_done(queued_task)
         
         logger.info(f"Task worker {worker_name} stopped")
     
@@ -6797,6 +6808,19 @@ class TaskOrchestrator(ITaskOrchestrator):
 
     # ★ EXECUTION ENTRY POINT — called by _task_worker() and directly by tests
     async def process_task(self, task: Task) -> TaskResult:
+        key = self._codex_queue_key(task)
+        if not key:
+            return await self._process_task(task)
+        # Also protect callers which bypass the gateway queue. The session is
+        # re-read inside _process_task, after the preceding turn persisted its ID.
+        lock = self._codex_task_locks.setdefault(key, asyncio.Lock())
+        self._task_cancel_events.setdefault(task.id, asyncio.Event())
+        async with lock:
+            if self._task_cancel_events[task.id].is_set():
+                return TaskResult(task.id, False, "", ["cancelled"], [], 0.0, now_iso())
+            return await self._process_task(task)
+
+    async def _process_task(self, task: Task) -> TaskResult:
         """Process a single task through the complete pipeline.
 
         Steps:
@@ -6976,6 +7000,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                     self.session_store.save(session)
                     backend_name = session.backend
                     backend = self._backends.get(backend_name, self._backends["claude"])
+                    if backend_name == "codex" and hasattr(backend, "prepare_execution"):
+                        backend.prepare_execution(task.id)
                     session.last_user_message = task.prompt
                     if session.backend_session_id:
                         from src.core.backend_call import call_backend
@@ -7105,10 +7131,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                             invocation_id=telemetry_context.invocation_id,
                             backend=backend_name,
                         )
-                        if session:
+                        if backend_name == "codex" and hasattr(backend, "cancel_execution"):
+                            backend.cancel_execution(task.id)
+                            raw = await asyncio.shield(exec_task)
+                            if session and raw.backend_session_id:
+                                session.backend_session_id = raw.backend_session_id
+                        elif session:
                             with contextlib.suppress(Exception):
                                 backend.cancel(session)
-                        exec_task.cancel()
+                        if backend_name != "codex":
+                            exec_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await exec_task
                         execution_time = time.time() - start_time
@@ -7149,10 +7181,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                             invocation_id=telemetry_context.invocation_id,
                             backend=backend_name,
                         )
-                        if session:
+                        if backend_name == "codex" and hasattr(backend, "cancel_execution"):
+                            backend.cancel_execution(task.id)
+                            raw = await asyncio.shield(exec_task)
+                            if session and raw.backend_session_id:
+                                session.backend_session_id = raw.backend_session_id
+                        elif session:
                             with contextlib.suppress(Exception):
                                 backend.cancel(session)
-                        exec_task.cancel()
+                        if backend_name != "codex":
+                            exec_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await exec_task
                         execution_time = time.time() - start_time
@@ -8024,6 +8062,11 @@ created: {task.created}
         if not ev.is_set():
             ev.set()
             t = self.active_tasks.get(task_id)
+            if t is not None and self._codex_queue_key(t):
+                # The execution loop consumes this task-specific event. A queued
+                # cancellation must never call backend.cancel(session).
+                self._emit_event("cancel_requested", t, None)
+                return True
             # Interrupt the live backend turn directly, right now. The execution
             # loop's own graceful-cancel branch (which calls backend.cancel(session)
             # before tearing down exec_task) only fires if it's watching a
@@ -8743,6 +8786,7 @@ Generated from user description: {description}
         pickup_deadline = time.time() + pickup_timeout_sec
         poll_interval = 3.0
         first_poll = True
+        codex_cancel_sent = False
         target_node_id = getattr(node, "node_id", None) or (session.machine_id if session else "")
         await _aio.to_thread(self._nudge_worker_for_dispatch, node, target_node_id, db)
 
@@ -8829,6 +8873,9 @@ Generated from user description: {description}
                         r = {}
                     if session and r:
                         changed = False
+                        if session.backend == "codex" and r.get("backend_session_id"):
+                            session.backend_session_id = r["backend_session_id"]
+                            changed = True
                         for attr in ("driver_type", "driver_status", "cache_health"):
                             value = r.get(attr)
                             if value is not None:
@@ -8914,6 +8961,21 @@ Generated from user description: {description}
                 # startup recovery (_recover_stale_busy_sessions) reattaches and
                 # reports whatever the worker actually wrote.
                 interrupted = task.id in self._shutdown_interrupted_tasks
+                if not interrupted and session and session.backend == "codex":
+                    if not codex_cancel_sent:
+                        db.enqueue_task(
+                            task_id=f"cancel-{task.id}",
+                            session_id=session.session_id,
+                            machine_id=session.machine_id,
+                            backend="codex",
+                            action="cancel_codex",
+                            payload={"target_task_id": task.id},
+                        )
+                        codex_cancel_sent = True
+                    # The worker owns the result. Keep this session reserved
+                    # until it confirms the actual child stopped.
+                    await _aio.sleep(poll_interval)
+                    continue
                 if not interrupted:
                     db.fail_task(task.id, "cancelled by gateway")
                 result = TaskResult(

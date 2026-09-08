@@ -159,7 +159,7 @@ def test_cancel_targets_only_requested_session(monkeypatch):
     assert killed == [101]
 
 
-def test_register_replaces_existing_session_process(monkeypatch):
+def test_register_refuses_existing_session_process(monkeypatch):
     backend = CodexBackend()
     killed = []
 
@@ -168,7 +168,8 @@ def test_register_replaces_existing_session_process(monkeypatch):
     first = _FakeProc(11)
     second = _FakeProc(22)
     backend._register_process(first, "session-a")
-    backend._register_process(second, "session-a")
+    with pytest.raises(RuntimeError, match="codex_thread_busy"):
+        backend._register_process(second, "session-a")
 
-    assert killed == [11]
-    assert backend._session_procs["session-a"] is second
+    assert killed == []
+    assert backend._session_procs["session-a"] is first
