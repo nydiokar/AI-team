@@ -178,7 +178,7 @@ def test_resolve_advisory_passes_unknown_through():
     assert resolve_model(_mk("opencode", "ollama-local/qwen3-coder")) == "ollama-local/qwen3-coder"
 
 
-# --------------------------------------------------------------------------- backend cmd
+# --------------------------------------------------------------------------- backend model propagation
 def test_claude_build_cmd_model_placement():
     # _build_cmd now lives only on ClaudePrintResumeDriver (single source of truth).
     from src.backends.claude_driver import ClaudePrintResumeDriver
@@ -190,18 +190,32 @@ def test_claude_build_cmd_model_placement():
     assert "--model" not in b._build_cmd(None, "sid", None)
 
 
-def test_codex_build_cmd_model_placement():
-    from src.backends.codex import CodexBackend
-    b = CodexBackend()
-    # fresh: -m goes after `exec`
-    fresh = b._build_cmd(None, "/repo", "gpt-5.5")
-    assert fresh[1] == "exec" and fresh[2] == "-m" and fresh[3] == "gpt-5.5"
-    # resume: -m goes after `resume <id>` (verified valid via --help)
-    resume = b._build_cmd("thread1", None, "gpt-5.2-codex")
-    assert resume[2] == "resume" and resume[3] == "thread1"
-    assert resume[resume.index("-m") + 1] == "gpt-5.2-codex"
-    assert "-m" not in b._build_cmd(None, "/repo", None)
-    assert "model_reasoning_effort=\"high\"" in b._build_cmd(None, "/repo", None, "high")
+def test_codex_app_server_turn_forwards_model_and_effort():
+    from src.backends.codex_app_server import CodexAppServerClient
+
+    calls = []
+
+    class RecordingClient(CodexAppServerClient):
+        def request(self, method, params, timeout=30):
+            calls.append((method, params, timeout))
+            return {}
+
+    client = object.__new__(RecordingClient)
+    client.start_turn("thread1", "work", "/repo", "gpt-5.5", "high")
+
+    assert calls == [
+        (
+            "turn/start",
+            {
+                "threadId": "thread1",
+                "input": [{"type": "text", "text": "work"}],
+                "cwd": "/repo",
+                "model": "gpt-5.5",
+                "effort": "high",
+            },
+            30.0,
+        )
+    ]
 
 
 def test_claude_build_cmd_effort_placement():
