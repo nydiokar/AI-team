@@ -35,6 +35,7 @@ from src.core.telemetry import (
     telemetry_subprocess_env,
 )
 from src.core.telemetry_adapters.codex import CodexTelemetryAdapter
+from src.backends.codex_ownership import CodexOwnership
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,18 @@ class CodexBackend(CodingBackend):
         self._session_telemetry: dict[str, TelemetryContext] = {}
         self._oneoff_procs: set[subprocess.Popen] = set()
         self._proc_lock = threading.Lock()
+        self._execution_cancels: dict[str, threading.Event] = {}
+
+    def prepare_execution(self, task_id: str) -> None:
+        with self._proc_lock:
+            self._execution_cancels.setdefault(task_id, threading.Event())
+
+    def cancel_execution(self, task_id: str) -> None:
+        """Signal precisely this turn; never interrupt a later session turn."""
+        with self._proc_lock:
+            event = self._execution_cancels.get(task_id)
+            if event is not None:
+                event.set()
 
     def create_session(self, session: Session, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         return self._run(session.repo_path, session.last_user_message, resume_id=None, session_key=session.session_id, model=_resolve_model(session), effort=_resolve_effort(session), telemetry_context=telemetry_context, telemetry_sink=telemetry_sink)
@@ -88,6 +101,11 @@ class CodexBackend(CodingBackend):
     def cancel(self, session: Session) -> None:
         with self._proc_lock:
             proc = self._session_procs.get(session.session_id)
+            context = self._session_telemetry.get(session.session_id)
+            event = self._execution_cancels.get(context.turn_id) if context else None
+            if event is not None:
+                event.set()
+                return
         if proc is not None:
             terminate_many_popen([proc])
 
@@ -171,7 +189,23 @@ class CodexBackend(CodingBackend):
                 logger.warning("event=codex_telemetry_emit_failed", exc_info=True)
 
         proc: Optional[subprocess.Popen] = None
+        ownership: Optional[CodexOwnership] = None
+        task_id = telemetry_context.turn_id if telemetry_context else ""
+        cancelled: Optional[threading.Event] = None
         try:
+            if task_id:
+                self.prepare_execution(task_id)
+                with self._proc_lock:
+                    cancelled = self._execution_cancels[task_id]
+            if cancelled is not None and cancelled.is_set():
+                return ExecutionResult(success=False, output="", errors=["cancelled"])
+            if session_key:
+                ownership = CodexOwnership()
+                resume_id = ownership.acquire(session_key, resume_id or "") or None
+                if task_id and ownership.cancelled(task_id):
+                    return ExecutionResult(success=False, output="", errors=["cancelled"], backend_session_id=ownership.thread_id)
+                cmd = self._build_cmd(resume_id, cwd, model, effort)
+                cmd[0] = self._resolve_exe(proc_env)
             proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -238,15 +272,38 @@ class CodexBackend(CodingBackend):
             stdout_done = False
             stderr_done = False
             killed_for_inactivity = False
+            last_stdout = time.monotonic()
+            last_cancel_check = 0.0
+
+            def _record_thread(line: bytes) -> None:
+                if ownership is None:
+                    return
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    return
+                if isinstance(event, dict) and event.get("type") == "thread.started":
+                    thread_id = event.get("thread_id")
+                    if not isinstance(thread_id, str) or not thread_id or len(thread_id) > 256:
+                        raise ValueError("Invalid Codex thread.started thread_id")
+                    ownership.record_thread(thread_id)
 
             while not (stdout_done and stderr_done):
+                if ownership is not None and cancelled is not None and time.monotonic() - last_cancel_check >= 1:
+                    last_cancel_check = time.monotonic()
+                    if ownership.cancelled(task_id):
+                        cancelled.set()
+                if cancelled is not None and cancelled.is_set():
+                    terminate_many_popen([proc])
                 if not stdout_done:
                     try:
-                        item = stdout_q.get(timeout=inactivity_sec)
+                        item = stdout_q.get(timeout=0.1)
                         if item is _SENTINEL:
                             stdout_done = True
                         else:
+                            last_stdout = time.monotonic()
                             stdout_lines.append(item)
+                            _record_thread(item)
                             if adapter is not None:
                                 try:
                                     _emit(adapter.consume_line(item.decode(errors="replace")))
@@ -255,6 +312,8 @@ class CodexBackend(CodingBackend):
                                         "event=codex_telemetry_parse_failed", exc_info=True
                                     )
                     except queue.Empty:
+                        if time.monotonic() - last_stdout < inactivity_sec:
+                            continue
                         logger.warning(
                             "codex inactivity timeout after %.0fs (no stdout) — terminating pid=%s",
                             inactivity_sec,
@@ -319,6 +378,7 @@ class CodexBackend(CodingBackend):
                             item = q_ref.get_nowait()
                             if item is not _SENTINEL:
                                 lines_ref.append(item)
+                                _record_thread(item)
                                 if q_ref is stdout_q and adapter is not None:
                                     _emit(adapter.consume_line(item.decode(errors="replace")))
                         except queue.Empty:
@@ -410,6 +470,11 @@ class CodexBackend(CodingBackend):
                 )
 
             result = self._parse(stdout, stderr, returncode, elapsed)
+            if ownership is not None:
+                result.backend_session_id = ownership.thread_id or result.backend_session_id
+            if cancelled is not None and cancelled.is_set():
+                result.success = False
+                result.errors = ["cancelled"]
             if adapter is not None and result.backend_session_id:
                 try:
                     _emit(
@@ -430,10 +495,20 @@ class CodexBackend(CodingBackend):
                 output="",
                 errors=[str(e)],
                 execution_time=time.time() - start,
+                backend_session_id=ownership.thread_id if ownership else "",
             )
         finally:
             if proc is not None:
+                if proc.poll() is None:
+                    terminate_many_popen([proc])
+                # Never release ownership while an un-reaped CLI can still mutate.
+                proc.wait(timeout=10)
                 self._unregister_process(proc, session_key)
+            if ownership is not None:
+                ownership.release()
+            if task_id:
+                with self._proc_lock:
+                    self._execution_cancels.pop(task_id, None)
             try:
                 sink.flush()
             except Exception:
@@ -482,43 +557,16 @@ class CodexBackend(CodingBackend):
         telemetry_context: Optional[TelemetryContext] = None,
         emit=None,
     ) -> None:
-        stale_proc: Optional[subprocess.Popen] = None
-        stale_context: Optional[TelemetryContext] = None
         with self._proc_lock:
             if session_key:
-                stale_proc = self._session_procs.get(session_key)
-                stale_context = self._session_telemetry.get(session_key)
+                current = self._session_procs.get(session_key)
+                if current is not None and current is not proc:
+                    raise RuntimeError("codex_thread_busy: a process is already registered")
                 self._session_procs[session_key] = proc
                 if telemetry_context is not None:
                     self._session_telemetry[session_key] = telemetry_context
             else:
                 self._oneoff_procs.add(proc)
-        if stale_proc is not None and stale_proc is not proc:
-            if (
-                emit is not None
-                and telemetry_context is not None
-                and stale_context is not None
-                and stale_context.invocation_id != telemetry_context.invocation_id
-            ):
-                emit(
-                    build_event(
-                        "invocation.duplicate_detected",
-                        turn_id=telemetry_context.turn_id,
-                        session_id=telemetry_context.session_id,
-                        node_id=telemetry_context.node_id,
-                        emitter_process_instance_id=EMITTER_PROCESS_INSTANCE_ID,
-                        source=telemetry_context.source,
-                        invocation_id=telemetry_context.invocation_id,
-                        backend="codex",
-                        model=telemetry_context.model,
-                        attributes={
-                            "duplicate_of_invocation_id": stale_context.invocation_id,
-                            "confidence": "probable",
-                            "rule": "session_process_replacement",
-                        },
-                    )
-                )
-            terminate_many_popen([stale_proc])
 
     def _unregister_process(self, proc: subprocess.Popen, session_key: Optional[str]) -> None:
         with self._proc_lock:

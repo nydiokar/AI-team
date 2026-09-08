@@ -647,6 +647,19 @@ async def _execute_task(
             "return_code": 0,
         }
 
+    if action == "cancel_codex":
+        from src.backends.codex_ownership import CodexOwnership
+        target = payload.get("target_task_id")
+        if not isinstance(target, str) or not target or len(target) > 256:
+            return {"success": False, "output": "", "errors": ["Invalid cancellation target"], "execution_time": 0.0}
+        def request_cancel() -> None:
+            CodexOwnership().request_cancel(target)
+        try:
+            await asyncio.to_thread(request_cancel)
+        except Exception as exc:
+            return {"success": False, "output": "", "errors": [str(exc)], "execution_time": 0.0}
+        return {"success": True, "output": "Cancellation requested", "errors": [], "execution_time": 0.0}
+
     # Session close: the gateway dispatches this when a mesh session is /closed
     # so the OWNING worker actually tears down its pooled backend session (frees
     # the claude process). Previously remote /close was a no-op on the worker and
@@ -1006,6 +1019,7 @@ class WorkerAgent:
         self._poll_now = asyncio.Event()
         self._heartbeat_now = asyncio.Event()
         self._semaphore = asyncio.Semaphore(self.cfg.max_concurrent)
+        self._codex_control_semaphore = asyncio.Semaphore(4)
         self._slots_used: int = 0  # semaphore-acquired count; differs from len(_active) which includes queued tasks
         self._inflight_sessions: set = set()  # session_ids with a claimed, executing turn task
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
@@ -1578,6 +1592,10 @@ class WorkerAgent:
         set_log_context(task_id=task_id, session_id=session_id)
         # Lightweight control action — must NOT consume a turn slot or it could
         # wait hours behind long-running turns before the process is freed.
+        if task_row.get("action") == "cancel_codex":
+            async with self._codex_control_semaphore:
+                await self._handle_close_session(task_row)
+            return
         if task_row.get("action") == "close_session":
             await self._handle_close_session(task_row)
             return
@@ -1691,7 +1709,7 @@ class WorkerAgent:
             logger.warning("close_claim_failed err=%s", e)
             return
         session_id = task_row.get("session_id", "")
-        if session_id:
+        if session_id and task_row.get("action") == "close_session":
             await self._wait_for_inflight_turn(session_id)
         result = await _execute_task(
             task_row,
