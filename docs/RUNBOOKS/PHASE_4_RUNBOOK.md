@@ -150,6 +150,10 @@ python main.py health     # expect OK (telegram + a backend present)
    `ai-team-worker`. If canary startup or heartbeat fails, the existing worker
    stays untouched and the canary is removed.
 
+   For Codex package upgrades, do not assume the install updates an already
+   running app-server. Follow the deliberate validation and worker/runtime
+   recycle procedure in [Codex app-server adapter convergence](../CODEX_APP_SERVER_ADAPTER_CONVERGENCE.md#codex-upgrades-and-runtime-recycle).
+
 ---
 
 ## 5. Verify the round-trip
