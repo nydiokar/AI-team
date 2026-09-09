@@ -444,7 +444,6 @@ surface is cosmetic, not a correctness or cost risk.
 ## Deferred — runtime / lower priority
 
 - Backend lifecycle hooks (session-ID detection, PreToolUse security, PostToolUse quality gates) — `docs/TBD/BACKEND_HOOKS_STRATEGY.md`.
-- Codex end-to-end validation.
 - OpenCode server cross-machine sessions (needs shared DB mount).
 - Postgres migration — trigger: >5 nodes or observed SQLite write contention.
 - **M-Mesh** (distributed event bus, shared state store, leader election) — "DO NOT build until the app is operable."

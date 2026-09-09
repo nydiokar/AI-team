@@ -1,7 +1,8 @@
 # Codex app-server adapter convergence
 
-Status: implemented behind the existing ``CodexBackend`` entry point. Focused
-offline parity is passing; live gateway deployment proof remains operator-gated.
+Status: closed. Focused offline parity and the post-worker-restart fresh-session
+two-turn validation passed. The legacy CLI-per-turn Codex production path has
+been removed.
 Protocol authority: installed `codex-cli 0.153.2`, generated JSON Schema.
 
 ## Original abstraction assessment
@@ -29,6 +30,25 @@ Generic Session stores the native thread in its deliberately generic identity
 slot, backend selection, workspace, model and effort. It has no Codex process or
 native turn field. Existing driver fields are unrelated to this migration.
 No generic interface change is justified by the native protocol.
+
+## Runtime topology
+
+Codex is not a CLI-per-turn backend. Each execution carrier owns its own
+persistent native runtime and backend registry:
+
+```
+Gateway/control process -> local CodexBackend -> CodexAppServerClient -> codex app-server
+Mesh worker node        -> worker CodexBackend -> CodexAppServerClient -> codex app-server
+```
+
+The gateway/control plane and every mesh worker have independent backend
+registries. Runtime lifecycle therefore belongs to the carrier executing the
+turn, not globally to the gateway. `CodingBackend` remains the generic contract;
+`CodexBackend` maps it to Codex-native semantics. `backend_session_id` remains
+the exact Codex thread ID.
+
+Gateway-owned Cases, Tasks, queueing, leases, retries, approvals, recovery
+policy, and durable ownership remain outside Codex.
 
 ## Ownership and composition
 
@@ -109,8 +129,11 @@ owned; gateway retry policy is not replaced.
    interruption, concurrency, durable claims and telemetry projection.
 3. The registry now selects only the app-server adapter. CLI-only tests and
    machinery are deleted; there is no fallback or second production backend name.
-4. Targeted gateway integration tests and a natural live multi-turn Codex probe
-   remain required before deployment. Do not restart worker carriers silently.
+4. The fresh worker-pinned live validation passed: turn one created and persisted
+   an exact thread ID; turn two used that same ID on the same worker and the same
+   app-server process. It established continuity across turns after fresh-session
+   creation only, not continuity across a worker restart. Do not restart worker
+   carriers silently.
 
 Delete CLI exec/resume construction, per-turn Popen registry, stdout prose/exit
 completion inference, inactivity kills and rollout-file usage scanning. Retain
@@ -125,3 +148,64 @@ and unsupported server requests fail explicitly; approvals are never granted by
 the transport. SQLite unavailability refuses ownership acquisition. Runtime death
 fails affected calls. Record measured bounds and any concrete deferrals here and
 in CONTEXT before closure.
+
+## Cancellation boundary
+
+`CodingBackend.cancel()` is best-effort. Codex cancellation sends native
+`turn/interrupt(threadId, turnId)` for the captured active turn; native terminal
+turn status is authoritative. The installed Codex runtime can report an
+interrupted turn while an already-running shell/tool child continues until its
+own completion. This is a native Codex limitation, not a violation of the
+gateway backend contract.
+
+Do not add adapter-level process-tree killing to ordinary cancellation unless a
+future design deliberately strengthens the generic cancellation contract.
+Carrier shutdown remains separate: it closes and reaps that carrier's owned
+app-server runtime.
+
+## Codex upgrades and runtime recycle
+
+Installing a Codex package does not replace a running `codex app-server`: that
+process continues with the binary/runtime it started with. Treat upgrades as
+deliberate dependency changes, not transparent live updates.
+
+**CURRENT**
+
+```
+Codex package update -> validated deployment -> deliberate worker/backend recycle
+```
+
+On every affected carrier:
+
+1. Inspect the intended release, update Codex, and verify `codex --version`.
+2. Validate app-server protocol/schema compatibility with the adapter; regenerate
+   the version-matched snapshot and update the supported/pinned version if needed.
+3. Run focused Codex adapter, protocol, and lifecycle tests; deploy repository
+   changes.
+4. Deliberately recycle the owning runtime. On a mesh node, the supported method
+   today is the normal operator worker restart/redeploy procedure.
+5. Verify the new app-server version, then run a fresh two-turn Codex smoke and
+   confirm exact thread continuity within that new runtime.
+
+This is intentionally not automatic. Automatic install-and-worker-restart could
+interrupt active tasks, invalidate worker-local backend state, roll out an
+untested protocol change, or update every node simultaneously.
+
+**TARGET — separate lifecycle feature, not part of this migration**
+
+```
+Codex package update -> compatibility gate -> drain Codex backend
+-> recycle only app-server -> reattach/recover threads -> smoke -> resume capacity
+```
+
+The worker would stay alive while its Codex backend quiesces new work, drains to
+a safe boundary, closes the old runtime, starts and validates the new one, then
+recovers exact persisted thread IDs where supported. It must fail closed rather
+than create fresh threads, roll back failed initialization/recovery, and leave
+non-Codex worker functions available.
+
+Future automation may detect/install updates, run compatibility checks, mark a
+node ready, schedule an idle backend recycle, smoke-test it, and roll back. It
+must not blindly restart workers, recycle during an active turn, deploy an
+unverified protocol, silently lose thread continuity, or update every mesh node
+at once. Use staged/canary rollout per worker/node.
