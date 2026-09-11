@@ -22,17 +22,10 @@ Validation policy (see MODEL_PICKER_PLAN.md R5/R6):
 from __future__ import annotations
 
 import logging
-import json
-import os
-import queue
-import shutil
-import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-
-from src.core.process_utils import ensure_node_on_path
 
 logger = logging.getLogger(__name__)
 
@@ -107,115 +100,13 @@ def _read_codex_model_list() -> List[ModelOption]:
     best-effort: a missing CLI, an old CLI, or an unavailable auth service must
     not make the gateway's model picker unusable.
     """
-    # A model picker must not create a second app-server runtime. Codex model
-    # names are advisory and pass through unchanged, so there is no execution
-    # dependency on a speculative local catalog probe.
-    return []
-
-    # Codex is an npm CLI. Its Windows shim needs node.exe on PATH; normal
-    # Codex execution already repairs that inherited PM2 environment through
-    # this helper. Model discovery must use the identical environment for both
-    # locating the shim and launching its app-server.
-    process_env = ensure_node_on_path()
-    executable = shutil.which("codex", path=process_env.get("PATH") or process_env.get("Path"))
-    if not executable:
-        logger.warning("event=codex_model_discovery_unavailable reason=executable_not_found")
-        return []
-
-    # A cold app-server start on a Windows worker can exceed three seconds,
-    # particularly when PM2 restored with a cold npm/Node environment. This is
-    # a background catalog read, not a task execution, so a bounded ten-second
-    # default keeps first registration reliable without affecting task timeouts.
-    timeout_seconds: float = 10.0
-    try:
-        timeout_seconds = max(0.5, float(os.getenv("CODEX_MODEL_DISCOVERY_TIMEOUT_SEC", "10")))
-    except ValueError:
-        pass
-
-    messages: list[str] = [
-        json.dumps({
-            "id": 1,
-            "method": "initialize",
-            "params": {"clientInfo": {"name": "ai-team", "title": "AI Team", "version": "1"}},
-        }),
-        json.dumps({"method": "initialized", "params": {}}),
-        json.dumps({
-            "id": 2,
-            "method": "model/list",
-            "params": {"includeHidden": False, "limit": 1000},
-        }),
-    ]
-    process: Optional[subprocess.Popen[str]] = None
-    try:
-        process = subprocess.Popen(
-            [executable, "app-server", "--stdio"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            env=process_env,
-        )
-        assert process.stdin is not None
-        process.stdin.write("\n".join(messages) + "\n")
-        process.stdin.flush()
-
-        assert process.stdout is not None
-        # Windows select() accepts sockets only, not a subprocess stdout pipe
-        # (WinError 10038). Read the JSONL pipe on a daemon thread and consume
-        # its bounded queue on every platform instead.
-        output_lines: queue.Queue[Optional[str]] = queue.Queue()
-
-        def read_stdout() -> None:
-            try:
-                for output_line in process.stdout:
-                    output_lines.put(output_line)
-            finally:
-                output_lines.put(None)
-
-        reader = threading.Thread(target=read_stdout, name="codex-model-reader", daemon=True)
-        reader.start()
-        deadline: float = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            remaining: float = max(0.0, deadline - time.monotonic())
-            try:
-                line = output_lines.get(timeout=remaining)
-            except queue.Empty:
-                break
-            if line is None:
-                break
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if message.get("id") != 2:
-                continue
-            result: dict[str, Any] = message.get("result") or {}
-            discovered: list[ModelOption] = []
-            for model in result.get("data", []):
-                name = model.get("model") or model.get("id")
-                if isinstance(name, str) and name.strip():
-                    advertised_efforts = tuple(
-                        item.get("reasoningEffort")
-                        for item in model.get("supportedReasoningEfforts", [])
-                        if isinstance(item, dict) and isinstance(item.get("reasoningEffort"), str)
-                    )
-                    discovered.append(ModelOption(
-                        name.strip(),
-                        is_default=bool(model.get("isDefault")),
-                        supported_efforts=advertised_efforts or None,
-                    ))
-            return discovered
-    except (OSError, ValueError, subprocess.SubprocessError):
-        logger.warning("event=codex_model_discovery_failed", exc_info=True)
-    finally:
-        if process is not None:
-            process.terminate()
-            try:
-                process.wait(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-    logger.warning("event=codex_model_discovery_empty reason=no_model_list_response")
+    # A model picker must not create a second app-server runtime. The owning
+    # worker's already-running app-server is the authority for Codex's catalog
+    # (see src/worker/agent.py:_discover_node_models, which calls
+    # CodexBackend.list_models() on that live client and reports the result
+    # through the node heartbeat). This gateway-side probe would have to spawn
+    # a second, throwaway app-server process to answer the same question, so
+    # it never does — Codex names are advisory and pass through unchanged.
     return []
 
 

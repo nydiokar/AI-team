@@ -480,10 +480,17 @@ def _make_backends() -> Dict[str, Any]:
 def _discover_node_models(backends: List[str], instances: Optional[Dict[str, Any]] = None) -> Dict[str, List[Dict[str, Any]]]:
     """Discover model descriptors from the CLIs installed on this worker.
 
-    The gateway must not invent or merge model names: an empty result means the
-    worker did not advertise a usable catalog and the UI should show that state.
-    Codex exposes the authoritative account/node catalog through app-server.
+    The gateway must not invent or merge model names: an empty result for a
+    backend the node runs means that backend did not advertise a usable
+    catalog and the UI should fall back to the static gateway catalog for it
+    (see control_api.api_models). Codex is the only backend with a live,
+    node-specific catalog (its account/model set is discovered through the
+    local app-server); claude and opencode are global/config-driven, so their
+    entries here just mirror the static catalog for parity with the gateway
+    fallback and so every backend the node runs gets an advertised key.
     """
+    from config.models import options as _static_options
+
     discovered: Dict[str, List[Dict[str, Any]]] = {}
     if "codex" in backends:
         try:
@@ -502,6 +509,12 @@ def _discover_node_models(backends: List[str], instances: Optional[Dict[str, Any
         except Exception:
             logger.warning("event=node_model_discovery_failed backend=codex", exc_info=True)
             discovered["codex"] = []
+    for static_backend in ("claude", "opencode", "opencode-server"):
+        if static_backend in backends:
+            discovered[static_backend] = [
+                {"name": o.name, "is_default": o.is_default, "efforts": list(o.supported_efforts or [])}
+                for o in _static_options(static_backend)
+            ]
     return discovered
 
 
@@ -1232,7 +1245,7 @@ class WorkerAgent:
                 try:
                     if time.monotonic() - self._model_capabilities_at >= _MODEL_CAPABILITIES_REFRESH_SECONDS:
                         discovered_models = await asyncio.to_thread(
-                            _discover_node_models, self.cfg.backends
+                            _discover_node_models, self.cfg.backends, self._backends
                         )
                         # Codex model discovery is best-effort. Once this
                         # worker has advertised a usable catalog, retain it
