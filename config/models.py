@@ -275,8 +275,14 @@ def effort_options_for_model(backend: str, model: Optional[str]) -> List[str]:
 
 
 def is_known(backend: str, name: str) -> bool:
-    """True if `name` is an exact catalog entry for `backend`."""
-    return any(opt.name == name for opt in options(backend))
+    """True if ``name`` is an exact entry in the backend's current catalog.
+
+    Codex is node-owned: its catalog is discovered from the local app-server,
+    so the static ``BACKEND_MODELS`` entry is intentionally empty. Validation
+    must use the same discovered catalog that feeds the node advertisement.
+    """
+    catalog: List[ModelOption] = available_options(backend)
+    return any(opt.name == name for opt in catalog)
 
 
 def is_advisory(backend: str) -> bool:
