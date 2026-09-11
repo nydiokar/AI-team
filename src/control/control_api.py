@@ -2628,7 +2628,11 @@ def build_control_api(orchestrator) -> FastAPI:
                     node_models = {}
 
         def serialize(model_backend: str) -> list[dict[str, Any]]:
-            if node_id != "__local__":
+            # A node only advertises backends it actually discovers a live
+            # catalog for (today: Codex, via its app-server). Backends the
+            # node hasn't advertised fall back to the static gateway catalog
+            # instead of going empty.
+            if node_id != "__local__" and model_backend in node_models:
                 return list(node_models.get(model_backend) or [])
             return [{"name": o.name, "is_default": o.is_default, "efforts": list(o.supported_efforts or [])} for o in _options(model_backend)]
 
