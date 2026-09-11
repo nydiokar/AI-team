@@ -1,8 +1,8 @@
-"""Host-local, fail-closed ownership for Codex native execution.
+"""Private durable ownership guard for the one Codex backend.
 
+It prevents two carriers from mutating the same native thread or workspace.
 Claims deliberately have no TTL: losing a gateway/worker does not prove its
-child stopped. An unclean exit requires operator recovery after verifying the
-old process tree is dead. All carriers sharing CODEX_HOME share this database.
+child stopped. It does not start Codex or translate its protocol.
 
 Cancellation uses the shared process-tree helper's approximately eight-second
 grace period, so a normal cancelled turn can take that long to settle.

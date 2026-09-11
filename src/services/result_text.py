@@ -336,7 +336,7 @@ def short_failure_reason(result) -> str:
                 compact = " ".join(t.split())
                 if len(compact) > 20:
                     return compact[:300]
-        return "Claude timeout"
+        return "Backend timeout"
     if any(s in haystack_lower for s in ("connection reset", "connection aborted", "network error", "temporarily unavailable", "service unavailable")):
         return "Claude network error"
     if any(isinstance(e, str) and "interactive_prompt_detected" in e for e in (getattr(result, "errors", []) or [])):

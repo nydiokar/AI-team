@@ -3,7 +3,23 @@
 Status: closed. Focused offline parity and the post-worker-restart fresh-session
 two-turn validation passed. The legacy CLI-per-turn Codex production path has
 been removed.
-Protocol authority: installed `codex-cli 0.153.2`, generated JSON Schema.
+Protocol authority: the adapter's bounded runtime contract for the RPC fields it consumes.
+
+## Code boundary
+
+There is exactly one Codex backend: `src/backends/codex_native.py:CodexBackend`.
+The two adjacent modules are private implementation seams, not alternative
+backends:
+
+| Module | Owns | Must not own |
+|---|---|---|
+| `codex_native.py` | Session/thread and turn semantics; `CodingBackend` contract; result projection | stdio framing, process-tree primitives, durable SQLite claims |
+| `codex_app_server.py` | One app-server runtime per carrier; RPC framing/correlation; bounded event routing | Session/Task policy, retries, database state |
+| `codex_ownership.py` | Durable thread/workspace exclusion across carriers | Running Codex or interpreting native messages |
+
+The registry imports only `CodexBackend`; callers never choose between these
+modules. A future Codex capability belongs in the semantic backend unless it is
+strictly transport or ownership machinery.
 
 ## Original abstraction assessment
 
@@ -76,8 +92,8 @@ authorize replaying a possibly executed gateway instruction.
 ## Desired lifecycle
 
 One intended execution runtime per carrier process, shared by its Codex adapter
-calls. Initialize with the pinned protocol before use; reject incompatible
-versions and schemas. Test construction must remain free of paid execution.
+calls. Initialize against the bounded protocol contract before use; reject malformed
+data that affects gateway state. Test construction must remain free of paid execution.
 Serialize runtime initialization only; unrelated threads execute concurrently.
 
 New session: acquire durable session ownership, call `thread/start`, immediately
@@ -113,7 +129,7 @@ shutdown interrupts active turns and shuts down/reaps its owned runtime/readers.
 | Different Sessions concurrently | Independent claims/turn channels, bounded capacity | Concurrent execution |
 | Two processes / thread alias | Shared durable thread claim | Contender fails closed |
 | Malformed/out-of-order events | Validate schema and lifecycle correlation | Fail closed; never infer success |
-| Version/schema mismatch | Pinned runtime and generated schema authority | Clear incompatibility before execution |
+| Malformed consumed protocol data | Adapter contract | Clear incompatibility before execution |
 
 Transport/request failures must not accidentally acquire retry eligibility by
 including retry-looking prose in their public error classification. Preserve
@@ -122,8 +138,8 @@ owned; gateway retry policy is not replaced.
 
 ## Migration and verification gates
 
-1. The bounded transport validates requests, responses and notifications against
-   the generated version-matched schema snapshot. It has offline fake-server
+1. The bounded transport validates its envelopes and the notification fields it
+   consumes, while ignoring unknown notifications. It has offline fake-server
    tests for correlation, death, malformed data, deadlines and limits.
 2. The semantic adapter has offline tests for exact IDs, cwd, terminal status,
    interruption, concurrency, durable claims and telemetry projection.
@@ -178,8 +194,8 @@ Codex package update -> validated deployment -> deliberate worker/backend recycl
 On every affected carrier:
 
 1. Inspect the intended release, update Codex, and verify `codex --version`.
-2. Validate app-server protocol/schema compatibility with the adapter; regenerate
-   the version-matched snapshot and update the supported/pinned version if needed.
+2. Validate the app-server against the adapter's focused compatibility tests;
+   additive protocol changes do not require an adapter update.
 3. Run focused Codex adapter, protocol, and lifecycle tests; deploy repository
    changes.
 4. Deliberately recycle the owning runtime. On a mesh node, the supported method

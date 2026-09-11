@@ -1,7 +1,9 @@
-"""Bounded, synchronous client for the pinned Codex app-server protocol.
+"""Private stdio runtime for the one Codex backend.
 
-No gateway objects or execution policy belong in this module. A single reader
-correlates RPC replies and routes native notifications to subscribed threads.
+Owns exactly one ``codex app-server`` process per ``CodexBackend`` carrier:
+process-tree lifetime, JSON-RPC framing, request correlation, bounded buffers,
+and event routing. It has no Session, Task, database, retry, or business-policy
+knowledge. Unknown backend notifications are intentionally ignored here.
 """
 from __future__ import annotations
 
@@ -11,26 +13,70 @@ import queue
 import signal
 import subprocess
 import threading
-from pathlib import Path
 
-from jsonschema import Draft7Validator
 from pydantic import JsonValue
 
-PROTOCOL = json.loads(Path(__file__).with_name("codex_protocol.json").read_text())
-VERSION: str = PROTOCOL["version"]
 MAX_FRAME = 4 * 1024 * 1024
 MAX_BUFFER = 16 * 1024 * 1024
 MAX_PENDING = 32
 RPC_TIMEOUT = 30.0
-RESPONSES = {
-    "initialize": "InitializeResponse",
-    "thread/start": "ThreadStartResponse",
-    "thread/resume": "ThreadResumeResponse",
-    "thread/unsubscribe": "ThreadUnsubscribeResponse",
-    "thread/compact/start": "ThreadCompactStartResponse",
-    "turn/start": "TurnStartResponse",
-    "turn/interrupt": "TurnInterruptResponse",
-}
+REQUEST_METHODS = frozenset({
+    "initialize", "thread/start", "thread/resume", "thread/unsubscribe",
+    "thread/compact/start", "turn/start", "turn/interrupt", "model/list",
+})
+CONSUMED_NOTIFICATIONS = frozenset({
+    "turn/started", "turn/completed", "thread/tokenUsage/updated",
+    "item/started", "item/completed",
+})
+
+
+def _create_windows_job(process: subprocess.Popen[bytes]) -> int:
+    """Own the full native runtime tree until this client closes it."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimitInformation(ctypes.Structure):
+        _fields_ = [("per_process_user_time_limit", ctypes.c_longlong),
+                    ("per_job_user_time_limit", ctypes.c_longlong),
+                    ("limit_flags", wintypes.DWORD),
+                    ("minimum_working_set_size", ctypes.c_size_t),
+                    ("maximum_working_set_size", ctypes.c_size_t),
+                    ("active_process_limit", wintypes.DWORD),
+                    ("affinity", ctypes.c_size_t),
+                    ("priority_class", wintypes.DWORD),
+                    ("scheduling_class", wintypes.DWORD)]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "read_operation_count", "write_operation_count", "other_operation_count",
+            "read_transfer_count", "write_transfer_count", "other_transfer_count")]
+
+    class ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [("basic_limit_information", BasicLimitInformation),
+                    ("io_info", IoCounters),
+                    ("process_memory_limit", ctypes.c_size_t),
+                    ("job_memory_limit", ctypes.c_size_t),
+                    ("peak_process_memory_used", ctypes.c_size_t),
+                    ("peak_job_memory_used", ctypes.c_size_t)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+    info = ExtendedLimitInformation()
+    info.basic_limit_information.limit_flags = 0x00002000  # KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+        kernel32.CloseHandle(job)
+        raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+    if not kernel32.AssignProcessToJobObject(job, process._handle):
+        kernel32.CloseHandle(job)
+        raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+    return int(job)
+
+
+def _close_windows_job(job: int) -> None:
+    import ctypes
+    ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(job)
 
 
 class CodexProtocolError(RuntimeError):
@@ -74,19 +120,23 @@ class CodexAppServerClient:
         self.writes: queue.Queue[bytes | None] = queue.Queue(MAX_PENDING)
         self.readers: list[threading.Thread] = []
         self.stderr: bytearray = bytearray()
-        self.validators = {name: Draft7Validator(schema)
-                           for name, schema in PROTOCOL["schemas"].items()}
+        self.windows_job: int | None = None
 
     def start(self) -> None:
-        version = subprocess.run([self.executable, "--version"], env=self.env,
-                                 capture_output=True, timeout=10, check=True)
-        if version.stdout.decode().strip() != VERSION:
-            raise CodexProtocolError(f"codex_version_mismatch: expected {VERSION}")
         self.process = subprocess.Popen(
             [self.executable, "app-server", "--stdio"], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
-            start_new_session=True,
+            start_new_session=os.name != "nt",
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
+        if os.name == "nt":
+            try:
+                self.windows_job = _create_windows_job(self.process)
+            except OSError as exc:
+                self.process.terminate()
+                self.process.wait(timeout=2)
+                self.process = None
+                raise CodexProtocolError("codex_runtime_ownership_unavailable") from exc
         for name, target in (("reader", self._read), ("writer", self._write),
                              ("stderr", self._read_stderr)):
             thread = threading.Thread(target=target, name=f"codex-app-server-{name}", daemon=True)
@@ -129,6 +179,9 @@ class CodexAppServerClient:
     def unload(self, thread_id: str) -> None:
         self.request("thread/unsubscribe", {"threadId": thread_id})
 
+    def list_models(self) -> dict[str, JsonValue]:
+        return self.request("model/list", {"includeHidden": False, "limit": 1000})
+
     def subscribe(self, thread_id: str) -> EventChannel:
         with self.lock:
             self.check()
@@ -155,12 +208,13 @@ class CodexAppServerClient:
                 timeout: float = RPC_TIMEOUT) -> dict[str, JsonValue]:
         with self.lock:
             self.check()
+            if method not in REQUEST_METHODS or not isinstance(params, dict):
+                raise CodexProtocolError("codex_invalid_client_request")
             if len(self.pending) >= MAX_PENDING:
                 raise CodexProtocolError("codex_rpc_capacity_exceeded")
             self.sequence += 1
             request_id = self.sequence
             message = {"id": request_id, "method": method, "params": params}
-            self.validators[method].validate(message)
             encoded = (json.dumps(message, separators=(",", ":")) + "\n").encode()
             if len(encoded) > MAX_FRAME:
                 raise CodexProtocolError("codex_request_too_large")
@@ -182,7 +236,6 @@ class CodexAppServerClient:
             result = response.get("result")
             if not isinstance(result, dict):
                 raise CodexProtocolError("codex_invalid_rpc_result")
-            self.validators[RESPONSES[method]].validate(result)
             return result
         except queue.Empty as exc:
             self._fail("codex_rpc_deadline_exceeded")
@@ -202,6 +255,7 @@ class CodexAppServerClient:
 
     def _read(self) -> None:
         assert self.process is not None and self.process.stdout is not None
+        event: object = None
         try:
             while True:
                 raw = self.process.stdout.readline(MAX_FRAME + 1)
@@ -222,17 +276,25 @@ class CodexAppServerClient:
                             raise CodexProtocolError("codex_unmatched_response")
                         self.pending[request_id].put_nowait(event)
                         continue
-                    self.validators["notifications"].validate(event)
+                    method = event.get("method")
+                    if method not in CONSUMED_NOTIFICATIONS:
+                        continue
                     params = event.get("params", {})
-                    thread_id = params.get("threadId") if isinstance(params, dict) else None
-                    channel = self.channels.get(thread_id) if isinstance(thread_id, str) else None
+                    if not isinstance(params, dict) or not isinstance(params.get("threadId"), str):
+                        raise CodexProtocolError(f"codex_invalid_native_event:{method}")
+                    channel = self.channels.get(params["threadId"])
                     if channel:
                         if self.buffered + len(raw) > MAX_BUFFER:
                             raise CodexProtocolError("codex_event_buffer_exceeded")
                         channel.events.put_nowait((event, len(raw)))
                         self.buffered += len(raw)
         except Exception as exc:
-            self._fail(str(exc) if isinstance(exc, CodexProtocolError) else "codex_invalid_native_event")
+            if isinstance(exc, CodexProtocolError):
+                self._fail(str(exc))
+            else:
+                method = event.get("method") if isinstance(event, dict) else None
+                suffix = method if isinstance(method, str) else "unknown"
+                self._fail(f"codex_invalid_native_event:{suffix}")
 
     def _write(self) -> None:
         assert self.process is not None and self.process.stdin is not None
@@ -263,15 +325,35 @@ class CodexAppServerClient:
             if process is not None:
                 # Own process group includes native tool/MCP descendants, even if
                 # app-server itself already died. Never signal a foreign runtime.
-                for sig in (signal.SIGTERM, signal.SIGKILL):
-                    try:
-                        os.killpg(process.pid, sig)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        continue
+                try:
+                    if process.stdin:
+                        process.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+                if os.name == "nt":
+                    if process.poll() is None:
+                        try:
+                            process.send_signal(signal.CTRL_BREAK_EVENT)
+                        except (OSError, ProcessLookupError, SystemError):
+                            pass
+                        try:
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            pass
+                elif process.poll() is None:
+                    for sig in (signal.SIGTERM, signal.SIGKILL):
+                        try:
+                            os.killpg(process.pid, sig)
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            continue
                 try:
                     self.writes.put_nowait(None)
                 except queue.Full:
@@ -291,4 +373,7 @@ class CodexAppServerClient:
                             pass
                 if any(reader.is_alive() for reader in self.readers):
                     raise CodexProtocolError("codex_reader_shutdown_incomplete")
+                if self.windows_job is not None:
+                    _close_windows_job(self.windows_job)
+                    self.windows_job = None
                 self.process = None

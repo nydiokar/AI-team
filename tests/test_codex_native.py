@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.backends.codex_app_server import CodexAppServerClient, CodexProtocolError, CodexRPCError
-from src.backends.codex import CodexBackend
+from src.backends.codex_native import CodexBackend
 from src.core.interfaces import CodingBackend
 from src.core.telemetry import TelemetryContext
 

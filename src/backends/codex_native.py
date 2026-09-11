@@ -1,4 +1,10 @@
-"""Semantic Codex adapter backed exclusively by the persistent app-server."""
+"""The one Codex ``CodingBackend`` implementation.
+
+This module owns gateway semantics: Session-to-thread mapping, one active turn
+per session, output/usage projection, and the public ``CodingBackend`` methods.
+It does not parse stdio frames or implement SQLite claims; those are delegated
+to ``codex_app_server`` and ``codex_ownership`` respectively.
+"""
 from __future__ import annotations
 
 import json
@@ -138,6 +144,11 @@ class CodexBackend(CodingBackend):
         # Native compaction is a mutation and must use the same ownership path.
         return self._run(session.repo_path, "", session.backend_session_id or None,
                          session.session_id, compact=True)
+
+    def list_models(self) -> list[dict[str, JsonValue]]:
+        response = self._runtime().list_models()
+        data = response.get("data", [])
+        return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
     def _thread_config(self, session_id: str) -> dict[str, JsonValue]:
         identity: dict[str, JsonValue] = {"SESSION_ID": session_id, "AI_TEAM_SESSION_ID": session_id}

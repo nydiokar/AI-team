@@ -11,7 +11,7 @@
 | Backend | Flag | Accepted value | Source |
 |---|---|---|---|
 | Claude Code (`2.1.181`) | `--model <model>` | alias (`sonnet`, `opus`, `haiku`, `fable`) **or** full name (`claude-fable-5`) | `claude --help` |
-| Codex (`codex-cli 0.139.0`) | `-m, --model <MODEL>` | model name (`gpt-5.5` is the live default); reasoning effort is a *separate* knob `-c model_reasoning_effort=` | `codex --help`, `~/.codex/config.toml` |
+| Codex | `-m, --model <MODEL>` | model name (`gpt-5.5` is the live default); reasoning effort is a *separate* knob `-c model_reasoning_effort=` | `codex --help`, `~/.codex/config.toml` |
 | OpenCode | `--model provider/model` (CLI) / `body.model={providerID,modelID}` (server) | `opencode/big-pickle`, `opencode/deepseek-v4-flash-free`, … | `opencode models` |
 
 Key truth: **a "model" here is just a name on a flag.** No opaque IDs. Claude aliases auto-track the latest version, so storing the alias never goes stale. Codex effort stays in `config.toml` (decision: name-only picker). OpenCode genuinely requires the `provider/model` form — that's its CLI syntax.
@@ -78,7 +78,7 @@ The mesh payload is **not** a generic Session serialization. There are **two han
 `OpenCodeBackend._session_model` reads `task_history[-1]["opencode_model"]`, but **nothing in the codebase ever writes that key** (grep confirms: no producer in orchestrator/telegram). So today OpenCode *always* uses the config default. My plan framed this as "just repoint it" — fine — but the framing that it was a working feature was wrong. It's dead code. Also: `task_history[-1]` is the *last* turn's dict; reading model from it is semantically broken (model is a session property, not a per-turn artifact). Replacing with `session.model` is the correct fix, and the old read should be deleted, not kept as a "temporary fallback" (keeping it would resurrect the broken semantics).
 
 ### R3 — Codex `-m` on the resume subcommand — **RESOLVED ✅**
-Verified via `codex exec resume --help` (codex-cli 0.139.0): `-m, --model <MODEL>` is listed as a valid option of the `resume` subcommand itself. So `codex exec resume <id> -m <model> --json --dangerously-bypass-approvals-and-sandbox -` parses cleanly — `-m` goes **after** `resume <id>`, alongside the other flags. No hard-failure risk.
+Verified via `codex exec resume --help`: `-m, --model <MODEL>` is listed as a valid option of the `resume` subcommand itself. So `codex exec resume <id> -m <model> --json --dangerously-bypass-approvals-and-sandbox -` parses cleanly — `-m` goes **after** `resume <id>`, alongside the other flags. No hard-failure risk.
 
 ### R4 — mid-session `/model` override honored? — **RESOLVED ✅ (favorable for all three)**
 - **Claude:** `claude --help` documents `--model` as *"Model for the current session"* and lists it for use *with* `--resume`/`--continue`. It is a **per-invocation** setting, not pinned at creation — passing `--model` on a resume turn sets that turn's model.

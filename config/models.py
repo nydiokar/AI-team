@@ -107,6 +107,11 @@ def _read_codex_model_list() -> List[ModelOption]:
     best-effort: a missing CLI, an old CLI, or an unavailable auth service must
     not make the gateway's model picker unusable.
     """
+    # A model picker must not create a second app-server runtime. Codex model
+    # names are advisory and pass through unchanged, so there is no execution
+    # dependency on a speculative local catalog probe.
+    return []
+
     # Codex is an npm CLI. Its Windows shim needs node.exe on PATH; normal
     # Codex execution already repairs that inherited PM2 environment through
     # this helper. Model discovery must use the identical environment for both
