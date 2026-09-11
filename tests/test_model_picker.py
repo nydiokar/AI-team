@@ -67,6 +67,28 @@ def test_validation_policy_strict_vs_advisory():
     assert validate("claude", "   ") is None
 
 
+def test_codex_validation_accepts_advertised_model_without_warning(monkeypatch, caplog):
+    monkeypatch.setattr(
+        models_module,
+        "_CODEX_MODEL_CACHE",
+        (1.0, [models_module.ModelOption("gpt-5.6-terra")]),
+    )
+
+    with caplog.at_level("WARNING"):
+        assert validate("codex", "gpt-5.6-terra") == "gpt-5.6-terra"
+
+    assert "model_unknown_passthrough" not in caplog.text
+
+
+def test_codex_validation_passes_through_when_catalog_unavailable(monkeypatch, caplog):
+    monkeypatch.setattr(models_module, "_CODEX_MODEL_CACHE", (1.0, []))
+
+    with caplog.at_level("WARNING"):
+        assert validate("codex", "gpt-future") == "gpt-future"
+
+    assert "model_unknown_passthrough" in caplog.text
+
+
 def test_codex_picker_uses_only_machine_catalog(monkeypatch):
     monkeypatch.setattr(
         models_module,
