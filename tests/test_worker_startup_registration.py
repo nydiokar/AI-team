@@ -94,16 +94,10 @@ def test_registration_allows_for_gateway_side_sqlite_work() -> None:
     assert posted[0][1]["capabilities"]["models"] == worker._model_capabilities
 
 
-def test_codex_advertisement_marks_configured_default(monkeypatch) -> None:
+def test_codex_advertisement_uses_persistent_runtime(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_DEFAULT_MODEL", "gpt-5.6-terra")
-    monkeypatch.setattr(
-        "config.models._read_codex_model_list",
-        lambda: [
-            ModelOption("gpt-6-astra", is_default=True),
-            ModelOption("gpt-5.6-terra"),
-        ],
-    )
-
-    advertised = agent_mod._discover_node_models(["codex"])["codex"]
-
+    class Runtime:
+        def list_models(self):
+            return [{"model": "gpt-6-astra", "isDefault": True}, {"model": "gpt-5.6-terra"}]
+    advertised = agent_mod._discover_node_models(["codex"], {"codex": Runtime()})["codex"]
     assert [item["name"] for item in advertised if item["is_default"]] == ["gpt-5.6-terra"]

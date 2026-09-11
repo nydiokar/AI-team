@@ -477,7 +477,7 @@ def _make_backends() -> Dict[str, Any]:
     return build_backends()
 
 
-def _discover_node_models(backends: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+def _discover_node_models(backends: List[str], instances: Optional[Dict[str, Any]] = None) -> Dict[str, List[Dict[str, Any]]]:
     """Discover model descriptors from the CLIs installed on this worker.
 
     The gateway must not invent or merge model names: an empty result means the
@@ -487,25 +487,17 @@ def _discover_node_models(backends: List[str]) -> Dict[str, List[Dict[str, Any]]
     discovered: Dict[str, List[Dict[str, Any]]] = {}
     if "codex" in backends:
         try:
-            from config.models import _read_codex_model_list
-
-            options = _read_codex_model_list()
+            runtime = (instances or {}).get("codex")
+            rows = runtime.list_models() if runtime is not None else []
             configured_default = (os.getenv("CODEX_DEFAULT_MODEL") or "").strip()
-            use_configured_default = any(option.name == configured_default for option in options)
+            model_names = {row.get("model") or row.get("id") for row in rows if isinstance(row, dict)}
+            use_configured_default = configured_default in model_names
             discovered["codex"] = [
-                {
-                    "name": option.name,
-                    # The node configuration controls the model it will
-                    # actually execute. Reflect it in the advertised catalog
-                    # so the picker does not claim the account default wins.
-                    "is_default": (
-                        option.name == configured_default
-                        if use_configured_default
-                        else option.is_default
-                    ),
-                    "efforts": list(option.supported_efforts or ()),
-                }
-                for option in options
+                {"name": name, "is_default": (name == configured_default if use_configured_default else bool(row.get("isDefault"))),
+                 "efforts": [entry.get("reasoningEffort") for entry in row.get("supportedReasoningEfforts", [])
+                             if isinstance(entry, dict) and isinstance(entry.get("reasoningEffort"), str)]}
+                for row in rows
+                if isinstance((name := row.get("model") or row.get("id")), str) and name.strip()
             ]
         except Exception:
             logger.warning("event=node_model_discovery_failed backend=codex", exc_info=True)
@@ -1025,7 +1017,7 @@ class WorkerAgent:
         self._job_procs: Dict[str, subprocess.Popen] = {}  # job_id → Popen (kept alive for exit-code retrieval)
         self._canary = (os.getenv("WORKER_CANARY") or "").lower() in {"1", "true", "yes"}
         self._incarnation_id = uuid.uuid4().hex
-        self._model_capabilities = _discover_node_models(self.cfg.backends)
+        self._model_capabilities = _discover_node_models(self.cfg.backends, self._backends)
         self._model_capabilities_at = time.monotonic()
         # Stamp our node + incarnation into the environment so every backend child
         # we spawn (the Claude SDK `claude` process inherits os.environ) carries

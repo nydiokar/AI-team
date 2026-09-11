@@ -3,7 +3,7 @@ from typing import Callable, Dict, Tuple
 
 from src.core.interfaces import CodingBackend
 from .claude_code import ClaudeCodeBackend
-from .codex import CodexBackend
+from .codex_native import CodexBackend
 from .opencode import OpenCodeBackend, OpenCodeServerBackend
 
 DEFAULT_BACKEND = "claude"
