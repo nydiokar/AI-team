@@ -15,7 +15,7 @@ backends:
 |---|---|---|
 | `codex_native.py` | Session/thread and turn semantics; `CodingBackend` contract; result projection | stdio framing, process-tree primitives, durable SQLite claims |
 | `codex_app_server.py` | One app-server runtime per carrier; RPC framing/correlation; bounded event routing | Session/Task policy, retries, database state |
-| `codex_ownership.py` | Durable thread/workspace exclusion across carriers | Running Codex or interpreting native messages |
+| `codex_ownership.py` | Durable thread exclusion and workspace affinity across carriers | Running Codex or interpreting native messages |
 
 The registry imports only `CodexBackend`; callers never choose between these
 modules. A future Codex capability belongs in the semantic backend unless it is
@@ -70,7 +70,7 @@ policy, and durable ownership remain outside Codex.
 
 Gateway owns Session/Case/Task identity, backend selection, durable queues/leases,
 orchestration retries, approvals, Case continuation and closure, audit/telemetry,
-workspace affinity and cross-process exclusion. Existing ownership changes in the
+workspace affinity and cross-process thread exclusion. Existing ownership changes in the
 working tree are prerequisites and must be preserved, not redesigned here.
 
 `CodexBackend` remains the only production semantic adapter. It composes the bounded
@@ -126,7 +126,7 @@ shutdown interrupts active turns and shuts down/reaps its owned runtime/readers.
 | Native turn fails | Terminal status/error authoritative | Failed result preserving output, ID and usage |
 | Interrupt/completion race | Terminal status authoritative | Completed remains success; interrupted is cancelled |
 | Same Session concurrently | Gateway FIFO plus durable claim and native idle check | No competing turn or implicit steering |
-| Different Sessions concurrently | Independent claims/turn channels, bounded capacity | Concurrent execution |
+| Different Sessions concurrently | Independent claims/turn channels, bounded capacity | Concurrent execution, including in the same workspace |
 | Two processes / thread alias | Shared durable thread claim | Contender fails closed |
 | Malformed/out-of-order events | Validate schema and lifecycle correlation | Fail closed; never infer success |
 | Malformed consumed protocol data | Adapter contract | Clear incompatibility before execution |
