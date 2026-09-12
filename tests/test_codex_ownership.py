@@ -76,6 +76,24 @@ def test_cross_process_claim_and_crash_fail_closed(tmp_path, monkeypatch) -> Non
     other.release()
 
 
+def test_cross_process_distinct_sessions_share_workspace(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    workspace = str(tmp_path / "workspace")
+    owner = CodexOwnership()
+    owner.acquire("first-session", "first-thread", workspace)
+    script = (
+        "from src.backends.codex_ownership import CodexOwnership; "
+        f"CodexOwnership().acquire('second-session', 'second-thread', {workspace!r})"
+    )
+    try:
+        competing = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=10
+        )
+        assert competing.returncode == 0, competing.stderr
+    finally:
+        owner.release()
+
+
 def test_live_cross_process_thread_alias_is_excluded(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     owner = CodexOwnership()
