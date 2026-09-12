@@ -1,6 +1,7 @@
 """Private durable ownership guard for the one Codex backend.
 
-It prevents two carriers from mutating the same native thread or workspace.
+It prevents two carriers from mutating the same native thread while preserving
+the workspace affinity of that thread.
 Claims deliberately have no TTL: losing a gateway/worker does not prove its
 child stopped. It does not start Codex or translate its protocol.
 
@@ -13,9 +14,6 @@ import uuid
 from contextlib import contextmanager
 from collections.abc import Iterator
 from pathlib import Path
-
-_CARRIER_OWNER: str = uuid.uuid4().hex
-
 
 class CodexOwnership:
     def __init__(self) -> None:
@@ -30,8 +28,6 @@ class CodexOwnership:
             conn.execute("CREATE TABLE IF NOT EXISTS threads (session_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS cancellations (task_id TEXT PRIMARY KEY)")
             conn.execute("CREATE TABLE IF NOT EXISTS affinities (key TEXT PRIMARY KEY, cwd TEXT NOT NULL)")
-            conn.execute("CREATE TABLE IF NOT EXISTS workspace_claims (owner TEXT PRIMARY KEY, cwd TEXT NOT NULL, domain TEXT NOT NULL)")
-            conn.execute("CREATE INDEX IF NOT EXISTS workspace_claims_cwd ON workspace_claims(cwd)")
 
     def request_cancel(self, task_id: str) -> None:
         if not task_id or len(task_id) > 256:
@@ -65,10 +61,6 @@ class CodexOwnership:
             if self.thread_id:
                 keys.append(f"thread:{self.thread_id}")
             if cwd:
-                existing = conn.execute("SELECT domain FROM workspace_claims WHERE cwd = ? LIMIT 1", (cwd,)).fetchone()
-                if existing and existing[0] != _CARRIER_OWNER:
-                    raise RuntimeError("codex_workspace_busy: another carrier owns this workspace")
-                conn.execute("INSERT INTO workspace_claims VALUES (?, ?, ?)", (self.owner, cwd, _CARRIER_OWNER))
                 for key in keys:
                     affinity = conn.execute("SELECT cwd FROM affinities WHERE key = ?", (key,)).fetchone()
                     if affinity and affinity[0] != cwd:
@@ -100,4 +92,3 @@ class CodexOwnership:
     def release(self) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM owners WHERE owner = ?", (self.owner,))
-            conn.execute("DELETE FROM workspace_claims WHERE owner = ?", (self.owner,))
