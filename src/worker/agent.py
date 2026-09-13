@@ -340,24 +340,42 @@ class _HTTP:
             "Content-Type": "application/json",
         }
 
-    def post(self, path: str, body: Any = None, timeout: int = 10) -> Any:
-        data = json.dumps(body).encode() if body is not None else b""
+    def _request(self, method: str, path: str, *, data: Optional[bytes], timeout: int) -> Any:
+        request_id = uuid.uuid4().hex[:12]
+        headers = self._headers()
+        headers["X-AI-Team-Request-ID"] = request_id
         req = urllib.request.Request(
             f"{self._base}{path}",
             data=data,
-            headers=self._headers(),
-            method="POST",
+            headers=headers,
+            method=method,
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+        started = time.perf_counter()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except Exception as exc:
+            logger.warning(
+                "event=controller_request_failed method=%s path=%s request_id=%s elapsed_ms=%.1f error_type=%s err=%s",
+                method,
+                path,
+                request_id,
+                (time.perf_counter() - started) * 1000,
+                type(exc).__name__,
+                exc,
+            )
+            raise
+
+    def post(self, path: str, body: Any = None, timeout: int = 10) -> Any:
+        data = json.dumps(body).encode() if body is not None else b""
+        return self._request("POST", path, data=data, timeout=timeout)
 
     def get(self, path: str, params: Optional[Dict[str, str]] = None, timeout: int = 10) -> Any:
         url = f"{self._base}{path}"
         if params:
             url += "?" + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-        req = urllib.request.Request(url, headers=self._headers(), method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+        request_path = url[len(self._base):]
+        return self._request("GET", request_path, data=None, timeout=timeout)
 
     def get_bytes(self, path: str, timeout: int = 60) -> bytes:
         req = urllib.request.Request(

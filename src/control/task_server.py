@@ -37,6 +37,9 @@ from src.core.telemetry import TelemetryEvent
 
 logger = logging.getLogger(__name__)
 
+_SLOW_REQUEST_SECONDS = 1.0
+_MESH_HEALTH_SAMPLE_SECONDS = 30.0
+
 
 # Optional hook into the in-process orchestrator, set only when this server runs
 # EMBEDDED in the gateway. Lets a worker-reported proactive turn trigger the
@@ -128,6 +131,25 @@ async def _local_node_heartbeat_loop() -> None:
         pass
 
 
+async def _mesh_health_sampler_loop() -> None:
+    """Record aggregate health outside worker liveness request handling."""
+    try:
+        while True:
+            db = get_db()
+            if db is not None:
+                try:
+                    await asyncio.to_thread(
+                        db.maybe_record_mesh_health_sample,
+                        source="task_server",
+                        min_interval_seconds=_MESH_HEALTH_SAMPLE_SECONDS,
+                    )
+                except Exception:
+                    logger.warning("event=mesh_health_sample_failed", exc_info=True)
+            await asyncio.sleep(_MESH_HEALTH_SAMPLE_SECONDS)
+    except asyncio.CancelledError:
+        pass
+
+
 def _parse_claimed_at(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -174,10 +196,11 @@ async def _lifespan(app: FastAPI):
     logger.info("event=task_server_started")
     reaper_task = asyncio.create_task(_stale_claim_reaper_loop())
     local_hb_task = asyncio.create_task(_local_node_heartbeat_loop())
+    health_sampler_task = asyncio.create_task(_mesh_health_sampler_loop())
     yield
-    for _t in (reaper_task, local_hb_task):
+    for _t in (reaper_task, local_hb_task, health_sampler_task):
         _t.cancel()
-    for _t in (reaper_task, local_hb_task):
+    for _t in (reaper_task, local_hb_task, health_sampler_task):
         try:
             await _t
         except asyncio.CancelledError:
@@ -186,6 +209,29 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI-Team Mesh Task Server", version="1.0", lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def _log_slow_request(request: Request, call_next):
+    """Emit a correlated record when task-server work delays a worker request."""
+    started = time.perf_counter()
+    request_id = request.headers.get("X-AI-Team-Request-ID", "")
+    status_code: Optional[int] = None
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        elapsed = time.perf_counter() - started
+        if elapsed >= _SLOW_REQUEST_SECONDS:
+            logger.warning(
+                "event=task_server_request_slow method=%s path=%s status=%s elapsed_ms=%.1f request_id=%s",
+                request.method,
+                request.url.path,
+                status_code if status_code is not None else "error",
+                elapsed * 1000,
+                request_id or "none",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -548,12 +594,6 @@ def node_heartbeat(payload: HeartbeatPayload) -> Dict[str, str]:
     if not ok:
         # Unknown node — prompt re-register instead of silently failing
         raise HTTPException(status_code=404, detail="Node not found; send /nodes/register first")
-    try:
-        db = get_db()
-        if db:
-            db.maybe_record_mesh_health_sample(source="heartbeat", min_interval_seconds=30.0)
-    except Exception:
-        pass
     return {"status": "ok"}
 
 
