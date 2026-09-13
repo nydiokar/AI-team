@@ -213,3 +213,47 @@ def test_heartbeat_endpoint_backward_compatible(tmp_path):
             old.close()
         db_mod._db_instance = old
         reg_mod._registry = None
+
+
+def test_heartbeat_does_not_run_mesh_health_aggregation(tmp_path, monkeypatch):
+    """Liveness acknowledgement must not wait on aggregate telemetry work."""
+    from config import config as cfg
+    cfg.mesh.db_path = str(tmp_path / "hb_no_aggregation.db")
+    import src.control.db as db_mod
+    import src.control.node_registry as reg_mod
+    from src.control.task_server import (
+        HeartbeatPayload,
+        NodeRegisterPayload,
+        _Capabilities,
+        node_heartbeat,
+        register_node,
+    )
+
+    old = db_mod._db_instance
+    db_mod._db_instance = None
+    if old:
+        old.close()
+    reg_mod._registry = None
+    try:
+        node_id = _node_id()
+        register_node(NodeRegisterPayload(
+            node_id=node_id,
+            tailscale_ip="127.0.0.1",
+            api_port=9001,
+            capabilities=_Capabilities(backends=["claude"], max_concurrent=2),
+        ))
+        db = db_mod.get_db()
+        assert db is not None
+        monkeypatch.setattr(
+            db,
+            "maybe_record_mesh_health_sample",
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must run off request path")),
+        )
+
+        assert node_heartbeat(HeartbeatPayload(node_id=node_id)) == {"status": "ok"}
+    finally:
+        db_mod._db_instance = None
+        if old:
+            old.close()
+        db_mod._db_instance = old
+        reg_mod._registry = None
