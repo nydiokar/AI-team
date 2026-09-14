@@ -3528,8 +3528,43 @@ class TaskOrchestrator(ITaskOrchestrator):
                     await self._recover_completed_session(session, task_row)
                     reconciled += 1
                     continue
-                if status in ("pending", "claimed"):
+                if status == "pending":
                     continue
+                if status == "claimed":
+                    # Claimed tasks are normally skipped — the worker is still
+                    # running. But if the worker's live_state is fresh and doesn't
+                    # list this task, the worker dropped it without reporting a
+                    # result (detached). Fail the task row so recovery proceeds.
+                    node_id = task_row.get("claimed_by") if task_row else None
+                    if node_id:
+                        node_row = db.get_node(node_id)
+                        if node_row is not None:
+                            try:
+                                from src.core.task_state_truth import derive_task_execution_state
+                                derived = derive_task_execution_state(task_row, node_row=node_row)
+                                if derived.state == "detached":
+                                    db.fail_task(
+                                        task_id,
+                                        "task detached: worker dropped it without reporting a result",
+                                    )
+                                    session.last_result_summary = (
+                                        "Task detached: worker completed or crashed without "
+                                        "posting a result. Retry the session."
+                                    )
+                                    logger.warning(
+                                        "event=detached_task_recovered session_id=%s "
+                                        "task_id=%s node=%s",
+                                        session_id, task_id, node_id,
+                                    )
+                                    # Fall through to ERROR-marking below.
+                                else:
+                                    continue
+                            except Exception:
+                                continue
+                        else:
+                            continue
+                    else:
+                        continue
                 if status in ("failed", "failed_node_offline"):
                     error_msg = (task_row.get("error") if task_row else "") or f"Task {status}"
                     session.last_result_summary = error_msg[-400:]
