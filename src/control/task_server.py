@@ -216,16 +216,6 @@ async def _log_slow_request(request: Request, call_next):
     """Emit a correlated record when task-server work delays a worker request."""
     started = time.perf_counter()
     request_id = request.headers.get("X-AI-Team-Request-ID", "")
-    is_worker_control_request = request.url.path.startswith(
-        ("/nodes/", "/tasks/", "/jobs", "/events/activity")
-    )
-    if is_worker_control_request:
-        logger.info(
-            "event=task_server_request_received method=%s path=%s request_id=%s",
-            request.method,
-            request.url.path,
-            request_id or "none",
-        )
     status_code: Optional[int] = None
     try:
         response = await call_next(request)
@@ -233,15 +223,6 @@ async def _log_slow_request(request: Request, call_next):
         return response
     finally:
         elapsed = time.perf_counter() - started
-        if is_worker_control_request:
-            logger.info(
-                "event=task_server_request_completed method=%s path=%s status=%s elapsed_ms=%.1f request_id=%s",
-                request.method,
-                request.url.path,
-                status_code if status_code is not None else "error",
-                elapsed * 1000,
-                request_id or "none",
-            )
         if elapsed >= _SLOW_REQUEST_SECONDS:
             logger.warning(
                 "event=task_server_request_slow method=%s path=%s status=%s elapsed_ms=%.1f request_id=%s",
