@@ -216,7 +216,9 @@ async def _log_slow_request(request: Request, call_next):
     """Emit a correlated record when task-server work delays a worker request."""
     started = time.perf_counter()
     request_id = request.headers.get("X-AI-Team-Request-ID", "")
-    is_worker_control_request = request.url.path.startswith(("/nodes/", "/tasks/", "/jobs"))
+    is_worker_control_request = request.url.path.startswith(
+        ("/nodes/", "/tasks/", "/jobs", "/events/activity")
+    )
     if is_worker_control_request:
         logger.info(
             "event=task_server_request_received method=%s path=%s request_id=%s",
@@ -862,8 +864,8 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
 # task server's lifetime.
 # ---------------------------------------------------------------------------
 
-async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
-    """Periodically sweep for stale claimed tasks and release them.
+def _reap_stale_claims_once() -> None:
+    """Synchronously sweep stale claims; callers must keep this off the event loop.
 
     A task claim is stale when claimed_at is older than `lease_sec` AND one of:
     - the claiming node is offline or gone (original condition), OR
@@ -876,51 +878,56 @@ async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
     the safety net for cases where the fast path was missed (e.g. gateway
     restart between worker death and re-registration).
     """
+    db = get_db()
+    if db is None:
+        return
+    from config import config as _cfg
+    lease_sec = getattr(_cfg.mesh, "claim_lease_sec", 300)
+    max_runtime_sec = int(getattr(_cfg.mesh, "claim_max_runtime_sec", 1800) or 0)
+    if max_runtime_sec <= 0:
+        max_runtime_sec = int(getattr(_cfg.system, "task_timeout", 0) or 1800)
+    stale = db.list_stale_claims(
+        lease_sec=lease_sec,
+        live_state_max_age_sec=getattr(_cfg.mesh, "routing_live_state_max_age_sec", 90),
+        active_task_max_runtime_sec=max_runtime_sec,
+    )
+    for row in stale:
+        task_id = row.get("id", "?")
+        claimed_by = row.get("claimed_by", "?")
+        claimed_at = row.get("claimed_at", "?")
+        reason = row.get("_stale_reason", "unknown")
+        if reason == "active_task_over_max_runtime":
+            db.fail_task(
+                task_id,
+                f"remote task exceeded mesh max runtime while still active on {claimed_by}",
+                status="failed",
+            )
+            logger.warning(
+                "event=stale_claim_failed task_id=%s claimed_by=%s claimed_at=%s reason=%s",
+                task_id, claimed_by, claimed_at, reason,
+            )
+        elif not _should_release_stale_claim(row, max_runtime_sec=max_runtime_sec):
+            logger.warning(
+                "event=stale_claim_release_deferred task_id=%s claimed_by=%s claimed_at=%s reason=%s max_runtime_sec=%s",
+                task_id, claimed_by, claimed_at, reason, max_runtime_sec,
+            )
+        else:
+            db.release_task(task_id, claimed_by)
+            logger.info(
+                "event=stale_claim_released task_id=%s claimed_by=%s claimed_at=%s reason=%s",
+                task_id, claimed_by, claimed_at, reason,
+            )
+
+
+async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
+    """Periodically sweep stale claims without blocking gateway request handling."""
     logger.info("event=stale_claim_reaper_started interval=%ds", interval_sec)
     try:
         while True:
             try:
-                db = get_db()
-                if db is not None:
-                    from config import config as _cfg
-                    lease_sec = getattr(_cfg.mesh, "claim_lease_sec", 300)
-                    max_runtime_sec = int(getattr(_cfg.mesh, "claim_max_runtime_sec", 1800) or 0)
-                    if max_runtime_sec <= 0:
-                        max_runtime_sec = int(getattr(_cfg.system, "task_timeout", 0) or 1800)
-                    stale = db.list_stale_claims(
-                        lease_sec=lease_sec,
-                        live_state_max_age_sec=getattr(_cfg.mesh, "routing_live_state_max_age_sec", 90),
-                        active_task_max_runtime_sec=max_runtime_sec,
-                    )
-                    for row in stale:
-                        task_id = row.get("id", "?")
-                        claimed_by = row.get("claimed_by", "?")
-                        claimed_at = row.get("claimed_at", "?")
-                        reason = row.get("_stale_reason", "unknown")
-                        if reason == "active_task_over_max_runtime":
-                            db.fail_task(
-                                task_id,
-                                f"remote task exceeded mesh max runtime while still active on {claimed_by}",
-                                status="failed",
-                            )
-                            logger.warning(
-                                "event=stale_claim_failed task_id=%s claimed_by=%s claimed_at=%s reason=%s",
-                                task_id, claimed_by, claimed_at, reason,
-                            )
-                        elif not _should_release_stale_claim(row, max_runtime_sec=max_runtime_sec):
-                            logger.warning(
-                                "event=stale_claim_release_deferred task_id=%s claimed_by=%s claimed_at=%s reason=%s max_runtime_sec=%s",
-                                task_id, claimed_by, claimed_at, reason, max_runtime_sec,
-                            )
-                        else:
-                            db.release_task(task_id, claimed_by)
-                            logger.info(
-                                "event=stale_claim_released task_id=%s claimed_by=%s claimed_at=%s reason=%s",
-                                task_id, claimed_by, claimed_at, reason,
-                            )
+                await asyncio.to_thread(_reap_stale_claims_once)
             except Exception as e:
                 logger.debug("event=stale_claim_reaper_error err=%s", e)
-
             await asyncio.sleep(interval_sec)
     except asyncio.CancelledError:
         logger.info("event=stale_claim_reaper_stopped")

@@ -173,6 +173,31 @@ def test_reaper_still_releases_strong_stale_reasons_after_lease():
     assert _should_release_stale_claim(row, max_runtime_sec=1800) is True
 
 
+def test_stale_claim_reaper_runs_sqlite_sweep_off_event_loop(monkeypatch):
+    import asyncio
+    import src.control.task_server as task_server
+
+    calls: list[str] = []
+
+    def sweep() -> None:
+        calls.append("sweep")
+
+    async def run_in_thread(func) -> None:
+        calls.append("to_thread")
+        func()
+
+    async def stop_after_first_sweep(_seconds: int) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(task_server, "_reap_stale_claims_once", sweep)
+    monkeypatch.setattr(task_server.asyncio, "to_thread", run_in_thread)
+    monkeypatch.setattr(task_server.asyncio, "sleep", stop_after_first_sweep)
+
+    asyncio.run(task_server._stale_claim_reaper_loop(interval_sec=1))
+
+    assert calls == ["to_thread", "sweep"]
+
+
 def test_stale_claims_when_node_offline(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     tid = _task_id()
