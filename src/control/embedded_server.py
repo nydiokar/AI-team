@@ -18,10 +18,55 @@ Lifecycle is owned by the orchestrator: `start()` on gateway startup,
 """
 
 import asyncio
+import faulthandler
 import logging
+import sys
+import threading
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+class _EventLoopStallWatchdog:
+    """Dump the gateway stack when its shared HTTP/event loop stops progressing."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, component: str, threshold_seconds: float = 5.0) -> None:
+        self._loop = loop
+        self._component = component
+        self._threshold_seconds = threshold_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"{component}-loop-watchdog",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            acknowledged = threading.Event()
+            started = time.monotonic()
+            try:
+                self._loop.call_soon_threadsafe(acknowledged.set)
+            except RuntimeError:
+                return
+            if not acknowledged.wait(timeout=self._threshold_seconds):
+                logger.error(
+                    "event=embedded_event_loop_stalled component=%s elapsed_ms=%.1f",
+                    self._component,
+                    (time.monotonic() - started) * 1000,
+                )
+                faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+                while not self._stop.is_set() and not acknowledged.wait(timeout=0.1):
+                    pass
+            self._stop.wait(timeout=1.0)
 
 
 class EmbeddedTaskServer:
@@ -32,6 +77,7 @@ class EmbeddedTaskServer:
         self.port = port
         self._server = None  # uvicorn.Server
         self._serve_task: Optional[asyncio.Task] = None
+        self._loop_watchdog: Optional[_EventLoopStallWatchdog] = None
 
     async def start(self) -> None:
         """Bind and start serving on the gateway's event loop. Idempotent."""
@@ -57,6 +103,10 @@ class EmbeddedTaskServer:
         self._serve_task = asyncio.create_task(
             self._serve(), name="embedded-task-server"
         )
+        self._loop_watchdog = _EventLoopStallWatchdog(
+            asyncio.get_running_loop(), "embedded-task-server"
+        )
+        self._loop_watchdog.start()
 
         # Wait briefly for the server to come up so registration races don't fail.
         for _ in range(50):  # up to ~5s
@@ -73,6 +123,8 @@ class EmbeddedTaskServer:
                 # gracefully — uvicorn raises SystemExit on bind failure, which
                 # would otherwise bypass `except Exception` and kill the process.
                 exc = self._serve_task.exception()
+                self._loop_watchdog.stop()
+                self._loop_watchdog = None
                 self._serve_task = None
                 self._server = None
                 raise RuntimeError(
@@ -98,6 +150,9 @@ class EmbeddedTaskServer:
 
     async def stop(self) -> None:
         """Signal uvicorn to shut down and await the serve task."""
+        if self._loop_watchdog is not None:
+            self._loop_watchdog.stop()
+            self._loop_watchdog = None
         if self._server is not None:
             self._server.should_exit = True
         if self._serve_task is not None and not self._serve_task.done():
