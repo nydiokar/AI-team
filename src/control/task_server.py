@@ -123,8 +123,8 @@ async def _local_node_heartbeat_loop() -> None:
         while True:
             await asyncio.sleep(interval)
             try:
-                if not get_registry().heartbeat(host):
-                    _register_local_node()  # re-register if the row was dropped
+                if not await asyncio.to_thread(get_registry().heartbeat, host):
+                    await asyncio.to_thread(_register_local_node)  # re-register if the row was dropped
             except Exception as e:
                 logger.debug("event=local_node_heartbeat_error err=%s", e)
     except asyncio.CancelledError:

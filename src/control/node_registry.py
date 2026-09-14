@@ -261,7 +261,7 @@ class NodeRegistry:
             age = (now - node.last_heartbeat).total_seconds()
             if age > self._timeout_sec:
                 node.status = "offline"
-                self._db_mark_offline(node.node_id)
+                await asyncio.to_thread(self._db_mark_offline, node.node_id)
                 logger.warning("event=node_offline node_id=%s age_s=%.0f", node.node_id, age)
                 # Check for tasks that were claimed by this node and failed.
                 # Run off-thread — these are blocking sqlite calls and would
