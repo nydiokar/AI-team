@@ -99,13 +99,22 @@ class PathResolver:
         )
 
     def resolve_execution_path(self, raw_path: Optional[str]) -> Optional[str]:
+        """Resolve a task working directory without scanning the workspace."""
         raw_path = (raw_path or "").strip()
         if not raw_path:
             return str(self.base_cwd) if self.base_cwd else None
 
-        result = self.resolve_session_path(raw_path)
-        if result.ok:
-            return result.resolved_path
+        candidate = self._coerce_candidate(raw_path)
+        if candidate is None:
+            return str(self.base_cwd) if self.base_cwd else None
+
+        try:
+            resolved = candidate.expanduser().resolve(strict=False)
+        except Exception:
+            resolved = candidate
+
+        if self._is_within_allowed_root(resolved) and resolved.is_dir():
+            return str(resolved)
         return str(self.base_cwd) if self.base_cwd else None
 
     def list_root_directories(self, limit: int = 12) -> List[str]:
@@ -171,22 +180,6 @@ class PathResolver:
                 for item in direct:
                     if Path(item).name == match and item not in suggestions:
                         suggestions.append(item)
-
-        root = self.allowed_root or self.base_cwd
-        if root and len(suggestions) < limit:
-            try:
-                all_dirs = [p for p in root.rglob("*") if p.is_dir()]
-                close = get_close_matches(target_name, [p.name for p in all_dirs], n=limit, cutoff=0.45)
-                for match in close:
-                    for item in all_dirs:
-                        if item.name == match:
-                            text = str(item.resolve())
-                            if text not in suggestions:
-                                suggestions.append(text)
-                            if len(suggestions) >= limit:
-                                return suggestions
-            except Exception:
-                return suggestions
 
         return suggestions[:limit]
 

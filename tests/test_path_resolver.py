@@ -36,10 +36,15 @@ def test_missing_path_returns_suggestions():
         shutil.rmtree(root.parent, ignore_errors=True)
 
 
-def test_execution_path_falls_back_to_base_for_invalid_input():
+def test_execution_path_falls_back_to_base_for_invalid_input_without_recursive_scan(monkeypatch):
     root = _make_workspace()
     try:
         resolver = PathResolver(base_cwd=str(root), allowed_root=str(root))
+
+        def fail_recursive_scan(*args, **kwargs):
+            raise AssertionError("execution path validation must not scan the workspace")
+
+        monkeypatch.setattr(Path, "rglob", fail_recursive_scan)
         resolved = resolver.resolve_execution_path("does-not-exist")
         assert resolved == str(root.resolve())
     finally:
