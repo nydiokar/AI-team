@@ -70,18 +70,20 @@ class _EventLoopStallWatchdog:
 
 
 class EmbeddedTaskServer:
-    """Runs the mesh FastAPI app on the current event loop as a managed task."""
+    """Run the mesh server on an isolated event loop in this process."""
 
     def __init__(self, host: str, port: int) -> None:
         self.host = host
         self.port = port
         self._server = None  # uvicorn.Server
-        self._serve_task: Optional[asyncio.Task] = None
+        self._server_thread: Optional[threading.Thread] = None
+        self._started = threading.Event()
+        self._startup_error: Optional[BaseException] = None
         self._loop_watchdog: Optional[_EventLoopStallWatchdog] = None
 
     async def start(self) -> None:
-        """Bind and start serving on the gateway's event loop. Idempotent."""
-        if self._serve_task is not None and not self._serve_task.done():
+        """Bind and start serving on an isolated event loop. Idempotent."""
+        if self._server_thread is not None and self._server_thread.is_alive():
             logger.warning("event=embedded_task_server_already_running")
             return
 
@@ -93,82 +95,71 @@ class EmbeddedTaskServer:
             host=self.host,
             port=self.port,
             log_level="warning",
-            # We manage signals at the gateway level; uvicorn must not install its own.
             lifespan="on",
         )
         self._server = uvicorn.Server(config)
-        # Prevent uvicorn from hijacking SIGINT/SIGTERM — the gateway owns those.
         self._server.install_signal_handlers = lambda: None
-
-        self._serve_task = asyncio.create_task(
-            self._serve(), name="embedded-task-server"
+        self._started.clear()
+        self._startup_error = None
+        self._server_thread = threading.Thread(
+            target=self._run_server_thread,
+            name="embedded-task-server",
+            daemon=True,
         )
-        self._loop_watchdog = _EventLoopStallWatchdog(
-            asyncio.get_running_loop(), "embedded-task-server"
-        )
-        self._loop_watchdog.start()
+        self._server_thread.start()
 
-        # Wait briefly for the server to come up so registration races don't fail.
-        for _ in range(50):  # up to ~5s
-            if getattr(self._server, "started", False):
-                logger.info(
-                    "event=embedded_task_server_started host=%s port=%s",
-                    self.host,
-                    self.port,
-                )
-                return
-            if self._serve_task.done():
-                # serve() exited early (e.g. port already bound). Surface it as a
-                # normal RuntimeError so callers' `except Exception` can degrade
-                # gracefully — uvicorn raises SystemExit on bind failure, which
-                # would otherwise bypass `except Exception` and kill the process.
-                exc = self._serve_task.exception()
-                self._loop_watchdog.stop()
-                self._loop_watchdog = None
-                self._serve_task = None
-                self._server = None
-                raise RuntimeError(
-                    f"embedded task server failed to start on {self.host}:{self.port}: {exc}"
-                )
-            await asyncio.sleep(0.1)
+        started = await asyncio.to_thread(self._started.wait, 5.0)
+        if started and getattr(self._server, "started", False):
+            logger.info(
+                "event=embedded_task_server_started host=%s port=%s",
+                self.host,
+                self.port,
+            )
+            return
+        if self._startup_error is not None:
+            raise RuntimeError(
+                f"embedded task server failed to start on {self.host}:{self.port}: {self._startup_error}"
+            )
         logger.warning(
             "event=embedded_task_server_start_timeout host=%s port=%s",
             self.host,
             self.port,
         )
 
-    async def _serve(self) -> None:
+    def _run_server_thread(self) -> None:
+        asyncio.run(self._serve_on_dedicated_loop())
+
+    async def _serve_on_dedicated_loop(self) -> None:
+        self._loop_watchdog = _EventLoopStallWatchdog(
+            asyncio.get_running_loop(), "embedded-task-server"
+        )
+        self._loop_watchdog.start()
         try:
-            await self._server.serve()
-        except asyncio.CancelledError:
-            raise
+            serve_task = asyncio.create_task(self._server.serve())
+            while not getattr(self._server, "started", False) and not serve_task.done():
+                await asyncio.sleep(0.05)
+            self._started.set()
+            await serve_task
         except BaseException as e:
-            # Catch BaseException (not just Exception) because uvicorn calls
-            # sys.exit(1) -> SystemExit on bind failure. Record it; the start()
-            # poller sees the task is done and converts it to a RuntimeError.
+            self._startup_error = e
+            self._started.set()
             logger.error("event=embedded_task_server_crashed err=%r", e)
+        finally:
+            if self._loop_watchdog is not None:
+                self._loop_watchdog.stop()
+                self._loop_watchdog = None
 
     async def stop(self) -> None:
-        """Signal uvicorn to shut down and await the serve task."""
-        if self._loop_watchdog is not None:
-            self._loop_watchdog.stop()
-            self._loop_watchdog = None
+        """Signal the isolated loop to stop and join its server thread."""
         if self._server is not None:
             self._server.should_exit = True
-        if self._serve_task is not None and not self._serve_task.done():
-            try:
-                await asyncio.wait_for(self._serve_task, timeout=10)
-            except asyncio.TimeoutError:
-                logger.warning("event=embedded_task_server_stop_timeout; cancelling")
-                self._serve_task.cancel()
-                try:
-                    await self._serve_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        if self._server_thread is not None and self._server_thread.is_alive():
+            await asyncio.to_thread(self._server_thread.join, 10.0)
+            if self._server_thread.is_alive():
+                logger.warning("event=embedded_task_server_stop_timeout")
         logger.info("event=embedded_task_server_stopped")
-        self._serve_task = None
+        self._server_thread = None
         self._server = None
-
 
 class EmbeddedControlServer:
     """Runs the gateway's Control API on the gateway event loop as a managed task.
