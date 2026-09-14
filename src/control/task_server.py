@@ -719,7 +719,6 @@ def release_task(task_id: str, payload: ClaimPayload) -> Dict[str, str]:
     return {"status": "released", "task_id": task_id}
 
 
-@app.post("/tasks/{task_id}/result", dependencies=[Depends(_require_auth)])
 def _reconcile_result_telemetry(task_id: str) -> None:
     """Reconcile telemetry after a worker has received its result acknowledgement."""
     db = get_db()
@@ -731,10 +730,11 @@ def _reconcile_result_telemetry(task_id: str) -> None:
         logger.debug("event=telemetry_reconcile_after_result_failed task_id=%s", task_id, exc_info=True)
 
 
+@app.post("/tasks/{task_id}/result", dependencies=[Depends(_require_auth)])
 def submit_result(
     task_id: str,
     payload: ExecutionResultPayload,
-    background_tasks: Optional[BackgroundTasks] = None,
+    background_tasks: BackgroundTasks,
 ) -> Dict[str, str]:
     db = get_db()
     if db is None:
