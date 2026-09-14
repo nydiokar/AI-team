@@ -22,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Security, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, Security, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -720,7 +720,22 @@ def release_task(task_id: str, payload: ClaimPayload) -> Dict[str, str]:
 
 
 @app.post("/tasks/{task_id}/result", dependencies=[Depends(_require_auth)])
-def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, str]:
+def _reconcile_result_telemetry(task_id: str) -> None:
+    """Reconcile telemetry after a worker has received its result acknowledgement."""
+    db = get_db()
+    if db is None:
+        return
+    try:
+        TelemetryStore(db).reconcile(turn_id=task_id, since_hours=0)
+    except Exception:
+        logger.debug("event=telemetry_reconcile_after_result_failed task_id=%s", task_id, exc_info=True)
+
+
+def submit_result(
+    task_id: str,
+    payload: ExecutionResultPayload,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> Dict[str, str]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -833,10 +848,10 @@ def submit_result(task_id: str, payload: ExecutionResultPayload) -> Dict[str, st
             pass
     if payload.usage is not None:
         db.enrich_task(task_id, usage=payload.usage)
-    try:
-        TelemetryStore(db).reconcile(turn_id=task_id, since_hours=0)
-    except Exception:
-        logger.debug("event=telemetry_reconcile_after_result_failed task_id=%s", task_id, exc_info=True)
+    if background_tasks is None:
+        _reconcile_result_telemetry(task_id)
+    else:
+        background_tasks.add_task(_reconcile_result_telemetry, task_id)
     return {"status": "accepted"}
 
 
