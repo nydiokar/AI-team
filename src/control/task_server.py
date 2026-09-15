@@ -20,7 +20,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, Security, UploadFile
 from fastapi.responses import FileResponse
@@ -39,6 +40,58 @@ logger = logging.getLogger(__name__)
 
 _SLOW_REQUEST_SECONDS = 1.0
 _MESH_HEALTH_SAMPLE_SECONDS = 30.0
+
+# --- Deferred telemetry projection ------------------------------------------
+# Raw telemetry events insert synchronously (fast, indexed). The CPU-bound turn
+# projection + session-growth refresh is the write-heavy half; it is deferred to
+# a background flusher so it never holds the DB write lock inside a worker's
+# request (heartbeat/claim/result share that one lock). Dirty ids coalesce, so a
+# turn that receives 20 activity events in a second is projected once, not 20x.
+_TELEMETRY_FLUSH_INTERVAL_SEC = 1.0
+_TELEMETRY_DIRTY_CAP = 20000  # bound memory if the projector stalls (telemetry is droppable)
+_telemetry_dirty_lock = threading.Lock()
+_telemetry_dirty_turns: set[str] = set()
+_telemetry_dirty_sessions: set[str] = set()
+
+
+def _enqueue_projection(turn_ids: Iterable[str], session_ids: Iterable[str]) -> None:
+    """Mark turns/sessions dirty for the background projection flusher."""
+    with _telemetry_dirty_lock:
+        if len(_telemetry_dirty_turns) < _TELEMETRY_DIRTY_CAP:
+            _telemetry_dirty_turns.update(t for t in turn_ids if t)
+        if len(_telemetry_dirty_sessions) < _TELEMETRY_DIRTY_CAP:
+            _telemetry_dirty_sessions.update(s for s in session_ids if s)
+
+
+def _drain_projection() -> Tuple[List[str], List[str]]:
+    with _telemetry_dirty_lock:
+        turns = list(_telemetry_dirty_turns)
+        sessions = list(_telemetry_dirty_sessions)
+        _telemetry_dirty_turns.clear()
+        _telemetry_dirty_sessions.clear()
+    return turns, sessions
+
+
+async def _telemetry_projection_flusher_loop(
+    interval_sec: float = _TELEMETRY_FLUSH_INTERVAL_SEC,
+) -> None:
+    """Coalesce and apply deferred telemetry projections off the request path."""
+    while True:
+        try:
+            await asyncio.sleep(interval_sec)
+            turns, sessions = _drain_projection()
+            if not turns and not sessions:
+                continue
+            db = get_db()
+            if db is None:
+                continue
+            await asyncio.to_thread(
+                TelemetryStore(db).project_dirty, turns, sessions, isolate=True
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("event=telemetry_projection_flush_failed", exc_info=True)
 
 
 # Optional hook into the in-process orchestrator, set only when this server runs
@@ -197,14 +250,25 @@ async def _lifespan(app: FastAPI):
     reaper_task = asyncio.create_task(_stale_claim_reaper_loop())
     local_hb_task = asyncio.create_task(_local_node_heartbeat_loop())
     health_sampler_task = asyncio.create_task(_mesh_health_sampler_loop())
+    projection_task = asyncio.create_task(_telemetry_projection_flusher_loop())
+    _bg_tasks = (reaper_task, local_hb_task, health_sampler_task, projection_task)
     yield
-    for _t in (reaper_task, local_hb_task, health_sampler_task):
+    for _t in _bg_tasks:
         _t.cancel()
-    for _t in (reaper_task, local_hb_task, health_sampler_task):
+    for _t in _bg_tasks:
         try:
             await _t
         except asyncio.CancelledError:
             pass
+    # Final drain so a clean shutdown does not strand pending projections.
+    try:
+        turns, sessions = _drain_projection()
+        if turns or sessions:
+            db = get_db()
+            if db is not None:
+                TelemetryStore(db).project_dirty(turns, sessions, isolate=True)
+    except Exception:
+        logger.debug("event=telemetry_projection_final_drain_failed", exc_info=True)
     get_registry().stop()
 
 
@@ -466,7 +530,12 @@ def submit_telemetry_batch(
             continue
         valid.append(event)
 
-    result = TelemetryStore(db).insert_events(valid)
+    # Insert raw events synchronously (fast, indexed) but defer the CPU-bound
+    # turn projection + session-growth refresh to the background flusher so this
+    # request never holds the DB write lock ahead of a worker heartbeat/claim.
+    result = TelemetryStore(db).insert_events(valid, rebuild=False)
+    session_ids = {e.session_id for e in valid if e.session_id is not None}
+    _enqueue_projection(result["turn_ids"], session_ids)
     return {
         "batch_id": payload.batch_id,
         "accepted": result["accepted"],
