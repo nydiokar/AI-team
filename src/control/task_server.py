@@ -50,6 +50,16 @@ _MESH_HEALTH_SAMPLE_SECONDS = 30.0
 _TELEMETRY_FLUSH_INTERVAL_SEC = 1.0
 _TELEMETRY_DIRTY_CAP = 20000  # bound memory if the projector stalls (telemetry is droppable)
 _WAL_CHECKPOINT_INTERVAL_SEC = 60.0  # bound WAL growth without contending on the hot path
+# Fairness: telemetry projection shares mesh.db's single write lock with the
+# control plane (heartbeat/claim/result). Under a backlog, projecting everything
+# in one shot holds/re-grabs that lock in a tight loop and STARVES control-plane
+# requests (observed: heartbeat/jobs/pending all stalling ~2s together). So each
+# tick projects a BOUNDED number of turns, in small chunks, pausing between
+# chunks to hand the lock back. Telemetry is eventually-consistent and droppable,
+# so falling behind is acceptable; a stalled heartbeat is not.
+_TELEMETRY_PROJECT_MAX_PER_TICK = 25
+_TELEMETRY_PROJECT_CHUNK = 5
+_TELEMETRY_PROJECT_CHUNK_PAUSE_SEC = 0.01
 _telemetry_dirty_lock = threading.Lock()
 _telemetry_dirty_turns: set[str] = set()
 _telemetry_dirty_sessions: set[str] = set()
@@ -64,11 +74,20 @@ def _enqueue_projection(turn_ids: Iterable[str], session_ids: Iterable[str]) -> 
             _telemetry_dirty_sessions.update(s for s in session_ids if s)
 
 
-def _drain_projection() -> Tuple[List[str], List[str]]:
+def _drain_projection(max_turns: Optional[int] = None) -> Tuple[List[str], List[str]]:
+    """Remove and return dirty ids. With ``max_turns`` set, drain at most that
+    many turns and leave the rest queued for the next tick (fairness); sessions
+    are few, so always fully drained."""
     with _telemetry_dirty_lock:
-        turns = list(_telemetry_dirty_turns)
+        if max_turns is None or len(_telemetry_dirty_turns) <= max_turns:
+            turns = list(_telemetry_dirty_turns)
+            _telemetry_dirty_turns.clear()
+        else:
+            all_turns = list(_telemetry_dirty_turns)
+            turns = all_turns[:max_turns]
+            _telemetry_dirty_turns.clear()
+            _telemetry_dirty_turns.update(all_turns[max_turns:])
         sessions = list(_telemetry_dirty_sessions)
-        _telemetry_dirty_turns.clear()
         _telemetry_dirty_sessions.clear()
     return turns, sessions
 
@@ -88,11 +107,17 @@ async def _telemetry_projection_flusher_loop(
             db = get_db()
             if db is None:
                 continue
-            turns, sessions = _drain_projection()
-            if turns or sessions:
-                await asyncio.to_thread(
-                    TelemetryStore(db).project_dirty, turns, sessions, isolate=True
-                )
+            turns, sessions = _drain_projection(_TELEMETRY_PROJECT_MAX_PER_TICK)
+            store = TelemetryStore(db)
+            # Project in small chunks, releasing the write lock between each so a
+            # control-plane heartbeat/claim can win it. The chunk runs in a worker
+            # thread (holds the lock); the pause runs on the loop (lock released).
+            for i in range(0, len(turns), _TELEMETRY_PROJECT_CHUNK):
+                chunk = turns[i:i + _TELEMETRY_PROJECT_CHUNK]
+                await asyncio.to_thread(store.project_dirty, chunk, [], isolate=True)
+                await asyncio.sleep(_TELEMETRY_PROJECT_CHUNK_PAUSE_SEC)
+            if sessions:
+                await asyncio.to_thread(store.project_dirty, [], sessions, isolate=True)
             now = time.monotonic()
             if now - last_checkpoint >= _WAL_CHECKPOINT_INTERVAL_SEC:
                 last_checkpoint = now
