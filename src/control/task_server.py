@@ -734,7 +734,7 @@ def _reconcile_result_telemetry(task_id: str) -> None:
 def submit_result(
     task_id: str,
     payload: ExecutionResultPayload,
-    background_tasks: BackgroundTasks,
+    background_tasks: BackgroundTasks = None,  # type: ignore[assignment]  # FastAPI injects by type; None lets direct callers run reconcile inline
 ) -> Dict[str, str]:
     db = get_db()
     if db is None:
