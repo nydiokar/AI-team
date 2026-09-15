@@ -49,6 +49,7 @@ _MESH_HEALTH_SAMPLE_SECONDS = 30.0
 # turn that receives 20 activity events in a second is projected once, not 20x.
 _TELEMETRY_FLUSH_INTERVAL_SEC = 1.0
 _TELEMETRY_DIRTY_CAP = 20000  # bound memory if the projector stalls (telemetry is droppable)
+_WAL_CHECKPOINT_INTERVAL_SEC = 60.0  # bound WAL growth without contending on the hot path
 _telemetry_dirty_lock = threading.Lock()
 _telemetry_dirty_turns: set[str] = set()
 _telemetry_dirty_sessions: set[str] = set()
@@ -75,19 +76,27 @@ def _drain_projection() -> Tuple[List[str], List[str]]:
 async def _telemetry_projection_flusher_loop(
     interval_sec: float = _TELEMETRY_FLUSH_INTERVAL_SEC,
 ) -> None:
-    """Coalesce and apply deferred telemetry projections off the request path."""
+    """Coalesce and apply deferred telemetry projections off the request path.
+
+    Doubles as the WAL maintenance tick: a time-gated ``wal_checkpoint`` keeps the
+    write-ahead log from growing unbounded under sustained telemetry write volume.
+    """
+    last_checkpoint = time.monotonic()
     while True:
         try:
             await asyncio.sleep(interval_sec)
-            turns, sessions = _drain_projection()
-            if not turns and not sessions:
-                continue
             db = get_db()
             if db is None:
                 continue
-            await asyncio.to_thread(
-                TelemetryStore(db).project_dirty, turns, sessions, isolate=True
-            )
+            turns, sessions = _drain_projection()
+            if turns or sessions:
+                await asyncio.to_thread(
+                    TelemetryStore(db).project_dirty, turns, sessions, isolate=True
+                )
+            now = time.monotonic()
+            if now - last_checkpoint >= _WAL_CHECKPOINT_INTERVAL_SEC:
+                last_checkpoint = now
+                await asyncio.to_thread(db.checkpoint_wal)
         except asyncio.CancelledError:
             raise
         except Exception:
