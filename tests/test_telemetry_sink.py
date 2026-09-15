@@ -226,6 +226,31 @@ def test_worker_with_shadow_db_fans_out_and_still_ships(monkeypatch):
     assert any(isinstance(s, BufferedHttpTelemetrySink) for s in sink._sinks)
 
 
+def test_colocated_worker_drops_redundant_local_db_mirror(monkeypatch):
+    """A worker shipping to a gateway on THIS host must NOT also mirror to the
+    same mesh.db from a second process — that is the cross-process lock source.
+    HTTP delivery is retained (no data loss); the redundant mirror is dropped."""
+    local = _RecordingSink()
+    monkeypatch.setattr(sink_mod, "_build_local_db_sink", lambda: local)
+    sink = build_runtime_telemetry_sink(
+        node_id="kanebra-worker",
+        base_url="http://127.0.0.1:9002",
+        token="tok",
+        is_gateway=False,
+    )
+    assert isinstance(sink, BufferedHttpTelemetrySink)  # HTTP kept, mirror dropped
+
+
+def test_http_target_colocation_detection(monkeypatch):
+    from config import config
+    monkeypatch.setattr(config.mesh, "tailscale_ip", "100.88.11.88")
+    assert sink_mod._http_target_is_colocated("http://127.0.0.1:9002")
+    assert sink_mod._http_target_is_colocated("http://localhost:9002")
+    assert sink_mod._http_target_is_colocated("http://100.88.11.88:9002")  # own mesh IP
+    assert not sink_mod._http_target_is_colocated("http://gateway:9001")
+    assert not sink_mod._http_target_is_colocated("http://100.99.1.2:9002")  # remote node
+
+
 def test_fanout_isolates_a_failing_sink(tmp_path):
     class _Boom:
         def emit(self, event):

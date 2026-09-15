@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Iterable, List, Protocol
@@ -376,6 +377,31 @@ def _build_local_db_sink() -> TelemetrySink | None:
     return None
 
 
+def _http_target_is_colocated(resolved_url: str) -> bool:
+    """True when the HTTP ingest gateway runs on THIS host.
+
+    A co-located worker ships telemetry over HTTP to a gateway whose
+    authoritative store is the same ``state/mesh.db`` file the worker's local
+    shadow mirror would write. In that case the mirror is redundant (HTTP lands
+    in that exact DB) and harmful — a second OS process doing ``BEGIN IMMEDIATE``
+    on the same SQLite file is the cross-process lock contention that surfaces as
+    ``database is locked``. Remote workers (distinct host + distinct DB file)
+    return False and keep their self-sufficient local ledger.
+    """
+    try:
+        from config import config
+        host = (urllib.parse.urlparse(resolved_url).hostname or "").lower()
+        if not host:
+            return False
+        local_markers = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+        own_ip = (config.mesh.tailscale_ip or "").strip().lower()
+        if own_ip:
+            local_markers.add(own_ip)
+        return host in local_markers
+    except Exception:
+        return False
+
+
 def build_runtime_telemetry_sink(
     *,
     node_id: str,
@@ -437,6 +463,18 @@ def build_runtime_telemetry_sink(
                 bool(resolved_url),
                 bool(resolved_token),
             )
+
+        # Drop the local DB mirror when the gateway we ship to is on THIS host:
+        # its ingest writes the same idempotent rows to the same mesh.db file,
+        # so mirroring from a second process only adds cross-process lock
+        # contention (the "database is locked" source). HTTP delivery is retained,
+        # so no telemetry is lost. Remote workers keep both (distinct DB file).
+        if http_sink is not None and local_sink is not None and _http_target_is_colocated(resolved_url):
+            logger.info(
+                "event=telemetry_local_mirror_dropped node_id=%s reason=colocated_gateway url=%s",
+                node_id, resolved_url,
+            )
+            local_sink = None
 
         sinks = [s for s in (http_sink, local_sink) if s is not None]
         if not sinks:
