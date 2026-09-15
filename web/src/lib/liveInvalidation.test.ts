@@ -26,9 +26,92 @@ describe("liveInvalidation", () => {
     ]);
 
     expect([...target.sessions]).toEqual(["s1"]);
+    expect([...target.activitySessions]).toEqual([]);
     expect([...target.cases]).toEqual(["c1", "c2"]);
     expect(target.tasks).toBe(true);
     expect(target.approvals).toBe(true);
+  });
+
+  it("scopes a task_activity progress ping to activity-only (no transcript churn)", () => {
+    const target = collectLiveInvalidationTargets([
+      {
+        event: "task_activity",
+        timestamp: "2026-09-16T00:00:00Z",
+        session_id: "s1",
+        task_id: "t1",
+        label: "Using Bash",
+      },
+    ]);
+
+    // A progress ping must NOT touch the full session read-models, the task list,
+    // cases, or approvals — only the live activity ticker.
+    expect([...target.sessions]).toEqual([]);
+    expect([...target.activitySessions]).toEqual(["s1"]);
+    expect(target.tasks).toBe(false);
+    expect([...target.cases]).toEqual([]);
+    expect(target.approvals).toBe(false);
+  });
+
+  it("invalidateLiveTargets refreshes ONLY session-activity for a progress ping", () => {
+    const invalidateQueries = vi.fn();
+    const client = { invalidateQueries } as unknown as QueryClient;
+
+    invalidateLiveTargets(client, {
+      sessions: new Set(),
+      activitySessions: new Set(["s1"]),
+      cases: new Set(),
+      tasks: false,
+      approvals: false,
+    });
+
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["session-activity", "s1"],
+    });
+    // The expensive transcript reads and the session list must NOT be invalidated.
+    expect(invalidateQueries).not.toHaveBeenCalledWith({
+      queryKey: ["session-messages", "s1"],
+    });
+    expect(invalidateQueries).not.toHaveBeenCalledWith({
+      queryKey: ["session-turns", "s1"],
+    });
+    expect(invalidateQueries).not.toHaveBeenCalledWith({
+      queryKey: ["session-usage", "s1"],
+    });
+    expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["sessions"] });
+    expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["tasks"] });
+  });
+
+  it("a real event supersedes a same-batch progress ping for the same session", () => {
+    // task_activity + mesh_result for s1 in one batch → s1 gets the FULL refresh,
+    // not the activity-only path (no double-invalidation, no missed transcript).
+    const target = collectLiveInvalidationTargets([
+      { event: "task_activity", timestamp: "2026-09-16T00:00:00Z", session_id: "s1" },
+      {
+        event: "mesh_result",
+        timestamp: "2026-09-16T00:00:01Z",
+        session_id: "s1",
+        task_id: "t1",
+      },
+    ]);
+    expect([...target.sessions]).toEqual(["s1"]);
+    expect(target.tasks).toBe(true);
+
+    const invalidateQueries = vi.fn();
+    const client = { invalidateQueries } as unknown as QueryClient;
+    invalidateLiveTargets(client, target);
+
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["session-messages", "s1"],
+    });
+    // session-activity for s1 is invalidated exactly once (via the full path),
+    // not again by the activity-only loop.
+    const activityCalls = invalidateQueries.mock.calls.filter(
+      ([arg]) =>
+        Array.isArray(arg?.queryKey) &&
+        arg.queryKey[0] === "session-activity" &&
+        arg.queryKey[1] === "s1",
+    );
+    expect(activityCalls).toHaveLength(1);
   });
 
   it("invalidates the session read model for notification route handoff", () => {
@@ -72,6 +155,7 @@ describe("liveInvalidation", () => {
 
     invalidateLiveTargets(client, {
       sessions: new Set(),
+      activitySessions: new Set(),
       cases: new Set(),
       tasks: true,
       approvals: false,
