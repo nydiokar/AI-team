@@ -1345,6 +1345,16 @@ class MeshDB:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS};")
             conn.execute("PRAGMA foreign_keys=ON;")
+            # I/O tuning: in WAL, synchronous=NORMAL is the recommended durable
+            # setting (only a power/OS crash can lose the last txn, not an app
+            # crash) and removes an fsync per commit — the main write-stall source.
+            # A negative cache_size is KiB; mmap lets reads hit the OS page cache
+            # without per-page syscalls, which is what cold reads on the large
+            # file were paying for.
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA cache_size=-8000;")       # ~8 MB page cache / connection
+            conn.execute("PRAGMA mmap_size=268435456;")    # 256 MB memory-mapped reads
+            conn.execute("PRAGMA wal_autocheckpoint=400;")  # ~1.6 MB WAL before auto-checkpoint
             self._local.conn = conn
         return conn
 
@@ -1391,11 +1401,13 @@ class MeshDB:
                 conn.execute("ROLLBACK;")
                 raise
 
-    def checkpoint_wal(self, mode: str = "TRUNCATE") -> Optional[tuple]:
+    def checkpoint_wal(self, mode: str = "PASSIVE") -> Optional[tuple]:
         """Checkpoint the WAL to bound its on-disk growth. Best-effort.
 
-        WAL only truncates when no reader pins an older frame; a busy checkpoint
-        is a no-op, never an error, so this is safe to call on a maintenance tick.
+        PASSIVE never blocks readers/writers — it checkpoints what it can and
+        returns immediately, so a maintenance tick can't stall the hot path
+        (TRUNCATE, by contrast, waits for readers and can add periodic stalls).
+        autocheckpoint keeps the WAL bounded between ticks.
         """
         try:
             row = self._conn().execute(f"PRAGMA wal_checkpoint({mode});").fetchone()
