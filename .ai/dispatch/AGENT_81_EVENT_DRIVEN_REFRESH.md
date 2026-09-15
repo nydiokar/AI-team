@@ -5,8 +5,8 @@ status: done              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A81             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: docs/EVENT_DRIVEN_READ_REFRESH.md,tests/test_transcript_read_a81.py,web/src/lib/liveInvalidation.test.ts,src/control/db.py                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-15T14:08:55.831230+00:00"
+evidence: [docs/EVENT_DRIVEN_READ_REFRESH.md, tests/test_transcript_read_a81.py, web/src/lib/liveInvalidation.test.ts, src/control/db.py]                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-09-15T14:09:57.309922+00:00"
 ```
 
 # DISPATCH — AGENT_81_EVENT_DRIVEN_REFRESH
