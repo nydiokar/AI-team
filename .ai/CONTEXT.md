@@ -68,7 +68,58 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-08-19 — Transient provider 5xx (529 Overloaded) now self-heals (flag OFF by default).**
+**2026-09-15 — "Slow / lost messages / dishonest state" cascade: root-caused to DB write
+contention + telemetry-on-hot-path; 4 PRs merged & deployed.**
+Symptoms (operator): sessions slow to start, waits on connect, messages not visible, a turn
+reported "running" that had actually errored. Evidence from live logs (09-14/15): `/telemetry/batches`
+was the #1 slow task-server path (160 `task_server_request_slow`), a `/nodes/heartbeat` measured at
+**178 s**, and `sqlite3.OperationalError: database is locked` on the telemetry write path. The old
+`httpx.ConnectError`×3634 flood is historical noise (2026-08-28), ruled out.
+
+**The cascade (one shared bottleneck).** Every task-server endpoint is a sync `def` running in the
+anyio threadpool, and they all funnel through `MeshDB`'s single process-wide `_write_lock`. Telemetry
+ingestion ran the CPU-bound turn projection (`rebuild_turn`) + session-growth refresh **synchronously
+inside the request**, holding that lock while node heartbeats, task claims, and result submissions
+queued behind it — so the worker's lifeline stalled and sessions couldn't start. A locked write
+*aborted* (the exception dropped it), which is the "said running but errored, not captured" dishonesty.
+
+**Fixes (all merged to main, gateway restarted; #138 is worker-side, awaits worker restart):**
+- **PR #135** — finished the WIP branch (transcript projection now renders a dispatched-but-unanswered
+  prompt instead of a blank turn = "message not visible" fix) + the CI break (`submit_result` needed a
+  `background_tasks=None` default) + dropped a committed ctags `tags` file.
+- **PR #136** — `submit_telemetry_batch` now inserts raw events fast (`rebuild=False`) and defers the
+  projection to a coalescing background flusher (task-server lifespan) via `asyncio.to_thread`. A turn
+  getting 20 activity events/sec is projected once, not 20×. Removes the #1 slow path.
+- **PR #137** — `_begin_immediate` retries transient `database is locked` on the BEGIN (idempotent) with
+  bounded backoff so a control-plane write is never silently dropped; `busy_timeout` 5s→15s; a 60s WAL
+  checkpoint on the flusher tick. **Verified live: WAL 12.6 MB → 33 KB after one tick.**
+- **PR #138 (root cause, worker-side)** — a co-located worker with `MESH_SHADOW_WRITE=true` (default)
+  was writing telemetry BOTH over HTTP to the gateway AND directly into the **same** `state/mesh.db`
+  via a second OS process (`DatabaseTelemetrySink` mirror) — pure cross-process `BEGIN IMMEDIATE`
+  contention for zero benefit (HTTP already lands in that file). Now the local mirror is dropped when
+  the HTTP target is on this host (loopback / own tailscale_ip); remote workers keep their ledger.
+  **Activates on next worker restart** — until then the running worker still double-writes.
+
+**Layer boundaries (as dissected — the map for the next refactor).**
+- *Gateway orchestrator* (`orchestrator.py`, in-process): writes session/task/flow state via the shared
+  `MeshDB` + `_write_lock`.
+- *Embedded task server* (`task_server.py`, own event loop): sync handlers in the threadpool, same shared
+  `MeshDB`/lock. Hot control-plane paths (heartbeat/pending/claim/result) and bulk telemetry share ONE
+  write mutex — the coupling behind the cascade.
+- *Worker daemon* (`worker_main.py` → `src/worker/agent.py`, separate OS process): talks to the gateway
+  over HTTP for control, but its telemetry sink ALSO opened `mesh.db` directly (the #138 defect).
+- *Telemetry tables* (`llm_events` 82k rows / `llm_turns`) live in the **same** `mesh.db` (186 MB) as
+  control-plane state — append-heavy, eventually-consistent data sharing the control-plane write lock.
+
+**Concrete next refactor (NOT yet done — the clean separation).** Move telemetry to its **own SQLite
+file** (`state/telemetry.db`, own connection + own write lock) so append-heavy telemetry writes can
+NEVER contend with control-plane writes. Blast radius is contained: `telemetry_store.py`,
+`telemetry_sink.py`, `session_timeline.py`, `db.py` (DDL), `orchestrator.py` (readers). Steps:
+(1) add a second `MeshDB`-style handle bound to `telemetry.db`; (2) move the `_LLM_TELEMETRY_SCHEMA_SQL`
+DDL there; (3) one-time copy-migrate the existing `llm_events`/`llm_turns` via `ATTACH`; (4) repoint
+`TelemetryStore` + the 4 readers; (5) keep cost/timeline reads working during transition. This is the
+last structural coupling; #136/#137/#138 already removed the acute pain, so schedule it as a deliberate,
+migration-tested PR rather than a rushed cutover.
 The gap: a Manager turn refused by an Anthropic server-side overload classifies as
 `error_class=upstream_error` (`api_error_status>=500`, PR #81) and its in-process burst retries are
 spent in seconds — so a multi-minute overload went terminal → session `ERROR` → the Case stalled
