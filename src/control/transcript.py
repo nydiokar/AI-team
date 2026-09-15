@@ -219,13 +219,12 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
     """Project the session's task ledger into conversation turns.
 
     Returns a turn list when the DB can serve the conversation, or ``None`` to
-    signal the caller to fall back to the file-stitching path (DB unavailable, or
-    no task row for this session carries a backfilled ``reply_text`` yet).
+    signal the caller to fall back to the file-stitching path (DB unavailable or
+    no task rows for this session).
 
-    A row is "usable" when ``reply_text`` is populated — that's the marker that the
-    artifact-complete enrichment (or backfill) has run for it. If NOT ONE row in
-    the session has reply_text, we hand off to the file path so old un-backfilled
-    sessions don't render blank.
+    A dispatched task is itself a durable conversation fact: its prompt must be
+    visible before a worker returns a reply. Completed rows add the assistant
+    side once ``reply_text`` is populated.
     """
     try:
         from src.control.db import get_db
@@ -239,8 +238,27 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
 
     if not rows:
         return None
-    if not any((r.get("reply_text") or "").strip() for r in rows):
-        return None  # nothing enriched yet — let the file path handle it
+    # Rows created before prompt-at-enqueue was added can still be in flight. The
+    # session snapshot holds the exact current prompt, keyed by last_task_id; use
+    # it only for that row so an older blank legacy row cannot borrow a newer
+    # instruction. This is a read-only compatibility bridge.
+    missing_prompt_task_ids: set[str] = {
+        str(row.get("task_id") or "")
+        for row in rows
+        if not (row.get("prompt") or "").strip()
+    }
+    if missing_prompt_task_ids:
+        try:
+            session_row = db.get_session(session_id)
+            last_task_id = str((session_row or {}).get("last_task_id") or "")
+            last_user_message = str((session_row or {}).get("last_user_message") or "").strip()
+            if last_task_id in missing_prompt_task_ids and last_user_message:
+                for row in rows:
+                    if row.get("task_id") == last_task_id and not (row.get("prompt") or "").strip():
+                        row["prompt"] = last_user_message
+                        break
+        except Exception as exc:
+            logger.debug("transcript_session_snapshot_read_failed session_id=%s err=%s", session_id, exc)
 
     turns: List[Dict[str, Any]] = []
     for r in rows:

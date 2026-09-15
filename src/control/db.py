@@ -1875,15 +1875,16 @@ class MeshDB:
     ) -> None:
         """Insert a new pending task into the dispatch queue."""
         now = _now()
+        prompt: str | None = payload.get("prompt") if isinstance(payload.get("prompt"), str) else None
         try:
             with self._write() as conn:
                 conn.execute(
                     """
                     INSERT INTO mesh_tasks (
                         id, session_id, machine_id, backend, action,
-                        payload, status, artifact_path, parent_task_id,
+                        payload, prompt, status, artifact_path, parent_task_id,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -1892,6 +1893,7 @@ class MeshDB:
                         backend,
                         action,
                         json.dumps(payload),
+                        prompt,
                         artifact_path,
                         parent_task_id,
                         now,
