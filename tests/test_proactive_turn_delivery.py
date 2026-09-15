@@ -75,6 +75,65 @@ def test_transcript_flags_proactive_turn_with_no_user_message(tmp_path):
     assert turn["result"] == "Autonomous update text."
 
 
+def test_transcript_keeps_dispatched_prompt_visible_before_result(tmp_path):
+    """Opening a running session must retain the user's durable prompt."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    session = _session("sess_pending")
+    session.last_task_id = "task_pending"
+    session.last_user_message = "Repair the session transcript view."
+    db.upsert_session(session)
+    db.enqueue_task(
+        task_id="task_pending",
+        session_id=session.session_id,
+        machine_id="Horse",
+        backend="claude",
+        action="resume_session",
+        payload={"prompt": session.last_user_message},
+    )
+
+    import src.control.db as db_mod
+    old = db_mod._db_instance
+    db_mod._db_instance = db
+    try:
+        turns = transcript_mod.get_transcript(tmp_path, tmp_path, session.session_id, limit=50)
+    finally:
+        db_mod._db_instance = old
+
+    assert turns is not None and len(turns) == 1
+    assert turns[0]["instruction"] == session.last_user_message
+    assert turns[0]["result"] == ""
+
+
+def test_transcript_recovers_current_legacy_pending_prompt_from_session(tmp_path):
+    """Pre-fix in-flight rows still render the prompt persisted on the session."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    session = _session("sess_legacy_pending")
+    session.last_task_id = "task_legacy_pending"
+    session.last_user_message = "Keep this prompt visible after opening the session."
+    db.upsert_session(session)
+    # Before prompt-at-enqueue, this column was NULL until task completion.
+    db.enqueue_task(
+        task_id=session.last_task_id,
+        session_id=session.session_id,
+        machine_id="Horse",
+        backend="claude",
+        action="resume_session",
+        payload={},
+    )
+
+    import src.control.db as db_mod
+    old = db_mod._db_instance
+    db_mod._db_instance = db
+    try:
+        turns = transcript_mod.get_transcript(tmp_path, tmp_path, session.session_id, limit=50)
+    finally:
+        db_mod._db_instance = old
+
+    assert turns is not None and len(turns) == 1
+    assert turns[0]["instruction"] == session.last_user_message
+    assert turns[0]["result"] == ""
+
+
 def test_proactive_endpoint_persists_and_invokes_hook(tmp_path):
     from config import config as cfg
     cfg.mesh.db_path = str(tmp_path / "mesh_ep.db")
@@ -227,4 +286,3 @@ def test_proactive_turn_accepted_for_unpinned_session_any_node(tmp_path):
     finally:
         db_mod._db_instance = None
         db_mod._db_instance = old
-
