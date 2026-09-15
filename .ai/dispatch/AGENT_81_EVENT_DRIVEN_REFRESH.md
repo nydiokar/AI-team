@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_81_EVENT_DRIVEN_REFRESH
 created_at: "2026-09-15T09:35:42.131929+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A81             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-15T09:37:06.601422+00:00"
+evidence: docs/EVENT_DRIVEN_READ_REFRESH.md,tests/test_transcript_read_a81.py,web/src/lib/liveInvalidation.test.ts,src/control/db.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-09-15T14:07:19.864668+00:00"
 ```
 
 # DISPATCH — AGENT_81_EVENT_DRIVEN_REFRESH

@@ -26,7 +26,7 @@ import type { GatewayEvent } from "../domain/events";
 import type { RawEvent } from "../transport/rawApi";
 import { useAuthStore } from "../stores/authStore";
 import type { ConnectionState } from "../domain/status";
-import { collectLiveInvalidationTargets, invalidateLiveTargets } from "../lib/liveInvalidation";
+import { collectLiveInvalidationTargets, invalidateLiveTargets, invalidateAllLive } from "../lib/liveInvalidation";
 import { useQueryClient } from "@tanstack/react-query";
 
 /** Max events retained in the rolling client log (bounded memory). */
@@ -62,6 +62,10 @@ export function useEventStream(): StreamState {
   const esRef = useRef<EventSource | null>(null);
   const retryRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Distinguishes the first connect (queries mount + fetch on their own) from a
+  // RE-connect / refocus after a gap, where the server tail may have rolled past
+  // events we missed — the resync case (A81).
+  const everConnectedRef = useRef<boolean>(false);
 
   const ingest = useCallback((raws: RawEvent[]) => {
     // reconnect-replay dedupe (pure, tested in eventDedupe.test.ts)
@@ -129,6 +133,13 @@ export function useEventStream(): StreamState {
       es.onopen = () => {
         retryRef.current = 0;
         setConnection("online");
+        // Reconnect-resync: on any re-open (not the first connect) the tail may
+        // have rolled past events missed during the gap — invalidate the live
+        // read-models once so a dropped-event window cannot strand stale data.
+        if (everConnectedRef.current) {
+          invalidateAllLive(queryClient);
+        }
+        everConnectedRef.current = true;
       };
       es.onmessage = (msg) => {
         try {
@@ -172,7 +183,7 @@ export function useEventStream(): StreamState {
       document.removeEventListener("visibilitychange", onVisibility);
       teardown();
     };
-  }, [token, ingest]);
+  }, [token, ingest, queryClient]);
 
   return { events, connection };
 }

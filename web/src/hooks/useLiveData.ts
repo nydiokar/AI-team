@@ -15,12 +15,16 @@ import { toApprovals } from "../transport/approvalAdapter";
 import { toArtifacts, toArtifactDetail } from "../transport/artifactAdapter";
 import { toSessionActivityTimeline } from "../transport/sessionTimelineAdapter";
 import { useAuthStore } from "../stores/authStore";
+import { SAFETY_NET_MS } from "../lib/refreshPolicy";
 
-const POLL_MS = 3000;
-// Slow tier for infra status that changes far slower than it's polled: node
-// liveness is heartbeat-derived on a ~90s timeout, and mesh-health is a trend
-// sample series. Polling these every 3s just keeps the mobile radio warm for no
-// fresher data — 20s is still multiples finer than the underlying signal.
+// A81: every POLL_MS hook here is event-covered (SSE → invalidateLiveTargets),
+// so the 3 s poll is now the SAFETY NET only. Rollback = SAFETY_NET_MS in
+// refreshPolicy.ts.
+const POLL_MS = SAFETY_NET_MS;
+// Slow tier for infra status that has NO covering event: node liveness is
+// heartbeat-derived on a ~90s timeout, and mesh-health is a trend sample series.
+// These keep their own gentle poll (unchanged) — 20s is still multiples finer
+// than the underlying signal.
 const SLOW_POLL_MS = 20000;
 
 export function useSessions(keepPinned?: boolean) {
