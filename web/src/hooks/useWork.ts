@@ -27,17 +27,16 @@ import type {
   RawCaseResumeResponse,
 } from "../transport/rawApi";
 import { useAuthStore } from "../stores/authStore";
+import { SAFETY_NET_MS } from "../lib/refreshPolicy";
 
 const EMPTY_AFFILIATIONS = new Map<string, SessionAffiliation>();
 
-const POLL_MS = 3000;
-// Case detail/lineage/affiliations change far less often than the live list, so
-// we poll them gently. (The affiliation index is one whole-substrate query since
-// A29 — no per-case fanout.)
-const DETAIL_POLL_MS = 15000;
-// The roster is the LIVE head of the case — who is working right now and which
-// scripts are running — so it polls on the fast tier, not the gentle detail tier.
-const LIVE_POLL_MS = 5000;
+// A81: every Work hook is event-covered (case/session events → invalidateLiveTargets),
+// so the three former tiers collapse to a single SAFETY NET; SSE invalidation + the
+// reconnect-resync are the real freshness path. Rollback = SAFETY_NET_MS.
+const POLL_MS = SAFETY_NET_MS;
+const DETAIL_POLL_MS = SAFETY_NET_MS;
+const LIVE_POLL_MS = SAFETY_NET_MS;
 
 const retry = (count: number, err: unknown) =>
   !(err instanceof ApiError && [401, 500].includes(err.status)) && count < 3;
