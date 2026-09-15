@@ -120,6 +120,30 @@ DDL there; (3) one-time copy-migrate the existing `llm_events`/`llm_turns` via `
 `TelemetryStore` + the 4 readers; (5) keep cost/timeline reads working during transition. This is the
 last structural coupling; #136/#137/#138 already removed the acute pain, so schedule it as a deliberate,
 migration-tested PR rather than a rushed cutover.
+
+**2026-09-15 (cont.) — Slow requests persisted after the first batch; root cause refined + 2 more PRs.**
+Live logs showed `/telemetry/batches` at **25–45 s** under load (07:45Z) and still **5 s** + a burst of
+heartbeat/`/jobs`/`/tasks/pending` stalling at an identical ~1960 ms **at LOW worker load** — proving the
+stalls are I/O + write-lock sharing, not query cost (a standalone `SELECT ... LIMIT 20` on the 186 MB
+mesh.db hit 2.5 s cold vs ~100 ms warm; worker telemetry write rate was 2 rows/20 s).
+- **PR #139** — SQLite I/O tuning on every MeshDB conn: `synchronous=NORMAL` (drops an fsync/commit),
+  `mmap_size=256MB` + `cache_size=8MB` (cold reads hit the page cache), and periodic checkpoint
+  `TRUNCATE`→`PASSIVE` (never blocks the hot path). **WAL verified 12.6 MB → 33 KB live.**
+- **PR #140** — the projection flusher still shared mesh.db's write lock and, under a backlog, projected
+  ALL dirty turns in one tight loop, starving control-plane. Now bounded (`_drain_projection(max_turns)`,
+  25/tick) + chunked (5) with an async pause that hands the lock back. Telemetry is droppable; a stalled
+  heartbeat is not.
+- **PARKED: telemetry → own DB file.** Built it, then found it UNSAFE to ship: control-plane methods
+  `get_session`/`get_job`/`recent_cache_write` (quota-resume cache-health)/`cost_case_rows` read the
+  `llm_*` tables from the mesh.db connection, some via **cross-table JOINs with `sessions`**. A separate
+  file breaks those joins (SQLite can't join across files without `ATTACH`, and `ATTACH` re-shares the
+  write lock — defeating the split). The correct split must first rewrite those 4 readers to app-level
+  joins (two queries + merge) or move them onto `TelemetryStore`. Do NOT ship a naive file split — it
+  silently degrades cache-health/orphan/cost reads.
+- **HONEST BOUNDARY — needs a worker restart.** The heavy-load stalls also come from the co-located
+  worker writing telemetry DIRECTLY to mesh.db cross-process (#138). No gateway-side change removes that;
+  it stops only when the worker restarts on #138's merged code. Deferred by operator ("too much work
+  happening"). Until then, expect residual stalls under heavy worker load.
 The gap: a Manager turn refused by an Anthropic server-side overload classifies as
 `error_class=upstream_error` (`api_error_status>=500`, PR #81) and its in-process burst retries are
 spent in seconds — so a multi-minute overload went terminal → session `ERROR` → the Case stalled
