@@ -144,3 +144,22 @@ def test_batch_defers_turn_projection_to_flusher(tmp_path, monkeypatch):
     TelemetryStore(db).project_dirty(dirty_turns, dirty_sessions, isolate=True)
     turns_after = db._conn().execute("SELECT COUNT(*) FROM llm_turns").fetchone()[0]
     assert turns_after == 1
+
+
+def test_drain_projection_is_bounded_for_fairness():
+    """A backlog must not be projected in one lock-hogging shot: each drain takes
+    at most ``max_turns`` and leaves the rest queued for the next tick."""
+    import src.control.task_server as ts
+    ts._drain_projection()  # clear leaked state
+    ts._enqueue_projection([f"turn_{i}" for i in range(60)], [])
+
+    first, _ = ts._drain_projection(max_turns=25)
+    assert len(first) == 25
+    second, _ = ts._drain_projection(max_turns=25)
+    assert len(second) == 25
+    third, _ = ts._drain_projection(max_turns=25)
+    assert len(third) == 10  # remainder
+    # No overlap, full coverage.
+    assert len(set(first) | set(second) | set(third)) == 60
+    # Fully drained now.
+    assert ts._drain_projection(max_turns=25) == ([], [])
