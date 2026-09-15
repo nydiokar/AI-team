@@ -50,6 +50,11 @@ export function invalidateLiveTargets(
     queryClient.invalidateQueries({ queryKey: ["tasks"] });
     queryClient.invalidateQueries({ queryKey: ["task-sections"] });
     queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    // A81: a new artifact (results/<task>.json) appears exactly when a task
+    // produces a result — the same moment a task_id-bearing event fires. Without
+    // this the artifacts list had NO covering event and would go stale once its
+    // aggressive poll dropped to the safety net.
+    queryClient.invalidateQueries({ queryKey: ["artifacts"] });
   }
   if (target.approvals) {
     queryClient.invalidateQueries({ queryKey: ["approvals"] });
@@ -72,6 +77,50 @@ export function invalidateLiveTargets(
     queryClient.invalidateQueries({ queryKey: ["work-roster", caseId] });
     queryClient.invalidateQueries({ queryKey: ["case-resume-state", caseId] });
     queryClient.invalidateQueries({ queryKey: ["work-affiliations"] });
+  }
+}
+
+/**
+ * Live read-model query-key prefixes — the set the event bridge keeps fresh.
+ * Used by the reconnect-resync to refetch everything visible after an SSE gap.
+ * react-query only refetches ACTIVE (mounted) queries, so a broad invalidate here
+ * is bounded to what's actually on screen.
+ */
+const LIVE_QUERY_KEYS: readonly (readonly [string])[] = [
+  ["sessions"],
+  ["tasks"],
+  ["task-sections"],
+  ["jobs"],
+  ["approvals"],
+  ["artifacts"],
+  ["session-messages"],
+  ["session-turns"],
+  ["session-usage"],
+  ["session-activity"],
+  ["work-list"],
+  ["work-detail"],
+  ["work-timeline"],
+  ["work-graph"],
+  ["work-roster"],
+  ["work-affiliations"],
+  ["case-resume-state"],
+] as const;
+
+/**
+ * Reconnect-resync (A81). The SSE stream reconnects with `since=0` and the server
+ * returns only its recent TAIL (not an offset-replay), so a disconnect longer than
+ * that window drops events permanently. On any SSE re-open we invalidate every live
+ * read-model once so a dropped-event window can never strand stale data. Idempotent
+ * with the tail-replay+dedupe path (short drops are covered twice; long drops only
+ * here).
+ */
+export function invalidateAllLive(queryClient: QueryClient): void {
+  if (import.meta.env?.DEV) {
+    // Observable freshness signal (dev only) — proves the resync fired.
+    console.debug("[live] reconnect resync — invalidating live read-models");
+  }
+  for (const queryKey of LIVE_QUERY_KEYS) {
+    queryClient.invalidateQueries({ queryKey });
   }
 }
 

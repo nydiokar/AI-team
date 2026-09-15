@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { QueryClient } from "@tanstack/react-query";
 import {
   collectLiveInvalidationTargets,
+  invalidateAllLive,
+  invalidateLiveTargets,
   invalidateRouteTarget,
 } from "./liveInvalidation";
 import type { RawEvent } from "../transport/rawApi";
@@ -59,6 +61,44 @@ describe("liveInvalidation", () => {
       queryKey: ["work-roster", "case/1"],
     });
     expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["tasks"] });
+  });
+
+  it("invalidates the artifacts list when a task-bearing event arrives (A81 coverage)", () => {
+    // A new artifact appears exactly when a task produces a result, so a task_id
+    // event must refresh the artifacts list — otherwise it goes stale once its
+    // aggressive poll drops to the safety net.
+    const invalidateQueries = vi.fn();
+    const client = { invalidateQueries } as unknown as QueryClient;
+
+    invalidateLiveTargets(client, {
+      sessions: new Set(),
+      cases: new Set(),
+      tasks: true,
+      approvals: false,
+    });
+
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["artifacts"] });
+  });
+
+  it("invalidateAllLive refreshes every live read-model (reconnect resync)", () => {
+    const invalidateQueries = vi.fn();
+    const client = { invalidateQueries } as unknown as QueryClient;
+
+    invalidateAllLive(client);
+
+    // A representative spread across the three surfaces + the trap key.
+    for (const key of [
+      ["sessions"],
+      ["session-messages"],
+      ["session-turns"],
+      ["artifacts"],
+      ["approvals"],
+      ["work-list"],
+      ["work-roster"],
+      ["case-resume-state"],
+    ]) {
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: key });
+    }
   });
 
   it("ignores raw events without useful correlation ids", () => {
