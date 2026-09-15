@@ -108,3 +108,39 @@ def test_encoded_payload_size_is_enforced_without_content_length(
         submit_telemetry_batch(payload, _request())
 
     assert error.value.status_code == 413
+
+
+def test_batch_defers_turn_projection_to_flusher(tmp_path, monkeypatch):
+    """Ingestion inserts raw events fast; projection is deferred to the flusher.
+
+    This keeps the DB write lock off the worker request path — the turn is not
+    projected inside the request, but its id is queued for the background
+    flusher, and ``project_dirty`` builds it.
+    """
+    import src.control.task_server as ts
+    from src.control.telemetry_store import TelemetryStore
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(ts, "get_db", lambda: db)
+    ts._drain_projection()  # clear any leaked global dirty state
+
+    payload = TelemetryBatchPayload(
+        batch_id="batch_defer",
+        node_id="worker-a",
+        events=[_event()],
+    )
+    result = submit_telemetry_batch(payload, _request())
+    assert result["accepted"] == 1
+
+    # Raw event landed synchronously; the turn projection did NOT run in-request.
+    events = db._conn().execute("SELECT COUNT(*) FROM llm_events").fetchone()[0]
+    turns_in_request = db._conn().execute("SELECT COUNT(*) FROM llm_turns").fetchone()[0]
+    assert events == 1
+    assert turns_in_request == 0
+
+    # The turn is queued for the flusher; draining + projecting builds it.
+    dirty_turns, dirty_sessions = ts._drain_projection()
+    assert "turn_ingest" in dirty_turns
+    TelemetryStore(db).project_dirty(dirty_turns, dirty_sessions, isolate=True)
+    turns_after = db._conn().execute("SELECT COUNT(*) FROM llm_turns").fetchone()[0]
+    assert turns_after == 1
