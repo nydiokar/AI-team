@@ -318,7 +318,12 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
             "usage": usage,
         })
 
-    turns.sort(key=lambda t: t.get("timestamp") or "")
+    # Conversation order = when each turn STARTED (the user sent it), never when it
+    # completed. Sorting completion-preferred made a slow turn sent first appear
+    # below a fast turn sent later, and — under the 3s poll — visibly reshuffle as
+    # completions landed. task_id is a deterministic tiebreaker for equal/missing
+    # timestamps so the order is stable across every fetch.
+    turns.sort(key=lambda t: (t.get("started_at") or "", t.get("task_id") or ""))
     if limit and len(turns) > limit:
         turns = turns[-limit:]
     return turns
@@ -435,7 +440,12 @@ def get_transcript(
         turns.append(turn)
 
     # Oldest→newest (a conversation reads top-to-bottom). Stable on equal ts.
-    turns.sort(key=lambda t: t.get("timestamp") or "")
+    # Conversation order = when each turn STARTED (the user sent it), never when it
+    # completed. Sorting completion-preferred made a slow turn sent first appear
+    # below a fast turn sent later, and — under the 3s poll — visibly reshuffle as
+    # completions landed. task_id is a deterministic tiebreaker for equal/missing
+    # timestamps so the order is stable across every fetch.
+    turns.sort(key=lambda t: (t.get("started_at") or "", t.get("task_id") or ""))
     if limit and len(turns) > limit:
         turns = turns[-limit:]
     return turns
