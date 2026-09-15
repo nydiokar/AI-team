@@ -48,6 +48,40 @@ def test_record_proactive_turn_persists_a_completed_assistant_turn(tmp_path):
     assert row["reply_text"] == "The background job finished — all green."
 
 
+def test_transcript_orders_by_send_time_not_completion(tmp_path):
+    """A turn sent FIRST but completing LATE must still render first.
+
+    The dearrangement bug sorted turns completion-preferred, so a slow first turn
+    dropped below a fast later one (and visibly reshuffled under the 3s poll)."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_session(_session("sess_order"))
+    db.enqueue_task(task_id="task_A", session_id="sess_order", machine_id="Horse",
+                    backend="claude", action="resume_session", payload={"prompt": "first message"})
+    db.enqueue_task(task_id="task_B", session_id="sess_order", machine_id="Horse",
+                    backend="claude", action="resume_session", payload={"prompt": "second message"})
+    # A sent first (10:00) finishes LATE (10:05); B sent second (10:01) finishes EARLY (10:02).
+    with db._write() as conn:
+        conn.execute(
+            "UPDATE mesh_tasks SET created_at=?, completed_at=?, status='completed', reply_text=? WHERE id=?",
+            ("2026-01-01T10:00:00+00:00", "2026-01-01T10:05:00+00:00", "reply A", "task_A"),
+        )
+        conn.execute(
+            "UPDATE mesh_tasks SET created_at=?, completed_at=?, status='completed', reply_text=? WHERE id=?",
+            ("2026-01-01T10:01:00+00:00", "2026-01-01T10:02:00+00:00", "reply B", "task_B"),
+        )
+
+    import src.control.db as db_mod
+    old = db_mod._db_instance
+    db_mod._db_instance = db
+    try:
+        turns = transcript_mod.get_transcript(tmp_path, tmp_path, "sess_order", limit=50)
+    finally:
+        db_mod._db_instance = old
+
+    assert turns is not None and len(turns) == 2
+    assert [t["task_id"] for t in turns] == ["task_A", "task_B"]
+
+
 def test_transcript_flags_proactive_turn_with_no_user_message(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     db.upsert_session(_session())
