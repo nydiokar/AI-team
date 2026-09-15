@@ -980,6 +980,11 @@ CREATE INDEX IF NOT EXISTS idx_mesh_tasks_session
 CREATE INDEX IF NOT EXISTS idx_mesh_tasks_created
     ON mesh_tasks(created_at);
 
+-- A81: composite for the transcript read (WHERE session_id=? ORDER BY created_at
+-- ASC) — a covered range scan instead of filter-on-session then sort.
+CREATE INDEX IF NOT EXISTS idx_mesh_tasks_session_created
+    ON mesh_tasks(session_id, created_at);
+
 -- Append-only event log per session — mirrors logs/session_events/{session_id}.log
 -- Kept as a table so the dashboard can query "all events for session X" without
 -- parsing NDJSON files.
@@ -2481,11 +2486,17 @@ class MeshDB:
         files, no NDJSON parsing. Rows lacking ``reply_text`` (not yet backfilled)
         are returned with ``reply_text=None`` so the caller can fall back.
         """
+        # Slim list projection (A81): only the columns the transcript LIST view
+        # actually renders. The large `parsed_output_json`/`file_changes_json`
+        # blobs (and unused `error_class`/`return_code`/`session_id`) are NOT read
+        # by either caller (`transcript._turns_from_db`, backfill script), so they
+        # are omitted to keep this per-poll read cheap. `reply_text` (full chat
+        # text), `result` (legacy fallback), `files_modified_json` (file_count) and
+        # `usage_json` (summary) are the fields that are consumed.
         rows = self._conn().execute(
             """
-            SELECT id AS task_id, session_id, prompt, reply_text,
-                   parsed_output_json, file_changes_json, files_modified_json,
-                   usage_json, error_class, return_code, status, result, action,
+            SELECT id AS task_id, prompt, reply_text,
+                   files_modified_json, usage_json, status, result, action,
                    created_at, completed_at
             FROM mesh_tasks
             WHERE session_id = ?
@@ -6052,6 +6063,11 @@ def _get_migrations() -> List[tuple]:
                 ON session_cache_heartbeat_owners(heartbeat_id, status)
         """),  # A80 session-cache heartbeat controllers and owner records.
         (32, "ALTER TABLE nodes ADD COLUMN model_capabilities TEXT NOT NULL DEFAULT '{}'"),
+        (33, """
+            CREATE INDEX IF NOT EXISTS idx_mesh_tasks_session_created
+                ON mesh_tasks(session_id, created_at)
+        """),  # A81: composite index for the transcript read
+               # (WHERE session_id=? ORDER BY created_at ASC) — covered range scan.
     ]
 
 
