@@ -88,11 +88,6 @@ class TelemetryStore:
                     duplicates += 1
 
         if rebuild:
-            for turn_id in turn_ids:
-                if self._turn_events_pruned(turn_id):
-                    self._flag_late_event_after_retention(turn_id)
-                else:
-                    self.rebuild_turn(turn_id)
             session_ids = sorted(
                 {
                     event.session_id
@@ -100,14 +95,63 @@ class TelemetryStore:
                     if event.session_id is not None
                 }
             )
-            for session_id in session_ids:
-                self._refresh_session_context_growth(session_id)
+            self.project_dirty(turn_ids, session_ids)
         return {
             "accepted": accepted,
             "duplicates": duplicates,
             "rejected": 0,
             "turn_ids": turn_ids,
         }
+
+    def project_dirty(
+        self,
+        turn_ids: Iterable[str],
+        session_ids: Iterable[str],
+        *,
+        isolate: bool = False,
+    ) -> None:
+        """Rebuild turn projections and refresh session context growth.
+
+        This is the write-heavy, CPU-bound half of telemetry ingestion. It is
+        deliberately separated from the raw ``INSERT`` so callers can defer it
+        off the request hot path (see the task server's projection flusher):
+        raw events land fast under the write lock, projections coalesce and
+        run in the background.
+
+        ``isolate=True`` wraps each turn/session so one bad row cannot abort a
+        batch — used by the background flusher. The synchronous ingestion path
+        keeps ``isolate=False`` to preserve fail-fast semantics.
+        """
+        for turn_id in turn_ids:
+            if isolate:
+                try:
+                    self._project_one_turn(turn_id)
+                except Exception:
+                    logger.debug(
+                        "event=telemetry_turn_projection_failed turn_id=%s",
+                        turn_id,
+                        exc_info=True,
+                    )
+            else:
+                self._project_one_turn(turn_id)
+        for session_id in session_ids:
+            if isolate:
+                try:
+                    self._refresh_session_context_growth(session_id)
+                except Exception:
+                    logger.debug(
+                        "event=telemetry_session_growth_failed session_id=%s",
+                        session_id,
+                        exc_info=True,
+                    )
+            else:
+                self._refresh_session_context_growth(session_id)
+
+    def _project_one_turn(self, turn_id: str) -> None:
+        if self._turn_events_pruned(turn_id):
+            self._flag_late_event_after_retention(turn_id)
+        else:
+            self.rebuild_turn(turn_id)
 
     def list_events(
         self, turn_id: str, *, after: Optional[str] = None, limit: int = 1000
