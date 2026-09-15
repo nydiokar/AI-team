@@ -169,6 +169,16 @@ _REVIEW_EVENT_TYPES = frozenset(REVIEW_VERDICT_EVENT_TYPES.values())
 
 _TRUTHY_FLAG_VALUES = ("1", "true", "yes", "on")
 
+# Write-transaction acquisition resilience. The worker daemon shares this SQLite
+# file cross-process, so BEGIN IMMEDIATE can raise "database is locked" once the
+# per-statement busy_timeout is exhausted. A dropped control-plane write shows up
+# as lost/dishonest state (a result never recorded), so the transaction START is
+# retried with bounded backoff before giving up. Only acquisition is retried —
+# nothing has been written yet, so it is idempotent.
+_WRITE_BEGIN_MAX_ATTEMPTS = 4
+_WRITE_BEGIN_BACKOFF_SEC = 0.1
+_BUSY_TIMEOUT_MS = 15000
+
 # A65 cost read-model. Usage sources that record ``input_token_semantics =
 # 'includes_cache'`` — ``input_tokens`` ALREADY CONTAINS the cached-input portion
 # (codex ``last_token_usage`` / codex ``turn.completed`` aggregates), so the cost
@@ -1333,23 +1343,66 @@ class MeshDB:
             )
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA busy_timeout=5000;")
+            conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS};")
             conn.execute("PRAGMA foreign_keys=ON;")
             self._local.conn = conn
         return conn
+
+    def _begin_immediate(self, conn: sqlite3.Connection) -> None:
+        """Acquire a write transaction, retrying transient cross-process locks.
+
+        Retries only the BEGIN (nothing is written yet, so it is idempotent) on
+        "database is locked"/"busy" with escalating backoff, then re-raises so a
+        genuine, sustained lock still surfaces instead of hanging forever.
+        """
+        last_exc: Optional[sqlite3.OperationalError] = None
+        for attempt in range(1, _WRITE_BEGIN_MAX_ATTEMPTS + 1):
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                return
+            except sqlite3.OperationalError as exc:
+                msg = str(exc).lower()
+                if "locked" not in msg and "busy" not in msg:
+                    raise
+                last_exc = exc
+                if attempt < _WRITE_BEGIN_MAX_ATTEMPTS:
+                    logger.warning(
+                        "event=db_write_begin_retry attempt=%d/%d err=%s",
+                        attempt, _WRITE_BEGIN_MAX_ATTEMPTS, exc,
+                    )
+                    time.sleep(_WRITE_BEGIN_BACKOFF_SEC * attempt)
+        logger.error(
+            "event=db_write_begin_exhausted attempts=%d err=%s",
+            _WRITE_BEGIN_MAX_ATTEMPTS, last_exc,
+        )
+        assert last_exc is not None
+        raise last_exc
 
     @contextmanager
     def _write(self) -> Generator[sqlite3.Connection, None, None]:
         """Serialised write context. Yields a connection inside a transaction."""
         conn = self._conn()
         with self._write_lock:
-            conn.execute("BEGIN IMMEDIATE;")
+            self._begin_immediate(conn)
             try:
                 yield conn
                 conn.execute("COMMIT;")
             except Exception:
                 conn.execute("ROLLBACK;")
                 raise
+
+    def checkpoint_wal(self, mode: str = "TRUNCATE") -> Optional[tuple]:
+        """Checkpoint the WAL to bound its on-disk growth. Best-effort.
+
+        WAL only truncates when no reader pins an older frame; a busy checkpoint
+        is a no-op, never an error, so this is safe to call on a maintenance tick.
+        """
+        try:
+            row = self._conn().execute(f"PRAGMA wal_checkpoint({mode});").fetchone()
+            return tuple(row) if row is not None else None
+        except Exception:
+            logger.debug("event=wal_checkpoint_failed mode=%s", mode, exc_info=True)
+            return None
 
     # ------------------------------------------------------------------
     # Schema init + migrations
