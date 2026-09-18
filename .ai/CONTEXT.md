@@ -68,6 +68,33 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-09-18 — Persistent slowness root-caused to the Wake-Dispatcher polling the DB on the
+event loop; 2 PRs merged (#145, #147). NOT yet deployed.**
+Live evidence (09-17/18): `event=embedded_event_loop_stalled elapsed_ms=5000–9684` ×15 +
+recurring faulthandler dumps. The dump proved the gateway MAIN loop running synchronous
+SQLite inline: `_wake_dispatcher_loop → _continue_case_once → compute_continuation_tick →
+list_flow_events`, and elsewhere `_handle_quota_paused_case → quota_window_state`. It scanned
+ALL open Cases every 30s, re-reading each Case's ≤500-row event log + a provider-global quota
+snapshot PER CASE — O(cases×events) blocking work whether or not anything changed. One process
+⇒ GIL starvation tripped the embedded task-server's stall watchdog and stalled every HTTP path.
+**#145** (`a6b7c7b`) offloads the reads to `asyncio.to_thread`; **#147** (`a750c7e`) makes the
+tick event-driven: `MeshDB.max_flow_event_ids()` (one batched, index-served watermark) lets an
+unchanged Case skip its read+recompute; quota state computed once/tick not once/Case; reuse the
+`list_open_cases` row instead of a redundant `get_flow_run`. Behaviour-preserving; 114 tests
+green. **DEPLOY PENDING:** main checkout was on a concurrent agent's branch with uncommitted WIP
+— `git checkout main && pm2 restart ai-team-gateway` when clean. Remaining structural work →
+"DB-contention optimization backlog" below.
+
+**2026-09-18 — Stale/wedged open Cases diagnosed (OPT-3).** The Wake-Dispatcher saw 14 "open"
+Cases; ~10 were orphans (Manager session `closed` but `flow_runs.status` NULL — Case lifecycle
+is not tied to session lifecycle; `close_case` never called automatically) and **4 are WEDGED**:
+each carries a **pending `case_manager_respawn` approval** (raised when the Manager died, then
+ignored). `close_case` hard-blocks on `_case_has_unresolved_approval` (`db.py:2985`), so those
+Cases can't be closed — even manually ("Close failed: case has an unresolved required approval")
+— AND the respawn never fired. Approvals have `expires_at` but **nothing enforces it**, so an
+ignored proposal wedges forever. Immediate relief (no code): `POST /api/approvals/{id}/resolve`
+`decision=reject` clears the pending approval → close unblocks. Proper fix = OPT-3.
+
 **2026-09-15 — "Slow / lost messages / dishonest state" cascade: root-caused to DB write
 contention + telemetry-on-hot-path; 4 PRs merged & deployed.**
 Symptoms (operator): sessions slow to start, waits on connect, messages not visible, a turn
@@ -515,6 +542,40 @@ on at normal scale):
 `ensure_cache_heartbeat_owner`'s bare-except (masks genuine DB errors as "flag off") was reviewed
 and left as-is — it fails safe (no heartbeat instead of a crash), and a distinguishable error
 surface is cosmetic, not a correctness or cost risk.
+
+## Deferred — DB-contention optimization backlog (2026-09-18) — "on the wall"
+
+Context: PRs #135–147 kept fighting the same slowness (SQLite contention / polling on
+one 190MB `mesh.db` shared by control-plane + telemetry). The **proven** acute cause was
+the Wake-Dispatcher running synchronous DB per-Case on the event loop — fixed by **#145**
+(offload to `asyncio.to_thread`) + **#147** (event-driven skip via `max_flow_event_ids`
+watermark + per-tick quota-state cache + reuse of the `list_open_cases` row). These are
+the *remaining* structural jobs, ranked by win/effort. Each is a small logic change, not a
+rewrite. **Verify against code before starting — do not trust this prose over the tree.**
+
+- **OPT-1 — Telemetry store separation (the recurring root; do NOT ship naively).**
+  `llm_events` (~82k rows) / `llm_turns` are append-heavy and live in the SAME `mesh.db`
+  as control-plane state, sharing its single `_write_lock`. Parked once already (#140)
+  because a **naive file split breaks live JOINs**: `get_session`/`get_job`/
+  `recent_cache_write`/`cost_case_rows` read `llm_*` joined to `sessions` on the mesh.db
+  connection, and SQLite can't join across files without `ATTACH` — and `ATTACH`
+  re-shares the write lock, defeating the split. **Correct order:** (1) rewrite those 4
+  readers to app-level joins (two queries + in-memory merge) or move them onto
+  `TelemetryStore`; (2) THEN move `llm_*` to `state/telemetry.db` (own connection + own
+  write lock); (3) one-time `ATTACH` copy-migrate; (4) repoint `TelemetryStore` + readers.
+  Migration-tested PR, not a rushed cutover. This is the last structural coupling.
+
+- **OPT-2 — Server-side pagination for read endpoints (approved).** `/api/sessions`
+  (`list_all` → `list_sessions` full-scans ~1594 rows), `list_session_case_links`
+  (`/api/work/affiliations`), and `api_session_timeline` all scan and contend (seen in the
+  faulthandler dumps). The web `200` limit is **client-side only**. Add server-side
+  `limit`/`offset` (default newest ~100) + a `load-more` affordance that fetches the next N
+  beyond the first N. Operator works mainly with the latest sessions, so newest-first +
+  bounded is the natural read shape.
+
+- **OPT-3 — Case lifecycle: stop the stale/wedged-Case pileup (see shift note below).**
+  Approval expiry enforcement + operator-close/interrupt cancels a Case's pending
+  approvals + orphan sweep able to *close* (not only *block*) Manager-terminal Cases.
 
 ## Deferred — runtime / lower priority
 
