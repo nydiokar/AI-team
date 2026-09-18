@@ -23,6 +23,7 @@ All ``/api/*`` endpoints require ``Authorization: Bearer {DASHBOARD_TOKEN}``
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import threading
@@ -505,10 +506,10 @@ def _token_accepted(supplied: Optional[str]) -> bool:
     an empty ``supplied`` never matches an empty accepted value."""
     if not supplied:
         return False
-    if supplied == _dashboard_token():
+    if hmac.compare_digest(supplied.encode(), _dashboard_token().encode()):
         return True
     worker = _worker_token()
-    return bool(worker) and supplied == worker
+    return bool(worker) and hmac.compare_digest(supplied.encode(), worker.encode())
 
 
 def _control_api_docs_enabled() -> bool:
@@ -2804,12 +2805,13 @@ def _web_dist_dir() -> "Path":
 
 
 def _mount_web_ui(app: FastAPI) -> None:
-    """Serve web/dist at / with the DASHBOARD_TOKEN injected into index.html (U5).
+    """Serve web/dist at / as a plain static page (U5).
 
-    The gateway, reachable only over the tailnet (bind host), bakes the token into
-    the served page so a trusted device needs no token prompt — while /api/* still
-    enforces the token (defense in depth). The token is injected as
-    ``window.__DASHBOARD_TOKEN__``; the UI's auth store reads it and skips the gate.
+    The DASHBOARD_TOKEN is NEVER embedded in the HTML: anything that can fetch ``/``
+    (a crawler, any tailnet peer, a reverse-proxy mistake) would otherwise receive
+    full control-API access, making the network bind the only credential. A device
+    pairs once via ``/#token=...`` (URL fragment — never sent to the server) or the
+    UI's TokenGate; /api/* enforces the token regardless.
     A built UI is optional: if web/dist is absent (dev — vite serves the UI and
     proxies /api here), the mount is skipped silently.
     """
@@ -2824,15 +2826,7 @@ def _mount_web_ui(app: FastAPI) -> None:
         return
 
     def _index_html() -> str:
-        html = index_file.read_text(encoding="utf-8")
-        token = _dashboard_token() or ""
-        # Inject BEFORE the first <script> so the global exists before the app boots.
-        inject = (
-            f'<script>window.__DASHBOARD_TOKEN__ = {json.dumps(token)};</script>'
-        )
-        if "<head>" in html:
-            return html.replace("<head>", "<head>" + inject, 1)
-        return inject + html
+        return index_file.read_text(encoding="utf-8")
 
     # Static assets (JS/CSS/img) served directly from web/dist/assets.
     assets = dist / "assets"

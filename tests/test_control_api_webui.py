@@ -1,9 +1,10 @@
-"""U5 — gateway serves the built Web UI with the token injected (no network).
+"""U5 — gateway serves the built Web UI WITHOUT the token (no network).
 
-The gateway serves web/dist at / and injects window.__DASHBOARD_TOKEN__ into
-index.html so a tailnet device needs no token prompt, while /api/* still enforces
-the token. Tests point _web_dist_dir at a temp dir so they don't depend on a real
-frontend build.
+The gateway serves web/dist at / as a plain static page. The dashboard token is
+NEVER embedded in HTML — anything that can fetch / (a crawler, any tailnet peer)
+would otherwise get full control-API access. A device pairs once by opening
+``/#token=...`` (fragment, never sent to the server) or typing it in the TokenGate.
+Tests point _web_dist_dir at a temp dir so they don't depend on a real frontend build.
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -41,20 +42,27 @@ def client(monkeypatch, fake_dist):
     return TestClient(control_api.build_control_api(_StubOrchestrator()))
 
 
-def test_index_injects_token(client):
+def test_index_never_embeds_token(client):
     r = client.get("/")
     assert r.status_code == 200
-    assert "window.__DASHBOARD_TOKEN__" in r.text
-    assert TOKEN in r.text
-    # Injected before the app body so the global exists at boot.
-    assert r.text.index("__DASHBOARD_TOKEN__") < r.text.index("app")
+    assert "app" in r.text  # the real index is served
+    assert "__DASHBOARD_TOKEN__" not in r.text
+    assert TOKEN not in r.text
 
 
 def test_spa_fallback_returns_index(client):
     # An unknown client-side route returns the SPA index (not 404).
     r = client.get("/sessions/abc123")
     assert r.status_code == 200
-    assert "__DASHBOARD_TOKEN__" in r.text
+    assert "app" in r.text
+    assert "__DASHBOARD_TOKEN__" not in r.text
+    assert TOKEN not in r.text
+
+
+def test_api_still_requires_token(client):
+    assert client.get("/api/sessions").status_code == 403
+    r = client.get("/api/sessions", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401
 
 
 def test_unknown_api_get_returns_404_not_spa(client):
@@ -111,7 +119,8 @@ def test_spa_fallback_blocks_path_traversal(monkeypatch, tmp_path, attack):
     if attack.startswith("/assets/"):
         assert r.status_code == 404
     else:
-        assert "__DASHBOARD_TOKEN__" in r.text
+        assert r.status_code == 200 and "<body>app</body>" in r.text
+        assert "__DASHBOARD_TOKEN__" not in r.text
 
 
 def test_no_dist_skips_mount(monkeypatch, tmp_path):
