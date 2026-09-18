@@ -1067,3 +1067,12 @@ export interface RawSystemAlertsResponse {
   ok: boolean;
   alerts: RawSystemAlert[];
 }
+
+// GET /api/metrics/health → the gateway's own "what is happening?" verdict, derived from
+// its in-process host/request metrics (src/control/app_metrics.py). Host cause outranks app.
+export interface RawHostHealth {
+  status: "ok" | "warn" | "bad";
+  cause: "ok" | "no_data" | "disk" | "memory" | "thermal" | "cpu" | "event_loop" | "slow_routes";
+  headline: string;
+  detail: string;
+}
