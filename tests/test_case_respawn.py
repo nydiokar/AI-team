@@ -146,8 +146,10 @@ class _FakeOrch:
     def _render_wake_turn(self, case_id, presented):
         return TaskOrchestrator._render_wake_turn(self, case_id, presented)
 
-    def _render_respawn_turn(self, case_id, objective):
-        return TaskOrchestrator._render_respawn_turn(self, case_id, objective)
+    def _render_respawn_turn(self, case_id, objective, dead_session_id=None):
+        return TaskOrchestrator._render_respawn_turn(
+            self, case_id, objective, dead_session_id,
+        )
 
     def _set_session_case_affiliation(self, sid, case_id, role=None):
         # Mirror the real seam's observable effect (store + record) without the DB
@@ -372,6 +374,21 @@ def test_respawn_preserves_flow_run_id_and_creates_no_new_case(tmp_path, monkeyp
     assert brief["objective"] == "migrate DB to v9"
     # objective_lock on the row is untouched
     assert db.get_flow_run(case_id)["objective_lock"] == "migrate DB to v9"
+
+
+def test_respawn_turn_offers_prior_session_readback():
+    """A fresh Manager rebuilds from the ledger, but the ledger holds verdicts —
+    not the prior Manager's own reasoning/in-flight intent. When the dead session
+    is known, the resume turn must point the new Manager at read_session_history
+    so it can catch up on what was actually done, without inheriting the fat
+    context. No dead session id ⇒ no dangling hint."""
+    orch = _FakeOrch(_FakeStore())
+    turn = orch._render_respawn_turn("case-x", "do the thing", "dead-sid-123")
+    assert "read_session_history" in turn
+    assert "dead-sid-123" in turn
+
+    bare = orch._render_respawn_turn("case-x", "do the thing", None)
+    assert "read_session_history" not in bare
 
 
 # --------------------------------------------------------------------------- #
