@@ -45,6 +45,7 @@ import type {
   RawCaseUsageResponse,
   RawCostAlertsResponse,
   RawSystemAlertsResponse,
+  RawHostHealth,
   RawCacheHeartbeat,
 } from "./rawApi";
 
@@ -872,6 +873,11 @@ export const api = {
    *  external healthcheck probe (see ~/scripts/aiteam-healthcheck.sh). */
   async systemAlerts(token: string): Promise<RawSystemAlertsResponse> {
     return get<RawSystemAlertsResponse>(`/api/system-alerts`, token);
+  },
+
+  /** GET /api/metrics/health — ok/warn/bad + cause (disk, memory, event loop, …). */
+  async hostHealth(token: string): Promise<RawHostHealth> {
+    return get<RawHostHealth>(`/api/metrics/health`, token);
   },
 };
 
