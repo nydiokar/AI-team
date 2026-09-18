@@ -1303,7 +1303,14 @@ CREATE INDEX IF NOT EXISTS idx_llm_model_requests_turn
     ON llm_model_requests(turn_id, invocation_id, sequence);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_model_provider_request
     ON llm_model_requests(invocation_id, provider_request_id)
-    WHERE provider_request_id IS NOT NULL
+    WHERE provider_request_id IS NOT NULL;
+-- Per-session turn lookup. Without this, any "this session's turns" read
+-- (recent_cache_write on the UI-polled resume-state path, cost reads, timeline)
+-- has no way into llm_turns by session_id and SQLite falls back to a full scan
+-- of llm_model_requests. With it, the resume-cost estimate is an index-driven
+-- read over just this session's turns, never the whole telemetry table.
+CREATE INDEX IF NOT EXISTS idx_llm_turns_session
+    ON llm_turns(session_id, ended_at)
 """
 
 
@@ -4738,7 +4745,14 @@ class MeshDB:
                 return None
             best = max(rows, key=lambda r: int(r["cache_creation"] or 0))
             return dict(best)
-        # Whole-session largest cache write (the default, correct path).
+        # Whole-session largest cache write (the default, correct path). This
+        # reads telemetry we already store (per-request cache_creation_tokens) —
+        # it does NOT re-measure or re-derive anything. It is index-driven via
+        # idx_llm_turns_session (session_id) → idx_llm_model_requests_turn: the
+        # optimizer enters through this session's turns only. Do NOT drop that
+        # index or reorder these joins — without the session_id index SQLite
+        # falls back to a full scan of llm_model_requests, and this runs on the
+        # UI-polled resume-state path.
         row = self._conn().execute(
             """
             SELECT r.cache_creation_tokens AS cache_creation,
