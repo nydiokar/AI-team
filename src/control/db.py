@@ -3062,6 +3062,31 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def max_flow_event_ids(self, flow_run_ids: List[str]) -> Dict[str, int]:
+        """The newest flow_event id per Case, in ONE batched query. Read-only.
+
+        The Wake-Dispatcher uses this as an event-driven change signal: a Case's
+        continuation state (``compute_continuation_tick``) is a pure function of
+        its flow_events, so a Case whose MAX(id) has not advanced since the last
+        evaluation cannot have changed — the dispatcher can skip the expensive
+        per-Case 500-row read + recompute entirely. ``MAX(id)`` is served straight
+        from ``idx_flow_events_flow(flow_run_id, id)`` (no row scan). Cases with no
+        events are absent from the result (the caller treats that as 'compute')."""
+        ids = [str(x) for x in flow_run_ids if x]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = self._conn().execute(
+            f"""
+            SELECT flow_run_id, MAX(id) AS max_id
+            FROM flow_events
+            WHERE flow_run_id IN ({placeholders})
+            GROUP BY flow_run_id
+            """,
+            (*ids,),
+        ).fetchall()
+        return {str(r["flow_run_id"]): int(r["max_id"]) for r in rows}
+
     # ------------------------------------------------------------------
     # [A56 / M4] Spec authoring → scored review gate → decomposer-as-DAG.
     #
