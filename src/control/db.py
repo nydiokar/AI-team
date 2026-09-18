@@ -4665,44 +4665,69 @@ class MeshDB:
             out[d["session_id"]] = d
         return out
 
-    def recent_cache_write(self, session_id: str, turns: int = 5) -> Optional[Dict[str, Any]]:
-        """[quota-resume] The LARGEST prompt-cache write observed in this
-        session's last ``turns`` turns — the only observed quantity that answers
-        "what does resuming this conversation cost?".
+    def recent_cache_write(
+        self, session_id: str, turns: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """[quota-resume] The LARGEST prompt-cache write this session ever
+        performed — the only observed quantity that answers "what does resuming
+        this conversation cost?".
 
         Resuming hours later re-writes the whole prompt cache (the provider's TTL
-        is ~1h), so the cost scales with the conversation, not with the next
+        is ~1h), so the cost scales with the CONVERSATION, not with the next
         prompt. Context size itself is NOT recorded (rows carry
         ``usage_granularity='invocation_total'`` /
         ``usage_coverage='aggregate_only'``), so the estimate uses the biggest
-        cache write the session actually performed recently. The MAXIMUM, not the
-        last one: the turn that died on quota often wrote almost nothing (the
-        provider refused it), and quoting that would tell the operator a 250k
-        resume costs a cent.
+        cache write the session actually performed.
 
-        ONE bounded read over the newest ``turns`` turns; ``is_duplicate=0`` so a
-        retried invocation cannot double-count. Returns
-        ``{cache_creation, model, observed_at}`` or None."""
-        rows = self._conn().execute(
+        The window is the WHOLE session, not a recent slice — this was a live
+        defect. A fat Manager loads its bulk context on the FIRST turn (observed:
+        220k on turn 1) and then only writes small deltas per turn, so the last-N
+        window saw ~20k and told the operator a 336k resume cost a cent → it
+        resumed ``in_place`` and paid the very rewrite this seam exists to avoid.
+        A session that ever wrote 220k has at least a 220k context to rebuild, so
+        the whole-session MAX is the honest lower bound. It can over-count a
+        session that was ``/compact``-ed after a big write, but over-counting only
+        ever recommends the CHEAP ``fresh_manager`` — it costs transcript detail,
+        never money. ``turns`` (optional) caps the scan to the newest N turns for
+        callers that explicitly want a recency window; the default is the whole
+        session. ``is_duplicate=0`` so a retried invocation cannot double-count.
+        Returns ``{cache_creation, model, observed_at}`` or None."""
+        if turns is not None:
+            rows = self._conn().execute(
+                """
+                SELECT r.cache_creation_tokens AS cache_creation,
+                       r.model                 AS model,
+                       COALESCE(t.ended_at, t.created_at) AS observed_at
+                FROM (
+                    SELECT turn_id, ended_at, created_at FROM llm_turns
+                    WHERE session_id = ?
+                    ORDER BY COALESCE(ended_at, created_at) DESC
+                    LIMIT ?
+                ) t
+                JOIN llm_model_requests r ON r.turn_id = t.turn_id
+                WHERE r.is_duplicate = 0
+                """,
+                (session_id, max(1, int(turns))),
+            ).fetchall()
+            if not rows:
+                return None
+            best = max(rows, key=lambda r: int(r["cache_creation"] or 0))
+            return dict(best)
+        # Whole-session largest cache write (the default, correct path).
+        row = self._conn().execute(
             """
             SELECT r.cache_creation_tokens AS cache_creation,
                    r.model                 AS model,
                    COALESCE(t.ended_at, t.created_at) AS observed_at
-            FROM (
-                SELECT turn_id, ended_at, created_at FROM llm_turns
-                WHERE session_id = ?
-                ORDER BY COALESCE(ended_at, created_at) DESC
-                LIMIT ?
-            ) t
+            FROM llm_turns t
             JOIN llm_model_requests r ON r.turn_id = t.turn_id
-            WHERE r.is_duplicate = 0
+            WHERE t.session_id = ? AND r.is_duplicate = 0
+            ORDER BY r.cache_creation_tokens DESC
+            LIMIT 1
             """,
-            (session_id, max(1, int(turns))),
-        ).fetchall()
-        if not rows:
-            return None
-        best = max(rows, key=lambda r: int(r["cache_creation"] or 0))
-        return dict(best)
+            (session_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     # ------------------------------------------------------------------
     # A65 cost read-model — bounded SQL aggregates over the same

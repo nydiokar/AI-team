@@ -195,8 +195,10 @@ class _FakeOrch:
         # inertness is proven, not stubbed.
         return await TaskOrchestrator._handle_transient_paused_case(self, db, case_id)
 
-    def _render_respawn_turn(self, case_id, objective):
-        return TaskOrchestrator._render_respawn_turn(self, case_id, objective)
+    def _render_respawn_turn(self, case_id, objective, dead_session_id=None):
+        return TaskOrchestrator._render_respawn_turn(
+            self, case_id, objective, dead_session_id,
+        )
 
     def _render_wake_turn(self, case_id, presented):
         return TaskOrchestrator._render_wake_turn(self, case_id, presented)

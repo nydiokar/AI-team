@@ -76,7 +76,7 @@ function estimateLine(estimate: RawCaseResumeEstimate | null): string {
     return `Resume cost unknown (${estimate.reason || "no telemetry"}).`;
   }
   const tokens = (estimate.cache_creation_tokens ?? 0).toLocaleString();
-  return `Resuming rewrites the prompt cache: ~${tokens} tokens ≈ $${(estimate.usd ?? 0).toFixed(2)} (estimated from this session's largest recent cache write).`;
+  return `In place rewrites the prompt cache: ~${tokens} tokens ≈ $${(estimate.usd ?? 0).toFixed(2)} (this session's largest cache write). Fresh Manager avoids that — it rebuilds from the ledger.`;
 }
 
 const REASON_COPY: Record<string, string> = {
@@ -115,9 +115,21 @@ export function CaseResumePanel({ caseId }: { caseId: string }) {
     setNote(null);
     try {
       const out = await resume.mutateAsync({ mode });
+      // If a proposal was pending, the operator just decided it BY CHOOSING a
+      // mode — resolve it approved so the panel clears and the auto-approval
+      // path cannot fire a second (recommended-mode) resume. The resume itself
+      // is single-flight server-side, so the approval's own resume_case is a
+      // harmless `resume_in_flight` no-op.
+      if (pendingId) {
+        try {
+          await resolveApproval.mutateAsync({ approvalId: pendingId, decision: "approved" });
+        } catch {
+          /* best-effort — the resume already happened */
+        }
+      }
       setNote(
         out.mode === "fresh_manager"
-          ? "Fresh Manager spawned on this Case."
+          ? "Fresh Manager spawned on this Case (rebuilt from the ledger)."
           : "Resume turn delivered to the existing Manager.",
       );
     } catch (err) {
@@ -197,24 +209,41 @@ export function CaseResumePanel({ caseId }: { caseId: string }) {
             {pendingId ? (
               <div className="flex items-center justify-between gap-3">
                 <p className="min-w-0 text-[12px] text-ink-muted">
-                  Quota is back. Resume this Case?
+                  Quota is back. Resume this Case — you choose how:
                 </p>
                 <div className="flex shrink-0 items-center gap-2">
                   <Button
                     variant="outline"
                     size="sm"
-                    disabled={resolveApproval.isPending}
+                    disabled={resume.isPending || resolveApproval.isPending}
                     onClick={() => void decide("rejected")}
                   >
                     Decline
                   </Button>
                   <Button
-                    variant="primary"
+                    variant={data.recommended_mode === "in_place" ? "primary" : "outline"}
                     size="sm"
-                    disabled={resolveApproval.isPending}
-                    onClick={() => void decide("approved")}
+                    disabled={resume.isPending || resolveApproval.isPending || managerGone}
+                    title={
+                      managerGone
+                        ? "The existing session is gone — use Fresh Manager"
+                        : "One turn into the existing Manager session (pays the cache rewrite)"
+                    }
+                    onClick={() => void run("in_place")}
                   >
-                    Resume
+                    <PlayCircle className="size-4" />
+                    In place
+                  </Button>
+                  <Button
+                    variant={
+                      data.recommended_mode === "fresh_manager" ? "primary" : "outline"
+                    }
+                    size="sm"
+                    disabled={resume.isPending || resolveApproval.isPending}
+                    title="New Manager on the SAME Case, rebuilt from the ledger (cheap)"
+                    onClick={() => void run("fresh_manager")}
+                  >
+                    Fresh Manager
                   </Button>
                 </div>
               </div>
