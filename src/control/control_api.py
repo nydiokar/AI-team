@@ -39,6 +39,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from src.core import observability
+from src.control import app_metrics
+from src.control.app_metrics import RequestTimingMiddleware
 
 if TYPE_CHECKING:
     from src.control.db import MeshDB
@@ -930,6 +932,7 @@ def build_control_api(orchestrator) -> FastAPI:
         redoc_url="/redoc" if _docs_on else None,
         openapi_url="/openapi.json" if _docs_on else None,
     )
+    app.add_middleware(RequestTimingMiddleware, component="gateway")
 
     @app.exception_handler(RequestValidationError)
     async def _validation_exception_handler(
@@ -2567,6 +2570,13 @@ def build_control_api(orchestrator) -> FastAPI:
             "governor_sdk_max_budget_usd": governor_budget,
         }
         return JSONResponse(result)
+
+    @app.get("/api/metrics/system", dependencies=[Depends(_require_auth)])
+    def api_metrics_system(minutes: int = Query(60, ge=1, le=180)) -> JSONResponse:
+        """Per-minute rollups: event-loop lag, request latency by route, disk/CPU/memory
+        pressure (see app_metrics). In-memory ring, newest last; also on disk in
+        logs/metrics.ndjson."""
+        return JSONResponse(app_metrics.snapshot(minutes))
 
     @app.get("/api/system-alerts", dependencies=[Depends(_require_auth)])
     def api_system_alerts(
