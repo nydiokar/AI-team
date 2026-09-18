@@ -1231,7 +1231,9 @@ class TaskOrchestrator(ITaskOrchestrator):
             return 0
         delivered = 0
         if continuation_enabled:
-            for case in db.list_open_cases():
+            # Read-only DB scans run in a worker thread so the Wake-Dispatcher never
+            # blocks the shared event loop (see _continue_case_once for the rationale).
+            for case in await asyncio.to_thread(db.list_open_cases):
                 case_id = str(case.get("flow_run_id") or "")
                 if not case_id:
                     continue
@@ -1547,7 +1549,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         # operator re-entry. Without this, cancelling in-flight workers would be
         # undone by the next satisfied-wait tick re-driving the very Case the
         # operator killed. ('blocked' has exactly one writer: interrupt_case.)
-        _row = db.get_flow_run(case_id)
+        # These synchronous SQLite reads run once per open Case every tick. Run them
+        # in a worker thread (MeshDB reads are fully concurrent, check_same_thread=False)
+        # so a slow read on the 190MB mesh.db never stalls the gateway event loop — a
+        # proven cause of `embedded_event_loop_stalled` + wide request timeouts.
+        _row = await asyncio.to_thread(db.get_flow_run, case_id)
         if _row is not None and str(_row.get("status") or "").strip().lower() == "blocked":
             return 0
         # [quota-resume] A quota-PAUSED Case is not a normal Case this tick: while
@@ -1565,7 +1571,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         # before satisfaction for the same reason the quota check is.
         if await self._handle_transient_paused_case(db, case_id):
             return 0
-        tick = db.compute_continuation_tick(case_id)
+        tick = await asyncio.to_thread(db.compute_continuation_tick, case_id)
         # [continuation-review-watermark] Retire one-shot groups the Manager already
         # drained by reviewing their members out-of-band (a tagged review.*, e.g.
         # during an operator poke that interleaved before the wake could fire). These
@@ -2156,10 +2162,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         per-request context telemetry (``usage_granularity='invocation_total'``,
         ``usage_coverage='aggregate_only'``), so the context size is NOT directly
         observable. What IS observed is the largest ``cache_creation_tokens``
-        this session recently wrote — see ``MeshDB.recent_cache_write``. That is
-        used as the estimate and labelled as such
-        (``basis='max_recent_turn_cache_creation'``), never dressed up as a
-        measurement.
+        this session ever wrote (whole-session, not a recent slice — the fat
+        early context load is the true resume cost) — see
+        ``MeshDB.recent_cache_write``. That is used as the estimate and labelled
+        as such (``basis='max_session_turn_cache_creation'``), never dressed up
+        as a measurement.
 
         Honesty rules: an unpriceable model or absent telemetry yields
         ``known=False`` + a reason, never a fabricated number.
@@ -2167,7 +2174,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         out: Dict[str, Any] = {
             "known": False, "reason": "no_telemetry", "session_id": session_id,
             "model": None, "cache_creation_tokens": None, "usd": None,
-            "basis": "max_recent_turn_cache_creation",
+            "basis": "max_session_turn_cache_creation",
         }
         if not session_id:
             out["reason"] = "no_session"
@@ -2342,11 +2349,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         )
         if not case_quota_resume_enabled():
             return False
-        pause = db.case_quota_pause(case_id)
+        pause = await asyncio.to_thread(db.case_quota_pause, case_id)
         if pause is None:
             return False
         paused_task_id = str(pause.get("paused_task_id") or "")
-        quota = self.quota_window_state(str(pause.get("provider") or "claude"))
+        quota = await asyncio.to_thread(
+            self.quota_window_state, str(pause.get("provider") or "claude")
+        )
         if quota.get("exhausted"):
             return True
         # THE RESET INSTANT ON THE REFUSAL IS THE SCHEDULE. The provider told us,
@@ -2540,7 +2549,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         )
         if not transient_provider_resume_enabled():
             return False
-        pause = db.transient_pause(case_id)
+        pause = await asyncio.to_thread(db.transient_pause, case_id)
         if pause is None:
             return False
         retry_at = _parse_iso_utc(pause.get("retry_at"))
@@ -3044,7 +3053,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             # Resume turn — a role-full Manager first assignment that RESUMES this Case
             # (get_case_brief + reconcile_waits), NOT a new objective. Delivering the turn
             # flips the new session BUSY→AWAITING_INPUT so the next tick wakes it normally.
-            resume = self._render_respawn_turn(case_id, objective)
+            resume = self._render_respawn_turn(case_id, objective, dead_session_id)
             try:
                 await self.submit_instruction(
                     description=resume,
@@ -3079,10 +3088,30 @@ class TaskOrchestrator(ITaskOrchestrator):
                 pass
             return False
 
-    def _render_respawn_turn(self, case_id: str, objective: str) -> str:
+    def _render_respawn_turn(
+        self, case_id: str, objective: str,
+        dead_session_id: Optional[str] = None,
+    ) -> str:
         """[A55] The role-full resume turn for a respawned Manager. Points it at the
         SAME Case to reconstruct (get_case_brief) and reconcile (reconcile_waits) — it
-        RESUMES a bounded Case, it does NOT open a new one."""
+        RESUMES a bounded Case, it does NOT open a new one.
+
+        This is a NEW session with an empty prompt cache, so it deliberately does
+        NOT re-pay the dead session's context (that is why fresh_manager is the
+        cheap mode). But the ledger records verdicts and dispatches, not the prior
+        Manager's own reasoning — so when the dead session is known, the new
+        Manager is told to read it via ``read_session_history`` if the brief
+        leaves a gap, catching up on what was actually done/attempted without
+        inheriting the whole fat context."""
+        history_hint = ""
+        if dead_session_id:
+            history_hint = (
+                "If the Case brief leaves the prior Manager's intent or in-flight "
+                f"reasoning unclear, call read_session_history(session_id=\"{dead_session_id}\") "
+                "to read the previous Manager's own conversation (what it decided, "
+                "dispatched, and had not yet finished) — a bounded, read-only catch-up "
+                "that does NOT re-load that session's context into yours. "
+            )
         return (
             "[respawn] You are resuming an EXISTING Case whose prior Manager session "
             f"crashed/was lost. Case: {case_id}. Objective (unchanged, do NOT re-open "
@@ -3090,9 +3119,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             "FIRST call get_case(case_id) / read your Case brief to reconstruct the full "
             "working state (dispatched workers, latest verdicts, open/ready waits, rounds "
             "used) from the durable record — your in-process memory is empty. Then call "
-            "reconcile_waits to re-establish your outstanding obligations. Review any "
-            "finished-but-unreviewed worker deliveries IN ORDER (relevance gate before "
-            "rigor gate), then dispatch the next task / wait on remaining workers / "
+            "reconcile_waits to re-establish your outstanding obligations. "
+            f"{history_hint}"
+            "Review any finished-but-unreviewed worker deliveries IN ORDER (relevance gate "
+            "before rigor gate), then dispatch the next task / wait on remaining workers / "
             "close the Case if its completion_criteria are met. Do NOT open_case a new "
             "objective — this is a continuation of the SAME bounded Case. This turn was "
             "delivered autonomously by the harness after a crash-respawn."
