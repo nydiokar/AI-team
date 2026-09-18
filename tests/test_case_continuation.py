@@ -149,9 +149,9 @@ class _FakeOrch:
             self, case_id, actor=actor, reason=reason,
         )
 
-    async def sweep_orphaned_cases(self, *, limit=200, dry_run=False, reason="manager_session_unavailable"):
+    async def sweep_orphaned_cases(self, *, limit=200, dry_run=False, reason="manager_session_unavailable", close_terminal_orphans=True):
         return await TaskOrchestrator.sweep_orphaned_cases(
-            self, limit=limit, dry_run=dry_run, reason=reason,
+            self, limit=limit, dry_run=dry_run, reason=reason, close_terminal_orphans=close_terminal_orphans,
         )
 
     async def set_case_state(self, case_id, *, state, actor="operator", reason="operator_state_change"):
