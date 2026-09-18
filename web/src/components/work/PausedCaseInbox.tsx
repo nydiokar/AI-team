@@ -8,9 +8,14 @@
  *
  * Read from the ONE existing pending-approvals endpoint (no new backend, no
  * per-case fanout): the Case-level `case_resume` rows carry their case id,
- * objective excerpt and cost estimate in the approval payload. Deciding here is
- * the same durable resolve the Case panel uses — approving is what RUNS the
- * resume.
+ * objective excerpt and cost estimate in the approval payload.
+ *
+ * This is a NOTICE + router, not a one-click resume. Resuming spends real money
+ * and the two modes cost very differently (in-place re-writes the whole prompt
+ * cache; fresh Manager rebuilds cheap from the ledger), so the actual decision —
+ * WHICH mode — belongs on the Case panel where both are shown with their cost.
+ * Here the operator can only dismiss ("Later") or open the panel to choose;
+ * there is deliberately no button that picks a mode for them.
  */
 import { Link } from "react-router-dom";
 import { PlayCircle } from "lucide-react";
@@ -85,15 +90,8 @@ export function PausedCaseInbox() {
                 >
                   Later
                 </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={resolve.isPending}
-                  onClick={() =>
-                    resolve.mutate({ approvalId: item.id, decision: "approved" })
-                  }
-                >
-                  Resume
+                <Button asChild variant="primary" size="sm">
+                  <Link to={`/work/${item.payload.case_id}`}>Choose how →</Link>
                 </Button>
               </div>
             </div>
