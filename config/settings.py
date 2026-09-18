@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional
 # explicit, that file is authoritative for these keys: commented/deleted keys
 # clear stale supervisor environment values instead of silently reusing them.
 _MANAGED_ENV_KEYS = {
+    "APP_METRICS_ENABLED",
     "CLAUDE_ALLOWED_ROOT",
     "CLAUDE_BASE_CWD",
     "CLAUDE_DEFAULT_MODEL",
