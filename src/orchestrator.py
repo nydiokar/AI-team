@@ -145,6 +145,20 @@ _TRANSIENT_FAILED_PROMPT_CAP: int = 16_000
 CASE_RESPAWN_APPROVAL_ACTION = "case_manager_respawn"
 CASE_RESUME_APPROVAL_ACTION = "case_resume"
 
+
+def _case_approval_expiry() -> str:
+    """ISO deadline after which an unactioned Case-level proposal (respawn/resume)
+    auto-expires instead of wedging the Case forever. Bounded by
+    ``CASE_APPROVAL_TTL_SEC`` (default 7 days) — long enough for an operator who is
+    away, short enough that a forgotten proposal cannot block a close indefinitely.
+    Module-level (not a method) so duck-typed orchestrator fakes need not stub it."""
+    ttl = 604800
+    try:
+        ttl = max(3600, int(os.getenv("CASE_APPROVAL_TTL_SEC", "") or ttl))
+    except (TypeError, ValueError):
+        pass
+    return (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat()
+
 CACHE_HEARTBEAT_PROMPT = (
     "[cache-heartbeat]\n"
     "The gateway is waking this session only to keep the Claude Code prompt cache warm\n"
@@ -1806,6 +1820,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             db, on_approve=self._on_case_approval_resolved,
         )
 
+
     async def _on_case_approval_resolved(self, row: Dict[str, Any]) -> None:
         """ApprovalService on_approve callback: the operator's decision is what
         RUNS the gated Case action (the service is a durable queue, not a blocked
@@ -2520,6 +2535,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             result = self.approval_service.request(
                 action=CASE_RESUME_APPROVAL_ACTION, risk="medium", reversible=True,
                 requested_by="system", case_id=case_id,
+                expires_at=_case_approval_expiry(),
                 payload={
                     "case_id": case_id,
                     "paused_task_id": paused_task_id,
@@ -2978,7 +2994,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 pass
             result = self.approval_service.request(
                 action=action, risk="medium", reversible=True, requested_by="system",
-                case_id=case_id,
+                case_id=case_id, expires_at=_case_approval_expiry(),
                 payload={
                     "case_id": case_id, "generation": generation,
                     "dead_session_id": dead_session_id, "cause": cause,
@@ -3370,6 +3386,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         # Manager's own-turn attach is created_by='system'; the root task is
         # role='root_task') — so filter on created_by to target only workers.
         # Best-effort; an already-cancelled/absent task returns False ⇒ idempotent.
+        # Cancel the in-flight WORKER tasks joined to this Case. A dispatched worker
+        # task is linked entity_type='task', role='task', created_by='manager' (the
+        # Manager's own-turn attach is created_by='system'; the root task is
+        # role='root_task') — so filter on created_by to target only workers.
+        # Best-effort; an already-cancelled/absent task returns False ⇒ idempotent.
         cancelled: List[str] = []
         try:
             for link in db.list_flow_links(
@@ -3382,6 +3403,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                     cancelled.append(tid)
         except Exception as e:
             logger.warning("event=interrupt_case_cancel_failed case=%s err=%s", case_id, e)
+
+        # A killed Case must not keep a dangling proposal that would later block a
+        # close ("unresolved required approval"). Cancel any pending approvals now;
+        # idempotent (no-op when there are none).
+        try:
+            db.cancel_case_pending_approvals(case_id, resolved_by=actor)
+        except Exception as e:
+            logger.warning("event=interrupt_case_approval_cancel_failed case=%s err=%s", case_id, e)
 
         # Mark blocked (resumable) — a follow-up turn can re-enter the Case.
         if status != "blocked":
@@ -3466,15 +3495,25 @@ class TaskOrchestrator(ITaskOrchestrator):
         limit: int = 200,
         dry_run: bool = False,
         reason: str = "manager_session_unavailable",
+        close_terminal_orphans: bool = True,
     ) -> Dict[str, Any]:
         """Operator cleanup for open Cases that have no active Manager session.
 
-        ``close_case`` means "done" and is criteria-gated, so an orphaned Case
-        must not be force-closed. The honest cleanup is the existing operator
-        interrupt path: mark it ``blocked`` (resumable), cancel any in-flight
-        worker tasks, and leave an audit event explaining why it left the active
-        set. Read/scan is bounded by ``limit``; writes only happen when
-        ``dry_run`` is false.
+        Two dispositions, decided by whether the Manager can still come back:
+          * **Terminal orphan** — the Manager session is CLOSED/CANCELLED or its
+            link/session is gone. There is no agent left to meet the completion
+            criteria or act on a proposal, so leaving it 'open' is a permanent lie
+            and it just piles up in the Wake-Dispatcher's scan. When
+            ``close_terminal_orphans`` (default True) it is **force-closed**
+            (outcome 'cancelled'): pending approvals cancelled, criteria/rework
+            waived, in-flight worker tasks cancelled.
+          * **Resumable** — the Manager is PINNED_NODE_OFFLINE (the node may
+            return). Kept on the honest interrupt path: marked ``blocked``
+            (resumable), workers cancelled, audit event.
+
+        Also enforces the approval TTL (``expire_stale_approvals``) so an ignored
+        proposal cannot keep wedging closes. Read/scan bounded by ``limit``; writes
+        only happen when ``dry_run`` is false.
         """
         from src.control.db import get_db
 
@@ -3487,14 +3526,26 @@ class TaskOrchestrator(ITaskOrchestrator):
         if not cleanup_reason:
             cleanup_reason = "manager_session_unavailable"
 
+        expired_approvals = 0
+        if not dry_run:
+            try:
+                expired_approvals = db.expire_stale_approvals()
+            except Exception as e:
+                logger.warning("event=sweep_expire_approvals_failed err=%s", e)
+
         candidates: List[Dict[str, Any]] = []
         cleaned: List[Dict[str, Any]] = []
         skipped: int = 0
-        inactive_statuses = {
+        # A Manager in one of these is GONE for good ⇒ the Case is a terminal orphan.
+        # PINNED_NODE_OFFLINE is deliberately NOT here: that node may return, so the
+        # Case stays resumable (interrupt→blocked), never force-closed.
+        terminal_statuses = {
             SessionStatus.CLOSED.value,
             SessionStatus.CANCELLED.value,
-            SessionStatus.PINNED_NODE_OFFLINE.value,
         }
+        # PINNED_NODE_OFFLINE is inactive-but-resumable (the node may return), so it
+        # is an orphan candidate but is interrupted→blocked, never force-closed.
+        inactive_statuses = terminal_statuses | {SessionStatus.PINNED_NODE_OFFLINE.value}
 
         for row in db.list_open_cases(limit=scan_limit):
             case_id = str(row.get("flow_run_id") or "").strip()
@@ -3502,9 +3553,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                 skipped += 1
                 continue
             status = str(row.get("status") or "").strip().lower()
-            if status == "blocked":
-                skipped += 1
-                continue
 
             manager_session_id = db.case_manager_session_id(case_id)
             orphan_reason: Optional[str] = None
@@ -3529,21 +3577,53 @@ class TaskOrchestrator(ITaskOrchestrator):
                 skipped += 1
                 continue
 
+            # Terminal = the Manager session EXISTS and is CLOSED/CANCELLED — gone
+            # for good. A missing link/session is left on the conservative interrupt
+            # path (could be a transient/malformed link); pinned-offline is resumable.
+            is_terminal_orphan = manager_status in terminal_statuses
+            disposition = (
+                "force_close"
+                if (is_terminal_orphan and close_terminal_orphans)
+                else "interrupt"
+            )
+            # A resumable Case already 'blocked' needs no further action this sweep.
+            if disposition == "interrupt" and status == "blocked":
+                skipped += 1
+                continue
+
             candidate = {
                 "case_id": case_id,
                 "manager_session_id": manager_session_id,
                 "manager_status": manager_status,
                 "reason": orphan_reason,
+                "disposition": disposition,
             }
             candidates.append(candidate)
             if dry_run:
                 continue
 
-            result = await self.interrupt_case(
-                case_id,
-                actor="operator",
-                reason=cleanup_reason,
-            )
+            if disposition == "force_close":
+                # Cancel any in-flight worker tasks first (best-effort), then force
+                # the criteria-gated close: no agent remains to satisfy the gates.
+                try:
+                    for link in db.list_flow_links(
+                        flow_run_id=case_id, entity_type="task", role="task",
+                    ):
+                        if str(link.get("created_by") or "") != "manager":
+                            continue
+                        tid = str(link.get("entity_id") or "").strip()
+                        if tid:
+                            self.cancel_task(tid)
+                except Exception as e:
+                    logger.warning("event=sweep_worker_cancel_failed case=%s err=%s", case_id, e)
+                result = await self.close_case(
+                    case_id, outcome="cancelled", actor="operator",
+                    force=True,
+                )
+            else:
+                result = await self.interrupt_case(
+                    case_id, actor="operator", reason=cleanup_reason,
+                )
             cleaned.append({**candidate, "result": result})
 
         return {
@@ -3553,6 +3633,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             "candidates": candidates,
             "cleaned": cleaned,
             "skipped": skipped,
+            "expired_approvals": expired_approvals,
         }
 
     # ===========================================================================
@@ -5230,6 +5311,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         continuation_plan: Optional[str] = None,
         exhaustion_attestation: Optional[str] = None,
         close_worker_sessions: bool = False,
+        resolve_pending_approvals: bool = False,
+        force: bool = False,
     ) -> Dict[str, Any]:
         """[A37] Orchestrator seam over ``db.close_case`` — authoritative closure.
 
@@ -5300,6 +5383,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             closed = db.close_case(
                 flow_run_id, outcome=outcome, actor=actor,
                 criteria_reconciliation=criteria_reconciliation,
+                resolve_pending_approvals=resolve_pending_approvals,
+                force=force,
             )
         except CaseCloseBlocked as e:
             return {"ok": False, "closed": False, "reason": e.reason}

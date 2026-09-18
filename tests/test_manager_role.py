@@ -374,9 +374,11 @@ def test_api_close_case_returns_result_dict():
     calls = {}
 
     def _close(case_id, *, outcome="closed", actor="operator", criteria_reconciliation=None,
-               continuation_plan=None, exhaustion_attestation=None):
+               continuation_plan=None, exhaustion_attestation=None,
+               resolve_pending_approvals=False, force=False):
         calls.update(case_id=case_id, actor=actor, outcome=outcome, continuation_plan=continuation_plan,
-                     exhaustion_attestation=exhaustion_attestation)
+                     exhaustion_attestation=exhaustion_attestation,
+                     resolve_pending_approvals=resolve_pending_approvals)
         return {"ok": False, "closed": False, "reason": "case has 1 open child flow(s)"}
 
     orch = types.SimpleNamespace(close_case=_close)

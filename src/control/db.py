@@ -2928,15 +2928,21 @@ class MeshDB:
         False so a lookup glitch never falsely blocks a close (the caller's other
         guards still apply)."""
         try:
+            # An approval whose expires_at has passed no longer blocks a close: an
+            # ignored proposal must not wedge a Case forever (the expires_at column
+            # existed but nothing enforced it). NULL expiry still blocks (a genuine
+            # open-ended gate); expire_stale_approvals() flips past-due rows to
+            # 'expired' so the queue is honest, not just silently ignored here.
             row = self._conn().execute(
                 """
                 SELECT 1 FROM flow_links fl
                 JOIN approvals a ON a.id = fl.entity_id
                 WHERE fl.flow_run_id = ? AND fl.entity_type = 'approval'
                   AND a.status = 'pending'
+                  AND (a.expires_at IS NULL OR a.expires_at > ?)
                 LIMIT 1
                 """,
-                (flow_run_id,),
+                (flow_run_id, _now()),
             ).fetchone()
             return row is not None
         except Exception as e:
@@ -2946,6 +2952,81 @@ class MeshDB:
             )
         return False
 
+    def cancel_case_pending_approvals(
+        self, flow_run_id: str, *, resolved_by: str = "case_closed",
+    ) -> int:
+        """Cancel every still-pending approval linked to a Case. Returns the count.
+
+        An explicit operator close/interrupt of a Case makes any dangling proposal
+        (respawn/resume) moot — cancelling them is the honest resolution, and it is
+        what unwedges a Case whose ignored proposal would otherwise block the
+        criteria-gated close. Terminal transition only (pending → 'cancelled'); an
+        already-resolved approval is untouched. Appends one audit event per Case."""
+        now = _now()
+        with self._write() as conn:
+            ids = [
+                str(r["entity_id"]) for r in conn.execute(
+                    """
+                    SELECT fl.entity_id FROM flow_links fl
+                    JOIN approvals a ON a.id = fl.entity_id
+                    WHERE fl.flow_run_id = ? AND fl.entity_type = 'approval'
+                      AND a.status = 'pending'
+                    """,
+                    (flow_run_id,),
+                ).fetchall()
+            ]
+            if not ids:
+                return 0
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(
+                f"""
+                UPDATE approvals
+                SET status = 'cancelled', resolved_by = ?, resolved_at = ?
+                WHERE id IN ({placeholders}) AND status = 'pending'
+                """,
+                (resolved_by, now, *ids),
+            )
+        self.append_flow_event(
+            flow_run_id, "approval.cancelled", resolved_by,
+            entity_type="approval", to_state="cancelled",
+            payload={"cancelled_ids": ids, "reason": "case_terminal"},
+        )
+        return len(ids)
+
+    def expire_stale_approvals(self, *, limit: int = 500) -> int:
+        """Flip past-``expires_at`` pending approvals to 'expired'. Returns the count.
+
+        Enforces the approval TTL the schema always carried but nothing swept: an
+        ignored proposal auto-resolves instead of blocking forever. Bounded (SQLite
+        has no UPDATE ... LIMIT), NULL-expiry rows are never touched (open-ended by
+        design). Idempotent; safe to call on any cadence."""
+        now = _now()
+        capped = max(1, min(int(limit or 500), 1000))
+        with self._write() as conn:
+            ids = [
+                str(r["id"]) for r in conn.execute(
+                    """
+                    SELECT id FROM approvals
+                    WHERE status = 'pending'
+                      AND expires_at IS NOT NULL AND expires_at <= ?
+                    ORDER BY expires_at ASC LIMIT ?
+                    """,
+                    (now, capped),
+                ).fetchall()
+            ]
+            if not ids:
+                return 0
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(
+                f"""
+                UPDATE approvals
+                SET status = 'expired', resolved_by = 'system_expiry', resolved_at = ?
+                WHERE id IN ({placeholders}) AND status = 'pending'
+                """,
+                (now, *ids),
+            )
+        return len(ids)
+
     def close_case(
         self,
         flow_run_id: str,
@@ -2953,6 +3034,8 @@ class MeshDB:
         outcome: str = "closed",
         actor: str = "operator",
         criteria_reconciliation: Optional[List[Dict[str, Any]]] = None,
+        resolve_pending_approvals: bool = False,
+        force: bool = False,
     ) -> bool:
         """[A37] Authoritatively close a Case — the ONLY status→terminal write path.
 
@@ -2988,22 +3071,33 @@ class MeshDB:
             raise CaseCloseBlocked(
                 f"case has {len(open_children)} open child flow(s)"
             )
+        # An explicit operator close (or a force/orphan cleanup) supersedes a
+        # dangling proposal: cancel the Case's pending approvals so the guard below
+        # passes, instead of refusing on a decision nobody is going to make. The
+        # guard still blocks a NON-operator (auto/Manager) close on a live approval.
+        if resolve_pending_approvals or force:
+            self.cancel_case_pending_approvals(flow_run_id, resolved_by=actor)
         if self._case_has_unresolved_approval(flow_run_id):
             raise CaseCloseBlocked("case has an unresolved required approval")
 
-        unresolved = _unreconciled_criteria(
-            row.get("completion_criteria"), criteria_reconciliation,
-        )
-        if unresolved:
-            raise CaseCloseBlocked(
-                f"completion_criteria not reconciled: {unresolved}"
+        # force = orphan cleanup (Manager session is terminal): the completion
+        # criteria and any rework verdict are moot — there is no agent left to meet
+        # or supersede them — so a forced close waives both. A normal close still
+        # honours every gate.
+        if not force:
+            unresolved = _unreconciled_criteria(
+                row.get("completion_criteria"), criteria_reconciliation,
             )
+            if unresolved:
+                raise CaseCloseBlocked(
+                    f"completion_criteria not reconciled: {unresolved}"
+                )
 
         # [M3.2] Unresolved-rework gate (flag-gated ⇒ OFF is byte-identical). The
         # LATEST review.* event is authoritative: if it is 'review.rework_requested'
         # it has NOT been superseded by a later accept/waive (else that later event
         # would be the latest), so the Case cannot honestly close.
-        if review_emitter_enabled():
+        if not force and review_emitter_enabled():
             review_events = [
                 e for e in self.list_flow_events(flow_run_id)
                 if e.get("event_type") in _REVIEW_EVENT_TYPES
