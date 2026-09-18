@@ -1233,14 +1233,44 @@ class TaskOrchestrator(ITaskOrchestrator):
         if continuation_enabled:
             # Read-only DB scans run in a worker thread so the Wake-Dispatcher never
             # blocks the shared event loop (see _continue_case_once for the rationale).
-            for case in await asyncio.to_thread(db.list_open_cases):
+            cases = await asyncio.to_thread(db.list_open_cases)
+            case_ids = [str(c.get("flow_run_id") or "") for c in cases]
+            case_ids = [c for c in case_ids if c]
+            # [event-driven] One batched read of every open Case's newest flow_event
+            # id. A Case whose id has not advanced since we last found it idle cannot
+            # have changed (compute_continuation_tick is a pure function of the event
+            # log), so _continue_case_once skips its 500-row read + recompute. This
+            # turns the common "nothing happened" tick from O(cases x events) into one
+            # aggregate query — the whole point of an event-driven loop.
+            max_event_ids: Dict[str, int] = {}
+            try:
+                max_event_ids = await asyncio.to_thread(db.max_flow_event_ids, case_ids)
+            except Exception as e:
+                logger.debug("event=wake_dispatcher_maxid_failed err=%s", e)
+            # Provider-global quota state is identical for every Case this tick;
+            # compute it at most once per provider instead of once per Case.
+            # Published on self so _handle_quota_paused_case reads it without a
+            # signature change (test doubles override that method).
+            self._quota_tick_cache = {}
+            skip_cache = getattr(self, "_continuation_skip_cache", None)
+            if skip_cache is None:
+                skip_cache = self._continuation_skip_cache = {}
+            for case in cases:
                 case_id = str(case.get("flow_run_id") or "")
                 if not case_id:
                     continue
                 try:
-                    delivered += await self._continue_case_once(db, case_id)
+                    delivered += await self._continue_case_once(
+                        db, case_id, case_row=case,
+                        cur_max_event_id=max_event_ids.get(case_id),
+                    )
                 except Exception as e:
                     logger.debug("event=wake_dispatcher_case_failed case=%s err=%s", case_id, e)
+            # Prune the skip-cache to currently-open Cases so it cannot grow without bound.
+            if skip_cache:
+                self._continuation_skip_cache = {
+                    k: v for k, v in skip_cache.items() if k in set(case_ids)
+                }
         if heartbeat_active:
             try:
                 delivered += await self._process_due_cache_heartbeats(db)
@@ -1535,11 +1565,19 @@ class TaskOrchestrator(ITaskOrchestrator):
             {"heartbeat_id": heartbeat_id, "session_id": session_id, "task_id": wake_task_id, "success": success},
         )
 
-    async def _continue_case_once(self, db, case_id: str) -> int:
+    async def _continue_case_once(
+        self, db, case_id: str, *,
+        case_row: Optional[Dict[str, Any]] = None,
+        cur_max_event_id: Optional[int] = None,
+    ) -> int:
         """Evaluate one Case: if a wait-group is satisfied, schedule + atomically
         claim the deterministic continuation row and deliver ONE coalesced wake
         turn to the bound live+idle Manager session. Returns 1 iff a turn was
-        delivered, else 0. Enforces the round cap (escalates on exhaustion)."""
+        delivered, else 0. Enforces the round cap (escalates on exhaustion).
+
+        ``case_row`` / ``cur_max_event_id`` are per-tick hints supplied by the
+        Wake-Dispatcher to avoid redundant DB work; both are optional so a direct
+        caller (e.g. a test) still gets correct behaviour."""
         from src.control.db import (
             CONTINUATION_MACHINE_SENTINEL, CONTINUATION_ACTION, continuation_task_id,
             _event_payload,
@@ -1549,11 +1587,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         # operator re-entry. Without this, cancelling in-flight workers would be
         # undone by the next satisfied-wait tick re-driving the very Case the
         # operator killed. ('blocked' has exactly one writer: interrupt_case.)
-        # These synchronous SQLite reads run once per open Case every tick. Run them
-        # in a worker thread (MeshDB reads are fully concurrent, check_same_thread=False)
-        # so a slow read on the 190MB mesh.db never stalls the gateway event loop — a
-        # proven cause of `embedded_event_loop_stalled` + wide request timeouts.
-        _row = await asyncio.to_thread(db.get_flow_run, case_id)
+        # list_open_cases already carries the status row, so reuse it instead of a
+        # redundant per-Case get_flow_run read; fall back to a read for direct callers.
+        _row = case_row
+        if _row is None:
+            _row = await asyncio.to_thread(db.get_flow_run, case_id)
         if _row is not None and str(_row.get("status") or "").strip().lower() == "blocked":
             return 0
         # [quota-resume] A quota-PAUSED Case is not a normal Case this tick: while
@@ -1571,6 +1609,18 @@ class TaskOrchestrator(ITaskOrchestrator):
         # before satisfaction for the same reason the quota check is.
         if await self._handle_transient_paused_case(db, case_id):
             return 0
+        # [event-driven] compute_continuation_tick is a pure function of the Case's
+        # flow_events. If no new event has been appended since we last found this Case
+        # idle (nothing satisfied, nothing to drain), the result is provably identical
+        # — skip the 500-row read + recompute. The pause checks above still run every
+        # tick because they are time-based (a backoff can elapse with no new event).
+        skip_cache = getattr(self, "_continuation_skip_cache", None)
+        if (
+            skip_cache is not None
+            and cur_max_event_id is not None
+            and skip_cache.get(case_id) == cur_max_event_id
+        ):
+            return 0
         tick = await asyncio.to_thread(db.compute_continuation_tick, case_id)
         # [continuation-review-watermark] Retire one-shot groups the Manager already
         # drained by reviewing their members out-of-band (a tagged review.*, e.g.
@@ -1579,7 +1629,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         # needlessly re-armed on a Manager resume. Discharge the obligation with a
         # plain wait_resolved marker (NO paid turn, NO round consumed). Idempotent:
         # once appended, the group carries a wait_resolved and leaves retire_only.
-        for gid in tick.get("retire_only_groups", []) or []:
+        retired_groups = tick.get("retire_only_groups", []) or []
+        for gid in retired_groups:
             db.append_flow_event(
                 case_id, "worker.wait_resolved", "system",
                 entity_type="wait_group", entity_id=gid,
@@ -1591,7 +1642,17 @@ class TaskOrchestrator(ITaskOrchestrator):
                 {"case_id": case_id, "wait_group_id": gid},
             )
         if not tick.get("satisfied"):
+            # [event-driven] Record that this Case is idle at this event id so the
+            # next tick can skip the recompute until a new event lands. Only when we
+            # wrote nothing this tick (draining a retire_only group appends events,
+            # so cur_max_event_id is already stale — let it recompute once more).
+            if skip_cache is not None and cur_max_event_id is not None and not retired_groups:
+                skip_cache[case_id] = cur_max_event_id
             return 0
+        # A satisfied Case is about to act (dispatch a wake); never let a stale idle
+        # marker suppress it. The action appends events, so it self-clears anyway.
+        if skip_cache is not None:
+            skip_cache.pop(case_id, None)
 
         generation = int(tick["generation_next"])
         cap = db.case_round_cap(case_id)
@@ -2353,9 +2414,17 @@ class TaskOrchestrator(ITaskOrchestrator):
         if pause is None:
             return False
         paused_task_id = str(pause.get("paused_task_id") or "")
-        quota = await asyncio.to_thread(
-            self.quota_window_state, str(pause.get("provider") or "claude")
-        )
+        # Quota state is provider-global — identical for every Case in a given tick.
+        # Reuse a per-tick cache so N paused Cases trigger at most ONE snapshot read
+        # per provider instead of N (latest_snapshots() is a real DB scan).
+        provider = str(pause.get("provider") or "claude")
+        quota_state_cache = getattr(self, "_quota_tick_cache", None)
+        if quota_state_cache is not None and provider in quota_state_cache:
+            quota = quota_state_cache[provider]
+        else:
+            quota = await asyncio.to_thread(self.quota_window_state, provider)
+            if quota_state_cache is not None:
+                quota_state_cache[provider] = quota
         if quota.get("exhausted"):
             return True
         # THE RESET INSTANT ON THE REFUSAL IS THE SCHEDULE. The provider told us,
