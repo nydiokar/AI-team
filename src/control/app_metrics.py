@@ -26,7 +26,7 @@ from collections import deque
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Deque, Optional
+from typing import Deque, Literal, Optional, Sequence
 
 from pydantic import BaseModel
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -335,6 +335,91 @@ def _drain_routes() -> dict[RouteKey, list[float]]:
     with _lock:
         drained, _routes = _routes, {}
     return drained
+
+
+# --------------------------------------------------------------------------- health verdict
+
+_HEALTH_WINDOW: int = 3  # rollups (~3 min): smooths blips so the banner doesn't flap
+
+
+class HealthVerdict(BaseModel):
+    status: Literal["ok", "warn", "bad"]
+    cause: Literal["ok", "no_data", "disk", "memory", "thermal", "cpu", "event_loop", "slow_routes"]
+    headline: str
+    detail: str
+
+
+def _level(value: float, warn: float, bad: float) -> int:
+    return 2 if value >= bad else 1 if value >= warn else 0
+
+
+def verdict(rollups: Sequence[Rollup]) -> HealthVerdict:
+    """Answer "what is happening?" from the last few rollups — host first, then app.
+
+    A host resource under pressure is reported as THE cause (the app is a victim of it);
+    only when the host is healthy do we blame the gateway loop or a slow handler. Network
+    is not measured: "slow endpoint, healthy host and loop" is the residual bucket.
+    """
+    win: list[Rollup] = list(rollups)[-_HEALTH_WINDOW:]
+    if not win:
+        return HealthVerdict(status="ok", cause="no_data", headline="", detail="")
+
+    def avg(key: str) -> float:
+        vals = [r.host_avg.get(key, 0.0) for r in win]
+        return sum(vals) / len(vals)
+
+    def peak(key: str) -> float:
+        return max(r.host_max.get(key, 0.0) for r in win)
+
+    slow: int = sum(r.req_slow for r in win)
+    lag_p95: float = max(r.lag_p95_ms for r in win)
+    victim: str = f"; {slow} slow requests (>1 s)" if slow else ""
+    mem_free: float = min(r.host_avg.get("mem_avail_mb", 1e9) for r in win)
+
+    host: list[tuple[int, str, str, str]] = [
+        (max(_level(avg("disk_util_pct"), 60, 90), _level(avg("cpu_iowait_pct"), 25, 50)), "disk",
+         "Host disk is saturated",
+         f"disk {avg('disk_util_pct'):.0f}% busy, iowait {avg('cpu_iowait_pct'):.0f}%, "
+         f"{avg('disk_await_ms'):.0f} ms/op{victim}"),
+        (max(_level(-mem_free, -600, -300), _level(avg("swap_in_pages_s"), 100, 1000)), "memory",
+         "Host is low on memory",
+         f"{mem_free:.0f} MB available, swapping in {avg('swap_in_pages_s'):.0f} pages/s{victim}"),
+        (_level(peak("temp_c"), 80, 85), "thermal", "Host is running hot (throttling likely)",
+         f"SoC {peak('temp_c'):.0f} °C{victim}"),
+        (_level(avg("cpu_busy_pct"), 75, 90), "cpu", "Host CPU is saturated",
+         f"CPU {avg('cpu_busy_pct'):.0f}% busy{victim}"),
+    ]
+    worst = max(host, key=lambda h: h[0])  # max() keeps the first on ties → disk > memory > …
+    if worst[0] > 0:
+        return HealthVerdict(status="bad" if worst[0] == 2 else "warn", cause=worst[1],  # type: ignore[arg-type]
+                             headline=worst[2], detail=worst[3])
+
+    loop_level: int = _level(lag_p95, 250, 1000)
+    slow_level: int = _level(slow, 5, 15)
+    if loop_level > 0 and loop_level >= slow_level:
+        return HealthVerdict(
+            status="bad" if loop_level == 2 else "warn", cause="event_loop",
+            headline="Gateway event loop is stalling",
+            detail=f"loop lag p95 {lag_p95:.0f} ms while the host is healthy — app-side{victim}")
+    if slow_level > 0:
+        tally: dict[tuple[str, str, str], int] = {}
+        p95: dict[tuple[str, str, str], float] = {}
+        for r in win:
+            for x in r.routes:
+                k = (x.component, x.method, x.route)
+                tally[k] = tally.get(k, 0) + x.slow
+                p95[k] = max(p95.get(k, 0.0), x.p95_ms)
+        top = max(tally, key=lambda k: tally[k]) if tally else None
+        worst_route = f"; worst: {top[1]} {top[2]} (p95 {p95[top]:.0f} ms)" if top else ""
+        return HealthVerdict(
+            status="bad" if slow_level == 2 else "warn", cause="slow_routes",
+            headline="Slow endpoints while host and loop are healthy",
+            detail=f"{slow} requests >1 s in ~{len(win)} min{worst_route} — slow handler/DB or the network path")
+    return HealthVerdict(status="ok", cause="ok", headline="", detail="")
+
+
+def current_verdict() -> HealthVerdict:
+    return verdict(list(_ring))
 
 
 # --------------------------------------------------------------------------- sampler task

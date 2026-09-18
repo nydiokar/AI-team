@@ -7,12 +7,14 @@ import type { ReactNode } from "react";
 import { BottomNavigation } from "./BottomNavigation";
 import { ConnectionBanner } from "./ConnectionBanner";
 import { SystemAlertBanner } from "./SystemAlertBanner";
+import { HostHealthBanner } from "./HostHealthBanner";
 
 export function MobileAppShell({ children }: { children: ReactNode }) {
   return (
     <div className="desktop-frame mx-auto flex h-full max-w-[480px] flex-col bg-base">
       <ConnectionBanner />
       <SystemAlertBanner />
+      <HostHealthBanner />
       <main className="flex-1 overflow-y-auto overscroll-contain">{children}</main>
       <BottomNavigation />
     </div>
