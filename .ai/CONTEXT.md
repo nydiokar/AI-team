@@ -80,6 +80,7 @@ sampling → `GET /api/metrics/system` + `logs/metrics.ndjson` (1 rollup/min, �
 **DEPLOY PENDING (operator decides):** `cd web && pnpm build` (web/dist is gitignored; needed for `#token=` pairing)
 then `pm2 restart ai-team-gateway`. After it every device sees the TokenGate once. Optional: rotate DASHBOARD_TOKEN
 (it was served to every fetcher until now). Deferred: task-server loop lag (own thread) is not probed; no browser-side timing.
+**#153** adds `GET /api/metrics/health` (verdict: host disk/memory/thermal/cpu outranks app event-loop/slow-route) + `HostHealthBanner` (only when not ok). `APP_METRICS_ENABLED` registered in the orchestrator flag list + `_MANAGED_ENV_KEYS` (#152); `.env.example` not checked.
 
 **2026-09-18 — Persistent slowness root-caused to the Wake-Dispatcher polling the DB on the
 event loop; 2 PRs merged (#145, #147). NOT yet deployed.**
