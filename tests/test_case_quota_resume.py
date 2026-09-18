@@ -233,8 +233,10 @@ class _Orch:
     def _render_quota_resume_turn(self, case_id, row):
         return TaskOrchestrator._render_quota_resume_turn(self, case_id, row)
 
-    def _render_respawn_turn(self, case_id, objective):
-        return TaskOrchestrator._render_respawn_turn(self, case_id, objective)
+    def _render_respawn_turn(self, case_id, objective, dead_session_id=None):
+        return TaskOrchestrator._render_respawn_turn(
+            self, case_id, objective, dead_session_id,
+        )
 
     def _render_wake_turn(self, case_id, presented):
         return TaskOrchestrator._render_wake_turn(self, case_id, presented)
@@ -854,7 +856,7 @@ def test_estimate_uses_the_observed_cache_write(tmp_path, monkeypatch):
     assert est["known"] is True
     assert est["cache_creation_tokens"] == 250_000
     assert est["usd"] > 0
-    assert est["basis"] == "max_recent_turn_cache_creation"
+    assert est["basis"] == "max_session_turn_cache_creation"
 
 
 def test_estimate_is_honest_when_unmeasurable(tmp_path, monkeypatch):
@@ -1268,6 +1270,62 @@ def test_mode_is_in_place_for_a_cold_but_small_session(tmp_path, monkeypatch):
     assert orch._recommended_resume_mode(
         "mgr-1", paused_at=_iso(_now() - timedelta(hours=4)),
     ) == "in_place"
+
+
+def _record_cache_write_seq(
+    db: MeshDB, session_id: str, writes: list[int],
+) -> None:
+    """Insert several turns (oldest→newest) each with its own cache write — the
+    real shape of a Manager session: one fat context load then small deltas."""
+    base = _now()
+    with db._write() as conn:
+        for i, cc in enumerate(writes):
+            stamp = _iso(base + timedelta(minutes=i))
+            tid = f"turn-{session_id}-{i}"
+            iid = f"inv-{session_id}-{i}"
+            conn.execute(
+                "INSERT INTO llm_turns (turn_id, session_id, task_id, observed_models, "
+                "final_status, timeout_status, metrics_json, coverage_json, data_quality_json, "
+                "projection_version, created_at, updated_at, ended_at) "
+                "VALUES (?, ?, ?, '[\"opus\"]', 'completed', 'none', '{}', '{}', '[]', 1, ?, ?, ?)",
+                (tid, session_id, f"task-{session_id}-{i}", stamp, stamp, stamp),
+            )
+            conn.execute(
+                "INSERT INTO llm_invocations (invocation_id, turn_id, attempt, spawn_reason, "
+                "action, node_id, backend, status, started_at, ended_at) "
+                "VALUES (?, ?, 1, 'initial', 'session_turn', '__local__', 'claude', 'completed', ?, ?)",
+                (iid, tid, stamp, stamp),
+            )
+            conn.execute(
+                "INSERT INTO llm_model_requests (model_request_id, invocation_id, turn_id, sequence, "
+                "model, work_category, input_token_semantics, usage_granularity, usage_coverage, "
+                "data_quality_json, input_tokens, output_tokens, cache_read_tokens, "
+                "cache_creation_tokens, is_duplicate) "
+                "VALUES (?, ?, ?, 0, 'opus', 'primary', 'excludes_cache', 'invocation_total', "
+                "'aggregate_only', '[]', 10, 10, 100, ?, 0)",
+                (f"req-{session_id}-{i}", iid, tid, cc),
+            )
+
+
+def test_mode_sees_the_fat_early_write_not_just_recent_deltas(tmp_path, monkeypatch):
+    """Live defect (session 7a88df677ed8): the bulk context load (220k) is on the
+    FIRST turn, then every later turn writes a small delta. A recent-N window saw
+    ~20k and wrongly recommended in_place, paying the 336k rewrite this seam
+    exists to avoid. The whole-session MAX must win."""
+    _flags(monkeypatch)
+    db = _mk_db(tmp_path, monkeypatch)
+    orch = _Orch(_FakeStore(_FakeSession("mgr-1")))
+    # Fat first turn, then many small deltas — the newest 5 are all small.
+    _record_cache_write_seq(
+        db, "mgr-1", [220_000, 26_000, 31_000, 11_000, 29_000, 17_000, 20_000],
+    )
+
+    est = orch.estimate_case_resume_cost("mgr-1")
+    assert est["cache_creation_tokens"] == 220_000
+
+    assert orch._recommended_resume_mode(
+        "mgr-1", paused_at=_iso(_now() - timedelta(hours=4)),
+    ) == "fresh_manager"
 
 
 def test_mode_is_fresh_manager_when_the_session_size_is_unknown(tmp_path, monkeypatch):
