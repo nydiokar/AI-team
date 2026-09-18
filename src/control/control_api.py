@@ -216,6 +216,10 @@ class CaseCloseBody(BaseModel):
     # earn advancement evidence (a second dispatch or a rework). Satisfies the
     # MANAGER_ADVANCEMENT_GATE close gate; ignored when the flag is OFF.
     exhaustion_attestation: Optional[str] = Field(default=None, max_length=8000)
+    # Operator escape hatch: cancel the Case's dangling pending approvals (an
+    # ignored respawn/resume proposal) so an explicit close is not wedged by
+    # "unresolved required approval". Default False ⇒ Manager/auto close unchanged.
+    resolve_pending_approvals: bool = False
 
 
 class CaseReviewBody(BaseModel):
@@ -295,13 +299,15 @@ class CaseInterruptBody(BaseModel):
 class CaseOrphanSweepBody(BaseModel):
     """Operator cleanup for open Cases whose Manager session is gone or inactive.
 
-    ``dry_run`` reports candidates without changing state. A real sweep marks
-    candidates blocked through the existing interrupt path; it does not close
-    them as complete.
+    ``dry_run`` reports candidates without changing state. A real sweep
+    force-closes TERMINAL orphans (Manager CLOSED/CANCELLED/gone) as 'cancelled'
+    when ``close_terminal_orphans`` (default True), and marks resumable ones
+    (pinned-node-offline) blocked through the interrupt path.
     """
     dry_run: bool = False
     limit: int = Field(default=200, ge=1, le=500)
     reason: Optional[str] = Field(default="manager_session_unavailable", max_length=64)
+    close_terminal_orphans: bool = True
 
 
 class CaseStateBody(BaseModel):
@@ -1816,6 +1822,7 @@ def build_control_api(orchestrator) -> FastAPI:
             criteria_reconciliation=body.criteria_reconciliation,
             continuation_plan=body.continuation_plan,
             exhaustion_attestation=body.exhaustion_attestation,
+            resolve_pending_approvals=body.resolve_pending_approvals,
         )
         return JSONResponse(result)
 
@@ -2029,6 +2036,7 @@ def build_control_api(orchestrator) -> FastAPI:
             limit=body.limit,
             dry_run=body.dry_run,
             reason=body.reason or "manager_session_unavailable",
+            close_terminal_orphans=body.close_terminal_orphans,
         )
         if not result.get("ok"):
             raise HTTPException(status_code=503, detail=result)
