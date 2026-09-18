@@ -38,8 +38,8 @@ class _StubOrchestrator:
         self.reconcile_calls.append((case_id, actor))
         return {"ok": True, "reconciled": {"resolved": []}, "rearmed": []}
 
-    async def sweep_orphaned_cases(self, *, limit=200, dry_run=False, reason="manager_session_unavailable"):
-        self.sweep_calls.append({"limit": limit, "dry_run": dry_run, "reason": reason})
+    async def sweep_orphaned_cases(self, *, limit=200, dry_run=False, reason="manager_session_unavailable", close_terminal_orphans=True):
+        self.sweep_calls.append({"limit": limit, "dry_run": dry_run, "reason": reason, "close_terminal_orphans": close_terminal_orphans})
         return {"ok": True, "dry_run": dry_run, "scanned": limit, "candidates": [], "cleaned": []}
 
     async def set_case_state(self, case_id, *, state, actor="operator", reason="operator_state_change"):
@@ -255,6 +255,7 @@ def test_orphan_sweep_delegates_to_orchestrator(client, orch):
         "limit": 7,
         "dry_run": True,
         "reason": "manual_cleanup",
+        "close_terminal_orphans": True,
     }]
 
 
