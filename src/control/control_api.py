@@ -2578,6 +2578,11 @@ def build_control_api(orchestrator) -> FastAPI:
         logs/metrics.ndjson."""
         return JSONResponse(app_metrics.snapshot(minutes))
 
+    @app.get("/api/metrics/health", dependencies=[Depends(_require_auth)])
+    def api_metrics_health() -> JSONResponse:
+        """Tiny 'what is happening' verdict (ok/warn/bad + cause) for the UI banner."""
+        return JSONResponse(app_metrics.current_verdict().model_dump())
+
     @app.get("/api/system-alerts", dependencies=[Depends(_require_auth)])
     def api_system_alerts(
         limit: int = Query(20, ge=1, le=100),

@@ -167,3 +167,78 @@ def test_endpoint_requires_auth_and_returns_ring(monkeypatch):
     body = r.json()
     assert body["count"] == 1 and body["rollup_seconds"] == 60
     assert c.get("/api/metrics/system?minutes=0", headers={"Authorization": "Bearer tok"}).status_code == 422
+
+
+# --------------------------------------------------------------------------- health verdict
+
+_HEALTHY = dict(cpu_busy_pct=10, cpu_iowait_pct=1, disk_util_pct=3, disk_await_ms=5,
+                mem_avail_mb=4000, swap_in_pages_s=0, temp_c=55)
+
+
+def _roll(host: dict | None = None, lag_p95: float = 5.0, slow: int = 0, routes=None) -> am.Rollup:
+    h = {**_HEALTHY, **(host or {})}
+    return am.Rollup(ts="t", window_s=60, lag_p95_ms=lag_p95, lag_max_ms=lag_p95, lag_over_100ms=0,
+                     req_total=50, req_slow=slow, req_5xx=0, host_avg=h, host_max=h,
+                     routes=routes or [])
+
+
+def test_verdict_healthy_and_no_data():
+    assert am.verdict([]).cause == "no_data" and am.verdict([]).status == "ok"
+    v = am.verdict([_roll(), _roll(), _roll()])
+    assert (v.status, v.cause) == ("ok", "ok")
+
+
+def test_verdict_names_saturated_disk_and_links_slow_requests():
+    v = am.verdict([_roll({"disk_util_pct": 97, "cpu_iowait_pct": 60, "disk_await_ms": 19}, slow=12)] * 3)
+    assert (v.status, v.cause) == ("bad", "disk")
+    assert "97% busy" in v.detail and "slow requests" in v.detail
+
+
+def test_verdict_disk_warn_from_iowait_alone():
+    v = am.verdict([_roll({"cpu_iowait_pct": 30})] * 3)
+    assert (v.status, v.cause) == ("warn", "disk")
+
+
+def test_verdict_memory_thermal_cpu():
+    assert am.verdict([_roll({"mem_avail_mb": 250})]).cause == "memory"
+    assert am.verdict([_roll({"swap_in_pages_s": 400})]).cause == "memory"
+    v = am.verdict([_roll({"temp_c": 86})])
+    assert (v.status, v.cause) == ("bad", "thermal")
+    assert am.verdict([_roll({"cpu_busy_pct": 95})]).cause == "cpu"
+
+
+def test_verdict_app_side_when_host_is_healthy():
+    v = am.verdict([_roll(lag_p95=1500)] * 3)
+    assert (v.status, v.cause) == ("bad", "event_loop") and "host is healthy" in v.detail
+    route = am.RouteRollup(component="gateway", method="GET", route="/api/sessions", n=30,
+                           p50_ms=100, p95_ms=4000, max_ms=9000, slow=9, err5xx=0)
+    v = am.verdict([_roll(slow=9, routes=[route])] * 3)
+    assert v.cause == "slow_routes" and "GET /api/sessions" in v.detail
+
+
+def test_verdict_host_cause_outranks_app_cause():
+    v = am.verdict([_roll({"disk_util_pct": 95}, lag_p95=2000, slow=20)] * 3)
+    assert v.cause == "disk"
+
+
+def test_verdict_only_uses_the_last_three_rollups():
+    bad = _roll({"disk_util_pct": 99})
+    assert am.verdict([bad, _roll(), _roll(), _roll()]).cause == "ok"
+
+
+def test_health_endpoint_requires_auth_and_reports_verdict(monkeypatch):
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
+    from src.services.session_service import SessionService
+    from src.services.session_store import SessionStore
+
+    class _Orch:
+        session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
+
+    c = TestClient(control_api.build_control_api(_Orch()))
+    assert c.get("/api/metrics/health").status_code == 403
+    h = {"Authorization": "Bearer tok"}
+    assert c.get("/api/metrics/health", headers=h).json()["cause"] == "no_data"
+    am._ring.extend([_roll({"disk_util_pct": 97})] * 3)
+    body = c.get("/api/metrics/health", headers=h).json()
+    assert body["status"] == "bad" and body["cause"] == "disk"
+    assert set(body) == {"status", "cause", "headline", "detail"}
