@@ -68,6 +68,19 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-09-18 (night) — Disk I/O proven as the slowness root; token-in-HTML removed; app metrics added. PRs #150 + #151 MERGED, NOT DEPLOYED.**
+Evidence: host is a Pi on a USB spinning disk (TOSHIBA MK3275GSX, ~90 IOPS ceiling) shared with the unrelated
+`sova` docker stack. `sova-backend` was crash-looping (23 restarts on 09-18, all exit 134 = V8 heap OOM), each
+cold start saturating the disk. Stopping it (23:42 EEST): load 8–9→~1, iowait 46–78%→~1%, `sda` util 97%→3–10%,
+>1s requests 51/h→0 (10-min window only — confirm with the new metrics). A second disk is planned by the operator.
+**#150** — `GET /` no longer injects `window.__DASHBOARD_TOKEN__` (any tailnet peer/crawler got the full API token;
+identity headers unusable: all nodes are tagged). Pair a device via `/#token=<token>` or the TokenGate; compare is
+constant-time. **#151** — `src/control/app_metrics.py`: route-template request histograms, loop lag, /proc host
+sampling → `GET /api/metrics/system` + `logs/metrics.ndjson` (1 rollup/min, ≤4 MB/day, no DB).
+**DEPLOY PENDING (operator decides):** `cd web && pnpm build` (web/dist is gitignored; needed for `#token=` pairing)
+then `pm2 restart ai-team-gateway`. After it every device sees the TokenGate once. Optional: rotate DASHBOARD_TOKEN
+(it was served to every fetcher until now). Deferred: task-server loop lag (own thread) is not probed; no browser-side timing.
+
 **2026-09-18 — Persistent slowness root-caused to the Wake-Dispatcher polling the DB on the
 event loop; 2 PRs merged (#145, #147). NOT yet deployed.**
 Live evidence (09-17/18): `event=embedded_event_loop_stalled elapsed_ms=5000–9684` ×15 +
