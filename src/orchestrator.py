@@ -4687,8 +4687,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # the others — bind what we can, log the rest.
                 logger.error(f"event=control_api_start_failed host={host} err={e}")
         self._embedded_control_apis = started
+        if started:
+            from src.control import app_metrics
+            app_metrics.start(config.system.logs_dir)
 
     async def _stop_embedded_control_api(self) -> None:
+        from src.control import app_metrics
+        await app_metrics.stop()
         if not self._embedded_control_apis:
             return
         for server in self._embedded_control_apis:

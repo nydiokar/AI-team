@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 _STAGING_ROOT = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
+from src.control.app_metrics import RequestTimingMiddleware
 from src.control.db import cache_heartbeat_interval_sec, get_db
 from src.control.mesh_health import get_mesh_health
 from src.control.node_registry import NodeInfo, NodeCapabilities, get_registry
@@ -307,6 +308,7 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI-Team Mesh Task Server", version="1.0", lifespan=_lifespan)
+app.add_middleware(RequestTimingMiddleware, component="task_server")
 
 
 @app.middleware("http")
