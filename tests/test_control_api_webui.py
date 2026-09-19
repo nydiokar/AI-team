@@ -145,6 +145,8 @@ def _client_from(monkeypatch, ip: str) -> TestClient:
     ("127.0.0.1:9003", "127.0.0.1"),
     ("localhost:9003", "127.0.0.1"),
     ("100.88.11.88:9003", "100.101.1.2"),          # direct tailnet bind, tailnet peer
+    ("100.99.1.1:9003", "100.101.1.2"),            # tailnet IP literal, bind host unset
+    ("[fd7a:115c:a1e0::1]:9003", "100.101.1.2"),
 ])
 def test_trusted_request_gets_token_injected(monkeypatch, fake_dist, host, ip):
     monkeypatch.setattr(control_api, "_control_api_bind_host", lambda: "100.88.11.88")
@@ -161,6 +163,7 @@ def test_trusted_request_gets_token_injected(monkeypatch, fake_dist, host, ip):
     ("evil.example.com", "100.101.1.2"),
     ("100.88.11.88", "203.0.113.9"),        # trusted name, non-tailnet client
     ("kanebra.tail4b3639.ts.net", "192.168.1.20"),
+    ("192.168.1.5:9003", "100.101.1.2"),    # non-tailnet IP literal
 ])
 def test_untrusted_request_never_gets_token(monkeypatch, fake_dist, host, ip):
     monkeypatch.setattr(control_api, "_control_api_bind_host", lambda: "100.88.11.88")
