@@ -78,8 +78,8 @@ fastapi 0.141.1 / starlette 1.6.0 / uvicorn 0.53 + all minor bumps; prod venv re
 and was NOT restarted — it runs the old in-memory versions until its next restart (operator's call).
 **#156/#157/#158** supersede #150's "never inject": `/` injects the token only when Host is `*.ts.net` /
 CONTROL_API_HOST / a tailnet IP literal (blocks DNS rebinding) AND the peer is a REMOTE tailnet device — loopback and
-any of this host's own addresses are never trusted (#158: host-networked sova containers incl. a public cloudflared
-tunnel share loopback; `tailscale serve` still works because uvicorn swaps in the remote IP from X-Forwarded-For).
+any of this host's own addresses are never trusted (#158: other host-networked services on the
+same box share loopback; `tailscale serve` still works because uvicorn swaps in the remote IP from X-Forwarded-For).
 Residual (accepted): a local process forging X-Forwarded-For over loopback. Index pages send X-Frame-Options: DENY;
 injected page is `no-store`. Your devices need no pairing; `#token=` + TokenGate remain the fallback. The
 "DEPLOY PENDING" item below is done. Known pre-existing flake on the Pi: `test_push_notifications.py::
