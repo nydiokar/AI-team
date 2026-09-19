@@ -160,7 +160,7 @@ def test_endpoint_requires_auth_and_returns_ring(monkeypatch):
         session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
 
     c = TestClient(control_api.build_control_api(_Orch()))
-    assert c.get("/api/metrics/system").status_code == 403
+    assert c.get("/api/metrics/system").status_code == 401
     am._ring.append(am._rollup(60.0, [1.0], [], {}))
     r = c.get("/api/metrics/system?minutes=5", headers={"Authorization": "Bearer tok"})
     assert r.status_code == 200
@@ -235,7 +235,7 @@ def test_health_endpoint_requires_auth_and_reports_verdict(monkeypatch):
         session_service = SessionService(SessionStore(), repo_path_validator=lambda _p: None)
 
     c = TestClient(control_api.build_control_api(_Orch()))
-    assert c.get("/api/metrics/health").status_code == 403
+    assert c.get("/api/metrics/health").status_code == 401
     h = {"Authorization": "Bearer tok"}
     assert c.get("/api/metrics/health", headers=h).json()["cause"] == "no_data"
     am._ring.extend([_roll({"disk_util_pct": 97})] * 3)
