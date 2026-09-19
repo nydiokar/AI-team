@@ -9,13 +9,20 @@ import { create } from "zustand";
 const STORAGE_KEY = "ai_team_dash_token";
 
 /**
- * Initial token resolution. The gateway NEVER embeds the token in the served page
- * (anyone able to fetch `/` would get full API access). A device pairs once by
- * opening `/#token=<token>` — the fragment is never sent to the server, so it stays
- * out of logs/referrers — or by typing it into the TokenGate. Either way it is
- * persisted to localStorage; the fragment is stripped from the address bar.
+ * Initial token resolution. On a trusted request (the operator's tailnet devices,
+ * Host-allowlisted against DNS rebinding) the gateway injects
+ * `window.__DASHBOARD_TOKEN__`, so no pairing is needed; the injected token wins so a
+ * rotated token is picked up without clearing localStorage. Otherwise a device pairs
+ * once via `/#token=<token>` (the fragment is never sent to the server; it is stripped
+ * from the address bar) or the TokenGate. Either way it is persisted to localStorage.
  */
 function initialToken(): string {
+  const injected = (window as unknown as { __DASHBOARD_TOKEN__?: string })
+    .__DASHBOARD_TOKEN__;
+  if (typeof injected === "string" && injected.length > 0) {
+    localStorage.setItem(STORAGE_KEY, injected);
+    return injected;
+  }
   const fromHash = new URLSearchParams(window.location.hash.slice(1)).get("token");
   if (fromHash) {
     localStorage.setItem(STORAGE_KEY, fromHash.trim());

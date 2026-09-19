@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import ipaddress
 import json
 import logging
 import threading
@@ -499,6 +500,53 @@ def _worker_token() -> str:
     except Exception:
         import os
         return os.getenv("WORKER_TOKEN", "")
+
+
+def _control_api_bind_host() -> str:
+    """The configured tailnet bind host (CONTROL_API_HOST), empty when unset."""
+    try:
+        from config import config as _cfg
+        return _cfg.mesh.control_api_host or ""
+    except Exception:
+        import os
+        return os.getenv("CONTROL_API_HOST", "")
+
+
+_TAILNET_NETS = (
+    ipaddress.ip_network("100.64.0.0/10"),        # Tailscale CGNAT range
+    ipaddress.ip_network("fd7a:115c:a1e0::/48"),  # Tailscale IPv6 ULA range
+)
+
+
+def _ui_request_trusted(host_header: str, client_ip: str) -> bool:
+    """Whether the served UI may carry the DASHBOARD_TOKEN for this request.
+
+    Both must hold:
+    - Host is a name an attacker cannot point at us: loopback, the configured
+      bind host, or a Tailscale MagicDNS ``*.ts.net`` name. This defeats DNS
+      rebinding, where a malicious site re-resolves ITS OWN name to our tailnet IP
+      and then reads ``/`` as same-origin.
+    - The peer is loopback (``tailscale serve`` proxies from 127.0.0.1) or a
+      tailnet address.
+    """
+    host = host_header.strip().lower()
+    if host.startswith("["):  # [::1]:9003
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    bind = _control_api_bind_host().strip().lower()
+    host_ok = (
+        host in ("localhost", "127.0.0.1", "::1")
+        or (bool(bind) and host == bind)
+        or host.endswith(".ts.net")
+    )
+    if not host_ok:
+        return False
+    try:
+        ip = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    return ip.is_loopback or any(ip in net for net in _TAILNET_NETS)
 
 
 def _token_accepted(supplied: Optional[str]) -> bool:
@@ -2830,13 +2878,14 @@ def _web_dist_dir() -> "Path":
 
 
 def _mount_web_ui(app: FastAPI) -> None:
-    """Serve web/dist at / as a plain static page (U5).
+    """Serve web/dist at / (U5), with the DASHBOARD_TOKEN injected for trusted requests.
 
-    The DASHBOARD_TOKEN is NEVER embedded in the HTML: anything that can fetch ``/``
-    (a crawler, any tailnet peer, a reverse-proxy mistake) would otherwise receive
-    full control-API access, making the network bind the only credential. A device
-    pairs once via ``/#token=...`` (URL fragment — never sent to the server) or the
-    UI's TokenGate; /api/* enforces the token regardless.
+    The tailnet is the trust boundary, so the operator's devices get the token baked
+    in as ``window.__DASHBOARD_TOKEN__`` (no pairing). Injection happens ONLY when
+    ``_ui_request_trusted`` holds (Host allowlist + loopback/tailnet peer), which
+    defeats DNS rebinding from a malicious site; the injected page is ``no-store``.
+    Any other request gets the plain page and pairs via ``/#token=...`` or the
+    TokenGate. /api/* enforces the token regardless.
     A built UI is optional: if web/dist is absent (dev — vite serves the UI and
     proxies /api here), the mount is skipped silently.
     """
@@ -2850,8 +2899,16 @@ def _mount_web_ui(app: FastAPI) -> None:
         logger.info("event=web_ui_not_mounted reason=no_dist dir=%s", dist)
         return
 
-    def _index_html() -> str:
-        return index_file.read_text(encoding="utf-8")
+    def _index_response(request: Request) -> HTMLResponse:
+        html = index_file.read_text(encoding="utf-8")
+        client_ip = request.client.host if request.client else ""
+        token = _dashboard_token()
+        if not token or not _ui_request_trusted(request.headers.get("host", ""), client_ip):
+            return HTMLResponse(html)
+        # Inject BEFORE the first <script> so the global exists before the app boots.
+        inject = f"<script>window.__DASHBOARD_TOKEN__ = {json.dumps(token)};</script>"
+        html = html.replace("<head>", "<head>" + inject, 1) if "<head>" in html else inject + html
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     # Static assets (JS/CSS/img) served directly from web/dist/assets.
     assets = dist / "assets"
@@ -2862,14 +2919,14 @@ def _mount_web_ui(app: FastAPI) -> None:
     # return annotation breaks OpenAPI schema generation (the /openapi.json 500 seen
     # when CONTROL_API_DOCS=true). Excluding them keeps the schema buildable.
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    def _web_index() -> HTMLResponse:
-        return HTMLResponse(_index_html())
+    def _web_index(request: Request) -> HTMLResponse:
+        return _index_response(request)
 
     # SPA fallback: any non-/api, non-asset path returns index (client-side routing).
     dist_resolved = dist.resolve()
 
     @app.get("/{full_path:path}", response_class=HTMLResponse, include_in_schema=False)
-    def _web_spa(full_path: str) -> HTMLResponse:
+    def _web_spa(full_path: str, request: Request) -> HTMLResponse:
         # DX-1: an unmatched GET under /api/ is a missing endpoint, not a client
         # route — return a real 404 JSON error instead of letting it fall through
         # to the SPA index (which would 200 with HTML and mask the bug). The named
@@ -2889,7 +2946,7 @@ def _mount_web_ui(app: FastAPI) -> None:
             if (candidate == dist_resolved or dist_resolved in candidate.parents) \
                     and candidate.is_file():
                 return FileResponse(str(candidate))  # type: ignore[return-value]
-        return HTMLResponse(_index_html())
+        return _index_response(request)
 
     logger.info("event=web_ui_mounted dir=%s", dist)
 
