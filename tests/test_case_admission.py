@@ -222,6 +222,44 @@ def test_attach_does_not_reclose_across_turns(tmp_path, monkeypatch):
     assert len(db.list_flow_links(flow_run_id=fid, entity_type="task", role="task")) == 2
 
 
+def test_watched_job_continuation_attaches_to_open_case(tmp_path, monkeypatch):
+    """A watched-job continuation on a session that already owns an open Case is
+    the SAME session continuing its work — it attaches (B), never births a new
+    Case nor relabels a Manager session as a 'worker' of that new Case."""
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+    store = _StubStore()
+    store.save(_session("sess-mgr"))
+    orch.session_store = store
+
+    fid = db.open_case("obj", "sess-mgr", role="manager")
+    task = _turn("t-job", "sess-mgr")
+    orch._stamp_child_dispatch_lineage(task, None, dispatched_by="watched_job:job_1")
+    assert orch._record_flow_run_start(task) is None
+
+    assert [r["flow_run_id"] for r in db.list_flow_runs()] == [fid]
+    assert task.metadata[TaskOrchestrator._CASE_ID_META_KEY] == fid
+    assert db.find_open_case_for_session("sess-mgr") == fid
+    session = store.get("sess-mgr")
+    assert (session.current_case_id, session.case_role) == (fid, "manager")
+
+
+def test_watched_job_continuation_without_open_case_still_births(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db = _db(tmp_path)
+    _patch_db(monkeypatch, db)
+    orch = _orch()
+
+    task = _turn("t-job", "sess-solo")
+    orch._stamp_child_dispatch_lineage(task, None, dispatched_by="watched_job:job_1")
+    fid = orch._record_flow_run_start(task)
+
+    assert fid is not None
+    assert db.get_flow_run(fid)["dispatched_by"] == "watched_job:job_1"
+
+
 # ---------------------------------------------------------------------------
 # Durable session affiliation
 # ---------------------------------------------------------------------------
