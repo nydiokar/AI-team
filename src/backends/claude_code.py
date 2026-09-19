@@ -16,7 +16,6 @@ import logging
 import os
 import subprocess
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -284,7 +283,7 @@ class ClaudeCodeBackend(CodingBackend):
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
         self._log_driver_turn("create_session", session.session_id or "")
-        proc_env = self._build_proc_env(session.backend_session_id or str(uuid.uuid4()), telemetry_context)
+        proc_env = self._build_proc_env(session.session_id, telemetry_context)
         before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
 
         result = self._driver.start_session(
@@ -340,7 +339,7 @@ class ClaudeCodeBackend(CodingBackend):
 
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
-        proc_env = self._build_proc_env(session.backend_session_id, telemetry_context)
+        proc_env = self._build_proc_env(session.session_id, telemetry_context)
         before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
 
         result = self._driver.send_turn(
