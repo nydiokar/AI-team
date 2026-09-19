@@ -131,3 +131,41 @@ def test_no_dist_skips_mount(monkeypatch, tmp_path):
     # No SPA catch-all mounted → unknown path is a 404, and /health still works.
     assert c.get("/health").status_code == 200
     assert c.get("/some/spa/route").status_code == 404
+
+
+# --- Trusted-host token injection (no pairing on the operator's tailnet devices) ---
+
+def _client_from(monkeypatch, ip: str) -> TestClient:
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    return TestClient(control_api.build_control_api(_StubOrchestrator()), client=(ip, 50000))
+
+
+@pytest.mark.parametrize("host,ip", [
+    ("kanebra.tail4b3639.ts.net", "127.0.0.1"),   # via `tailscale serve` (loopback proxy)
+    ("127.0.0.1:9003", "127.0.0.1"),
+    ("localhost:9003", "127.0.0.1"),
+    ("100.88.11.88:9003", "100.101.1.2"),          # direct tailnet bind, tailnet peer
+])
+def test_trusted_request_gets_token_injected(monkeypatch, fake_dist, host, ip):
+    monkeypatch.setattr(control_api, "_control_api_bind_host", lambda: "100.88.11.88")
+    c = _client_from(monkeypatch, ip)
+    for path in ("/", "/sessions/abc"):
+        r = c.get(path, headers={"Host": host})
+        assert r.status_code == 200
+        assert f'window.__DASHBOARD_TOKEN__ = "{TOKEN}"' in r.text
+        assert r.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("host,ip", [
+    ("evil.example.com", "127.0.0.1"),      # DNS rebinding: attacker-controlled name
+    ("evil.example.com", "100.101.1.2"),
+    ("100.88.11.88", "203.0.113.9"),        # trusted name, non-tailnet client
+    ("kanebra.tail4b3639.ts.net", "192.168.1.20"),
+])
+def test_untrusted_request_never_gets_token(monkeypatch, fake_dist, host, ip):
+    monkeypatch.setattr(control_api, "_control_api_bind_host", lambda: "100.88.11.88")
+    c = _client_from(monkeypatch, ip)
+    r = c.get("/", headers={"Host": host})
+    assert r.status_code == 200
+    assert "__DASHBOARD_TOKEN__" not in r.text
+    assert TOKEN not in r.text
