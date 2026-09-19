@@ -68,7 +68,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
-**2026-09-19 — CI green again; deps locked + upgraded; token injection restored for trusted requests. PRs #154–#157 MERGED + DEPLOYED.**
+**2026-09-19 — CI green again; deps locked + upgraded; token injection restored for trusted requests. PRs #154–#159 MERGED + DEPLOYED.**
 CI had been red since #150: prod `.venv` sat on fastapi 0.115 (pyproject `>=` only; `pip install -e` never upgrades) while
 CI pulled 0.141, which returns 401 not 403 for a missing bearer. **#154** — `_require_auth` owns the missing-token 401
 (`auto_error=False`); `constraints.txt` pins the exact stack, CI installs `-c constraints.txt`. **#155** — upgraded to
@@ -76,8 +76,11 @@ fastapi 0.141.1 / starlette 1.6.0 / uvicorn 0.53 + all minor bumps; prod venv re
 (`e`, `httpx2`, `httpcore2`, `truststore`). **Held back on purpose (own PRs):** `claude-agent-sdk` 0.2.110 (latest
 0.2.157), `mcp` 1.28 (2.x is major), `watchdog`/`python-dotenv` (exact pins). The local `ai-team-worker` shares `.venv`
 and was NOT restarted — it runs the old in-memory versions until its next restart (operator's call).
-**#156/#157** supersede #150's "never inject": `/` injects the token only when Host is loopback / `*.ts.net` /
-CONTROL_API_HOST / a loopback-or-tailnet IP literal AND the peer is loopback or tailnet (blocks DNS rebinding);
+**#156/#157/#158** supersede #150's "never inject": `/` injects the token only when Host is `*.ts.net` /
+CONTROL_API_HOST / a tailnet IP literal (blocks DNS rebinding) AND the peer is a REMOTE tailnet device — loopback and
+any of this host's own addresses are never trusted (#158: host-networked sova containers incl. a public cloudflared
+tunnel share loopback; `tailscale serve` still works because uvicorn swaps in the remote IP from X-Forwarded-For).
+Residual (accepted): a local process forging X-Forwarded-For over loopback. Index pages send X-Frame-Options: DENY;
 injected page is `no-store`. Your devices need no pairing; `#token=` + TokenGate remain the fallback. The
 "DEPLOY PENDING" item below is done. Known pre-existing flake on the Pi: `test_push_notifications.py::
 test_fanout_disables_gone_and_records_timeout` (wall-clock < 0.9s; ~1.04s on this host, passes on CI).
