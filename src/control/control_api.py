@@ -23,10 +23,12 @@ All ``/api/*`` endpoints require ``Authorization: Bearer {DASHBOARD_TOKEN}``
 from __future__ import annotations
 
 import asyncio
+import functools
 import hmac
 import ipaddress
 import json
 import logging
+import socket
 import threading
 from collections import OrderedDict
 from contextlib import asynccontextmanager, contextmanager
@@ -522,36 +524,57 @@ def _ui_request_trusted(host_header: str, client_ip: str) -> bool:
     """Whether the served UI may carry the DASHBOARD_TOKEN for this request.
 
     Both must hold:
-    - Host is a name an attacker cannot point at us: loopback, the configured
-      bind host, or a Tailscale MagicDNS ``*.ts.net`` name. This defeats DNS
-      rebinding, where a malicious site re-resolves ITS OWN name to our tailnet IP
-      and then reads ``/`` as same-origin.
-    - The peer is loopback (``tailscale serve`` proxies from 127.0.0.1) or a
-      tailnet address.
+    - Host is a name an attacker cannot point at us: the configured bind host, a
+      Tailscale MagicDNS ``*.ts.net`` name (not publicly resolvable), or a tailnet
+      IP literal. This defeats DNS rebinding, where a malicious site re-resolves ITS
+      OWN name to our tailnet IP and then reads ``/`` as same-origin.
+    - The peer is a REMOTE tailnet device. ``tailscale serve`` proxies from
+      127.0.0.1 and uvicorn's proxy-headers middleware (trusts X-Forwarded-For from
+      127.0.0.1 only) swaps in the real remote IP, so a peer that is loopback or
+      any of THIS host's addresses (v4/v6, incl. our own tailnet IP when a local
+      process goes through serve) is a process on this host — a host-networked
+      container, an SSRF through a local service — never trusted.
+    Residual (accepted): a local process that forges X-Forwarded-For over loopback.
     """
     host = host_header.strip().lower()
-    if host.startswith("["):  # [::1]:9003
+    if host.startswith("["):  # [fd7a::1]:9003
         host = host[1:].split("]", 1)[0]
     elif host.count(":") == 1:
         host = host.rsplit(":", 1)[0]
     bind = _control_api_bind_host().strip().lower()
     host_ok = (
-        host == "localhost"
-        or (bool(bind) and host == bind)
+        (bool(bind) and host == bind)
         or host.endswith(".ts.net")
         # An IP-literal Host is never a rebinding vector (that needs the attacker's
-        # own domain in Host), so any loopback/tailnet IP literal is trusted.
-        or _is_loopback_or_tailnet(host)
+        # own domain in Host), so any tailnet IP literal is trusted.
+        or _is_tailnet(host)
     )
-    return host_ok and _is_loopback_or_tailnet(client_ip)
+    return host_ok and _is_tailnet(client_ip) and not _is_local_address(client_ip)
 
 
-def _is_loopback_or_tailnet(addr: str) -> bool:
+@functools.lru_cache(maxsize=256)
+def _is_local_address(addr: str) -> bool:
+    """True iff ``addr`` is assigned to this host: the kernel only lets us bind a
+    local address. Covers every interface and IPv6 with no config to drift."""
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
-    return ip.is_loopback or any(ip in net for net in _TAILNET_NETS)
+    family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.bind((str(ip), 0))
+        return True
+    except OSError:
+        return False
+
+
+def _is_tailnet(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in net for net in _TAILNET_NETS)
 
 
 def _token_accepted(supplied: Optional[str]) -> bool:
@@ -2904,16 +2927,20 @@ def _mount_web_ui(app: FastAPI) -> None:
         logger.info("event=web_ui_not_mounted reason=no_dist dir=%s", dist)
         return
 
+    # The dashboard is auto-authenticated on trusted devices: never frameable
+    # (clickjacking from a malicious page the operator visits).
+    _NO_FRAME = {"X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'"}
+
     def _index_response(request: Request) -> HTMLResponse:
         html = index_file.read_text(encoding="utf-8")
         client_ip = request.client.host if request.client else ""
         token = _dashboard_token()
         if not token or not _ui_request_trusted(request.headers.get("host", ""), client_ip):
-            return HTMLResponse(html)
+            return HTMLResponse(html, headers=_NO_FRAME)
         # Inject BEFORE the first <script> so the global exists before the app boots.
         inject = f"<script>window.__DASHBOARD_TOKEN__ = {json.dumps(token)};</script>"
         html = html.replace("<head>", "<head>" + inject, 1) if "<head>" in html else inject + html
-        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(html, headers={**_NO_FRAME, "Cache-Control": "no-store"})
 
     # Static assets (JS/CSS/img) served directly from web/dist/assets.
     assets = dist / "assets"
