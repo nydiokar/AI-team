@@ -233,7 +233,7 @@ def test_colocated_worker_drops_redundant_local_db_mirror(monkeypatch):
     local = _RecordingSink()
     monkeypatch.setattr(sink_mod, "_build_local_db_sink", lambda: local)
     sink = build_runtime_telemetry_sink(
-        node_id="kanebra-worker",
+        node_id="gateway-worker",
         base_url="http://127.0.0.1:9002",
         token="tok",
         is_gateway=False,
@@ -243,10 +243,10 @@ def test_colocated_worker_drops_redundant_local_db_mirror(monkeypatch):
 
 def test_http_target_colocation_detection(monkeypatch):
     from config import config
-    monkeypatch.setattr(config.mesh, "tailscale_ip", "100.88.11.88")
+    monkeypatch.setattr(config.mesh, "tailscale_ip", "100.64.0.10")
     assert sink_mod._http_target_is_colocated("http://127.0.0.1:9002")
     assert sink_mod._http_target_is_colocated("http://localhost:9002")
-    assert sink_mod._http_target_is_colocated("http://100.88.11.88:9002")  # own mesh IP
+    assert sink_mod._http_target_is_colocated("http://100.64.0.10:9002")  # own mesh IP
     assert not sink_mod._http_target_is_colocated("http://gateway:9001")
     assert not sink_mod._http_target_is_colocated("http://100.99.1.2:9002")  # remote node
 
