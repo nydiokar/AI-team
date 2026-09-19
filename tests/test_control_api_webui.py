@@ -134,19 +134,24 @@ def test_no_dist_skips_mount(monkeypatch, tmp_path):
 
 
 # --- Trusted-host token injection (no pairing on the operator's tailnet devices) ---
+# In prod, `tailscale serve` proxies from 127.0.0.1 and uvicorn's proxy-headers
+# middleware replaces the peer with the remote tailnet IP (X-Forwarded-For), so the
+# app sees the real device IP; TestClient's ``client=`` models that post-middleware
+# view directly.
 
-def _client_from(monkeypatch, ip: str) -> TestClient:
+def _client_from(monkeypatch, ip: str, base_url: str = "http://testserver") -> TestClient:
     monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
-    return TestClient(control_api.build_control_api(_StubOrchestrator()), client=(ip, 50000))
+    return TestClient(
+        control_api.build_control_api(_StubOrchestrator()),
+        base_url=base_url, client=(ip, 50000),
+    )
 
 
 @pytest.mark.parametrize("host,ip", [
-    ("kanebra.tail4b3639.ts.net", "127.0.0.1"),   # via `tailscale serve` (loopback proxy)
-    ("127.0.0.1:9003", "127.0.0.1"),
-    ("localhost:9003", "127.0.0.1"),
-    ("100.88.11.88:9003", "100.101.1.2"),          # direct tailnet bind, tailnet peer
-    ("100.99.1.1:9003", "100.101.1.2"),            # tailnet IP literal, bind host unset
-    ("[fd7a:115c:a1e0::1]:9003", "100.101.1.2"),
+    ("kanebra.tail4b3639.ts.net", "100.101.1.2"),   # via `tailscale serve` (XFF peer)
+    ("100.88.11.88:9003", "100.101.1.2"),            # direct tailnet bind, tailnet peer
+    ("100.99.1.1:9003", "100.101.1.2"),              # tailnet IP literal, bind host unset
+    ("[fd7a:115c:a1e0::1]:9003", "fd7a:115c:a1e0::5"),
 ])
 def test_trusted_request_gets_token_injected(monkeypatch, fake_dist, host, ip):
     monkeypatch.setattr(control_api, "_control_api_bind_host", lambda: "100.88.11.88")
@@ -159,11 +164,15 @@ def test_trusted_request_gets_token_injected(monkeypatch, fake_dist, host, ip):
 
 
 @pytest.mark.parametrize("host,ip", [
-    ("evil.example.com", "127.0.0.1"),      # DNS rebinding: attacker-controlled name
-    ("evil.example.com", "100.101.1.2"),
-    ("100.88.11.88", "203.0.113.9"),        # trusted name, non-tailnet client
+    ("evil.example.com", "100.101.1.2"),        # DNS rebinding: attacker-controlled name
+    ("100.88.11.88", "203.0.113.9"),            # trusted name, non-tailnet client
     ("kanebra.tail4b3639.ts.net", "192.168.1.20"),
-    ("192.168.1.5:9003", "100.101.1.2"),    # non-tailnet IP literal
+    ("192.168.1.5:9003", "100.101.1.2"),        # non-tailnet IP literal
+    # Loopback peer = a local process (e.g. a host-networked container or an SSRF
+    # through a local service), never a remote device: never trusted.
+    ("127.0.0.1:9003", "127.0.0.1"),
+    ("localhost:9003", "127.0.0.1"),
+    ("kanebra.tail4b3639.ts.net", "127.0.0.1"),
 ])
 def test_untrusted_request_never_gets_token(monkeypatch, fake_dist, host, ip):
     monkeypatch.setattr(control_api, "_control_api_bind_host", lambda: "100.88.11.88")
@@ -172,3 +181,31 @@ def test_untrusted_request_never_gets_token(monkeypatch, fake_dist, host, ip):
     assert r.status_code == 200
     assert "__DASHBOARD_TOKEN__" not in r.text
     assert TOKEN not in r.text
+
+
+@pytest.mark.parametrize("host,base_url", [
+    ("100.88.11.88:9003", "http://100.88.11.88:9003"),        # dialing our tailnet IP
+    ("kanebra.tail4b3639.ts.net", "http://testserver"),       # via serve: XFF = our own IP
+])
+def test_self_originated_request_never_gets_token(monkeypatch, fake_dist, host, base_url):
+    # A process ON the gateway host (host-networked container, local SSRF) shows up
+    # with one of our own addresses as the peer — local, not a remote device.
+    monkeypatch.setattr(control_api, "_is_local_address", lambda ip: ip == "100.88.11.88")
+    c = _client_from(monkeypatch, "100.88.11.88", base_url=base_url)
+    r = c.get("/", headers={"Host": host})
+    assert TOKEN not in r.text
+
+
+def test_is_local_address():
+    assert control_api._is_local_address("127.0.0.1")
+    assert not control_api._is_local_address("203.0.113.9")   # TEST-NET-3, never local
+    assert not control_api._is_local_address("not-an-ip")
+
+
+def test_index_forbids_framing(monkeypatch, fake_dist):
+    # The auto-authenticated dashboard must not be frameable (clickjacking).
+    c = _client_from(monkeypatch, "100.101.1.2")
+    for host in ("kanebra.tail4b3639.ts.net", "evil.example.com"):
+        r = c.get("/", headers={"Host": host})
+        assert r.headers["x-frame-options"] == "DENY"
+        assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
