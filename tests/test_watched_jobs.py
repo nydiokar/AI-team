@@ -437,6 +437,24 @@ async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeyp
     assert submitted[0]["extra_metadata"] == {"job_id": "job_test123", "source": "watched_job"}
     assert "all tests passed" in submitted[0]["description"]
 
+    # The continuation turn carries the payload — no duplicate synthetic turn.
+    assert store.get(session.session_id).last_task_id != "job_test123"
+
+    # Notify-only (no continuation) still records the synthetic job turn.
+    orch._processed_terminal_jobs = set()
+    await orch._process_terminal_job({
+        "id": "job_test123",
+        "session_id": session.session_id,
+        "node_id": "worker-a",
+        "label": "npm test",
+        "status": "done",
+        "exit_code": 0,
+        "tail": "all tests passed",
+        "notify": 1,
+        "notify_agent": 0,
+    })
+    assert len(submitted) == 1
+
     turns = transcript.get_transcript(tmp_path / "results", sessions_dir, session.session_id)
     assert turns is not None
     assert turns[-1]["task_id"] == "job_test123"

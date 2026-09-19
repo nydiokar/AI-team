@@ -4348,7 +4348,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.info("event=job_notify_skipped job_id=%s reason=no_session", job_id)
             return
 
-        self._record_job_session_turn(job, session, payload)
+        # With notify_agent the continuation turn below carries the same payload —
+        # a synthetic turn too would show the job result twice in the session.
+        if not job.get("notify_agent"):
+            self._record_job_session_turn(job, session, payload)
 
         if job.get("notify"):
             result = TaskResult(
@@ -4390,6 +4393,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                 )
             except Exception as e:
                 logger.warning("event=job_notify_agent_failed job_id=%s err=%s", job_id, e)
+                self._record_job_session_turn(job, session, payload)
 
     @staticmethod
     def _format_file_change_lines(result: TaskResult, limit: int = 20) -> List[str]:
@@ -5076,7 +5080,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             # session link). The Case id is stashed under `_CASE_ID_META_KEY`
             # (NOT `_FLOW_RUN_META_KEY`) precisely so the per-turn stage/terminal
             # helpers do not fire on the shared Case and auto-close it.
-            if not lineage and not managed and session_id:
+            # A watched-job continuation (lineage = only `dispatched_by=watched_job:*`)
+            # is the SAME session resuming its own work, so it attaches here too —
+            # otherwise it births a Case and relabels a Manager session as its worker.
+            watched_job_continuation = (
+                not parent_fid
+                and str(lineage.get("dispatched_by") or "").startswith("watched_job:")
+            )
+            if (not lineage or watched_job_continuation) and not managed and session_id:
                 open_case_id = db.find_open_case_for_session(session_id)
                 if open_case_id:
                     self._stash_task_meta(task, self._CASE_ID_META_KEY, open_case_id)
