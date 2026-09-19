@@ -41,7 +41,7 @@ The operator had started nothing — this was a worker-side self-restart.
   made the poison task terminal and stopped the re-claim loop (it was *not* re-claimed after
   restart 2).
 - Horse re-registered healthy at `09:52:31Z`, `online`, `live_sessions: 0`, incarnation `c6b609e88b51…`.
-- The gateway host's own `kanebra-worker` had **14 days uptime** — the fault is isolated to Horse.
+- The gateway host's own `gateway-worker` had **14 days uptime** — the fault is isolated to Horse.
 
 ### Horse-box evidence (collected by a diagnostic agent dispatched onto Horse, session `808afc069336`, task `task_eeb974b3`)
 - **Supervisor:** PM2 fork mode, `ai-team-worker` (pm2 id 15), script `worker_main.py` via
