@@ -536,14 +536,19 @@ def _ui_request_trusted(host_header: str, client_ip: str) -> bool:
         host = host.rsplit(":", 1)[0]
     bind = _control_api_bind_host().strip().lower()
     host_ok = (
-        host in ("localhost", "127.0.0.1", "::1")
+        host == "localhost"
         or (bool(bind) and host == bind)
         or host.endswith(".ts.net")
+        # An IP-literal Host is never a rebinding vector (that needs the attacker's
+        # own domain in Host), so any loopback/tailnet IP literal is trusted.
+        or _is_loopback_or_tailnet(host)
     )
-    if not host_ok:
-        return False
+    return host_ok and _is_loopback_or_tailnet(client_ip)
+
+
+def _is_loopback_or_tailnet(addr: str) -> bool:
     try:
-        ip = ipaddress.ip_address(client_ip)
+        ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
     return ip.is_loopback or any(ip in net for net in _TAILNET_NETS)
