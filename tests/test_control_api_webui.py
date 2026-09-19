@@ -60,7 +60,7 @@ def test_spa_fallback_returns_index(client):
 
 
 def test_api_still_requires_token(client):
-    assert client.get("/api/sessions").status_code == 403
+    assert client.get("/api/sessions").status_code == 401
     r = client.get("/api/sessions", headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
 

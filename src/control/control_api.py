@@ -951,9 +951,19 @@ def build_control_api(orchestrator) -> FastAPI:
         safe = _scrub_surrogates(jsonable_encoder(exc.errors()))
         return JSONResponse(status_code=422, content={"detail": safe})
 
-    _bearer = HTTPBearer(auto_error=True)
+    # auto_error=False: we own the missing-credential status (always 401) instead of
+    # inheriting it from FastAPI, which changed it from 403 to 401 across versions.
+    _bearer = HTTPBearer(auto_error=False)
 
-    async def _require_auth(creds: HTTPAuthorizationCredentials = Security(_bearer)) -> None:
+    async def _require_auth(
+        creds: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
+    ) -> None:
+        if creds is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Not authenticated",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         if not _dashboard_token():
             raise HTTPException(status_code=500, detail="DASHBOARD_TOKEN not configured")
         if not _token_accepted(creds.credentials):
