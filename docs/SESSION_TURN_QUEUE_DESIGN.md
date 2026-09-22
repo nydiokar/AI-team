@@ -67,6 +67,9 @@ number changes. These are implementation requirements, not optional cleanup.
 | P2 | [Composer.tsx](../web/src/components/timeline/Composer.tsx), `send`, blocks on `submit.isPending`, not on the session's running state. | The UI already accepts successive sends; the missing pieces are durable queue truth, editing, and safe backend scheduling. Do not sell a button change as the fix. |
 | P2 | `task_events` contains outcome fields, not arbitrary revision payloads. Current instruction limit is 262144 characters, plus a separate 48000-character carry-context limit. | Specify revision storage; do not claim it already exists. A new 16 KiB limit is a deliberate new-route policy, not the existing instruction maximum. |
 
+| P1 | `GET /api/turns/{turn_id}` and `useSessionTurns` already expose telemetry; A81 changed event-covered reads to `SAFETY_NET_MS=60000`. | Use separate turn-request routes/query keys and preserve the event-first refresh policy. |
+| P1 | `_SDKSession.send` cancels the previous turn when its lock is occupied; worker result posting has an in-memory delivery deadline. | Managed conflict must fail closed; persist bounded result-delivery obligations before posting. |
+
 Also correct the context map: the actual service is
 [`src/services/session_service.py`](../src/services/session_service.py), not
 `src/core/session_service.py`.
@@ -286,6 +289,13 @@ session. A new worker endpoint authorizes start with a conditional
 `claimed -> running` update for that token; only a successful start response
 permits a backend call. All result/release/cancel acknowledgements use the token.
 
+An exact repeated start request from the same live carrier process/token returns
+the same authorization. The carrier has one invocation owner per attempt and
+must not create a new executor on a start-response retry. A restarted carrier
+may replay a persisted result but may not invoke using an old authorization.
+Lost claim responses are resolved by looking up that process's ownership, not
+by inventing a second task or token.
+
 Record `started_at` as **start authorized**, not proof the model has seen the
 prompt. A crash between this commit and invocation is inherently ambiguous.
 An expired claim before start may be invalidated/reoffered atomically: its old
@@ -314,6 +324,15 @@ reopen execution or make an accepted result disappear. Result DB failure is
 503; the carrier retains/retries its bounded result-delivery obligation.
 Do not return “accepted” after a helper swallowed a write failure.
 
+Persist each managed result in a bounded carrier-local spool before POST,
+keyed by task ID and claim token, with atomic file replacement. Reuse the
+gateway reconcile-spool pattern; this is a completed delivery obligation, not
+queued execution intent. Replay on startup/after transient failures; remove
+only after durable acknowledgement or an explicit stale-attempt receipt.
+Reserve spool capacity before start and stop claiming when full. Oversized
+results or disk failure must visibly hold reconciliation, not silently discard
+results. The implementation packet fixes bounds and failure tests.
+
 A protocol-1 completion must not subsequently be overwritten by legacy
 `_dispatch_to_node` or `_mesh_complete_task` full-session saves. Extract the
 existing outcome classification/cache/native-session logic into the shared
@@ -331,6 +350,23 @@ the post-hoc proactive sink is not such a contract. Until proven for a backend
 mode, do not enroll sessions capable of unsolicited concurrent execution.
 This is a named rollout gate, not an unsupported claim that a DB index controls
 the SDK stream.
+
+For managed SDK calls, an occupied `_SDKSession.send` lock must return a typed
+ownership conflict without `cancel_inflight`. Prove that native background
+results cannot fulfill the wrong explicit request. Default Claude SDK support
+is a required build gate; excluding all Claude sessions or silently disabling
+background functionality does not satisfy this design. Verify SDK lifecycle
+semantics with installed source and deterministic fake-stream tests before
+bulk implementation. If no safe contract exists, record a concrete blocked
+gate instead of claiming an executable guarantee.
+
+Provide an operator recovery-resolution operation requiring the current task
+and token plus a recorded authenticated carrier observation of backend
+quiescence, or a durable terminal result. Free text, offline status or a new
+incarnation alone is insufficient. Resolve conditionally to the observed
+terminal outcome (cancelled/failed if quiescent without a result); never
+implicitly replay that prompt. An explicit retry creates a linked new request.
+If quiescence cannot be established, retain the hold and show missing evidence.
 
 ## 7. Producer policies and closure
 
@@ -364,6 +400,15 @@ by silently inserting an exact old prompt after newer user work. Hold the
 session under its existing pause policy; if operator recovery supersedes that
 pause, invalidate the automatic retry. Withdraw obsolete optional automation,
 not real instructions, to remove head-of-line blockage.
+
+Concrete retry rule: after failed A's automatic pause is eligible to end, if
+real instruction B was accepted before any retry, atomically supersede A's
+retry obligation, clear only that producer's eligible pause and leave B as
+head. Do not append R behind B while the same pause blocks B. Otherwise admit
+R as head and allow it through its own eligible automatic pause only. All
+other holds still apply. Clear/replace that pause at R's terminal commit, not
+at enqueue. A later B stays behind R under FIFO. Approval or a future
+quota/backoff deadline is never cleared by this rule.
 
 Close/interrupt must race safely with both admission and activation: persist
 the authoritative closed/blocked state and withdrawal of matching queued
@@ -444,12 +489,13 @@ patterns. New endpoints:
 
 | Route | Result |
 | --- | --- |
-| POST /api/sessions/{id}/turns | 202 after durable admission; idempotent replay returns the same ID and current summary. |
-| GET /api/sessions/{id}/turns | Cursor-bounded queued/active summaries, revision and blocked reason. |
-| GET /api/turns/{id} | Authorized bounded full intent for inspection/edit. |
-| PATCH /api/turns/{id} | Queued edit with required If-Match revision; 409 on conflict. |
-| POST /api/turns/{id}/withdraw | Conditional withdrawal; auditable, never deletion. |
-| POST /api/sessions/{id}/turns/pause or /resume | Persist operator queue hold/resume; resume does not override recovery, Case, quota or approval gates. |
+| POST /api/sessions/{id}/turn-requests | 202 after durable admission; idempotent replay returns the same ID and current summary. |
+| GET /api/sessions/{id}/turn-requests | Cursor-bounded queued/active summaries, revision and blocked reason. |
+| GET /api/turn-requests/{id} | Authorized bounded full intent for inspection/edit. |
+| PATCH /api/turn-requests/{id} | Queued edit with required If-Match revision; 409 on conflict. |
+| POST /api/turn-requests/{id}/withdraw | Conditional withdrawal; auditable, never deletion. |
+| POST /api/sessions/{id}/turn-requests/pause or /resume | Persist operator queue hold/resume; resume does not override recovery, Case, quota or approval gates. |
+| POST /api/turn-requests/{id}/resolve-recovery | Operator-authorized resolution using recorded carrier evidence and current ownership; 409 for insufficient evidence. |
 | POST /api/instructions | Compatibility shape/status preserved (`ok`, `task_id`, `session`); enrolled session uses the same admission service. |
 
 Return stable `turn_id`/legacy `task_id`, status, revision, acceptance time and
@@ -464,12 +510,14 @@ existing MCP/tool filtering and gateway transport, reusing
 `dispatch_worker(session_id=...)` where its role allows it. Add it explicitly
 to authorized worker and Manager tool sets; a web endpoint alone does not
 deliver “agents can send to agents.” Check Case membership, role and recipient
-at the server, not just in the tool wrapper. If available credentials cannot
-bind a sender session, expose only the existing trusted-operator scope until a
-scoped sender credential is provided; do not claim agent-isolated authorization
-with `DASHBOARD_TOKEN` and a self-reported sender ID. That identity binding is
-a release gate for agent-scoped sending, not a requirement to build a new
-messaging platform.
+at the server, not just in the tool wrapper. This milestone includes a narrow
+session-bound send credential provisioned through the trusted carrier/boot
+path, with revocation on session close/Case membership change. Derive sender
+from the credential, not request fields. Shared admin bearer credentials remain
+explicit operator authority, not scoped agent identity. This is a send
+capability, not an A71 per-node credential rewrite or a sandbox against agents
+that can already steal host admin secrets. The packet fixes issuance,
+provisioning, storage and validation details.
 
 Attachment references must survive queue wait, restart and revision.
 Current staged files need explicit reference retention/ownership validation;
@@ -485,8 +533,10 @@ Keep chat-first UI:
 - Show source, queue count and blocked reason. Edit/withdraw only queued human
   items; refresh on 409.
 - Keep active-turn stop separate from withdrawal and from pause/resume queue.
-- Reuse current polling and post-commit invalidation. A 3-second fallback works
-  after missed SSE. Do not require WebSockets.
+- Use `useSessionTurnQueue` and `["session-turn-queue", sessionId]`; preserve
+  telemetry `useSessionTurns`/`session-turns` and `/api/turns`. Extend post-commit
+  invalidation and reconnect resync with existing `SAFETY_NET_MS` (60 seconds)
+  as the UI fallback. Scheduler fallback (3 seconds) is separate. No WebSockets.
 - Update `task_state_truth.py`, session timeline/transcript, session list and
   stale-BUSY repair together. Current helpers know pending/claimed only;
   “running” must not be mistaken for an orphan.
