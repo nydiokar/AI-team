@@ -1,0 +1,727 @@
+```yaml
+job_id: AGENT_82_SESSION_TURN_QUEUE
+created_at: "2026-09-22T11:39:06.841262+00:00"        # CANONICAL — set once at dispatch, never derive again
+status: ready              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md#A82             # -> DISPATCH_LOG.md section with the verdict prose
+evidence: []                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-09-22T11:39:07.619307+00:00"
+```
+
+# A82 — Build the unified session turn queue
+
+**Implementation branch:** `feat/session-turn-queue` (isolated worktree).
+**Design:** [SESSION_TURN_QUEUE_DESIGN.md](../../docs/SESSION_TURN_QUEUE_DESIGN.md).
+**Starting code reference:** `5f58d2e`; earlier design review commit `d59cca2`.
+Read the current committed design, including the dispatch clarification changes,
+not an old copy of that commit.
+**Deliverable:** tested, independently reviewed implementation committed on the
+feature branch, with a PR if authenticated repository tooling is available.
+Production activation is separate. This packet is ready to execute, not proof
+that the implementation or every backend capability already exists.
+
+## 0. Mission, authority, and stopping rules
+
+Build the design end to end: a sender can submit several instructions to a busy
+session, each is durably acknowledged and editable until activation, and the
+recipient executes them serially without corrupting its native conversation.
+Human, authorized agent and system origins use the same turn ledger.
+Include durable recovery, truthful UI, agent sender tooling and regression tests.
+
+The owner authorizes autonomous repository inspection, implementation, offline
+testing, narrow design corrections supported by code, and independent review.
+Do not repeatedly ask the owner how to find files, use APIs, choose helper
+names, resolve an ordinary failing test, or interpret a behavior already fixed
+here. Investigate the tree and installed dependency source. Record material
+discoveries in this packet's Execution record; amend the design in the same
+branch when a real contradiction is found. Preserve all safety invariants.
+
+The following are the only escalation boundaries:
+
+- A required guarantee is impossible with the available backend/API after
+  inspection and a reproducing test, and alternatives require a product change.
+  Report the exact failed gate, evidence and least disruptive alternatives.
+- Destructive live changes, deleting user work, production data repair, changing
+  paid usage policy, or worker restart/redeploy not already authorized.
+- A required external credential/capability remains unavailable after discovery.
+  Complete independent local work first; don't fake a review or working feature.
+
+Do not mark done simply because a flag is OFF. A safe unfinished feature is still
+unfinished. Mandatory tests cannot be skipped, xfailed or replaced with mocks of
+the behavior they are supposed to prove. Record an actual block honestly if a
+required gate cannot pass.
+
+The independent code-review worker(s) described in §12 are authorized. This is
+not authorization for arbitrary extra agents or a paid full-backend e2e suite.
+Use at most one reviewer at a time; fix findings before asking for another pass.
+Do not change live flags, run live load tests, restart services, merge or deploy
+as part of this packet. The requested handoff is the reviewed feature branch;
+this task-specific scope narrows older generic self-merge/deploy instructions.
+
+## 1. Required boot and isolated workspace
+
+1. Run `pwd` as its own terminal call; read `.ai/CONTEXT.md` first. Read the
+   applicable repository instructions and `.ai/dispatch/CLAUDE.md`. Summarize
+   purpose, relevant files, setup and risks before changing code.
+2. Inspect `git status --short --branch`, existing worktrees and this packet's
+   YAML state. Never stash, reset, delete, overwrite or commit somebody else's
+   changes. The sibling design files `SESSION_WAIT_STATE_GRANULARITY.md` and
+   `WORKER_CACHE_HEARTBEAT_EXTENSION.md` were untracked when this packet was
+   authored; they are unrelated work, not implementation requirements.
+3. Create the feature branch in an isolated worktree from the commit containing
+   this packet. Example, only after checking that both branch/path are unused:
+   `git worktree add ../AI-team-session-turn-queue -b feat/session-turn-queue HEAD`.
+   If the branch already exists, inspect and resume it when it belongs to A82;
+   otherwise use a unique `feat/session-turn-queue-<suffix>`. Never force-create.
+4. Run all implementation commands in that worktree. Record its absolute path,
+   branch and base commit below. Set A82 status active and owner through the
+   dispatch script in the worktree, not by editing the YAML block.
+5. Use repo-local Python environment. For a new worktree, use the existing
+   project install workflow with `pyproject.toml`, dev extras and
+   `constraints.txt`; do not install into system Python. Inspect pytest fixtures
+   before running them: a copied/shared venv or editable install must not cause
+   imports from the original live checkout. Verify imported `src.__file__`.
+6. Linux/Bash only. Each new terminal sequence starts with a separate `pwd`.
+   Use `pnpm` for web tooling when available. Never run `python main.py status`,
+   `--force`, a full pytest/e2e suite, or pytest faulthandler timeout flags.
+   Redirect any full diagnostic dump to /tmp. Clean up child processes/listeners
+   created by tests and reviewers, not just their shell wrappers.
+
+Dispatch commands (use the real worktree root):
+
+```bash
+.venv/bin/python scripts/dispatch/dispatch_state.py --set AGENT_82_SESSION_TURN_QUEUE status active
+.venv/bin/python scripts/dispatch/dispatch_state.py --set AGENT_82_SESSION_TURN_QUEUE owner <actual-agent-name>
+```
+
+These are separate commands. The generic `pnpm dispatch:set` wording in older
+dispatch docs does not apply here. Use the Python script, never hand-edit YAML
+or generated `_DISPATCH_STATE.md`. Keep DISPATCH_LOG's A82 entry current.
+
+## 2. Read map and current behavior to verify
+
+Read the full design, then these symbols and their callers before proposing
+code. Use `rg`; when a symbol moved, find it rather than create a duplicate.
+
+| Area | Existing source and why it matters |
+| --- | --- |
+| Admission/execution | `src/orchestrator.py`: `submit_instruction`, `_enqueue_task`, `_task_worker`, `process_task`, context preparation, `_mesh_enqueue_task`, `_dispatch_to_node`, `_mesh_complete_task`, reconcile spool and stale-BUSY repair. |
+| Durable state | `src/control/db.py`: migrations, `_write/_begin_immediate`, task insert/claim/release/node-release/complete/fail, `get_session_turns`, session upsert, flow links, close_case and producer token helpers. |
+| API | `src/control/control_api.py`: instruction body/route, process-local idempotency cache, operator auth, telemetry /api/turns, stop/close/compact, uploads, events and app factory. |
+| Carrier protocol | `src/control/task_server.py`: registration, polling, claim/result/release/reaper, result telemetry reconciliation, staging. `src/control/node_registry.py`: incarnation handling. |
+| Worker | `src/worker/agent.py`: `_poll_loop`, `_fetch_pending`, `_handle_task`, `_handle_close_session`, `_execute_task`, `_make_session_from_payload`, result posting and shutdown. |
+| Session state | Actual path `src/services/session_service.py`; `src/services/session_store.py`; `src/core/interfaces.py`. The CONTEXT path `src/core/session_service.py` is stale. |
+| Backend ownership | `src/backends/claude_driver.py`: `_SDKSession.send/_submit_turn/_reader_loop/_dispatch`, `_get_or_create`, role/tool config. `src/backends/codex_native.py`: `_thread_config`, `_run`, cancellation/compaction. OpenCode adapters and registry. |
+| Internal producers | Orchestrator Case continuation/finalizers, quota/transient resume, respawn, cache heartbeat, watched-job completion, .task.md session-scoped ingestion and Telegram session sends. |
+| Sender tooling | `scripts/mcp_manager.py`: `_dispatch_worker`, `_api_request`, shared token fallback and tool schemas. `scripts/mcp_jobs.py`; role filters in Claude/Codex paths. |
+| UI truth | `web/src/components/timeline/Composer.tsx`, `useSessionActions.ts`, `useLiveData.ts`, `apiClient.ts`, timeline adapters/stores, `liveInvalidation.ts`, `refreshPolicy.ts`. |
+| Flags | `config/settings.py`, db runtime-flag registry, orchestrator flag exports, managed env keys, `docs/ENV_FEATURE_FLAGS.md`, `.env.example`; locate every real registration seam. |
+
+Observed root cause: API acceptance enters an ephemeral gateway queue and
+prematurely mutates session state; durable execution rows arrive later.
+Serialization is backend/path-specific, and local shadow claims are best
+effort. The worker can schedule the same pending ID repeatedly and does not
+serialize different turns of one session. Result task status becomes terminal
+before the session/native ID is necessarily reconciled. These are the causes
+to fix; “enable send while busy” alone is not the implementation.
+
+## 3. Fixed decisions and interpretation traps
+
+1. **One execution ledger, not one table for every purpose.** `mesh_tasks` holds
+   managed turn intent. Revision audit, hashed credentials and completed-result
+   spool are ancillary state; none may become a second prompt/execution queue.
+2. **Protocol 0 stays legacy/control.** Protocol 1 is explicit managed execution,
+   scoped to enrolled sessions. Active uniqueness must not include stop/close,
+   sentinel Case tokens or legacy rows. Reject legacy execution bypasses for
+   an enrolled session at DB insert/claim boundaries.
+3. **One session owner includes uncertainty.** `recovery_required` retains the
+   active slot. Offline, expired heartbeat, a new incarnation, coroutine
+   cancellation, a terminal-looking status or API timeout do not prove the
+   old process stopped. No exactly-once backend-effects claim.
+4. **Canonical commit precedes acknowledgement.** New helpers throw typed
+   failures; do not reuse swallowing helpers unchanged. No accepted SSE/event
+   or backend call on failed commit. Existing mirror/reconcile helpers are not
+   an alternative admission authority.
+5. **Queued is not BUSY.** Acceptance must not overwrite the active task ID,
+   last executed prompt or native backend ID. Read active ownership from the
+   ledger. Stop must not cancel the newest waiting ID by mistake.
+6. **Fresh config is not stale whole-session save.** Version configuration;
+   update completion-owned fields only. Preserve concurrent close/model/pin
+   changes. Do not let legacy completion later overwrite canonical completion.
+7. **Routing keeps host affinity.** Gateway-local carrier and local standalone
+   daemon may share a hostname: include carrier kind/process identity. Remote
+   pinned sessions never relocate just because the node is unavailable.
+8. **Acceptance FIFO has no hidden priorities.** Commit order defines sequence;
+   timestamps/client clocks do not. No reorder endpoint. Edit preserves sequence.
+   Source does not grant priority or permission.
+9. **Retry decision is fixed.** Failed A + earlier waiting B + eligible automatic
+   pause: supersede A's automatic retry and release only that eligible pause;
+   run B. No B: admit head retry R, allow through its own eligible pause only,
+   close/replace that pause on R's terminal outcome. Later B stays after R.
+   Never deadlock B behind a pause whose retry is behind B. Preserve approval,
+   operator stop, Case block and future provider deadlines.
+10. **Optional automation can expire; humans cannot silently disappear.**
+    Heartbeat is idle-only. Revalidate continuation work at activation; an
+    intervening human review can make the wake obsolete. Do not coalesce humans.
+11. **Routes/query keys are new names.** Use `turn-requests` API resources,
+    `useSessionTurnQueue` and `["session-turn-queue", sessionId]`. Existing
+    `/api/turns`, its detail route and `useSessionTurns` are telemetry.
+12. **Two different clocks.** Scheduler fallback is 3 seconds. UI uses A81
+    post-commit SSE/reconnect invalidation plus existing 60-second
+    `SAFETY_NET_MS`. Do not regress all chat reads to 3-second polling.
+13. **Two auth scopes.** Existing admin callers retain operator authority.
+    The new sender tool uses only a dedicated session send credential; no
+    dashboard/worker-token fallback. Tool allowlists are not authentication.
+14. **One off is outside this change.** Leave stateless tasks and unenrolled
+    legacy sessions working. Do not turn this into a framework rewrite,
+    backend replacement, telemetry DB split, broker, or generic peer inbox.
+15. **Prepared prompt differs from editable intent.** Context/role/attachments
+    are assembled once for the consumed revision. Never prepend them again on
+    result retries or reuse the wrong session's carry context.
+16. **A feature gate does not abandon accepted work.** Disabling new enrollment
+    leaves existing managed consumers/recovery/read APIs available until drained.
+17. **Real SDK capability must be proved.** The lock currently interrupts the
+    old turn on conflict; post-hoc proactive output is not an idle signal.
+    A mock that always reports idle cannot establish correctness.
+18. **No invented public helpers.** `enqueue_turn`, the new routes, protocol
+    fields, scheduler, sender credentials, result spool and tests below are
+    to-be-created contracts. Names in this packet do not mean they exist.
+    Reuse current helpers only after checking their semantics.
+
+## 4. Stage 0 — executable contract probes before bulk implementation
+
+Do this first; it prevents building a large queue around an impossible driver
+assumption. It is code investigation plus targeted red tests, not another
+general design document.
+
+- Build an execution-path inventory in the Execution record: source → admission
+  → DB row → carrier → backend → result → session update. Include compact,
+  retry loops, startup recovery, watched jobs, proactive output and remote close.
+  Every actual path must either join protocol 1 or be explicitly legacy/control.
+- Read the installed Claude SDK source/types and current driver reader. Construct
+  controlled stream traces for a native background task completing immediately
+  before explicit dispatch, while it is reserved, and immediately after a
+  terminal result. Include multiple background tasks and a stopped/killed task.
+  Identify exactly which observations prove quiescence and correct attribution.
+  A task-finished notification alone does not prove its ensuing model continuation
+  ended. An empty `_pending` deque is also not sufficient.
+- Choose and implement the smallest driver reservation state that retains
+  ownership until all native work affecting that session is quiescent, using
+  actual supported SDK lifecycle signals. Reserve on the SDK loop before
+  submitting a query; don't infer safety from delayed gateway polling.
+  Keep background functionality and cache/session continuity. Protocol-1 lock
+  conflicts must never call `cancel_inflight`.
+- Test same-process once-only execution on a lost start response and restarted
+  carrier refusal to reuse old authorization. Model lost claim responses too.
+- Verify per-session MCP configuration can carry sender-only credentials on
+  both Claude SDK and Codex native, without global env/config mutation.
+- Verify migration on a fixture with duplicate legacy active rows, cancellation
+  rows and NULL-session scheduling tokens; schema must still install.
+- Request the first independent review under §12 of these contracts/red tests
+  before integrating the scheduler. The reviewer can identify a narrow defect;
+  fix it autonomously and recheck.
+
+**Gate:** mandatory default Claude SDK and Codex native contracts have an
+evidence-backed implementation path. If the SDK cannot expose enough information,
+investigate supported source/API alternatives and record a minimal design
+amendment. Do not silently disable background work, switch all users to a
+different driver, exclude all Claude sessions or claim Stage 0 passed. Escalate
+only after a concrete reproducer establishes the missing capability.
+
+## 5. Stage 1 — acceptance tests before feature code
+
+Create these test files (or extend an exact equivalent already in the tree).
+Write executable cases for the entire contract now, before Stages 2–8.
+Use existing factories/fixtures, a real temporary file-backed SQLite DB and
+fake backend/carrier transports. Test discovery must succeed. Missing features
+must fail assertions at runtime, not be hidden with skip/xfail or fail merely
+because a test imported a nonexistent module.
+
+| ID / proposed test file | Required assertions |
+| --- | --- |
+| DB01–08 `tests/test_turn_queue_db.py` | Additive migration, scoped unique slot, required managed fields, monotonic sequence, original-request hash, replay after edit/withdraw/close, revision audit rollback, no legacy execution bypass. |
+| API01–08 `tests/test_turn_queue_api.py` | Commit-before-202, unchanged compatibility envelope/status, one-item full read vs summary page, stale revision 409, auth/closure/Case races, 429 limits, 503 DB failure, unchanged telemetry routes. |
+| SCH01–06 `tests/test_turn_queue_scheduler.py` | Head-only FIFO, delayed blocked prefix fairness, distinct-session progress, activation/config races, no prompt reinjection, no writes/network/expensive context under transaction. |
+| OWN01–10 `tests/test_turn_queue_ownership.py` | Carrier kind/incarnation/token fencing, lost claim/start response replay, once-only invocation, post-start restart hold, old result rejection, same result idempotency, stop/close/compact, native ID atomic commit, stale session-save defense, confirmed-quiescence recovery resolution. |
+| WRK01–06 `tests/test_turn_queue_worker.py` | Dedup before task creation, bounded scheduled+executing IDs, claim response payload authoritative, result spool boot replay/receipt cleanup, disk/full/oversize failure, shutdown does not release a running backend. |
+| SDK01–04 `tests/test_turn_queue_sdk_ownership.py` | Deterministic native lifecycle race traces from Stage 0, no implicit interrupt on lock conflict, no autonomous result misattribution, held native work retains ownership. |
+| SYS01–08 `tests/test_turn_queue_producers.py` | Busy Manager wake, obsolete continuation, durable token→turn crash handoff, restart finalizer, A/B/R retry matrix, heartbeat expiry, respawn linkage, watched-job single notification/Case membership. |
+| AUTH01–06 `tests/test_turn_queue_sender.py` | Dedicated capability issuance/validation/revocation, sender binding, cross-Case rejection, shared credential not accepted as scoped sender, concurrent Claude/Codex MCP env separation, same operation retry after tool restart. |
+| INT01–06 `tests/test_turn_queue_integration.py` | Real control API → DB → scheduler → real task-server handlers → worker fake backend → result → next activation, with two carriers/sessions and restart/fault barriers; no direct fake completion shortcut. |
+| LOAD01–04 `tests/test_turn_queue_pressure.py` | 100 admissions, bounded count/bytes/executor tasks, pre-parse chunked size rejection/body timeout, real SQLite lock contention, lifecycle responsiveness, no phantom acknowledgements. |
+| ROLL01–05 `tests/test_turn_queue_rollout.py` | Flag-off, mesh-off, missing capability, race-free enrollment, disable-new-enrollment/drain with existing rows, no downgrade losing accepted work. |
+| UI01–08 `web/src/lib/turnQueue.test.ts` and queue component/hook tests | Send while running, reload reconciliation, edit/withdraw conflicts, stop/pause behavior, distinct telemetry, SSE/reconnect/safety poll, pending/terminal dedup, attachments/carry/draft preservation and keyboard/accessibility. |
+
+Minimum integration stories, with observable barriers rather than sleeps:
+
+1. A running on local Claude; B and C acknowledged; revise C; complete A;
+   B alone starts; withdraw still-queued C; reload sees no vanished B.
+2. Repeat on a remote fake carrier; A's first result supplies native ID X.
+   Hold result reconciliation at a barrier: B must not start until commit,
+   then B must resume X and must not call create_session.
+3. Admit on two sessions; block the oldest head on one, fill its waiting queue;
+   the other must progress within one eligible scheduler pass.
+4. Crash gateway after admission, after activation, after result commit before
+   invalidation, and after producer token claim. Recreate objects against the
+   same DB. IDs and accepted intent survive; no duplicate execution.
+5. Simulate isolated carrier still executing after heartbeat timeout. Second
+   carrier must not run successor or same started prompt. Replay persisted result;
+   only then release. A new incarnation alone does not end the hold.
+6. Have a credentialed worker send two instructions to a busy same-Case Manager.
+   Verify distinct accepted IDs, source binding, FIFO, no interruption, and
+   failure for forged/cross-Case/revoked sender. Human sends use the same ledger.
+
+Record the initial red assertions and existing baseline failures below. Don't
+“fix” a baseline failure by weakening tests or editing unrelated code. Reproduce
+and classify it; run the affected test once after a justified fix.
+
+## 6. Stage 2 — schema, transaction seams, and session ownership
+
+Implement design §§3–4 and scoped indexes exactly in intent. Use the next
+available migration number; never renumber historical migrations.
+Keep code small: strict DB helpers in the DB layer, Pydantic request/result
+types and a narrow service/scheduler module if it avoids further orchestrator
+growth. Do not introduce a generic repository/event-bus framework.
+
+Required atomic operations:
+
+- Enqueue: idempotency lookup → current permissions/state/capacity → sequence →
+  task + Case membership + required token linkage. One transaction.
+- Revise/withdraw: revision + queued predicate + bounded audit. One transaction.
+- Activate: head + no owner + config/Case/intent revisions → immutable prepared
+  payload + carrier assignment + pending. One transaction.
+- Claim/start/release: task + protocol + carrier kind/process + token + state
+  predicates. Return structured authoritative ownership/payload.
+- Complete: outcome + native ID/driver/result fields + session active identity +
+  required retry/pause state + task terminal. One transaction.
+- Close/interrupt: canonical state + applicable queued withdrawals + admission
+  exclusion. Existing approval/completion criteria remain enforced.
+- Enrollment: canonical DB present, no legacy in-memory/durable/native work,
+  eligible backend/carrier, persisted marker, no racing legacy admission.
+- Recovery resolution: current token plus recorded authenticated quiescence or
+  result; conditional terminalization, no implicit rerun.
+
+Use typed errors mapped consistently: 401 invalid credential; 403 disallowed
+scope; 404 unknown/inaccessible resource as existing policy requires; 409 state,
+revision, idempotency mismatch or missing recovery evidence; 413 byte cap;
+422 malformed model data; 429 capacity/rate; 503 DB unavailable/deadline.
+Internal producers get the corresponding typed outcome, not HTTP objects.
+
+Body and mutation admission gates apply before parsing/submitting executor jobs.
+Use a process-shared, loop-independent finite permit mechanism across the two
+gateway loops; do not share an asyncio semaphore across event loops.
+Use a monotonic end-to-end deadline and remaining-time lock/SQLite timeouts;
+restore thread-local SQLite timeout state afterward. Don't change every legacy
+DB operation as an incidental refactor.
+
+All session writers affecting enrolled sessions must preserve field ownership.
+Cover model/effort/pin/close and file-shadow saves, not just the new result API.
+No JSON fallback for managed admission/activation/recovery.
+
+**Gate:** DB/API red tests now pass; index query plans are attached in Execution
+record; legacy migration and legacy nonqueue regression tests still pass.
+
+## 7. Stage 3 — carrier protocol, results, and failure recovery
+
+Add version/capability negotiation before managed pending rows are visible.
+Extend existing poll/claim/result infrastructure rather than a parallel worker
+protocol. Managed start is a new conditional operation; release before start
+is safe only for the current token. Release after start is forbidden without
+quiescence. Legacy handlers remain unchanged for protocol 0.
+
+Wire DTOs include protocol version, task ID, carrier kind/process incarnation,
+claim token and state. The claim response supplies the frozen payload; execute
+that response, not the poll snapshot. Never serialize credentials/tokens into
+public transcript/telemetry views. Claim token is an execution credential.
+
+On a lost claim response, retry/lookup using the same task and requesting
+carrier process; retrieve its existing ownership. On a repeated start with the
+same live attempt, return the same authorization. A single carrier invocation
+owner consumes it once; no parallel handler may create another backend call.
+After carrier restart old authorization cannot start anything. It may submit
+a durably spooled result bearing the old token if that token still owns the
+held task; reject only if superseded, not merely because a node restarted.
+
+Worker bookkeeping:
+
+- Do not schedule a fetched ID already in scheduled/executing/result-delivery
+  state. Acquire bounded scheduling capacity before create_task.
+- Cap scheduled+executing work to at most twice configured execution slots.
+  Backend execution retains existing max_concurrent bound.
+- Control cancellation has separate small bounded capacity and targets the
+  current attempt. Close preserves established safe drain ordering.
+- Stop new claims before graceful shutdown; await/stop and verify children
+  before any ownership release. Cancelling an awaiter is not backend shutdown.
+- Result completion pending delivery keeps session ownership even if the backend
+  slot can be returned. It must not create unlimited background retry tasks.
+
+Managed result spool initial limits: 8 MiB serialized envelope per result,
+128 MiB retained envelopes per carrier, 2 concurrent result-delivery requests.
+Reserve one envelope allowance before start; if reservation is unavailable,
+leave pending rather than run and discard. Store outside repo source, under
+carrier state with mode 0600, atomic replacement and bounded replay batches.
+Use only validated task/token identifiers for spool paths; never client paths.
+
+Preserve full backend artifacts using existing artifact storage. If a result
+cannot fit its envelope, preserve the full artifact locally, keep the durable
+ownership hold with a bounded diagnostic/result-reference record, and stop new
+claims if delivery cannot be reconciled. Do not truncate a reply and pretend
+full canonical delivery succeeded. Test this failure path explicitly. Do not
+delete a spool because an HTTP timeout elapsed, or because any 2xx arrived:
+parse durable accepted/stale receipt and match task/token. Disk-write failure
+leaves a visible recovery obligation; it cannot produce a successful ack.
+
+Expose bounded authenticated carrier quiescence observations (task, token,
+carrier/process and native execution identity, terminal/stop evidence). The
+operator resolve-recovery endpoint consumes this recorded evidence, not an
+operator-supplied boolean. Node registration/offline status is not evidence.
+Auto-reconcile a matching valid spooled terminal result; retain unresolved holds.
+
+Extract shared completion classification rather than duplicating salvage,
+quota, cache health, telemetry invocation and native-ID rules. Heavy telemetry,
+notification, file mirrors and projection remain after canonical commit.
+
+**Gate:** OWN/WRK/SDK tests pass, remote native-ID integration passes, and a fresh
+independent reviewer clears ownership/recovery (§12) before admission goes live.
+
+## 8. Stage 4 — admission/scheduler and all execution producers
+
+Wire `submit_instruction` and session-scoped entrypoints to the new service only
+when enrolled. Keep the harness gate and Case/role lineage semantics. Do not
+double-create a flow or drop a join when changing the enqueue path.
+
+Implement fair scheduler from design §5. With default global waiting cap 50,
+scan only the bounded nonterminal subset; select eligible heads before LIMIT 25.
+Do not hold a local execution worker per remote pending/running row. Use bounded
+batched reconciliation and event hints; waiting work stays in SQLite.
+
+Canonical input/storage bounds are in design §8. Enforce fleet queued+pending
+count and stored bytes in the transaction, with per-session cap 20. Ensure
+legacy and managed admission do not each consume an independent “50” allowance
+in one mixed-mode gateway. Do not load full prompts for queue-list summaries.
+
+Convert these paths individually with their tests, in this order:
+
+1. Web/Telegram/runtime session instructions and local/remote execution.
+2. Compaction and ordinary active cancellation/close.
+3. Case continuation token→turn linkage and durable finalization.
+4. Watched-job notification, preserving existing Case attachment/dedup.
+5. Quota and transient retry using the exact A/B/R rule.
+6. Cache heartbeat with idle-only eligibility and expiry.
+7. Respawn with existing Case lease/approval/role boot and durable new-session link.
+8. Session-scoped file ingestion/restart recovery; inspect for remaining bypasses.
+
+For each, record producer → durable trigger identity → turn ID → completion
+effect in the Execution record. Permanent idempotency collapses replay even after
+the coalesce key no longer covers a terminal row. In-memory finalizers may
+accelerate work but cannot be the only path. A crash after token claim/admission
+must be recoverable without another turn or lost round accounting.
+
+Revalidate source-specific state at activation and closure. Do not add a new
+Case poller or scan all Case event logs for each queue tick. Reuse the current
+event watermark/batched quota work.
+
+**Gate:** SCH/SYS/INT tests pass and grep/inventory shows no unmanaged execution
+path into an enrolled session.
+
+## 9. Stage 5 — scoped agent sender, not a new messaging platform
+
+Implement `send_instruction(target_session_id, body, operation_id)` as one
+dedicated stdio MCP sender tool. Reuse JSON-RPC/HTTP helper conventions without
+inheriting `mcp_manager._token_candidates` admin fallback.
+Add a dedicated script only if existing tool routing cannot keep credential
+selection and permissions separate cleanly.
+
+Credential contract:
+
+- Gateway mints an opaque cryptographically random capability at an authenticated,
+  currently owned carrier/session boot/provision request. Bind it from canonical
+  claimed task/session to sender session, Case, role, credential generation and
+  allowed operation. Request cannot choose arbitrary sender/Case bindings.
+- Store only a cryptographic hash plus binding/revocation metadata in mesh DB.
+  Raw token appears only in the private provisioning response and session-local
+  MCP server environment; never in mesh task payload, list APIs, transcript,
+  prompts, telemetry, artifacts, source files or logs.
+- Validate current session open state, membership/generation, role and same-Case
+  recipient on each send. Worker→Manager and worker→worker are allowed within
+  the current open Case; no cross-Case, broadcast, self-send or system-source
+  impersonation. Manager→worker is allowed by the same rules.
+- Revoke on session close, Case-binding change and carrier replacement; reissue
+  via current authenticated ownership, not fallback to admin credentials.
+- Credential permits only send_instruction, not operator edit/withdraw/close,
+  file staging, claims or credential minting. Unknown/revoked token returns 401;
+  valid wrong-scope target returns 403.
+- Existing shared node/admin trust remains; this is not an OS sandbox or the
+  separate A71 per-node credentials project. Do not claim protection against
+  host admin-secret theft. New scoped endpoint must not silently accept the
+  shared worker/admin bearer as if it identified an agent.
+
+Provision per backend instance: Claude `_get_or_create → _SDKSession._async_run`
+can pass server-specific `ClaudeAgentOptions.mcp_servers`; verify installed
+source rather than guess constructor fields. Codex native seam is
+`_thread_config` (not the nonexistent `_session_config`).
+Preserve user/project MCP settings, global environment and unrelated servers.
+Do not turn on strict MCP replacement globally. Test two concurrent sessions
+receive different tokens and never inherit each other's credentials.
+
+The tool uses the collision-free admission resource with a scoped auth handler,
+stable operation ID header and existing transport address resolution.
+Do not create a new session to send to an existing one. Tool retry reuses key;
+same key/different body conflicts. Return accepted ID/status, not “agent read it.”
+Apply design rate bounds and Case/round policy without silently minting a Case.
+
+**Gate:** AUTH and credentialed-agent INT tests pass on both local and remote
+provisioning; no operator-only fallback counts as completed agent support.
+
+## 10. Stage 6 — UI/API truth and compatibility
+
+Implement the route table in design §9, including pause/resume and recovery
+resolution. Use explicit Pydantic types and bounded cursor pagination.
+Preserve `POST /api/instructions`' existing HTTP success status/envelope for
+legacy callers; enrolled admission returns its canonical task ID and truthful
+session state. Brand-new create route returns 202. Do not reuse telemetry DTOs.
+
+Queue cards are a separate read model from historical exchanges. On activation,
+move the same ID to Starting; on start authorization label Working conservatively;
+on unresolved execution show Recovery required. Do not display a waiting prompt
+as already consumed. Persisted queued count must not mark sessions BUSY.
+Do not mark a session idle just because a later admission was rejected.
+
+Mutations include expected revision; on 409 refetch the item without overwriting
+the running prompt. Keep draft, attachment and first-turn carry semantics.
+Stop active sets persistent operator queue pause and cancels only current work;
+withdraw affects only the selected queued item. Resume clears only operator
+pause, not provider/approval/Case/recovery holds.
+
+Extend existing SSE invalidation and reconnect resync for queue keys/counts
+after commit. Use shared SAFETY_NET_MS, not an extra interval system. Old
+telemetry info tab, transcript, costs and task truth must still work.
+Update all known status consumers, orphan scans and terminal-state sets together.
+
+**Gate:** UI tests, web typecheck/build, API compatibility and telemetry regression
+tests pass. Inspect component interaction with mocked network/backend; no paid
+model needed.
+
+## 11. Stage 7 — regression, pressure and rollout rehearsal
+
+Run tests in bounded groups after reading fixtures. Proposed adjacent regression
+inventory (all paths existed at dispatch; narrow/extend based on actual changes):
+
+```text
+tests/test_mesh_enqueue_affinity.py
+tests/test_claim_reaper.py
+tests/test_task_state_truth.py
+tests/test_mesh_dispatch_timeout.py
+tests/test_mesh_reconcile_spool.py
+tests/test_session_cancellation.py
+tests/test_session_close_propagation.py
+tests/test_session_service.py
+tests/test_session_service_lifecycle.py
+tests/test_session_payload_roundtrip.py
+tests/test_session_case_persist.py
+tests/test_case_admission.py
+tests/test_case_continuation.py
+tests/test_case_interrupt.py
+tests/test_case_closure.py
+tests/test_case_quota_resume.py
+tests/test_case_transient_resume.py
+tests/test_case_respawn.py
+tests/test_session_cache_heartbeat.py
+tests/test_watched_jobs.py
+tests/test_sdk_driver_proactive.py
+tests/test_proactive_turn_delivery.py
+tests/test_codex_ownership.py
+tests/test_codex_native.py
+tests/test_control_api_write.py
+tests/test_control_api_fork.py
+tests/test_telegram_session_flow.py
+tests/test_mcp_manager.py
+tests/test_mcp_jobs.py
+tests/test_worker_role.py
+tests/test_transcript_read_a81.py
+tests/test_session_timeline.py
+```
+
+Run the new suites first, then relevant groups from above with
+`.venv/bin/python -m pytest <explicit paths> --tb=short`.
+Do not pass the entire tests directory. Inspect subprocess/backend fixtures:
+stub/block real paid CLI/network invocation while retaining real DB/protocol
+logic. A test's name alone does not prove it is offline. Use temporary roots
+for DB, sessions, artifacts, spool and logs.
+
+Web commands from the isolated worktree, each separately:
+`pnpm --dir web test`, `pnpm --dir web typecheck`,
+`pnpm --dir web build`. Follow existing lint/config checks when applicable.
+Do not build into the live checkout's served dist.
+
+Pressure rehearsal with fake carriers and temporary DB:
+
+- 100 simultaneous maximum-size caller requests; only 4 queue mutations may
+  execute concurrently. Excess gets finite 429; accepted work obeys per-session
+  20/global queued+pending 50 and 100 MiB stored-intent bounds.
+- New request total 256 KiB/body text 16 KiB; compatibility total 2 MiB with
+  existing character limits. Include chunked oversize and slow bodies.
+  A whole-body read before checking length fails this gate.
+- Mutation lock/DB deadline 5 seconds and body-read deadline 5 seconds, measured
+  separately. A request may spend both; do not falsely assert 5-second total
+  including body upload. Allow bounded test scheduling tolerance, never multiply
+  legacy 15-second busy retries after the new deadline.
+- Hold the SQLite write lock from a second connection. Requests terminate
+  within the deadline with structured failure; no false acceptance. Heartbeat
+  reads/event loop remain responsive; writes under the held lock may fail
+  promptly rather than magically succeed. Executor permits stay occupied until
+  timed-out threads actually exit; no orphaned threads accumulate.
+- Compare 1000 vs 100000 completed rows with the same 50 waiting items.
+  EXPLAIN must use session/nonterminal indexes; no full-history scan/temp sort
+  introduced by activation. Query count for Case eligibility stays batched.
+- Measure peak RSS delta, number of executor threads/SQLite connections,
+  scheduled worker handlers, result-delivery tasks, event-loop lag and request
+  durations. Initial fake-load guard: less than 256 MiB incremental RSS for
+  admission-only run; worker spool contents are not all loaded in memory.
+  Exceeding it requires profiling/fixing, not raising the limit silently.
+- Once the external test lock is released, pending eligible heads progress;
+  admission pressure does not starve result/heartbeat capacity. Reject a design
+  that is memory-bounded only because lifecycle work cannot run.
+
+Rollout rehearsal on fixtures: enrollment refuses old worker capabilities and
+busy/native-background sessions; admission exclusion closes the cutover race;
+all enabled producers honor the marker. Turn the enrollment flag OFF with
+accepted managed rows and restart: managed consumption/recovery must continue.
+Drain/remove enrollment only after no waiting/active/recovery obligation remains.
+Show legacy and MESH_ENABLED=false paths still behave as before.
+
+Explicitly walk all six service-boundary items (concurrency, memory, payload,
+timeout, malformed input, backing failure) for admission, start/result,
+credential provisioning/send and recovery resolution. Put any true deferral
+under A82 in CONTEXT with evidence; required safety gates cannot be deferred
+while marking done.
+
+## 12. Independent adversarial review and remediation
+
+Three review gates: after Stage 0 contracts, after ownership/recovery Stage 3,
+and after the complete implementation/test pass. Use a fresh reviewer context
+at each significant gate. The final reviewer must inspect the complete candidate
+and report against exact branch/base plus working-tree diff.
+
+Preferred mechanism: built-in subagent with `fork_turns="none"`, explicit repo/
+worktree path, packet/design pointers and read-only task. No parent transcript,
+reasoning recap or suggested verdict. Do not pass “we fixed everything.”
+
+If built-in delegation is unavailable, use the existing mesh Manager dispatch
+tool to create a fresh Claude SDK reviewer with explicit `model="opus"`,
+`backend="claude"`, `role="worker"`, and cwd equal to the isolated candidate
+worktree. Inspect actual tool schema/API and available nodes first. Reuse
+`dispatch_worker`/`wait_for_worker`; do not guess a /spawn endpoint, invoke
+a sessionless oneoff, restart a node, or select a remote cwd that does not contain
+the candidate. Reviewer on the gateway host can inspect the uncommitted worktree;
+a remote worker must receive a verified candidate snapshot and base/diff hashes
+through existing staging before reviewing. If it cannot see the exact candidate,
+that review does not count. Never expose tokens in shell commands/transcripts.
+
+User authorized these bounded review turns; no separate owner approval is needed
+for the review itself. Use one reviewer at a time, no recursive delegation,
+bounded output and normal model budget controls. If Opus is unavailable, another
+fresh capable reviewer is acceptable; record the actual model, not the preference.
+Read-only review can run on the current legacy mesh; it must not depend on
+enabling the new feature being reviewed.
+
+Reviewer prompt (fill factual placeholders only):
+
+> Independently review A82 at WORKTREE, base BASE_SHA and candidate DIFF_HASH.
+> Read .ai/CONTEXT.md, .ai/dispatch/AGENT_82_SESSION_TURN_QUEUE.md and the linked
+> design, then inspect code/tests yourself. Do not modify files, run paid
+> backends/live APIs, deploy, commit, or spawn agents. Try to falsify session
+> serialization, claim/start/result fencing, SDK autonomous result attribution,
+> completion/native-ID atomicity, FIFO/retry liveness, Case/token crash recovery,
+> scoped sender authorization, bounded pressure and mixed-version rollout.
+> Check integration fit and unnecessary new infrastructure, not just style.
+> At each finding cite file/symbol, reproducible triggering sequence, violated
+> requirement, severity and minimal fix/test. Distinguish existing baseline
+> issues from introduced defects. Audit tests for mocks that bypass the changed
+> boundary. Return findings plus explicit gaps in evidence and accept/rework.
+> For final review, inspect UI/telemetry compatibility and all Stage 1 test IDs.
+> No request to the owner for facts available in the repository.
+
+Keep reviewer result in this packet's Review record with reviewer/session ID,
+candidate hash, stage and concrete findings. No separate summary-document spree.
+For each valid finding: write a failing regression, implement the smallest fix,
+run affected checks, and have the reviewer independently verify the revised
+candidate. A rejected finding needs code/test evidence and reviewer agreement;
+author disagreement alone is not clearance.
+
+Require no unresolved correctness, security, data-loss, deadlock, pressure or
+compatibility finding before final commit. Record cosmetic suggestions with
+reason if intentionally omitted. Test edits after review can alter the oracle;
+get them checked too. If the candidate changes materially after final approval,
+refresh affected tests and reviewer verification before committing.
+
+Do not substitute the implementation agent's self-review for fresh review.
+If all review mechanisms are unavailable, finish the candidate/tests and report
+the exact tooling blocker; do not mark reviewed/done or fabricate a transcript.
+Track every review session you create and close it only after its terminal
+result using existing session lifecycle; leave no active orphan reviewer.
+
+## 13. Final commit, PR and closure
+
+The owner requested review before implementation commit. Keep Stage 0–7
+changes in the isolated worktree until the final independent pass and remediation
+are complete; do not create unreviewed checkpoint commits merely to transport
+them to a reviewer. Preserve work on disk; no stash/reset/cleanup of user files.
+A local reviewer can inspect the uncommitted candidate directly.
+
+Once final review passes:
+
+1. Run `git diff --check`, inspect scope and secret leakage, confirm required
+   tests/build already passed for this candidate. Repeat only checks affected
+   by subsequent changes; don't run the paid full suite.
+2. Fill Execution/Review/Closure records with exact test commands, results,
+   test-ID coverage, candidate/base reference, measured pressure bounds,
+   implemented backend capability matrix and any separately pending live
+   deployment checks. Do not report fake-carrier integration as live e2e.
+3. Set evidence/results_ref through dispatch_state.py, update DISPATCH_LOG A82,
+   remove A82 from active CONTEXT if present, and mark done only if all build
+   gates passed. Keep flags OFF and production activation pending explicit
+   deployment work. Proof paths must exist, not be future filenames.
+4. Stage only A82 implementation/tests/docs plus generated dispatch changes
+   produced by the repo hook. Commit on the feature branch after review.
+5. Open a PR using existing authenticated Git tooling if available, describing
+   resulting behavior, ownership/recovery changes, tests and rollout gates.
+   Use a body file for multiline CLI text. Do not force-push. If remote tooling
+   is unavailable, the reviewed local commit is still a real deliverable;
+   report PR publication separately as unavailable.
+6. Leave branch unmerged and live services untouched. Final response: branch,
+   commit, PR if created, packet path, test/review verdict, remaining production
+   activation requirements. Never say “guaranteed no issues.”
+
+## 14. Milestone checklist
+
+- [ ] Isolated branch/worktree; baseline and producer inventory recorded.
+- [ ] Stage 0 default Claude SDK/Codex capability probes and independent review pass.
+- [ ] Stage 1 acceptance/regression/integration tests written and meaningful red recorded.
+- [ ] Stage 2 schema and atomic DB/session/Case boundaries pass.
+- [ ] Stage 3 carrier ownership/result spool/recovery and independent review pass.
+- [ ] Stage 4 fair admission/scheduler and every producer integrated.
+- [ ] Stage 5 actual scoped agent sender works locally/remotely.
+- [ ] Stage 6 UI/API truth, edits, pause/recovery and telemetry compatibility pass.
+- [ ] Stage 7 pressure, regression and rollout rehearsal pass.
+- [ ] Final fresh-context adversarial review; every material finding resolved/rechecked.
+- [ ] Reviewed implementation committed on feature branch; PR/handoff completed.
+
+## 15. Execution record
+
+Not started. Implementation agent records concise facts here as work proceeds:
+base SHA/worktree, path inventory, Stage 0 evidence, red→green test IDs/commands,
+query-plan/load measurements, discovered design amendments and capability matrix.
+Do not change this to “passed” merely because this dispatch document was reviewed.
+
+## 16. Review record
+
+Implementation reviews not started. Record each stage's independent reviewer,
+candidate reference, findings, regression/fix evidence and re-review disposition.
+The design/dispatch authors' review does not satisfy implementation review.
+
+## 17. Closure
+
+Pending implementation. Acceptance of this packet authorizes the work and tests
+above; it does not assert that the design already passed its backend proof gates.
