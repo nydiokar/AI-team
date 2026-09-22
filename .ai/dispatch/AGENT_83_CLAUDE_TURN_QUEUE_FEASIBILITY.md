@@ -1,62 +1,38 @@
 ```yaml
 job_id: AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY
 created_at: "2026-09-22T17:11:35.678902+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: dead              # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
-results_ref: DISPATCH_LOG.md#A83             # -> DISPATCH_LOG.md section with the verdict prose
+results_ref: DISPATCH_LOG.md#A82-claude#A83             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-22T17:11:36.872576+00:00"
+updated_at: "2026-09-22T19:20:38.551305+00:00"
 ```
 
-# A83 — Resolve Claude SDK turn-queue feasibility before implementation
+# A82 supporting checklist — Claude queued-turn integration
 
-**Status:** investigation ready; A82 implementation is blocked on this result.
-**Priority:** required. Claude SDK is a primary backend, not an optional rollout exclusion.
-**Branch:** `investigate/claude-turn-queue`, in an isolated worktree.
-**Design:** [SESSION_TURN_QUEUE_DESIGN.md](../../docs/SESSION_TURN_QUEUE_DESIGN.md).
-**Dependent build:** [AGENT_82_SESSION_TURN_QUEUE.md](AGENT_82_SESSION_TURN_QUEUE.md).
+**Standalone investigation superseded:** execute
+[AGENT_82_SESSION_TURN_QUEUE.md](AGENT_82_SESSION_TURN_QUEUE.md).
+This historical filename is retained for links; it is unrelated to the separate
+AGENT_83_SESSION_STATE_LEGIBILITY job. The YAML status is dead because this is
+no longer an independently dispatched task, not because Claude support failed.
 
-## 1. Assignment
+Start building the unified queue on A82's feature branch. Run the checks below
+as part of its source investigation and carrier integration. They do not block
+schema, admission or test development. Default Claude SDK support is mandatory
+for final completion and rollout.
 
-Finish the investigation needed to make the session turn-queue design executable
-for the actual Claude SDK backend. Do not build the queue first and leave Claude
-as a later integration problem. Deliver a concrete protocol/driver contract,
-reproducing tests, an independently reviewed feasibility verdict, and corrected
-design/build instructions.
+The core behavior is ordinary sequential dispatch:
+persist B/C while A runs; after A's terminal outcome and session update are
+committed, dispatch B, then C. The potential native-background result-ordering
+collision remains unproven. Test its reachability against actual source and
+protocol behavior; do not turn its possibility into a claim the queue cannot
+be built.
 
-The owner wants multiple human/agent/system instructions accepted durably while
-a recipient is busy, then delivered in order as ordinary turns, without
-interrupting existing work, confusing replies, or overwhelming the gateway.
-Reuse existing task/mesh infrastructure. Claude is one of the most-used backends.
-Neither excluding Claude nor silently disabling its background functionality
-counts as satisfying this task.
-
-Work autonomously. Find facts in source, installed libraries, tests and actual
-protocol traces before asking the owner. A question about where a helper lives,
-how the existing mesh dispatch works, or which SDK is installed is not an owner
-decision. If a required behavior is impossible, prove the specific missing
-capability and present the smallest concrete alternatives. Do not replace
-investigation with “needs a gate” or “verify during implementation.”
-
-## 2. Boot and safe workspace
-
-- Start terminal work with a separate `pwd`; read `.ai/CONTEXT.md` first.
-  Summarize project purpose, files and setup before investigation.
-- Read repository instructions, dispatch protocol, design and A82 packet.
-  Inspect git status/worktrees; preserve unrelated/untracked files.
-- Create an isolated investigation branch/worktree from the commit containing
-  this packet. Use repo .venv/project install workflow with constraints; verify
-  imports point to the investigation checkout. Linux/Bash; no force/destructive
-  commands. Do not invoke `python main.py status`.
-- Use temporary DB/session/spool/log roots, fake transports and explicit targeted
-  pytest paths with `--tb=short`. No full pytest/e2e suite, production DB changes,
-  service/worker restart, live flag changes or surprise paid backend runs.
-- Source-reading and an isolated minimal executable prototype/test adapter are
-  authorized. A full queue implementation, generic refactor, SDK upgrade or
-  backend switch is outside this investigation.
-- Record state via `scripts/dispatch/dispatch_state.py --set`; do not hand-edit
-  YAML/generated boards. Set A83 active while investigating; A82 stays blocked.
+Use A82's isolated workspace, test-first workflow, safety constraints and
+independent review process. Do not create a separate prerequisite branch or ask
+the owner to commission another investigation. Keep flags OFF while building.
+The next sections retain the detailed code facts and regression traces.
 
 ## 3. Established observations — verify, don't blindly trust
 
@@ -164,98 +140,28 @@ bounded cost/time, expected discriminating observations and cleanup.
 Do not run it silently. Do all other work first. Do not treat optional live
 testing as an excuse to stop source investigation early.
 
-## 6. Select one concrete integration contract
+## Integration acceptance
 
-Evaluate the existing mechanisms first. Select the least disruptive contract
-that proves safety and preserves useful background behavior. Define:
+First prove normal explicit message/answer serialization through the existing
+Claude adapter. Then use the tests above to establish native-background ordering.
+A failing reachable trace must get a minimal driver/ownership fix and regression
+test within A82. Do not redesign unrelated backend behavior.
 
-- Driver state machine and transition owner/thread/loop.
-- How native and explicit work acquire/retain/release the same session reservation.
-- How every result is attributed; no “assume first result belongs to latest query.”
-- When the gateway task becomes terminal vs when the session becomes eligible
-  for another turn. If those boundaries differ, define persisted ownership and
-  read-model semantics without creating another execution queue.
-- Claim/start/result and native driver evidence needed after failure/restart.
-- SDK lock-conflict behavior for managed sessions: fail closed, never implicit
-  interruption of previous work.
-- Fairness/liveness: how unrelated sessions proceed, what happens with a long
-  background job, and what the waiting user sees. Do not silently hold all
-  instructions forever merely because any historical background task exists.
-- Effects on warm session/cache continuity, compaction, watched-job wakeups,
-  cancellation and role/tool provisioning.
-- Exact code seams, data fields, acceptance tests and rollout requirements.
+Record the actual SDK version, documented versus inferred ordering guarantees,
+chosen reservation/result-attribution mechanism, restart behavior and test
+evidence in A82's Execution record. Amend the design only where the source or
+test demonstrates a real gap. Passing fake-stream tests proves the adapter's
+behavior for those traces, not unsupported upstream guarantees.
 
-Also resolve any contradiction the selected Claude contract introduces into
-A82's completion/native-ID atomicity, result spool, retries or sender capability.
-Do not leave two incompatible options in the implementation guide.
+The final independent reviewer checks these results along with the rest of A82.
+Do not exclude Claude or silently disable background functionality to make a
+test pass. Do not mark the feature done or enable it until the required ownership,
+result attribution, recovery and regression tests pass.
 
-If a safe contract requires a product tradeoff—such as holding followups through
-all native background work—spell out actual behavior and supported bounds.
-Do not label a material behavior change “just an implementation detail.”
-If no contract satisfies the requested behavior with the installed backend,
-return a proved NO-GO with concrete alternatives; no “Claude optional” escape.
+If a concrete reproducer proves a required guarantee cannot be achieved using
+the supported backend interfaces, document the specific failed contract and
+smallest alternatives. That demonstrated limit may block completion/rollout;
+an unimplemented test or speculative race alone does not justify blocking the
+whole build.
 
-## 7. Independent review
-
-Before finalizing, have a fresh-context reviewer inspect the actual source,
-reproducer/prototype and chosen contract. Built-in subagent with
-`fork_turns="none"` is preferred. Alternatively use a fresh Claude Opus reviewer
-through the existing mesh dispatch API/tool, with explicit model and a verified
-copy of this worktree; inspect the real API, never guess a spawn endpoint.
-The owner authorizes bounded independent review, not unrelated paid experiments.
-
-Provide only repo/worktree, base/candidate references, this packet, design and
-a neutral request to falsify the contract. No author conclusion or conversation
-history. Reviewer must check reachable ordering, tests that mock away the race,
-unsupported SDK assumptions, liveness and fit with existing infrastructure.
-Read-only, no deployment, no recursive agent spawning.
-
-Fix substantiated findings and re-run affected tests. Have the reviewer verify
-fixes. Record reviewer identity, exact candidate and findings/disposition here.
-If independent tooling is unavailable, report that explicitly; do not claim
-review completed. Close only reviewer sessions you created, after terminal
-result, without restarting workers.
-
-## 8. Deliverables and release of A82
-
-Deliver all of the following in the investigation branch:
-
-1. Findings/protocol evidence and one selected contract in this packet.
-2. Executable race reproducers and minimal proof prototype if necessary.
-3. Updated design removing the unresolved Claude placeholder and describing
-   the proven mechanism, or a clearly stated NO-GO with evidence.
-4. Updated A82 steps/test oracle to consume those results without rediscovering
-   the issue. Do not tell the builder to repeat an open-ended feasibility study.
-5. Independent review and precise test commands/results.
-6. A committed reviewed investigation result; no live deployment.
-
-GO requires default Claude SDK support with its intended native background
-functionality, correct attribution, non-interruption, bounded/livable waiting,
-recovery semantics and independent review evidence. An optional-backend
-exclusion, suppressed test or broad claim of correctness is not GO.
-
-On GO, set A83 done with real evidence paths, update DISPATCH_LOG, and deliberately
-set A82 ready only once its current design/packet have no remaining unresolved
-build prerequisite. Ensure A82's starting branch includes this investigation
-commit/prototype evidence before execution; “done elsewhere” is not enough.
-
-On NO-GO, A83 may close as a completed investigation with a clearly named NO-GO
-verdict and evidence, but A82 stays blocked. Never auto-unblock A82 merely because
-its dependency job has status done. A82 has no auto-unblock permission.
-
-Owner handoff: chosen mechanism or proved blocker, tests/reviewer verdict,
-branch/commit, updated design/build packet paths and the exact next action.
-No production-safe or zero-issues guarantee based only on mocked tests.
-
-## Findings
-
-Not investigated yet. Record versioned source facts and trace evidence here.
-
-## Review
-
-Not performed on implementation/prototype yet. Earlier design-review findings
-motivate this investigation; they do not prove the selected solution.
-
-## Closure
-
-Pending. Explicit verdict required: GO or NO-GO, with evidence and A82 readiness.
+No feasibility conclusion or implementation result is claimed by this checklist.

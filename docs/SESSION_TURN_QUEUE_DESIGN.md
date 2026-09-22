@@ -1,6 +1,6 @@
 # Session Turn Queue — Unified Durable Delivery Design
 
-**Status:** proposed implementation guide; build blocked on A83 Claude feasibility investigation
+**Status:** ready for staged implementation; backend acceptance tests and review required before rollout
 
 **Date:** 2026-09-22
 
@@ -8,10 +8,12 @@
 
 **Decision:** extend `mesh_tasks`, with the safety and migration contracts below.
 
-**Required before build:** [A83](../.ai/dispatch/AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY.md)
-must prove the default Claude SDK/native-background ownership contract and update
-this design. [A82](../.ai/dispatch/AGENT_82_SESSION_TURN_QUEUE.md) is blocked until
-that reviewed GO verdict. Claude is mandatory, not an optional rollout exclusion.
+**Build entrypoint:** [A82](../.ai/dispatch/AGENT_82_SESSION_TURN_QUEUE.md).
+Proceed on a feature branch. The [Claude regression checklist](../.ai/dispatch/AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY.md)
+belongs to the build's carrier-integration tests, not a separate feasibility
+prerequisite. Claude is mandatory. An unproven background-ordering concern is
+not evidence that ordinary queued delivery is impossible; required tests and
+review must pass before completion/rollout.
 
 ## 1. Owner verdict and scope
 
@@ -360,8 +362,8 @@ ownership conflict without `cancel_inflight`. Prove that native background
 results cannot fulfill the wrong explicit request. Default Claude SDK support
 is a required build gate; excluding all Claude sessions or silently disabling
 background functionality does not satisfy this design. Verify SDK lifecycle
-semantics with installed source and deterministic fake-stream tests before
-bulk implementation. If no safe contract exists, record a concrete blocked
+semantics with installed source and deterministic fake-stream tests during
+carrier integration. If no safe contract exists, record a concrete blocked
 gate instead of claiming an executable guarantee.
 
 Provide an operator recovery-resolution operation requiring the current task
