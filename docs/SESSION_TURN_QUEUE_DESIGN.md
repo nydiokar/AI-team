@@ -1,695 +1,626 @@
 # Session Turn Queue — Unified Durable Delivery Design
 
-**Status:** proposed design; no implementation in this document  
-**Date:** 2026-09-22  
-**Decision requested:** approve the architecture and split it into implementation packets
+**Status:** adversarially reviewed implementation guide; not implemented
 
-## 1. Decision in one sentence
+**Date:** 2026-09-22
 
-Make `mesh_tasks` the **one durable queue and execution ledger for every agent
-turn**, adding a durable pre-dispatch `queued` state and per-session FIFO
-activation. Do not create a second task/message queue and do not use a broker
-yet.
+**Code baseline:** `5f58d2e`; original draft preserved in `0f832bf`
 
-An instruction that is meant to make an agent act is a **turn request**. It is
-not distinguished by whether its author is a human, another agent, or an
-internal continuation mechanism. Every turn request follows the same lifecycle:
+**Decision:** extend `mesh_tasks`, with the safety and migration contracts below.
 
-```text
-accepted / editable queue item
-       -> activated for its target session
-       -> claimed by the target carrier
-       -> running in the backend
-       -> terminal result
-```
+## 1. Owner verdict and scope
 
-The design deliberately keeps a separate future concept for an informational
-peer message that should *not* spend a model turn. That is an inbox/audit
-object, not a competing execution queue. A peer message that should cause a
-next turn creates a turn request and therefore uses this queue.
+Keep one durable ledger for requested agent turns. A human instruction, an
+agent instruction, and a system continuation all request the same operation:
+deliver a prompt to a recipient session when that session can safely run it.
+Their origin affects authorization and eligibility, not which queue stores them.
 
-## 2. Product intent and non-negotiable principles
+The original direction is sound; its implementation contract was not ready.
+In particular, a unique index is not an execution lease, a terminal task row
+does not currently mean its session has been reconciled, and the existing
+table contains control commands and scheduling tokens as well as turns.
+The revisions below address those gaps without adding another message queue,
+broker, or workflow engine.
 
-### The user-visible promise
+The product promise is:
 
-When a session is working, a sender can still submit another instruction. The
-gateway accepts it durably, shows that it is waiting, and starts it only after
-the current turn has reached a safe terminal boundary. Until the queue item is
-activated, its author can revise or withdraw it. A restart, a node outage, or a
-duplicate HTTP retry must not lose or duplicate the instruction.
+- Accept several instructions while a session is busy, acknowledge only after
+  persistence, and show their durable waiting state.
+- Execute accepted requests in per-session acceptance order, without injecting
+  into the current turn. Different sessions share bounded carrier capacity.
+- Allow revision/withdrawal until activation; preserve the same task ID.
+- Reconcile retries by durable idempotency. Recover safely after process
+  restart; visibly hold uncertain execution instead of silently replaying it.
+- Support permitted human, Manager, worker, and internal senders through one
+  admission service. “Anybody” means an authorized sender, not arbitrary
+  network access or permission to impersonate another agent.
 
-The same promise applies to:
+Do **not** promise exactly-once backend execution or uninterrupted availability
+during partitions. SQLite cannot atomically commit a backend invocation or
+undo its external effects. The defensible guarantee is idempotent admission,
+one authorized execution owner, and no successor while prior execution is
+uncertain. Current WAL `synchronous=NORMAL` protects process-crash recovery,
+not loss of the latest commits under every power/storage failure.
 
-- a person sending a follow-up to a busy worker or Manager;
-- a Manager or worker targeting another existing session in a permitted Case;
-- the Wake Dispatcher returning completed-worker information to a Manager;
-- quota/transient retry and crash-respawn continuation turns;
-- a future peer-message delivery that explicitly asks for a model turn.
+Information-only chat that should not run a model is outside this milestone.
+Do not create an inbox as a prerequisite for delivering instructions.
 
-### Governing principles
+## 2. Adversarial findings grounded in the tree
 
-1. **One intent, one ledger, one active turn per session.** `mesh_tasks` is the
-   canonical record from acceptance through result. There must never be a
-   parallel “message queue” that needs to be reconciled with a “task queue.”
-2. **A turn is non-interrupting.** The queue never writes into an active SDK,
-   CLI, app-server, or PTY turn. A queued prompt becomes the next ordinary
-   backend turn only after the prior turn is terminal.
-3. **Durability before acknowledgement.** The API replies “queued” only after
-   one short SQLite transaction commits. Live SSE, polling wake-ups, browser
-   notification, and scheduler signals are acceleration only, never authority.
-4. **Exact-once admission; at-least-once activation; never concurrent session
-   execution.** Retried requests return the original turn. Crashes may retry an
-   unstarted dispatch, but a database-enforced session lease prevents competing
-   turns on the same session.
-5. **Mutability stops at consumption.** A `queued` item can be edited or
-   withdrawn. The transition to `pending` is the consumption boundary: after
-   that it may already be on a remote worker, so it is immutable. A sender can
-   still request ordinary task cancellation, but cannot silently rewrite it.
-6. **Messages do not grant authority.** A queued peer-originated instruction is
-   still untrusted content and goes through the recipient's normal role/tool,
-   Case, approval, cost, and admission controls. It does not merge, approve,
-   release, close, or otherwise mutate state merely by arriving.
-7. **Keep the control plane cheap.** Queue admission, revision, withdrawal,
-   activation, claim, and terminal state writes are indexed O(1)/bounded SQLite
-   transactions. They never synchronously run a backend, wake a worker over the
-   network, project telemetry, rebuild a transcript, or scan all Cases.
+References are paths and symbols at the code baseline, so they survive line
+number changes. These are implementation requirements, not optional cleanup.
 
-## 3. Current state and root cause
-
-The repository already has valuable primitives, but they do not form the
-promise above.
-
-| Existing component | What it does now | Missing for a safe next-turn queue |
+| Priority | Evidence / challenged assumption | Required correction |
 | --- | --- | --- |
-| `mesh_tasks` in `src/control/db.py` | Durable worker dispatch/result ledger: `pending -> claimed -> completed/failed`; task ID, prompt, session ID, node routing, claim/recovery, results | No pre-dispatch editable state, queue position, durable idempotency key, or rule that only one same-session row can be active |
-| `SessionTaskQueue` | In-memory gateway queue; skips an already-owned **Codex** session so other sessions can continue | Not durable; its per-session rule is Codex-only; it cannot coordinate remote workers or provide API-visible edit/withdraw state |
-| remote worker poller | Fetches a batch of pending `mesh_tasks`, starts concurrent handlers, then claims each row | Tracks in-flight sessions only for close-session deferral; does not defer a second same-session turn |
-| `POST /api/instructions` | Marks a target session busy and creates a task immediately | “busy” is not an admission lease; no durable waiting state exists and the status is written before execution begins |
-| M3.4 Wake Dispatcher | Coalesces satisfied Case wait-groups and, when a Manager is `AWAITING_INPUT`, calls `submit_instruction` | Correctly avoids mid-turn interruption, but only for Case waits and it bypasses a universal turn queue |
-| web composer | Has idempotency keys, optimistic delivery state, a transcript, polling, and a running indicator | Cannot display server-authoritative queued items, revise them, withdraw them, or send freely while a turn is running |
+| P0 | [db.py](../src/control/db.py), `enqueue_task`, `claim_task`, `complete_task`: writes catch errors; completion updates by ID without an ownership predicate. [orchestrator.py](../src/orchestrator.py), `_mesh_enqueue_task`: local execution is not stopped by a failed self-claim. | New canonical queue helpers must propagate failure and make ownership transitions conditional. No backend call after failed admission/claim/start. |
+| P0 | `mesh_tasks` also stores `close_session`, `cancel_codex`, file staging and sentinel-pinned continuation/quota/heartbeat leases. [agent.py](../src/worker/agent.py), `_handle_task`, deliberately runs cancellation outside turn capacity. | Classify rows. Scope session uniqueness to managed execution turns. Never block cancellation behind the turn it must stop. Sentinel leases have NULL session IDs already; retain that separation. |
+| P0 | Existing legacy rows can contain multiple pending/claimed turns for a session. The original unconditional partial unique index applies even with the new flag OFF. | Add opt-in row classification and gate per-session enrollment; do not install an index that invalidates legacy data or changes flag-off writers. |
+| P0 | [task_server.py](../src/control/task_server.py), `submit_result`, commits terminal status; `_dispatch_to_node` in the orchestrator later saves the returned backend session ID. | Commit terminal outcome and correctness-critical session fields atomically before releasing the slot. Otherwise the next request can dispatch as `create_session` again. |
+| P0 | `release_task`, `release_node_claims`, `list_stale_claims`, the stale-claim reaper, and worker shutdown can re-offer a claimed row. Results identify a node, not a unique claim attempt. | Add attempt fencing and a persisted start boundary; do not reuse legacy release/reaper behavior for possibly-started managed turns. Timeouts/offline labels do not prove the old backend stopped. |
+| P1 | [session_store.py](../src/services/session_store.py), `get/save`: DB-first reads with file fallback; save writes JSON then whole-session DB upsert. | Flag-on scheduling must use strict canonical DB reads and field-scoped/versioned updates. A stale completion snapshot must not revert model, pin, close state, or active task identity. |
+| P1 | `compact_session` directly invokes the local backend or dispatches a remote task. SDK proactive turns are recorded only after they happen (`_deliver_proactive_turn`, [claude_driver.py](../src/backends/claude_driver.py)). | Compaction must use session serialization. Native unsolicited work requires a proven driver idle/ownership gate or exclusion from enrollment; changing `submit_instruction` alone cannot cover it. |
+| P1 | `_continue_case_once` waits for AWAITING_INPUT, then separately claims a scheduling token, submits a random-ID turn, and launches an in-memory finalizer. | Durable token-to-turn linkage, admission while busy where valid, activation-time revalidation, and restart reconciliation are required. Coalescing alone does not close the crash gap. |
+| P1 | `mesh_tasks.flow_run_id` is an optional convenience column; `enqueue_task` does not populate it. Case identity is also in `flow_links` and task metadata. | Populate the explicit Case association and authoritative membership together for managed rows; do not assume existing rows carry it. |
+| P1 | Selecting the oldest 25 due rows before removing blocked sessions can repeatedly select the same blocked rows. A batch size caps writes, not SQL work or fairness. | Filter eligible session heads before LIMIT, index the nonterminal subset, and bound total waiting work. Test a blocked-prefix workload and query plans. |
+| P1 | `MeshDB._write` uses an unbounded-wait Python lock and up to four 15-second SQLite busy waits. `asyncio.to_thread` does not bound submitted work. | Separate bounded admission capacity, finite lock/transaction deadlines, and strict request-body limits from per-session serialization. |
+| P1 | Worker `_poll_loop` creates handlers for every fetched row, including rows already scheduled and waiting for its semaphore; it overwrites `_active[task_id]`. | Deduplicate scheduled IDs and bound scheduled handlers before creating tasks, not just concurrent backend calls. |
+| P2 | [Composer.tsx](../web/src/components/timeline/Composer.tsx), `send`, blocks on `submit.isPending`, not on the session's running state. | The UI already accepts successive sends; the missing pieces are durable queue truth, editing, and safe backend scheduling. Do not sell a button change as the fix. |
+| P2 | `task_events` contains outcome fields, not arbitrary revision payloads. Current instruction limit is 262144 characters, plus a separate 48000-character carry-context limit. | Specify revision storage; do not claim it already exists. A new 16 KiB limit is a deliberate new-route policy, not the existing instruction maximum. |
 
-The underlying defect is therefore structural: the system has a durable
-**execution** ledger and an ephemeral **pre-execution** queue, but no durable
-session-serialized admission-to-execution lifecycle shared by all backends.
+Also correct the context map: the actual service is
+[`src/services/session_service.py`](../src/services/session_service.py), not
+`src/core/session_service.py`.
 
-## 4. Alternatives considered
+## 3. Durable model: one turn ledger, distinct row purposes
 
-### A. New `session_turn_queue` table plus existing `mesh_tasks`
+Keep `mesh_tasks`, its task IDs, result/artifact linkage, and existing transport.
+Do not rename “task” throughout the repository for this feature.
 
-This is superficially small: put drafts in a new table, then create a
-`mesh_tasks` row at delivery. It is rejected.
+Add nullable/default-safe fields:
 
-It produces two authoritative records for one instruction, requiring an
-outbox-like handoff, reconciliation after crashes, duplicate suppression across
-both tables, two status models, and a permanent answer to “which row is the
-real task?” It would recreate the synchronization risk this design is intended
-to remove.
+| Field | Contract |
+| --- | --- |
+| `queue_protocol INTEGER NOT NULL DEFAULT 0` | 0 = legacy/control/scheduling rows; 1 = managed execution turn. Server-owned, never client-selectable. |
+| `queue_sequence INTEGER` | Monotonic per-session acceptance order; allocated inside admission transaction. |
+| `turn_source`, `sender_session_id` | Server-derived source and attributable agent sender where applicable. |
+| `turn_kind` | instruction, continuation, retry, heartbeat, compaction; label does not grant permissions. |
+| `idempotency_scope`, `idempotency_key`, `admission_hash` | Durable original-request identity; hash includes target, body, attachments and relevant request options. |
+| `revision INTEGER NOT NULL DEFAULT 1` | Compare-and-swap for queued edits/withdrawal. |
+| `not_before`, `expires_at` | Optional internal eligibility and expiration; humans have no automatic expiry. |
+| `activated_at`, `started_at` | Persisted activation and start authorization timestamps. |
+| `claim_token` | Fresh opaque execution-attempt identity returned by claim, required by start/result/release. |
+| `coalesce_key` | Namespaced internal producer key; never used to merge human instructions. |
+| `blocked_reason` | Bounded reason for an ineligible queue head or uncertain execution. |
 
-### B. Keep the in-memory queue and add UI editing around it
+Reuse `flow_run_id` for the explicitly validated Case association of managed
+turns and retain authoritative `flow_links`. Preserve `parent_task_id` for
+retry/lineage linkage. Store bounded producer-specific preconditions in the
+existing payload, not another scheduler database.
 
-Rejected. It loses accepted work on a gateway restart, cannot arbitrate between
-the gateway and remote node workers, and exposes no durable truthful state.
+On the existing session row, add durable enrollment and queue-pause markers
+and a configuration revision used by activation. Derive the active turn from
+the indexed ledger rather than maintaining a competing active-turn table.
+Configuration writers increment that revision; completion updates only the
+fields it owns. Pause/resume is an explicit authenticated queue control and
+must survive restart. A new admission does not implicitly clear a recovery,
+quota, approval, or operator-stop hold.
 
-### C. Add Redis Streams, NATS JetStream, or another broker first
+For revision history, add a small append-only `mesh_turn_revisions` table
+keyed by `(task_id, revision)`, containing changed body/reference fields,
+actor and timestamp. This is audit history, not a second queue or execution
+authority. It is inserted atomically with the queued revision. Do not overload
+outcome-only `task_events` or append an ever-growing JSON array to a task row.
+Cap edits at 20 per turn initially; terminal retention follows task history.
 
-Rejected for this milestone. A broker carries events; it does not define
-editable state, per-session ordering, authorization, transcript linkage, or
-the single active-turn invariant. It would add operational state, credentials,
-deployment, monitoring, redelivery rules, and another source of failure before
-the product semantics have been proven. SQLite is already the canonical
-control-plane database and is sufficient for the bounded, single-gateway fleet
-today.
-
-### D. Evolve `mesh_tasks` into the unified turn ledger
-
-**Chosen.** The table already identifies the same real-world object: one
-instruction/turn with a task ID, target session, routing, result, artifact, and
-transcript fields. Add the missing pre-dispatch and scheduling semantics to
-that object. The current in-memory queue becomes an implementation detail to
-remove after migration, not a second system to preserve.
-
-## 5. Canonical model
-
-### Terminology
-
-- **Turn request:** a durable request for one target session to receive one
-  ordinary next prompt. This is the queue object and the existing task ID.
-- **Turn:** a turn request after it starts backend execution, plus its result.
-- **Peer message:** future durable information intended for reading/audit. It
-  only becomes a turn request when policy explicitly requests delivery as a
-  next turn.
-- **Activation:** the atomic `queued -> pending` transition that consumes a
-  mutable request and makes it eligible for a carrier. It is not a model call.
-- **Carrier:** the gateway local worker or a mesh worker node that runs the
-  backend for the session.
-
-### `mesh_tasks` lifecycle
-
-Existing terminal values remain meaningful. Add one pre-dispatch state and make
-the transition contract explicit:
+Managed turn states:
 
 ```text
-                         PATCH / withdraw allowed
-                                      |
-                                      v
-  API/MCP/system ---> [queued] ---> [pending] ---> [claimed] ---> [running]
-                         |              |              |              |
-                         +--> withdrawn +--------------+--------------+
-                                                        |
-                                  completed | failed | cancelled | failed_node_offline
+queued --activate--> pending --claim--> claimed --start--> running
+   |                      |                |                 |
+withdrawn                 +---------- terminal outcome ------+
+                                           |
+                                     recovery_required
 ```
 
-- `queued`: committed intent. It has a target session and queue sequence but
-  is not visible to a worker claim scan. Editable/withdrawable.
-- `pending`: activated, immutable, and routable to the selected carrier.
-  Existing worker polling continues to use this state.
-- `claimed`: atomically leased to one node. A failed/dead incarnation releases
-  it according to the existing claim reaper.
-- `running`: the carrier has crossed the backend-call boundary. This transition
-  is recorded before invoking the backend, not inferred from a live event.
-- `withdrawn`: an unconsumed request was intentionally removed. Retain it for
-  audit and idempotency; never delete the row.
-- terminal execution states retain the current semantics. A cancelled queued
-  request is `withdrawn`; a cancellation after activation is `cancelled` when
-  the existing backend cancellation path reaches a terminal result.
+Terminal outcomes are `completed`, `failed`, `cancelled`,
+`failed_node_offline`, and `withdrawn`. `recovery_required` is **not**
+terminal: it retains the session slot until backend quiescence/result is
+established. It can be entered from claimed/running when ownership or start is
+uncertain. A pending item can be cancelled safely before any claim. A queued
+withdrawal never becomes an execution failure.
 
-`pending`, `claimed`, and `running` together hold the per-session active slot.
-They are deliberately separate so the UI and recovery code do not pretend that
-a worker has started merely because a sender can no longer edit the prompt.
-
-### Additive columns and indexes
-
-Do not rename `mesh_tasks` or create a parallel queue table. Add a migration
-with these nullable/default-safe columns:
-
-| Column | Purpose |
-| --- | --- |
-| `queue_sequence INTEGER` | Strict FIFO order within `session_id`; `NULL` on legacy rows |
-| `turn_source TEXT NOT NULL DEFAULT 'legacy'` | `web`, `telegram`, `manager_tool`, `case_continuation`, `quota_resume`, `transient_retry`, `peer_delivery`, `system`, `legacy` |
-| `turn_kind TEXT NOT NULL DEFAULT 'instruction'` | Product/audit label: `instruction`, `continuation`, `retry`, later `peer_delivery`; never used to grant authority |
-| `idempotency_key TEXT` | Durable replay protection for admission requests |
-| `revision INTEGER NOT NULL DEFAULT 1` | Optimistic concurrency for edit/withdraw |
-| `not_before TEXT` | Optional delayed eligibility; supports bounded retry/backoff without a second scheduler |
-| `activated_at TEXT`, `started_at TEXT` | Truthful user-visible lifecycle timestamps |
-| `coalesce_key TEXT` | Bounded internal deduplication for automation only |
-
-Keep existing `flow_run_id`, `prompt`, `payload`, routing, claim, result, and
-artifact fields. `flow_run_id` associates a Case-scoped turn without requiring
-a second Case queue.
-
-Required indexes:
+Use these index shapes (include all required columns in the migration):
 
 ```sql
-CREATE INDEX idx_mesh_turns_queued_due
-  ON mesh_tasks(status, not_before, created_at)
-  WHERE status = 'queued';
-
-CREATE INDEX idx_mesh_turns_session_order
-  ON mesh_tasks(session_id, queue_sequence, status);
-
 CREATE UNIQUE INDEX idx_mesh_turns_one_active_session
-  ON mesh_tasks(session_id)
-  WHERE session_id IS NOT NULL
-    AND status IN ('pending', 'claimed', 'running');
+ON mesh_tasks(session_id)
+WHERE queue_protocol = 1 AND session_id IS NOT NULL
+  AND status IN ('pending', 'claimed', 'running', 'recovery_required');
+
+CREATE UNIQUE INDEX idx_mesh_turns_session_sequence
+ON mesh_tasks(session_id, queue_sequence)
+WHERE queue_protocol = 1;
+
+CREATE INDEX idx_mesh_turns_waiting
+ON mesh_tasks(created_at, id)
+WHERE queue_protocol = 1 AND status = 'queued';
+
+CREATE INDEX idx_mesh_turns_session_open
+ON mesh_tasks(session_id, queue_sequence)
+WHERE queue_protocol = 1
+  AND status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required');
 
 CREATE UNIQUE INDEX idx_mesh_turns_idempotency
-  ON mesh_tasks(idempotency_key)
-  WHERE idempotency_key IS NOT NULL;
+ON mesh_tasks(idempotency_scope, idempotency_key)
+WHERE queue_protocol = 1;
 
 CREATE UNIQUE INDEX idx_mesh_turns_active_coalesce
-  ON mesh_tasks(coalesce_key)
-  WHERE coalesce_key IS NOT NULL
-    AND status IN ('queued', 'pending', 'claimed', 'running');
+ON mesh_tasks(coalesce_key)
+WHERE queue_protocol = 1 AND coalesce_key IS NOT NULL
+  AND status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required');
 ```
 
-The active-session unique index is a backstop, not the scheduler algorithm. It
-makes a missed application-level check fail closed rather than allow two turns
-to steer the same SDK/CLI/app-server session.
+Require non-NULL session, sequence and idempotency fields for protocol 1 via
+DB constraints/triggers as appropriate to an additive SQLite migration.
+State transitions must also have conditional predicates; the unique index is
+only the final backstop. Index operations are logarithmic, not a literal O(1)
+guarantee. Latest-sequence lookup uses the session-sequence index, not an
+aggregate scan over completed history.
 
-For a session, `queue_sequence` is allocated inside the same short
-`BEGIN IMMEDIATE` write transaction as insertion using the indexed latest
-sequence. The current `MeshDB._write()` mechanism already serializes local
-writes and SQLite provides the cross-process write lock. This is bounded by the
-per-session queue cap, never a scan of task history.
+Control commands and Case scheduling tokens stay protocol 0. Cancellation is
+out of band and targets an active task **and attempt**, while close stops new
+admission and drains/cancels according to the existing carrier close ordering.
+File fetches are prerequisites/control work, not conversational turns; they
+must finish before a referencing turn starts. Compaction mutates backend
+context and therefore is a protocol-1 serialized operation.
 
-## 6. End-to-end flow
+Guard legacy inserts/claims at the DB boundary for enrolled sessions: reject
+protocol-0 execution actions while allowing the explicit control-action
+catalog. Do not infer action category from `session_id IS NULL` or trust a
+caller-supplied `queue_protocol`. This closes a bypass that the scoped unique
+index alone cannot prevent.
 
-### 6.1 Human/API submission
+## 4. Admission, idempotency, and editable intent
 
-```text
-Composer / Telegram / future peer tool
-  -> authenticated Control API
-  -> validate input, session, Case/role policy, idempotency key, queue limits
-  -> one DB transaction: insert mesh_tasks(status='queued', sequence=N)
-  -> commit
-  -> HTTP 202 {turn_id, status, revision, queue_position}
-  -> non-authoritative scheduler signal + UI invalidation event
-```
+One transport-neutral `enqueue_turn` service is shared by web, Telegram,
+Manager/worker tools, file ingestion when session-scoped, watched-job
+continuations, and internal producers. Reuse the existing harness admission
+gate and metadata/Case lineage builders; do not bypass them by writing rows
+straight from an HTTP handler.
 
-The Control API must not mark the session `BUSY` at acceptance. A queued item
-is not executing. The session becomes `BUSY` only in the same path that makes
-the item active/starts it. This removes the current dishonest `BUSY` state when
-work is merely waiting.
+Within one finite write transaction:
 
-The old `POST /api/instructions` remains a compatibility facade during the
-rollout. For a session-scoped request with the new flag on, it calls the same
-enqueue service and returns the same `task_id` field, now meaning the durable
-turn ID. New clients use the explicit session-turn routes below. Stateless
-one-off work can use the same table with `session_id=NULL`, becomes immediately
-`pending`, and is deliberately not editable because it has no persistent
-recipient conversation.
+1. Resolve durable idempotency first. Matching scope/key and original hash
+   returns the same ID and **current** status/revision, even if the queue is
+   now full or the session has since closed. Recheck caller read permission.
+   The same key with different original input returns 409.
+2. Validate the canonical recipient, enrollment, Case membership/state,
+   sender permission, harness policy, and total/per-session capacity.
+3. Allocate sequence and insert bounded intent, explicit Case link, and any
+   required producer-token linkage. Commit before acknowledgement.
 
-### 6.2 Revision and withdrawal
+The idempotency scope includes the server-known trust principal/domain,
+recipient and operation; aliases of the same admission route share the same
+scope. Do not persist bearer secrets as scope values. Browser and MCP retries
+reuse an operation ID; Telegram uses its stable inbound update identity;
+internal producers derive keys from their durable trigger identity.
+Concurrent distinct requests are ordered by transaction acceptance, not by
+client clock. Sequential sends that await acknowledgement preserve that order.
 
-```text
-author reads queued turn {turn_id, revision=3}
-  -> PATCH with expected revision 3
-  -> UPDATE ... WHERE id=? AND status='queued' AND revision=3
-  -> revision=4, prompt/payload updated
+Replaying create after edit returns the existing revised turn; it never restores
+the original text. Keep the original admission hash separate from revision
+hashes. Durable idempotency tombstones must outlive any future history pruning.
+Retention bounds are part of the implementation packet, not an excuse to delete
+unconsumed requests.
 
-author withdraws with expected revision 4
-  -> UPDATE ... WHERE id=? AND status='queued' AND revision=4
-  -> status='withdrawn', revision=5
-```
+Acceptance does not modify `BUSY`, `last_task_id`, `last_user_message`, or
+the native backend session ID. Those describe active/last-executed work.
+Expose queued count separately. In particular, stop must resolve the active
+ledger row, not the most recently submitted ID.
 
-Both responses use `409` for a stale revision or a no-longer-queued item and
-return the current safe summary. They never overwrite a prompt that the
-scheduler may have activated. An edit is a revision of the same task ID so the
-UI, audit trail, and idempotency identity remain stable; the prior body is kept
-in an append-only lightweight `task_events` audit event or revision payload,
-not silently discarded.
+Revision and withdrawal are conditional updates on
+`id + queue_protocol + status='queued' + expected_revision`, with audit in
+the same transaction. Revision can change bounded body/attachment references;
+it cannot change recipient, source, Case, sequence, or scheduling authority.
+Return 409 and a safe current summary on a stale revision/consumption race.
+System-generated turns are not human-editable; their owning producer controls
+withdrawal, and operator Case controls remain available.
 
-### 6.3 Activation and routing
+Persist sender intent separately from the prepared execution prompt. At
+activation, construct role/context/attachment payload once for the winning
+revision, retaining prompt/metadata conventions from `process_task`.
+Do not repeatedly prepend context on retries or run staging/backend work under
+the DB write lock.
 
-The gateway owns a small `TurnScheduler` loop, started only when
-`SESSION_TURN_QUEUE_ENABLED=1`. It has an in-process `asyncio.Event` for fast
-wake-up and a short periodic fallback for recovery. The event is not durable;
-the `queued` rows are.
+## 5. Activation, fairness, and routing
 
-On each bounded pass, it asks `MeshDB.activate_due_turns(limit=25)` to do the
-following in a short transaction for each eligible head item:
+Use one gateway scheduler with a coalesced in-process event and a bounded
+periodic fallback (initially 3 seconds). Events are hints; queued rows are
+authority. Completion, admission, withdrawal and relevant session/Case changes
+signal it. No process or task is created per waiting message.
 
-1. Select only `queued` rows with `not_before IS NULL OR <= now`, using the
-   queued-due index. Never scan all Cases, all sessions, or completed history.
-2. Verify the row is the lowest non-terminal `queue_sequence` for its session.
-3. Verify no row for that session is `pending`, `claimed`, or `running`.
-4. Read the fresh session routing/configuration source required for dispatch
-   (current backend, node affinity, model, role/CWD). This preserves the
-   existing promise that a model change applies on the next turn; do not freeze
-   mutable session configuration at queue acceptance.
-5. Build the normal execution payload, set routing and `activated_at`, then
-   update that row from `queued` to `pending`.
+For each pass:
 
-The `UPDATE` predicate repeats the status/head/active-slot conditions. If the
-unique active-slot index or predicate rejects a race, that scheduler attempt is
-a no-op and the next bounded pass retries. No network call occurs inside this
-transaction.
+1. Read a bounded snapshot of waiting rows and session heads using partial
+   indexes. Eligibility/head/no-active filtering precedes the activation LIMIT.
+   With the global waiting cap in §8, inspecting the entire waiting subset is
+   bounded; do not scan completed history or all Cases.
+2. A delayed/blocked head holds its own session, not unrelated sessions.
+   Never skip an earlier human request to run a later one. Order eligible heads
+   by acceptance timestamp plus stable ID; activate at most 25 per pass, one
+   per session, yielding between small transactions.
+3. Revalidate session open state, Case policy, authorization, producer
+   preconditions, routing and config revision. Withdraw obsolete system intent
+   with a reason. Leave temporarily ineligible intent queued with a reason.
+4. Prepare expensive context outside the transaction against a versioned
+   snapshot, then conditionally commit `queued -> pending`, immutable payload
+   and activation timestamp. Retry preparation if relevant revisions changed.
+   The transaction rechecks head and slot ownership; no file/network/model
+   operation occurs inside it.
+5. Fetch only routable pending rows. Claim must independently check carrier
+   assignment/capability; filtering the poll response is insufficient.
 
-For a local target, the existing gateway execution worker claims the same
-`pending` row before it builds/runs the `Task`. For a remote target, the
-existing worker poller sees the same `pending` row and claims it through the
-existing task server. There is one consumer protocol and one row, not a gateway
-queue handing off to a node queue.
+Fresh session configuration at activation means model changes made while
+queued apply to that next turn. It does not authorize moving a machine-local
+native session to another node. Preserve existing pin/repin policy. An explicit
+carrier assignment is needed because a gateway local worker and a standalone
+daemon can share a hostname: a hostname alone is not exclusive ownership.
+Preserve the current default local routing for unpinned gateway submissions
+unless a separate placement policy is deliberately changed.
 
-The current in-memory `SessionTaskQueue` is removed only after local execution
-also claims from this ledger. Until then, the feature flag keeps the existing
-path intact; it must not be used as a second authority for flag-on requests.
+Local and remote execution claim the **same** managed row and use the returned
+immutable payload. The current worker ignores the claim response and executes
+the earlier poll snapshot; migrate that behavior. Local managed execution must
+not call the legacy shadow enqueue/self-claim path again.
 
-### 6.4 Carrier execution and completion
+The in-memory `SessionTaskQueue` remains for legacy work while flag-off support
+exists. Managed execution can use a bounded ID-only scheduling hint, but never
+a second authoritative prompt copy. Waiting remote results must not occupy all
+gateway execution slots: preserve bounded result reconciliation without one
+local worker/polling coroutine per queued remote turn.
 
-```text
-pending row
-  -> carrier atomically claims row (same session active index still holds)
-  -> carrier records running before backend call
-  -> SDK / Codex app-server / OpenCode receives normal next turn
-  -> task result endpoint commits terminal row + session state
-  -> after commit: scheduler signal, UI invalidation, existing notifications
-```
+## 6. Execution ownership, completion, and recovery
 
-The worker daemon must enforce this through the database claim contract, not
-only its in-memory `_inflight_sessions` set. A node may fetch several rows, but
-only an eligible head row for a session can claim. Different sessions remain
-fully concurrent up to the existing node/gateway semaphore limits.
+Claim returns a fresh token bound to task, carrier process/incarnation and
+session. A new worker endpoint authorizes start with a conditional
+`claimed -> running` update for that token; only a successful start response
+permits a backend call. All result/release/cancel acknowledgements use the token.
 
-On terminal completion, the result write and session transition complete first.
-Only then does a background/signal path wake the scheduler. The following
-queued item starts as a new normal turn; it does not get appended into the
-current backend stream.
+Record `started_at` as **start authorized**, not proof the model has seen the
+prompt. A crash between this commit and invocation is inherently ambiguous.
+An expired claim before start may be invalidated/reoffered atomically: its old
+token can no longer pass start. Once start was authorized, no automatic replay
+on lease age, heartbeat loss, shutdown, or registration.
 
-### 6.5 Case continuation and system-generated turns
+A fencing token prevents stale DB updates; it cannot stop an isolated CLI from
+writing files. After start uncertainty, hold `recovery_required` and require
+carrier/backend reconciliation or explicit operator resolution with proof of
+quiescence before releasing the session slot. A runtime timeout without a
+confirmed stop is uncertainty, not a safe terminal boundary. The same applies
+to `failed_node_offline`. Independent sessions continue normally.
 
-M3.4's Wake Dispatcher retains its useful semantics: condition-gated,
-coalesced, leased, bounded by round cap, and Case-aware. Its final delivery
-changes from direct `submit_instruction()` to `enqueue_turn()` with:
+Result commit must atomically:
 
-```text
-turn_source = 'case_continuation'
-turn_kind   = 'continuation'
-flow_run_id = case_id
-coalesce_key = deterministic case/generation key
-```
+- verify current token and allowed state; accept identical repeated results
+  idempotently and reject/ignore superseded attempts;
+- write canonical outcome and correctness-critical transcript/result fields;
+- update native session ID, driver state and active identity with field-scoped
+  predicates; preserve concurrent user model/settings changes and close state;
+- transition the task terminal and release the session slot.
 
-The pre-existing continuation row/lease remains the Case-level deduplication
-mechanism. The unified queue is the session-level delivery mechanism. Those are
-different scopes and both remain necessary: Case logic decides *whether* a
-Manager should be woken; the turn queue decides *when it is safe* to deliver.
+Then schedule notifications, telemetry, file mirrors, artifact enrichment,
+Case evaluation and the next activation. Failure of those projections cannot
+reopen execution or make an accepted result disappear. Result DB failure is
+503; the carrier retains/retries its bounded result-delivery obligation.
+Do not return “accepted” after a helper swallowed a write failure.
 
-Quota resume, transient retry, cache heartbeats, and respawn use the same
-enqueue service, each with a deterministic idempotency/coalesce key and their
-existing budget/round guards. They must never bypass it with a direct backend
-call.
+A protocol-1 completion must not subsequently be overwritten by legacy
+`_dispatch_to_node` or `_mesh_complete_task` full-session saves. Extract the
+existing outcome classification/cache/native-session logic into the shared
+completion path rather than duplicate divergent implementations. Persist any
+required retry/pause eligibility before the successor can start.
 
-## 7. Public API contract
+JSON session files remain recoverable mirrors and are never deleted.
+Scheduling must not fall back to them when the canonical DB is unavailable.
+File writes happen after commit; rebuilding a mirror is safe, accepting work
+against a stale mirror is not.
 
-All routes require the existing authenticated Control API boundary. Payloads
-use strict Pydantic models; field names below are conceptual, not a commitment
-to exact JSON spelling.
+Startup reattaches owned executions and reconciles results in bounded batches.
+Native autonomous SDK turns need a driver-level idle/ownership contract:
+the post-hoc proactive sink is not such a contract. Until proven for a backend
+mode, do not enroll sessions capable of unsolicited concurrent execution.
+This is a named rollout gate, not an unsupported claim that a DB index controls
+the SDK stream.
 
-| Route | Purpose | Result |
-| --- | --- | --- |
-| `POST /api/sessions/{id}/turns` | Enqueue a human turn | `202`, durable turn summary |
-| `GET /api/sessions/{id}/turns?state=queued,pending&limit=50` | Bounded queue read model | queued/active turn cards with position and revision |
-| `PATCH /api/turns/{turn_id}` | Edit queued body/attachments using `If-Match` revision | updated queued summary or `409` |
-| `POST /api/turns/{turn_id}/withdraw` | Logical withdrawal using `If-Match` revision | withdrawn summary or `409` |
-| `POST /api/instructions` | Compatibility facade | same task ID and response shape during migration |
+## 7. Producer policies and closure
 
-The create response includes `turn_id`/legacy `task_id`, `status`,
-`queue_position`, `revision`, `created_at`, and an acknowledgement that the
-body is persisted. It must not promise an execution time.
+Reuse existing Case generation, round caps, pause policies, role boot,
+wait-group satisfaction and heartbeat ownership. The turn scheduler must not
+reimplement those evaluators.
 
-Attachment references are immutable staged-file IDs/path references, never
-inline arbitrary files in the queue row. A revision replaces the reference only
-while queued; cleanup must retain files referenced by any non-terminal turn.
-
-Authorization in the current dashboard is bearer-token scoped, not per-user.
-For v1 that is consistent with the existing control-plane trust domain. A
-future agent-origin API must additionally validate sender/recipient Case
-affiliation and role before it may create a `peer_delivery` turn. Unknown,
-closed, cross-Case, or unauthorized target sessions fail before any write.
-
-## 8. Frontend design
-
-The session detail page remains a chat-first view. Sending while a turn is
-running is allowed. The composer’s button always means “queue this next turn,”
-not “interrupt the current turn.” The stop control remains distinct and only
-cancels active work.
-
-```text
-Completed conversation
-  current assistant turn: Working…
-
-Next up (2)
-  [You] “After that, inspect the test failure.”  Queue #1  Edit  Withdraw
-  [System] “Workers A and B finished; review results.”   Queue #2
-
-[composer: Send next instruction…]
-```
-
-Required UI behavior:
-
-- Add a durable `useSessionTurns` queue query and mutations for enqueue, edit,
-  withdraw. Use the current React Query invalidation/polling pattern; SSE only
-  causes an earlier refetch.
-- Replace client-only optimistic sent bubbles as the authority. An optimistic
-  card may appear immediately, but it reconciles by server `turn_id` and is
-  replaced by the durable queue item on the `202` response.
-- Show queued items as distinct “Next up” cards, not as completed transcript
-  user bubbles. This prevents the UI implying the model has already seen text.
-- Render the active `pending`/`claimed`/`running` request as “Starting” or
-  “Working” with its stable task ID. The durable transcript continues to render
-  completed exchanges as it does now.
-- Show source honestly: `You`, `Manager`, `Worker`, or `System`; show a compact
-  reason for system continuations. Do not expose a peer message body to a
-  recipient before policy has delivered it as a turn.
-- Permit edit/withdraw only on `queued` cards. On `409`, refresh the card and
-  explain that it has already started delivery; offer the existing stop action
-  only where appropriate.
-- Preserve drafts and accessibility. The composer should say “Queue next
-  instruction…” while a session is busy, retain keyboard send, and expose queue
-  count/status to screen readers.
-- A session list row gains `queuedCount` and a concise state such as
-  `Working · 2 next`. It does not use a queued item to mark a session as busy.
-
-No WebSocket is required. The existing 3-second polling model is sufficient for
-truth and works after a missed SSE event. Add a small SSE event such as
-`turn_queue_changed` only after the DB commit to reduce perceived latency.
-
-## 9. SQLite, transport, and contention plan
-
-### Why SQLite is sufficient now
-
-There is one gateway-owned canonical DB, WAL mode, a bounded process write
-lock, an existing retrying `BEGIN IMMEDIATE` write path, and a fleet already
-using HTTP against the gateway rather than direct worker DB mutation. Queue
-operations are short indexed writes; they are far cheaper than the telemetry
-projection work that caused the documented past contention incident.
-
-The queue must not repeat that incident:
-
-- no polling/recomputing all Case event logs to find queue work;
-- no synchronous transcript rebuild, notification fanout, wake call, or
-  telemetry projection in queue write transactions;
-- all async orchestration reads use `asyncio.to_thread` from the gateway event
-  loop, as the Wake Dispatcher now does;
-- activation has a fixed batch maximum (initially 25) and yields between
-  batches; it never drains unbounded backlog while holding the write lock;
-- telemetry remains lower priority and bounded as already designed;
-- rows contain bounded text/references only, not artifacts or streamed output.
-
-### Capacity and abuse bounds
-
-Initial hard limits, made runtime-configurable only after the behavior is
-measured:
-
-| Limit | Initial bound | Reason |
-| --- | ---: | --- |
-| turn body | existing instruction maximum, capped at 16 KiB for new queue API | bounded DB/request/prompt cost |
-| attachments | references only; 8 per queued item | no inline bulk data |
-| pending queued turns per session | 20 | prevents a stale or malicious sender building unbounded future work |
-| queue read page | 50, max 100 | bounded UI/API memory |
-| activation batch | 25 | write-lock fairness |
-| system coalesced wake requests | one active deterministic key | prevents worker-completion storms |
-| future agent-origin rate | 30 requests/10 min/Case/sender, lower attention-wake cap | prevents ping-pong/cost storms |
-
-At 100 concurrent admission calls, each performs one capped validation and one
-indexed short transaction. SQLite serializes the writes rather than allowing
-inconsistent session activation. With a 16 KiB body cap, 20 waiting turns per
-session uses at most about 320 KiB of queued body text per session on disk; API
-responses load at most 50 rows. Queue limits produce `429`/structured
-`queue_full`, not silent dropping.
-
-### Transport boundaries
-
-```text
-Browser / Telegram / MCP
-      HTTPS + Idempotency-Key
-             |
-             v
-Gateway Control API -- one DB transaction --> mesh_tasks
-             |                                  (canonical)
-             +-- after commit --> scheduler event / SSE invalidation
-             |
-             v
-Gateway local carrier OR existing worker HTTP poll/claim/result protocol
-             |
-             v
-Backend native session (one ordinary turn)
-```
-
-Workers continue to communicate only with the task server over authenticated
-HTTP. They do not open SQLite directly. The transport protocol changes only to
-make claim eligibility session-aware and to record `running`; it does not gain
-a broker or a peer-to-peer data path.
-
-### Broker promotion criteria
-
-Do not introduce Redis/NATS pre-emptively. Reconsider only when measured
-evidence shows one of these: multiple independent gateway writers need an
-external coordination plane; SQLite queue write latency/backlog breaches a
-documented SLO after telemetry is separated/fixed; durable fanout to many
-independent consumers is required; or the mesh is no longer gateway-owned.
-Even then, SQLite remains the canonical turn state and the broker is an
-outbox/notification acceleration layer, never the editable source of truth.
-
-## 10. Failure, recovery, and security semantics
-
-| Event | Required behavior |
+| Producer | Admission identity and activation policy |
 | --- | --- |
-| HTTP retry/time-out after acceptance | durable idempotency returns the original turn, never creates another |
-| API DB failure | `503`; do not report accepted or emit a live event |
-| gateway restart while `queued` | row remains queued; scheduler rescans bounded due rows |
-| gateway restart while `pending`/`claimed` | existing claim/incarnation recovery determines whether the same row is re-offered; no later same-session row activates first |
-| node offline before claim | leave/recover the head request according to existing affinity/offline policy; do not skip it and run a later instruction |
-| backend start result uncertain | retain the active lease and fail closed under existing backend recovery rules; never replay a possibly-started prompt automatically |
-| concurrent edit vs activation | conditional revision/status update permits exactly one; loser receives `409` and fresh state |
-| queue full/rate limit | structured rejection before write; caller retains its local draft |
-| Case closed/blocked | withdraw queued Case-generated and peer-delivery turns for that Case in the authoritative close/interrupt transaction; ordinary operator turns without that Case link follow existing session policy |
-| session closed | refuse new queue entries; close policy withdraws queued session entries and uses existing active-task cancellation/close ordering |
-| peer prompt injection | delivered text is marked untrusted, bounded, attributable, Case-authorized, and cannot become an action without normal recipient tools/gates |
+| Human / authorized agent instruction | Never coalesce; FIFO; recheck recipient and Case permissions. Ordinary instruction failure releases the slot only when the backend is quiescent. Existing recovery/approval policy may hold successors. |
+| Case continuation | Case + generation maps durably to a turn ID. May be accepted while Manager is busy, but activation rechecks unresolved presented work. Withdraw if an intervening human turn already reviewed it or Case/Manager binding changed. |
+| Watched-job notification | Reuse the existing watched-job completion owner and current Case attachment. One notification identity; do not also invent a second wake for the same obligation. |
+| Quota/transient retry | Tie to failed task + pause identity + attempt, preserving exact failed prompt and existing budget guards. Retry only if the pause is still current and no intervening successful/manual recovery superseded it. |
+| Cache heartbeat | Opportunistic idle-only work with deadline. Do not queue stale heartbeat turns behind real work; skip/expire when useful work exists. Revalidate owner, cache evidence and quota at activation. |
+| Manager respawn | Keep the existing Case-level lease, approval, role and reconstruction path. Persist new-session/turn linkage; do not treat it as sending to the closed old session. |
+| Compaction | Serialize as a context-changing operation; preserve native backend behavior and report its own outcome. |
+| Native proactive output | Audit an already-produced result; not a new inbound prompt. Requires the driver safety gate in §6. |
 
-The queue service boundary checklist is mandatory before closure:
+Case scheduling tokens can remain in `mesh_tasks` with protocol 0 and NULL
+session IDs. In one transaction link token/trigger to its deterministic
+protocol-1 turn; retries discover that same ID. A task created after a token
+claim must not get a new random ID on each crash retry. Finalizers become
+restart-reconcilable from durable links/results; an in-memory
+`asyncio.create_task(_finalize_...)` cannot be the sole completion mechanism.
+Coalesce keys cover open work; durable idempotency covers completed delivery.
+Count rounds/retry attempts once at the existing semantic boundary, not once
+per HTTP retry or scheduler pass.
 
-- **Concurrency:** atomic queue head activation plus partial unique active-session
-  index; bounded scheduler batch.
-- **Memory:** body/attachment/page/count caps as above; no inline files.
-- **Request size:** Pydantic limits and HTTP content-length enforcement.
-- **Timeout:** no backend/network work inside writes; worker delivery has its
-  existing task timeout; scheduler fallback recovers missed signals.
-- **Malformed input:** strict states/source enums, UUID/task ID limits,
-  revision validation, session/Case authorization before write.
-- **Backing failures:** DB unavailable is 503; worker unavailable leaves the
-  durable head pending/recoverable; notification failure does not change truth.
+Keep strict acceptance FIFO for real instructions. Do not solve retry priority
+by silently inserting an exact old prompt after newer user work. Hold the
+session under its existing pause policy; if operator recovery supersedes that
+pause, invalidate the automatic retry. Withdraw obsolete optional automation,
+not real instructions, to remove head-of-line blockage.
 
-## 11. Migration and rollout
+Close/interrupt must race safely with both admission and activation: persist
+the authoritative closed/blocked state and withdrawal of matching queued
+turns in one transaction, checked by both writers. Current `close_case`
+spans multiple calls; it needs a transaction-aware seam, not a new endpoint
+calling several best-effort helpers.
 
-This is a behavior change that must be feature-gated, not a big-bang schema
-rewrite.
+For an already pending/claimed/running turn, closure uses cancellation/close
+ordering and retains ownership until quiescent. Never delete rows. Do not
+auto-withdraw unrelated operator work because it shares a recipient: Case
+association and source are explicit. A queued request scoped to a closed or
+blocked Case cannot activate regardless of source. Session closure withdraws
+all its waiting work and refuses new work. “Stop active” cancels that turn;
+queued work stays visible but paused until explicit resume/send-next, so stop
+does not immediately launch the next queued instruction.
 
-1. **Schema and pure DB helpers.** Add columns/indexes and helpers for enqueue,
-   read, revise, withdraw, activate, claim, and terminal transitions. Existing
-   legacy rows remain valid: their `queue_sequence` is `NULL` and current
-   `pending` semantics are unchanged.
-2. **Flag-off compatibility.** Add `SESSION_TURN_QUEUE_ENABLED`, default OFF.
-   With it off, `POST /api/instructions`, local in-memory queuing, and worker
-   polling remain byte-compatible.
-3. **Flag-on admission only in tests.** Session-scoped instructions create
-   `queued` rows. A deterministic test scheduler activates them; prove edit,
-   withdraw, idempotency, and FIFO before touching live worker routing.
-4. **Unify local and remote claim.** Move local execution to claim from
-   `mesh_tasks`; change remote claim eligibility to respect the same session
-   active rule. Remove `SessionTaskQueue` as authority for flag-on turns.
-5. **Route internal producers.** Convert Case continuation first, then quota,
-   transient retry, cache heartbeat, and respawn. Each conversion gets focused
-   regression tests that prove no direct bypass remains.
-6. **Frontend.** Ship the Next up read model and edit/withdraw actions while the
-   flag is off against fixtures/tests, then enable it with backend activation.
-7. **Controlled live validation.** Use one non-critical warmed session: send a
-   long first turn, queue/revise/withdraw additional turns, restart gateway at a
-   safe boundary, prove exact ordering on a local and a remote carrier. Do not
-   restart a worker/node carrier without operator approval.
-8. **Default-on decision.** Only after load/correctness evidence. Retire the
-   legacy in-memory queue after no caller uses it for flag-on execution.
+## 8. Service boundary and pressure limits
 
-Each code packet belongs on `feat/session-turn-queue-*` with a PR under the
-repository branch policy. The design itself is docs-only and belongs on `main`.
+Per-session serialization does not protect the HTTP server from 100 concurrent
+requests. Apply these initial limits to the new admission service; calibrate on
+the Pi before enabling broadly.
 
-## 12. Verification matrix
+| Boundary | Initial requirement |
+| --- | --- |
+| Waiting capacity | Reuse `config.system.max_queue_size` (currently 50) as the fleet-wide managed queued + pending cap, plus 20 per session. Enforce atomically; edits cannot increase total byte budget beyond its cap. Legacy enrollment must not double the advertised budget. |
+| New-route input | 16 KiB UTF-8 body text; at most 8 bounded attachment references. Cap the entire JSON request at 256 KiB including carry context and metadata. Validate all strings/collections, not just prompt. |
+| Compatibility route | Preserve existing 262144-character prompt and 48000-character carry limits; add a 2 MiB serialized request ceiling, covering worst-case UTF-8 plus bounded metadata. Do not silently truncate existing accepted prompts to 16 KiB. |
+| Stored waiting intent | At most 2 MiB per row and 100 MiB fleet-wide using persisted byte accounting. This includes prompt/payload copies, not only the visible body. Prepared context has its own finite cap; no streamed output in queue reads. |
+| Admission concurrency | At most 4 executing queue mutations across control/agent/system ingress; reject excess promptly with structured 429 + Retry-After. Separate bounded carrier lifecycle capacity so ingress cannot exhaust result/heartbeat handling. |
+| Time | Queue mutation has a 5-second total lock/DB deadline with bounded lock acquisition and remaining-time SQLite busy timeout. Do not call the existing 60+ second retry path unchanged. Body-read deadline 5 seconds. |
+| Reads / scheduler | Read summaries 50/page, max 100; preview at most 2 KiB per row, full body only for one-item read/edit. Activation max 25/pass; bounded outstanding executor submissions. |
+| Agent fanout | Initial 30 admissions/10 minutes/Case/sender, with stricter existing automation budgets. Enforce server-side against validated identity, not a caller-supplied source string. |
+| Revision history | At most 20 edits/turn, bounded audit fields; no unlimited write amplification by repeatedly editing one queued item. |
 
-Tests must precede each implementation increment where feasible.
+Memory at N=100: reject before parsing large bodies or creating 100 executor
+jobs. Four largest compatibility requests are at most 8 MiB raw bytes, plus
+bounded JSON/validation copies, four worker-thread DB connection caches
+(currently ~8 MiB each), and existing process baseline. This is a bounded input
+estimate, not a measured RSS guarantee. Measure peak RSS and control-plane
+latency in the load gate; do not claim 100 × 16 KiB is the total process cost.
 
-### Database/concurrency tests
+Use streaming byte counting before JSON parsing, also for chunked bodies;
+Content-Length and Pydantic checks alone do not bound an incoming read.
+The middleware/service capacity budget must cover the admission lanes even
+though control API and task server run on different event loops. A bounded
+executor/timed DB-lock seam is acceptable; another persistent queue is not.
+Timeout cancellation must not release an executor permit while its thread is
+still running. If a response is lost after commit, idempotency resolves the
+outcome.
 
-- 100 concurrent same-session enqueues produce one monotonically ordered queue
-  with no lost IDs and no duplicate idempotency item.
-- same-session activation races produce exactly one active row; different
-  sessions activate concurrently.
-- second same-session remote claim is rejected even when a node fetched both
-  rows in the same poll batch.
-- edit/withdraw wins only before activation; activation/edit races produce one
-  winner and an honest `409` for the other.
-- crash/release/reclaim preserves the head item and does not activate its
-  successor early.
-- deterministic system coalesce keys collapse only the intended active wake;
-  human instructions never coalesce.
+Explicit service-boundary closure checks:
 
-### API tests
+- **Concurrency:** bounded ingress and scheduled worker handlers, separate
+  lifecycle capacity, atomic session ownership. Session uniqueness alone fails
+  this requirement.
+- **Memory:** whole-request, waiting byte/count, revision and read-page bounds;
+  measured RSS under 100 concurrent callers before broad activation.
+- **Request size:** pre-parse byte limits and strict models; reject malformed,
+  truncated, unknown-source and invalid-reference payloads structurally.
+- **Timeout:** finite body/lock/DB time; no backend/network operation in a
+  transaction. Backend execution and uncertain shutdown use §6.
+- **Backing failures:** queue enrollment/consumption fails closed if DB or
+  required schema is unavailable. API returns 503, preserves drafts and
+  emits no acceptance event. Offline workers leave their head recoverable;
+  failed notifications do not change durable truth.
 
-- create/list/edit/withdraw authorization, validation, payload limits,
-  idempotency after process restart, queue cap, stale revision, and `503` DB
-  failure are all explicit.
-- compatibility `/api/instructions` returns the same task ID as the queue item
-  and never marks a merely queued session busy.
-- Case/session closure handles queued Case-scoped items safely.
+DB reads **and writes** from async loops go through bounded offload.
+Do not instantiate unbounded threads/SQLite caches or poll every Case to find
+queue work. Reuse existing metrics for admission/activation latency, oldest
+head age, rejection count, recovery holds and control-plane health; no noisy
+per-poll logging. Telemetry separation remains a separate measured optimization,
+not a prerequisite or a change this design silently makes.
 
-### Orchestrator/worker tests
+## 9. Sender API and frontend
 
-- local Codex, local Claude, and remote Claude/Codex paths all obey the same
-  single active session rule.
-- a worker completion while Manager is busy queues exactly one coalesced next
-  Manager turn; it does not interrupt the current turn.
-- model/pin changes made while an item is queued are read at activation and
-  affect that next turn according to existing session semantics.
-- no internal producer calls the backend or raw `submit_instruction` directly
-  once migrated.
+Use existing authenticated Control API infrastructure and React Query/SSE
+patterns. New endpoints:
 
-### Frontend tests
+| Route | Result |
+| --- | --- |
+| POST /api/sessions/{id}/turns | 202 after durable admission; idempotent replay returns the same ID and current summary. |
+| GET /api/sessions/{id}/turns | Cursor-bounded queued/active summaries, revision and blocked reason. |
+| GET /api/turns/{id} | Authorized bounded full intent for inspection/edit. |
+| PATCH /api/turns/{id} | Queued edit with required If-Match revision; 409 on conflict. |
+| POST /api/turns/{id}/withdraw | Conditional withdrawal; auditable, never deletion. |
+| POST /api/sessions/{id}/turns/pause or /resume | Persist operator queue hold/resume; resume does not override recovery, Case, quota or approval gates. |
+| POST /api/instructions | Compatibility shape/status preserved (`ok`, `task_id`, `session`); enrolled session uses the same admission service. |
 
-- send while running yields a durable queued card; refresh/reload retains it.
-- revision/withdraw states and `409` conflict handling are truthful.
-- a queued card does not render as though the agent already received it.
-- queue count/status remains correct under poll and SSE invalidation races.
-- keyboard/accessibility behavior remains usable while a session is running.
+Return stable `turn_id`/legacy `task_id`, status, revision, acceptance time and
+queue position as a snapshot, not a guaranteed start time. Source is
+server-derived. Shared dashboard bearer credentials currently identify a trust
+domain, not individual users; v1 operator edits are domain-authorized, not
+falsely described as author-only.
 
-### Live acceptance
+Finish the agent sender path in this milestone: expose a bounded
+`send_instruction(target_session_id, body, operation_id)` tool through the
+existing MCP/tool filtering and gateway transport, reusing
+`dispatch_worker(session_id=...)` where its role allows it. Add it explicitly
+to authorized worker and Manager tool sets; a web endpoint alone does not
+deliver “agents can send to agents.” Check Case membership, role and recipient
+at the server, not just in the tool wrapper. If available credentials cannot
+bind a sender session, expose only the existing trusted-operator scope until a
+scoped sender credential is provided; do not claim agent-isolated authorization
+with `DASHBOARD_TOKEN` and a self-reported sender ID. That identity binding is
+a release gate for agent-scoped sending, not a requirement to build a new
+messaging platform.
 
-Run a bounded, operator-approved end-to-end case with a Manager and at least
-one remote worker. Queue two human instructions while the Manager is running;
-edit the second; let a worker completion produce a continuation at the same
-time; verify deterministic order, no active-turn interruption, no duplicate
-delivery, truthful UI, and recovery through a gateway restart.
+Attachment references must survive queue wait, restart and revision.
+Current staged files need explicit reference retention/ownership validation;
+path syntax alone is not authorization. Fetch remotely before start, with
+existing staging limits/timeouts, outside queue transactions.
 
-## 13. Relationship to future peer messaging
+Keep chat-first UI:
 
-The prior peer-messaging investigation remains useful, but its inbox is not a
-substitute for this queue.
+- Existing send-while-running behavior now reconciles optimistic cards by
+  durable task ID into “Next up.” Refresh retains accepted requests.
+- Queued, starting, working and recovery-required have distinct labels.
+  Pending/claimed text is not evidence the model consumed it.
+- Show source, queue count and blocked reason. Edit/withdraw only queued human
+  items; refresh on 409.
+- Keep active-turn stop separate from withdrawal and from pause/resume queue.
+- Reuse current polling and post-commit invalidation. A 3-second fallback works
+  after missed SSE. Do not require WebSockets.
+- Update `task_state_truth.py`, session timeline/transcript, session list and
+  stale-BUSY repair together. Current helpers know pending/claimed only;
+  “running” must not be mistaken for an orphan.
+- Filter/control queued cards by ID so pending prompts and terminal transcript
+  exchanges never duplicate under reload/SSE races. Preserve draft, keyboard,
+  accessibility, attachment and carry-context behavior.
 
-```text
-future peer transport
-  informational message -> agent_messages / recipient state -> optional notice
-  action-worthy delivery -> enqueue_turn(target_session_id, source=peer_delivery)
+## 10. Incremental implementation and rollout gates
 
-human / Wake Dispatcher / retry
-  action-worthy delivery -> enqueue_turn(...) directly
+This affects ownership across layers; an admission-only live rollout is unsafe.
+Split into reviewable packets, keeping enrollment disabled until all safety
+dependencies are ready. No backend transport rewrite is required.
+
+1. **Schema and strict DB primitives.** Add protocol fields, scoped indexes,
+   revision audit, idempotency and transaction-aware session/Case updates.
+   Test migrations against duplicate legacy active rows and control commands.
+   No default-on global index or reinterpretation of existing rows.
+2. **Carrier ownership and atomic completion.** Implement claim/start/result
+   fencing, strict local claim, bounded worker scheduling, session reconciliation,
+   control-command exceptions and recovery holds. Capability-advertise protocol
+   support. Legacy workers must not receive managed rows.
+3. **Admission and fair scheduler.** Route session-scoped entrypoints through
+   the common service, preserve policy/context preparation, apply pressure
+   bounds and activate only eligible heads. Keep stateless one-offs on the
+   existing path initially; converting them is not needed for session FIFO.
+4. **Producers and backend coverage.** Convert Case/job/retry/heartbeat/respawn
+   final delivery with durable linkage and recovery; serialize compaction.
+   Prove or gate native unsolicited SDK work. Exercise local Claude/Codex and
+   supported OpenCode modes, plus remote carriers.
+5. **Surfaces.** Add queue truth and edit/withdraw UI, MCP sender support and
+   server authorization; preserve Telegram and compatibility response semantics.
+   Editing can ship after safe FIFO delivery; it must not delay fixing ownership.
+6. **Enrollment.** Feature defaults OFF. Start with `MESH_ENABLED=true` and
+   canonical DB available; `MESH_ENABLED=false` remains unchanged. Persist a
+   per-session protocol enrollment marker. Enroll only quiescent sessions with
+   no legacy queued, pending, claimed or native unsolicited work, using the
+   same admission exclusion that prevents a new legacy arrival racing cutover.
+   All producers for an enrolled session must use protocol 1. Reject
+   enrollment if any required capability is missing.
+7. **Controlled validation.** Only after local test/load gates, use an
+   operator-approved noncritical session on local and remote carriers. Worker
+   restart/deployment requires surfacing to the operator; this review does not
+   authorize it. Test waiting restart, acknowledged-result restart, uncertain
+   start and carrier outage without replaying side effects.
+8. **Rollback.** Disabling new enrollment must keep the protocol-1 consumer and
+   recovery/read surfaces alive for existing rows. Pause new admission, drain
+   or explicitly withdraw waiting work, reconcile all active/recovery holds,
+   then remove enrollment. Do not downgrade to a binary that ignores managed
+   rows. Keep legacy `SessionTaskQueue` until no required legacy path uses it.
+
+Feature flags are admission policy, not permission to abandon durable work.
+Changing all mesh tasks or introducing a broker is unnecessary for this scope.
+
+## 11. Required verification matrix
+
+Tests precede each implementation increment where feasible. Use repo .venv,
+targeted tests and temporary databases/fake carriers; no paid backend/full e2e
+runs by default.
+
+**Migration and DB invariants**
+
+- Legacy duplicate same-session pending/claimed rows survive schema migration.
+  Active turn + close/cancel coexist; sentinel leases stay out of uniqueness.
+- 100 concurrent submissions with the production per-session cap yield exactly
+  the allowed admissions and structured rejections; no lost acknowledged IDs.
+  A separate raised-cap fixture tests 100-item ordering. Concurrent retries of
+  one key create one row even at capacity.
+- Key/input conflict, replay after edit/withdraw/close/restart, and revision
+  races preserve identity. Revision audit commits or rolls back with the edit.
+- Activation races allow one session owner; a delayed/blocked oldest prefix
+  does not starve unrelated sessions. EXPLAIN QUERY PLAN and a large completed
+  history fixture verify the nonterminal/indexed access path.
+
+**Ownership and failure boundaries**
+
+- No execution after failed claim/start; carrier affinity/capability checked at
+  claim; worker uses claim response, not stale poll data.
+- Old incarnation/token result cannot overwrite a new attempt. Identical result
+  retries succeed without duplicate session/Case side effects.
+- Crash before start can safely re-offer; crash after start authorization holds
+  recovery. Partition + old worker still executing never activates successor.
+- First remote result commits native session ID before the second turn snapshot.
+  Concurrent model change/close survives completion and JSON mirroring.
+- Stop, close and cancellation remain usable at capacity; queued work does not
+  auto-launch immediately after stop. Compaction cannot overlap a turn.
+- Repeated polling while all slots are occupied creates bounded handlers with
+  no duplicate `_active` bookkeeping loss. Remote waiters do not starve local work.
+
+**Producer and integration behavior**
+
+- Busy Manager receives one durable continuation; intervening review makes it
+  obsolete. Token claim/admission/finalizer crash boundaries recover once.
+- Job notification attaches to the right Case with no duplicate wake.
+- Retry is invalidated by superseding recovery; heartbeat expires behind useful
+  work; Case/session closure races admission and activation correctly.
+- Local/remote Claude, Codex and supported OpenCode execution plus native
+  proactive mode satisfy the ownership gate or refuse enrollment explicitly.
+- Agent tool can queue multiple authorized same-Case instructions; forged sender,
+  cross-Case and closed-recipient requests fail on the server.
+
+**Pressure, UI and rollback**
+
+- 100 callers with maximum bodies, chunked oversized bodies and a held SQLite
+  write lock: finite response time, bounded threads/RSS and no accepted loss.
+  Verify excess 429/DB 503, heartbeat/result responsiveness and caller timeout
+  after a successful commit resolved by retrying the same key.
+- Queue/read summaries remain bounded; attachment retention and carry context
+  survive restart. UI pending/active/terminal reconciliation has no duplicate
+  bubbles; drafts, conflicts and accessibility remain usable.
+- Capability mismatch, flag-off, mixed legacy sessions, quiescent enrollment,
+  disabling new enrollment and safe drain/rollback all have explicit tests.
+
+## 12. Review verification and remaining evidence
+
+This review inspected the actual admission, shadow-dispatch, claim/result,
+reaper, session-save, producer, worker polling and composer code. It ran the
+existing targeted suites:
+
+```bash
+.venv/bin/python -m pytest tests/test_mesh_enqueue_affinity.py tests/test_claim_reaper.py tests/test_task_state_truth.py --tb=short -q
 ```
 
-This keeps the shared foundation exactly where it belongs: all **next-turn
-delivery** is one unified `mesh_tasks` lifecycle. It avoids forcing every
-informational message to burn tokens, and it avoids rebuilding delivery when
-peer messaging is later approved.
+All passed. These establish current behavior only; they do not validate the
+proposed implementation. A disposable in-memory SQLite 3.40.1 reproduction
+confirmed the original unscoped active-session index fails on a legitimate
+claimed turn plus pending cancellation for the same session. Partial indexes
+are supported locally; deployment migration/capability tests remain required.
 
-## 14. Review questions for the next agent
+No production DB mutation, backend invocation, service restart, worker
+deployment or load test was performed. Capacity numbers above are initial
+bounded policy, not measured Pi throughput. Implementation must meet the
+explicit test and rollout gates before this design's delivery promises are
+advertised.
 
-An independent reviewer should challenge these points against the latest tree
-before implementation:
-
-1. Does every local and remote execution path actually claim a queue row before
-   reaching its backend? Identify any bypass.
-2. Can SQLite's supported partial-index/version behavior enforce the proposed
-   active-session invariant on the deployment version? If not, replace it with
-   an equally atomic guard, not an in-memory lock.
-3. Does the actual session shadow-write model permit reading fresh routing/model
-   data at activation without a stale overwrite race? If not, define one
-   authoritative session snapshot seam before coding.
-4. Are `flow_run_id` and Case close/interrupt paths sufficient to withdraw only
-   the intended Case-scoped queued turns?
-5. Does `pending` have any hidden external consumer that assumes it means
-   “already running”? Preserve compatibility or explicitly migrate that
-   consumer.
-6. Are the row/text/attachment and scheduler batch limits appropriate for the
-   measured Pi/SQLite environment? Validate with a focused contention test, not
-   intuition.
-7. Does the UI preserve the distinction between queued text, a started prompt,
-   and a completed transcript exchange under a reload/SSE race?
-
-## 15. Explicit non-goals for the first build
-
-- No broker, Redis, NATS, MQTT, PTY injection, or backend transport rewrite.
-- No free-form cross-Case peer chat or unbounded broadcast.
-- No automatic execution of a sender's requested state-changing action.
-- No streamed partial model replies; the existing whole-turn transcript model
-  remains intact.
-- No deletion of task/turn history to implement withdrawal.
-- No always-on self-initiating agent loop. Case continuation remains bounded by
-  its existing operator-started Case and round/cost gates.
-
-## 16. Final verdict
-
-Refactor the meaning of `mesh_tasks` from “a worker task after the gateway has
-already decided to run it” to “the durable lifecycle of an instruction/turn.”
-That is the least-disruptive design that still gives the desired full behavior:
-queued delivery, mutation before consumption, durable recovery, safe
-non-interruption, unified human/agent/system sources, and a clean future path
-for peer messaging.
-
-The implementation must be incremental and flag-gated, but the destination has
-one queue, one task ID, one lifecycle, and one session-serialization invariant.
+The architectural choice remains one ledger, one accepted turn ID and one
+session execution owner. The principal work is making existing ownership and
+completion paths authoritative; another queue would leave those defects in place.
