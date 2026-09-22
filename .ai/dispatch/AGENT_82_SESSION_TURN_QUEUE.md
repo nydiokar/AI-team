@@ -1,20 +1,23 @@
 ```yaml
 job_id: AGENT_82_SESSION_TURN_QUEUE
 created_at: "2026-09-22T11:39:06.841262+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: blocked              # ready | active | blocked | done | dead
+status: ready              # ready | active | blocked | done | dead
 owner: ""
-depends_on: ["AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY"]
+depends_on: []
 results_ref: DISPATCH_LOG.md#A82             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-22T17:11:38.402767+00:00"
+updated_at: "2026-09-22T19:20:07.742109+00:00"
 ```
 
 # A82 — Build the unified session turn queue
 
-**BLOCKED — do not start implementation.** First execute
-[A83 Claude feasibility investigation](AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY.md).
-Only a reviewed GO verdict incorporated into this design/packet can release A82.
-The remaining stages below are a draft build plan, not a claim of feasibility.
+**READY — start the staged implementation on the feature branch.** Claude SDK
+is mandatory. The [Claude regression checklist](AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY.md)
+is part of this build, not a separate prerequisite job. Prove ordinary queued
+message/answer delivery first; test native-background interactions during carrier
+integration. Failed safety tests block completion and rollout, not unrelated
+schema/admission work. No evidence currently establishes that the queue is
+infeasible for Claude.
 
 **Implementation branch:** `feat/session-turn-queue` (isolated worktree).
 **Design:** [SESSION_TURN_QUEUE_DESIGN.md](../../docs/SESSION_TURN_QUEUE_DESIGN.md).
@@ -23,8 +26,9 @@ Read the current committed design, including the dispatch clarification changes,
 not an old copy of that commit.
 **Deliverable:** tested, independently reviewed implementation committed on the
 feature branch, with a PR if authenticated repository tooling is available.
-Production activation is separate. This packet is not ready to execute until
-A83 resolves the mandatory Claude contract and explicitly releases this job.
+Production activation is separate. Proceed with implementation and resolve the
+backend integration questions using the required tests; do not ask the owner
+to commission another investigation before starting.
 
 ## 0. Mission, authority, and stopping rules
 
@@ -194,12 +198,14 @@ to fix; “enable send while busy” alone is not the implementation.
     to-be-created contracts. Names in this packet do not mean they exist.
     Reuse current helpers only after checking their semantics.
 
-## 4. Stage 0 — executable contract probes before bulk implementation
+## 4. Stage 0 — source map and carrier test oracle
 
-This stage is gated by A83. Consume its reviewed contract, source evidence and
-committed reproducers first; verify them against the build baseline. Do not
-repeat an unresolved feasibility study during the bulk build. The checks below
-describe the evidence A83 must supply and A82 must retain as regression coverage.
+Map the current implementation and define the carrier test oracle early. The
+Claude checklist is supporting material for this stage and Stage 3, not an
+external dependency. Start with ordinary explicit message/answer serialization.
+Investigate native-background ordering against actual SDK source and reachable
+traces; do not assume a speculative collision has been proved. Schema, admission
+and test development can proceed while this integration work is completed.
 
 - Build an execution-path inventory in the Execution record: source → admission
   → DB row → carrier → backend → result → session update. Include compact,
@@ -212,7 +218,7 @@ describe the evidence A83 must supply and A82 must retain as regression coverage
   Identify exactly which observations prove quiescence and correct attribution.
   A task-finished notification alone does not prove its ensuing model continuation
   ended. An empty `_pending` deque is also not sufficient.
-- Apply A83's proved driver reservation contract, which retains
+- Establish the driver reservation contract during Stage 3, retaining
   ownership until all native work affecting that session is quiescent, using
   actual supported SDK lifecycle signals. Reserve on the SDK loop before
   submitting a query; don't infer safety from delayed gateway polling.
@@ -225,16 +231,16 @@ describe the evidence A83 must supply and A82 must retain as regression coverage
 - Verify migration on a fixture with duplicate legacy active rows, cancellation
   rows and NULL-session scheduling tokens; schema must still install.
 - Request the first independent review under §12 of these contracts/red tests
-  before integrating the scheduler. A83's independent contract review supplies
-  this first gate if the candidate contract is unchanged. The reviewer can identify a narrow defect;
+  before enabling the carrier integration. The reviewer can identify a narrow defect;
   fix it autonomously and recheck.
 
-**Gate:** mandatory default Claude SDK and Codex native contracts have an
-evidence-backed implementation path. If the SDK cannot expose enough information,
-investigate supported source/API alternatives and record a minimal design
-amendment. Do not silently disable background work, switch all users to a
-different driver, exclude all Claude sessions or claim Stage 0 passed. Escalate
-only after a concrete reproducer establishes the missing capability.
+**Stage 0 exit:** execution paths, source facts and required race tests are
+mapped. Passing Claude SDK and Codex ownership tests is mandatory for Stage 3
+and final completion; it is not a reason to postpone starting this build.
+Investigate supported source/API alternatives and amend the design narrowly if
+a real failing test requires it. Do not silently disable background work,
+switch drivers or exclude Claude. Escalate only a concrete demonstrated
+capability limit, not the existence of a test still to implement.
 
 ## 5. Stage 1 — acceptance tests before feature code
 
@@ -704,7 +710,7 @@ Once final review passes:
 ## 14. Milestone checklist
 
 - [ ] Isolated branch/worktree; baseline and producer inventory recorded.
-- [ ] Stage 0 default Claude SDK/Codex capability probes and independent review pass.
+- [ ] Stage 0 source/path inventory and Claude SDK/Codex race-test oracle recorded.
 - [ ] Stage 1 acceptance/regression/integration tests written and meaningful red recorded.
 - [ ] Stage 2 schema and atomic DB/session/Case boundaries pass.
 - [ ] Stage 3 carrier ownership/result spool/recovery and independent review pass.
