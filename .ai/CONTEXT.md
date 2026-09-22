@@ -46,6 +46,8 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
+| **A83** | `AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY.md` | — | dispatched | Required Claude SDK/native-background ownership investigation, race reproducers and independent GO/NO-GO review before queue implementation. |
+| **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | A83 reviewed GO | **blocked** | Unified durable session turn queue. Claude is mandatory; do not start the build or infer readiness from the design alone. |
 | **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
 | **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |

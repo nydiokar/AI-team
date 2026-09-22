@@ -1,15 +1,20 @@
 ```yaml
 job_id: AGENT_82_SESSION_TURN_QUEUE
 created_at: "2026-09-22T11:39:06.841262+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: blocked              # ready | active | blocked | done | dead
 owner: ""
-depends_on: []
+depends_on: ["AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY"]
 results_ref: DISPATCH_LOG.md#A82             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-22T11:39:07.619307+00:00"
+updated_at: "2026-09-22T17:11:38.402767+00:00"
 ```
 
 # A82 — Build the unified session turn queue
+
+**BLOCKED — do not start implementation.** First execute
+[A83 Claude feasibility investigation](AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY.md).
+Only a reviewed GO verdict incorporated into this design/packet can release A82.
+The remaining stages below are a draft build plan, not a claim of feasibility.
 
 **Implementation branch:** `feat/session-turn-queue` (isolated worktree).
 **Design:** [SESSION_TURN_QUEUE_DESIGN.md](../../docs/SESSION_TURN_QUEUE_DESIGN.md).
@@ -18,8 +23,8 @@ Read the current committed design, including the dispatch clarification changes,
 not an old copy of that commit.
 **Deliverable:** tested, independently reviewed implementation committed on the
 feature branch, with a PR if authenticated repository tooling is available.
-Production activation is separate. This packet is ready to execute, not proof
-that the implementation or every backend capability already exists.
+Production activation is separate. This packet is not ready to execute until
+A83 resolves the mandatory Claude contract and explicitly releases this job.
 
 ## 0. Mission, authority, and stopping rules
 
@@ -191,9 +196,10 @@ to fix; “enable send while busy” alone is not the implementation.
 
 ## 4. Stage 0 — executable contract probes before bulk implementation
 
-Do this first; it prevents building a large queue around an impossible driver
-assumption. It is code investigation plus targeted red tests, not another
-general design document.
+This stage is gated by A83. Consume its reviewed contract, source evidence and
+committed reproducers first; verify them against the build baseline. Do not
+repeat an unresolved feasibility study during the bulk build. The checks below
+describe the evidence A83 must supply and A82 must retain as regression coverage.
 
 - Build an execution-path inventory in the Execution record: source → admission
   → DB row → carrier → backend → result → session update. Include compact,
@@ -206,7 +212,7 @@ general design document.
   Identify exactly which observations prove quiescence and correct attribution.
   A task-finished notification alone does not prove its ensuing model continuation
   ended. An empty `_pending` deque is also not sufficient.
-- Choose and implement the smallest driver reservation state that retains
+- Apply A83's proved driver reservation contract, which retains
   ownership until all native work affecting that session is quiescent, using
   actual supported SDK lifecycle signals. Reserve on the SDK loop before
   submitting a query; don't infer safety from delayed gateway polling.
@@ -219,7 +225,8 @@ general design document.
 - Verify migration on a fixture with duplicate legacy active rows, cancellation
   rows and NULL-session scheduling tokens; schema must still install.
 - Request the first independent review under §12 of these contracts/red tests
-  before integrating the scheduler. The reviewer can identify a narrow defect;
+  before integrating the scheduler. A83's independent contract review supplies
+  this first gate if the candidate contract is unchanged. The reviewer can identify a narrow defect;
   fix it autonomously and recheck.
 
 **Gate:** mandatory default Claude SDK and Codex native contracts have an

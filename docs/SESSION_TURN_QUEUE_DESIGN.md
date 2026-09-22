@@ -1,12 +1,17 @@
 # Session Turn Queue — Unified Durable Delivery Design
 
-**Status:** adversarially reviewed implementation guide; not implemented
+**Status:** proposed implementation guide; build blocked on A83 Claude feasibility investigation
 
 **Date:** 2026-09-22
 
 **Code baseline:** `5f58d2e`; original draft preserved in `0f832bf`
 
 **Decision:** extend `mesh_tasks`, with the safety and migration contracts below.
+
+**Required before build:** [A83](../.ai/dispatch/AGENT_83_CLAUDE_TURN_QUEUE_FEASIBILITY.md)
+must prove the default Claude SDK/native-background ownership contract and update
+this design. [A82](../.ai/dispatch/AGENT_82_SESSION_TURN_QUEUE.md) is blocked until
+that reviewed GO verdict. Claude is mandatory, not an optional rollout exclusion.
 
 ## 1. Owner verdict and scope
 
@@ -66,7 +71,6 @@ number changes. These are implementation requirements, not optional cleanup.
 | P1 | Worker `_poll_loop` creates handlers for every fetched row, including rows already scheduled and waiting for its semaphore; it overwrites `_active[task_id]`. | Deduplicate scheduled IDs and bound scheduled handlers before creating tasks, not just concurrent backend calls. |
 | P2 | [Composer.tsx](../web/src/components/timeline/Composer.tsx), `send`, blocks on `submit.isPending`, not on the session's running state. | The UI already accepts successive sends; the missing pieces are durable queue truth, editing, and safe backend scheduling. Do not sell a button change as the fix. |
 | P2 | `task_events` contains outcome fields, not arbitrary revision payloads. Current instruction limit is 262144 characters, plus a separate 48000-character carry-context limit. | Specify revision storage; do not claim it already exists. A new 16 KiB limit is a deliberate new-route policy, not the existing instruction maximum. |
-
 | P1 | `GET /api/turns/{turn_id}` and `useSessionTurns` already expose telemetry; A81 changed event-covered reads to `SAFETY_NET_MS=60000`. | Use separate turn-request routes/query keys and preserve the event-first refresh policy. |
 | P1 | `_SDKSession.send` cancels the previous turn when its lock is occupied; worker result posting has an in-memory delivery deadline. | Managed conflict must fail closed; persist bounded result-delivery obligations before posting. |
 
