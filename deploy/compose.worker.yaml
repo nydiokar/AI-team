@@ -1,0 +1,42 @@
+name: ai-team-worker
+
+services:
+  worker:
+    image: ${AI_TEAM_WORKER_IMAGE:-ai-team-worker-codex:local}
+    build:
+      context: ..
+      target: worker-codex
+    command: ["python", "worker_main.py"]
+    init: true
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+    secrets:
+      - source: worker_env
+        target: role.env
+        mode: 0444
+    environment:
+      AI_TEAM_ENV_FILE: /run/secrets/role.env
+    volumes:
+      - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/state:/app/state
+      - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/logs:/app/logs
+      - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/tasks:/app/tasks
+      - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/results:/app/results
+      - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/summaries:/app/summaries
+      - ${WORKSPACE_ROOT:?set WORKSPACE_ROOT}:/workspaces
+    ports:
+      - "${WORKER_BIND_IP:?set WORKER_BIND_IP}:9001:9001"
+
+secrets:
+  worker_env:
+    file: ${WORKER_ENV_FILE:?set WORKER_ENV_FILE}

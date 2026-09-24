@@ -452,14 +452,21 @@ def _session_dispatch_payload(session: Any) -> Dict[str, Any]:
     }
 
 
-def resolve_control_api_hosts(control_api_host: str, tailscale_ip: str) -> list[str]:
+def resolve_control_api_hosts(
+    control_api_host: str,
+    tailscale_ip: str,
+    control_api_bind_host: str = "",
+) -> list[str]:
     """Bind hosts for the embedded Control API (UI + read/control surface).
 
     Fail-closed, and NEVER the LAN/public interface by default — the UI serves the
     dashboard token in-page (``control_api._mount_web_ui``), so any bound-but-
     untrusted interface hands that token to whoever can reach it.
 
-      - An explicit ``CONTROL_API_HOST`` is honored verbatim (single bind). This is
+      - An explicit ``CONTROL_API_BIND_HOST`` is honored verbatim (single bind).
+        It exists for bridged containers, where the process cannot bind the host's
+        Tailscale address. Docker controls external exposure with port publishing.
+      - Otherwise an explicit ``CONTROL_API_HOST`` is honored verbatim (single bind). This is
         the operator override; ``0.0.0.0`` here is a deliberate LAN-exposure choice.
       - Otherwise bind BOTH ``127.0.0.1`` (local clients — the in-gateway Manager
         MCP, health probes, an SSH tunnel) AND this node's Tailscale IP (a remote
@@ -468,6 +475,9 @@ def resolve_control_api_hosts(control_api_host: str, tailscale_ip: str) -> list[
 
     Returns the ordered, de-duplicated list of hosts to bind.
     """
+    explicit_bind: str = (control_api_bind_host or "").strip()
+    if explicit_bind:
+        return [explicit_bind]
     explicit: str = (control_api_host or "").strip()
     if explicit:
         return [explicit]
@@ -4624,7 +4634,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             return
         if self._embedded_task_server is not None:
             return
-        host = config.mesh.tailscale_ip or "127.0.0.1"
+        host = config.mesh.bind_host or config.mesh.tailscale_ip or "127.0.0.1"
         port = config.mesh.task_server_port
         try:
             from src.control.embedded_server import EmbeddedTaskServer
@@ -4676,7 +4686,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         if self._embedded_control_apis:
             return
         hosts: list[str] = resolve_control_api_hosts(
-            config.mesh.control_api_host, config.mesh.tailscale_ip
+            config.mesh.control_api_host,
+            config.mesh.tailscale_ip,
+            config.mesh.control_api_bind_host,
         )
         port = config.mesh.dashboard_port
         from src.control.embedded_server import EmbeddedControlServer
@@ -4919,6 +4931,22 @@ class TaskOrchestrator(ITaskOrchestrator):
         is flag-gated OFF by default (`HARNESS_LEVEL3_GUARD`), so default behavior
         is byte-identical: absent flag / absent field / level ≤ 2 ⇒ pass-through.
         """
+        # A controller-only deployment still needs this gateway queue to dispatch
+        # remote-pinned tasks. Reject local work *before* queueing it, otherwise a
+        # controller image without agent CLIs would leave an unpinned turn stuck.
+        if not config.system.local_execution_enabled and self._task_requires_local_execution(task):
+            logger.warning(
+                "event=task_blocked reason=local_execution_disabled task_id=%s source=%s",
+                task.id,
+                (task.metadata or {}).get("source", "runtime"),
+            )
+            self._emit_event(
+                "task_blocked",
+                task,
+                {"task_id": task.id, "reason": "local_execution_disabled"},
+            )
+            raise HarnessAdmissionBlocked(task.id, "local_execution_disabled")
+
         # [Harness] Admission control (spec docs/Task_harness_workflow.md §14).
         if not self._harness_level3_allows_autopickup(task):
             logger.warning(
@@ -4988,6 +5016,18 @@ class TaskOrchestrator(ITaskOrchestrator):
                 self._emit_event("dropped_after_throttle", task, {"timeout": 5.0})
                 raise RuntimeError("Task queue is full") from exc
         return task.id
+
+    def _task_requires_local_execution(self, task: Task) -> bool:
+        """Whether this gateway would execute ``task`` rather than mesh-dispatch it."""
+        session_id = str((task.metadata or {}).get("session_id") or "").strip()
+        session = self.session_store.get(session_id) if session_id else None
+        host = socket.gethostname()
+        return not bool(
+            config.mesh.enabled
+            and session is not None
+            and session.machine_id
+            and session.machine_id != host
+        )
 
     def _record_flow_run_start(self, task: Task) -> Optional[str]:
         """Best-effort FlowRun dispatch-start record (A19, v0.4 §13 item 1).
@@ -7186,6 +7226,20 @@ class TaskOrchestrator(ITaskOrchestrator):
                     f"affinity invariant violated: session {getattr(session, 'session_id', None)!r} "
                     f"pinned to {getattr(session, 'machine_id', None)!r} reached the local worker "
                     f"loop on host {_host!r}"
+                )
+
+            # Defense-in-depth for controller-only deployments. Admission rejects
+            # this path before queueing; retain this guard for direct callers that
+            # intentionally bypass _enqueue_task in tests or maintenance code.
+            if not route_remote and not config.system.local_execution_enabled:
+                return TaskResult(
+                    task_id=task.id,
+                    success=False,
+                    output="",
+                    errors=["local_execution_disabled"],
+                    files_modified=[],
+                    execution_time=time.time() - start_time,
+                    timestamp=now_iso(),
                 )
 
             while not route_remote:
