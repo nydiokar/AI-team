@@ -247,6 +247,40 @@ async def test_invoke_manager_opens_case_and_boots(monkeypatch):
     assert submitted["session_id"] == "mgr-1" and "ship X" in submitted["description"]
 
 
+@pytest.mark.asyncio
+async def test_invoke_manager_autopins_unpinned_repo_before_create(monkeypatch):
+    from src.control import session_node_resolver
+    from src.services.session_service import CommandResult
+
+    monkeypatch.setenv("MANAGER_ROLE_ENABLED", "1")
+    monkeypatch.setattr(
+        session_node_resolver,
+        "resolve_unpinned_session_node",
+        lambda *, backend, repo_path: "Horse",
+    )
+    orch = _orch()
+
+    session = types.SimpleNamespace(session_id="mgr-1", repo_path="/home/cifran/dev/AI-team")
+    create_kwargs = {}
+
+    def _create_session(**kw):
+        create_kwargs.update(kw)
+        return CommandResult(True, session=session)
+
+    orch.session_service = types.SimpleNamespace(create_session=_create_session)
+    orch.open_case = lambda objective, sid, role="manager", completion_criteria=None: "case-1"
+
+    async def _submit(*_args, **_kwargs):
+        return "task-1"
+
+    orch.submit_instruction = _submit
+
+    result = await orch.invoke_manager("ship X", repo_path="/home/cifran/dev/AI-team")
+
+    assert result["ok"] is True
+    assert create_kwargs["node_id"] == "Horse"
+
+
 # ---------------------------------------------------------------------------
 # Layer surface — POST /api/manager refuses when the role path is disabled
 # ---------------------------------------------------------------------------

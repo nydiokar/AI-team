@@ -5823,8 +5823,20 @@ class TaskOrchestrator(ITaskOrchestrator):
                 repo_path,
             )
 
+        resolved_node_id = node_id
+        if not resolved_node_id or resolved_node_id == "__local__":
+            try:
+                from src.control.session_node_resolver import resolve_unpinned_session_node
+
+                resolved_node_id = resolve_unpinned_session_node(
+                    backend=backend,
+                    repo_path=repo_path,
+                ) or node_id
+            except (AttributeError, ImportError, TypeError, ValueError) as exc:
+                logger.warning("event=manager_node_autopin_failed repo_path=%s err=%s", repo_path, exc)
+
         result = self.session_service.create_session(
-            backend=backend, repo_path=repo_path, model=model, node_id=node_id,
+            backend=backend, repo_path=repo_path, model=model, node_id=resolved_node_id,
             origin=SessionOrigin(channel="web", kind="user"), bind_chat=False,
             continued_from=continued_from,
         )

@@ -1818,12 +1818,18 @@ def build_control_api(orchestrator) -> FastAPI:
                 return JSONResponse(cached)
 
             from src.core.interfaces import SessionOrigin
+            from src.control.session_node_resolver import resolve_unpinned_session_node
+
+            node_id = body.node_id or resolve_unpinned_session_node(
+                backend=body.backend,
+                repo_path=body.repo_path,
+            ) or "__local__"
 
             result = orchestrator.session_service.create_session(
                 backend=body.backend,
                 repo_path=body.repo_path,
                 model=body.model,
-                node_id=body.node_id or "__local__",
+                node_id=node_id,
                 origin=SessionOrigin(channel="web", kind="user"),
                 role_boot=body.role_boot,
                 continued_from=body.continued_from,
