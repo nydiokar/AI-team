@@ -2,20 +2,36 @@ name: ai-team-worker
 
 services:
   worker:
-    image: ${AI_TEAM_WORKER_IMAGE:-ai-team-worker-codex:local}
+    image: ${AI_TEAM_WORKER_IMAGE:-ai-team-worker-agents:local}
     build:
       context: ..
-      target: worker-codex
+      target: worker-agents
     command: ["python", "worker_main.py"]
-    init: true
+    environment:
+      HOME: /app
+      CODEX_HOME: /app/.codex
+      # Git's ownership guard applies to bind-mounted host repositories even
+      # when the configured worker group has write access. Git 2.39 does not
+      # honor subtree wildcards here; trust the container's visible filesystem.
+      # Docker keeps that scope to the immutable image plus declared mounts.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
     restart: unless-stopped
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      # Compose preserves the host ownership of a mode-600 secret. Root needs
+      # this only to copy it to /tmp before dropping permanently to ai-team.
+      - DAC_OVERRIDE
+      - CHOWN
+      - SETUID
+      - SETGID
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m
+      - /tmp:rw,nosuid,size=1g
     logging:
       driver: local
       options:
@@ -25,17 +41,19 @@ services:
       - source: worker_env
         target: role.env
         mode: 0444
-    environment:
-      AI_TEAM_ENV_FILE: /run/secrets/role.env
     volumes:
       - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/state:/app/state
       - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/logs:/app/logs
       - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/tasks:/app/tasks
       - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/results:/app/results
       - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/summaries:/app/summaries
-      - ${WORKSPACE_ROOT:?set WORKSPACE_ROOT}:/workspaces
+      # Backend runtime/auth state is per worker. Never mount the host home or a
+      # controller's state directory into this container.
+      - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/codex:/app/.codex
+      - ${WORKER_DATA_ROOT:?set WORKER_DATA_ROOT}/claude:/app/.claude
+      - ${WORKSPACE_ROOT:?set WORKSPACE_ROOT}:${WORKSPACE_ROOT}
     ports:
-      - "${WORKER_BIND_IP:?set WORKER_BIND_IP}:9001:9001"
+      - "${WORKER_BIND_IP:?set WORKER_BIND_IP}:${WORKER_PUBLISHED_PORT:-9001}:9001"
 
 secrets:
   worker_env:
