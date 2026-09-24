@@ -100,6 +100,7 @@ v0.6 automation; the file said the operator may delete it). Both existed only in
 | Doc | Status | What it's for |
 |---|---|---|
 | [`RUNBOOKS/OPERATIONS_PM2.md`](RUNBOOKS/OPERATIONS_PM2.md) | 🟢 | Running the gateway under PM2 (the supported way to keep it alive). |
+| [`RUNBOOKS/OPERATIONS_DOCKER.md`](RUNBOOKS/OPERATIONS_DOCKER.md) | 🔵 | Docker Compose controller and Codex-worker deployment; pending full local and two-machine validation. |
 | [`RUNBOOKS/CONTROL_SURFACE_DEPLOY_RUNBOOK.md`](RUNBOOKS/CONTROL_SURFACE_DEPLOY_RUNBOOK.md) | 🟢 | Deploying the unified gateway (Telegram + Web on one process). |
 | [`RUNBOOKS/PHASE_4_RUNBOOK.md`](RUNBOOKS/PHASE_4_RUNBOOK.md) | 🔵 | VPS cutover runbook — migrate control plane off this PC. Not executed yet. |
 | [`RUNBOOK_db_self_sufficient.md`](RUNBOOK_db_self_sufficient.md) | 🟢 | Procedure to migrate conversation/artifact data into `mesh.db` and drop fat `results/*.json`. Migration itself is done; kept as the reversibility procedure. |

@@ -1,0 +1,75 @@
+name: ai-team
+
+x-runtime-security: &runtime-security
+  init: true
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  logging:
+    driver: local
+    options:
+      max-size: 10m
+      max-file: "5"
+
+x-controller-volumes: &controller-volumes
+  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/state:/app/state
+  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/logs:/app/logs
+  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/tasks:/app/tasks
+  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/results:/app/results
+  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/summaries:/app/summaries
+
+services:
+  task-server:
+    <<: *runtime-security
+    image: ${AI_TEAM_IMAGE:-ai-team:local}
+    build:
+      context: .
+      target: runtime
+    command: ["python", "server_main.py"]
+    restart: unless-stopped
+    secrets:
+      - source: controller_env
+        target: role.env
+        mode: 0444
+    environment:
+      AI_TEAM_ENV_FILE: /run/secrets/role.env
+    volumes: *controller-volumes
+    ports:
+      - "${MESH_BIND_IP:?set MESH_BIND_IP}:9002:9002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:9002/health', timeout=3).status == 200"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  gateway:
+    <<: *runtime-security
+    image: ${AI_TEAM_IMAGE:-ai-team:local}
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    secrets:
+      - source: controller_env
+        target: role.env
+        mode: 0444
+    environment:
+      AI_TEAM_ENV_FILE: /run/secrets/role.env
+    volumes: *controller-volumes
+    ports:
+      - "${CONTROL_BIND_IP:?set CONTROL_BIND_IP}:9003:9003"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:9003/health', timeout=3).status == 200"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+secrets:
+  controller_env:
+    file: ${CONTROLLER_ENV_FILE:?set CONTROLLER_ENV_FILE}

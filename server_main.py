@@ -39,7 +39,7 @@ def main() -> None:
     # gateway/worker lines in a shared events stream (correlate by task_id).
     init_logging(node_id="controller", level="INFO")
 
-    host = config.mesh.tailscale_ip or "127.0.0.1"
+    host = config.mesh.bind_host or config.mesh.tailscale_ip or "127.0.0.1"
     port = config.mesh.task_server_port
 
     import uvicorn
