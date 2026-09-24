@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from src.control import control_api
 from src.services.session_store import SessionStore
-from src.services.session_service import SessionService
+from src.services.session_service import CommandResult, SessionService
 
 
 TOKEN = "test-control-token"
@@ -202,6 +202,70 @@ def test_sessions_endpoint_reflects_service(client, orch, tmp_path):
     assert mine["backend"] == "claude"
     assert mine["is_active"] is True
     assert mine["origin_channel"] == "web"
+
+
+def test_create_session_autopins_unpinned_remote_repo(monkeypatch):
+    from config import config
+    from fastapi.testclient import TestClient
+    from src.control.node_registry import NodeCapabilities, NodeInfo, get_registry
+
+    monkeypatch.setattr(config.mesh, "enabled", True)
+    registry = get_registry()
+    monkeypatch.setattr(registry, "_nodes", {})
+    registry._nodes["Horse"] = NodeInfo(
+        node_id="Horse",
+        tailscale_ip="100.64.0.9",
+        api_port=9001,
+        capabilities=NodeCapabilities(
+            backends=["claude"],
+            max_concurrent=2,
+            repos=[{"name": "AI-team", "path": "/home/cifran/dev/AI-team"}],
+        ),
+        status="online",
+    )
+
+    def reject_local(_path):
+        return CommandResult(False, reason="invalid_repo_path", detail="gateway cannot stat it")
+
+    orch = _StubOrchestrator()
+    orch.session_service = SessionService(SessionStore(), repo_path_validator=reject_local)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    local_client = TestClient(control_api.build_control_api(orch))
+
+    response = local_client.post(
+        "/api/sessions",
+        headers=_auth(),
+        json={"backend": "claude", "repo_path": "/home/cifran/dev/AI-team", "model": "sonnet"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["session"]["machine_id"] == "Horse"
+
+
+def test_create_session_without_matching_remote_repo_keeps_local_validation(monkeypatch):
+    from config import config
+    from fastapi.testclient import TestClient
+    from src.control.node_registry import get_registry
+
+    monkeypatch.setattr(config.mesh, "enabled", True)
+    monkeypatch.setattr(get_registry(), "_nodes", {})
+
+    def reject_local(_path):
+        return CommandResult(False, reason="invalid_repo_path", detail="gateway cannot stat it")
+
+    orch = _StubOrchestrator()
+    orch.session_service = SessionService(SessionStore(), repo_path_validator=reject_local)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: TOKEN)
+    local_client = TestClient(control_api.build_control_api(orch))
+
+    response = local_client.post(
+        "/api/sessions",
+        headers=_auth(),
+        json={"backend": "claude", "repo_path": "/home/cifran/dev/AI-team", "model": "sonnet"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["reason"] == "invalid_repo_path"
 
 
 def test_sessions_limit_validation_and_bound(client, orch, tmp_path):
