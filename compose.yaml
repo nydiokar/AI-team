@@ -1,12 +1,18 @@
 name: ai-team
 
 x-runtime-security: &runtime-security
-  init: true
   read_only: true
   security_opt:
     - no-new-privileges:true
   cap_drop:
     - ALL
+  # The root bootstrap needs this one capability to read Docker Compose's
+  # host-owned 0600 secret before it drops to the unprivileged app user.
+  cap_add:
+    - DAC_OVERRIDE
+    - CHOWN
+    - SETUID
+    - SETGID
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=64m
   logging:
@@ -35,11 +41,9 @@ services:
       - source: controller_env
         target: role.env
         mode: 0444
-    environment:
-      AI_TEAM_ENV_FILE: /run/secrets/role.env
     volumes: *controller-volumes
     ports:
-      - "${MESH_BIND_IP:?set MESH_BIND_IP}:9002:9002"
+      - "${MESH_BIND_IP:?set MESH_BIND_IP}:${MESH_PUBLISHED_PORT:-9002}:9002"
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:9002/health', timeout=3).status == 200"]
       interval: 15s
@@ -58,11 +62,9 @@ services:
       - source: controller_env
         target: role.env
         mode: 0444
-    environment:
-      AI_TEAM_ENV_FILE: /run/secrets/role.env
     volumes: *controller-volumes
     ports:
-      - "${CONTROL_BIND_IP:?set CONTROL_BIND_IP}:9003:9003"
+      - "${CONTROL_BIND_IP:?set CONTROL_BIND_IP}:${CONTROL_PUBLISHED_PORT:-9003}:9003"
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:9003/health', timeout=3).status == 200"]
       interval: 15s

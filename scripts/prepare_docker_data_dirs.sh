@@ -18,6 +18,6 @@ case "$data_root" in
 esac
 
 install -d -m 0700 -o 10001 -g 10001 "$data_root"
-for directory in state logs tasks results summaries; do
+for directory in state logs tasks results summaries codex claude; do
   install -d -m 0700 -o 10001 -g 10001 "$data_root/$directory"
 done
