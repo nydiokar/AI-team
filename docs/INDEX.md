@@ -122,6 +122,7 @@ tables for the authoritative prioritization; these are the supporting writeups.
 | [`TBD/BACKEND_HOOKS_STRATEGY.md`](TBD/BACKEND_HOOKS_STRATEGY.md) | 🔵 | Whether backend lifecycle hooks (Claude Code/Codex/OpenCode) can replace/supplement gateway state management. |
 | [`TBD/CLAUDE_HOOK_IDEAS.md`](TBD/CLAUDE_HOOK_IDEAS.md) | 🔵 | Claude Code hooks as a leverage point for deterministic lifecycle behavior. |
 | [`TBD/SESSION_WINDOW_WARMING_SPEC.md`](TBD/SESSION_WINDOW_WARMING_SPEC.md) | 🔵 | Quota window coordinator proposal — no implementation yet. Corresponds to the unmerged `phase1-quota-window-coordinator` branch (see `.ai/CONTEXT.md`). |
+| [`TBD/BACKEND_RUNTIME_RELEASES.md`](TBD/BACKEND_RUNTIME_RELEASES.md) | 🔵 | Operator-approved, per-node Codex/Claude runtime-release design: immutable candidates, worker-wide drain, canary, recovery proof, and rollback. |
 
 ## Archive — retired, historical record only
 
