@@ -381,22 +381,26 @@ def _reclassify_salvaged_turn_success(result: TaskResult) -> TaskResult:
     return result
 
 
-def _operator_stop_held(db: Any, session_id: Optional[str]) -> bool:
+def _operator_stop_held(db: Any, session_id: Any) -> bool:
     """[A82 Stage 4b rework 2] True iff ``session_id`` carries the durable
     operator-stop hold (managed stop). Case automation (wake dispatcher, crash
     respawn, transient / quota resume) must neither wake nor replace such a
     session — only an operator action releases it. No read at all while no
     session is enrolled (legacy byte-identical); an unreadable record is
-    treated as HELD (automation skips this tick, fail closed)."""
-    sid = (session_id or "").strip()
-    if db is None or not sid:
+    treated as HELD (automation skips this tick, fail closed). ``session_id``
+    may be a zero-arg callable, resolved only after the enrollment
+    short-circuit (no lookup at all while nothing is enrolled)."""
+    if db is None:
         return False
     try:
         if db.any_session_enrolled() is False:
             return False
+        sid = str((session_id() if callable(session_id) else session_id) or "").strip()
+        if not sid:
+            return False
         return bool(db.operator_stop_hold(sid))
     except Exception:
-        logger.warning("event=operator_stop_hold_unreadable session_id=%s", sid, exc_info=True)
+        logger.warning("event=operator_stop_hold_unreadable", exc_info=True)
         return True
 
 
@@ -2483,7 +2487,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         if pause is None:
             return False
         if _operator_stop_held(
-            db, str(pause.get("session_id") or "") or db.case_manager_session_id(case_id),
+            db, lambda: str(pause.get("session_id") or "") or db.case_manager_session_id(case_id),
         ):
             # [A82 Stage 4b rework 2] Operator-stopped Manager: no automatic
             # resume/respawn; the pause keeps holding the Case.
