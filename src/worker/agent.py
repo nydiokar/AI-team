@@ -1343,6 +1343,25 @@ class WorkerAgent:
         self._managed_claims[task_id] = rec
         return rec
 
+    async def _drop_attempt(self, task_id: str) -> None:
+        """[A82 Stage 3 rework 6] The server says this attempt is terminal / not
+        ours (definitive refusal): drop the durable record AND any in-memory
+        backend wait for its turn (abandon-and-forget), so the session can
+        become quiescent again without a close/restart."""
+        rec = dict(self._managed_claims.get(task_id) or {})
+        if not rec and self._claim_store is not None:
+            rec = self._claim_store.get(task_id) or {}
+        self._claim_forget(task_id)
+        turn_uuid = rec.get("turn_uuid")
+        backend = (self._backends or {}).get(str(rec.get("backend") or ""))
+        forget = getattr(backend, "forget_managed_turn", None)
+        if turn_uuid and callable(forget):
+            session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
+            try:
+                await asyncio.to_thread(forget, session, turn_uuid)
+            except Exception:
+                logger.warning("event=managed_forget_turn_failed task_id=%s", task_id, exc_info=True)
+
     def _claim_forget(self, task_id: str) -> None:
         self._managed_claims.pop(task_id, None)
         if self._claim_store is not None:
@@ -1546,10 +1565,13 @@ class WorkerAgent:
                  "incarnation_id": self._incarnation_id, "reason": (reason or "")[:500]},
             )
         except Exception as e:
-            if self._is_definitive_refusal(e):
+            # MINOR-2: only a fenced 409 or a 404 ("no managed turn") is a
+            # definitive answer here; 401/403/other 4xx are transient (auth /
+            # proxy trouble) — keep the record and retry (rate-limited).
+            if isinstance(e, urllib.error.HTTPError) and e.code in (404, 409):
                 logger.warning("event=managed_enter_recovery_refused task_id=%s err=%s", task_id, e)
                 if task_id not in self._pending_result_delivery:
-                    self._claim_forget(task_id)
+                    await self._drop_attempt(task_id)
                 return False
             logger.error(
                 "event=managed_enter_recovery_failed task_id=%s err=%s — retried by "
@@ -1763,6 +1785,25 @@ class WorkerAgent:
             return None
         return process_gone_proof(ident)
 
+    async def _probe_held_attempt(self, tid: str, tok: str, rec: Dict[str, Any], why: str) -> bool:
+        """Rate-limited server consultation for an attempt the carrier cannot
+        resolve itself. Re-asserting the recovery hold is idempotent; a
+        definitive 404/409 (row terminal / operator-resolved / not ours) drops
+        the record and forgets the backend wait. Returns True iff dropped."""
+        now = time.monotonic()
+        last = self._held_probe_at.get(tid)
+        if last is not None and now - last < self._held_probe_interval_sec:
+            return False
+        self._held_probe_at[tid] = now
+        logger.warning("event=managed_recovery_held task_id=%s reason=%s", tid, why)
+        await self._enter_managed_recovery(
+            tid, tok, rec.get("reason") or f"carrier: held ({why})",
+        )
+        if tid not in self._managed_claims:
+            self._held_probe_at.pop(tid, None)
+            return True
+        return False
+
     async def _reconcile_managed_claims(self, batch: int = 8) -> int:
         """[A82 Stage 3 rework, B2] Give every durably held managed attempt a
         live exit (boot + every poll pass, bounded batch, no background tasks).
@@ -1817,31 +1858,18 @@ class WorkerAgent:
                 # the operator route (no auto-resolve on a guess).
                 proof = self._backend_process_gone(rec)
                 if proof is None:
-                    # Held for the operator. Still consult the server (rate
-                    # limited): re-asserting the recovery hold is idempotent,
-                    # and a definitive refusal (row resolved by an operator /
-                    # terminal) drops the record — no unbounded record growth,
-                    # no per-pass warning spam.
-                    now = time.monotonic()
-                    last = self._held_probe_at.get(tid)
-                    if last is not None and now - last < self._held_probe_interval_sec:
-                        continue
-                    self._held_probe_at[tid] = now
-                    logger.warning(
-                        "event=managed_recovery_needs_operator task_id=%s — no proof the "
-                        "previous backend process is gone", tid,
-                    )
-                    await self._enter_managed_recovery(
-                        tid, tok, rec.get("reason") or "carrier: held for operator (no process proof)",
-                    )
-                    if tid not in self._managed_claims:
-                        self._held_probe_at.pop(tid, None)
+                    if await self._probe_held_attempt(tid, tok, rec, "no process proof"):
                         done += 1
                     continue
                 kind = "carrier_restarted"
             else:
                 session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
                 if not await self._backend_quiescent(str(rec.get("backend") or ""), session):
+                    # Still owed by a live backend: keep holding, but consult
+                    # the server (rate-limited) so an operator resolution is a
+                    # real exit (the backend wait is then forgotten).
+                    if await self._probe_held_attempt(tid, tok, rec, "backend not quiescent"):
+                        done += 1
                     continue
                 kind = "backend_quiescent"
             if tid in self._pending_result_delivery:
@@ -1856,9 +1884,9 @@ class WorkerAgent:
                      **({"process_proof": proof} if proof else {})},
                 )
             except Exception as e:
-                if self._is_definitive_refusal(e):
+                if isinstance(e, urllib.error.HTTPError) and e.code in (404, 409):
                     logger.warning("event=managed_quiescence_refused task_id=%s err=%s", tid, e)
-                    self._claim_forget(tid)
+                    await self._drop_attempt(tid)
                     done += 1
                 else:
                     logger.warning("event=managed_quiescence_post_failed task_id=%s err=%s", tid, e)

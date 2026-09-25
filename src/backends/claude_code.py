@@ -404,6 +404,12 @@ class ClaudeCodeBackend(CodingBackend):
         self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
         return result
 
+    def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+        sessions = getattr(self._driver, "_sessions", None)
+        sdk_sess = sessions.get(session.session_id) if sessions is not None else None
+        forget = getattr(sdk_sess, "forget_managed_turn", None)
+        return bool(callable(forget) and forget(turn_uuid))
+
     def is_quiescent(self, session: Session) -> bool:
         probe = getattr(self._driver, "is_session_quiescent", None)
         return bool(callable(probe) and probe(session.session_id))
