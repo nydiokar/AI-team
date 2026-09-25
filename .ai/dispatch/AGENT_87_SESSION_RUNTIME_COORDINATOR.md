@@ -81,9 +81,20 @@ Coordinator: Manager session `a2a819ff55c0`. Built from repository + running-env
 5. **A85/A86 BLOCKED by environment** — no docker/podman here, so executable container acceptance is impossible; dispatching a build would yield only the written declaration this charter rejects. → escalate to operator (needs a docker-capable env or the prod host).
 
 ---
+## Per-worker review records
+
+### A83 — Session state legibility — handoff 2026-09-25 — VERDICT: ACCEPT (merged)
+- **Claimed behavior:** additive, read-path-only derived `SessionReason` on `/api/sessions` + timeline; enum/migration/loop untouched; `needs_input`/`is_active` byte-identical.
+- **Independently reproduced (Manager):** `src.__file__` = this checkout (tests exercise edited code); `pytest tests/test_session_reason*.py` → 21 passed; scope guards: `SessionStatus` enum diff empty, `src/control/db.py` NOT in diff (no schema/DDL), no `create_task`/timer/loop added (only #145/#147 guard comments), `from_session`/`needs_input`/`is_active` unchanged; `pnpm --dir web typecheck` clean + 144 web tests pass.
+- **Fresh adversarial reviewer (no parent context, told to falsify 8 targets):** ACCEPT — all 8 survived; independently ran the 21 py tests and traced the real `list_views → build_reason_batch` path (1× `list_jobs_for_sessions`, 1× `max_flow_event_ids`, per-open-case pause + manager-only wait reads; BUSY→None zero-read confirmed in code, not stub; priority order matches spec §4; `open_case_idle` for both roles; forward-compat unknown web kind → null; no-N+1/zero-read tests non-vacuous).
+- **Findings:** 0 blocker/major. Nits/observations recorded: (1) `session_reason.py:109` comment overstates "EXACT reuse" of the heartbeat fold (it re-implements the same per-group fold with all-groups scope — behavior correct); (2) `session_reason.py:~190` reads openness via one `get_flow_run(cid)` per distinct open case on the page (O(open-cases-on-page), each an indexed PK lookup — bounded, but not batched; a `get_flow_runs(ids)` batch primitive doesn't exist and adding one would violate least-action). Neither blocks; both are candidate micro-optimizations.
+- **A83↔A84 reconciliation note (carry to A84):** A83's `waiting_workers`/`open_case_idle` derive from the legacy wait-group substrate via `_case_has_unresolved_wait_group`. When A84 moves new Cases to the outbox, A83's derivation MUST switch source per-Case (outbox vs wait-group) so a new-Case Manager isn't mislabeled `open_case_idle` while a durable outbox row is pending. The UI label must never become control authority. → jointly reviewed at A84 cutover.
+- **Disposition:** merged to `main` (local, `--no-ff` `7c5c100`). Remaining operator-gated: remote push/PR (no `gh` here) and `web/dist` rebuild + gateway restart to deploy the pillow.
+
 ## Milestone (burndown)
 
 - [x] Current compatibility ledger created from repository evidence (2026-09-25)
+- [x] A83 legacy/new wait-source compatibility reviewed (verdict ACCEPT; reconciliation note carried to A84)
 - [ ] A82 ownership/queue review completed before A84 schema/cutover work
 - [ ] A83 legacy/new wait-source compatibility reviewed with A84
 - [ ] A84 atomicity, recovery, barrier, and liveness evidence independently reviewed
