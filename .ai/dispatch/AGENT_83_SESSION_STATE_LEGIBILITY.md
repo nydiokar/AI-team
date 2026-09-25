@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_83_SESSION_STATE_LEGIBILITY
 created_at: "2026-09-22T00:00:00+00:00"
-status: ready
-owner: ""
+status: done
+owner: mgr-a2a819ff:worker
 depends_on: []
-results_ref: null
-evidence: []
-updated_at: "2026-09-22T00:00:00+00:00"
+results_ref: DISPATCH_LOG.md#A83
+evidence: tests/test_session_reason.py
+updated_at: "2026-09-25T08:45:04.479434+00:00"
 ```
 
 # DISPATCH — A83 · Session state legibility (primary state + secondary reason)
