@@ -368,6 +368,30 @@ class CodingBackend(ABC):
         wait for it so the session can become quiescent again. Default: no-op."""
         return False
 
+    # [A82 Stage 4b] Producer 2 — managed compaction + operator cancel.
+    def run_managed_compaction(
+        self, session: "Session", ownership: Any, *,
+        telemetry_context: Any = None, telemetry_sink: Any = None,
+        on_process: Any = None,
+    ) -> ExecutionResult:
+        """Compact ``session``'s native context as ONE managed turn owned by
+        ``ownership``. Same contract as :meth:`run_managed_turn`: never
+        interrupts native work (not quiescent ⇒ typed ``OwnershipConflictError``
+        before anything is submitted), and an unattributable outcome is a typed
+        ``RecoveryRequiredError``. Default: unsupported (fail closed)."""
+        from src.control.turn_queue import ManagedUnsupportedError
+
+        raise ManagedUnsupportedError(
+            "backend has no managed compaction path", backend=type(self).__name__,
+        )
+
+    def cancel_managed_turn(self, session: "Session", turn_uuid: str) -> bool:
+        """Operator cancel of the managed turn ``turn_uuid`` ONLY (never another
+        turn): interrupt it if it is the turn the backend is running, or arm the
+        interrupt for when it begins. True iff a cancel was delivered/armed.
+        Default: False (nothing to cancel on this backend)."""
+        return False
+
 
 class ITaskOrchestrator(ABC):
     """Main orchestrator interface"""

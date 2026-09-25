@@ -67,6 +67,9 @@ class SchedulerPassResult(BaseModel):
     lineage_recovered: int = 0
     carrier_requeued: int = 0
     pending: int = 0
+    # [A82 Stage 4b] withdrawn turns whose Case lineage is still `void`.
+    lineage_voided: int = 0
+    void_outstanding: int = 0
 
 
 PrepareFn = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[PreparedTurn]]
@@ -131,6 +134,7 @@ async def run_scheduler_pass(
     limit: int = ACTIVATION_LIMIT_PER_PASS,
     allowance: Optional[SharedWaitingAllowance] = None,
     recover_lineage: Optional[RecoverFn] = None,
+    void_lineage: Optional[RecoverFn] = None,
 ) -> SchedulerPassResult:
     """One bounded activation pass. ``prepare(head, row)`` builds the
     execution payload for the full row (outside any transaction).
@@ -147,6 +151,19 @@ async def run_scheduler_pass(
                     result.lineage_recovered += 1
             except Exception as e:  # noqa: BLE001 — stays pending; retried later
                 logger.debug("event=turn_lineage_recovery_error task_id=%s err=%s", row.get("id"), e)
+    if void_lineage is not None:
+        # [A82 Stage 4b] Void the Case lineage of withdrawn turns (session
+        # close) that the live closer could not finish (a writer lease still
+        # live, a DB error). Bounded; the index holds only unfinished rows.
+        for row in await asyncio.to_thread(db.list_void_lineage, limit):
+            try:
+                if await void_lineage(row):
+                    result.lineage_voided += 1
+                else:
+                    result.void_outstanding += 1
+            except Exception as e:  # noqa: BLE001 — stays void; retried later
+                result.void_outstanding += 1
+                logger.debug("event=turn_void_lineage_error task_id=%s err=%s", row.get("id"), e)
     heads: List[Dict[str, Any]] = await asyncio.to_thread(
         db.select_eligible_turn_heads, limit,
     )
@@ -211,6 +228,10 @@ def _next_timeout(
     safety net while queued rows exist; else never (sleep until a hint)."""
     if res.activated >= limit:
         return 0
+    if res.void_outstanding and not res.waiting:
+        # [A82 Stage 4b] An unfinished lineage void (writer lease ≤30 s) needs a
+        # bounded wake even when the fleet is otherwise idle.
+        return FALLBACK_INTERVAL_SEC
     if not res.waiting:
         # Activated-but-unclaimed rows exist: keep the bounded safety-net wake so
         # a carrier that dies with the fleet otherwise idle is still detected
@@ -241,10 +262,12 @@ class TurnScheduler:
         allowance: Optional[SharedWaitingAllowance] = None,
         safety_net_sec: float = SAFETY_NET_SEC,
         recover_lineage: Optional[RecoverFn] = None,
+        void_lineage: Optional[RecoverFn] = None,
     ) -> None:
         self._db = db
         self._prepare = prepare
         self._recover_lineage = recover_lineage
+        self._void_lineage = void_lineage
         self._fallback_sec = fallback_sec
         self._safety_net_sec = safety_net_sec
         self._slot_backoff_k = 0
@@ -283,6 +306,7 @@ class TurnScheduler:
                     res = await run_scheduler_pass(
                         self._db, self._prepare, limit=self._limit,
                         allowance=self._allowance, recover_lineage=self._recover_lineage,
+                        void_lineage=self._void_lineage,
                     )
                     self.passes += 1
                     if res.activated:

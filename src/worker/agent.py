@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.control.turn_queue import ManagedTurnOwnership
+from src.control.turn_queue import CANCEL_MANAGED_ACTION, ManagedTurnOwnership
 
 from src.core.process_utils import (
     WORKER_INCARNATION_ENV,
@@ -643,7 +643,7 @@ async def _execute_task(
             payload = {}
 
     action = task_row.get("action", "run_oneoff")
-    if managed and action not in ("create_session", "resume_session"):
+    if managed and action not in ("create_session", "resume_session", "compact_session"):
         return {
             "success": False,
             "output": "",
@@ -822,7 +822,21 @@ async def _execute_task(
         from src.core.interfaces import ExecutionResult as _ER
         from src.core.backend_call import call_backend
 
-        if action in ("create_session", "resume_session"):
+        if managed and action == "compact_session":
+            # [A82 Stage 4b] Managed compaction: ONLY through the interface
+            # (no backend-name branching, no legacy fallback).
+            session = _make_session_from_payload(payload)
+            if session is None:
+                raise ValueError("Session payload missing for session action")
+            raw = await asyncio.to_thread(
+                call_backend,
+                functools.partial(backend.run_managed_compaction, on_process=on_process),
+                session,
+                ownership,
+                telemetry_context=context,
+                telemetry_sink=sink,
+            )
+        elif action in ("create_session", "resume_session"):
             session = _make_session_from_payload(payload)
             if session is None:
                 raise ValueError("Session payload missing for session action")
@@ -2521,7 +2535,7 @@ class WorkerAgent:
                             if self._is_already_scheduled(task_id):
                                 continue
                             if (
-                                row.get("action") not in ("close_session", "cancel_codex")
+                                row.get("action") not in ("close_session", "cancel_codex", CANCEL_MANAGED_ACTION)
                                 and not self._scheduling_capacity_available()
                             ):
                                 # Leave it queued server-side; a later poll picks
@@ -2618,6 +2632,13 @@ class WorkerAgent:
         if task_row.get("action") == "cancel_codex":
             async with self._codex_control_semaphore:
                 await self._handle_close_session(task_row)
+            return
+        if task_row.get("action") == CANCEL_MANAGED_ACTION:
+            # [A82 Stage 4b] Operator cancel of a managed attempt this carrier
+            # holds — outside the turn slot (it must never queue behind the
+            # very turn it stops).
+            async with self._codex_control_semaphore:
+                await self._handle_cancel_managed(task_row)
             return
         if task_row.get("action") == "close_session":
             await self._handle_close_session(task_row)
@@ -2765,6 +2786,69 @@ class WorkerAgent:
                 self._slots_used -= 1
                 self._inflight_sessions.discard(session_id)
                 self._heartbeat_now.set()  # push slots_used=0 immediately after task ends
+
+    async def _handle_cancel_managed(self, task_row: Dict[str, Any]) -> None:
+        """[A82 Stage 4b] Deliver an operator cancel to the managed attempt this
+        carrier holds for ``payload.target_task_id``. Claims the control row
+        (legacy protocol-0 claim), looks the attempt up in the durable claim
+        record (its per-attempt ``turn_uuid``), and asks the backend to cancel
+        EXACTLY that turn (``CodingBackend.cancel_managed_turn``). The attempt's
+        own result / recovery then commits ``cancelled`` server-side (the cancel
+        is recorded against its token). No live attempt ⇒ nothing to interrupt
+        (it already finished, or the Stage-3 recovery exits own it)."""
+        task_id = task_row.get("id", "unknown")
+        try:
+            await asyncio.to_thread(
+                self._http.post, f"/tasks/{task_id}/claim", {"node_id": self.cfg.node_id}
+            )
+        except urllib.error.HTTPError as e:
+            if e.code != 409:
+                logger.warning("cancel_managed_claim_failed err=%s", e)
+            return
+        except Exception as e:
+            logger.warning("cancel_managed_claim_failed err=%s", e)
+            return
+        payload = task_row.get("payload") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        target = payload.get("target_task_id") if isinstance(payload, dict) else None
+        delivered = False
+        detail = "no live managed attempt on this carrier"
+        if not isinstance(target, str) or not target or len(target) > 256:
+            detail = "invalid cancellation target"
+        else:
+            rec = dict(self._managed_claims.get(target) or {})
+            if not rec and self._claim_store is not None:
+                rec = dict(self._claim_store.get(target) or {})
+            turn_uuid = str(rec.get("turn_uuid") or "")
+            backend = (self._backends or {}).get(str(rec.get("backend") or ""))
+            cancel = getattr(backend, "cancel_managed_turn", None)
+            if rec and turn_uuid and callable(cancel):
+                session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
+                try:
+                    delivered = bool(await asyncio.to_thread(cancel, session, turn_uuid))
+                    detail = "interrupt delivered" if delivered else "turn not in flight"
+                except Exception as e:
+                    detail = f"cancel failed: {type(e).__name__}"
+                    logger.warning("event=cancel_managed_failed target=%s", target, exc_info=True)
+        logger.info("event=cancel_managed_handled target=%s delivered=%s", target, delivered)
+        result = {
+            "success": True, "output": detail, "errors": [], "files_modified": [],
+            "execution_time": 0.0, "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 0,
+        }
+        try:
+            delivered_post = await _post_result_until_accepted(
+                self._http, f"/tasks/{task_id}/result", {"node_id": self.cfg.node_id, **result},
+                label="cancel_managed_result_post",
+            )
+            if not delivered_post:
+                raise RuntimeError("controller_unreachable_until_delivery_deadline")
+        except Exception as e:
+            logger.error("cancel_managed_result_post_failed err=%s", e)
 
     async def _wait_for_inflight_turn(self, session_id: str) -> None:
         """Hold a close_session control task until the session's turn finishes.

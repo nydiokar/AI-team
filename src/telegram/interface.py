@@ -2682,6 +2682,23 @@ class TelegramInterface:
         if not self._user_can_access_session(update.effective_user.id, session):
             await update.message.reply_text("❌ You do not own that session.")
             return
+        # [A82 Stage 4b] Enrolled session: cancel the turn owning the ACTIVE
+        # slot (ledger truth, never last_task_id). None ⇒ legacy below.
+        stop_managed = getattr(self.orchestrator, "stop_managed_session_turn", None)
+        try:
+            managed = stop_managed(session) if callable(stop_managed) else None
+        except Exception as e:
+            await update.message.reply_text(f"Cancellation not recorded: {e}")
+            return
+        if managed is not None:
+            cancelled, active_id = managed
+            if cancelled:
+                await update.message.reply_text(
+                    f"Cancellation requested for `{active_id}` in session {self._session_tag(session.session_id)}."
+                )
+            else:
+                await update.message.reply_text("No active turn to cancel in that session.")
+            return
         if not session.last_task_id:
             await update.message.reply_text("No task is associated with that session yet.")
             return
@@ -2714,7 +2731,11 @@ class TelegramInterface:
         await update.message.reply_text("Compacting context...")
         try:
             result = await self.orchestrator.compact_session(session.session_id)
-            if result.success:
+            managed = getattr(result, "parsed_output", None)
+            if result.success and isinstance(managed, dict) and managed.get("managed"):
+                # [A82 Stage 4b] Enrolled: compaction is a queued managed turn.
+                await update.message.reply_text(f"📥 {result.output}. It runs after the turns ahead of it.")
+            elif result.success:
                 await update.message.reply_text("Context compacted. The session will continue with a condensed summary.")
             else:
                 err = (result.errors or ["unknown error"])[0]
@@ -2844,11 +2865,15 @@ class TelegramInterface:
         # Lifecycle (backend close + status + backend_session_id) lives on the
         # transport-neutral service (U3.5/P1). backend.close may block, so run the
         # service call off-thread. Chat unbinding below stays Telegram's concern.
-        await asyncio.to_thread(
+        closed = await asyncio.to_thread(
             self.orchestrator.session_service.close_session,
             session.session_id,
             backends=getattr(self.orchestrator, "_backends", {}),
         )
+        if getattr(closed, "reason", "") == "turn_queue_unavailable":
+            # [A82 Stage 4b] Managed close could not reach the turn ledger.
+            await update.message.reply_text("Close not recorded (turn queue unavailable) — retry.")
+            return
         session = self.session_store.get(session.session_id) or session
         active = self.session_store.get_active(update.effective_chat.id)
         if active and active.session_id == session.session_id:

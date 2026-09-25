@@ -550,6 +550,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self.session_service = SessionService(
             self.session_store,
             remote_close_dispatcher=self._dispatch_remote_close,
+            managed_close=self._close_managed_session,
         )
         self.workflow_service = WorkflowService()
         self._backends = build_backends()
@@ -5493,8 +5494,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 events = db.list_flow_events(flow_run_id)
             except Exception:
                 events = []
+            # [A82 Stage 4b] A dispatch whose child Case was voided because its
+            # turn was withdrawn before it ever ran is not an advancement.
+            voided = {
+                e.get("entity_id") for e in events
+                if e.get("event_type") == "task.dispatch_voided"
+            }
             dispatch_count = sum(
-                1 for e in events if e.get("event_type") == "task.dispatched"
+                1 for e in events
+                if e.get("event_type") == "task.dispatched"
+                and not (voided and e.get("entity_id") in voided)
             )
             had_rework = any(
                 e.get("event_type") == "review.rework_requested" for e in events
@@ -6393,7 +6402,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             self._stash_task_meta(task, self._TURN_ENROLLED_META_KEY, bool(turn_queue_enrolled))
         return await self._enqueue_task(task)
 
-    async def compact_session(self, session_id: str):
+    async def compact_session(self, session_id: str, operation_id: Optional[str] = None):
         """Send /compact to the backend for the given session, collapsing context."""
         from src.core.interfaces import ExecutionResult
         session = self.session_store.get(session_id)
@@ -6404,6 +6413,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         backend = self._backends.get(session.backend)
         if not backend:
             return ExecutionResult(success=False, output="", errors=[f"Unknown backend: {session.backend}"])
+
+        # [A82 Stage 4b] Enrolled ⇒ compaction is a managed, serialized turn
+        # (never a direct backend call that could overlap a managed turn). No
+        # marker read while no session is enrolled (legacy byte-identical).
+        if await self._session_turn_queue_enrolled(session_id):
+            return await self._admit_managed_compaction(session, operation_id)
 
         # If the session is pinned to a remote mesh node, dispatch there — running
         # the backend locally would use the wrong cwd (the Pi doesn't have the
@@ -8455,6 +8470,12 @@ created: {task.created}
 
         Returns True if a cancel signal was set for a queued or running task.
         """
+        # [A82 Stage 4b] A managed (protocol-1) turn is cancelled ONLY through
+        # the token-fenced ledger path; None ⇒ not managed (legacy below, and no
+        # read at all while no session is enrolled).
+        managed = self._cancel_managed_turn_if_managed(task_id)
+        if managed is not None:
+            return managed
         ev = self._task_cancel_events.get(task_id)
         if ev is None:
             # If task exists but no event yet (e.g., still queued elsewhere), create and set
@@ -9097,7 +9118,7 @@ Generated from user description: {description}
         setattr(result, "backend_name", backend_name)
         return result
 
-    def _dispatch_remote_close(self, session: Any) -> None:
+    def _dispatch_remote_close(self, session: Any, node_id: Optional[str] = None) -> None:
         """Enqueue a fire-and-forget close_session task pinned to the session's
         owning node so the remote worker tears down its live backend session and
         frees the claude process.
@@ -9108,7 +9129,9 @@ Generated from user description: {description}
         next poll. If the node is offline the task simply waits; the worker's boot
         reaper reclaims the process on restart regardless, so no leak survives.
         """
-        machine_id = getattr(session, "machine_id", "") or ""
+        # [A82 Stage 4b] ``node_id`` targets the managed carrier that owns an
+        # enrolled session's process (unpinned sessions run there too).
+        machine_id = node_id or getattr(session, "machine_id", "") or ""
         if not machine_id:
             return
         from src.control.db import get_db
@@ -9913,6 +9936,218 @@ Generated from user description: {description}
                     turn_id, outcome, flow_run_id)
         return outcome == "done"
 
+    # ------------------------------------------------------------------ #
+    # [A82 Stage 4b] Producer 2 — compaction, operator cancel/stop of the
+    # ACTIVE managed turn, and session close with managed rows. Every path
+    # below is reached only for an ENROLLED session (or a protocol-1 row);
+    # while no session is enrolled none of them reads the DB.
+    # ------------------------------------------------------------------ #
+    _COMPACTION_PROMPT = "/compact"
+
+    async def _admit_managed_compaction(self, session: Any, operation_id: Optional[str]) -> Any:
+        """Admit ONE managed compaction turn (``turn_kind='compaction'``,
+        action ``compact_session``) for an enrolled session. It is serialized
+        by the session's active slot like any managed turn — it never runs
+        concurrently with, and never interrupts, another managed turn. Durable
+        trigger identity: scope ``operator:<sid>:compaction`` + the caller's
+        operation id (web ``Idempotency-Key``), and the active coalesce key
+        ``compaction:<sid>`` (a compaction already waiting/running absorbs a
+        repeat). No Case lineage (legacy compaction records none). Returns an
+        accepted envelope; the turn's own terminal outcome is its result."""
+        from src.core.interfaces import ExecutionResult
+        from src.control.db import get_db, _canonical_admission_hash
+        from src.control.turn_admission import AdmissionRequest, admit_turn_async
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        sid = str(session.session_id)
+        backend = str(session.backend or "claude")
+        carrier = self._managed_carrier_assignment(session, backend)
+        turn_id = f"compact-{sid[:8]}-{uuid.uuid4().hex[:12]}"
+        op = (operation_id or "").strip() or f"compact:{turn_id}"
+        request = AdmissionRequest(
+            session_id=sid,
+            task_id=turn_id,
+            body=self._COMPACTION_PROMPT,
+            payload={
+                "task_id": turn_id,
+                "prompt": self._COMPACTION_PROMPT,
+                "metadata": {"session_id": sid, "source": "compact", "task_origin": "runtime"},
+                "task": {
+                    "type": TaskType.ANALYZE.value,
+                    "priority": TaskPriority.HIGH.value,
+                    "created": now_iso(),
+                    "title": "Compact session context",
+                    "target_files": [],
+                    "success_criteria": ["Context compacted"],
+                    "context": "",
+                },
+            },
+            backend=backend,
+            machine_id=carrier,
+            action="compact_session",
+            turn_source="operator",
+            turn_kind="compaction",
+            operation_id=op,
+            idempotency_scope=f"operator:{sid}:compaction",
+            admission_hash=_canonical_admission_hash({"session_id": sid, "turn_kind": "compaction"}),
+            coalesce_key=f"compaction:{sid}",
+        )
+        admission = await admit_turn_async(
+            get_db(), request, fleet_cap=int(config.system.max_queue_size),
+        )
+        notify_turn_queue_changed()
+        logger.info(
+            "event=managed_compaction_admitted task_id=%s session_id=%s replay=%s coalesced=%s",
+            admission, sid, admission.idempotent_replay, admission.coalesced,
+        )
+        return ExecutionResult(
+            success=True,
+            output=f"Compaction queued as turn #{admission.queue_sequence}",
+            errors=[],
+            parsed_output={
+                "managed": True,
+                "task_id": str(admission),
+                "status": admission.status,
+                "queue_sequence": admission.queue_sequence,
+                "coalesced": bool(admission.coalesced),
+            },
+        )
+
+    def _cancel_managed_turn_if_managed(self, task_id: str, *, actor: str = "operator") -> Optional[bool]:
+        """Operator cancel of ONE managed turn through the token-fenced ledger
+        path (``MeshDB.request_turn_cancel``). None ⇒ not a managed row (the
+        caller keeps the legacy path; no read at all while nothing is
+        enrolled). Only the targeted attempt is affected — queued turns behind
+        it are untouched. Typed failures propagate (fail closed)."""
+        from src.control.db import get_db
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        db = get_db()
+        if db is None or db.any_session_enrolled() is False:
+            return None
+        row = db.get_task(task_id)
+        if not row or int(row.get("queue_protocol") or 0) != 1:
+            return None
+        out = db.request_turn_cancel(task_id, actor=actor)
+        if out.outcome == "cancelled":
+            notify_turn_queue_changed()  # the slot freed: next head may activate
+        logger.info(
+            "event=managed_turn_cancel task_id=%s outcome=%s node=%s control=%s",
+            task_id, out.outcome, out.node_id, out.control_task_id,
+        )
+        return out.outcome in ("cancelled", "requested")
+
+    def stop_managed_session_turn(self, session: Any) -> Optional[Tuple[bool, Optional[str]]]:
+        """[A82 Stage 4b] "Stop" for an ENROLLED session: cancel the turn that
+        OWNS the active slot, read from the ledger (never ``last_task_id``,
+        never a queued id). Returns (cancelled, task_id), or None for an
+        unenrolled session (the legacy stop path, no read while nothing is
+        enrolled). Stop is NOT a queue pause: queued turns stay queued and the
+        scheduler activates the next head normally (persistent pause/resume is
+        Stage 6)."""
+        from src.control.db import get_db
+        from src.control.turn_admission import session_enrollment_sync
+
+        db = get_db()
+        sid = str(getattr(session, "session_id", "") or "")
+        if not sid or not session_enrollment_sync(db, sid):
+            return None
+        active = db.get_active_turn(sid)
+        if not active:
+            return (False, None)
+        tid = str(active["id"])
+        return (bool(self._cancel_managed_turn_if_managed(tid)), tid)
+
+    def _close_managed_session(self, session: Any) -> Optional[str]:
+        """``SessionService.close_session`` hook. None ⇒ unenrolled (legacy
+        close, no read while nothing is enrolled). For an ENROLLED session:
+
+        1. ONE transaction: session ``closed`` + every queued turn withdrawn
+           (admission and activation refuse a closed session in their own txn);
+        2. void the Case lineage of each withdrawn turn (a child Case born for
+           a turn that will never run is closed ``cancelled``, its parent gets a
+           ``task.dispatch_voided`` so the advancement gate does not count it,
+           and the session's affiliation to it is cleared). The scheduler sweep
+           re-runs anything left ``void`` (e.g. a writer lease still live);
+        3. the ACTIVE turn is cancelled through the fenced path (its result /
+           recovery commits ``cancelled``; ownership is released by that exit);
+        4. the carrier that owns the session's process gets the existing
+           ``close_session`` teardown (it waits for the in-flight turn first).
+        Returns that carrier node id ("" if none). Every step is idempotent, so
+        a retry after a typed failure converges."""
+        from src.control.db import get_db
+        from src.control.turn_admission import session_enrollment_sync
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        db = get_db()
+        sid = str(getattr(session, "session_id", "") or "")
+        if not sid or not session_enrollment_sync(db, sid):
+            return None
+        closed = db.close_session_turns(sid, actor="operator")
+        for turn_id in closed.withdrawn:
+            try:
+                self._void_withdrawn_lineage(turn_id)
+            except Exception as e:  # noqa: BLE001 — stays `void`; the sweep re-runs it
+                logger.warning("event=managed_void_lineage_deferred task_id=%s err=%s", turn_id, e)
+        carrier = ""
+        if closed.active_task_id:
+            out = db.request_turn_cancel(closed.active_task_id, actor="session_close")
+            carrier = out.node_id or ""
+        carrier = carrier or self._managed_carrier_node(session)
+        if carrier:
+            self._dispatch_remote_close(session, node_id=carrier)
+        notify_turn_queue_changed()
+        logger.info(
+            "event=managed_session_closed session_id=%s withdrawn=%d active=%s carrier=%s",
+            sid, len(closed.withdrawn), closed.active_task_id, carrier,
+        )
+        return carrier
+
+    def _void_withdrawn_lineage(self, turn_id: str) -> bool:
+        """Void the Case lineage of a withdrawn managed turn — ONE convergent,
+        idempotent, raising procedure keyed on the turn id (live closer and the
+        scheduler sweep run exactly this; recovery is a re-run):
+
+        * a Case BORN for the turn (own flow_run): parent ``task.dispatch_voided``
+          (once), the child closed ``cancelled`` (force: nothing will ever meet
+          its criteria), every session still affiliated to it cleared;
+        * join/attach membership: left as written (legacy close parity — the
+          task link is audit, the session affiliation belongs to the Case);
+        * then ``void`` → ``voided`` (CAS).
+        Returns False (nothing written) while the withdrawn writer's lineage
+        lease is still live — it could still be mid-write; True once voided."""
+        from src.control.db import get_db, _now as _db_now
+
+        db = get_db()
+        row = db.get_task(turn_id)
+        if row is None or row.get("lineage_state") != "void":
+            return True
+        lease = row.get("lineage_lease_until")
+        if lease and str(lease) > _db_now():
+            return False
+        prior = db.existing_task_lineage(turn_id)
+        if prior is not None and prior["kind"] == "own_flow":
+            fid = prior["flow_run_id"]
+            frow = db.get_flow_run(fid) or {}
+            parent = frow.get("parent_flow_run_id")
+            if parent:
+                db.append_flow_event_once(
+                    parent, "task.dispatch_voided", "system", entity_type="flow", entity_id=fid,
+                    payload={"child_task_id": turn_id, "reason": "turn_withdrawn"},
+                )
+            if (frow.get("status") or "") not in db._CLOSED_STATUSES:
+                res = self.close_case(fid, outcome="cancelled", actor="system", force=True)
+                after = db.get_flow_run(fid) or {}
+                if (after.get("status") or "") not in db._CLOSED_STATUSES:
+                    raise RuntimeError(f"void lineage: child case {fid} not closed: {res.get('reason')}")
+            for link in db.list_flow_links(flow_run_id=fid, entity_type="session"):
+                db.clear_session_case_if(str(link.get("entity_id") or ""), fid)
+        return bool(db.mark_lineage_voided(turn_id)) or db.turn_lineage_state(turn_id) == "voided"
+
+    async def _void_withdrawn_lineage_async(self, row: Dict[str, Any]) -> bool:
+        """Scheduler sweep entry (off the event loop)."""
+        return await asyncio.to_thread(self._void_withdrawn_lineage, str(row["id"]))
+
     _LINEAGE_LEASE_SEC = 30.0
     _LINEAGE_REPLAY_WAIT_SEC = 5.0
 
@@ -9975,10 +10210,12 @@ Generated from user description: {description}
         # Context is assembled once per prepared revision: clear the in-memory
         # once-guard so a re-preparation (stale revision) injects exactly once
         # into the fresh raw intent, and drop it afterwards (no growth).
+        compaction = str(row.get("turn_kind") or "") == "compaction"
         self._compact_injected_ids.discard(task.id)
         try:
-            await self._maybe_inject_restart_recovery_context(task)
-            await self._maybe_inject_compact_context(task)
+            if not compaction:  # [A82 Stage 4b] `/compact` stays a bare slash command
+                await self._maybe_inject_restart_recovery_context(task)
+                await self._maybe_inject_compact_context(task)
         finally:
             self._compact_injected_ids.discard(task.id)
         session = self.session_store.get(sid) if sid else None
@@ -9986,6 +10223,9 @@ Generated from user description: {description}
         # that deregistered makes the head back off instead of activating).
         machine_id = self._managed_carrier_assignment(session, str(row.get("backend") or ""))
         action, payload = self._mesh_dispatch_payload(task, sid, session, socket.gethostname())
+        if compaction:
+            action = "compact_session"
+            payload["action"] = action
         # Keep the task spec so a row returned to `queued` (dead carrier) can be
         # re-prepared from the same intent.
         spec = (json.loads(row["payload"]) if isinstance(row.get("payload"), str)
@@ -10006,10 +10246,7 @@ Generated from user description: {description}
         from src.control.db import get_db
         from src.control.turn_queue import CarrierUnavailableError
 
-        pinned = str(getattr(session, "machine_id", "") or "").strip() if session else ""
-        host = socket.gethostname()
-        local = str(getattr(config.mesh, "local_carrier_node_id", "") or "").strip()
-        target = pinned if pinned and pinned != host else (local or pinned)
+        target = self._managed_carrier_node(session)
         if not target:
             raise CarrierUnavailableError(
                 "no managed carrier for an unpinned session: set MESH_LOCAL_CARRIER_NODE_ID",
@@ -10022,6 +10259,15 @@ Generated from user description: {description}
                 session_id=getattr(session, "session_id", None), node_id=target,
             )
         return target
+
+    def _managed_carrier_node(self, session: Any) -> str:
+        """The carrier node id an enrolled session's managed turns are assigned
+        to (no liveness/registration check): a pin to another node, else this
+        host's ``MESH_LOCAL_CARRIER_NODE_ID``, else the pin; "" if none."""
+        pinned = str(getattr(session, "machine_id", "") or "").strip() if session else ""
+        host = socket.gethostname()
+        local = str(getattr(config.mesh, "local_carrier_node_id", "") or "").strip()
+        return pinned if pinned and pinned != host else (local or pinned)
 
     def _start_turn_scheduler(self) -> None:
         """Start the single managed-turn scheduler loop when a mesh DB exists and
@@ -10042,6 +10288,7 @@ Generated from user description: {description}
         self.task_queue.share_allowance(ALLOWANCE)
         self._turn_scheduler = TurnScheduler(
             db, self._prepare_managed_turn, recover_lineage=self._recover_managed_lineage,
+            void_lineage=self._void_withdrawn_lineage_async,
         )
         self._turn_scheduler_task = asyncio.create_task(
             self._turn_scheduler.run(), name="turn-scheduler",
