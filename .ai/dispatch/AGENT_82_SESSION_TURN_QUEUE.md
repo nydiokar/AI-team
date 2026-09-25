@@ -1197,6 +1197,27 @@ The first run left 4 survivors (event-once, strict, decision-reuse, requeue-touc
 - **Residual:** a withdrawal that lands AFTER the procedure has written a link (between write groups) leaves that link on a withdrawn turn. The fence stops further writes and reports withdrawn, but written links are not deleted.
 - **Stands from rework 2:** M3 enrollment must happen inside the gateway process, and m4 compat cap. m2 (the sync carrier read) is now partly addressed because lineage runs in a thread; the carrier-assignment read in admission/prepare is still inline.
 
+### Stage 4a rework 4 — A87 round-4 review closed (2026-09-25, commit `9d45a37` + this record)
+
+- **MAJOR 1: recovery re-affiliated a session to a CLOSED Case.**
+  - **Fix.** When `_managed_lineage_converge` reuses a prior decision, it now checks whether that Case has closed since. This covers both the membership case and the own-flow/birth case. If it has closed, recovery finalizes with that case_id (the link already exists, reproducing "legacy attached, then close cleared it") and writes nothing more: no `affiliate()`, no late `task.attached` / `session.attached`, no session link. The fresh-decision branches were checked too. J re-checks the Case is open, and B uses `find_open_case_for_session`, so they cannot pick a closed Case.
+  - **Test correction.** My own `test_recovery_reuses_the_durable_decision` closed the Case with raw SQL, skipping the affiliation clear, and so codified the bug. It now closes via the real `o.close_case` and asserts no re-affiliation and `flow.closed` as the last event.
+  - **Probe P2** is adopted as `test_P2_recovery_after_real_close_does_not_reaffiliate`.
+  - **Mutation:** dropping the closed check → both tests fail.
+- **MINOR 2.** Added join and attach variants of the full-re-run event-once test. The mutation `task.attached once=True→False` is now killed (join, attach, P2).
+- **MINOR 3 (carried): the fence is advisory between write groups.** A stalled writer holds `_write_lock` inside a single DB write, so a recovery claim, which needs the same lock, times out at its 5 s deadline instead of interleaving. Across write groups the fence is re-checked, and every step is get-or-create, so a stale writer's late steps converge on the same objects. What it can still do after losing the lease is complete writes that recovery would have made anyway. It cannot finalize (CAS).
+- **CARRY — HARD Stage-6 PRECONDITION: phantom child Case on withdraw.**
+  - **The defect.** A withdraw landing after a partial or full BIRTH leaves a phantom child Case:
+    - the open child `flow_run` blocks the parent's `close_case` (`CaseCloseBlocked`);
+    - the session stays affiliated to the phantom (`find_open_case_for_session` returns it);
+    - the phantom `task.dispatched` inflates the advancement-gate count (probe P3).
+  - **Why it is not a 4a defect.** It is unreachable in 4a. The only withdraw caller is scheduler expiry, and heads exclude lineage-pending rows.
+  - **The precondition.** Any Stage-6 withdraw of a lineage-pending or partially-lineaged row must void/close the child flow_run and clear the affiliation, with a test. A87 carries this to CONTEXT.md.
+- **Verification.**
+  - turn-queue files: 260 passed / 7 red. The reds are unchanged: SYS03-07 are Stage 4b+, and api ×2 are Stage 6.
+  - 419 regression group (the 303 group + `test_case_closure`, `test_case_interrupt`, `test_mcp_manager`): 419 passed.
+  - Mutations were run in a scratch worktree, removed.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
