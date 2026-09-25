@@ -110,7 +110,7 @@ export function SessionRow({
         <h3 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-ink">
           {proj}
         </h3>
-        <SessionStatusChip state={session.opState} closed={closed} />
+        <SessionStatusChip state={session.opState} closed={closed} reason={session.reason} />
       </div>
 
       {/* Compact runtime context: backend, selected model, target, and recency. */}

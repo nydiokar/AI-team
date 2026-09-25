@@ -95,6 +95,25 @@ export interface Session {
   keepPinned: boolean;
   /** Searchable operator note explaining why the session was kept. */
   keepNote: string;
+  /** [A83] Derived, non-authoritative secondary reason refining `opState`
+   *  (spec docs/TBD/SESSION_WAIT_STATE_GRANULARITY.md). null ⇒ no reason. */
+  reason: SessionReason | null;
+}
+
+// [A83] Canonical secondary reason. Presentational; the enum stays authoritative.
+export type SessionReasonKind =
+  | "paused_quota"
+  | "paused_retry"
+  | "waiting_workers"
+  | "waiting_job"
+  | "open_case_idle"
+  | "idle"
+  | "node_offline";
+
+export interface SessionReason {
+  kind: SessionReasonKind;
+  confidence: "high" | "medium";
+  detail: string | null;
 }
 
 // ── Task ─ 🟡 PARTIAL / ❌ MISSING lifecycle (gap-doc §4) ───────────────────
