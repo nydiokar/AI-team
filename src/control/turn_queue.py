@@ -272,3 +272,61 @@ class RecoveryResolution(BaseModel):
 
     task_id: str
     resolved_status: str
+
+
+# --------------------------------------------------------------------------- #
+# A82 Stage 4a — admission bounds (design §8) + the admission result.
+# --------------------------------------------------------------------------- #
+# Per-session waiting cap (queued + pending managed rows of one session).
+PER_SESSION_WAITING_CAP = 20
+# Stored waiting-intent byte caps (persisted `intent_bytes`, design §8).
+MAX_INTENT_BYTES_PER_ROW = 2 * 1024 * 1024
+MAX_INTENT_BYTES_FLEET = 100 * 1024 * 1024
+# Queue-mutation total lock/DB deadline (design §8 "Time").
+ADMISSION_DEADLINE_SEC = 5.0
+# Statuses that occupy the fleet waiting allowance (design §8: queued + pending).
+WAITING_STATUSES = ("queued", "pending")
+
+
+class TurnAdmission(str):
+    """The acknowledged managed admission: a ``str`` equal to the turn id (so it
+    can be passed straight to ``get_task`` and compared across replays, like
+    ``ClaimToken``), carrying the committed row summary.
+
+    ``admission["id"]`` / ``["status"]`` / ``["revision"]`` /
+    ``["queue_sequence"]`` / ``["idempotent_replay"]`` / ``["coalesced"]`` keep
+    the Stage-2 mapping shape; any other subscript is ordinary ``str`` indexing.
+    Only ever constructed AFTER the admitting transaction committed."""
+
+    _FIELDS = ("id", "status", "revision", "queue_sequence", "idempotent_replay", "coalesced")
+
+    id: str
+    status: str
+    revision: int
+    queue_sequence: Optional[int]
+    idempotent_replay: bool
+    coalesced: bool
+
+    def __new__(
+        cls,
+        task_id: str,
+        *,
+        status: str,
+        revision: int,
+        queue_sequence: Optional[int],
+        idempotent_replay: bool,
+        coalesced: bool = False,
+    ) -> "TurnAdmission":
+        self = super().__new__(cls, task_id)
+        self.id = task_id
+        self.status = status
+        self.revision = int(revision)
+        self.queue_sequence = queue_sequence
+        self.idempotent_replay = idempotent_replay
+        self.coalesced = coalesced
+        return self
+
+    def __getitem__(self, key: Any) -> Any:  # type: ignore[override]
+        if isinstance(key, str) and key in self._FIELDS:
+            return getattr(self, key)
+        return super().__getitem__(key)

@@ -1,6 +1,7 @@
 """Bounded FIFO queue that leaves busy Codex sessions pending, without using a worker."""
 import asyncio
 from collections.abc import Callable
+from typing import Any
 
 from src.core.interfaces import Task
 
@@ -12,6 +13,31 @@ class SessionTaskQueue(asyncio.Queue[Task]):
         self._owned: dict[str, str] = {}
         self._keys: dict[str, str] = {}
         self._changed = asyncio.Event()
+        # [A82 Stage 4a] Optional shared legacy+managed waiting allowance. None
+        # (the default, and whenever no managed queue exists) keeps the plain
+        # asyncio.Queue capacity check byte-identical.
+        self._shared: Any = None
+
+    def share_allowance(self, shared: Any) -> None:
+        """Count managed waiting turns against this queue's ``maxsize`` so the
+        legacy and managed paths draw on ONE allowance (design §8)."""
+        self._shared = shared
+
+    def full(self) -> bool:
+        shared = self._shared
+        if shared is None:
+            return super().full()
+        return shared.legacy_blocked(self.qsize(), self.maxsize)
+
+    def put_nowait(self, item: Task) -> None:
+        shared = self._shared
+        if shared is None:
+            return super().put_nowait(item)
+        # Check + put atomically against a concurrent managed reservation.
+        with shared.lock:
+            if shared.legacy_blocked(self.qsize(), self.maxsize):
+                raise asyncio.QueueFull
+            return super().put_nowait(item)
 
     def _put(self, item: Task) -> None:
         self._keys[item.id] = self._key(item)

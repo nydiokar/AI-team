@@ -125,6 +125,87 @@ _CONTINUE_INLINE_MAX = 48000
 # that, so no realistic caller (web composer, MCP Manager, Manager-internal
 # dispatch) can hit it; it only blunts runaway/accidental oversized posts.
 _MAX_INSTRUCTION_CHARS = 262144
+# [A82 Stage 4a] Compatibility-route serialized request ceiling (design §8):
+# above the worst-case valid body (262144-char prompt + 48000-char carry, JSON-
+# escaped) so no previously valid request is refused, but bounded pre-parse.
+_INSTRUCTIONS_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+# Body-read deadline for the capped routes (design §8 "Time").
+_BODY_READ_DEADLINE_SEC = 5.0
+
+
+async def _session_turn_queue_enrolled(session_id: str) -> bool:
+    """[A82 Stage 4a] Durable enrollment marker (canonical DB, offloaded).
+    Mesh DB absent ⇒ False; unreadable ⇒ typed 503 (fail closed)."""
+    from src.control.db import get_db
+    from src.control.turn_queue import BackingStoreError
+
+    db = get_db()
+    if db is None:
+        return False
+    try:
+        return bool(await asyncio.to_thread(db.is_session_enrolled, session_id))
+    except Exception as e:
+        raise _turn_queue_http(BackingStoreError(f"enrollment marker unreadable: {e}"))
+
+
+def _turn_queue_http(err: Exception) -> HTTPException:
+    """[A82 Stage 4a] Map a typed managed-queue outcome to a structured HTTP
+    error (design §6 table); 429 carries Retry-After."""
+    status = int(getattr(err, "status_code", 503) or 503)
+    code = str(getattr(err, "code", "turn_queue_error"))
+    ctx = getattr(err, "context", {}) or {}
+    headers = None
+    if status == 429:
+        headers = {"Retry-After": str(int(ctx.get("retry_after", 1) or 1))}
+    return HTTPException(
+        status_code=status,
+        detail={"ok": False, "reason": code, "message": str(getattr(err, "detail", err))[:300]},
+        headers=headers,
+    )
+
+
+async def _submit_managed_instruction(
+    orchestrator: Any, body: Any, session: Any, idempotency_key: Optional[str],
+) -> str:
+    """[A82 Stage 4a] Producer 1 (web) → managed admission. The web
+    Idempotency-Key is the durable operation id (replay-safe across restarts)."""
+    from src.control.turn_queue import TurnQueueError
+    from src.orchestrator import HarnessAdmissionBlocked
+
+    try:
+        return await orchestrator.submit_instruction(
+            description=body.description,
+            session_id=session.session_id,
+            cwd=session.repo_path or body.cwd,
+            target_files=body.target_files,
+            source="web_session",
+            parent_flow_run_id=body.parent_flow_run_id,
+            join_case_id=body.case_id,
+            extra_metadata=_instruction_extra_metadata(body),
+            operation_id=idempotency_key,
+        )
+    except HarnessAdmissionBlocked as blocked:
+        raise _harness_blocked_http(blocked)
+    except TurnQueueError as err:
+        raise _turn_queue_http(err)
+
+
+def _preparse_byte_guard(app: Any) -> None:
+    """[A82 Stage 4a] Install the streamed pre-parse byte gate (design §8):
+    bytes are counted as RECEIVED (chunked included) and a structured 413 is
+    returned before JSON parsing for the operator recovery route and the
+    ``/api/instructions`` admission route; a stalled body read fails at the
+    deadline instead of holding the request open."""
+    from src.control.body_cap import BodyCapMiddleware
+
+    app.add_middleware(
+        BodyCapMiddleware,
+        rules=[
+            (r"/api/turn-requests/[^/]+/resolve-recovery", 16 * 1024),
+            (r"/api/instructions", _INSTRUCTIONS_MAX_REQUEST_BYTES),
+        ],
+        read_deadline_sec=_BODY_READ_DEADLINE_SEC,
+    )
 # [A72 review] Smaller semantic fields on the case write surface. The MCP client
 # already bounds spec body ≤ 8k / title ≤ 512 / uri ≤ 1000 / reviewer ≤ 64, so the
 # server bounds below sit at-or-above every legit caller and only reject bulk that
@@ -1022,12 +1103,8 @@ def build_control_api(orchestrator) -> FastAPI:
         openapi_url="/openapi.json" if _docs_on else None,
     )
     app.add_middleware(RequestTimingMiddleware, component="gateway")
-    # [A82 Stage 3 rework 4, m2] Streamed byte cap on the operator recovery route.
-    from src.control.body_cap import BodyCapMiddleware
-
-    app.add_middleware(
-        BodyCapMiddleware, rules=[(r"/api/turn-requests/[^/]+/resolve-recovery", 16 * 1024)],
-    )
+    # [A82 Stage 3 rework 4, m2 / Stage 4a] Streamed pre-parse byte caps.
+    _preparse_byte_guard(app)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_exception_handler(
@@ -1219,6 +1296,9 @@ def build_control_api(orchestrator) -> FastAPI:
                     "note": body.note,
                 }
                 res = db.resolve_recovery(task_id, token, evidence, resolved_status=body.decision)
+                from src.control.turn_scheduler import notify_turn_queue_changed
+
+                notify_turn_queue_changed()  # [A82 Stage 4a] slot freed
                 return JSONResponse({"ok": True, "task_id": task_id, "status": res.resolved_status})
         except TurnQueueError as e:
             raise HTTPException(status_code=getattr(e, "status_code", 409), detail={"ok": False, "reason": e.code})
@@ -1855,6 +1935,17 @@ def build_control_api(orchestrator) -> FastAPI:
                 session = orchestrator.session_service.store.get(body.session_id)
                 if session is None:
                     raise HTTPException(status_code=404, detail="session_not_found")
+                if await _session_turn_queue_enrolled(session.session_id):
+                    # [A82 Stage 4a] Enrolled ⇒ managed admission. Acceptance is
+                    # durable before this returns and does NOT write BUSY /
+                    # last_user_message / last_task_id (queued is not busy).
+                    task_id = await _submit_managed_instruction(
+                        orchestrator, body, session, idempotency_key,
+                    )
+                    session = orchestrator.session_service.store.get(session.session_id)
+                    resp = {"ok": True, "task_id": task_id, "session": _session_payload(session)}
+                    _idem_put("instructions", idempotency_key, resp)
+                    return JSONResponse(resp)
                 # Status write (BUSY + last_user_message) lives on the service.
                 orchestrator.session_service.mark_busy(
                     session.session_id, last_user_message=body.description)
