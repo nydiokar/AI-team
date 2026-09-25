@@ -20,6 +20,9 @@ dependencies = [
   "python-multipart>=0.0.9",
   "claude-agent-sdk>=0.1.0",
   "anyio>=4.0.0",
+  # [A82] backend-process liveness proof for managed-turn recovery; also makes
+  # reap_stale_worker_children real (it was a silent no-op without psutil).
+  "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]

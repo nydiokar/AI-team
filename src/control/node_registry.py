@@ -287,7 +287,10 @@ class NodeRegistry:
             rows = db.list_tasks(status="claimed")
             failed = []
             for row in rows:
-                if row.get("claimed_by") == node_id:
+                # [A82 Stage 3 rework 4, m4] fail_task is fenced to protocol-0
+                # rows; a managed row it cannot change must not be reported
+                # (or notified) as failed. Offline is not quiescence.
+                if row.get("claimed_by") == node_id and int(row.get("queue_protocol") or 0) == 0:
                     db.fail_task(row["id"], f"node {node_id} went offline", status="failed_node_offline")
                     failed.append(row["id"])
             return failed

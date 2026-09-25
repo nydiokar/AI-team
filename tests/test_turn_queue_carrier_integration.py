@@ -134,6 +134,7 @@ def _worker(tmp_path, http, *, managed: bool = True, incarnation: str = "inc-1",
     w._start_retry_delays = (0.0, 0.0, 0.0)
     w._result_delivery_semaphore = asyncio.Semaphore(2)
     w._delivering = set()
+    w._delivery_parked = set()
     w._managed_claims_blocked = None
     if managed and isinstance(http, _ClientHTTP):
         w._register()  # registers queue protocol 1 + managed backends via the real route
@@ -163,8 +164,10 @@ class _FakeBackend:
         self.rows: List[Dict[str, Any]] = []
         self.native_id = native_id
 
-    async def __call__(self, task_row, backends, http=None, telemetry_sink=None, node_id="", ownership=None):
+    async def __call__(self, task_row, backends, http=None, telemetry_sink=None, node_id="", ownership=None, on_process=None):
         self.rows.append({**task_row, "_ownership": ownership})
+        if on_process is not None and getattr(self, "pid", None):
+            on_process({"pid": self.pid, "create_time": 1000.0})
         return {
             "success": True, "output": f"answer to {task_row['payload']['prompt']}",
             "errors": [], "files_modified": [], "execution_time": 0.01,
@@ -588,6 +591,7 @@ def real_claude(monkeypatch):
     import src.core.test_guard as tg
     from tests.test_turn_queue_sdk_ownership import _FakeClient, _start_fake_session
 
+    monkeypatch.setenv("WORKER_MANAGED_TURNS", "1")  # managed carrier ⇒ echo correlation on
     fake = _FakeClient()
     sess = _start_fake_session(fake)
     proactive: List[Any] = []
@@ -670,34 +674,43 @@ def test_INT11_managed_row_reaches_send_managed_on_real_driver(db, tmp_path, rea
     assert db.get_active_turn("sess-11") is None
 
 
-def test_INT12_uncorrelated_managed_result_enters_recovery_and_holds(db, tmp_path, real_claude):
-    from tests.test_turn_queue_sdk_ownership import _result
+def test_INT12_foreign_turn_result_not_served_managed_turn_gets_its_own(db, tmp_path, real_claude):
+    """[Stage 3 rework 4] Echo correlation end to end on the REAL driver: a
+    result from a turn that began before our prompt's echo (an autonomous
+    continuation) goes to the proactive sink; the managed turn completes with
+    the reply of the turn our echoed prompt began. Never interrupted, never
+    reported as recovery."""
+    import threading
+    import time as _t
+    from tests.test_turn_queue_sdk_ownership import _assistant, _emit_autonomous, _result
 
-    real_claude.fake.replies["bare prompt"] = [_result("BARE OUTPUT")]
+    real_claude.fake.defer_echo = True
+    real_claude.fake.replies["my prompt"] = []
     http = _ClientHTTP(TestClient(ts.app))
     w = _worker(tmp_path, http)
     w._backends = {"claude": real_claude.backend}
-    _seed_session_turn(db, "t-12", "sess-12", "bare prompt")
-    _run_one(w, "t-12")
-    import time as _t
-    _t.sleep(0.2)  # proactive delivery runs on the SDK loop via to_thread
-
+    _seed_session_turn(db, "t-12", "sess-12", "my prompt")
+    th = threading.Thread(target=_run_one, args=(w, "t-12"), daemon=True)
+    th.start()
+    for _ in range(50):
+        if real_claude.fake.queries_sent:
+            break
+        _t.sleep(0.05)
+    _emit_autonomous(real_claude.sess, real_claude.fake, _assistant("auto"), _result("AUTONOMOUS OUTPUT"))
+    _t.sleep(0.2)
+    assert _row(db, "t-12")["status"] == "running", "foreign result closed the managed turn"
+    _emit_autonomous(real_claude.sess, real_claude.fake, real_claude.fake.echo_for(),
+                     _assistant("mine", sid="n-12"), _result("MY REPLY", sid="n-12"))
+    th.join(5)
+    assert not th.is_alive()
     assert real_claude.calls == {"send": 0, "send_managed": 1, "run_managed_turn": 1}
     posted = [c[1] for c in http.calls if c[0] == "POST"]
-    assert "/tasks/t-12/enter-recovery" in posted
-    assert "/tasks/t-12/result-managed" not in posted, "uncertain outcome reported as a result"
+    assert "/tasks/t-12/enter-recovery" not in posted
     row = _row(db, "t-12")
-    assert row["status"] == "recovery_required"
-    assert "uncorrelated" in (row["blocked_reason"] or "")
-    # Ownership held: DB slot retained, carrier keeps the claim, drain refuses release.
-    assert db.get_active_turn("sess-12")["id"] == "t-12"
-    assert w._managed_claims["t-12"]["status"] == "recovery_required"
-    assert w._managed_shutdown_release_ok({"id": "t-12", "queue_protocol": 1, "status": "recovery_required"}) is False
-    assert w._result_spool.reserved_bytes() == 0 and _spooled(w) == []
-    # Never interrupted; the output reached the proactive sink, not the turn.
+    assert row["status"] == "completed" and json.loads(row["result"])["output"] == "MY REPLY"
+    assert [o.output for o in real_claude.proactive] == ["AUTONOMOUS OUTPUT"]
     assert real_claude.fake.interrupts == 0
-    assert [o.output for o in real_claude.proactive] == ["BARE OUTPUT"]
-    # The route is token-fenced: a foreign token cannot move/complete anything.
+    # The recovery route stays token-fenced: a foreign token moves nothing.
     r = TestClient(ts.app).post("/tasks/t-12/enter-recovery", json={"node_id": NODE, "claim_token": "x"},
                                 headers={"Authorization": f"Bearer {TOKEN}"})
     assert r.status_code == 409

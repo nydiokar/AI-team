@@ -340,13 +340,17 @@ class CodingBackend(ABC):
 
     def run_managed_turn(
         self, session: "Session", message: str, ownership: Any, *,
-        telemetry_context: Any = None, telemetry_sink: Any = None
+        telemetry_context: Any = None, telemetry_sink: Any = None,
+        on_process: Any = None,
     ) -> ExecutionResult:
         """Execute one managed turn for ``ownership`` (a
         ``turn_queue.ManagedTurnOwnership``). Must NEVER interrupt an in-flight
         turn on conflict (typed ``OwnershipConflictError`` instead) and must
         raise/report a typed ``RecoveryRequiredError`` when the outcome cannot
-        be attributed (uncorrelated result / deadline). Default: unsupported."""
+        be attributed (uncorrelated result / deadline). ``on_process`` (optional
+        callable) receives the backend process identity ({pid, create_time})
+        BEFORE the prompt is submitted, so a successor carrier can prove that
+        process is gone. Default: unsupported."""
         from src.control.turn_queue import ManagedUnsupportedError
 
         raise ManagedUnsupportedError(

@@ -42,6 +42,7 @@ from claude_agent_sdk import (  # noqa: E402
     AssistantMessage,
     ResultMessage,
     TextBlock,
+    UserMessage,
     TaskNotificationMessage,
     TaskUpdatedMessage,
     TERMINAL_TASK_STATUSES,
@@ -121,16 +122,41 @@ def _task_updated(task_id: str, status: str, sid: str = "sid-1") -> TaskUpdatedM
 # also record whether interrupt() was ever called so we can assert NO interrupt)
 # --------------------------------------------------------------------------- #
 class _FakeClient:
+    """Fake claude_agent_sdk client. Emulates `--replay-user-messages` as
+    verified live (A82 §15 spike): when the CLI begins the turn for a prompt it
+    echoes a `UserMessage` carrying the prompt's uuid — the caller's uuid for
+    the AsyncIterable form, a CLI-minted one for the string form — before the
+    reply frames. `defer_echo=True` models a prompt queued behind a turn that is
+    already running: the test emits the echo itself (via `echo_for`)."""
+
     def __init__(self) -> None:
         self.q: asyncio.Queue = asyncio.Queue()
         self.replies: dict = {}
         self.queries_sent: list = []
+        self.query_uuids: list = []
         self.interrupts: int = 0
+        self.echo = True
+        self.defer_echo = False
 
-    async def query(self, message: str, session_id: str = "default") -> None:
-        self.queries_sent.append(message)
-        for m in self.replies.get(message, []):
+    async def query(self, message, session_id: str = "default") -> None:
+        import uuid as _uuid
+
+        if isinstance(message, str):
+            text, uid = message, str(_uuid.uuid4())
+        else:
+            text, uid = None, None
+            async for m in message:
+                text = m["message"]["content"]
+                uid = m.get("uuid") or str(_uuid.uuid4())
+        self.queries_sent.append(text)
+        self.query_uuids.append(uid)
+        if self.echo and not self.defer_echo:
+            self.q.put_nowait(UserMessage(content=text, uuid=uid))
+        for m in self.replies.get(text, []):
             self.q.put_nowait(m)
+
+    def echo_for(self, index: int = -1) -> "UserMessage":
+        return UserMessage(content=self.queries_sent[index], uuid=self.query_uuids[index])
 
     async def receive_messages(self):
         while True:
@@ -143,6 +169,7 @@ class _FakeClient:
 def _start_fake_session(fake: _FakeClient) -> _SDKSession:
     sess = _SDKSession("key", "/tmp", None, {})
     sess._client = fake
+    sess._replay_user_messages = True  # managed-capable session (echo correlation)
 
     def run() -> None:
         loop = asyncio.new_event_loop()
@@ -155,6 +182,13 @@ def _start_fake_session(fake: _FakeClient) -> _SDKSession:
             while not sess._closed:
                 await asyncio.sleep(0.02)
             sess._reader_task.cancel()
+            # Await the reader so its `finally` fails any still-pending turn —
+            # otherwise a thread blocked in send()/send_managed() never returns
+            # and the interpreter hangs at exit (A87 round-2 P5 hang).
+            try:
+                await sess._reader_task
+            except BaseException:  # noqa: BLE001
+                pass
 
         loop.run_until_complete(boot())
         loop.close()
@@ -274,6 +308,10 @@ def test_SDK02_background_result_not_served_as_explicit_reply():
     """
     fake = _FakeClient()
     fake.replies["explicit question"] = []  # its real reply arrives later
+    # [Stage 3 rework 4] Real CLI ordering (A82 §15 spike): a turn already
+    # running when the prompt is written finishes first; our prompt's echo only
+    # appears when the CLI begins OUR turn.
+    fake.defer_echo = True
 
     proactive: list = []
     sess = _start_fake_session(fake)
@@ -297,12 +335,17 @@ def test_SDK02_background_result_not_served_as_explicit_reply():
         assert getattr(_ask.result, "output", None) != "BACKGROUND JOB OUTPUT — not your answer", (
             "background result was misattributed as the explicit prompt's reply"
         )
-        # Strengthened (rework): no deadlock, no interrupt, output not lost.
-        asker.join(timeout=2)
-        assert not asker.is_alive(), "managed caller deadlocked on an uncorrelated result"
-        assert _ask.result is not None and isinstance(_ask.result, Exception)
-        assert fake.interrupts == 0, "managed path interrupted the backend"
+        # Strengthened: the background output reaches the proactive sink, the
+        # managed turn is still waiting (not failed), never interrupted …
         assert [o.output for _k, o in proactive] == ["BACKGROUND JOB OUTPUT — not your answer"]
+        assert asker.is_alive() and len(sess._pending) == 1
+        assert fake.interrupts == 0, "managed path interrupted the backend"
+        # … and its OWN turn (echo, then reply) is served to it.
+        _emit_autonomous(sess, fake, fake.echo_for(), _assistant("mine"), _result("MY ANSWER"))
+        asker.join(timeout=2)
+        assert not asker.is_alive()
+        assert getattr(_ask.result, "output", None) == "MY ANSWER"
+        assert sess.is_quiescent() is True
     finally:
         sess.close()
 
@@ -491,14 +534,11 @@ def test_SDK06a_managed_correlated_reply_is_served():
         sess.close()
 
 
-def test_SDK06b_managed_bare_result_fails_closed_without_deadlock_or_interrupt():
-    """MANAGED: a bare ResultMessage (no response-start frame) is uncorrelated.
-    The managed caller gets a typed RecoveryRequiredError promptly (no deadlock,
-    no deadline wait), the backend is NEVER interrupted, the output is surfaced
-    via the proactive sink (not lost, not misattributed), and the session is held
-    (not quiescent) until a further terminal result proves the query ended."""
-    from src.control.turn_queue import RecoveryRequiredError
-
+def test_SDK06b_managed_bare_result_closing_our_echoed_turn_is_served():
+    """[Stage 3 rework 4] MANAGED echo correlation: a result-only reply that
+    closes the turn begun by OUR echoed prompt IS our reply (served, no
+    deadlock, no interrupt); a bare result arriving BEFORE our echo belongs to
+    another turn and goes to the proactive sink while we keep waiting."""
     fake = _FakeClient()
     fake.replies["bare"] = [_result("bare managed")]
     proactive: list = []
@@ -506,18 +546,10 @@ def test_SDK06b_managed_bare_result_fails_closed_without_deadlock_or_interrupt()
     sess._on_proactive = lambda key, outcome: proactive.append(outcome)
     try:
         t0 = time.monotonic()
-        with pytest.raises(RecoveryRequiredError):
-            sess.send_managed("bare")
+        assert sess.send_managed("bare").output == "bare managed"
         assert time.monotonic() - t0 < 2
-        time.sleep(0.2)
-        assert fake.interrupts == 0
-        assert [o.output for o in proactive] == ["bare managed"]
-        assert sess.is_quiescent() is False, "uncorrelated managed result released the hold"
-        # The (possibly still running) real reply later terminates the query:
-        _emit_autonomous(sess, fake, _assistant("real"), _result("real reply"))
-        time.sleep(0.3)
+        assert proactive == [] and fake.interrupts == 0
         assert sess.is_quiescent() is True
-        assert [o.output for o in proactive][-1] == "real reply"
     finally:
         sess.close()
 

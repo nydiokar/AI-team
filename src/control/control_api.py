@@ -1022,6 +1022,12 @@ def build_control_api(orchestrator) -> FastAPI:
         openapi_url="/openapi.json" if _docs_on else None,
     )
     app.add_middleware(RequestTimingMiddleware, component="gateway")
+    # [A82 Stage 3 rework 4, m2] Streamed byte cap on the operator recovery route.
+    from src.control.body_cap import BodyCapMiddleware
+
+    app.add_middleware(
+        BodyCapMiddleware, rules=[(r"/api/turn-requests/[^/]+/resolve-recovery", 16 * 1024)],
+    )
 
     @app.exception_handler(RequestValidationError)
     async def _validation_exception_handler(

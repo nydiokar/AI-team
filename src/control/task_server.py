@@ -334,6 +334,18 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="AI-Team Mesh Task Server", version="1.0", lifespan=_lifespan)
 app.add_middleware(RequestTimingMiddleware, component="task_server")
+# [A82 Stage 3 rework 4, m2] Streamed byte cap on every managed carrier route
+# (chunked bodies included), enforced before the body is parsed.
+from src.control.body_cap import BodyCapMiddleware  # noqa: E402
+
+_MANAGED_ROUTE_BODY_CAP = 8 * 1024 * 1024 + 64 * 1024
+app.add_middleware(
+    BodyCapMiddleware,
+    rules=[
+        (r"/tasks/[^/]+/(result-managed|quiescence)", _MANAGED_ROUTE_BODY_CAP),
+        (r"/tasks/[^/]+/(claim-managed|start-managed|release-managed|enter-recovery)", 16 * 1024),
+    ],
+)
 
 
 @app.middleware("http")
@@ -1300,6 +1312,9 @@ class QuiescenceObservationPayload(BaseModel):
     #                       reaped the old incarnation's backend children at boot.
     stop_evidence: Optional[str] = Field(default=None, max_length=32)
     observer_incarnation: Optional[str] = Field(default=None, max_length=128)
+    # carrier_restarted only: {"pid": int, "observed": "absent"|"create_time_mismatch"}
+    # — the carrier's proof that the attempt's recorded backend process is gone.
+    process_proof: Optional[Dict[str, Any]] = None
     result: Optional[Dict[str, Any]] = None
 
 
@@ -1365,10 +1380,13 @@ def record_quiescence_observation(
     elif kind == "backend_quiescent":
         ok = bool(payload.observer_incarnation) and payload.observer_incarnation == claim_inc == registered
     elif kind == "carrier_restarted":
+        proof = payload.process_proof or {}
         ok = (
             bool(payload.observer_incarnation)
             and payload.observer_incarnation == registered
             and payload.observer_incarnation != claim_inc
+            and isinstance(proof.get("pid"), int)
+            and proof.get("observed") in ("absent", "create_time_mismatch")
         )
     else:
         ok = False
@@ -1392,6 +1410,7 @@ def record_quiescence_observation(
         "native_session_id": payload.native_session_id,
         "stop_evidence": kind,
         "observer_incarnation": payload.observer_incarnation,
+        "process_proof": payload.process_proof,
         "source": "carrier",
     }
     try:
