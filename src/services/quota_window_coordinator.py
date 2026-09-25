@@ -1649,7 +1649,19 @@ def build_quota_coordinator_from_config(
     *,
     enabled: Optional[bool] = None,
     event_handlers: Optional[Iterable[QuotaEventHandler]] = None,
+    observe_locally: bool = True,
 ) -> QuotaWindowCoordinator:
+    """Build the coordinator from config.
+
+    ``observe_locally`` controls whether this process spawns the Claude harness
+    to OBSERVE quota itself. On a controller-only host (the Docker controller,
+    ``GATEWAY_LOCAL_EXECUTION_ENABLED=false``) there is no Claude binary or
+    credentials, so it is False: the coordinator becomes ingest-only (no
+    spawning adapters). Quota is then observed harness-side by a worker and POSTed
+    to ``/telemetry/quota-observation``, which writes the same store this
+    coordinator reads. A single-process/local-execution host keeps
+    ``observe_locally=True`` for byte-identical legacy behaviour.
+    """
     from config import config
 
     quota_cfg = getattr(config, "quota", None)
@@ -1659,9 +1671,10 @@ def build_quota_coordinator_from_config(
     max_interval = int(getattr(quota_cfg, "observe_max_interval_sec", 21600))
     lead = int(getattr(quota_cfg, "reset_probe_lead_sec", 900))
     retention = int(getattr(quota_cfg, "snapshot_retention_days", _SNAPSHOT_RETENTION_DAYS))
+    adapters = build_default_quota_adapters() if observe_locally else []
     return QuotaWindowCoordinator(
         store=QuotaWindowStore(db_path),
-        adapters=build_default_quota_adapters(),
+        adapters=adapters,
         enabled=cfg_enabled,
         observe_interval_sec=interval,
         observe_max_interval_sec=max_interval,
@@ -1669,3 +1682,113 @@ def build_quota_coordinator_from_config(
         event_handlers=event_handlers,
         snapshot_retention_days=retention,
     )
+
+
+# ---------------------------------------------------------------------------
+# Worker-originated ingest (controller/worker split)
+# ---------------------------------------------------------------------------
+
+_INGEST_STORE_LOCK = threading.Lock()
+_INGEST_STORES: Dict[str, QuotaWindowStore] = {}
+
+
+def _ingest_store(db_path: str) -> QuotaWindowStore:
+    """A process-wide cached store per db_path (thread-safe: thread-local conns +
+    write lock). Avoids re-running schema init on every ingest request."""
+    with _INGEST_STORE_LOCK:
+        store = _INGEST_STORES.get(db_path)
+        if store is None:
+            store = QuotaWindowStore(db_path)
+            _INGEST_STORES[db_path] = store
+        return store
+
+
+async def ingest_worker_quota_observation(
+    *,
+    provider: str,
+    node_id: str,
+    principal_key: str = "",
+    sdk_version: Optional[str] = None,
+    claude_code_version: Optional[str] = None,
+    observed_at: Optional[str] = None,
+    usage: Optional[Dict[str, Any]] = None,
+    error: str = "",
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Persist a worker-originated quota observation through the existing store.
+
+    Observation is done harness-side; this only validates and writes — NO Claude
+    process is ever spawned here. On success it reuses
+    ``QuotaWindowCoordinator.observe_once`` with a ``read_usage``-injected adapter,
+    so the persisted rows match the pre-Docker in-process observer. On ``error``
+    (or missing usage) it records the harness as adapter-unavailable WITHOUT
+    overwriting the last good snapshots — so a transient harness failure surfaces
+    as an explicit unavailable adapter, not as a flapped/empty window.
+    """
+    from config import config
+
+    if db_path is None:
+        db_path = getattr(getattr(config, "quota", None), "db_path", "state/quota_windows.db")
+    store = _ingest_store(db_path)
+    now = normalize_utc(observed_at) or utc_now()
+
+    if provider != "claude":
+        store.add_event(
+            "quota.worker_observation_ignored",
+            provider=provider,
+            reason="unsupported_provider",
+            payload={"node_id": node_id},
+        )
+        return {"accepted": False, "reason": "unsupported_provider", "provider": provider}
+
+    if error or usage is None:
+        reason = f"worker_harness_unavailable:{error or 'no_usage_payload'}"
+        store.set_adapter_status(
+            QuotaAdapterStatus(
+                provider="claude",
+                enabled=True,
+                status="unavailable",
+                reason=reason,
+                adapter_version=ClaudeGetUsageQuotaAdapter.adapter_version,
+                schema_version=ClaudeGetUsageQuotaAdapter.schema_version,
+                last_checked_at=now,
+            )
+        )
+        store.add_event(
+            "quota.worker_observation_error",
+            provider="claude",
+            reason=reason,
+            payload={"node_id": node_id},
+        )
+        try:
+            from src.core.observability import emit_event
+
+            emit_event("quota.worker_observation_error", provider="claude", node_id=node_id, reason=reason)
+        except Exception:
+            pass
+        return {"accepted": False, "reason": "harness_error", "detail": reason}
+
+    async def _read_usage() -> Dict[str, Any]:
+        return usage
+
+    adapter = ClaudeGetUsageQuotaAdapter(
+        principal_key=principal_key or "",
+        read_usage=_read_usage,
+        claude_code_version_value=claude_code_version,
+        now=lambda: now,
+    )
+    coordinator = QuotaWindowCoordinator(store=store, adapters=[adapter], enabled=True)
+    await coordinator.observe_once()
+    store.add_event(
+        "quota.worker_observation_ingested",
+        provider="claude",
+        reason="",
+        payload={"node_id": node_id, "sdk_version": sdk_version or ""},
+    )
+    try:
+        from src.core.observability import emit_event
+
+        emit_event("quota.worker_observation_ingested", provider="claude", node_id=node_id)
+    except Exception:
+        pass
+    return {"accepted": True, "provider": "claude", "node_id": node_id}
