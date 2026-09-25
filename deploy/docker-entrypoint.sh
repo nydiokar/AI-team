@@ -5,7 +5,7 @@ export HOME=/app
 export CODEX_HOME=/app/.codex
 
 exec setpriv \
-  --reuid=10001 \
-  --regid=10001 \
+  --reuid="${APP_UID:-10001}" \
+  --regid="${APP_GID:-10001}" \
   --clear-groups \
   "$@"

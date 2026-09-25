@@ -721,3 +721,39 @@ def test_local_node_reregister_reaps_orphaned_self_claim(tmp_path, monkeypatch):
     # register()'s fast path already released the orphaned self-claim to pending.
     row = db.get_task(tid)
     assert row["status"] == "pending" and row["claimed_by"] is None
+
+
+def test_lifespan_skips_local_node_when_local_execution_disabled(tmp_path, monkeypatch):
+    """With GATEWAY_LOCAL_EXECUTION_ENABLED=false there are no in-process
+    self-claims, so the task server must not register its own host as a node.
+    In Docker that host is the container id and leaked as a phantom node."""
+    import asyncio
+    import socket
+    import src.control.db as db_mod
+    import src.control.node_registry as nr_mod
+    import src.control.task_server as ts
+    from config import config as cfg
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(db_mod, "_db_instance", db)
+    monkeypatch.setattr(nr_mod, "_registry", NodeRegistry(heartbeat_timeout_sec=90))
+
+    async def _idle() -> None:
+        await asyncio.Event().wait()
+
+    for name in ("_stale_claim_reaper_loop", "_mesh_health_sampler_loop",
+                 "_telemetry_projection_flusher_loop", "_local_node_heartbeat_loop"):
+        monkeypatch.setattr(ts, name, _idle)
+
+    async def _run() -> None:
+        async with ts._lifespan(ts.app):
+            pass
+
+    host = socket.gethostname()
+    monkeypatch.setattr(cfg.system, "local_execution_enabled", False)
+    asyncio.run(_run())
+    assert db.get_node(host) is None, "phantom self-node registered with local execution off"
+
+    monkeypatch.setattr(cfg.system, "local_execution_enabled", True)
+    asyncio.run(_run())
+    assert db.get_node(host) is not None, "self-node must still register when local execution is on"

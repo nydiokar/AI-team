@@ -279,14 +279,19 @@ def _should_release_stale_claim(row: Dict[str, Any], *, max_runtime_sec: int, no
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    from config import config as _cfg
     get_registry().start()
-    _register_local_node()
+    # The self-node only keeps in-process local self-claims live; with local
+    # execution disabled there are none, and the row leaks as a phantom node.
+    local_execution: bool = bool(_cfg.system.local_execution_enabled)
+    if local_execution:
+        _register_local_node()
     logger.info("event=task_server_started")
     reaper_task = asyncio.create_task(_stale_claim_reaper_loop())
-    local_hb_task = asyncio.create_task(_local_node_heartbeat_loop())
+    local_hb_task = asyncio.create_task(_local_node_heartbeat_loop()) if local_execution else None
     health_sampler_task = asyncio.create_task(_mesh_health_sampler_loop())
     projection_task = asyncio.create_task(_telemetry_projection_flusher_loop())
-    _bg_tasks = (reaper_task, local_hb_task, health_sampler_task, projection_task)
+    _bg_tasks = tuple(t for t in (reaper_task, local_hb_task, health_sampler_task, projection_task) if t is not None)
     yield
     for _t in _bg_tasks:
         _t.cancel()
