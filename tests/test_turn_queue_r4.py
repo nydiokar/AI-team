@@ -129,6 +129,11 @@ def test_R4_flag_off_session_with_ended_reader_is_not_evicted(monkeypatch):
     """Legacy byte-identical: with the managed flag OFF (no replay) a session
     whose reader ended is handled exactly as before (no new eviction)."""
     monkeypatch.delenv("WORKER_MANAGED_TURNS", raising=False)
+
+    def no_spawn(self):
+        raise AssertionError("would spawn a real CLI (session was evicted)")
+
+    monkeypatch.setattr(_SDKSession, "start", no_spawn)  # cost guard for mutants too
     dead_fake = _EOFClient()
     dead = _start_fake_session(dead_fake)
     dead._replay_user_messages = False

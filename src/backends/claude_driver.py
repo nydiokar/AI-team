@@ -1863,8 +1863,10 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         native work in flight on this carrier ⇒ quiescent."""
         with self._lock:
             sdk_sess = self._sessions.get(session_id)
-        if sdk_sess is None or sdk_sess._closed or sdk_sess._reader_ended:
-            return True  # no live CLI for this session ⇒ no backend work in flight
+        if sdk_sess is None or sdk_sess._closed:
+            return True
+        # A session whose CLI exited (reader ended) reports quiescent itself,
+        # unless a late reply is still being handed off.
         return sdk_sess.is_quiescent()
 
     def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, _managed: bool = False, _on_process=None, _turn_uuid=None) -> ExecutionResult:
