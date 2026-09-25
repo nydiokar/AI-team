@@ -3849,6 +3849,28 @@ class MeshDB:
         now = _now()
         try:
             with self._write() as conn:
+                # [A82 Stage 4b] An attempt the operator cancelled is never
+                # re-offered: releasing it (nothing ran) ends it `cancelled`.
+                cancelled = conn.execute(
+                    "SELECT 1 FROM mesh_tasks WHERE id = ? AND queue_protocol = 1 "
+                    "AND cancel_token IS NOT NULL AND cancel_token = ? AND claim_token = ?",
+                    (task_id, claim_token, claim_token),
+                ).fetchone() is not None
+                if cancelled:
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET status = 'cancelled', completed_at = ?, updated_at = ?,
+                            error = COALESCE(error, 'cancelled by operator (backend not invoked)')
+                        WHERE id = ? AND queue_protocol = 1 AND claim_token = ?
+                          AND (claimed_by = ? OR ? = 0)
+                          AND status IN ('claimed', 'running', 'recovery_required')
+                          AND (? = 1 OR (status = 'claimed' AND started_at IS NULL))
+                        """,
+                        (now, now, task_id, claim_token, node_id or "",
+                         1 if backend_not_invoked else 0, 1 if backend_not_invoked else 0),
+                    )
+                    return conn.execute("SELECT changes()").fetchone()[0] > 0
                 if backend_not_invoked:
                     conn.execute(
                         """
