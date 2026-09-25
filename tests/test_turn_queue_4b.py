@@ -771,7 +771,11 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
                              entity_id="w1", payload={"outcome": "success"})
         woke = asyncio.run(auto._continue_case_once(db, case_id))
         _append_pause(db, case_id, "sess-1", retry_at=_iso(_now() - timedelta(seconds=1)))
-        asyncio.run(auto._handle_transient_paused_case(db, case_id))
+        owned = asyncio.run(auto._handle_transient_paused_case(db, case_id))
+        if stop:
+            # held: the pause keeps owning the Case (not closed as
+            # "session_unavailable" and handed to the dead-manager path)
+            assert owned is True and db.transient_pause(case_id) is not None
         return woke, auto.deliveries
 
     woke, deliveries = scenario(stop=False)  # control: automation does act
@@ -962,11 +966,91 @@ def test_R10_quota_auto_resume_does_not_resume_a_stopped_manager(tmp_path, monke
             _run(db, t)
             assert o.stop_managed_session_turn(_sess())[0] is True
         auto = Q._Orch(o.session_store, snapshots=Q._restored_snapshot())
+        resumes = []
+        real_resume = auto.resume_case
+
+        async def resume_case(case_id, **kw):
+            resumes.append(case_id)
+            return await real_resume(case_id, **kw)
+        auto.resume_case = resume_case
         Q._pause(auto, db, case_id, "sess-1")
         owned = asyncio.run(auto._handle_quota_paused_case(db, case_id))
+        if stop:
+            assert resumes == []
         return owned, auto.deliveries
 
     owned, deliveries = scenario(stop=False)  # control: auto-resume acts
     assert owned is True and len(deliveries) == 1
     owned, deliveries = scenario(stop=True)
     assert owned is True and deliveries == []
+
+
+def test_R07b_release_keeps_a_non_cancelled_status_when_the_hold_record_is_set(tmp_path, monkeypatch):
+    """M3 kill: a stale save rewrote status while the hold record stands; the
+    operator's release clears the record but never clobbers that status."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    _stop_with_queued(o, db)
+    s = _sess()
+    s.status = SessionStatus.AWAITING_INPUT
+    db.upsert_session(s)
+    _submit(o, operation_id="op-release")
+    assert _sess().status == SessionStatus.AWAITING_INPUT
+    assert db.operator_stop_hold("sess-1") is None
+
+
+def test_R08b_activation_refuses_on_the_hold_record_alone(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    _t1, t2 = _stop_with_queued(o, db)
+    s = _sess()
+    s.status = SessionStatus.IDLE
+    db.upsert_session(s)  # status no longer says cancelled
+    row = db.get_task(t2)
+    out = db.activate_prepared_turn(
+        t2, expected_revision=int(row["revision"]),
+        expected_config_revision=int(db.get_session("sess-1")["config_revision"]),
+        action="resume_session", payload={"prompt": "x"}, machine_id="worker-a",
+    )
+    assert out == "ineligible" and db.get_task(t2)["status"] == "queued"
+
+
+def test_R11_unenrolled_case_automation_never_reads_the_hold_record(tmp_path, monkeypatch):
+    import inspect
+    import threading as _th
+
+    from src.core.interfaces import SessionStatus as SS
+    from tests.test_case_transient_resume import _Orch
+
+    class _Auto(_Orch):
+        def __getattr__(self, name):
+            static = inspect.getattr_static(TaskOrchestrator, name)
+            if isinstance(static, (staticmethod, classmethod)):
+                return getattr(TaskOrchestrator, name)
+            attr = getattr(TaskOrchestrator, name)
+            return attr.__get__(self) if callable(attr) else attr
+
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
+    db, o = _setup(tmp_path, monkeypatch, enroll=False)
+    s = _sess()
+    s.status = SS.AWAITING_INPUT
+    o.session_store.save(s)
+    case_id = db.open_case("ship X", "sess-1", role="manager",
+                           completion_criteria='{"round_cap": 5}')
+    db.arm_wait_group(case_id, "g1", "ALL", ["w1"])
+    db.append_flow_event(case_id, "task.finished", "worker", entity_type="task",
+                         entity_id="w1", payload={"outcome": "success"})
+    stmts = []
+    real_conn = type(db)._conn
+
+    def traced(self):
+        c = real_conn(self)
+        c.set_trace_callback(lambda sql: stmts.append(sql))
+        return c
+    monkeypatch.setattr(type(db), "_conn", traced)
+    auto = _Auto(o.session_store)
+    assert asyncio.run(auto._continue_case_once(db, case_id)) == 1
+    monkeypatch.setattr(type(db), "_conn", real_conn)
+    assert not [q for q in stmts if "turn_queue_hold" in q]
