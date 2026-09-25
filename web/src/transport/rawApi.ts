@@ -43,6 +43,22 @@ export interface RawSessionView {
   keep_pinned?: boolean;
   /** Operator note explaining why the session is kept. Optional for older payloads. */
   keep_note?: string;
+  /** [A83] Derived, non-authoritative secondary reason refining `status`
+   *  (backend core.session_reason.SessionReason.to_dict()). null/absent ⇒ no
+   *  reason (BUSY, terminal, or db unavailable). Optional so older cached
+   *  payloads without the field still parse. */
+  reason?: RawSessionReason | null;
+}
+
+// [A83] Shape of SessionReason.to_dict(): {kind, confidence, detail}.
+export interface RawSessionReason {
+  /** Vocabulary (spec §4): paused_quota | paused_retry | waiting_workers |
+   *  waiting_job | open_case_idle | idle | node_offline. */
+  kind: string;
+  /** "high" | "medium" — medium marks absence-based inferences. */
+  confidence: string;
+  /** Bounded presentational detail (e.g. a node id), or null. */
+  detail?: string | null;
 }
 
 // GET /api/sessions/{id}/usage → per-session token totals + approx USD cost.

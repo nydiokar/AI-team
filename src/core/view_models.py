@@ -12,6 +12,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
 
 from src.core.interfaces import Session, SessionStatus
+from src.core.session_reason import SessionReason
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,14 @@ class SessionView:
     continued_from: Optional[str]  # [Session-fork] session this one continues, or None
     keep_pinned: bool              # operator kept this session for later
     keep_note: str                 # operator note explaining why it was kept
+    # [A83] Derived, non-authoritative *secondary reason* refining the primary
+    # `status` (spec docs/TBD/SESSION_WAIT_STATE_GRANULARITY.md). Computed on the
+    # READ path, attached here as a sibling — the enum stays authoritative and
+    # `needs_input`/`is_active` are unchanged. None ⇒ no reason derived (BUSY,
+    # terminal, or db unavailable); serializes to null. Populate via
+    # `with_reason` from the batched `derive_session_reasons`; the plain
+    # `from_session` leaves it None so every existing caller is byte-identical.
+    reason: Optional[SessionReason] = None
 
     @classmethod
     def from_session(cls, s: Session) -> "SessionView":
@@ -97,6 +106,14 @@ class SessionView:
             keep_pinned=bool(getattr(s, "keep_pinned", False)),
             keep_note=getattr(s, "keep_note", "") or "",
         )
+
+    def with_reason(self, reason: Optional["SessionReason"]) -> "SessionView":
+        """Return a copy carrying the derived secondary reason (A83).
+
+        Frozen DTO ⇒ ``replace`` a fresh instance. Presentational only — no other
+        field changes, so ``needs_input``/``is_active`` stay byte-identical."""
+        from dataclasses import replace
+        return replace(self, reason=reason)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)   # JSON-ready for a future Web UI / WebSocket
