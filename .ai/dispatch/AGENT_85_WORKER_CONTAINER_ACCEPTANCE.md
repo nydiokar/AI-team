@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_85_WORKER_CONTAINER_ACCEPTANCE
 created_at: "2026-09-24T18:00:20+00:00"
-status: active
+status: deferred
 owner: mgr-a2a819ff:worker
 depends_on: []
 results_ref: DISPATCH_LOG.md#A85
 evidence: []
-updated_at: "2026-09-25T10:02:33.167728+00:00"
+updated_at: "2026-09-25T10:40:36.714335+00:00"
 ```
 
 # DISPATCH — A85 · Containerized worker acceptance baseline
@@ -54,6 +54,21 @@ No Renovate rollout automation, registry publication, node maintenance API, depl
 - [ ] Recreation/auth/session-resume evidence recorded honestly
 - [ ] A87 accepts the Docker acceptance gate or records a concrete block
 
-## Closure (fill on completion)
+## Closure — DEFERRED / PREMISE RETIRED 2026-09-25 (operator decision, Case 58c2f812)
 
-State whether A86 is unblocked, what credentials/canary evidence remains operator-gated, and confirm no live worker was changed.
+**Status: deferred (premise retired by the same decision that dropped A86).** The operator decided
+workers will be taken **OUT of the container**. A85's whole reason to exist — "establish a reproducible
+containerized worker deployment unit BEFORE runtime-update automation (A86)" — is retired along with
+A86: there is no downstream consumer for a container acceptance baseline if workers are not
+containerized. A87 therefore does NOT pursue the executable Docker acceptance gate.
+
+**Work already produced (preserved, reversible):** branch `feat/worker-container-acceptance` @ `1cd15b3`
+— boundary map `docs/WORKER_CONTAINER_ACCEPTANCE.md`, Renovate-readable pinned image ARGs in
+`Dockerfile`, `scripts/container_acceptance.sh` (executable gate that honestly skips+exits 2 when docker
+is absent), and `tests/test_container_acceptance.py` (17 docker-free static invariants, passing). NO
+image was built/run (no docker in the exec env), NO live worker changed, NOT merged. This branch is a
+clean artifact to resume from if workers are ever re-containerized.
+
+**Not merged on purpose:** merging container-acceptance scaffolding to `main` while the strategic
+direction is to leave containers would add dead surface. Left on its branch pending the operator's
+non-container worker plan. If that plan lands and containers are truly gone, this branch can be dropped.
