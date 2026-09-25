@@ -98,6 +98,9 @@ services:
     ports:
       # Normally 127.0.0.1 because Tailscale Serve proxies this port.
       - "${DOCKER_GATEWAY_PUBLISH_HOST:-127.0.0.1}:${DASHBOARD_PORT:-9003}:${DASHBOARD_PORT:-9003}"
+      # Mesh nodes reach the control API at CONTROLLER_URL host + DASHBOARD_PORT
+      # (scripts/mcp_manager.py _base_url), same as the pre-Docker gateway bind.
+      - "${MESH_TAILSCALE_IP:?set MESH_TAILSCALE_IP}:${DASHBOARD_PORT:-9003}:${DASHBOARD_PORT:-9003}"
 
     healthcheck:
       test:
