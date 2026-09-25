@@ -771,3 +771,22 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
     assert woke == 1 and deliveries
     woke, deliveries = scenario(stop=True)
     assert woke == 0 and deliveries == []
+
+
+def test_R03c_hold_is_enforced_by_head_selection_and_by_activation(tmp_path, monkeypatch):
+    """Both layers honour the stop hold independently: the head query skips a
+    held session, and a head selected BEFORE the hold landed is refused inside
+    the activation transaction."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    t1 = _submit(o, operation_id="a")
+    [head] = db.select_eligible_turn_heads(25)
+    assert head["id"] == t1
+    srev = db.get_session("sess-1")["config_revision"]
+    db._conn().execute("UPDATE sessions SET status = 'cancelled' WHERE session_id = 'sess-1'")
+    assert db.select_eligible_turn_heads(25) == []
+    out = db.activate_prepared_turn(
+        t1, expected_revision=int(head["revision"]), expected_config_revision=int(srev),
+        action="resume_session", payload={"prompt": "x"}, machine_id="worker-a",
+    )
+    assert out == "ineligible" and db.get_task(t1)["status"] == "queued"
