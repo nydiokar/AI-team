@@ -20,6 +20,15 @@ import sys
 from pathlib import Path
 
 
+# Stable, PATH-resolvable launcher command names (see src/mcp_launchers.py).
+# Registered into backend configs INSTEAD of "<python> <abs path>" so ONE
+# platform-neutral config works on the Linux host, the Windows host, and inside
+# the worker container (Docker worker/host integration §7). Each environment
+# provides these commands on its own PATH via the package's console entry points.
+JOBS_LAUNCHER = "ai-team-mcp-jobs"
+MANAGER_LAUNCHER = "ai-team-mcp-manager"
+
+
 def _script_path() -> Path:
     return (Path(__file__).parent / "mcp_jobs.py").resolve()
 
@@ -48,8 +57,8 @@ def _register_claude_manager(script: Path) -> None:
 
     existing.setdefault("mcpServers", {})
     existing["mcpServers"]["manager"] = {
-        "command": sys.executable,
-        "args": [str(script)],
+        "command": MANAGER_LAUNCHER,
+        "args": [],
     }
     cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     print(f"  [claude-code]  manager → {cfg_path}")
@@ -71,8 +80,8 @@ def _register_claude(script: Path) -> None:
 
     existing.setdefault("mcpServers", {})
     existing["mcpServers"]["jobs"] = {
-        "command": sys.executable,
-        "args": [str(script)],
+        "command": JOBS_LAUNCHER,
+        "args": [],
     }
     cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     print(f"  [claude-code]  {cfg_path}")
@@ -118,7 +127,7 @@ def _register_opencode(script: Path) -> None:
     existing.setdefault("mcp", {})
     existing["mcp"]["jobs"] = {
         "type": "local",
-        "command": [sys.executable, str(script)],
+        "command": [JOBS_LAUNCHER],
         "enable": True,
     }
     cfg_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
@@ -142,14 +151,12 @@ def _register_codex(script: Path) -> None:
         print(f"  [codex]        {cfg_path}  (already registered)")
         return
 
-    # Use forward slashes so Windows paths don't trip TOML's backslash
-    # escape parsing (e.g. "\Users" -> invalid \U unicode escape).
-    command = sys.executable.replace("\\", "/")
-    script_path = str(script).replace("\\", "/")
+    # Platform-neutral stable command name (no host-specific absolute paths that
+    # would also break TOML backslash parsing on Windows, e.g. "\U..." escapes).
     entry = (
         "\n[mcp_servers.jobs]\n"
-        f'command = "{command}"\n'
-        f'args = ["{script_path}"]\n'
+        f'command = "{JOBS_LAUNCHER}"\n'
+        "args = []\n"
     )
     with cfg_path.open("a", encoding="utf-8") as fh:
         fh.write(entry)
