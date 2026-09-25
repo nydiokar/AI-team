@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_85_WORKER_CONTAINER_ACCEPTANCE
 created_at: "2026-09-24T18:00:20+00:00"
-status: blocked
-owner: ""
+status: active
+owner: mgr-a2a819ff:worker
 depends_on: []
 results_ref: DISPATCH_LOG.md#A85
 evidence: []
-updated_at: "2026-09-25T08:26:16.034347+00:00"
+updated_at: "2026-09-25T10:02:33.167728+00:00"
 ```
 
 # DISPATCH — A85 · Containerized worker acceptance baseline
