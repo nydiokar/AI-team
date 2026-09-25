@@ -1343,6 +1343,38 @@ The first run left 4 survivors (event-once, strict, decision-reuse, requeue-touc
 4. New: the armed-cancel registry is per carrier process. A carrier restart loses armed entries, but the durable claim record's `cancel_requested` plus the server's `cancel_token` still end the attempt `cancelled` via the not-invoked release / reconciler.
 5. New: a held (`cancelled`) session with queued turns stays held until the operator sends or compacts. Queue-level resume/send-next routes are Stage 6.
 
+### Stage 4b rework 2 — A87 round-2 review (stop-hold invariant) closed (2026-09-26, commits `fd8db8a`..HEAD + this record)
+
+**Invariant now made true.** An operator stop of an ENROLLED session holds it. Only an operator action releases the hold. Case automation neither runs turns into a held session nor replaces it.
+
+**Durable record.** Migration 37 adds `sessions.turn_queue_hold` (`'operator_stop'` | NULL). It is written in the stop's cancel txn together with status `cancelled`, guarded by `!= 'closed'`.
+- It is cleared by an operator admission. The release is `status := CASE cancelled→idle ELSE status`, so a live BUSY / AWAITING_INPUT / ERROR is never clobbered.
+- `close_session_turns` also clears it: a closed session is dead and goes back to the crash path.
+- `upsert_session` is `ON CONFLICT DO UPDATE` and does not list the column, so a stale whole-row save cannot erase the record.
+- Head selection, `activate_prepared_turn` (in the txn) and `count_slot_waiting_sessions` honour the RECORD as well as the status.
+
+| Finding | Fix | Test (mutation killed) |
+|---|---|---|
+| **1** automation released the hold (dispatch_worker was labelled human) | `POST /api/instructions` accepts `X-AI-Team-Principal: automation`. For an enrolled session that maps to source `automation_session` (principal `automation`, `turn_source='system'`), which never releases. `scripts/mcp_manager.py` `dispatch_worker` sends it. With no header the caller is the operator (web UI). **This is a trust-model LABEL, not authentication**: both callers hold the same bearer token, and a caller that omits the header is treated as the operator. The other in-repo caller, `scripts/verify_a11_affinity.py`, is a manual operator verification script; it stays operator. | R05 (dispatch_worker-shaped ⇒ hold stays, queued not activated, row `system` / `automation:` scope; web-shaped ⇒ releases and the queue resumes); mcp test asserts the header; mutants: header ignored / automation counted human / mcp sends no header ⇒ killed |
+| **2** wake dispatcher replaced a stopped Manager | Module helper `_operator_stop_held(db, sid)` reads the durable record. It does no read while nothing is enrolled; an unreadable record counts as held (fail closed). Three consumers use it: (a) `_continue_case_once` returns 0 BEFORE the dead/crash-respawn branch, with no respawn, no approval, no escalation and the wait state intact; (b) `_handle_transient_paused_case` returns True, so the pause keeps owning the Case and is not closed "session_unavailable" and handed to respawn; (c) `_handle_quota_paused_case` returns True, so there is no auto/approved `resume_case`. "Stopped" and "dead" are told apart by the record, not the status: after close the record is cleared and the crash path owns the session again. | R04 (now asserts NO respawn, NO approval, pause kept; the control without stop wakes/delivers), R04b (default approval ON: no crash-respawn call for a held Manager; after close it takes the crash path), R10 (quota auto-resume: control resumes; held ⇒ no `resume_case`), R11 (unenrolled: no hold read); mutants: wake / transient / quota ignore hold, helper reads when nothing enrolled ⇒ killed |
+| **3** surviving M2/M3/M4 | kill tests | R06 (stop racing close never turns closed→cancelled), R07 + R07b (operator send never clobbers BUSY/AWAITING_INPUT/ERROR, even with the record set after a stale save), R09 (slot-waiting count excludes held sessions), R08/R08b (heads and activation each hold on the record alone) |
+
+M1 (reviewer) is near-equivalent and noted, not killed.
+
+**Mutation run** (scratch worktree `mut4b2`, removed with plain `git worktree remove`; spawn guard on): 15 mutants, all killed. The first pass left 5 survivors (M3, activation-on-record, transient, quota, helper-read); R07b/R08b/R10/R11 and a strengthened R04 were added until every one was killed.
+
+**Verification.**
+- turn-queue files: 316 passed / 7 red. The reds are unchanged: SYS03-07 and api ×2.
+- Regression group + `test_case_transient_resume`, `test_wake_dispatcher_eventdriven`, `test_mcp_manager`, `test_case_respawn`, `test_case_quota_resume`: 517 passed.
+- Reviewer probes: Q3/Q4 now hold. Q1 as written (no principal header = operator) still releases, by design. Q2 is a carried item.
+
+**Residuals — carried (A87 → CONTEXT.md).**
+1. MINOR 4: stale whole-row `upsert_session` saves (e.g. `_record_job_session_turn`, orchestrator.py ~4354) can rewrite the `cancelled` STATUS; legacy has the same race. Activation and Case automation no longer depend on status: they read the durable record. Other status-only readers (UI, resume-mode choice) can still be misled.
+2. MINOR 5: a stop with no active turn (between turns, or while a head is blocked) does not hold (legacy parity: mark_cancelled only on an actual cancel).
+3. Armed-cancel registry: eviction beyond 256 entries drops the oldest arms, and leaked arms of already-finished turns occupy slots until evicted.
+4. The principal header is self-declared. An automation caller that omits it is treated as the operator and releases the hold. Authenticated per-caller principals belong to A71 (per-node credentials).
+5. Stands from rework 1: the late `ensure_future` interrupt; a slow lineage writer past its lease; 4b residuals 2-6; the per-process armed registry.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
