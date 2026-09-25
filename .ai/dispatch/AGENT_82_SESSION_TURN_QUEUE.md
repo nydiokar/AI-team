@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_82_SESSION_TURN_QUEUE
 created_at: "2026-09-22T11:39:06.841262+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: active              # ready | active | blocked | done | dead
+owner: mgr-a2a819ff:stage0
 depends_on: []
 results_ref: DISPATCH_LOG.md#A82             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-22T19:20:07.742109+00:00"
+updated_at: "2026-09-25T08:45:50.267928+00:00"
 ```
 
 # A82 — Build the unified session turn queue
@@ -723,16 +723,65 @@ Once final review passes:
 
 ## 15. Execution record
 
-Not started. Implementation agent records concise facts here as work proceeds:
-base SHA/worktree, path inventory, Stage 0 evidence, red→green test IDs/commands,
-query-plan/load measurements, discovered design amendments and capability matrix.
-Do not change this to “passed” merely because this dispatch document was reviewed.
+### Stage 0 — ground-truth inventory (2026-09-25, read-only; on `main` @ `96cba58`)
+Delivered by a Stage-0 investigation worker under A87 coordination; **every load-bearing symbol
+resolved by name** (ctags/`symbol_lookup` unavailable in this env — Grep/Read used) and the P0 seams
+re-verified from code by the Manager (A87). Key verified facts:
+
+- **Root cause (design §2) CONFIRMED in code:** `control_api.py:1789` `mark_busy` writes BUSY +
+  `last_user_message` **before** `submit_instruction` (1793) durably enqueues and **before**
+  `session.last_task_id` is saved (1808). `HarnessAdmissionBlocked`→`mark_idle` unwinds, but any
+  other failure/crash in that window strands the session BUSY with **no durable row**.
+- **Terminal-atomicity gap (feeds A84 too):** `db.complete_task` (db.py:2268) / `fail_task` (:2290)
+  do `UPDATE … WHERE id=?` with **no ownership/claim-token/status predicate**, wrapped in
+  `try/except: logger.warning` — a **failed write returns silently as success**. Session native-id /
+  active identity is reconciled in a **separate later save** (`_dispatch_to_node` / local
+  `process_task`), so completion is NOT atomic with native-id commit → a successor turn can re-`create_session`.
+- **Claim guard is node-identity, not per-attempt:** `task_server.submit_result` (:869) guards on
+  `claimed_by != node_id`; a reaped/re-offered duplicate from the same node passes. Design §6 wants a
+  fresh per-attempt `claim_token`.
+- **Driver blind to background-task lifecycle:** `_reader_loop` (claude_driver.py:886) branches only on
+  `AssistantMessage`/`ResultMessage`; references **no** `Task*Message` in code. The installed SDK
+  0.2.110 exposes `TERMINAL_TASK_STATUSES` (types.py:1074), `TaskNotificationMessage` (:1115),
+  `TaskUpdatedMessage` (:1140) — terminal via *either* message — so a real quiescence oracle is
+  buildable without a driver/backend swap. Quiescence requires ALL of: `_pending` empty **and** no
+  non-terminal tracked background task_id **and** the terminal `ResultMessage` of the last `query`
+  observed. "task-finished notification" and "empty `_pending`" are each individually INSUFFICIENT.
+- **`send()` interrupts on lock conflict (claude_driver.py:1127-1134):** calls `cancel_inflight()` then
+  re-acquires (deliberate — the ever-growing-transcript fix). §3.17 tension: the managed path must diverge.
+- **Codex seam:** reservation/MCP-injection seam is `CodexBackend._thread_config` (codex_native.py:153);
+  `_session_config` does NOT exist. One-active-turn enforced via `_active[key]` + `codex_thread_busy`.
+- **Schema baseline:** highest migration = **33**; next available = **34**. `mesh_tasks` has NONE of
+  `queue_protocol/queue_sequence/idempotency_*/revision/claim_token/coalesce_key/turn_source/
+  sender_session_id/turn_kind/not_before/expires_at/activated_at/started_at` — all to-be-created.
+  `flow_run_id` was added by `_ensure_substrate_columns` ALTER (db.py:1475), NOT a numbered migration,
+  and `enqueue_task` does not populate it — managed rows must set Case membership explicitly.
+
+### Manager (A87) decisions gating Stage 2 — DECIDED 2026-09-25
+1. **Legacy vs managed divergence at `_SDKSession.send`:** build a DISTINCT protocol-1 (managed)
+   no-interrupt path returning a typed ownership conflict (409) that NEVER calls `cancel_inflight`;
+   legacy protocol-0 interrupt-on-conflict stays **byte-identical** (do not regress the transcript-bug
+   fix). One shared path is rejected.
+2. **Completion helpers:** ADD new strict helpers (throwing typed failures; ownership/claim-token/status
+   predicates + atomic native-id/active-identity commit) used ONLY on the protocol-1 path. Do **NOT**
+   modify the legacy swallowing `complete_task`/`fail_task` (least-action; avoids rippling into every
+   legacy caller). Legacy callers keep the existing helpers.
+3. **Stage 1 "meaningful red" scope APPROVED as:** author now the assertion-capable suites
+   (OWN/WRK/SDK/SYS + API compatibility + LOAD) which fail on assertions against current behavior; the
+   module-dependent suites (new DB helpers/SCH/AUTH/INT/ROLL/UI) are accepted as ImportError-red until
+   Stage 2 skeletons land. Migration-survival DB cases may be authored once migration 34 exists.
+
+Stage 2+ (behavior-changing) remains GATED on the Manager's review of the Stage 1 red tests.
 
 ## 16. Review record
 
-Implementation reviews not started. Record each stage's independent reviewer,
-candidate reference, findings, regression/fix evidence and re-review disposition.
-The design/dispatch authors' review does not satisfy implementation review.
+### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
+Independently re-verified 5/5 load-bearing pillars from the tree: the control_api root-cause window,
+`complete_task` swallow+no-predicate, driver `send()` `cancel_inflight`-on-conflict, SDK Task* messages
+present + driver-code blind, and the `flow_run_id`-outside-numbered-migration fact. Inventory is honest
+(line numbers marked approximate where not personally opened; ctags-unavailable caveat stated). No
+capability limit demonstrated — the SDK exposes the signals the oracle needs. Three escalated decisions
+resolved above. Stage 1 authorized (assertion-capable red tests); Stage 2 gated on Stage-1 review.
 
 ## 17. Closure
 
