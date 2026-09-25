@@ -9594,6 +9594,9 @@ Generated from user description: {description}
             # path without an Idempotency-Key); the key is still non-NULL.
             operation_id = f"task:{task.id}"
         existing = await asyncio.to_thread(db.find_turn_by_idempotency, scope, operation_id)
+        if existing is None:
+            backend = self._resolve_task_backend(task)
+            carrier = self._managed_carrier_assignment(self.session_store.get(sid), backend)
         if existing is not None:
             if existing.get("admission_hash") not in (None, admission_hash):
                 raise OwnershipConflictError(
@@ -9630,7 +9633,8 @@ Generated from user description: {description}
             task_id=task.id,
             body=task.prompt or "",
             payload=intent_payload,
-            backend=self._resolve_task_backend(task),
+            backend=backend,
+            machine_id=carrier,
             action="resume_session",
             turn_source="human" if source in ("web_session", "telegram_session", "telegram") else "system",
             turn_kind="instruction",
@@ -9706,14 +9710,40 @@ Generated from user description: {description}
         finally:
             self._compact_injected_ids.discard(task.id)
         session = self.session_store.get(sid) if sid else None
-        host = socket.gethostname()
-        action, payload = self._mesh_dispatch_payload(task, sid, session, host)
-        # Carrier assignment (design §3.7/§5): a pinned session stays on its
-        # node (never relocated); an unpinned session keeps today's default of
-        # host-local execution — assigned to THIS host's managed carrier, never
-        # left claimable by any accept-unpinned remote node.
-        machine_id = ((session.machine_id or None) if session else None) or host
+        # Re-resolved at activation (a repin while queued applies; a carrier
+        # that deregistered makes the head back off instead of activating).
+        machine_id = self._managed_carrier_assignment(session, str(row.get("backend") or ""))
+        action, payload = self._mesh_dispatch_payload(task, sid, session, socket.gethostname())
         return PreparedTurn(action=action, payload=payload, machine_id=machine_id)
+
+    def _managed_carrier_assignment(self, session: Any, backend: str) -> str:
+        """Registered carrier node id that will claim this session's managed
+        turns (design §3.7/§5). A session pinned to another node stays there
+        (never relocated). An unpinned or host-pinned session goes to this
+        host's configured local carrier (``MESH_LOCAL_CARRIER_NODE_ID`` — the
+        daemon's WORKER_NODE_ID); a hostname is used only if a carrier actually
+        REGISTERED under exactly that id. The target must have registered
+        ``backend`` as managed-capable, else a typed 503 refusal: a turn nobody
+        can claim is never accepted."""
+        from src.control.db import get_db
+        from src.control.turn_queue import CarrierUnavailableError
+
+        pinned = str(getattr(session, "machine_id", "") or "").strip() if session else ""
+        host = socket.gethostname()
+        local = str(getattr(config.mesh, "local_carrier_node_id", "") or "").strip()
+        target = pinned if pinned and pinned != host else (local or pinned)
+        if not target:
+            raise CarrierUnavailableError(
+                "no managed carrier for an unpinned session: set MESH_LOCAL_CARRIER_NODE_ID",
+                session_id=getattr(session, "session_id", None),
+            )
+        db = get_db()
+        if db is None or backend not in db.node_managed_backends(target):
+            raise CarrierUnavailableError(
+                f"no registered managed-capable carrier '{target}' for backend '{backend}'",
+                session_id=getattr(session, "session_id", None), node_id=target,
+            )
+        return target
 
     def _start_turn_scheduler(self) -> None:
         """Start the single managed-turn scheduler loop when a mesh DB exists and

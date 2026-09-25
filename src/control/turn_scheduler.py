@@ -63,6 +63,7 @@ class SchedulerPassResult(BaseModel):
     withdrawn: int = 0
     waiting: int = 0
     next_wake_sec: Optional[float] = None
+    slot_waiting: int = 0
 
 
 PrepareFn = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[PreparedTurn]]
@@ -168,6 +169,7 @@ async def run_scheduler_pass(
     shared.refresh_managed(totals["count"], generation)
     result.waiting = int(totals["queued"])
     if result.waiting:
+        result.slot_waiting = int(await asyncio.to_thread(db.count_slot_waiting_sessions))
         wake = await asyncio.to_thread(db.next_turn_wake_at)
         if wake:
             try:
@@ -178,18 +180,30 @@ async def run_scheduler_pass(
     return result
 
 
-def _next_timeout(res: SchedulerPassResult, limit: int, safety_net_sec: float) -> Optional[float]:
+def _next_timeout(
+    res: SchedulerPassResult, limit: int, safety_net_sec: float,
+    slot_backoff_sec: Optional[float] = None,
+) -> Optional[float]:
     """When to run the next pass without a hint: immediately if the pass hit
     its LIMIT (more eligible heads may remain); at the earliest time a delayed
-    or backed-off head becomes eligible; else a long lost-hint safety net while
-    queued rows exist; else never (sleep until a hint)."""
+    or backed-off head becomes eligible; for heads waiting on their own slot
+    holder, on a bounded exponential backoff (a completion committed by an
+    out-of-process task server cannot hint this loop); else a long lost-hint
+    safety net while queued rows exist; else never (sleep until a hint)."""
     if res.activated >= limit:
         return 0
     if not res.waiting:
         return None
+    candidates = [safety_net_sec]
     if res.next_wake_sec is not None:
-        return min(res.next_wake_sec, safety_net_sec)
-    return safety_net_sec
+        candidates.append(res.next_wake_sec)
+    if res.slot_waiting and slot_backoff_sec is not None:
+        candidates.append(slot_backoff_sec)
+    return min(candidates)
+
+
+SLOT_BACKOFF_BASE_SEC = 3.0
+SLOT_BACKOFF_CAP_SEC = 30.0
 
 
 class TurnScheduler:
@@ -209,6 +223,7 @@ class TurnScheduler:
         self._prepare = prepare
         self._fallback_sec = fallback_sec
         self._safety_net_sec = safety_net_sec
+        self._slot_backoff_k = 0
         self._limit = limit
         self._allowance = allowance
         self._event: Optional[asyncio.Event] = None
@@ -246,7 +261,14 @@ class TurnScheduler:
                         allowance=self._allowance,
                     )
                     self.passes += 1
-                    timeout = _next_timeout(res, self._limit, self._safety_net_sec)
+                    if res.activated:
+                        self._slot_backoff_k = 0
+                    slot_backoff = min(
+                        self._fallback_sec * (2 ** self._slot_backoff_k), SLOT_BACKOFF_CAP_SEC,
+                    )
+                    timeout = _next_timeout(
+                        res, self._limit, self._safety_net_sec, slot_backoff,
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # noqa: BLE001 — keep the loop alive
@@ -261,8 +283,9 @@ class TurnScheduler:
                     continue
                 try:
                     await asyncio.wait_for(self._event.wait(), timeout=timeout)
+                    self._slot_backoff_k = 0  # a hint: fresh, fast recheck
                 except asyncio.TimeoutError:
-                    pass
+                    self._slot_backoff_k = min(self._slot_backoff_k + 1, 16)
         finally:
             _unregister(self)
 

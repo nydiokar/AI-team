@@ -48,6 +48,7 @@ _MANAGED_ENV_KEYS = {
     "MESH_ENABLED",
     "MESH_HEALTH_FAILURE_THRESHOLD",
     "MESH_HEALTH_WINDOW_SIZE",
+    "MESH_LOCAL_CARRIER_NODE_ID",
     "MESH_ONEOFF_QUEUE_TIMEOUT_SEC",
     "MESH_ROUTING_FRESHNESS_WAIT_SEC",
     "MESH_ROUTING_LIVE_STATE_MAX_AGE_SEC",
@@ -244,6 +245,10 @@ class MeshConfig:
     # Empty preserves the legacy bind-to-tailscale behavior.
     bind_host: str = ""                      # MESH_BIND_HOST
     task_server_port: int = 9002            # MESH_TASK_SERVER_PORT
+    # [A82 Stage 4a] Registered node id of this host's managed-turn carrier (the
+    # local worker daemon's WORKER_NODE_ID). Unpinned / host-pinned enrolled
+    # sessions are assigned to it; never inferred from the hostname.
+    local_carrier_node_id: str = ""         # MESH_LOCAL_CARRIER_NODE_ID
     worker_token: str = ""                  # WORKER_TOKEN — shared mesh auth secret
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
     oneoff_queue_timeout_sec: int = 36000   # MESH_ONEOFF_QUEUE_TIMEOUT_SEC (10 hours)
@@ -762,6 +767,12 @@ class Config:
             v = os.getenv("MESH_TASK_SERVER_PORT")
             if v is not None:
                 self.mesh.task_server_port = int(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_LOCAL_CARRIER_NODE_ID")
+            if v is not None:
+                self.mesh.local_carrier_node_id = v.strip()
         except Exception:
             pass
         try:

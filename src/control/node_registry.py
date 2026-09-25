@@ -320,6 +320,11 @@ class NodeRegistry:
                     repos=node.capabilities.repos,
                     models=node.capabilities.models,
                     incarnation_id=node.incarnation_id,
+                    # [A82 Stage 4a rework] persisted managed capability.
+                    managed_backends=(
+                        list(node.capabilities.managed_backends or [])
+                        if 1 in set(node.capabilities.queue_protocols or []) else []
+                    ),
                 )
                 node.incarnation_id = incarnation_id
                 return old_incarnation, incarnation_id

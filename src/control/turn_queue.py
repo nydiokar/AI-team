@@ -150,6 +150,14 @@ class CapacityError(TurnQueueError):
     code = "capacity"
 
 
+class CarrierUnavailableError(TurnQueueError):
+    """503 — no registered managed-capable carrier for the turn's assignment
+    (A82 Stage 4a rework): refused rather than queued for nobody to claim."""
+
+    status_code = 503
+    code = "carrier_unavailable"
+
+
 class BackingStoreError(TurnQueueError):
     """503 — DB unavailable / deadline exceeded (design §6/§8). Fails closed."""
 

@@ -297,11 +297,11 @@ def test_SCH07_loop_hint_and_lazy_fallback(tmp_path):
             if totals["count"] - totals["queued"] == 9:
                 break
         assert db.get_task(t1)["status"] == "pending"
-        # A head waiting on a slot holder cannot progress: NO steady polling
-        # (only hints or the long safety net) ...
+        # A head waiting on its slot holder: NO steady polling — rechecks back
+        # off exponentially (0.05, 0.1, 0.2, 0.4, 0.8 s ... capped) ...
         before = sched.passes
-        await asyncio.sleep(0.4)
-        assert sched.passes == before, "polled a session that cannot progress"
+        await asyncio.sleep(1.6)
+        assert sched.passes - before <= 6, "steady polling of a session that cannot progress"
         # ...and nothing is held per pending/running row: 9 pending rows, at
         # most the one wait_for helper task of the timer is added.
         assert db.managed_waiting_totals()["count"] - db.managed_waiting_totals()["queued"] == 9
@@ -413,3 +413,12 @@ def test_SCH09c_blocked_state_change_logged_once(tmp_path, caplog):
         _pass(db, bad)
     assert sum("turn_prepare_failed" in r.getMessage() for r in caplog.records) == 1
     assert db.get_task(t)["blocked_attempts"] == 3
+
+
+def test_SCH10_next_timeout_policy():
+    r = ts.SchedulerPassResult
+    assert ts._next_timeout(r(activated=25, waiting=5), 25, 60) == 0
+    assert ts._next_timeout(r(waiting=0), 25, 60) is None                 # sleep until hint
+    assert ts._next_timeout(r(waiting=3), 25, 60) == 60                   # paused/backed-off only
+    assert ts._next_timeout(r(waiting=3, next_wake_sec=4.0), 25, 60) == 4.0
+    assert ts._next_timeout(r(waiting=3, slot_waiting=1), 25, 60, 12.0) == 12.0
