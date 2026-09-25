@@ -135,6 +135,8 @@ def _worker(tmp_path, http, *, managed: bool = True, incarnation: str = "inc-1",
     w._result_delivery_semaphore = asyncio.Semaphore(2)
     w._delivering = set()
     w._delivery_parked = set()
+    w._held_probe_at = {}
+    w._held_probe_interval_sec = 0.0
     w._managed_claims_blocked = None
     if managed and isinstance(http, _ClientHTTP):
         w._register()  # registers queue protocol 1 + managed backends via the real route

@@ -322,6 +322,9 @@ class TurnOutcome:
     # proactive sink so the carrier can commit it to the held turn — never
     # dropped into an unread future.
     late_managed: bool = False
+    # [A82 Stage 3 rework 5] The managed turn identity (the echoed prompt uuid)
+    # a late reply belongs to — the carrier binds it to EXACTLY that attempt.
+    managed_turn_uuid: str = ""
 
 
 @dataclass
@@ -790,10 +793,8 @@ class _SDKSession:
         # [A82 Stage 3 rework 4] Echo correlation state. `_turn_owner` is the
         # managed pending whose echoed UserMessage began the CURRENT CLI turn;
         # the next ResultMessage closes that turn and is served to it.
-        # `_ghosts` remembers (bounded) abandoned managed turns popped before
         # their echo, so a later echo still routes their reply as late_managed.
         self._turn_owner: Optional["_PendingTurn"] = None
-        self._ghosts: "Dict[str, _PendingTurn]" = {}
         self._last_managed: Optional["_PendingTurn"] = None
         # Managed correlation needs the CLI's user-message echo; the flag is
         # decided per process (managed carrier ON) so a legacy-only worker's
@@ -1063,7 +1064,7 @@ class _SDKSession:
                         owner = next(
                             (p for p in self._pending if p.managed and p.turn_uuid == uid),
                             None,
-                        ) or self._ghosts.pop(uid, None)
+                        )
                         if owner is not None:
                             owner.echo_seen = True
                             self._turn_owner = owner
@@ -1189,6 +1190,7 @@ class _SDKSession:
                 # Late reply of a deadline-held managed turn (M3): route it to
                 # the carrier as late_managed, never to an unread future.
                 outcome.late_managed = True
+                outcome.managed_turn_uuid = owner.turn_uuid or ""
             else:
                 owner.future.set_result(outcome)
                 return
@@ -1203,16 +1205,11 @@ class _SDKSession:
                 return
             # Only managed turns are waiting and none has begun (no echo yet):
             # this result belongs to another turn (autonomous continuation /
-            # a turn already running) → proactive sink. An ABANDONED managed
-            # head that never saw its echo is popped here (wedge exit) and
-            # remembered as a bounded ghost so a later echo still routes its
-            # reply as late_managed.
-            for p in [p for p in self._pending if p.managed and p.abandoned and not p.echo_seen]:
-                self._pending.remove(p)
-                if p.turn_uuid:
-                    self._ghosts[p.turn_uuid] = p
-                    while len(self._ghosts) > 16:
-                        self._ghosts.pop(next(iter(self._ghosts)))
+            # a turn already running) → proactive sink. A managed prompt that
+            # was written to the CLI but not yet echoed is STILL owed by the
+            # CLI, so it stays pending (the session is NOT quiescent) — even if
+            # its caller already hit the deadline. Its exits: its own echo +
+            # result (routed late_managed), session close, or stream end.
         # No one asked for this turn — it's a background-job continuation.
         outcome.proactive = True
         if outcome.late_managed and self._on_proactive is not None:
@@ -1248,7 +1245,8 @@ class _SDKSession:
                 pending.future.set_exception(err)
 
     async def _submit_turn(
-        self, message: str, progress_cb=None, managed: bool = False
+        self, message: str, progress_cb=None, managed: bool = False,
+        turn_uuid: Optional[str] = None,
     ) -> "TurnOutcome":
         """Send one user turn and await its terminal result.
 
@@ -1277,7 +1275,7 @@ class _SDKSession:
                 # CLI when it begins the turn that processes this prompt.
                 import uuid as _uuid
 
-                pending.turn_uuid = str(_uuid.uuid4())
+                pending.turn_uuid = turn_uuid or str(_uuid.uuid4())
                 self._last_managed = pending
 
                 async def _one(text: str = message, uid: str = pending.turn_uuid):
@@ -1335,7 +1333,7 @@ class _SDKSession:
                 return False
         return True
 
-    def send_managed(self, message: str, progress_cb=None) -> "TurnOutcome":
+    def send_managed(self, message: str, progress_cb=None, turn_uuid: Optional[str] = None) -> "TurnOutcome":
         """[A82 Stage 2 / §15 decision 1] Protocol-1 MANAGED send.
 
         A DISTINCT path from the legacy :meth:`send`. On a lock conflict (a turn
@@ -1364,12 +1362,14 @@ class _SDKSession:
             )
         try:
             return self._submit_managed_no_interrupt(
-                self._reserve_and_submit_managed(message, progress_cb), timeout
+                self._reserve_and_submit_managed(message, progress_cb, turn_uuid), timeout
             )
         finally:
             self._lock.release()
 
-    async def _reserve_and_submit_managed(self, message: str, progress_cb=None) -> "TurnOutcome":
+    async def _reserve_and_submit_managed(
+        self, message: str, progress_cb=None, turn_uuid: Optional[str] = None
+    ) -> "TurnOutcome":
         """[A82 Stage 3 rework, M4] Quiescence reservation ON THE SDK LOOP.
 
         Design §6: "reserve on the SDK loop before submitting a query". The
@@ -1398,23 +1398,18 @@ class _SDKSession:
                 "managed send is fail-closed",
                 session_key=self.session_key,
             )
-        return await self._submit_turn(message, progress_cb=progress_cb, managed=True)
+        return await self._submit_turn(message, progress_cb=progress_cb, managed=True, turn_uuid=turn_uuid)
 
     def process_identity(self) -> Dict[str, Any]:
-        """pid (+ create_time when psutil is available) of this session's CLI
-        subprocess; empty when unknown."""
+        """Wall-clock-immune identity of this session's CLI subprocess (see
+        ``process_utils.process_identity``); empty when unknown."""
         proc = getattr(getattr(self._client, "_transport", None), "_process", None)
         pid = getattr(proc, "pid", None)
         if not isinstance(pid, int):
             return {}
-        ident: Dict[str, Any] = {"pid": pid}
-        try:
-            import psutil  # type: ignore
+        from src.core.process_utils import process_identity
 
-            ident["create_time"] = psutil.Process(pid).create_time()
-        except Exception:
-            pass
-        return ident
+        return process_identity(pid)
 
     def _abandon_managed_pending(self) -> None:
         """Deadline expired (runs on the loop). If the reply was served to the
@@ -1429,6 +1424,7 @@ class _SDKSession:
         if fut.done() and not fut.cancelled() and fut.exception() is None:
             outcome = fut.result()
             outcome.late_managed = True
+            outcome.managed_turn_uuid = p.turn_uuid or ""
             outcome.proactive = True
             if self._on_proactive is not None:
                 self._late_handoffs += 1
@@ -1766,11 +1762,11 @@ class ClaudeSDKClientDriver(ClaudeDriver):
     def send_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
         return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
 
-    def run_managed_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None, on_process=None) -> ExecutionResult:
+    def run_managed_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None, on_process=None, turn_uuid=None) -> ExecutionResult:
         """[A82 Stage 3] Driver half of ``CodingBackend.run_managed_turn``: the
         same turn pipeline, but submitted through the private no-interrupt,
         loop-reserved ``_SDKSession.send_managed``."""
-        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context, _managed=True, _on_process=on_process)
+        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context, _managed=True, _on_process=on_process, _turn_uuid=turn_uuid)
 
     def is_session_quiescent(self, session_id: str) -> bool:
         """Quiescence of the pooled SDK session. No live pooled process ⇒ no
@@ -1781,7 +1777,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             return True
         return sdk_sess.is_quiescent()
 
-    def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, _managed: bool = False, _on_process=None) -> ExecutionResult:
+    def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, _managed: bool = False, _on_process=None, _turn_uuid=None) -> ExecutionResult:
         start = time.time()
         try:
             sdk_sess = self._get_or_create(session, model, effort, proc_env)
@@ -1803,7 +1799,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             # [A82 Stage 3 rework] Managed (protocol-1) rows take the
             # no-interrupt, loop-reserved send; legacy rows keep `send`.
             if _managed:
-                outcome = sdk_sess.send_managed(message, progress_cb=progress_cb)
+                outcome = sdk_sess.send_managed(message, progress_cb=progress_cb, turn_uuid=_turn_uuid)
             else:
                 outcome = sdk_sess.send(message, progress_cb=progress_cb)
             elapsed = time.time() - start

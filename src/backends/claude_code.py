@@ -393,6 +393,7 @@ class ClaudeCodeBackend(CodingBackend):
             telemetry_context=telemetry_context,
             proc_env=proc_env,
             on_process=on_process,
+            turn_uuid=getattr(ownership, "turn_uuid", None),
         )
         self._observe_driver_state(session, result)
         result = self._observe_cache_health(session, result)
