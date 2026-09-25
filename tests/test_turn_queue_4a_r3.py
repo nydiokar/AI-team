@@ -368,8 +368,10 @@ def test_strict_link_failure_raises_and_stays_pending(tmp_path, monkeypatch):
 
 def test_recovery_reuses_the_durable_decision(tmp_path, monkeypatch):
     """Writer attached to the session's open Case, then died before finalize;
-    the Case closes before recovery. Recovery must complete THAT membership, not
-    re-decide (which would now run the turn Case-less)."""
+    the Case is CLOSED (real `close_case`, which clears affiliations) before
+    recovery. Recovery keeps THAT membership (never re-decides to run
+    Case-less) but must not re-affiliate the session to the closed Case nor
+    write any event after `flow.closed` (A87 round-4 MAJOR 1)."""
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     own = db.open_case(objective="own", session_id="sess-1", role="manager")
@@ -377,9 +379,62 @@ def test_recovery_reuses_the_durable_decision(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         _submit(o, operation_id="d", source="runtime")
     monkeypatch.setattr(db, "finalize_turn_lineage", real)
-    db._conn().execute("UPDATE flow_runs SET status='closed' WHERE flow_run_id=?", (own,))
+    r = o.close_case(own, actor="operator")
+    assert r["ok"] and r["closed"], r
     assert db.find_open_case_for_session("sess-1") is None
     [row] = _managed_rows(db)
     db._conn().execute("UPDATE mesh_tasks SET lineage_lease_until=? WHERE id=?", (PAST, row["id"]))
     _pass(db, o)
     assert db.get_task(row["id"])["flow_run_id"] == own
+    assert db.get_session("sess-1")["current_case_id"] != own
+    evs = [e["event_type"] for e in db.list_flow_events(own)]
+    assert "flow.closed" in evs and evs[-1] == "flow.closed", evs
+
+
+def test_P2_recovery_after_real_close_does_not_reaffiliate(tmp_path, monkeypatch):
+    """A87 round-4 probe P2, adopted: join writer wrote the task link, then
+    `task.attached` failed (503); the Manager closes the Case via the real seam;
+    recovery must not re-affiliate the session nor append after `flow.closed`."""
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
+    real = db.append_flow_event_once
+    monkeypatch.setattr(db, "append_flow_event_once",
+                        lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+    with pytest.raises(tq.BackingStoreError):
+        _submit(o, join_case_id=case_id, operation_id="j", source="runtime")
+    monkeypatch.setattr(db, "append_flow_event_once", real)
+    [row] = _managed_rows(db)
+    r = o.close_case(case_id, actor="operator")
+    assert r["ok"] and r["closed"], r
+    db._conn().execute("UPDATE mesh_tasks SET lineage_lease_until=? WHERE id=?", (PAST, row["id"]))
+    res = _pass(db, o)
+    s = db.get_session("sess-1")
+    evs = [e["event_type"] for e in db.list_flow_events(case_id)]
+    assert res.lineage_recovered == 1
+    assert s["current_case_id"] != case_id, "session affiliated to a CLOSED Case after close"
+    assert evs[-1] == "flow.closed" and "task.attached" not in evs, evs
+    assert db.get_task(row["id"])["flow_run_id"] == case_id
+
+
+@pytest.mark.parametrize("shape", ["join", "attach"])
+def test_full_rerun_writes_each_event_once_member_shapes(tmp_path, monkeypatch, shape):
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    if shape == "join":
+        case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
+        kw = {"join_case_id": case_id}
+    else:
+        case_id = db.open_case(objective="own", session_id="sess-1", role="manager")
+        kw = {}
+    before = [e["event_type"] for e in db.list_flow_events(case_id)]
+    real = _crash_before_finalize(db, monkeypatch)
+    with pytest.raises(SystemExit):
+        _submit(o, operation_id="e", source="runtime", **kw)
+    monkeypatch.setattr(db, "finalize_turn_lineage", real)
+    [row] = _managed_rows(db)
+    db._conn().execute("UPDATE mesh_tasks SET lineage_lease_until=? WHERE id=?", (PAST, row["id"]))
+    _pass(db, o)  # recovery re-runs the WHOLE procedure
+    after = [e["event_type"] for e in db.list_flow_events(case_id)]
+    assert after[len(before):] == ["task.attached"], after
+    assert db.get_task(row["id"])["flow_run_id"] == case_id
