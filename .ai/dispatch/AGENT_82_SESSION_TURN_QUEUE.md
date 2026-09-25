@@ -984,6 +984,13 @@ Round-4 file `tests/test_turn_queue_r4.py`: 8 of 13 tests fail on `dc970f5`. The
 **Verification:** turn-queue (9 files): 133 passed ×2; driver 121; carrier/legacy 122; session/case/control 96; interface 139;
 legacy-helper/process users 255. Still red (later stages, unchanged): api 2, pressure 3, producers 7.
 
+### Stage 3 ACCEPTED (round 5) — final minors (2026-09-25, commit `071a78f`)
+- **MINOR-1:** in `_run_turn`, a managed prompt whose stdin write was refused by a terminated CLI ("Cannot write to terminated process") is never sent. The dead session is still torn down, but the result is now `error_class=managed_conflict` / `not_submitted` instead of `transient`. The worker therefore releases the turn as not-invoked (prompt preserved, back to pending). Legacy keeps `transient`. Tests: `test_R5_refused_managed_write_is_not_submitted_at_driver`, `…_returns_turn_to_pending`.
+- **MINOR-2 (surviving mutants killed):** (M1) a dead session with a pending late handoff is NOT quiescent, at session or driver level, so the reconciler cannot fail the row in that window (`test_R5_M1_…`). (M3) Starved loop: the managed step was dequeued ahead of the abandon step and stalls past the deadline + abandon wait. The caller then raises `RecoveryRequiredError` and must not attest not-submitted, because the prompt IS written once the loop resumes (`test_R5_M3_…`). The abandon wait is now `_SDKSession._abandon_wait_sec` (default 5 s; tests shorten it).
+- **Mutation verification** (scratch worktree with an autouse guard making `_SDKSession.start` / `ClaudeSDKClient.connect` raise — no real CLI was started): the baseline passes (105). Mutant M1 `return not self._late_handoffs`→`return True` → M1 test fails. Mutant M3 `abandoned.wait(...) and pending is None`→`pending is None` → M3 test fails. Mutant "refused write → transient" → both MINOR-1 tests fail.
+- **MINOR-3** (the `_turn_owner` clear in `forget_managed_turn` is redundant, because the owner is also cleared on the next dispatch) is left untested by design.
+- **Verification:** turn-queue (10 files) 137 passed; driver 121; carrier/legacy 122; session/case/control 96; interface 139; legacy-helper/process users 255. Still red (Stages 4/6/7, unchanged): api 2, pressure 3, producers 7.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
