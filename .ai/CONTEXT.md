@@ -74,9 +74,10 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 (proven live: 10001 `Permission denied`, 1000 OK). Entrypoint now drops to the owner of the mounted `/app/state`
 (never root; fallback 10001; `APP_UID`/`APP_GID` override) — no `.env` edit needed, ownership of
 `~/ai-team-data` decides. `controller/` chowned to 1000 → gateway/task-server run as uid 1000.
-**`workers/kanebra-worker/` is still 10001 and the worker container still runs the old image as 10001 — rollout is
-operator-gated** (had a live Claude session): `sudo chown -R 1000:1000 ~/ai-team-data/workers/kanebra-worker` then
-`docker compose --env-file .env -f deploy/compose.worker.yaml up -d --build`. Horse needs the same if it runs Docker.
+`workers/kanebra-worker/` chowned to 1000 and the worker recreated (operator-approved) → runs as uid 1000.
+**PROVEN via the gateway:** `POST /api/sessions` (claude/haiku, node `kanebra-worker`) + `/api/instructions` → worker
+created a file and committed `f40fe06` in a scratch repo; host `git log` + file owner `cifran` confirm. Horse needs the
+same chown + recreate if it runs Docker.
 **Phantom nodes:** task server registered `socket.gethostname()` (container id) as a gateway self-node; now only when
 `local_execution_enabled` (compose sets it false on task-server too). Deleted phantom `e8d0cac9b780` and stale
 PM2-era `kanebra` (online in DB since 2026-09-24 22:27Z — nothing marks rows offline that the restarted
