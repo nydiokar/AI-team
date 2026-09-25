@@ -9711,8 +9711,13 @@ Generated from user description: {description}
         finally:
             self._compact_injected_ids.discard(task.id)
         session = self.session_store.get(sid) if sid else None
-        action, payload = self._mesh_dispatch_payload(task, sid, session, socket.gethostname())
-        machine_id = (session.machine_id or None) if session else None
+        host = socket.gethostname()
+        action, payload = self._mesh_dispatch_payload(task, sid, session, host)
+        # Carrier assignment (design §3.7/§5): a pinned session stays on its
+        # node (never relocated); an unpinned session keeps today's default of
+        # host-local execution — assigned to THIS host's managed carrier, never
+        # left claimable by any accept-unpinned remote node.
+        machine_id = ((session.machine_id or None) if session else None) or host
         return PreparedTurn(action=action, payload=payload, machine_id=machine_id)
 
     def _start_turn_scheduler(self) -> None:
