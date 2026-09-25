@@ -961,6 +961,29 @@ Adopted round-3 probes: `tests/test_turn_queue_r3.py`. The stale-claim, no-sessi
 regressions 122; session/case/control 96; interface-touching 139; legacy-helper/process_utils users 255. Still red (later stages,
 unchanged): api 2, pressure 3, producers 7.
 
+### Stage 3 rework 6 — A87 round-4 review closed (2026-09-25, commits `ca50f0a`, see git log for the follow-up)
+
+| Finding | Fix | Test (mutation killed) |
+|---|---|---|
+| **MAJOR-1** clean CLI exit wedge | The reader's `finally` now always sets `_reader_ended` (normal EOF or error). `_SDKSession.is_quiescent()` returns True for a dead reader, unless a late reply is still being handed off (the driver defers to it). `_get_or_create` evicts a managed-carrier session (replay on) whose reader ended: it marks the session closed, pokes its idle loop, and respawns with resume. Flag-OFF sessions (no replay) never take the new branch, so legacy is byte-identical. | Adopted EOF probe, both variants (abandoned / in-flight), fresh-session replacement, flag-OFF not-evicted; mutations: no flag / no eviction / evict-regardless-of-flag → fail |
+| **MINOR-1** operator resolve = real exit | `CodingBackend.forget_managed_turn(session, turn_uuid)` (default no-op; Claude drops the pending entry on the loop, clears the owner, and marks the query terminal if nothing else is pending). The worker's `_drop_attempt` runs on every definitive 404/409 from `enter-recovery`/`quiescence`. The reconciler now also consults the server (rate-limited) while a live backend is not quiescent, not only when there is no proof. | submitted-never-echoed + alive CLI + operator resolve ⇒ session quiescent ⇒ next managed turn completes; mutation "no forget" → fails |
+| **MINOR-2** refusal classes | Only 404/409 are definitive for the recovery/quiescence probes; 401/403/other 4xx are transient (record kept, rate-limited retry). | 401/403/400 keep, 404/409 drop; mutation "any 4xx" → fails |
+| **MINOR-3** not-submitted attestation | On the deadline, the caller waits (≤5 s) for the loop-side abandon. If the ticket shows the prompt was never registered, it raises a typed `OwnershipConflictError(not_submitted)` → `managed_conflict` → the worker releases it as not-invoked: back to pending, prompt preserved. | starved-loop test; mutation → fails |
+| **MINOR-4** tests | `/proc/<pid>/stat` with `)` in the process name (symlinked `sleep` named "evil) name"); late-capture session-mismatch guard. | mutations `rsplit→split` and "no session guard" → fail |
+
+**Corrected exit table (replaces the wording of rework 3/5 where it differs).** A managed prompt written to the CLI stays pending (session not quiescent) until ONE of:
+1. its own echo + result arrive — served, or routed `late_managed` and bound by turn uuid;
+2. the CLI's stream ends (clean exit or error) — pending failed, session dead ⇒ quiescent, and replaced on the next managed turn;
+3. the session is closed;
+4. the server says its row is terminal (operator resolve / any 404/409) — the carrier forgets the pending wait, and the session becomes quiescent while the CLI keeps running.
+
+DB-side exits are unchanged (reconciler evidence or operator route). The earlier claim that an operator resolution alone freed the session was not true before this rework; it is true now (test above).
+
+Cost note: one mutation run (evict-regardless-of-flag) briefly spawned the real CLI through an unpatched `_SDKSession.start` in the flag-OFF test. It connected and exited with code 1 (invalid resume id). No query was sent, so no model turn happened. The test now patches `start` to fail loudly, so the mutant fails without spawning.
+Round-4 file `tests/test_turn_queue_r4.py`: 8 of 13 tests fail on `dc970f5`. The other 5 pass there: flag-OFF not-evicted, 404/409 drop, the `/proc` paren test and the session guard. They are guards on behavior that was already correct, and their mutations are verified above.
+**Verification:** turn-queue (9 files): 133 passed ×2; driver 121; carrier/legacy 122; session/case/control 96; interface 139;
+legacy-helper/process users 255. Still red (later stages, unchanged): api 2, pressure 3, producers 7.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
