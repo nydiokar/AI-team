@@ -341,6 +341,32 @@ class _TurnAccumulator:
     ndjson_lines: List[str] = field(default_factory=list)
 
 
+# [A82 Stage 4b rework] Operator cancels armed for a managed turn uuid whose
+# prompt is not registered on any SDK loop yet (the CLI process may still be
+# spawning). Consumed by `_SDKSession._submit_turn` in the same loop step that
+# would register the prompt: an armed turn is never submitted (typed
+# not-submitted conflict ⇒ the carrier releases it not-invoked ⇒ `cancelled`).
+# Keyed by the carrier's per-attempt uuid (globally unique); bounded.
+_ARMED_CANCEL_LOCK = threading.Lock()
+_ARMED_CANCELS: Dict[str, float] = {}
+_ARMED_CANCEL_CAP = 256
+
+
+def arm_managed_cancel(turn_uuid: str) -> None:
+    if not turn_uuid:
+        return
+    with _ARMED_CANCEL_LOCK:
+        _ARMED_CANCELS.pop(turn_uuid, None)
+        _ARMED_CANCELS[turn_uuid] = time.monotonic()
+        while len(_ARMED_CANCELS) > _ARMED_CANCEL_CAP:
+            _ARMED_CANCELS.pop(next(iter(_ARMED_CANCELS)))
+
+
+def disarm_managed_cancel(turn_uuid: str) -> bool:
+    with _ARMED_CANCEL_LOCK:
+        return _ARMED_CANCELS.pop(turn_uuid or "", None) is not None
+
+
 def _replay_user_messages_enabled() -> bool:
     """[A82 Stage 3 rework 4] Managed correlation needs the CLI's replayed
     user-message echoes. Enabled only when this process runs the managed
@@ -1282,6 +1308,15 @@ class _SDKSession:
 
             raise RecoveryRequiredError(
                 "managed turn abandoned before submission", session_key=self.session_key,
+            )
+        if managed and turn_uuid and disarm_managed_cancel(turn_uuid):
+            # [A82 Stage 4b rework] Cancelled before it could be registered:
+            # never submit it (same loop step as the registration below).
+            from src.control.turn_queue import OwnershipConflictError
+
+            raise OwnershipConflictError(
+                "managed turn cancelled by the operator before submission (not submitted)",
+                session_key=self.session_key, reason="not_submitted",
             )
         loop = asyncio.get_event_loop()
         future: "asyncio.Future" = loop.create_future()

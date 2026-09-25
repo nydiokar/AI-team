@@ -373,3 +373,65 @@ def test_K06_backends_without_a_managed_compaction_path_fail_closed():
     with pytest.raises(tq.ManagedUnsupportedError):
         CodingBackend.run_managed_compaction(fake, None, None)
     assert CodingBackend.cancel_managed_turn(fake, None, "u") is False
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4b rework — MAJOR 1: cancel in the boot window is never lost
+# --------------------------------------------------------------------------- #
+def test_R01_cancel_in_boot_window_is_armed_and_the_turn_never_runs(db, tmp_path, real_claude):
+    """Adopted reviewer probe P1 (inverted): the cancel lands after
+    /start-managed (row running, turn uuid recorded) but before the driver
+    registered the prompt (CLI boot). It is armed by uuid; the prompt is never
+    submitted; the attempt is released not-invoked ⇒ `cancelled`."""
+    fake = real_claude.fake
+    fake.replies["slow boot"] = [_assistant("work", sid="n-p"), _result("real output", sid="n-p")]
+    _interrupt_ends_turn(fake, sid="n-p")
+    gate = threading.Event()
+    inner = real_claude.backend.run_managed_turn
+
+    def gated(*a, **k):
+        assert gate.wait(10)
+        return inner(*a, **k)
+
+    real_claude.backend.run_managed_turn = gated
+    w = _worker(tmp_path, _ClientHTTP(TestClient(ts.app)))
+    w._backends = {"claude": real_claude.backend}
+    _seed_session_turn(db, "t-p", "sess-p", "slow boot")
+    th = threading.Thread(target=_run_one, args=(w, "t-p"), daemon=True)
+    th.start()
+    assert _wait(lambda: _row(db, "t-p")["status"] == "running"
+                 and (w._managed_claims.get("t-p") or {}).get("turn_uuid"))
+    assert _gateway_cancel("t-p") is True
+    _handle_control(w)
+    gate.set()
+    th.join(10)
+    assert not th.is_alive()
+    row = _row(db, "t-p")
+    assert row["status"] == "cancelled", row["status"]
+    assert "slow boot" not in fake.queries_sent and fake.interrupts == 0  # never ran
+    assert db.get_active_turn("sess-p") is None and "t-p" not in w._managed_claims
+
+
+def test_R02_cancel_before_the_turn_uuid_exists_is_caught_pre_invoke(db, tmp_path, real_claude):
+    """The cancel is handled between /start-managed and the carrier recording
+    the turn uuid (nothing to arm yet): the attempt carries the cancel and the
+    pre-invoke check releases it not-invoked ⇒ `cancelled`, backend never called."""
+    fake = real_claude.fake
+    fake.replies["p"] = [_result("should not run")]
+    w = _worker(tmp_path, _ClientHTTP(TestClient(ts.app)))
+    w._backends = {"claude": real_claude.backend}
+    _seed_session_turn(db, "t-q", "sess-q", "p")
+    real_start = w._claim_and_start_managed
+
+    async def start_then_cancel(task_id):
+        out = await real_start(task_id)
+        assert not (w._managed_claims.get(task_id) or {}).get("turn_uuid")
+        assert _gateway_cancel(task_id) is True
+        rows = await w._fetch_pending()
+        [ctl] = [r for r in rows if r.get("action") == "cancel_managed"]
+        await w._handle_cancel_managed(ctl)
+        return out
+    w._claim_and_start_managed = start_then_cancel
+    _run_one(w, "t-q")
+    assert _row(db, "t-q")["status"] == "cancelled"
+    assert real_claude.calls["run_managed_turn"] == 0 and fake.queries_sent == []

@@ -398,11 +398,23 @@ class ClaudeCodeBackend(CodingBackend):
         )
 
     def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
-        """[A82 Stage 4b] Operator cancel of exactly the managed turn ``turn_uuid``."""
+        """[A82 Stage 4b] Operator cancel of exactly the managed turn ``turn_uuid``.
+
+        [rework] ARM first (a prompt not yet registered — CLI still booting — is
+        then never submitted), then deliver to the live pending entry if one
+        exists (interrupt now or at its echo) and disarm. Returns True: the
+        cancel is delivered or durably armed for this uuid."""
+        from src.backends.claude_driver import arm_managed_cancel, disarm_managed_cancel
+
+        if not turn_uuid:
+            return False
+        arm_managed_cancel(turn_uuid)
         sessions = getattr(self._driver, "_sessions", None)
         sdk_sess = sessions.get(session.session_id) if sessions is not None else None
         cancel = getattr(sdk_sess, "cancel_managed_turn", None)
-        return bool(callable(cancel) and cancel(turn_uuid))
+        if callable(cancel) and cancel(turn_uuid):
+            disarm_managed_cancel(turn_uuid)  # delivered to the registered prompt
+        return True
 
     def _run_managed(self, label: str, session: Session, ownership, telemetry_context, telemetry_sink, invoke) -> ExecutionResult:
         from src.control.turn_queue import ManagedUnsupportedError, OwnershipConflictError

@@ -214,7 +214,9 @@ def test_C06_web_stop_cancels_the_slot_holder_not_last_task_id(tmp_path, monkeyp
     assert db.get_task(t2)["status"] == "queued"
     assert len(_control_rows(db, "cancel_managed")) == 1
     s = _sess()
-    assert s.status != SessionStatus.CANCELLED and s.last_task_id == t0  # no whole-session save
+    # [rework] stop holds the session like legacy (CANCELLED, field-scoped in
+    # the cancel txn); no whole-session save (last_task_id untouched).
+    assert s.status == SessionStatus.CANCELLED and s.last_task_id == t0
 
 
 def test_C06b_stop_with_no_active_turn_cancels_nothing(tmp_path, monkeypatch):
@@ -239,22 +241,40 @@ def test_C07_unenrolled_cancel_stop_compact_close_touch_no_queue_state(tmp_path,
     """Legacy byte-identity: with nothing enrolled, none of the producer-2
     entry points reads the enrollment marker or the managed ledger, and each
     takes exactly the legacy branch."""
+    import threading as _th
+
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
     _wire(o)
     _with_native(db)
+    # [rework] Trace EVERY thread's connection (`_conn()` is per-thread; the
+    # web routes run on portal/threadpool threads) — reviewer probe P2.
     stmts = []
-    db._conn().set_trace_callback(stmts.append)
+    lock = _th.Lock()
+    real_conn = type(db)._conn
+
+    def traced(self):
+        c = real_conn(self)
+
+        def cb(sql):
+            with lock:
+                stmts.append((_th.current_thread().name, sql))
+        c.set_trace_callback(cb)
+        return c
+    monkeypatch.setattr(type(db), "_conn", traced)
     assert o.cancel_task("task_unknown") is False
     c = _client(monkeypatch, o)
     r = c.post("/api/sessions/sess-1/stop", headers={"Authorization": "Bearer tok"})
     assert r.json() == {"ok": True, "cancelled": False, "task_id": _sess().last_task_id}
     r = c.post("/api/sessions/sess-1/compact", headers={"Authorization": "Bearer tok"})
     assert r.json() == {"ok": True, "output": "legacy compacted", "errors": []}
-    res = o.session_service.close_session("sess-1", backends=o._backends)
-    db._conn().set_trace_callback(None)
-    assert res.ok and o._backends["claude"].compacted == ["sess-1"]
-    bad = [s for s in stmts if "turn_queue_enrolled" in s or "queue_protocol" in s
-           or "cancel_managed" in s or "task_unknown" in s]
+    r = c.post("/api/sessions/sess-1/close", headers={"Authorization": "Bearer tok"})
+    assert r.status_code == 200, r.text
+    monkeypatch.setattr(type(db), "_conn", real_conn)
+    assert o._backends["claude"].compacted == ["sess-1"]
+    assert len({t for t, _ in stmts}) >= 2  # the route threads were traced too
+    bad = [sql for _, sql in stmts if "INSERT INTO sessions" not in sql and (
+        "turn_queue_enrolled" in sql or "queue_protocol" in sql or "cancel_managed" in sql
+        or "cancel_token" in sql or "lineage" in sql or "task_unknown" in sql)]
     assert bad == [], bad
     assert _managed_rows(db) == [] and _control_rows(db, "cancel_managed") == []
 
@@ -563,9 +583,11 @@ def test_T01_telegram_session_cancel_targets_the_active_managed_turn(tmp_path, m
     asyncio.run(bot._handle_session_cancel(upd, _Ctx(["sess-1"])))
     assert t1 in upd.message.replies[-1]
     assert db.get_task(t1)["cancel_token"] == tok and db.get_task(t2)["status"] == "queued"
-    assert _sess().status != SessionStatus.CANCELLED
-    # Explicit task id through /cancel goes through the fenced cancel_task path.
+    assert _sess().status == SessionStatus.CANCELLED  # stop hold (rework)
+    # Explicit task id through /cancel goes through the fenced cancel_task path
+    # (after an operator action released the stop hold).
     db.complete_turn(t1, tok, {"success": False}, status="failed")
+    _submit(o, operation_id="c")
     _pass(db, o)
     upd = _Upd()
     asyncio.run(bot._handle_cancel_command(upd, _Ctx([t2])))
@@ -631,3 +653,121 @@ def test_S01_unfinished_void_keeps_a_bounded_idle_wake():
     res = ts.SchedulerPassResult(void_outstanding=1)
     assert ts._next_timeout(res, 25, 60.0, 3.0) == ts.FALLBACK_INTERVAL_SEC
     assert ts._next_timeout(ts.SchedulerPassResult(), 25, 60.0, 3.0) is None
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4b rework
+# --------------------------------------------------------------------------- #
+def test_R01_void_never_wipes_a_newer_case_affiliation(tmp_path, monkeypatch):
+    """M3 kill: the strict clear is conditional on the voided child Case."""
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    parent = db.open_case(objective="p", session_id="mgr-x", role="manager")
+    tb = _birth(o, "b", parent)
+    child = db.get_task(tb)["flow_run_id"]
+    newer = db.open_case(objective="newer", session_id="mgr-y", role="manager")
+    db.set_session_case("sess-1", newer, "worker")
+    assert db.clear_session_case_if("sess-1", child) is False
+    assert o.session_service.close_session("sess-1", backends=o._backends).ok
+    assert db.get_flow_run(child)["status"] == "cancelled"
+    assert _sess().current_case_id == newer
+
+
+def test_R02_release_of_a_cancelled_attempt_is_node_fenced(tmp_path, monkeypatch):
+    """M1 kill: another node cannot end a cancelled attempt via release."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    t1 = _submit(o, operation_id="a")
+    _pass(db, o)
+    tok = _run(db, t1)
+    o.cancel_task(t1)
+    assert db.release_turn(t1, tok, backend_not_invoked=True, node_id="intruder") is False
+    assert db.get_task(t1)["status"] == "running"
+    assert db.release_turn(t1, tok, backend_not_invoked=True, node_id="worker-a") is True
+    assert db.get_task(t1)["status"] == "cancelled"
+
+
+def test_R03_stop_holds_activation_until_an_operator_action(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    t1 = _submit(o, operation_id="a")
+    t2 = _submit(o, operation_id="b")
+    _pass(db, o)
+    tok = _run(db, t1)
+    assert o.stop_managed_session_turn(_sess()) == (True, t1)
+    db.complete_turn(t1, tok, {"success": False}, status="failed")
+    assert db.get_task(t1)["status"] == "cancelled"
+    res = _pass(db, o)
+    assert res.activated == 0 and db.get_task(t2)["status"] == "queued"  # held
+    assert _sess().status == SessionStatus.CANCELLED
+    t3 = _submit(o, operation_id="c")  # the operator acts again: hold released
+    assert _sess().status == SessionStatus.IDLE
+    _pass(db, o)
+    assert db.get_task(t2)["status"] == "pending" and db.get_task(t3)["status"] == "queued"
+
+
+def test_R03b_plain_cancel_and_automation_admission_do_not_touch_the_hold(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    t1 = _submit(o, operation_id="a")
+    _pass(db, o)
+    _run(db, t1)
+    assert o.cancel_task(t1) is True  # Case interrupt / explicit id: no hold
+    assert _sess().status == SessionStatus.IDLE
+    assert o.stop_managed_session_turn(_sess()) == (True, t1)
+    assert _sess().status == SessionStatus.CANCELLED
+    db.enqueue_turn(session_id="sess-1", backend="claude", payload={"prompt": "auto"},
+                    body="auto", turn_source="system", operation_id="sys-1",
+                    idempotency_scope="system:sess-1", machine_id="worker-a")
+    assert _sess().status == SessionStatus.CANCELLED  # automation never releases it
+
+
+def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monkeypatch):
+    """Wake dispatcher and transient resume honour the managed stop hold."""
+    import inspect
+
+    from src.core.interfaces import SessionStatus as SS
+    from tests.test_case_transient_resume import _Orch, _append_pause, _iso, _now
+
+    class _Auto(_Orch):
+        """The duck-typed automation self, falling back to the REAL methods."""
+
+        def __getattr__(self, name):
+            static = inspect.getattr_static(TaskOrchestrator, name)
+            if isinstance(static, (staticmethod, classmethod)):
+                return getattr(TaskOrchestrator, name)
+            attr = getattr(TaskOrchestrator, name)
+            return attr.__get__(self) if callable(attr) else attr
+
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+    monkeypatch.setenv("TRANSIENT_PROVIDER_RESUME_ENABLED", "1")
+    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+
+    def scenario(stop: bool):
+        s = _sess()
+        s.status = SS.AWAITING_INPUT
+        o.session_store.save(s)
+        case_id = db.open_case("ship X", "sess-1", role="manager",
+                               completion_criteria='{"round_cap": 5}')
+        if stop:
+            t = _submit(o, operation_id=f"op-{case_id}")
+            _pass(db, o)
+            _run(db, t)
+            assert o.stop_managed_session_turn(_sess())[0] is True
+        auto = _Auto(o.session_store)
+        db.arm_wait_group(case_id, "g1", "ALL", ["w1"])
+        db.append_flow_event(case_id, "task.finished", "worker", entity_type="task",
+                             entity_id="w1", payload={"outcome": "success"})
+        woke = asyncio.run(auto._continue_case_once(db, case_id))
+        _append_pause(db, case_id, "sess-1", retry_at=_iso(_now() - timedelta(seconds=1)))
+        asyncio.run(auto._handle_transient_paused_case(db, case_id))
+        return woke, auto.deliveries
+
+    woke, deliveries = scenario(stop=False)  # control: automation does act
+    assert woke == 1 and deliveries
+    woke, deliveries = scenario(stop=True)
+    assert woke == 0 and deliveries == []

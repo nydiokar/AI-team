@@ -2641,6 +2641,15 @@ class MeshDB:
                         (sid,),
                     ).fetchone()
                     sequence = (int(seq_row[0]) + 1) if seq_row and seq_row[0] is not None else 1
+                    if turn_source in ("human", "operator"):
+                        # [A82 Stage 4b rework] An operator action releases the
+                        # stop hold (legacy parity: the next send clears
+                        # CANCELLED); automation never does.
+                        conn.execute(
+                            "UPDATE sessions SET status = 'idle', updated_at = ? "
+                            "WHERE session_id = ? AND status = 'cancelled'",
+                            (now, sid),
+                        )
                     conn.execute(
                         """
                         INSERT INTO mesh_tasks (
@@ -2862,7 +2871,7 @@ class MeshDB:
               AND (t.blocked_until IS NULL OR t.blocked_until <= ?)
               AND (t.lineage_state IS NULL OR t.lineage_state != 'pending')
               AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
-              AND COALESCE(s.status, '') != 'closed'
+              AND COALESCE(s.status, '') NOT IN ('closed', 'cancelled')
               AND NOT EXISTS (
                   SELECT 1 FROM mesh_tasks e
                   WHERE e.session_id = t.session_id
@@ -2934,8 +2943,11 @@ class MeshDB:
                 ).fetchone()
                 if (
                     srow is None or not srow["turn_queue_enrolled"]
-                    or srow["turn_queue_paused"] or (srow["status"] or "") == "closed"
+                    or srow["turn_queue_paused"]
+                    or (srow["status"] or "") in ("closed", "cancelled")
                 ):
+                    # [A82 Stage 4b rework] `cancelled` = operator stop hold:
+                    # nothing activates until an operator action releases it.
                     return "ineligible"
                 if int(srow["config_revision"]) != int(expected_config_revision):
                     return "stale"
@@ -3009,7 +3021,7 @@ class MeshDB:
             FROM mesh_tasks t JOIN sessions s ON s.session_id = t.session_id
             WHERE t.queue_protocol = 1 AND t.status = 'queued'
               AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
-              AND COALESCE(s.status, '') != 'closed'
+              AND COALESCE(s.status, '') NOT IN ('closed', 'cancelled')
               AND EXISTS (
                   SELECT 1 FROM mesh_tasks a
                   WHERE a.session_id = t.session_id
@@ -3259,7 +3271,9 @@ class MeshDB:
     # and session close with managed rows. Strict: one bounded transaction
     # each, typed errors, never swallowed.
     # ------------------------------------------------------------------ #
-    def request_turn_cancel(self, task_id: str, *, actor: str = "operator") -> "TurnCancelOutcome":
+    def request_turn_cancel(
+        self, task_id: str, *, actor: str = "operator", hold_session: bool = False,
+    ) -> "TurnCancelOutcome":
         """Cancel ONE managed turn, token-fenced, in ONE transaction.
 
         * ``pending`` (never claimed) / ``claimed`` never started: nothing ran,
@@ -3274,7 +3288,14 @@ class MeshDB:
           resolution commits ``cancelled`` (``complete_turn``). Queued rows of
           the session are untouched.
         * terminal ⇒ ``already_terminal``; ``queued`` ⇒ ``not_active``.
-        Idempotent: a repeat converges on the same state/control row."""
+        Idempotent: a repeat converges on the same state/control row.
+
+        ``hold_session`` (operator STOP, Stage 4b rework): in the SAME
+        transaction the session enters the legacy ``cancelled`` status — the
+        stop hold every Case automation consumer already honours (wake
+        dispatcher, transient/quota resume, resume-mode choice, orphan sweep),
+        and which activation honours for managed turns: nothing queued starts
+        until an operator action (a new human/operator admission) releases it."""
         from .turn_queue import CANCEL_MANAGED_ACTION, TurnCancelOutcome
 
         now = _now()
@@ -3288,6 +3309,14 @@ class MeshDB:
                 if row is None or row["queue_protocol"] != 1:
                     raise TurnNotFoundError("no managed turn to cancel", task_id=task_id)
                 status = row["status"]
+                if hold_session and status not in (
+                    "completed", "failed", "cancelled", "failed_node_offline", "withdrawn", "queued",
+                ):
+                    conn.execute(
+                        "UPDATE sessions SET status = 'cancelled', updated_at = ? "
+                        "WHERE session_id = ? AND COALESCE(status, '') != 'closed'",
+                        (now, row["session_id"]),
+                    )
                 if status in ("completed", "failed", "cancelled", "failed_node_offline", "withdrawn"):
                     return TurnCancelOutcome(task_id=task_id, outcome="already_terminal", status=status)
                 if status == "queued":

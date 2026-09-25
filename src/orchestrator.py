@@ -10021,7 +10021,9 @@ Generated from user description: {description}
             },
         )
 
-    def _cancel_managed_turn_if_managed(self, task_id: str, *, actor: str = "operator") -> Optional[bool]:
+    def _cancel_managed_turn_if_managed(
+        self, task_id: str, *, actor: str = "operator", hold_session: bool = False,
+    ) -> Optional[bool]:
         """Operator cancel of ONE managed turn through the token-fenced ledger
         path (``MeshDB.request_turn_cancel``). None ⇒ not a managed row (the
         caller keeps the legacy path; no read at all while nothing is
@@ -10036,7 +10038,7 @@ Generated from user description: {description}
         row = db.get_task(task_id)
         if not row or int(row.get("queue_protocol") or 0) != 1:
             return None
-        out = db.request_turn_cancel(task_id, actor=actor)
+        out = db.request_turn_cancel(task_id, actor=actor, hold_session=hold_session)
         if out.outcome == "cancelled":
             notify_turn_queue_changed()  # the slot freed: next head may activate
         logger.info(
@@ -10050,9 +10052,12 @@ Generated from user description: {description}
         OWNS the active slot, read from the ledger (never ``last_task_id``,
         never a queued id). Returns (cancelled, task_id), or None for an
         unenrolled session (the legacy stop path, no read while nothing is
-        enrolled). Stop is NOT a queue pause: queued turns stay queued and the
-        scheduler activates the next head normally (persistent pause/resume is
-        Stage 6)."""
+        enrolled). [Stage 4b rework] Stop HOLDS the session like legacy stop
+        (session ``cancelled``, set in the cancel transaction): Case automation
+        (wake dispatcher, transient/quota resume, orphan sweep) does not restart
+        it, and activation starts no queued turn until an operator action (a new
+        human/operator admission) releases the hold. Explicit pause/resume
+        routes are Stage 6."""
         from src.control.db import get_db
         from src.control.turn_admission import session_enrollment_sync
 
@@ -10064,7 +10069,7 @@ Generated from user description: {description}
         if not active:
             return (False, None)
         tid = str(active["id"])
-        return (bool(self._cancel_managed_turn_if_managed(tid)), tid)
+        return (bool(self._cancel_managed_turn_if_managed(tid, hold_session=True)), tid)
 
     def _close_managed_session(self, session: Any) -> Optional[str]:
         """``SessionService.close_session`` hook. None ⇒ unenrolled (legacy
