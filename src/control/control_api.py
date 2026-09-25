@@ -861,6 +861,17 @@ async def _store_session_upload(
     from pathlib import Path as _Path
     from src.control.node_inspector import session_node
 
+    if await _session_turn_queue_enrolled(session.session_id):
+        # [A82 Stage 4a] Session-scoped file ingestion is producer 8 (not yet
+        # converted). Refuse BEFORE any file write / BUSY mark rather than run
+        # an unmanaged or half-managed turn into an enrolled session.
+        from src.control.turn_queue import ManagedUnsupportedError
+
+        raise _turn_queue_http(ManagedUnsupportedError(
+            "file upload into a turn-queue-enrolled session is not supported yet",
+            session_id=session.session_id,
+        ))
+
     ext = _os.path.splitext(raw_name)[1].lower()
     blocked_exts: set[str] = {
         ".exe", ".bat", ".cmd", ".com", ".msi", ".msp", ".scr", ".pif",
