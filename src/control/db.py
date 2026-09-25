@@ -2584,7 +2584,7 @@ class MeshDB:
                     fleet = conn.execute(
                         f"""
                         SELECT COUNT(*) AS n, COALESCE(SUM(intent_bytes), 0) AS b
-                        FROM mesh_tasks
+                        FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open
                         WHERE {_MANAGED_OPEN_PREDICATE}
                           AND status IN ('queued', 'pending')
                         """
@@ -2604,7 +2604,7 @@ class MeshDB:
                         )
                     per_session = conn.execute(
                         f"""
-                        SELECT COUNT(*) FROM mesh_tasks
+                        SELECT COUNT(*) FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open
                         WHERE session_id = ? AND {_MANAGED_OPEN_PREDICATE}
                           AND status IN ('queued', 'pending')
                         """,
@@ -2681,7 +2681,7 @@ class MeshDB:
             f"""
             SELECT COUNT(*) AS n, COALESCE(SUM(intent_bytes), 0) AS b,
                    COALESCE(SUM(status = 'queued'), 0) AS q
-            FROM mesh_tasks
+            FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open
             WHERE {_MANAGED_OPEN_PREDICATE} AND status IN ('queued', 'pending')
             """
         ).fetchone()
@@ -2736,7 +2736,8 @@ class MeshDB:
               AND NOT EXISTS (
                   SELECT 1 FROM mesh_tasks e
                   WHERE e.session_id = t.session_id
-                    AND e.{_MANAGED_OPEN_PREDICATE}
+                    AND e.queue_protocol = 1
+                    AND e.status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')
                     AND e.queue_sequence < t.queue_sequence
               )
               AND NOT EXISTS (
@@ -2809,7 +2810,8 @@ class MeshDB:
                 blocker = conn.execute(
                     f"""
                     SELECT 1 FROM mesh_tasks e
-                    WHERE e.session_id = ? AND e.{_MANAGED_OPEN_PREDICATE}
+                    WHERE e.session_id = ? AND e.queue_protocol = 1
+                    AND e.status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')
                       AND (e.queue_sequence < (SELECT queue_sequence FROM mesh_tasks WHERE id = ?)
                            OR e.status IN ('pending', 'claimed', 'running', 'recovery_required'))
                     LIMIT 1
@@ -2979,6 +2981,7 @@ class MeshDB:
                         )
                     total = conn.execute(
                         f"SELECT COALESCE(SUM(intent_bytes), 0) FROM mesh_tasks "
+                        f"INDEXED BY idx_mesh_turns_session_open "
                         f"WHERE {_MANAGED_OPEN_PREDICATE} AND status IN ('queued', 'pending')"
                     ).fetchone()[0]
                     if int(total) > MAX_INTENT_BYTES_FLEET:
