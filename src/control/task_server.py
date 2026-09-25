@@ -881,7 +881,7 @@ def claim_task(task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    ok = db.claim_task(task_id, payload.node_id)
+    ok = db.claim_task(task_id, payload.node_id)  # protocol-0 only (DB-fenced)
     if not ok:
         raise HTTPException(status_code=409, detail="Task already claimed or not pending")
     task = db.get_task(task_id)
@@ -890,7 +890,29 @@ def claim_task(task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
             task["payload"] = json.loads(task["payload"])
         except Exception:
             pass
+    if task:
+        _strip_managed_secrets(task)
     return {"status": "claimed", "task": task}
+
+
+def _strip_managed_secrets(row: Dict[str, Any]) -> Dict[str, Any]:
+    """[A82 Stage 3 rework] Never return the managed execution credential or
+    admission material through a legacy response."""
+    for key in ("claim_token", "idempotency_key", "admission_hash"):
+        row.pop(key, None)
+    return row
+
+
+def _refuse_if_managed(db: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    """[A82 Stage 3 rework, M5] Legacy protocol-0 routes must never mutate a
+    protocol-1 row (that would bypass token fencing). Returns the row."""
+    task = db.get_task(task_id)
+    if task and int(task.get("queue_protocol") or 0) == 1:
+        raise HTTPException(
+            status_code=409,
+            detail="managed (protocol-1) turn: use the managed carrier routes",
+        )
+    return task
 
 
 # --------------------------------------------------------------------------- #
@@ -1012,9 +1034,30 @@ class ManagedAttemptPayload(BaseModel):
     """Identifies one managed execution attempt (design §6): the carrier node,
     its process incarnation and the per-attempt claim token."""
 
-    node_id: str
-    claim_token: str
-    incarnation_id: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str = Field(min_length=1, max_length=128)
+    claim_token: str = Field(min_length=1, max_length=128)
+    incarnation_id: Optional[str] = Field(default=None, max_length=128)
+    # Release only: the carrier's write-ahead attestation that the backend was
+    # never invoked for this attempt (allows release of a started row).
+    backend_not_invoked: bool = False
+
+
+# [A82 Stage 3 rework, m2] Server-side byte cap for managed carrier bodies: one
+# result envelope (8 MiB, design §7) plus bounded framing.
+_MANAGED_BODY_MAX_BYTES = 8 * 1024 * 1024 + 64 * 1024
+
+
+def _guard_managed_body(request: Request) -> None:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            too_big = int(content_length) > _MANAGED_BODY_MAX_BYTES
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"ok": False, "reason": "invalid_content_length"})
+        if too_big:
+            raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
 
 
 @app.post("/tasks/{task_id}/start-managed", dependencies=[Depends(_require_auth)])
@@ -1052,7 +1095,12 @@ def release_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, A
     from .turn_queue import TurnQueueError
 
     try:
-        released = db.release_turn(task_id=task_id, claim_token=payload.claim_token)
+        released = db.release_turn(
+            task_id=task_id,
+            claim_token=payload.claim_token,
+            backend_not_invoked=payload.backend_not_invoked,
+            node_id=payload.node_id,
+        )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 503), detail=str(e))
     if not released:
@@ -1098,19 +1146,41 @@ def enter_managed_recovery(task_id: str, payload: ManagedRecoveryPayload) -> Dic
     return {"status": "recovery_required", "task_id": task_id}
 
 
-class ManagedResultPayload(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class _ManagedResultFields(BaseModel):
+    """[A82 Stage 3 rework, m2] The exact result-envelope fields a carrier may
+    send (the worker's ``_execute_task`` result dict); anything else is
+    rejected (extra="forbid"). Text fields are length-bounded."""
 
-    node_id: str
-    claim_token: str
+    model_config = ConfigDict(extra="forbid")
+
     success: bool = True
-    output: str = ""
-    errors: List[str] = Field(default_factory=list)
-    backend_session_id: Optional[str] = None
-    artifact_path: Optional[str] = None
+    output: str = Field(default="", max_length=8 * 1024 * 1024)
+    errors: List[str] = Field(default_factory=list, max_length=200)
+    files_modified: List[str] = Field(default_factory=list, max_length=10000)
+    execution_time: float = 0.0
+    timestamp: str = Field(default="", max_length=64)
+    return_code: int = 0
+    error_detail: str = Field(default="", max_length=64 * 1024)
+    raw_stdout: str = Field(default="", max_length=8 * 1024 * 1024)
+    raw_stderr: str = Field(default="", max_length=1024 * 1024)
+    error_class: str = Field(default="", max_length=128)
+    backend_session_id: Optional[str] = Field(default=None, max_length=256)
+    driver_type: str = Field(default="", max_length=64)
+    driver_status: str = Field(default="", max_length=64)
+    cache_health: str = Field(default="unknown", max_length=64)
+    cache_unhealthy_count: int = 0
+    previous_backend_session_ids: List[str] = Field(default_factory=list, max_length=1000)
+    usage: Optional[Dict[str, Any]] = None
+    telemetry_invocation_id: str = Field(default="", max_length=128)
+    artifact_path: Optional[str] = Field(default=None, max_length=4096)
 
 
-@app.post("/tasks/{task_id}/result-managed", dependencies=[Depends(_require_auth)])
+class ManagedResultPayload(_ManagedResultFields):
+    node_id: str = Field(min_length=1, max_length=128)
+    claim_token: str = Field(min_length=1, max_length=128)
+
+
+@app.post("/tasks/{task_id}/result-managed", dependencies=[Depends(_require_auth), Depends(_guard_managed_body)])
 def submit_managed_result(task_id: str, payload: ManagedResultPayload) -> Dict[str, Any]:
     """Atomic managed (protocol-1) result commit (design §6). Verifies the claim
     token + state and commits the terminal outcome, native session id and active
@@ -1119,7 +1189,8 @@ def submit_managed_result(task_id: str, payload: ManagedResultPayload) -> Dict[s
     receipt that echoes ``task_id`` AND ``claim_token`` so the carrier's result
     spool can prune ONLY on a task/token-matched receipt (never on a bare 2xx or
     timeout — design §6). An identical repeated commit for the current token is
-    idempotent; a superseded/foreign token is rejected (409)."""
+    idempotent; a superseded/foreign token is rejected (409). Body size is
+    capped BEFORE validation by the ``_guard_managed_body`` dependency (m2)."""
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -1198,18 +1269,12 @@ def _commit_managed_result(
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
 
 
-class ManagedTerminalResult(BaseModel):
+class ManagedTerminalResult(_ManagedResultFields):
     """A durable terminal result presented as recovery evidence (m1): it must be
     a real result envelope — an explicit boolean ``success`` plus its output —
     not merely any non-null value."""
 
-    model_config = ConfigDict(extra="allow")
-
     success: bool
-    output: str = ""
-    errors: List[str] = Field(default_factory=list)
-    backend_session_id: Optional[str] = None
-    artifact_path: Optional[str] = None
 
 
 class QuiescenceObservationPayload(BaseModel):
@@ -1219,18 +1284,34 @@ class QuiescenceObservationPayload(BaseModel):
     result. Node registration/offline status is NOT quiescence — the validator
     rejects a bare boolean/offline label."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    node_id: str
-    claim_token: str
+    node_id: str = Field(min_length=1, max_length=128)
+    claim_token: str = Field(min_length=1, max_length=128)
     quiescent: bool = False
     terminal: bool = False
-    terminal_status: Optional[str] = None
-    native_session_id: Optional[str] = None
+    terminal_status: Optional[str] = Field(default=None, max_length=32)
+    native_session_id: Optional[str] = Field(default=None, max_length=256)
+    # [A82 Stage 3 rework] How the carrier knows the backend is stopped:
+    #   backend_terminal  — native execution identity + terminal observation;
+    #   backend_quiescent — the SAME live carrier process (observer incarnation ==
+    #                       claim incarnation) observed its backend quiescent;
+    #   carrier_restarted — a NEW carrier process (registered incarnation) that
+    #                       reaped the old incarnation's backend children at boot.
+    stop_evidence: Optional[str] = Field(default=None, max_length=32)
+    observer_incarnation: Optional[str] = Field(default=None, max_length=128)
     result: Optional[Dict[str, Any]] = None
 
 
-@app.post("/tasks/{task_id}/quiescence", dependencies=[Depends(_require_auth)])
+def _registered_incarnation(db: Any, node_id: str) -> Optional[str]:
+    node = get_registry().get(node_id)
+    if node is not None and node.incarnation_id:
+        return node.incarnation_id
+    row = db.get_node(node_id) if hasattr(db, "get_node") else None
+    return (row or {}).get("incarnation_id")
+
+
+@app.post("/tasks/{task_id}/quiescence", dependencies=[Depends(_require_auth), Depends(_guard_managed_body)])
 def record_quiescence_observation(
     task_id: str, payload: QuiescenceObservationPayload
 ) -> Dict[str, Any]:
@@ -1271,13 +1352,30 @@ def record_quiescence_observation(
             artifact_path=res.artifact_path,
         )
         return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.status}
-    # No result: a quiescence observation must carry native execution identity
-    # AND an explicit terminal/stop observation. Without a result the outcome is
-    # not success — only failed/cancelled may be recorded.
-    if not (payload.quiescent and payload.terminal and (payload.native_session_id or "").strip()):
+    # No result: a quiescence observation must carry an explicit terminal/stop
+    # observation bound to a verifiable carrier identity. Without a result the
+    # outcome is not success — only failed/cancelled may be recorded.
+    if not (payload.quiescent and payload.terminal):
+        raise HTTPException(status_code=409, detail="insufficient quiescence evidence (requires quiescent + terminal)")
+    kind = payload.stop_evidence or "backend_terminal"
+    registered = _registered_incarnation(db, payload.node_id)
+    claim_inc = task.get("claim_incarnation")
+    if kind == "backend_terminal":
+        ok = bool((payload.native_session_id or "").strip())
+    elif kind == "backend_quiescent":
+        ok = bool(payload.observer_incarnation) and payload.observer_incarnation == claim_inc == registered
+    elif kind == "carrier_restarted":
+        ok = (
+            bool(payload.observer_incarnation)
+            and payload.observer_incarnation == registered
+            and payload.observer_incarnation != claim_inc
+        )
+    else:
+        ok = False
+    if not ok:
         raise HTTPException(
             status_code=409,
-            detail="insufficient quiescence evidence (requires quiescent + terminal + native execution identity)",
+            detail="insufficient quiescence evidence (unverifiable stop evidence / carrier identity)",
         )
     if payload.terminal_status not in ("failed", "cancelled"):
         raise HTTPException(
@@ -1292,6 +1390,9 @@ def record_quiescence_observation(
         "terminal": True,
         "terminal_status": payload.terminal_status,
         "native_session_id": payload.native_session_id,
+        "stop_evidence": kind,
+        "observer_incarnation": payload.observer_incarnation,
+        "source": "carrier",
     }
     try:
         outcome = db.resolve_recovery(
@@ -1315,6 +1416,7 @@ def release_task(task_id: str, payload: ClaimPayload) -> Dict[str, str]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
+    _refuse_if_managed(db, task_id)
     ok = db.release_task(task_id, payload.node_id)
     if not ok:
         raise HTTPException(status_code=409, detail="Task not claimed by this node or not in claimed state")
@@ -1341,7 +1443,7 @@ def submit_result(
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    task = db.get_task(task_id)
+    task = _refuse_if_managed(db, task_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
 

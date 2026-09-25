@@ -366,6 +366,19 @@ class BindBody(BaseModel):
     chat_id: Optional[int] = None
 
 
+class TurnRecoveryResolveBody(BaseModel):
+    """[A82 Stage 3 rework] Operator unwedge for a held managed turn. Minimal
+    (full UI is Stage 6): the decision + note are recorded on the row."""
+
+    model_config = {"extra": "forbid"}
+
+    decision: str = Field(pattern="^(failed|cancelled|requeue)$")
+    note: str = Field(default="", max_length=500)
+    # The operator explicitly accepts that the backend outcome is unproven
+    # (required for a started/held turn; not needed to requeue an unstarted one).
+    acknowledge_uncertain: bool = False
+
+
 class RuntimeFlagBody(BaseModel):
     value: bool
     set_by: Optional[str] = Field(default=None, max_length=128)
@@ -1153,6 +1166,57 @@ def build_control_api(orchestrator) -> FastAPI:
         except Exception:
             pass
         return {"status": "ok", "governor": governor}
+
+    @app.post("/api/turn-requests/{task_id}/resolve-recovery", dependencies=[Depends(_require_auth)])
+    def api_resolve_turn_recovery(task_id: str, body: TurnRecoveryResolveBody) -> JSONResponse:
+        """[A82 Stage 3 rework] Operator exit for every held managed state.
+
+        * ``claimed`` (never started) → ``requeue`` only: token-fenced release
+          to pending (prompt preserved, token cleared).
+        * ``running`` / ``recovery_required`` → ``failed``/``cancelled`` only,
+          with ``acknowledge_uncertain``: the row enters recovery (if running)
+          and is resolved through the Stage-2 ``resolve_recovery`` with the
+          operator decision recorded as evidence. Never ``completed`` (no
+          result) and never requeued after start (double-execution risk).
+        No claim token is needed or returned."""
+        from src.control.turn_queue import TurnQueueError
+
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        row = db.get_task(task_id)
+        if not row or int(row.get("queue_protocol") or 0) != 1:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "no_managed_turn"})
+        status = str(row.get("status") or "")
+        token = row.get("claim_token") or ""
+        try:
+            if status == "claimed":
+                if body.decision != "requeue":
+                    raise HTTPException(status_code=409, detail={"ok": False, "reason": "unstarted_turn_requeue_only"})
+                if not db.release_turn(task_id, token):
+                    raise HTTPException(status_code=409, detail={"ok": False, "reason": "state_changed"})
+                return JSONResponse({"ok": True, "task_id": task_id, "status": "pending"})
+            if status in ("running", "recovery_required"):
+                if body.decision == "requeue":
+                    raise HTTPException(status_code=409, detail={"ok": False, "reason": "started_turn_cannot_requeue"})
+                if not body.acknowledge_uncertain:
+                    raise HTTPException(status_code=409, detail={"ok": False, "reason": "acknowledgement_required"})
+                if status == "running":
+                    db.enter_recovery(task_id, token, reason=f"operator: {body.note}"[:500])
+                evidence = {
+                    "source": "operator",
+                    "task_id": task_id,
+                    "quiescent": True,
+                    "terminal": True,
+                    "terminal_status": body.decision,
+                    "acknowledged_uncertain": True,
+                    "note": body.note,
+                }
+                res = db.resolve_recovery(task_id, token, evidence, resolved_status=body.decision)
+                return JSONResponse({"ok": True, "task_id": task_id, "status": res.resolved_status})
+        except TurnQueueError as e:
+            raise HTTPException(status_code=getattr(e, "status_code", 409), detail={"ok": False, "reason": e.code})
+        raise HTTPException(status_code=409, detail={"ok": False, "reason": "not_resolvable", "status": status})
 
     @app.get("/api/flags", dependencies=[Depends(_require_auth)])
     def api_list_flags() -> JSONResponse:

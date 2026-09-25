@@ -38,6 +38,7 @@ logger = logging.getLogger("worker.managed_result_spool")
 MAX_ENVELOPE_BYTES = 8 * 1024 * 1024          # 8 MiB per serialized result
 MAX_RETAINED_BYTES = 128 * 1024 * 1024        # 128 MiB retained per carrier
 MAX_CONCURRENT_DELIVERIES = 2                  # informational; caller enforces
+MAX_DEAD_LETTERS = 256                         # m3: bounded dead-letter count
 
 # Validated identifier syntax for spool paths — reject anything that could
 # escape the spool dir or collide. Task/token ids are server-minted opaque
@@ -70,6 +71,54 @@ class SpoolReservation:
     task_id: str
     claim_token: str
     nbytes: int
+
+
+def _fsync_dir(path: Path) -> None:
+    """fsync a directory so a completed rename survives power loss (m4)."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_json(dir_path: Path, final: Path, body: Dict[str, Any]) -> None:
+    """0600 temp + fsync + atomic replace + dir fsync."""
+    dir_path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(dir_path, 0o700)
+    except OSError:
+        pass
+    data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    fd, tmp = tempfile.mkstemp(dir=str(dir_path), prefix=".spool-", suffix=".tmp")
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, final)
+    _fsync_dir(dir_path)
+
+
+def _clean_orphan_tmps(dir_path: Path) -> int:
+    """Remove ``.spool-*.tmp`` left by a crash mid-write (never a committed
+    envelope — those are only visible after the atomic rename). Returns count."""
+    n = 0
+    if not dir_path.exists():
+        return 0
+    for p in dir_path.glob(".spool-*.tmp"):
+        try:
+            p.unlink()
+            n += 1
+        except OSError:
+            pass
+    return n
 
 
 def _validate_id(kind: str, value: str) -> str:
@@ -113,16 +162,50 @@ class ManagedResultSpool:
     def _path(self, task_id: str, claim_token: str) -> Path:
         return self.dir / f"{_validate_id('task_id', task_id)}.{_validate_id('claim_token', claim_token)}.json"
 
+    @property
+    def dead_dir(self) -> Path:
+        return self.dir.parent / "managed_result_dead"
+
     def _retained_bytes(self) -> int:
-        if not self.dir.exists():
-            return 0
         total = 0
-        for p in self.dir.glob("*.json"):
-            try:
-                total += p.stat().st_size
-            except OSError:
-                pass
+        for d in (self.dir, self.dead_dir):
+            if not d.exists():
+                continue
+            for p in d.glob("*.json"):
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
         return total
+
+    def clean_orphan_tmps(self) -> int:
+        """Boot hygiene (m4): drop crash-orphaned temp files; returns count."""
+        return _clean_orphan_tmps(self.dir)
+
+    def dead_letter(self, task_id: str, claim_token: str, reason: str) -> bool:
+        """[m3] Move an envelope the server DEFINITIVELY refused (4xx) out of the
+        replay queue into a bounded dead-letter dir (it still counts against the
+        retained budget, so a pile-up stops new managed claims rather than
+        growing without bound). Returns False if the dead-letter dir is full
+        (the envelope then stays in the spool — never deleted)."""
+        src = self._path(task_id, claim_token)
+        if not src.exists():
+            return True
+        self.dead_dir.mkdir(parents=True, exist_ok=True)
+        if len(list(self.dead_dir.glob("*.json"))) >= MAX_DEAD_LETTERS:
+            logger.error("event=managed_dead_letter_full task_id=%s", task_id)
+            return False
+        try:
+            os.replace(src, self.dead_dir / src.name)
+            _atomic_write_json(
+                self.dead_dir, self.dead_dir / (src.name + ".reason"),
+                {"task_id": task_id, "reason": (reason or "")[:500]},
+            )
+            _fsync_dir(self.dir)
+        except OSError:
+            logger.warning("event=managed_dead_letter_failed task_id=%s", task_id, exc_info=True)
+            return False
+        return True
 
     # --- reservation (design §6: reserve BEFORE start) ------------------- #
     def reserve(self, task_id: str, claim_token: str, nbytes: int) -> Optional[SpoolReservation]:
@@ -188,6 +271,7 @@ class ManagedResultSpool:
                 os.close(fd)
             os.chmod(tmp, 0o600)
             os.replace(tmp, final)  # atomic on POSIX
+            _fsync_dir(self.dir)  # m4: make the rename itself durable
             # The envelope now occupies retained bytes; drop its reservation.
             self._reserved.pop((task_id, claim_token), None)
         except OSError as e:
@@ -258,3 +342,64 @@ class ManagedResultSpool:
                 continue
             out.append((tid, tok, env))
         return out
+
+
+class ManagedClaimStore:
+    """[A82 Stage 3 rework, B2] Durable record of every managed attempt this
+    carrier holds, written AT CLAIM TIME (before start) under carrier state
+    (``<state_dir>/managed_claims/<task_id>.json``, 0600, atomic + dir fsync)
+    and removed ONLY on a durable receipt / acknowledged release / resolved
+    recovery. It survives a crash so a restarted carrier can always move every
+    held row (no token lives only in memory).
+
+    ``invoked`` is a WRITE-AHEAD flag: set durably BEFORE the backend is
+    called, so ``invoked == False`` is proof the backend never ran for that
+    attempt."""
+
+    def __init__(self, state_dir: str | os.PathLike[str]) -> None:
+        self.dir = Path(state_dir) / "managed_claims"
+
+    def _path(self, task_id: str) -> Path:
+        return self.dir / f"{_validate_id('task_id', task_id)}.json"
+
+    def put(self, task_id: str, record: Dict[str, Any]) -> None:
+        _validate_id("claim_token", str(record.get("claim_token", "")))
+        try:
+            _atomic_write_json(self.dir, self._path(task_id), {**record, "task_id": task_id})
+        except OSError as e:
+            raise ResultSpoolError(f"failed to persist managed claim {task_id}: {e}") from e
+
+    def update(self, task_id: str, **fields: Any) -> Dict[str, Any]:
+        rec = self.get(task_id) or {}
+        rec.update(fields)
+        self.put(task_id, rec)
+        return rec
+
+    def get(self, task_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            return json.loads(self._path(task_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def remove(self, task_id: str) -> None:
+        try:
+            self._path(task_id).unlink(missing_ok=True)
+            _fsync_dir(self.dir)
+        except OSError:
+            logger.warning("event=managed_claim_remove_failed task_id=%s", task_id)
+
+    def list(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        if not self.dir.exists():
+            return out
+        for p in sorted(self.dir.glob("*.json")):
+            if limit is not None and len(out) >= limit:
+                break
+            try:
+                out.append(json.loads(p.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                logger.warning("event=managed_claim_unreadable path=%s", p.name)
+        return out
+
+    def clean_orphan_tmps(self) -> int:
+        return _clean_orphan_tmps(self.dir)
