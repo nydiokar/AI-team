@@ -1062,7 +1062,42 @@ Equivalent, survives: dropping the legacy term from `reserve()` alone. The txn c
 5. Enrollment itself (quiescence / no-legacy-work checks, capability refusal) is not implemented. `enroll_session` is only the marker (Stage 7 rollout).
 6. `compact_session` and other direct execution paths are not guarded yet (producer 2+). Only the `submit_instruction` lane and uploads fail closed.
 7. After a managed turn completes, session BUSY/IDLE display is not driven by the queue (Stage 6 UI truth).
-8. There is no gateway-in-process carrier. Managed rows execute only on a Stage-3 managed carrier (the local daemon for unpinned sessions), so an enrolled session requires `WORKER_MANAGED_TURNS` on its carrier.
+8. *(Rewritten by the Stage 4a rework, findings 3/4.)* There is no carrier inside the gateway process. A managed row executes only on a Stage-3 managed carrier (`WORKER_MANAGED_TURNS`) whose node id is the row's assignment:
+   - The assignment is resolved from the node registration persisted in `nodes.managed_backends`: a session pinned to another node keeps its pin; an unpinned or host-pinned session goes to `MESH_LOCAL_CARRIER_NODE_ID`. A hostname is used only if a carrier registered under exactly that id.
+   - Admission refuses with 503 `carrier_unavailable` when nobody can claim.
+   - `claim_turn` enforces the assignment inside the CAS.
+   - Operator action before enrollment: set `MESH_LOCAL_CARRIER_NODE_ID` to the local daemon's `WORKER_NODE_ID`.
+
+### Stage 4a rework — A87 adversarial review closed (2026-09-25, commits `90564be`..`857a03a` + this record)
+
+| Finding | Fix | Test (mutation killed) |
+|---|---|---|
+| **M1** blocked heads starve LIMIT 25 | Migration 35 (unreleased) adds `blocked_until` and `blocked_attempts`. A prepare failure or oversize refusal sets an exponential capped backoff: 3 s·2^(n-1), at most 300 s (`_apply_turn_block` / `mark_turn_blocked`). The head query skips a head until its backoff expires; an edit re-arms it. The WARNING is logged only when the reason changes. | SCH09, probe `test_blocked_heads_starve_other_sessions`, SCH09b, SCH09c (no filter → 3 fail; no re-arm → SCH09b) |
+| **M2** legacy regression on marker read | Process-level presence flag `MeshDB.any_session_enrolled()`. It is loaded at start from `SELECT … LIMIT 1`, raised before an enrollment commits, and refreshed (cleared when no session is enrolled) each scheduler pass. A generation guard means a refresh never lowers it across a concurrent enroll. While no session is enrolled, the legacy path does no marker read and behaves exactly as main. Otherwise there is one read per request, offloaded; the web route passes its decision on (`turn_queue_enrolled`). An unreadable marker fails closed only when enrollment can exist. | P1-11 (probe L1), P1-11b (L2), P1-11c (exactly one read per request), P1-11d (presence ignored → P1-11/11b fail) |
+| **M3** claim ignores assignment | `claim_turn` refuses (409) unless `row.machine_id == node_id`: once as a pre-check and again as an `AND machine_id = ?` predicate in the CAS. An unassigned managed row is claimable by nobody. Stage-2 `activate_turn` now assigns the session pin to an unassigned row (activation = carrier assignment), so no Stage 2/3 fixture changed. | probe `test_claim_ignores_machine_assignment` (the pre-check alone is backed up by the SQL predicate; removing both → fails) |
+| **M4** hostname assignment | `_managed_carrier_assignment` resolves the pin, else `MESH_LOCAL_CARRIER_NODE_ID` (new config). The target must have REGISTERED the backend as managed-capable; registration is persisted in `nodes.managed_backends` so an out-of-process task server works. Otherwise typed `CarrierUnavailableError` 503 before any side effect. It is re-resolved at activation; a carrier that disappeared makes the head back off. | P1-07b, P1-07c, P1-07d, P1-07e (hostname fallback / no registry check → P1-07c, P1-07e fail) |
+| **m5/m6** phantom / double lineage | Admission is committed first, with a 30 s lineage hold (`not_before`). Only the request whose insert won writes lineage (`_record_flow_run_start`). `finalize_turn_lineage` then attaches Case + lineage metadata and releases the hold. A refusal or a replay writes no lineage. A crash between the two only delays activation by ≤30 s, and that turn then lacks its Case link (best-effort, as in legacy). | P1-12 (probe L3), P1-12b (L4), P1-12c, P1-04 (lineage on replay → P1-04/P1-12 fail) |
+| **m7** 408 untested | Test through the real app (`build_control_api`) with a stalled chunked body. | P1-13b (deadline disabled → fails) |
+| **m8** 2 MiB refuses valid prompts | The compat cap is derived as 12 B/char (escaped surrogate pair) × (262144 + 48000) + 256 KiB envelope ≈ 3.8 MiB. **This deviates from design §8's 2 MiB**, which would refuse valid escaped non-BMP prompts. A 256 KiB rule is pre-registered for `/api/sessions/{id}/turn-requests`. | P1-13 (2 MiB cap → fails) |
+| **m9** raw `QueueFull` | `SessionTaskQueue.put` (shared) retries `put_nowait` until the caller's `wait_for` expires, so the orchestrator raises `RuntimeError("Task queue is full")` as on main. Unshared ⇒ `super().put`. | ADM04f (override removed → fails), ADM04g |
+| **m10** steady 3 s poll | Next wake comes from `_next_timeout`. It is immediate if LIMIT was hit, and otherwise the earliest of: (a) a head's due `not_before` / `blocked_until`; (b) for heads waiting on their own slot holder, a backoff 3→30 s, reset by any hint or activation; (c) a 60 s lost-hint safety net. With no queued rows it waits for a hint only. | SCH07 (≤6 passes in 1.6 s; steady poll → fails), SCH10 |
+
+**Why (b) exists.** In the default deployment (`MESH_EMBEDDED_SERVER=false`) `/result-managed` commits in the task-server process, so its hint cannot reach the gateway scheduler. The next head therefore activates within ≤30 s of a completion (≈3 s right after activity). A cross-process wake signal is deferred to the A84 completion-delivery work.
+
+**Adopted probes.**
+- `tests/test_turn_queue_4a_probes.py` is the reviewer DB file adopted verbatim, except the claim probe now asserts refusal + the correct claim and the plan probe asserts index use.
+- The legacy probes are P1-11/11b/12/12b; the 408 probe is P1-13b.
+
+**Mutation run.** Scratch worktree, removed with plain `git worktree remove`; spawn guard on. All 11 new guards were killed, as listed in the table.
+
+**Verification.**
+- turn-queue (15 files): 228 passed / 7 red. The reds are unchanged: SYS03-07 are Stage 4b+, and api ×2 are Stage 6.
+- Named regression group: 303 passed. Adjacent group: 262 passed. node/registry/settings users: 255 passed.
+
+**Residuals.** Stage 4a residuals 1-7 stand (2 = cold allowance cache). New:
+- (9) cross-process completion wake is bounded by the slot backoff, not immediate;
+- (10) the node registration column is persisted at register time only, so a carrier that registered before this migration must re-register before its sessions can be admitted (fail closed);
+- (11) the lineage hold (30 s) is a bounded crash window without Case lineage.
 
 ## 16. Review record
 
