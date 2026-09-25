@@ -1123,6 +1123,80 @@ Equivalent, survives: dropping the legacy term from `reserve()` alone. The txn c
 - **New:** lineage recovery re-runs `_record_flow_run_start` for join/attach when the crashed writer wrote nothing. Links are idempotent (`INSERT OR IGNORE`), but a `task.attached` flow event can be duplicated if the crash fell between the event and the link. That is an audit row only.
 - **New:** `_record_flow_run_start` still swallows its own DB errors (legacy best-effort). A lineage DB failure, as opposed to a crash, finalizes with whatever lineage was written.
 
+### Stage 4a rework 3 — A87 round-3 review closed (2026-09-25, commits `ae90528`..`5ebe54a` + this record)
+
+**Root cause addressed.** The managed lineage was a multi-step, non-transactional sequence: its steps could fail silently, recovery treated a partial result as complete, and it was not fenced by the lease. It is now **one convergent, idempotent, raising procedure keyed on the task id**, `orchestrator._managed_lineage_converge`. The live writer and recovery run exactly this procedure; recovery is a re-run, and there is no "treat partial as done" branch.
+
+**Write inventory.** This is the diff against the live legacy `_record_flow_run_start`; the parity test below enforces it.
+
+| Branch | Writes (all get-or-create / at-most-once, all RAISE on DB error) |
+|---|---|
+| flag OFF | `flow_runs` dispatch-start row for the task (`get_or_create_task_flow_run`) |
+| (J) join, open Case | task link `task` (created_by=manager) · `task.attached` {membership: worker} · affiliation `current_case_id/case_role=worker` (`db.set_session_case`) · session link `worker` (created_by=manager) |
+| (B) attach to the session's open Case | task link `task` (created_by=system) · `task.attached` · affiliation (role resolved from the session link, no-op if already current) |
+| (C) standalone | nothing |
+| (A) birth | `flow_runs` keyed on the task (lineage columns parent_flow_run_id / dispatched_by / dispatch_file / completion_criteria / objective_lock) · `flow.created` · `root_task` link · session `worker` link · `session.attached` {role: worker} · affiliation worker · parent `child_flow` link · parent `task.dispatched` |
+| Harness gate outcome | Runs before admission; a refusal inserts no row and writes no lineage, so there is nothing to persist. |
+
+**Mechanics.**
+- **Flow runs:** `MeshDB.get_or_create_task_flow_run` does SELECT-by-task_id + INSERT in one write transaction, so two writers converge on the same Case.
+- **Events:** `MeshDB.append_flow_event_once` does an existence check + insert on (flow, type, entity_type, entity_id) in one transaction.
+- **Links:** these were already unique-keyed.
+- **Strict mode:** `_record_flow_link` / `_record_flow_event` take kw-only `strict` / `once`. Their defaults are unchanged, so legacy is byte-identical.
+- **Fixed decision:** the durable decision an earlier writer took (its own flow_run, or a membership link) is reused, so a Case closing in between cannot re-route a half-written lineage.
+- **Fencing:** `fence()` checks lease ownership and withdrawal after the decision read and before each write group. `finalize_turn_lineage` stays the CAS. A stalled writer's late steps are no-ops on already-created objects.
+- **Failure handling:** any error becomes a typed 503 and the row stays `pending`; recovery re-runs after the lease expires. The procedure runs in a worker thread, off the event loop.
+- **Withdraw (m1):** `withdraw_turn` sets `lineage_state='void'` on a pending lineage. The writer's fence (or finalize) then reports **withdrawn**: the admitting call returns `TurnAdmission(status='withdrawn')`, replays report withdrawn, and the recovery list skips the row. Telegram answers "Withdrawn".
+- **Idle dead-carrier wake (M3):** with no queued rows but managed `pending` rows present, the scheduler keeps the bounded safety-net wake, so `requeue_turns_on_dead_carriers` runs even when the fleet is otherwise idle.
+- **Read-first requeue (m2):** the requeue does a read-only existence check first and takes BEGIN IMMEDIATE only when a candidate exists.
+
+**Tests.** `tests/test_turn_queue_4a_r3.py` contains the 8 A87 probes, adapted to assert correct behavior:
+- 1a join and 1a birth: raise 503 → not activatable → recovered and activated with the link. The birth probe now injects into `get_or_create_task_flow_run`, the managed birth.
+- 1b: recovered equals live, for both join and birth.
+- 1c: exactly 1 flow_run and 1 child_flow link.
+- 1d: withdrawn / withdrawn / void / no link.
+- 2: payload metadata survives requeue.
+- 2b: real `TurnScheduler.run` with an idle fleet → requeued.
+
+Plus these additions:
+- requeue never touches claimed/running rows;
+- requeue on a stale heartbeat while status is still `online`;
+- requeue reads before taking the write lock;
+- **legacy-parity** tests (join / attach / birth), comparing links, events and affiliation;
+- a full re-run after a crash before finalize writes each event once;
+- a strict link failure raises and the row stays pending;
+- recovery reuses the durable decision.
+
+R1/R1b (rework 2) now inject the crash into `_managed_lineage_converge`, since the managed path no longer calls `_record_flow_run_start`.
+
+**Mutation run.** Scratch worktree, removed; spawn guard on. All killed:
+
+| Mutant | Failing test |
+|---|---|
+| birth not get-or-create | R1c |
+| event not once | full re-run |
+| strict swallowed | strict-link |
+| join open-check swallowed | 1a join |
+| fence removed | 1d |
+| withdraw doesn't void | 1d, SCH08 |
+| no idle pending wake | 2b |
+| requeue touches claimed/running | 5 tests |
+| heartbeat staleness ignored | stale-heartbeat, probe 2 |
+| read-first removed | read-first |
+| no decision reuse | decision-reuse |
+
+The first run left 4 survivors (event-once, strict, decision-reuse, requeue-touches-claimed). I added the tests above until all were killed.
+
+**Verification.**
+- turn-queue (17 files): 251 passed + r3 additions / 7 red. The reds are unchanged: SYS03-07 are Stage 4b+, and api ×2 are Stage 6.
+- Regression group: 303 passed. Adjacent group: 262 passed.
+
+**Carried (for CONTEXT.md).**
+- **m3:** `node_heartbeat_timeout_sec` (default 90 s) must be at least 2× the worker heartbeat interval (30 s). A smaller value marks live carriers dead and requeues their unclaimed rows repeatedly. It is fail-safe (queued, visible, not lost) but noisy. It is documented rather than clamped.
+- **m4:** after a gateway restart, a requeued row's backoff can grow to about 48 s (3→6→12→24 s accumulations) before it re-activates.
+- **Residual:** a withdrawal that lands AFTER the procedure has written a link (between write groups) leaves that link on a withdrawn turn. The fence stops further writes and reports withdrawn, but written links are not deleted.
+- **Stands from rework 2:** M3 enrollment must happen inside the gateway process, and m4 compat cap. m2 (the sync carrier read) is now partly addressed because lineage runs in a thread; the carrier-assignment read in admission/prepare is still inline.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
