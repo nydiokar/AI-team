@@ -340,9 +340,32 @@ class _PendingTurn:
     The reader fulfils ``future`` when the matching ``ResultMessage`` arrives.
     ``progress_cb`` is the activity callback for *this* turn, routed by the
     reader while this turn is the active (head) one.
+
+    [A82 Stage 3] Correlation reservation (design §6, closes SDK02 — "reserve on
+    the SDK loop before submitting a query"). A ``ResultMessage`` is served to the
+    head pending turn ONLY when the CLI has demonstrably begun *this query's own
+    response stream*, so an unsolicited/autonomous ``ResultMessage`` (a
+    ``run_in_background`` job finishing) can never be popped off ``_pending`` and
+    mis-attributed as this turn's explicit answer. Two fields express that:
+
+      * ``response_started`` — set True by the reader when it observes the first
+        message of this query's response (a ``SystemMessage`` init or an
+        ``AssistantMessage``). In production every real reply's stream begins with
+        such a message before its terminal ``ResultMessage`` (verified against the
+        installed SDK: a lone ``ResultMessage`` with nothing before it does not
+        occur for a normal query — an early failure raises instead).
+      * ``submit_settled`` — set True by ``_submit_turn`` one loop tick AFTER the
+        query is issued. Before it settles, a reply the CLI produced *in the same
+        tick as the query* is still this turn's (covers a bare result-only reply).
+
+    ``_dispatch`` serves the head iff ``awaiting_response and (response_started or
+    not submit_settled)``; otherwise the result is autonomous → proactive sink.
     """
     future: "asyncio.Future"
     progress_cb: Any = None
+    awaiting_response: bool = True
+    response_started: bool = False
+    submit_settled: bool = False
 
 
 class SDKStreamEndedError(RuntimeError):
@@ -922,6 +945,14 @@ class _SDKSession:
         if self._client is None:
             return
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock, ThinkingBlock
+        # [A82 Stage 3] SystemMessage(subtype="init") is the first frame the CLI
+        # emits for a real query's response (verified against the installed SDK);
+        # observing it marks the head pending turn's response as started so a
+        # racing autonomous ResultMessage cannot be mis-served. Import defensively.
+        try:
+            from claude_agent_sdk import SystemMessage
+        except Exception:  # pragma: no cover - depends on installed SDK version
+            SystemMessage = ()  # type: ignore
         # [A82 Stage 2] Background-task lifecycle messages ship in SDK 0.2.110.
         # Import them defensively so an older SDK that lacks them still boots
         # (the oracle then simply never sees a non-terminal background task).
@@ -940,6 +971,13 @@ class _SDKSession:
         try:
             async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
+                    # [A82 Stage 3] The head pending turn's own response stream
+                    # has begun (design §6 correlation): mark it started so its
+                    # terminal ResultMessage is served to it even though it will
+                    # arrive many ticks after submit settled. A background result
+                    # racing the real reply never sets this, so it stays autonomous.
+                    if self._pending:
+                        self._pending[0].response_started = True
                     # [A82 Stage 2] A model continuation is now in flight until
                     # its terminal ResultMessage arrives — a quiescence conjunct
                     # (SDK04b: task-finished + autonomous continuation ≠ idle).
@@ -997,6 +1035,14 @@ class _SDKSession:
                     status = getattr(msg, "status", None)
                     if tid and status:
                         self._bg_task_status[str(tid)] = str(status)
+                elif SystemMessage and isinstance(msg, SystemMessage):
+                    # [A82 Stage 3] The CLI's init frame for a query's response.
+                    # Its arrival proves the head pending turn's own response
+                    # stream has begun, so a subsequent ResultMessage is served to
+                    # it (correlation reservation). A background job's autonomous
+                    # output surfaces via the Task* frames above, not a fresh init.
+                    if self._pending:
+                        self._pending[0].response_started = True
         except asyncio.CancelledError:
             # Session closing. Fall through to `finally` so waiters don't hang.
             end_reason = "reader task cancelled"
@@ -1105,11 +1151,24 @@ class _SDKSession:
         """Route a finished turn: fulfil the oldest pending query, or — if none
         is waiting — treat it as an autonomous turn and hand it to the proactive
         sink. Runs on the SDK loop thread."""
+        # [A82 Stage 3] Serve the head pending turn ONLY when this result belongs
+        # to it (design §6 correlation, closes SDK02). It belongs to the head iff
+        # the head is still awaiting a response AND either its own response stream
+        # has begun (``response_started`` — a real reply is always preceded by an
+        # init/assistant frame) OR the query has not yet settled (a bare
+        # result-only reply the CLI produced in the same tick as the query). An
+        # unsolicited/autonomous background ResultMessage sets neither once the
+        # submit has settled, so it falls through to the proactive sink instead of
+        # being mis-attributed as this turn's explicit answer. A real reply is
+        # byte-identical to before: legacy protocol-0 turns begin with an
+        # init/assistant frame, so the head is served exactly as it always was.
         if self._pending:
-            pending = self._pending.popleft()
-            if not pending.future.done():
-                pending.future.set_result(outcome)
-            return
+            head = self._pending[0]
+            if head.awaiting_response and (head.response_started or not head.submit_settled):
+                self._pending.popleft()
+                if not head.future.done():
+                    head.future.set_result(outcome)
+                return
         # No one asked for this turn — it's a background-job continuation.
         outcome.proactive = True
         if self._on_proactive is None:
@@ -1151,6 +1210,12 @@ class _SDKSession:
         future: "asyncio.Future" = loop.create_future()
         pending = _PendingTurn(future=future, progress_cb=progress_cb)
         self._pending.append(pending)
+        # [A82 Stage 3] A query is now outstanding — this is the quiescence
+        # oracle's `_last_query_terminal` conjunct (reset True by the reader on
+        # this query's terminal ResultMessage). Setting it here (not only in the
+        # reader) closes the Stage-0 gap where an oracle read between submit and
+        # the first response wrongly reported the session idle.
+        self._last_query_terminal = False
         try:
             # session_id here is the SDK's *internal* conversation-thread
             # selector, not the gateway session id; one _SDKSession owns one
@@ -1164,6 +1229,15 @@ class _SDKSession:
             except ValueError:
                 pass
             raise
+        # [A82 Stage 3] Yield one loop tick so the reader can drain a reply the
+        # CLI produced synchronously with the query (a bare result-only reply is
+        # this turn's answer). After the tick, mark the reservation settled: from
+        # here on a ResultMessage is served to this turn ONLY once its response
+        # stream has been seen to start (``response_started``), so an autonomous
+        # background result racing the real reply routes to the proactive sink
+        # instead of being mis-served here.
+        await asyncio.sleep(0)
+        pending.submit_settled = True
         return await future
 
     def is_quiescent(self) -> bool:
@@ -1226,6 +1300,26 @@ class _SDKSession:
                 session_key=self.session_key,
             )
         try:
+            # [A82 Stage 3] Reserve on the SDK loop BEFORE submitting (design §6):
+            # a managed turn only starts when the session is quiescent, so no
+            # native background work can be racing this query's reply. If a
+            # background task is still non-terminal (or the last query has not
+            # reached its terminal ResultMessage), fail closed — the durable queue
+            # will re-activate this turn once the session settles. This is the
+            # ownership half of the SDK02 correlation: combined with the reader's
+            # response-start gate, a background result can neither be outstanding
+            # at submit nor be mis-served after it.
+            if not self.is_quiescent():
+                logger.warning(
+                    "event=sdk_managed_turn_not_quiescent session_key=%s — native "
+                    "work is still in flight; managed send fails closed",
+                    self.session_key,
+                )
+                raise OwnershipConflictError(
+                    "session is not quiescent (native background work in flight); "
+                    "managed send is fail-closed",
+                    session_key=self.session_key,
+                )
             return self.submit(
                 self._submit_turn(message, progress_cb=progress_cb), timeout=timeout
             )

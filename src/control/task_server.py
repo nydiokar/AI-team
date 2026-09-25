@@ -162,6 +162,26 @@ def _looks_like_backend_error(output: Optional[str]) -> str:
     return ""
 
 
+def classify_completion_outcome(
+    success: bool, output: Optional[str], errors: Optional[List[str]]
+) -> "tuple[bool, str]":
+    """[A82 Stage 3] Shared completion classification (design §6: "Extract shared
+    completion classification rather than duplicating salvage/quota/cache-health/
+    native-id rules").
+
+    Returns ``(effective_success, downgraded_error_class)``. The single source of
+    truth for the success-downgrade trust boundary: a worker running pre-fix
+    driver code can report ``success=True`` while ``output`` is actually a bare
+    backend error string. Both the legacy protocol-0 ``submit_result`` and the
+    managed protocol-1 result path classify through here, so the two never drift.
+    """
+    if success and not errors:
+        err_class = _looks_like_backend_error(output)
+        if err_class:
+            return False, err_class
+    return success, ""
+
+
 
 def _register_local_node() -> None:
     """Register the gateway's OWN host as an online node so its in-process
@@ -375,6 +395,12 @@ class _Capabilities(BaseModel):
     projects_root: str = ""
     repos: List[Dict[str, str]] = Field(default_factory=list)
     models: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
+    # [A82 Stage 3] Managed turn-queue protocol versions this carrier supports.
+    # Empty/[0] = legacy-only carrier: it MUST NOT be offered protocol-1 (managed)
+    # rows (design §7: "Legacy workers must not receive managed rows"; capability
+    # negotiation happens BEFORE managed pending rows are visible). A carrier
+    # advertises 1 here once it runs the managed claim/result/spool path.
+    queue_protocols: List[int] = Field(default_factory=lambda: [0])
 
 
 class NodeRegisterPayload(BaseModel):
@@ -813,6 +839,228 @@ def claim_task(task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
     return {"status": "claimed", "task": task}
 
 
+# --------------------------------------------------------------------------- #
+# [A82 Stage 3] Managed (protocol-1) carrier protocol — capability-negotiated.
+# These extend the EXISTING poll/claim/result infrastructure; they do NOT form a
+# parallel worker protocol. Legacy protocol-0 handlers above are unchanged.
+# --------------------------------------------------------------------------- #
+class ManagedClaimPayload(BaseModel):
+    node_id: str
+    carrier_kind: str = "gateway_local"
+    incarnation_id: Optional[str] = None
+    # A carrier MUST advertise it supports the managed protocol to receive a
+    # managed claim; a legacy poll/claim never reaches this route.
+    queue_protocols: List[int] = Field(default_factory=lambda: [1])
+
+
+@app.get("/tasks/pending-managed", dependencies=[Depends(_require_auth)])
+def get_pending_managed(
+    node_id: Optional[str] = None,
+    backends: Optional[str] = None,
+    accept_unpinned: bool = True,
+    limit: int = 10,
+    queue_protocols: str = "1",
+) -> List[Dict[str, Any]]:
+    """Return protocol-1 pending turns to a carrier that negotiated managed
+    support (design §6/§7). Capability negotiation happens BEFORE managed rows
+    are visible: a caller that does not declare protocol 1 gets an empty list, so
+    a legacy carrier can never see or claim a managed turn. The execution
+    credential is stripped from this view — the claim response carries it.
+    """
+    try:
+        supported = {int(p) for p in queue_protocols.split(",") if p.strip()}
+    except ValueError:
+        supported = set()
+    if 1 not in supported:
+        # Not a managed-capable carrier — no managed rows are visible to it.
+        return []
+    db = get_db()
+    if db is None:
+        return []
+    backend_list = [b.strip() for b in backends.split(",") if b.strip()] if backends else None
+    return db.get_pending_managed_turns(
+        node_id=node_id,
+        backends=backend_list,
+        accept_unpinned=accept_unpinned,
+        limit=limit,
+    )
+
+
+@app.post("/tasks/{task_id}/claim-managed", dependencies=[Depends(_require_auth)])
+def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
+    """Claim a managed turn, minting a fresh per-attempt token and returning the
+    FROZEN execution payload in the response (design §6). The carrier executes
+    THIS response, not the poll snapshot. A lost claim response is resolved by
+    re-claiming with the same task + carrier process (the same live claimed
+    attempt returns its existing ownership via ``claim_turn`` CAS). The token is
+    an execution credential and appears ONLY here — never in poll/list/telemetry.
+    """
+    from .turn_queue import TurnQueueError
+
+    if 1 not in set(payload.queue_protocols or []):
+        raise HTTPException(status_code=409, detail="carrier did not negotiate managed protocol")
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        token = db.claim_turn(
+            task_id=task_id,
+            node_id=payload.node_id,
+            carrier_kind=payload.carrier_kind,
+            incarnation_id=payload.incarnation_id,
+        )
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    return {
+        "status": "claimed",
+        "claim_token": str(token),
+        # The frozen execution payload the carrier must run (design §5).
+        "task": {
+            "id": token.task_id,
+            "session_id": token.session_id,
+            "queue_protocol": 1,
+            "claim_token": str(token),
+            "status": token.status,
+            "payload": token.payload,
+        },
+    }
+
+
+class ManagedResultPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    node_id: str
+    claim_token: str
+    success: bool = True
+    output: str = ""
+    errors: List[str] = Field(default_factory=list)
+    backend_session_id: Optional[str] = None
+    artifact_path: Optional[str] = None
+
+
+@app.post("/tasks/{task_id}/result-managed", dependencies=[Depends(_require_auth)])
+def submit_managed_result(task_id: str, payload: ManagedResultPayload) -> Dict[str, Any]:
+    """Atomic managed (protocol-1) result commit (design §6). Verifies the claim
+    token + state and commits the terminal outcome, native session id and active
+    identity in ONE transaction via ``complete_turn``; classification goes through
+    the SHARED helper so it never drifts from the legacy path. Returns a durable
+    receipt that echoes ``task_id`` AND ``claim_token`` so the carrier's result
+    spool can prune ONLY on a task/token-matched receipt (never on a bare 2xx or
+    timeout — design §6). An identical repeated commit for the current token is
+    idempotent; a superseded/foreign token is rejected (409)."""
+    from .turn_queue import TurnQueueError
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    # Late arrival from a reaped/superseded attempt whose row is already terminal:
+    # return a durable STALE receipt (matched to task+token) rather than 403, so
+    # the carrier can retire its spool obligation (design §6 stale receipt).
+    task = db.get_task(task_id)
+    if task and str(task.get("status")) in ("completed", "failed", "failed_node_offline", "cancelled", "withdrawn"):
+        return {"status": "accepted (stale)", "task_id": task_id, "claim_token": payload.claim_token}
+    effective_success, downgraded = classify_completion_outcome(
+        payload.success, payload.output, payload.errors
+    )
+    result_dict = {
+        "success": effective_success,
+        "output": payload.output,
+        "errors": payload.errors,
+        "backend_session_id": payload.backend_session_id,
+        "error_detail": downgraded,
+    }
+    if effective_success:
+        status, error = "completed", None
+    else:
+        status = "failed"
+        error = "; ".join(payload.errors) if payload.errors else (
+            f"backend error result ({downgraded})" if downgraded else "worker reported failure"
+        )
+    try:
+        outcome = db.complete_turn(
+            task_id=task_id,
+            claim_token=payload.claim_token,
+            result=result_dict,
+            status=status,
+            native_session_id=payload.backend_session_id,
+            error=error,
+            artifact_path=payload.artifact_path,
+        )
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    return {
+        "status": "accepted",
+        "task_id": outcome.task_id,
+        "claim_token": payload.claim_token,
+        "resolved_status": outcome.status,
+    }
+
+
+class QuiescenceObservationPayload(BaseModel):
+    """An authenticated carrier observation of backend quiescence for a held
+    (recovery_required) managed turn (design §6). Bound to the execution attempt:
+    node/process/native identity + a terminal/stop signal, or a durable terminal
+    result. Node registration/offline status is NOT quiescence — the validator
+    rejects a bare boolean/offline label."""
+
+    model_config = ConfigDict(extra="allow")
+
+    node_id: str
+    claim_token: str
+    quiescent: bool = False
+    terminal: bool = False
+    terminal_status: Optional[str] = None
+    native_session_id: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+
+
+@app.post("/tasks/{task_id}/quiescence", dependencies=[Depends(_require_auth)])
+def record_quiescence_observation(
+    task_id: str, payload: QuiescenceObservationPayload
+) -> Dict[str, Any]:
+    """Record a carrier quiescence observation for a held managed turn and
+    auto-reconcile it (design §6). If the observation carries a durable terminal
+    ``result``, the turn is reconciled to that outcome; otherwise a valid
+    quiescent+terminal observation resolves the recovery hold to the observed
+    terminal status. An insufficient observation (bare boolean / offline) is
+    refused (409) — the hold is retained with missing evidence. This is the
+    RECORDED evidence the operator resolve-recovery endpoint (Stage 6) consumes;
+    the carrier cannot supply a bare boolean."""
+    from .turn_queue import TurnQueueError
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    evidence: Dict[str, Any] = {
+        "task_id": task_id,
+        "claim_token": payload.claim_token,
+        "quiescent": bool(payload.quiescent),
+        "terminal": bool(payload.terminal),
+        "terminal_status": payload.terminal_status,
+        "native_session_id": payload.native_session_id,
+        "result": payload.result,
+    }
+    # Auto-reconcile a matching valid spooled terminal result to its outcome;
+    # otherwise resolve to the observed terminal status (cancelled/failed).
+    resolved_status = "failed"
+    if payload.result is not None:
+        resolved_status = "failed" if payload.result.get("success") is False else "completed"
+    elif payload.terminal_status in ("completed", "failed", "cancelled"):
+        resolved_status = payload.terminal_status
+    else:
+        resolved_status = "cancelled"
+    try:
+        outcome = db.resolve_recovery(
+            task_id=task_id,
+            claim_token=payload.claim_token,
+            quiescence_evidence=evidence,
+            resolved_status=resolved_status,
+        )
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.resolved_status}
+
+
 @app.post("/tasks/{task_id}/release", dependencies=[Depends(_require_auth)])
 def release_task(task_id: str, payload: ClaimPayload) -> Dict[str, str]:
     """Release a claimed task back to pending (worker graceful shutdown).
@@ -876,19 +1124,18 @@ def submit_result(
     # "Prompt is too long" bug — an is_error ResultMessage stored as a reply).
     # Independently re-validate here so the gateway never persists such a turn as
     # completed even before the worker is redeployed.
-    effective_success = payload.success
-    downgraded_error_class = ""
-    if payload.success and not payload.errors:
-        err_class = _looks_like_backend_error(payload.output)
-        if err_class:
-            effective_success = False
-            downgraded_error_class = err_class
-            logger.warning(
-                "event=submit_result_downgraded task_id=%s node=%s error_class=%s "
-                "— worker reported success but output is a backend error string "
-                "(likely pre-fix driver); recording as failure",
-                task_id, payload.node_id, err_class,
-            )
+    # [A82 Stage 3] Classify through the shared helper so legacy and managed
+    # paths apply the identical success-downgrade rule.
+    effective_success, downgraded_error_class = classify_completion_outcome(
+        payload.success, payload.output, payload.errors
+    )
+    if downgraded_error_class:
+        logger.warning(
+            "event=submit_result_downgraded task_id=%s node=%s error_class=%s "
+            "— worker reported success but output is a backend error string "
+            "(likely pre-fix driver); recording as failure",
+            task_id, payload.node_id, downgraded_error_class,
+        )
 
     result_dict = {
         "success": effective_success,
