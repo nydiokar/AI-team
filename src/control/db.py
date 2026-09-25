@@ -1367,6 +1367,11 @@ class MeshDB:
         self._write_lock = threading.Lock()
         self._local = threading.local()   # per-thread connection cache
         self._init_schema()
+        # [A82 Stage 4a rework] Process-level "any session enrolled" presence so
+        # the legacy path does no enrollment-marker read while none exists.
+        self._any_enrolled: Optional[bool] = None
+        self._enroll_generation = 0
+        self.refresh_enrollment_presence()
 
     # ------------------------------------------------------------------
     # Connection management
@@ -3108,6 +3113,10 @@ class MeshDB:
         sid = (session_id or "").strip()
         if not sid:
             return
+        # Raised BEFORE the marker commits: a legacy admission racing the
+        # enrollment then reads the marker instead of skipping it.
+        self._enroll_generation += 1
+        self._any_enrolled = True
         try:
             with self._write() as conn:
                 conn.execute(
@@ -3117,6 +3126,31 @@ class MeshDB:
                 )
         except Exception as e:
             raise _turn_backing_error("enroll_session", session_id=sid, err=e)
+
+    def refresh_enrollment_presence(self) -> Optional[bool]:
+        """[A82 Stage 4a rework] Reload the process-level presence flag with one
+        bounded query. On failure the previous value is kept (None = unknown ⇒
+        callers treat enrollment as possibly present and fail closed)."""
+        generation = self._enroll_generation
+        try:
+            row = self._conn().execute(
+                "SELECT 1 FROM sessions WHERE turn_queue_enrolled = 1 LIMIT 1"
+            ).fetchone()
+            present = row is not None
+            # Never lower the flag across a concurrently starting enrollment
+            # (its marker may not have committed when we read).
+            if present or generation == self._enroll_generation:
+                self._any_enrolled = present
+        except Exception as e:
+            logger.warning("event=turn_queue_enrollment_presence_failed err=%s", e)
+        return self._any_enrolled
+
+    def any_session_enrolled(self) -> Optional[bool]:
+        """True / False, or None when it could never be determined. Unknown is
+        retried once per call (a single bounded read)."""
+        if self._any_enrolled is None:
+            return self.refresh_enrollment_presence()
+        return self._any_enrolled
 
     def is_session_enrolled(self, session_id: str) -> bool:
         row = self._conn().execute(

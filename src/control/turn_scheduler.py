@@ -158,6 +158,10 @@ async def run_scheduler_pass(
         elif outcome == "ineligible":
             result.ineligible += 1
         await asyncio.sleep(0)  # yield between small transactions
+    # Keep the process-level enrollment presence honest (cleared when none).
+    refresh = getattr(db, "refresh_enrollment_presence", None)
+    if callable(refresh):
+        await asyncio.to_thread(refresh)
     shared = allowance if allowance is not None else ALLOWANCE
     generation = shared.snapshot_generation()
     totals: Dict[str, int] = await asyncio.to_thread(db.managed_waiting_totals)

@@ -5031,7 +5031,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         # no in-memory queue). Unenrolled / mesh-off ⇒ the legacy path below,
         # unchanged. The marker is read from the canonical DB, never a flag.
         _sid = str((task.metadata or {}).get("session_id") or "").strip()
-        if _sid and self._session_turn_queue_enrolled(_sid):
+        _known = (task.metadata or {}).pop(self._TURN_ENROLLED_META_KEY, None)
+        if _sid and (_known if _known is not None else await self._session_turn_queue_enrolled(_sid)):
             return await self._admit_managed_session_turn(task)
         if task.metadata:
             task.metadata.pop(self._TURN_OPERATION_META_KEY, None)
@@ -6329,6 +6330,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         dispatch_file: Optional[str] = None,
         join_case_id: Optional[str] = None,
         operation_id: Optional[str] = None,
+        turn_queue_enrolled: Optional[bool] = None,
     ) -> str:
         """Direct runtime entrypoint for Telegram/CLI instructions.
 
@@ -6371,6 +6373,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         # strips it so its task metadata stays byte-identical.
         if operation_id:
             self._stash_task_meta(task, self._TURN_OPERATION_META_KEY, operation_id)
+        if turn_queue_enrolled is not None:
+            self._stash_task_meta(task, self._TURN_ENROLLED_META_KEY, bool(turn_queue_enrolled))
         return await self._enqueue_task(task)
 
     async def compact_session(self, session_id: str):
@@ -9515,6 +9519,9 @@ Generated from user description: {description}
     # preparation seam. Design: docs/SESSION_TURN_QUEUE_DESIGN.md §4/§5/§8.
     # ===========================================================================
     _TURN_OPERATION_META_KEY = "__turn_operation_id"
+    # Enrollment already resolved by the caller (web route) — avoids a second
+    # marker read per request. Popped before any legacy use.
+    _TURN_ENROLLED_META_KEY = "__turn_enrolled"
     # Producer-1 sources converted to managed admission. Every other producer
     # (continuation, watched job, retry, heartbeat, respawn, compaction, file
     # ingestion) is converted in its own later sub-stage; until then it FAILS
@@ -9529,26 +9536,14 @@ Generated from user description: {description}
         "runtime": "runtime",
     }
 
-    def _session_turn_queue_enrolled(self, session_id: str) -> bool:
-        """Durable enrollment marker from the canonical DB (never a flag).
-
-        Mesh DB absent ⇒ no managed queue exists ⇒ False (legacy). A DB that
-        exists but cannot answer FAILS CLOSED: an enrolled session must never
-        receive unmanaged execution because the marker was unreadable. One
-        indexed primary-key read, done inline like the rest of ``_enqueue_task``
-        (its lineage writes are inline too) so the legacy flow gains no await."""
+    async def _session_turn_queue_enrolled(self, session_id: str) -> bool:
+        """Durable enrollment marker from the canonical DB (never a flag). No
+        read at all while no session is enrolled; otherwise one offloaded read,
+        failing closed when unreadable (see ``turn_admission.session_enrollment``)."""
         from src.control.db import get_db
-        from src.control.turn_queue import BackingStoreError
+        from src.control.turn_admission import session_enrollment
 
-        db = get_db()
-        if db is None:
-            return False
-        try:
-            return bool(db.is_session_enrolled(session_id))
-        except Exception as e:
-            raise BackingStoreError(
-                f"turn-queue enrollment marker unreadable: {e}", session_id=session_id,
-            )
+        return await session_enrollment(get_db(), session_id)
 
     async def _admit_managed_session_turn(self, task: Task) -> str:
         """Admit ``task`` as ONE durable managed turn for its enrolled session.
