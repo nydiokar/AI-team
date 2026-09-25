@@ -13,7 +13,7 @@ data directory on a network share or synced folder.
 ```bash
 git clone <release-repository-url> ai-team
 cd ai-team
-sudo ./scripts/prepare_docker_data_dirs.sh /srv/ai-team
+sudo APP_UID=$(id -u) APP_GID=$(id -g) ./scripts/prepare_docker_data_dirs.sh /srv/ai-team
 install -m 600 deploy/controller.env.example /srv/ai-team/controller.env
 ```
 
@@ -48,7 +48,7 @@ only the projects this worker may modify.
 
 ```bash
 cd ai-team
-sudo ./scripts/prepare_docker_data_dirs.sh /srv/ai-team-worker
+sudo APP_UID=$(id -u) APP_GID=$(id -g) ./scripts/prepare_docker_data_dirs.sh /srv/ai-team-worker <worker-node-id>
 install -m 600 deploy/worker.env.example /srv/ai-team-worker/worker.env
 install -m 600 deploy/worker.compose.env.example /srv/ai-team-worker/compose.env
 ```
@@ -68,10 +68,18 @@ docker compose --env-file /srv/ai-team-worker/compose.env -f deploy/compose.work
 docker compose --env-file /srv/ai-team-worker/compose.env -f deploy/compose.worker.yaml logs -f worker
 ```
 
-The image runs as fixed UID/GID `10001` (`ai-team`). Grant that identity access
-to the declared projects root with an ACL rather than running the worker as root
-or making the tree world-writable. Apply default ACLs before the worker creates
-new repositories:
+The entrypoint starts as root only to drop to `APP_UID`/`APP_GID` (default
+`10001`). Set both in the repo-root `.env` to the host owner of the projects root
+(`id -u` / `id -g`) so the worker can write and commit there; `safe.directory`
+only silences git's ownership warning, it does not grant write access. Prepare
+and own the data root with the same identity:
+
+```bash
+sudo APP_UID=$(id -u) APP_GID=$(id -g) ./scripts/prepare_docker_data_dirs.sh "$DOCKER_DATA_ROOT" "$WORKER_NODE_ID"
+```
+
+If the projects root must stay owned by another user, keep the default `10001`
+and grant it access with ACLs instead:
 
 ```bash
 sudo setfacl -Rm u:10001:rwX /srv/worker-projects

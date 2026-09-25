@@ -45,6 +45,8 @@ services:
       MESH_ENABLED: "true"
       MESH_EMBEDDED_SERVER: "false"
       MESH_BIND_HOST: "0.0.0.0"
+      # No in-process execution here: skip the gateway self-node registration.
+      GATEWAY_LOCAL_EXECUTION_ENABLED: "false"
 
     restart: unless-stopped
 
