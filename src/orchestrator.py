@@ -696,8 +696,22 @@ class TaskOrchestrator(ITaskOrchestrator):
                 )
                 self.quota_digest_subscriber = digest
                 event_handlers.append(digest.handle_event)
+            # Observe locally ONLY when this host also executes locally (i.e. the
+            # Claude harness is present). On a controller-only host
+            # (GATEWAY_LOCAL_EXECUTION_ENABLED=false, the Docker controller) the
+            # coordinator is ingest-only: it never spawns Claude, and quota is
+            # observed harness-side by a worker POSTing /telemetry/quota-observation
+            # into the same store this coordinator reads.
+            observe_locally = bool(getattr(config.system, "local_execution_enabled", True))
             self.quota_coordinator = build_quota_coordinator_from_config(
-                enabled=True, event_handlers=event_handlers
+                enabled=True,
+                event_handlers=event_handlers,
+                observe_locally=observe_locally,
+            )
+            logger.info(
+                "event=quota_coordinator_built observe_locally=%s mode=%s",
+                observe_locally,
+                "local_observe" if observe_locally else "ingest_only",
             )
         except Exception as e:
             logger.warning(f"Failed to initialize quota coordinator: {e}")
@@ -4764,9 +4778,17 @@ class TaskOrchestrator(ITaskOrchestrator):
         - file_watcher_running: based on watcher state
         """
         
-        # Check Claude Code CLI
-        self.component_status["claude_available"] = self._check_claude_cli_available()
-        
+        # Harness availability. When this host executes locally the Claude CLI is
+        # expected to be present, so probe it. On a controller-only host (the
+        # Docker controller, GATEWAY_LOCAL_EXECUTION_ENABLED=false) the harness
+        # lives on the WORKERS, not here — probing a local CLI that is absent by
+        # design would falsely report the controller "degraded", so derive
+        # availability from online mesh workers instead.
+        if bool(getattr(config.system, "local_execution_enabled", True)):
+            self.component_status["claude_available"] = self._check_claude_cli_available()
+        else:
+            self.component_status["claude_available"] = self._any_worker_backend_available("claude")
+
         # Check LLAMA availability
         llama_status = self.llama_mediator.get_status(probe=False)
         self.component_status["llama_available"] = bool(llama_status.get("helpers_enabled"))
@@ -4840,6 +4862,37 @@ class TaskOrchestrator(ITaskOrchestrator):
             self._artifact_index_path.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             logger.warning(f"event=artifact_index_save_failed task_id={task_id} error={e}")
+
+    def _any_worker_backend_available(self, backend: str) -> bool:
+        """True when at least one ONLINE mesh worker advertises ``backend``.
+
+        Under the controller/worker split, harness availability is a WORKER
+        property — the controller must not report itself degraded merely because
+        it has no local CLI (it has none by design). Best-effort: on any read
+        error, assume delegated-and-available rather than falsely degraded; a
+        successful read that finds no such worker honestly reports unavailable.
+        """
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return True
+            for row in db.list_nodes(status="online"):
+                raw = row.get("backends")
+                if isinstance(raw, str):
+                    try:
+                        names = json.loads(raw or "[]")
+                    except Exception:
+                        names = []
+                elif isinstance(raw, (list, tuple)):
+                    names = list(raw)
+                else:
+                    names = []
+                if backend in names:
+                    return True
+            return False
+        except Exception:
+            return True
 
     def _check_claude_cli_available(self) -> bool:
         """Best-effort check that Claude CLI exists and is authenticated."""
