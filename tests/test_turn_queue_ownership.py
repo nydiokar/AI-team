@@ -154,23 +154,59 @@ def test_OWN01_claim_returns_fresh_token_bound_to_carrier_and_incarnation(tmp_pa
     assert row.get("claim_token") == token, "claim_token not persisted on the row"
 
 
-def test_OWN01b_legacy_claimed_by_is_node_identity_not_attempt_token(tmp_path):
-    """Documents the CURRENT gap: `claimed_by` is a node id, not a per-attempt
-    token, so two claim attempts by the same node are indistinguishable. Target
-    contract requires a distinct token per attempt.
-
-    RED: the row exposes no per-attempt claim_token column.
+def test_OWN01b_legacy_claim_mints_no_token_boundary(tmp_path):
+    """Boundary (A82 §15 decision 2): the LEGACY claim path stays byte-identical —
+    it records only `claimed_by` (node identity) and mints NO per-attempt
+    `claim_token`. The per-attempt token exists ONLY on the managed protocol-1
+    claim (proven by OWN01a). Amended from the original Stage-1 draft, which
+    asserted the legacy `claim_task` should gain a token — that contradicts the
+    binding decision to leave the legacy path untouched (A87 review 2026-09-25).
     """
     db = _db(tmp_path)
     _session(db)
     _node(db)
-    _enqueue(db)
-    assert db.claim_task("t-1", "worker-a") is True
-    row = db.get_task("t-1")
-    assert row.get("claim_token"), (
-        "current claim records only node identity (claimed_by); a per-attempt "
-        "claim_token is required for fencing (design §6)"
+    # A legacy protocol-0 row (the untouched path).
+    db.enqueue_task(
+        task_id="t-legacy",
+        session_id="sess-1",
+        machine_id=None,
+        backend="claude",
+        action="resume_session",
+        payload={"task_id": "t-legacy", "prompt": "hi"},
     )
+    assert db.claim_task("t-legacy", "worker-a") is True
+    row = db.get_task("t-legacy")
+    assert row.get("queue_protocol") == 0, "legacy row must remain protocol-0"
+    assert row.get("claimed_by") == "worker-a"
+    assert not row.get("claim_token"), (
+        "legacy claim must NOT mint a per-attempt token (byte-identical legacy); "
+        "the claim_token lives only on the managed claim path — A82 §15 dec.2"
+    )
+
+
+def test_OWN01c_claim_token_never_leaks_through_list_tasks(tmp_path):
+    """Regression (A87 adversarial review 2026-09-25): migration 34 added
+    `claim_token`/`idempotency_key`/`admission_hash` to `mesh_tasks`; the operator
+    `/api/tasks` surface reads `list_tasks` which SELECT *'d the row. The execution
+    credential must NEVER serialize through a list surface (design §6/§3.13).
+    """
+    db = _db(tmp_path)
+    _session(db)
+    _node(db, incarnation_id="inc-a")
+    _enqueue(db)
+    token = _managed_claim(
+        db, task_id="t-1", node_id="worker-a", carrier_kind="gateway_local", incarnation_id="inc-a"
+    )
+    assert token, "managed claim must mint a token"
+    # The row still carries the token internally...
+    assert db.get_task("t-1").get("claim_token") == token
+    # ...but the list surface must strip it (and the idempotency/admission fields).
+    listed = db.list_tasks(session_id="sess-1")
+    assert listed, "expected the managed task in list_tasks"
+    for row in listed:
+        assert "claim_token" not in row, "claim_token leaked through list_tasks"
+        assert "idempotency_key" not in row, "idempotency_key leaked through list_tasks"
+        assert "admission_hash" not in row, "admission_hash leaked through list_tasks"
 
 
 # --------------------------------------------------------------------------- #

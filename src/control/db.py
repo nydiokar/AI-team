@@ -3165,6 +3165,7 @@ class MeshDB:
             f"""
             SELECT * FROM mesh_tasks
             WHERE status = 'pending'
+            AND queue_protocol = 0
             {machine_clause}
             {backend_clause}
             ORDER BY created_at ASC
@@ -3374,7 +3375,18 @@ class MeshDB:
             f"SELECT * FROM mesh_tasks {where} ORDER BY created_at DESC LIMIT ?",
             params,
         ).fetchall()
-        return [dict(r) for r in rows]
+        # [A82] Never serialize the managed-turn execution credential (or the
+        # idempotency/admission material that could aid forgery/replay) through
+        # this operator list surface (/api/tasks). The claim token is an
+        # execution credential (design §6/§3.13); the carrier claim response is
+        # the only place it may appear.
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            for _secret in ("claim_token", "idempotency_key", "admission_hash"):
+                d.pop(_secret, None)
+            out.append(d)
+        return out
 
     # ------------------------------------------------------------------
     # FlowRun record (v0.4 §13 item 1, A19) — one row per dispatch flow.
