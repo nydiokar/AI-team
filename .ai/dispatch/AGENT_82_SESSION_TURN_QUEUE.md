@@ -1375,6 +1375,30 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 4. The principal header is self-declared. An automation caller that omits it is treated as the operator and releases the hold. Authenticated per-caller principals belong to A71 (per-node credentials).
 5. Stands from rework 1: the late `ensure_future` interrupt; a slow lineage writer past its lease; 4b residuals 2-6; the per-process armed registry.
 
+### Stage 4b ACCEPTED — final minors (2026-09-26, commit `7b51e75` + this record)
+
+1. **Test honesty for the fail-closed hold read.**
+   - F01 kills N1. A stopped Manager's hold read raises: no respawn, no approval, no delivery. The next tick, with a healthy read, still holds.
+   - F01b is the adopted probe P1: an unheld Manager whose read fails once is skipped for that tick and woken on the next.
+   - F02 kills N2: a quota pause that names no session falls back to `case_manager_session_id` and honours the hold.
+2. **A coalesced operator admission releases the hold.** The release is factored into `_release_stop_hold(conn, sid, now)` (db.py) and now runs both in the coalesce branch (human/operator only) and on a fresh insert. A pure idempotent replay still skips it, which is harmless.
+   - F04 is P6 inverted: compaction queued behind a running turn, then Stop, then Compact again (coalesced). The hold is released and the compaction activates next.
+   - F04b: a coalesced automation admission keeps the hold.
+3. **Lazy quota lookup.** `_operator_stop_held` accepts a zero-arg resolver, called only after the enrollment short-circuit. The quota handler passes `lambda: pause.session_id or db.case_manager_session_id(case_id)`. F03 shows no Manager lookup happens while nothing is enrolled.
+4. **Web upload-with-instruction: checked, NOT real.** `_store_session_upload` (control_api.py) already refuses an enrolled session with 422 `managed_unsupported` as its first step, before any file write, `mark_busy`, staging or admission (Stage 4a). The `mark_busy` calls the review cited are therefore unreachable for an enrolled session, and no code was changed. F05 proves it through the real app, with and without an instruction: 422, status unchanged (AWAITING_INPUT), no `uploads/` directory, no managed row. An ACCEPTED upload cannot happen for an enrolled session until producer 8.
+
+**Mutation run** (scratch worktree `mut4b3`, removed with plain `git worktree remove`; spawn guard on): 5 mutants, all killed — N1, N2, eager quota lookup, coalesced operator not releasing, and coalesced automation releasing.
+
+**Verification.**
+- turn-queue files: 323 passed / 7 red. The reds are unchanged: SYS03-07 and api ×2.
+- Regression group: 517 passed. That is the 420 group plus `test_case_transient_resume`, `test_wake_dispatcher_eventdriven`, `test_case_respawn` and `test_case_quota_resume`; `test_mcp_manager` is already in the 420 group.
+
+**Residuals — carried (A87 → CONTEXT.md).**
+1. An operator-invoked `sweep_orphaned_cases` force-closes a held Manager's Case (legacy parity). Since "held" is now resumable, the sweep may close a Case the operator meant only to pause.
+2. An automation close (`release_worker` / `close_case` with worker close) of a held session ends the hold as a terminal action: `close_session_turns` clears the record and withdraws queued work.
+3. A quota pause bound to an old held session can keep owning the Case after an operator-approved respawn onto a new session. The held-session check returns True, so the pause keeps holding until closed.
+4. All earlier 4b / rework / rework-2 residuals stand.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
