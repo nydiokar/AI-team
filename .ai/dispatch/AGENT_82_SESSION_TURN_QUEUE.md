@@ -1188,7 +1188,7 @@ R1/R1b (rework 2) now inject the crash into `_managed_lineage_converge`, since t
 The first run left 4 survivors (event-once, strict, decision-reuse, requeue-touches-claimed). I added the tests above until all were killed.
 
 **Verification.**
-- turn-queue (17 files): 251 passed + r3 additions / 7 red. The reds are unchanged: SYS03-07 are Stage 4b+, and api ×2 are Stage 6.
+- turn-queue (17 files): 257 passed / 7 red. The reds are unchanged: SYS03-07 are Stage 4b+, and api ×2 are Stage 6.
 - Regression group: 303 passed. Adjacent group: 262 passed.
 
 **Carried (for CONTEXT.md).**
