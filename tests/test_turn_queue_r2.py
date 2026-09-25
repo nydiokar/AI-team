@@ -31,6 +31,15 @@ from tests.test_turn_queue_sdk_ownership import (
 H = {"Authorization": f"Bearer {TOKEN}"}
 
 
+def _wait_query(fake, n: int = 1, timeout: float = 5.0) -> None:
+    """Wait until the SDK loop has actually written `n` prompts (robust under
+    load: a slow loop must not make the test emit frames before the query)."""
+    end = time.monotonic() + timeout
+    while len(fake.queries_sent) < n and time.monotonic() < end:
+        time.sleep(0.01)
+    assert len(fake.queries_sent) >= n, "prompt never reached the fake CLI"
+
+
 def _managed_in_thread(sess, msg: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
 
@@ -124,7 +133,8 @@ def test_D3_abandoned_unechoed_prompt_keeps_session_in_flight_until_its_echo():
     sess._turn_timeout_sec = lambda: 0.3
     try:
         out = _managed_in_thread(sess, "queued prompt")
-        out["t"].join(2)
+        out["t"].join(5)
+        _wait_query(fake)
         assert "e" in out  # RecoveryRequiredError at the deadline
         assert sess.is_quiescent() is False
         _emit_autonomous(sess, fake, _assistant("x"), _result("FOREIGN"))
@@ -167,7 +177,7 @@ def test_MAJOR2_foreign_tool_result_user_message_does_not_claim_managed_turn():
     sess._turn_timeout_sec = lambda: 5
     try:
         out = _managed_in_thread(sess, "mine")
-        time.sleep(0.1)
+        _wait_query(fake)
         tool_result = UserMessage(
             content=[ToolResultBlock(tool_use_id="tu-1", content="ok", is_error=False)],
             uuid="some-other-uuid",
@@ -214,13 +224,35 @@ def test_m5_reply_served_between_timeout_and_abandon_goes_late():
     got: List[Any] = []
     sess._on_proactive = lambda k, o: got.append(o)
     try:
-        fut = asyncio.run_coroutine_threadsafe(sess._submit_turn("m", managed=True), sess._loop)
-        time.sleep(0.1)
+        ticket = {"abandoned": False, "pending": None}
+        fut = asyncio.run_coroutine_threadsafe(sess._submit_turn("m", managed=True, ticket=ticket), sess._loop)
+        _wait_query(fake)
         _emit_autonomous(sess, fake, _result("SERVED"))  # echo was emitted at query
         assert fut.result(2).output == "SERVED"           # future holds the reply…
-        sess._loop.call_soon_threadsafe(sess._abandon_managed_pending)  # …caller timed out
+        sess._loop.call_soon_threadsafe(sess._abandon_managed_pending, ticket)  # …caller timed out
         time.sleep(0.3)
         assert [(o.output, o.late_managed) for o in got] == [("SERVED", True)]
+        assert got[0].managed_turn_uuid == fake.query_uuids[-1]
+    finally:
+        sess.close()
+
+
+def test_m5b_deadline_before_submission_never_submits_the_prompt():
+    """A starved loop: the caller's deadline (abandon) runs before the managed
+    coroutine registers its turn ⇒ the prompt is never written (nobody would
+    await it) and the session stays quiescent."""
+    from src.control.turn_queue import RecoveryRequiredError
+
+    fake = _FakeClient()
+    sess = _start_fake_session(fake)
+    try:
+        ticket = {"abandoned": False, "pending": None}
+        sess._loop.call_soon_threadsafe(sess._abandon_managed_pending, ticket)
+        time.sleep(0.1)
+        fut = asyncio.run_coroutine_threadsafe(sess._submit_turn("m", managed=True, ticket=ticket), sess._loop)
+        with pytest.raises(RecoveryRequiredError):
+            fut.result(2)
+        assert fake.queries_sent == [] and sess.is_quiescent() is True
     finally:
         sess.close()
 
@@ -235,7 +267,8 @@ def test_M3a_late_handoff_keeps_session_non_quiescent_until_sink_returns():
     sess._turn_timeout_sec = lambda: 0.3
     try:
         out = _managed_in_thread(sess, "slow")
-        out["t"].join(2)
+        out["t"].join(5)
+        _wait_query(fake)
         _emit_autonomous(sess, fake, fake.echo_for(), _result("LATE"))
         time.sleep(0.2)
         assert len(sess._pending) == 0
