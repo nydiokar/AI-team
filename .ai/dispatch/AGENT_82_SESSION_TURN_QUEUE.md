@@ -1218,6 +1218,106 @@ The first run left 4 survivors (event-once, strict, decision-reuse, requeue-touc
   - 419 regression group (the 303 group + `test_case_closure`, `test_case_interrupt`, `test_mcp_manager`): 419 passed.
   - Mutations were run in a scratch worktree, removed.
 
+### Stage 4b — producer 2: compaction + operator cancel/stop + session close (2026-09-26, commits `fc207b3`..`fdc4365` + this record)
+
+**Scope.** For ENROLLED sessions only, compaction and ordinary active cancellation/close now go through the managed ledger/ownership model. Unenrolled sessions take the unchanged legacy branch, and while nothing is enrolled no new DB read happens (test C07 traces the statements).
+
+**Built.**
+- **Fenced operator cancel.** `MeshDB.request_turn_cancel` (db.py:3262) is one `_managed_write` txn:
+  - `pending` (unclaimed) or `claimed` never started → terminal `cancelled` right there. The old token's `/start-managed` then gets a 409 and the carrier drops the attempt.
+  - `running` / `recovery_required` → `cancel_token := claim_token` plus ONE protocol-0 `cancel_managed` control row, pinned to `claimed_by`, keyed `cancelm-<task>-<sha256(token)[:12]>`. `INSERT OR IGNORE` makes a repeat converge. The payload carries no token.
+  - `queued` → `not_active`; terminal → `already_terminal`.
+  - The attempt's own exit then commits truthfully (`_cancel_requested_for`, db.py:8546, token-equal):
+    - `complete_turn` failed → `cancelled`; a success that beat the interrupt stays `completed`;
+    - `resolve_recovery` failed → `cancelled`;
+    - `release_turn` of a cancelled attempt → `cancelled`, never re-offered.
+- **Entry points.**
+  - `cancel_task` hook (orchestrator.py:8481 → `_cancel_managed_turn_if_managed`, :10024). It keeps the bool contract: a ledger failure returns False. `interrupt_case` and the Case sweep go through it too.
+  - `stop_managed_session_turn` (:10048) cancels the turn that OWNS the active slot (`get_active_turn`), never `last_task_id`. It does no whole-session CANCELLED save.
+  - Callers: web `POST /api/sessions/{id}/stop`, Telegram `/session_cancel`, and session-scoped `/cancel` (`_managed_session_cancel_reply`). An explicit task id goes through `cancel_task`.
+- **Carrier delivery.**
+  - `WorkerAgent._handle_cancel_managed` (agent.py:2790) runs outside the turn slot (control semaphore) and is exempt from the capacity gate.
+  - It finds the attempt's `turn_uuid` in the durable claim record and calls the NEW interface `CodingBackend.cancel_managed_turn(session, turn_uuid)` (interfaces.py:388; default False; no backend-name branching).
+  - Claude: `_SDKSession.cancel_managed_turn` (claude_driver.py:1505) decides on the SDK loop. It interrupts only if that uuid's echo began the CLI's current turn. If the prompt is written but not yet echoed, it arms `cancel_requested`, and the interrupt fires on that echo. It never interrupts a foreign or autonomous turn.
+  - `task_server` treats `cancel_managed` as a control row (no session turn event).
+- **What "stop" means (vs Stage 6 pause).**
+  - Stop = cancel ONE active attempt (terminal `cancelled`). Queued turns behind it are untouched, and the scheduler activates the next head normally.
+  - This deviates from design §7 ("queued work stays paused until explicit resume") until Stage 6 adds persistent `turn_queue_paused` pause/resume.
+  - Cancelling a queued turn by explicit id is refused (`not_active`); withdraw is a Stage-6 surface.
+- **Compaction = a managed turn.**
+  - `compact_session` (enrolled) → `_admit_managed_compaction` (:9955): `turn_kind='compaction'`, `action='compact_session'`, body `/compact`, `turn_source='operator'`, no Case lineage.
+  - Serialized by the active slot: never concurrent with a managed turn, and never interrupting one.
+  - Preparation keeps the bare command (no restart/compact context injection) and sets action `compact_session`.
+  - The carrier dispatches it only through the NEW `CodingBackend.run_managed_compaction` (interfaces.py:372). The default raises `ManagedUnsupportedError`; Codex/OpenCode keep the default (K06).
+  - **Why a special driver path.** The bundled CLI 2.1.191 source (`_bundled/claude`, the query engine's `!shouldQuery` branch) yields `init` / local-command stdout / `compact_boundary` / `result` for a local slash command and NEVER echoes the caller uuid, so echo correlation would wedge `/compact` into recovery.
+  - `ClaudeSDKClientDriver.run_managed_compaction` (claude_driver.py:1976) runs it on a process that never received a query (`_ever_submitted`):
+    - a used pooled process is retired only if quiescent, decided on its loop in the same step as marking it closed (`retire_if_quiescent`, :1556), with no interrupt;
+    - otherwise it returns `managed_conflict`, meaning released not-invoked;
+    - the fresh process resumes the session's native id (`resume_if_new`);
+    - `send_managed(local_command=True)` owns the first turn by construction and refuses on a used process.
+  - Web route: an `Idempotency-Key` becomes the operation id. The enrolled envelope adds `queued/task_id/status`; the unenrolled envelope is byte-identical. Telegram replies "📥 Compaction queued as turn #n".
+- **Session close.**
+  - `SessionService(managed_close=…)` → `_close_managed_session` (:10069). None ⇒ legacy.
+  - One txn (`close_session_turns`, db.py:3368): the session is `closed` and every queued row is `withdrawn`, with a revision audit (`session_close:<actor>`).
+  - `lineage_state` `pending|done` → `void`. A pending writer keeps its lease expiry.
+  - Then the void procedure runs, then `request_turn_cancel(active)`, then the existing `close_session` teardown row pinned to the carrier that owns the process (active `claimed_by`, else `_managed_carrier_node`). The gateway-local `backend.close` is skipped.
+  - The native id is cleared as in legacy. `_commit_completion_identity` no longer writes `backend_session_id` on a closed session, so a late cancelled result cannot resurrect it.
+  - A ledger failure returns `turn_queue_unavailable` (web 503, Telegram "retry"). Every step is idempotent, so a retry converges (L01c).
+- **Stage-6 precondition (4a carry) implemented for close.** `_void_withdrawn_lineage` (:10114) is ONE convergent, raising procedure keyed on the turn id. The live closer and the scheduler sweep (`run_scheduler_pass(void_lineage=…)`, `list_void_lineage` served by partial index `idx_mesh_turns_lineage_void`, migration 36) run exactly this. It waits while the withdrawn writer's lease is live. For a Case BORN for the turn it:
+  1. appends parent `task.dispatch_voided` (once);
+  2. closes the child `cancelled` (force) via the real `close_case`;
+  3. clears the affiliation strictly (`clear_session_case_if`);
+  4. CAS `void` → `voided`.
+
+  The advancement gate ignores voided dispatches. Join/attach memberships are left as written (legacy close parity).
+
+**Producer → durable trigger identity → turn id → completion effect.**
+| Producer | Durable trigger identity | Turn id | Completion effect |
+|---|---|---|---|
+| compaction (web `/compact`, Telegram `/compact`) | idempotency (`operator:<sid>:compaction`, `Idempotency-Key` or `compact:<turn id>`) + active coalesce `compaction:<sid>` | `compact-<sid8>-<hex12>` (protocol 1, `turn_kind=compaction`) | scheduler → carrier `run_managed_compaction` → `/result-managed` → `complete_turn` (terminal + native id) |
+| operator cancel/stop (web stop, Telegram `/session_cancel` `/cancel`, `interrupt_case`) | (task id, claim token) → `cancel_token` + control row `cancelm-<task>-<hash(token)>` | the targeted active turn (no new turn) | unclaimed/unstarted: `cancelled` in the cancel txn; running/held: the attempt's result / recovery / release commits `cancelled` |
+| session close (web, Telegram, Case worker close) | session id (`close_session_turns`, idempotent) | none new (withdrawn ids + active id) | queued → `withdrawn` + lineage `voided`; active → cancel row above; carrier `close_session` teardown |
+
+**Exit table (new managed states).**
+| State | Exits | Tests |
+|---|---|---|
+| running/recovery_required with `cancel_token` | interrupt → own result → `cancelled` (`completed` if it won the race); released not-invoked → `cancelled`; recovery resolution → `cancelled`; carrier offline → Stage-3 exits unchanged | X01, X02, C03, C03b, C04, C05 |
+| `cancel_managed` control row (protocol 0) | carrier claim + handle → completed (no attempt held ⇒ no-op); carrier offline → waits like `close_session` rows; crash mid-handle → legacy reaper re-offers, idempotent | X01, X03, X05 |
+| withdrawn + `lineage_state='void'` | inline void at close; sweep once the lease expires (3 s idle wake while outstanding) → `voided` | L02, L02b, L03, L03b, S01 |
+| session `closed` with managed rows | queued → `withdrawn` (same txn); active → cancel path; admission/activation refuse inside the window | L01, L01b, L05 |
+| compaction row | the Stage-3 exits of any managed turn; not quiescent ⇒ `managed_conflict` → released to pending | K04, K04b, K05 |
+
+**Tests (offline; autouse guard makes `_SDKSession.start` / `ClaudeSDKClient.connect` / `create_subprocess_exec` raise).**
+- New files:
+  - `tests/test_turn_queue_4b.py` (28): real file-backed MeshDB, real orchestrator methods, real `SessionService.close_session`, real control API app, real scheduler / `close_case`, real Telegram handlers.
+  - `tests/test_turn_queue_4b_carrier.py` (10): real task-server app, real `WorkerAgent`, the REAL Claude driver and `_SDKSession`s on a fake SDK client. Fresh processes boot through a subclass `start`; the base `start` stays guarded. Compaction E2E is gateway admission → scheduler → carrier → driver.
+- Counts:
+  - turn-queue files: 298 passed / 7 red. The reds are unchanged (SYS03-07, api ×2), versus the 260 baseline plus 38 new.
+  - Regression group: 419 passed. `test_session_cancellation` + `test_compact_context_injection`: 12 passed.
+  - Adjacent (backend_call/registry, claude_session_backend, codex_native/ownership, control_api/flows/work, flow_links/write_path, session_affiliations, task_server_client/upload, worker_pinned_only/role, warm_worker_idle_reaper, case_observable_worker_session, queue_persistence): 188 passed.
+- **Mutation run** (scratch worktree `mut4b`, spawn guard on, removed with plain `git worktree remove`): 42 mutants over db/orchestrator/scheduler/service/agent/driver/routes/task_server, all KILLED.
+  - The first run left 1 survivor ("cancel_task reads the ledger when nothing is enrolled"). C07 was strengthened.
+  - 3 driver mutants were first killed only by the 180 s timeout (hang). The fixture now bounds the managed deadline at 3 s, so they fail fast.
+  - Equivalent: dropping the token-equality inside `_cancel_requested_for`. No path re-mints a token on a row that carries `cancel_token`, because release of a cancelled attempt ends it.
+
+**Service boundary (§7).**
+| Item | web stop / Telegram cancel | web / Telegram compact | close (web / Telegram / Case) | carrier `cancel_managed` handler |
+|---|---|---|---|---|
+| Concurrency | sync route; one indexed read + one `_managed_write` txn (serialized, 5 s); repeat converges | admission service (4 permits, caps, coalesce) | `to_thread`; 2 txns + ≤20 voids (per-session cap) | control semaphore (1), outside turn slots; ≤1 row per (task, token) |
+| Memory | O(1) | ≤2 MiB/row caps (4a) | O(withdrawn ≤ 20) | O(1) |
+| Request size | no body | no body; Idempotency-Key truncated to 256 | no body | target ≤256 chars validated |
+| Timeout | 5 s ledger deadline ⇒ 503 | 5 s admission ⇒ 503/429 | 5 s per txn ⇒ `turn_queue_unavailable` 503, retry converges | loop-side cancel waits ≤5 s; result post bounded by the delivery deadline |
+| Malformed input | 404 unknown session; not-active ⇒ `cancelled:false` | 409 key/body mismatch; 503 no carrier | 404 unknown session | invalid target ⇒ completed with a reason |
+| Backing failure | unreadable marker/ledger ⇒ 503, nothing recorded; `cancel_task` ⇒ False | 503, no row | fail closed (session not closed if the txn failed) | claim error ⇒ row stays pending (re-polled); no attempt ⇒ no-op |
+
+**Residuals / carried (for CONTEXT.md).**
+1. Stop is not a pause: queued work behind a stopped turn runs next (Stage 6 pause/resume).
+2. The compaction attribution relies on the fresh-process argument. It is verified from the bundled CLI 2.1.191 source plus fake-stream tests, NOT live (no live calls authorized). Retiring the warm process drops its prompt cache (compaction resets the context anyway).
+3. The enrolled compaction response means "accepted/queued", not "compacted"; the truth is the turn's terminal status. BUSY/IDLE and queue display are Stage 6.
+4. `interrupt_case` / the Case sweep cancel running/pending managed Case turns through the fenced path. QUEUED managed rows of a blocked/closed Case are not withdrawn yet (Stage 4c: Case revalidation at activation).
+5. The carrier teardown `close_session` row still uses the legacy swallowing `enqueue_task` (best-effort, as legacy; the ledger is authoritative). The carrier's close interrupts a still-pending held (recovery_required) prompt; that is the operator's stop, and the attempt then resolves `cancelled` via the Stage-3 reconciler.
+6. Links written by a withdrawn join/attach writer stay (4a residual stands); only born child Cases are voided.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
