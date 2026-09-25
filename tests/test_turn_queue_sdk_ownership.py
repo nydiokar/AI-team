@@ -261,6 +261,16 @@ def test_SDK02_background_result_not_served_as_explicit_reply():
     RED by assertion: with a prompt pending, an unsolicited background result
     arriving first is popped off `_pending` and mis-served as that prompt's
     reply on current code.
+
+    [A82 Stage 3 rework — fixture correction, recorded in packet §15] The
+    explicit prompt is submitted through the MANAGED (protocol-1) send. Design §6
+    correlation is a managed-path contract; the legacy protocol-0 `send` must stay
+    byte-identical (§15 decision 1) and a bare `ResultMessage` there is
+    indistinguishable from a legitimate result-only reply, which the legacy path
+    MUST keep serving (see SDK05b — the Stage-3 attempt to gate the shared
+    `_dispatch` deadlocked legacy bare replies and hit `cancel_inflight`). The
+    assertion is unchanged and strengthened: the managed caller must also return
+    promptly (no deadlock), never interrupt, and the output must not be lost.
     """
     fake = _FakeClient()
     fake.replies["explicit question"] = []  # its real reply arrives later
@@ -271,7 +281,7 @@ def test_SDK02_background_result_not_served_as_explicit_reply():
 
     def _ask():
         try:
-            _ask.result = sess.send("explicit question")
+            _ask.result = _managed_send(sess, "explicit question")
         except Exception as e:  # noqa: BLE001
             _ask.result = e
 
@@ -283,9 +293,16 @@ def test_SDK02_background_result_not_served_as_explicit_reply():
         _emit_autonomous(sess, fake, _result("BACKGROUND JOB OUTPUT — not your answer"))
         time.sleep(0.3)
 
+        assert not isinstance(_ask.result, _ManagedSendMissing)
         assert getattr(_ask.result, "output", None) != "BACKGROUND JOB OUTPUT — not your answer", (
             "background result was misattributed as the explicit prompt's reply"
         )
+        # Strengthened (rework): no deadlock, no interrupt, output not lost.
+        asker.join(timeout=2)
+        assert not asker.is_alive(), "managed caller deadlocked on an uncorrelated result"
+        assert _ask.result is not None and isinstance(_ask.result, Exception)
+        assert fake.interrupts == 0, "managed path interrupted the backend"
+        assert [o.output for _k, o in proactive] == ["BACKGROUND JOB OUTPUT — not your answer"]
     finally:
         sess.close()
 
@@ -396,5 +413,172 @@ def test_SDK04c_quiescence_requires_all_three_signals():
             "oracle failed to recognise genuine quiescence when all three "
             "signals hold"
         )
+    finally:
+        sess.close()
+
+
+# --------------------------------------------------------------------------- #
+# [A82 Stage 3 rework] M5/M6 — bare-result routing: legacy unchanged, managed
+# fail-closed; M4 — reservation on the SDK loop thread.
+# --------------------------------------------------------------------------- #
+def _init_frame():
+    from claude_agent_sdk import SystemMessage
+
+    return SystemMessage(subtype="init", data={})
+
+
+def test_SDK05a_legacy_bare_result_same_tick_is_served():
+    """LEGACY `send`: a result-only reply (no init/assistant frame) is this
+    turn's answer — served exactly as before Stage 3 (M5/M6 regression)."""
+    fake = _FakeClient()
+    fake.replies["q"] = [_result("bare answer")]
+    sess = _start_fake_session(fake)
+    try:
+        t0 = time.monotonic()
+        out = sess.send("q")
+        assert out.output == "bare answer"
+        assert time.monotonic() - t0 < 2
+        assert fake.interrupts == 0
+    finally:
+        sess.close()
+
+
+def test_SDK05b_legacy_bare_result_arriving_later_is_served_no_interrupt():
+    """LEGACY `send`: a bare ResultMessage arriving many ticks after the query
+    (real CLI latency) is served to the pending legacy turn — no deadlock, no
+    timeout, never `cancel_inflight` (the Stage-3 regression the review found)."""
+    fake = _FakeClient()
+    fake.replies["slow"] = []
+    proactive: list = []
+    sess = _start_fake_session(fake)
+    sess._on_proactive = lambda key, outcome: proactive.append(outcome)
+    box: dict = {}
+
+    def _ask():
+        try:
+            box["r"] = sess.send("slow")
+        except Exception as e:  # noqa: BLE001
+            box["r"] = e
+
+    try:
+        th = threading.Thread(target=_ask, daemon=True)
+        th.start()
+        time.sleep(0.3)
+        _emit_autonomous(sess, fake, _result("late bare reply"))
+        th.join(timeout=3)
+        assert not th.is_alive(), "legacy send deadlocked on a bare result reply"
+        assert getattr(box.get("r"), "output", None) == "late bare reply"
+        assert fake.interrupts == 0
+        assert proactive == []
+        assert len(sess._pending) == 0
+    finally:
+        sess.close()
+
+
+def test_SDK06a_managed_correlated_reply_is_served():
+    """MANAGED: a reply whose own response stream began (init / assistant frame)
+    is served to the managed turn."""
+    fake = _FakeClient()
+    fake.replies["m1"] = [_init_frame(), _result("managed answer")]
+    fake.replies["m2"] = [_assistant("working"), _result("second answer")]
+    sess = _start_fake_session(fake)
+    try:
+        assert sess.send_managed("m1").output == "managed answer"
+        assert sess.send_managed("m2").output == "second answer"
+        assert fake.interrupts == 0
+        assert sess.is_quiescent() is True
+    finally:
+        sess.close()
+
+
+def test_SDK06b_managed_bare_result_fails_closed_without_deadlock_or_interrupt():
+    """MANAGED: a bare ResultMessage (no response-start frame) is uncorrelated.
+    The managed caller gets a typed RecoveryRequiredError promptly (no deadlock,
+    no deadline wait), the backend is NEVER interrupted, the output is surfaced
+    via the proactive sink (not lost, not misattributed), and the session is held
+    (not quiescent) until a further terminal result proves the query ended."""
+    from src.control.turn_queue import RecoveryRequiredError
+
+    fake = _FakeClient()
+    fake.replies["bare"] = [_result("bare managed")]
+    proactive: list = []
+    sess = _start_fake_session(fake)
+    sess._on_proactive = lambda key, outcome: proactive.append(outcome)
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(RecoveryRequiredError):
+            sess.send_managed("bare")
+        assert time.monotonic() - t0 < 2
+        time.sleep(0.2)
+        assert fake.interrupts == 0
+        assert [o.output for o in proactive] == ["bare managed"]
+        assert sess.is_quiescent() is False, "uncorrelated managed result released the hold"
+        # The (possibly still running) real reply later terminates the query:
+        _emit_autonomous(sess, fake, _assistant("real"), _result("real reply"))
+        time.sleep(0.3)
+        assert sess.is_quiescent() is True
+        assert [o.output for o in proactive][-1] == "real reply"
+    finally:
+        sess.close()
+
+
+def test_SDK06c_managed_deadline_raises_typed_recovery_without_interrupt(monkeypatch):
+    """MANAGED: deadline expiry never calls cancel_inflight (§15 dec.1); it
+    raises RecoveryRequiredError and keeps the session held."""
+    from src.control.turn_queue import RecoveryRequiredError
+
+    fake = _FakeClient()
+    fake.replies["never"] = []
+    sess = _start_fake_session(fake)
+    monkeypatch.setattr(sess, "_turn_timeout_sec", lambda: 0.3)
+    try:
+        with pytest.raises(RecoveryRequiredError):
+            sess.send_managed("never")
+        assert fake.interrupts == 0
+        assert sess.is_quiescent() is False
+    finally:
+        sess.close()
+
+
+def test_SDK07_managed_quiescence_reserved_on_sdk_loop_thread():
+    """M4: the managed quiescence check runs ON the SDK loop thread and the
+    pending reservation is registered in the same loop step (no await between),
+    so no reader frame can interleave (no caller-thread TOCTOU)."""
+    fake = _FakeClient()
+    fake.replies["r"] = [_assistant("a"), _result("ok")]
+    sess = _start_fake_session(fake)
+    seen: dict = {}
+    real = sess.is_quiescent
+
+    def _spy() -> bool:
+        seen["thread"] = threading.get_ident()
+        seen["loop_running_here"] = sess._loop.is_running() and (
+            asyncio.get_running_loop() is sess._loop
+        )
+        seen["pending_before"] = len(sess._pending)
+        return real()
+
+    def _loop_ident() -> None:
+        seen["loop_thread"] = threading.get_ident()
+
+    try:
+        sess._loop.call_soon_threadsafe(_loop_ident)
+        time.sleep(0.1)
+        sess.is_quiescent = _spy  # type: ignore[method-assign]
+        assert sess.send_managed("r").output == "ok"
+        assert seen["thread"] == seen["loop_thread"] != threading.get_ident()
+        assert seen["loop_running_here"] is True
+        assert seen["pending_before"] == 0
+
+        # Atomicity: a background task registered on the loop BEFORE the managed
+        # reservation step makes the reservation fail closed (the check reads
+        # loop-owned state, not a caller-thread snapshot).
+        sess.is_quiescent = real  # type: ignore[method-assign]
+        _emit_autonomous(sess, fake, _task_updated("bg-late", "running"))
+        time.sleep(0.2)
+        with pytest.raises(Exception) as ei:
+            sess.send_managed("r")
+        assert "quiescent" in str(ei.value)
+        assert fake.interrupts == 0
     finally:
         sess.close()

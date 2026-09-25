@@ -341,31 +341,21 @@ class _PendingTurn:
     ``progress_cb`` is the activity callback for *this* turn, routed by the
     reader while this turn is the active (head) one.
 
-    [A82 Stage 3] Correlation reservation (design §6, closes SDK02 — "reserve on
-    the SDK loop before submitting a query"). A ``ResultMessage`` is served to the
-    head pending turn ONLY when the CLI has demonstrably begun *this query's own
-    response stream*, so an unsolicited/autonomous ``ResultMessage`` (a
-    ``run_in_background`` job finishing) can never be popped off ``_pending`` and
-    mis-attributed as this turn's explicit answer. Two fields express that:
-
-      * ``response_started`` — set True by the reader when it observes the first
-        message of this query's response (a ``SystemMessage`` init or an
-        ``AssistantMessage``). In production every real reply's stream begins with
-        such a message before its terminal ``ResultMessage`` (verified against the
-        installed SDK: a lone ``ResultMessage`` with nothing before it does not
-        occur for a normal query — an early failure raises instead).
-      * ``submit_settled`` — set True by ``_submit_turn`` one loop tick AFTER the
-        query is issued. Before it settles, a reply the CLI produced *in the same
-        tick as the query* is still this turn's (covers a bare result-only reply).
-
-    ``_dispatch`` serves the head iff ``awaiting_response and (response_started or
-    not submit_settled)``; otherwise the result is autonomous → proactive sink.
+    [A82 Stage 3 rework] ``managed`` marks a protocol-1 turn submitted through
+    :meth:`_SDKSession.send_managed`. ONLY managed turns are subject to result
+    correlation (design §6, SDK02): a ``ResultMessage`` is served to a managed
+    head only once the reader has seen *this query's own response stream* begin
+    (``response_started`` — a ``SystemMessage`` init or ``AssistantMessage``).
+    A result arriving before that is uncorrelated: the managed turn fails closed
+    with a typed recovery error (no deadlock, no ``cancel_inflight``) and the
+    output is surfaced through the proactive sink. Legacy (protocol-0) turns keep
+    the exact pre-Stage-3 FIFO routing: any ``ResultMessage`` serves the head,
+    including a bare result-only reply (§15 decision 1: legacy byte-identical).
     """
     future: "asyncio.Future"
     progress_cb: Any = None
-    awaiting_response: bool = True
+    managed: bool = False
     response_started: bool = False
-    submit_settled: bool = False
 
 
 class SDKStreamEndedError(RuntimeError):
@@ -1035,12 +1025,18 @@ class _SDKSession:
                     status = getattr(msg, "status", None)
                     if tid and status:
                         self._bg_task_status[str(tid)] = str(status)
-                elif SystemMessage and isinstance(msg, SystemMessage):
+                elif (
+                    SystemMessage
+                    and isinstance(msg, SystemMessage)
+                    and getattr(msg, "subtype", None) == "init"
+                ):
                     # [A82 Stage 3] The CLI's init frame for a query's response.
                     # Its arrival proves the head pending turn's own response
                     # stream has begun, so a subsequent ResultMessage is served to
-                    # it (correlation reservation). A background job's autonomous
-                    # output surfaces via the Task* frames above, not a fresh init.
+                    # it (managed correlation). Only the plain ``init`` subtype
+                    # counts: Task*/hook/mirror frames are SystemMessage
+                    # subclasses that background work can emit, so they must not
+                    # mark a managed head's response as started.
                     if self._pending:
                         self._pending[0].response_started = True
         except asyncio.CancelledError:
@@ -1151,24 +1147,42 @@ class _SDKSession:
         """Route a finished turn: fulfil the oldest pending query, or — if none
         is waiting — treat it as an autonomous turn and hand it to the proactive
         sink. Runs on the SDK loop thread."""
-        # [A82 Stage 3] Serve the head pending turn ONLY when this result belongs
-        # to it (design §6 correlation, closes SDK02). It belongs to the head iff
-        # the head is still awaiting a response AND either its own response stream
-        # has begun (``response_started`` — a real reply is always preceded by an
-        # init/assistant frame) OR the query has not yet settled (a bare
-        # result-only reply the CLI produced in the same tick as the query). An
-        # unsolicited/autonomous background ResultMessage sets neither once the
-        # submit has settled, so it falls through to the proactive sink instead of
-        # being mis-attributed as this turn's explicit answer. A real reply is
-        # byte-identical to before: legacy protocol-0 turns begin with an
-        # init/assistant frame, so the head is served exactly as it always was.
-        if self._pending:
-            head = self._pending[0]
-            if head.awaiting_response and (head.response_started or not head.submit_settled):
-                self._pending.popleft()
+        # [A82 Stage 3 rework] Result correlation applies ONLY to a managed
+        # (protocol-1) head (design §6, SDK02). A legacy head is served FIFO
+        # exactly as before Stage 3 — including a bare result-only reply — so the
+        # shared reader never deadlocks a legacy send (§15 decision 1, M5/M6).
+        if self._pending and self._pending[0].managed:
+            head = self._pending.popleft()
+            if head.response_started:
                 if not head.future.done():
                     head.future.set_result(outcome)
                 return
+            # A ResultMessage before this managed query's own response stream
+            # began cannot be attributed to it (it may be an autonomous background
+            # result). Fail the managed turn closed with a typed recovery error —
+            # never serve it as the explicit reply, never leave the caller blocked
+            # until the turn deadline, never interrupt — and surface the output
+            # through the proactive sink below. The query itself has NOT been
+            # proven terminal, so the quiescence oracle keeps the session held
+            # until a further terminal ResultMessage is observed.
+            self._last_query_terminal = False
+            if not head.future.done():
+                from src.control.turn_queue import RecoveryRequiredError
+                head.future.set_exception(RecoveryRequiredError(
+                    "managed turn received a ResultMessage before its own response "
+                    "stream began; result is uncorrelated — recovery required",
+                    session_key=self.session_key, reason="uncorrelated_result",
+                ))
+            logger.warning(
+                "event=sdk_managed_result_uncorrelated session_key=%s chars=%d — "
+                "managed turn failed closed; output routed to proactive sink",
+                self.session_key, len(outcome.output or ""),
+            )
+        elif self._pending:
+            pending = self._pending.popleft()
+            if not pending.future.done():
+                pending.future.set_result(outcome)
+            return
         # No one asked for this turn — it's a background-job continuation.
         outcome.proactive = True
         if self._on_proactive is None:
@@ -1197,7 +1211,9 @@ class _SDKSession:
             if not pending.future.done():
                 pending.future.set_exception(err)
 
-    async def _submit_turn(self, message: str, progress_cb=None) -> "TurnOutcome":
+    async def _submit_turn(
+        self, message: str, progress_cb=None, managed: bool = False
+    ) -> "TurnOutcome":
         """Send one user turn and await its terminal result.
 
         Registers a pending entry BEFORE writing the query so the reader can
@@ -1208,7 +1224,7 @@ class _SDKSession:
             raise RuntimeError("SDK client not initialised")
         loop = asyncio.get_event_loop()
         future: "asyncio.Future" = loop.create_future()
-        pending = _PendingTurn(future=future, progress_cb=progress_cb)
+        pending = _PendingTurn(future=future, progress_cb=progress_cb, managed=managed)
         self._pending.append(pending)
         # [A82 Stage 3] A query is now outstanding — this is the quiescence
         # oracle's `_last_query_terminal` conjunct (reset True by the reader on
@@ -1229,15 +1245,6 @@ class _SDKSession:
             except ValueError:
                 pass
             raise
-        # [A82 Stage 3] Yield one loop tick so the reader can drain a reply the
-        # CLI produced synchronously with the query (a bare result-only reply is
-        # this turn's answer). After the tick, mark the reservation settled: from
-        # here on a ResultMessage is served to this turn ONLY once its response
-        # stream has been seen to start (``response_started``), so an autonomous
-        # background result racing the real reply routes to the proactive sink
-        # instead of being mis-served here.
-        await asyncio.sleep(0)
-        pending.submit_settled = True
         return await future
 
     def is_quiescent(self) -> bool:
@@ -1300,31 +1307,67 @@ class _SDKSession:
                 session_key=self.session_key,
             )
         try:
-            # [A82 Stage 3] Reserve on the SDK loop BEFORE submitting (design §6):
-            # a managed turn only starts when the session is quiescent, so no
-            # native background work can be racing this query's reply. If a
-            # background task is still non-terminal (or the last query has not
-            # reached its terminal ResultMessage), fail closed — the durable queue
-            # will re-activate this turn once the session settles. This is the
-            # ownership half of the SDK02 correlation: combined with the reader's
-            # response-start gate, a background result can neither be outstanding
-            # at submit nor be mis-served after it.
-            if not self.is_quiescent():
-                logger.warning(
-                    "event=sdk_managed_turn_not_quiescent session_key=%s — native "
-                    "work is still in flight; managed send fails closed",
-                    self.session_key,
-                )
-                raise OwnershipConflictError(
-                    "session is not quiescent (native background work in flight); "
-                    "managed send is fail-closed",
-                    session_key=self.session_key,
-                )
-            return self.submit(
-                self._submit_turn(message, progress_cb=progress_cb), timeout=timeout
+            return self._submit_managed_no_interrupt(
+                self._reserve_and_submit_managed(message, progress_cb), timeout
             )
         finally:
             self._lock.release()
+
+    async def _reserve_and_submit_managed(self, message: str, progress_cb=None) -> "TurnOutcome":
+        """[A82 Stage 3 rework, M4] Quiescence reservation ON THE SDK LOOP.
+
+        Design §6: "reserve on the SDK loop before submitting a query". The
+        quiescence read and the ``_pending`` registration in :meth:`_submit_turn`
+        run in the same loop callback with no ``await`` between them, and every
+        oracle input (``_pending``, background-task status, terminal/assistant
+        flags) is mutated only on this loop thread — so no reader frame can
+        interleave between the check and the reservation (no caller-thread
+        TOCTOU). Not quiescent ⇒ typed :class:`OwnershipConflictError`; the
+        durable queue re-activates the turn once the session settles."""
+        from src.control.turn_queue import OwnershipConflictError
+
+        if not self.is_quiescent():
+            logger.warning(
+                "event=sdk_managed_turn_not_quiescent session_key=%s — native "
+                "work is still in flight; managed send fails closed",
+                self.session_key,
+            )
+            raise OwnershipConflictError(
+                "session is not quiescent (native background work in flight); "
+                "managed send is fail-closed",
+                session_key=self.session_key,
+            )
+        return await self._submit_turn(message, progress_cb=progress_cb, managed=True)
+
+    def _submit_managed_no_interrupt(self, coro, timeout: Optional[float]) -> "TurnOutcome":
+        """Run a managed coroutine on the SDK loop WITHOUT the legacy
+        interrupt-on-failure of :meth:`submit` (§15 decision 1: the managed path
+        never calls ``cancel_inflight``). A deadline expiry raises a typed
+        :class:`RecoveryRequiredError` and leaves the turn registered in
+        ``_pending`` so the quiescence oracle keeps the session held until the
+        backend actually reaches a terminal result (design §3.3: uncertainty
+        retains ownership)."""
+        import concurrent.futures
+
+        from src.control.turn_queue import RecoveryRequiredError
+
+        if not self._loop or self._closed:
+            coro.close()
+            raise RuntimeError("SDK session loop is not running")
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "event=sdk_managed_turn_deadline session_key=%s timeout=%s — no "
+                "interrupt; turn held for recovery",
+                self.session_key, timeout,
+            )
+            raise RecoveryRequiredError(
+                "managed turn exceeded its deadline without a terminal result; "
+                "backend not interrupted — recovery required",
+                session_key=self.session_key, reason="managed_turn_deadline",
+            )
 
     def _turn_timeout_sec(self) -> Optional[float]:
         """Resolve the per-turn deadline (shared by legacy + managed send)."""
