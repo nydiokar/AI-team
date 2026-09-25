@@ -254,7 +254,7 @@ def test_C07_unenrolled_cancel_stop_compact_close_touch_no_queue_state(tmp_path,
     db._conn().set_trace_callback(None)
     assert res.ok and o._backends["claude"].compacted == ["sess-1"]
     bad = [s for s in stmts if "turn_queue_enrolled" in s or "queue_protocol" in s
-           or "cancel_managed" in s]
+           or "cancel_managed" in s or "task_unknown" in s]
     assert bad == [], bad
     assert _managed_rows(db) == [] and _control_rows(db, "cancel_managed") == []
 
