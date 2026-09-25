@@ -143,7 +143,9 @@ class AdmissionRequest(BaseModel):
     coalesce_key: Optional[str] = Field(default=None, max_length=256)
     sender_session_id: Optional[str] = Field(default=None, max_length=256)
     machine_id: Optional[str] = Field(default=None, max_length=256)
-    not_before: Optional[str] = Field(default=None, max_length=64)
+    # Durable "lineage pending" writer token (Case lineage written after the
+    # commit, then finalized under CAS); None ⇒ no post-admission lineage.
+    lineage_token: Optional[str] = Field(default=None, max_length=64, repr=False)
 
 
 def admit_turn(
@@ -179,7 +181,7 @@ def admit_turn(
                 coalesce_key=request.coalesce_key,
                 sender_session_id=request.sender_session_id,
                 machine_id=request.machine_id,
-                not_before=request.not_before,
+                lineage_token=request.lineage_token,
                 require_enrolled=True,
                 external_waiting=slot["legacy"],
                 fleet_cap=fleet_cap,

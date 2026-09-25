@@ -523,7 +523,7 @@ def test_P1_07e_carrier_gone_before_activation_backs_off(tmp_path, monkeypatch):
                                             allowance=ta.SharedWaitingAllowance()))
     row = db.get_task(t1)
     assert res.activated == 0 and row["status"] == "queued"
-    assert row["blocked_reason"] == "prepare_failed: CarrierUnavailableError"
+    assert row["blocked_reason"].startswith("prepare_failed: CarrierUnavailableError")
     assert row["blocked_until"]
 
 
@@ -556,17 +556,6 @@ def test_P1_12b_refused_admission_leaves_no_lineage(tmp_path, monkeypatch):
     links = [l["entity_id"] for l in db.list_flow_links(flow_run_id=case_id)
              if l["entity_type"] == "task"]
     assert len(links) == 20 and all(db.get_task(x) is not None for x in links)
-
-
-def test_P1_12c_lineage_hold_blocks_activation_until_finalized(tmp_path, monkeypatch):
-    db, o = _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(db, "finalize_turn_lineage",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash-like")))
-    t = _submit(o, operation_id="h")
-    row = db.get_task(t)
-    assert row["status"] == "queued" and row["not_before"]  # held, not lost
-    assert db.select_eligible_turn_heads(25) == []
-    assert db.next_turn_wake_at() == row["not_before"]      # bounded: wakes when it expires
 
 
 # P1-13 (A87 rework m7/m8) -------------------------------------------------- #

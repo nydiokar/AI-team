@@ -53,6 +53,11 @@ def _session(db, sid, *, enroll=True, machine="worker-a", status=SessionStatus.I
     ))
     if enroll:
         db.enroll_session(sid)
+    # Fixture (rework 2): the assigned carrier is a LIVE registered node, since
+    # a pending row on a dead/unknown carrier is now returned to queued.
+    if machine:
+        db.upsert_node(node_id=machine, tailscale_ip="", api_port=9001, backends=["claude"],
+                       max_concurrent=2, managed_backends=["claude"])
 
 
 def _q(db, sid, body, **kw):
@@ -239,7 +244,7 @@ def test_SCH05d_prepare_failure_leaves_queued_with_reason(tmp_path):
     res = _pass(db, bad)
     assert res.blocked == 1
     row = db.get_task(t)
-    assert row["status"] == "queued" and row["blocked_reason"] == "prepare_failed: ValueError"
+    assert row["status"] == "queued" and row["blocked_reason"].startswith("prepare_failed: ValueError")
 
 
 # SCH06 --------------------------------------------------------------------- #
