@@ -38,11 +38,13 @@ def test_R1_crash_after_commit_is_recovered_never_runs_caseless(tmp_path, monkey
     db, o = _setup(tmp_path, monkeypatch)
     o._LINEAGE_REPLAY_WAIT_SEC = 0.2
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
-    real = o._record_flow_run_start
-    o._record_flow_run_start = lambda t: (_ for _ in ()).throw(SystemExit("process died"))
+    # Process dies after the commit, before any lineage write (rework 3: the
+    # managed path runs `_managed_lineage_converge`, not `_record_flow_run_start`).
+    real = o._managed_lineage_converge
+    o._managed_lineage_converge = lambda *a: (_ for _ in ()).throw(SystemExit("process died"))
     with pytest.raises(SystemExit):
         _submit(o, join_case_id=case_id, operation_id="op1", source="runtime")
-    o._record_flow_run_start = real
+    o._managed_lineage_converge = real
     [row] = _managed_rows(db)
     assert row["lineage_state"] == "pending"
     assert json.loads(row["payload"])["metadata"]["__join_case_id"] == case_id
@@ -67,11 +69,11 @@ def test_R1b_replay_after_lease_expiry_recovers_then_acks(tmp_path, monkeypatch)
     monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
     db, o = _setup(tmp_path, monkeypatch)
     case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
-    real = o._record_flow_run_start
-    o._record_flow_run_start = lambda t: (_ for _ in ()).throw(SystemExit("died"))
+    real = o._managed_lineage_converge
+    o._managed_lineage_converge = lambda *a: (_ for _ in ()).throw(SystemExit("died"))
     with pytest.raises(SystemExit):
         _submit(o, join_case_id=case_id, operation_id="op1", source="runtime")
-    o._record_flow_run_start = real
+    o._managed_lineage_converge = real
     [row] = _managed_rows(db)
     db._conn().execute("UPDATE mesh_tasks SET lineage_lease_until=? WHERE id=?", (PAST, row["id"]))
     tid = _submit(o, join_case_id=case_id, operation_id="op1", source="runtime")

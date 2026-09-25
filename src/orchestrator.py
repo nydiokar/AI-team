@@ -6049,8 +6049,13 @@ class TaskOrchestrator(ITaskOrchestrator):
         role: str,
         created_by: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        *,
+        strict: bool = False,
     ) -> None:
         """[A26] Best-effort authoritative case↔entity link. Swallows failures.
+
+        [A82 Stage 4a rework 3] ``strict=True`` (managed lineage only) RAISES
+        instead of swallowing; the default path is unchanged.
 
         SHADOW/RECORD ONLY — a relationship row, never read to drive execution.
         Idempotent at the DB layer (unique-keyed). Wrapped so any failure logs and
@@ -6068,6 +6073,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 created_by=created_by, metadata=metadata,
             )
         except Exception as e:
+            if strict:
+                raise
             logger.warning(
                 "event=flow_link_failed flow_run_id=%s role=%s err=%s",
                 flow_run_id, role, e,
@@ -6083,8 +6090,15 @@ class TaskOrchestrator(ITaskOrchestrator):
         entity_type: Optional[str] = None,
         entity_id: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
+        *,
+        strict: bool = False,
+        once: bool = False,
     ) -> None:
         """[A26] Best-effort append-only case lifecycle event. Swallows failures.
+
+        [A82 Stage 4a rework 3] ``strict=True`` RAISES instead of swallowing;
+        ``once=True`` writes the (flow, type, entity) event at most once. Both are
+        used only by the managed lineage; the default path is unchanged.
 
         SHADOW/RECORD ONLY — audit trail, never read to drive execution. Wrapped
         so any failure logs and returns; an event write can NEVER raise into task
@@ -6097,12 +6111,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             db = get_db()
             if db is None:
                 return
-            db.append_flow_event(
+            (db.append_flow_event_once if once else db.append_flow_event)(
                 flow_run_id, event_type, actor,
                 from_state=from_state, to_state=to_state,
                 entity_type=entity_type, entity_id=entity_id, payload=payload,
             )
         except Exception as e:
+            if strict:
+                raise
             logger.warning(
                 "event=flow_event_failed flow_run_id=%s type=%s err=%s",
                 flow_run_id, event_type, e,
@@ -9557,7 +9573,7 @@ Generated from user description: {description}
         NOT touch BUSY / last_task_id / last_user_message / native id."""
         from src.control.db import get_db, _canonical_admission_hash
         from src.control.turn_admission import AdmissionRequest, admit_turn_async
-        from src.control.turn_queue import ManagedUnsupportedError
+        from src.control.turn_queue import ManagedUnsupportedError, TurnAdmission
         from src.control.turn_scheduler import notify_turn_queue_changed
 
         meta = task.metadata or {}
@@ -9625,8 +9641,14 @@ Generated from user description: {description}
                 # writer, or run the recovery ourselves once its lease expired.
                 await self._await_or_recover_lineage(str(admission))
             return admission
-        # COMMITTED and ours — lineage exactly once (join / attach / birth).
-        flow_run_id = await self._write_managed_lineage(task, str(admission), token)
+        # COMMITTED and ours — the convergent lineage procedure (join / attach /
+        # birth); any failure ⇒ typed 503, the row stays lineage-pending.
+        outcome, flow_run_id = await self._write_managed_lineage(task, str(admission), token)
+        if outcome == "withdrawn":
+            return TurnAdmission(
+                str(admission), status="withdrawn", revision=admission.revision,
+                queue_sequence=admission.queue_sequence, idempotent_replay=False,
+            )
         logger.info(
             "event=managed_turn_admitted task_id=%s session_id=%s source=%s seq=%s",
             admission, sid, source, admission.queue_sequence,
@@ -9646,46 +9668,192 @@ Generated from user description: {description}
         notify_turn_queue_changed()
         return admission
 
-    async def _write_managed_lineage(self, task: Task, turn_id: str, token: str) -> Optional[str]:
-        """Write the Case lineage for a lineage-pending managed row and finalize
-        it under the CAS (``lineage_token``). Idempotent against a crashed
-        earlier writer: an already-created own flow (birth / dispatch record)
-        or membership link is REUSED — never a second Case. Raises typed 503 if
-        the lease was lost (a recovery writer owns it) or finalize failed."""
+    class _LineageFenceLost(Exception):
+        """The managed-lineage writer no longer owns the row's lineage lease."""
+
+    class _LineageWithdrawn(Exception):
+        """The turn was withdrawn while its lineage was pending."""
+
+    def _managed_lineage_converge(
+        self, task: Task, db: Any, fence: Callable[[], None],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """ONE convergent, idempotent managed-lineage procedure keyed on the task
+        id — the live writer and recovery run exactly this. It mirrors EVERY
+        write of the legacy ``_record_flow_run_start`` (A19/A36/A38/A26/A29/A47):
+
+          * flag OFF: the task's dispatch-start flow_run;
+          * (J) join: task link (created_by=manager) + ``task.attached``
+            {membership: worker} + session affiliation role=worker + session
+            ``worker`` link (created_by=manager);
+          * (B) attach: task link (created_by=system) + ``task.attached`` + session
+            affiliation (role resolved from the link);
+          * (C) standalone: nothing;
+          * (A) birth: flow_run (lineage columns: parent_flow_run_id /
+            dispatched_by / dispatch_file / completion_criteria / objective) +
+            ``flow.created`` + ``root_task`` link + session ``worker`` link +
+            ``session.attached`` + affiliation role=worker + parent ``child_flow``
+            link + parent ``task.dispatched``.
+
+        Every step is get-or-create (flow_run keyed on task id; links unique;
+        events at-most-once per (flow, type, entity)) and RAISES on DB error. A
+        decision already durably taken by an earlier writer (own flow_run / a
+        membership link) is re-used so a Case opening/closing in between cannot
+        re-route a half-written lineage. ``fence()`` (lease + withdrawal) runs
+        after the decision read and before every write group. Sync; run it in a
+        worker thread. Returns (flow_run_id, case_id)."""
+        drive_on = self._harness_flow_drive_enabled()
+        prior = db.existing_task_lineage(task.id)
+        fence()
+        meta = task.metadata or {}
+        session_id = str(meta.get("session_id") or "").strip()
+        if not drive_on:
+            fid = db.get_or_create_task_flow_run(task.id, "dispatch_start")
+            return fid, fid
+        lineage = self._dispatch_lineage_fields(task)
+        parent_fid = lineage.get("parent_flow_run_id")
+        managed = bool(meta.get(self._MANAGED_CASE_META_KEY))
+        join_case_id = str(meta.get(self._JOIN_CASE_META_KEY) or "").strip()
+
+        def affiliate(case_id: str, role: Optional[str]) -> None:
+            if not session_id:
+                return
+            cur = db.get_session(session_id) or {}
+            if role is None:
+                if cur.get("current_case_id") == case_id:
+                    return
+                links = db.list_flow_links(
+                    flow_run_id=case_id, entity_type="session", entity_id=session_id,
+                )
+                role = str(links[0].get("role") or "worker") if links else "worker"
+            if cur.get("current_case_id") == case_id and cur.get("case_role") == role:
+                return
+            db.set_session_case(session_id, case_id, role)
+
+        def member(case_id: str, joined: bool) -> Tuple[Optional[str], Optional[str]]:
+            fence()
+            self._stash_task_meta(task, self._CASE_ID_META_KEY, case_id)
+            self._record_flow_link(
+                case_id, "task", task.id, "task",
+                created_by="manager" if joined else "system", strict=True,
+            )
+            self._record_flow_event(
+                case_id, "task.attached", "system", entity_type="task", entity_id=task.id,
+                payload={"membership": "worker"} if joined else None,
+                strict=True, once=True,
+            )
+            if joined:
+                affiliate(case_id, "worker")
+                if session_id:
+                    self._record_flow_link(
+                        case_id, "session", session_id, "worker",
+                        created_by="manager", strict=True,
+                    )
+            else:
+                affiliate(case_id, None)
+            return None, case_id
+
+        if prior is not None and prior["kind"] == "member":
+            return member(prior["flow_run_id"], prior["flow_run_id"] == join_case_id)
+        if prior is None:
+            if join_case_id:
+                row = db.get_flow_run(join_case_id)
+                if row is not None and (row.get("status") or "") not in db._CLOSED_STATUSES:
+                    return member(join_case_id, True)
+            watched_job_continuation = (
+                not parent_fid
+                and str(lineage.get("dispatched_by") or "").startswith("watched_job:")
+            )
+            if (not lineage or watched_job_continuation) and not managed and session_id:
+                open_case_id = db.find_open_case_for_session(session_id)
+                if open_case_id:
+                    return member(open_case_id, False)
+            if not lineage and not managed:
+                return None, None
+        # (A) BIRTH — converges on the flow_run created FOR this task.
+        fence()
+        create_fields = dict(lineage)
+        criteria = meta.get(self._MANAGED_CASE_CRITERIA_KEY)
+        if criteria:
+            create_fields["completion_criteria"] = criteria
+        fid = db.get_or_create_task_flow_run(
+            task.id, "intent", objective_lock=meta.get(self._MANAGED_CASE_OBJECTIVE_KEY),
+            **create_fields,
+        )
+        self._stash_task_meta(task, self._FLOW_RUN_META_KEY, fid)
+        self._record_flow_event(
+            fid, "flow.created", "system", to_state="intent",
+            entity_type="task", entity_id=task.id, strict=True, once=True,
+        )
+        self._record_flow_link(fid, "task", task.id, "root_task", created_by="system", strict=True)
+        if session_id:
+            self._record_flow_link(fid, "session", session_id, "worker",
+                                   created_by="system", strict=True)
+            self._record_flow_event(
+                fid, "session.attached", "system", entity_type="session",
+                entity_id=session_id, payload={"role": "worker"}, strict=True, once=True,
+            )
+            affiliate(fid, "worker")
+        if parent_fid:
+            self._record_flow_link(parent_fid, "flow", fid, "child_flow",
+                                   created_by=lineage.get("dispatched_by"), strict=True)
+            self._record_flow_event(
+                parent_fid, "task.dispatched", "system", entity_type="flow", entity_id=fid,
+                payload={
+                    "dispatched_by": lineage.get("dispatched_by"),
+                    "dispatch_file": lineage.get("dispatch_file"),
+                    "child_task_id": task.id,
+                },
+                strict=True, once=True,
+            )
+        return fid, fid
+
+    async def _write_managed_lineage(self, task: Task, turn_id: str, token: str) -> Tuple[str, Optional[str]]:
+        """Run the convergent lineage procedure under the lease fence, then
+        finalize (CAS). Returns ("done" | "withdrawn", flow_run_id). Raises a
+        typed 503 on any DB error or a lost lease (the row stays lineage-pending
+        and recovery re-runs the same procedure after the lease expires)."""
         from src.control.db import get_db
         from src.control.turn_queue import BackingStoreError
 
         db = get_db()
-        prior = await asyncio.to_thread(db.existing_task_lineage, turn_id)
-        if prior is None:
-            flow_run_id = self._record_flow_run_start(task)
-        else:
-            flow_run_id = prior["flow_run_id"]
-            if prior["kind"] == "own_flow":
-                self._stash_task_meta(task, self._FLOW_RUN_META_KEY, flow_run_id)
-                self._record_flow_link(
-                    flow_run_id, "task", turn_id, "root_task", created_by="system",
-                )
-            else:
-                self._stash_task_meta(task, self._CASE_ID_META_KEY, flow_run_id)
-        meta = task.metadata or {}
-        case_id = (
-            meta.get(self._CASE_ID_META_KEY)
-            or meta.get(self._FLOW_RUN_META_KEY)
-            or flow_run_id
-        )
+
+        def fence() -> None:
+            own = db.turn_lineage_owner(turn_id)
+            if own is None or own["status"] == "withdrawn" or own["lineage_state"] == "void":
+                raise self._LineageWithdrawn(turn_id)
+            if own["lineage_state"] != "pending" or own["lineage_token"] != token:
+                raise self._LineageFenceLost(turn_id)
+
+        try:
+            flow_run_id, case_id = await asyncio.to_thread(
+                self._managed_lineage_converge, task, db, fence,
+            )
+        except self._LineageWithdrawn:
+            return "withdrawn", None
+        except self._LineageFenceLost:
+            if await asyncio.to_thread(db.turn_lineage_state, turn_id) == "done":
+                return "done", None
+            raise BackingStoreError(
+                "managed turn lineage lease lost; recovery will retry", task_id=turn_id,
+            )
+        except Exception as e:  # any DB/lineage failure: fail closed, stay pending
+            raise BackingStoreError(
+                f"managed turn lineage write failed; recovery will retry: {e}", task_id=turn_id,
+            )
         ok = await asyncio.to_thread(
-            db.finalize_turn_lineage, turn_id, token,
-            str(case_id) if case_id else None, dict(meta),
+            db.finalize_turn_lineage, turn_id, token, case_id, dict(task.metadata or {}),
         )
         if not ok:
-            if await asyncio.to_thread(db.turn_lineage_state, turn_id) == "done":
-                return flow_run_id  # another writer finalized the same lineage
+            state = await asyncio.to_thread(db.turn_lineage_state, turn_id)
+            if state == "done":
+                return "done", flow_run_id
+            if state == "void":
+                return "withdrawn", None
             raise BackingStoreError(
                 "managed turn lineage not finalized (lease lost); recovery will retry",
                 task_id=turn_id,
             )
-        return flow_run_id
+        return "done", flow_run_id
 
     async def _await_or_recover_lineage(self, turn_id: str) -> None:
         """A replay that finds its row lineage-pending: wait (bounded) for the
@@ -9724,12 +9892,13 @@ Generated from user description: {description}
             return False
         task = self._task_from_managed_row(row)
         try:
-            flow_run_id = await self._write_managed_lineage(task, turn_id, token)
+            outcome, flow_run_id = await self._write_managed_lineage(task, turn_id, token)
         except Exception as e:  # noqa: BLE001 — stays pending; retried after the lease
             logger.warning("event=managed_lineage_recovery_failed task_id=%s err=%s", turn_id, e)
             return False
-        logger.info("event=managed_lineage_recovered task_id=%s flow_run_id=%s", turn_id, flow_run_id)
-        return True
+        logger.info("event=managed_lineage_recovered task_id=%s outcome=%s flow_run_id=%s",
+                    turn_id, outcome, flow_run_id)
+        return outcome == "done"
 
     _LINEAGE_LEASE_SEC = 30.0
     _LINEAGE_REPLAY_WAIT_SEC = 5.0
