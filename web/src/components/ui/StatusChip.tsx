@@ -11,6 +11,7 @@ import type {
   TaskState,
   TargetHealth,
 } from "../../domain/status";
+import type { SessionReason } from "../../domain/models";
 
 type Role = "running" | "ok" | "warn" | "bad" | "idle";
 
@@ -56,7 +57,25 @@ function healthMap(h: TargetHealth): { role: Role; label: string } {
   }
 }
 
-function Pill({ role, label }: { role: Role; label: string }) {
+// [A83] The secondary-reason sub-label appended to a session's pillow. Turns a
+// blunt "Waiting"/"Idle" into "waiting · on workers / on a script / paused:
+// quota / idle", "open case · nothing pending", and "held for node <id>". The
+// primary label always carries the meaning (acceptance #13); this only refines.
+function reasonSublabel(reason: SessionReason | null | undefined): string | null {
+  if (!reason) return null;
+  switch (reason.kind) {
+    case "paused_quota": return "paused: quota";
+    case "paused_retry": return "paused: retry";
+    case "waiting_workers": return "on workers";
+    case "waiting_job": return "on a script";
+    case "open_case_idle": return "open case · nothing pending";
+    case "node_offline": return reason.detail ? `held for node ${reason.detail}` : "held for node";
+    case "idle": return null; // plain idle needs no refinement
+    default: return null;
+  }
+}
+
+function Pill({ role, label, sublabel }: { role: Role; label: string; sublabel?: string | null }) {
   const r = ROLE[role];
   return (
     <span
@@ -68,14 +87,17 @@ function Pill({ role, label }: { role: Role; label: string }) {
     >
       <span className={cn("size-1.5 rounded-full", r.dot, r.pulse && "pulse-dot")} />
       {label}
+      {sublabel ? <span className="opacity-70">· {sublabel}</span> : null}
     </span>
   );
 }
 
-export function SessionStatusChip({ state, closed }: { state: SessionOpState; closed?: boolean }) {
+export function SessionStatusChip(
+  { state, closed, reason }: { state: SessionOpState; closed?: boolean; reason?: SessionReason | null },
+) {
   if (closed) return <Pill role="idle" label="Closed" />;
   const { role, label } = opMap(state);
-  return <Pill role={role} label={label} />;
+  return <Pill role={role} label={label} sublabel={reasonSublabel(reason)} />;
 }
 
 export function TaskStatusChip({ state }: { state: TaskState }) {

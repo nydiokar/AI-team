@@ -3,9 +3,35 @@
  * status enum is split into lifecycle + operational state (gap-doc §3,
  * acceptance #4 — the two must not be conflated).
  */
-import type { Session } from "../domain/models";
+import type { Session, SessionReason, SessionReasonKind } from "../domain/models";
 import type { SessionLifecycle, SessionOpState } from "../domain/status";
-import type { RawSessionView } from "./rawApi";
+import type { RawSessionReason, RawSessionView } from "./rawApi";
+
+const REASON_KINDS: ReadonlySet<string> = new Set<SessionReasonKind>([
+  "paused_quota",
+  "paused_retry",
+  "waiting_workers",
+  "waiting_job",
+  "open_case_idle",
+  "idle",
+  "node_offline",
+]);
+
+/**
+ * [A83] Normalize the raw secondary reason. Returns null for absent/unknown
+ * kinds so an unrecognized future backend value degrades to "no extra label"
+ * rather than rendering a raw string.
+ */
+export function deriveReason(raw: RawSessionView): SessionReason | null {
+  const r: RawSessionReason | null | undefined = raw.reason;
+  if (!r || typeof r.kind !== "string" || !REASON_KINDS.has(r.kind)) return null;
+  const confidence = r.confidence === "medium" ? "medium" : "high";
+  return {
+    kind: r.kind as SessionReasonKind,
+    confidence,
+    detail: r.detail ?? null,
+  };
+}
 
 /**
  * lifecycle: open vs closed only (archived ⛔ dropped). `cancelled` is a turn
@@ -77,6 +103,7 @@ export function toSession(raw: RawSessionView): Session {
     continuedFrom: raw.continued_from ?? null,
     keepPinned: Boolean(raw.keep_pinned),
     keepNote: raw.keep_note ?? "",
+    reason: deriveReason(raw),
   };
 }
 

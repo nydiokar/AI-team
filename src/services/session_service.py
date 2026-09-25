@@ -311,16 +311,33 @@ class SessionService:
 
     # --- queries (read) — one read shape for every surface (Move C / M2) ---
 
-    def list_views(self, limit: int = 200, *, keep_pinned: Optional[bool] = None) -> List[SessionView]:
+    def list_views(
+        self,
+        limit: int = 200,
+        *,
+        keep_pinned: Optional[bool] = None,
+        db: Any = None,
+    ) -> List[SessionView]:
         """Sessions as operator-facing read models (DB-first, newest first).
 
         Bounded by ``limit`` so a polling surface doesn't scan the whole table on
         every request. Sessions come back ordered by ``updated_at`` desc from the
         store, so the bound keeps the most recently active ones.
+
+        [A83] When ``db`` is supplied, attach the derived, non-authoritative
+        *secondary reason* to each view in ONE batched pass
+        (``derive_session_reasons`` — a single ``list_jobs_for_sessions`` plus
+        bounded per-manager reads; no N+1). ``db`` omitted ⇒ reasons stay None
+        and the views are byte-identical to before (Telegram et al. unchanged).
         """
+        sessions = self.store.list_all(limit=limit, keep_pinned=keep_pinned)
+        if db is None:
+            return [SessionView.from_session(s) for s in sessions]
+        from src.core.session_reason import derive_session_reasons
+        reasons = derive_session_reasons(db, sessions)
         return [
-            SessionView.from_session(s)
-            for s in self.store.list_all(limit=limit, keep_pinned=keep_pinned)
+            SessionView.from_session(s).with_reason(reasons.get(s.session_id))
+            for s in sessions
         ]
 
     def active_view(self, chat_id: int) -> Optional[SessionView]:

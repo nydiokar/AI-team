@@ -1249,7 +1249,11 @@ def build_control_api(orchestrator) -> FastAPI:
         keep_pinned: Optional[bool] = Query(default=None),
     ) -> JSONResponse:
         try:
-            views = orchestrator.session_service.list_views(limit=limit, keep_pinned=keep_pinned)
+            # [A83] Pass the existing DB handle so the batched secondary-reason
+            # derivation runs on the read path (no N+1, no timer — #145/#147).
+            views = orchestrator.session_service.list_views(
+                limit=limit, keep_pinned=keep_pinned, db=_db()
+            )
             sessions = [v.to_dict() for v in views]
         except Exception as e:
             logger.warning("control_api_sessions_failed err=%s", e)
@@ -1427,12 +1431,24 @@ def build_control_api(orchestrator) -> FastAPI:
         db = _db()
         session = orchestrator.session_service.store.get(session_id)
         session_row = _session_payload(session) if session is not None else None
+        # [A83] Derive the session's secondary reason on the read path (batched;
+        # zero reads for BUSY/terminal — never on a timer, #145/#147) and attach
+        # it to the timeline head + response.
+        session_reason = None
+        if db is not None and session is not None:
+            try:
+                from src.core.session_reason import derive_session_reasons
+                derived = derive_session_reasons(db, [session]).get(session_id)
+                session_reason = derived.to_dict() if derived is not None else None
+            except Exception as e:
+                logger.warning("control_api_timeline_reason_failed err=%s", e)
         from src.control.session_timeline import build_session_timeline
         response = build_session_timeline(
             db=db,
             telemetry_store=_telemetry_store(),
             session_id=session_id,
             session_row=session_row,
+            session_reason=session_reason,
             limit=limit,
             cursor=cursor,
         )

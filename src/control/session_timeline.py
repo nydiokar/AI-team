@@ -31,6 +31,7 @@ TimelineKind = Literal[
     "approval",
     "recovery",
     "system_notice",
+    "session_state",  # [A83] head item carrying the derived secondary reason
 ]
 
 
@@ -52,6 +53,12 @@ class SessionTimelineItem(BaseModel):
     summary: str
     detail: dict[str, Any] = Field(default_factory=dict)
     raw_refs: dict[str, str] = Field(default_factory=dict)
+    # [A83] Derived, non-authoritative secondary reason for the session's primary
+    # state, carried alongside the timeline (spec
+    # docs/TBD/SESSION_WAIT_STATE_GRANULARITY.md). Session-scoped, so it is
+    # attached to the head `session_state` item, not per task/turn/job. None ⇒ no
+    # reason (BUSY, terminal, or db unavailable).
+    reason: dict[str, Any] | None = None
 
 
 class SessionTimelineResponse(BaseModel):
@@ -60,6 +67,10 @@ class SessionTimelineResponse(BaseModel):
     generated_at: str
     coverage: dict[str, str]
     context_fill: dict[str, Any]
+    # [A83] The session's derived secondary reason, surfaced at the response
+    # level too (the pillow needs it even when the item page is empty). None ⇒
+    # no reason derived.
+    reason: dict[str, Any] | None = None
 
 
 def build_session_timeline(
@@ -68,6 +79,7 @@ def build_session_timeline(
     telemetry_store: Any | None,
     session_id: str,
     session_row: dict[str, object] | None = None,
+    session_reason: dict[str, Any] | None = None,
     limit: int = 50,
     cursor: str | None = None,
 ) -> SessionTimelineResponse:
@@ -270,6 +282,27 @@ def build_session_timeline(
         )
 
     items.sort(key=lambda item: item.timestamp, reverse=True)
+    # [A83] Prepend a session-scoped head item carrying the derived secondary
+    # reason, so it leads the first page and is present even when there are no
+    # task/turn/job items. Reason is computed on the read path by the caller
+    # (never here, never on a timer — #145/#147); we only render it.
+    if session_reason is not None:
+        kind_txt = str(session_reason.get("kind") or "")
+        items.insert(
+            0,
+            SessionTimelineItem(
+                id=f"session:{session_id}:reason",
+                kind="session_state",
+                source="session_reason",
+                timestamp=generated_at,
+                session_id=session_id,
+                status=_session_status_text(session_row),
+                confidence=str(session_reason.get("confidence") or "") or None,
+                summary=f"Session reason: {kind_txt}" if kind_txt else "Session reason",
+                detail={"reason": session_reason},
+                reason=session_reason,
+            ),
+        )
     page: list[SessionTimelineItem] = items[offset : offset + bounded_limit]
     next_offset: int = offset + bounded_limit
     return SessionTimelineResponse(
@@ -278,6 +311,7 @@ def build_session_timeline(
         generated_at=generated_at,
         coverage=coverage,
         context_fill=_context_fill_summary(turns[0] if turns else None),
+        reason=session_reason,
     )
 
 
@@ -332,6 +366,14 @@ def _timestamp(*values: object) -> str:
 
 def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _session_status_text(session_row: dict[str, object] | None) -> str | None:
+    """The session's primary status off the loaded row (presentational), or None."""
+    if not isinstance(session_row, dict):
+        return None
+    status = session_row.get("status")
+    return status if isinstance(status, str) and status else None
 
 
 def _staleness_for_state(state: str) -> str:
