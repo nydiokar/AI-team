@@ -34,6 +34,7 @@ task_dependencies  — DAG edges for agent-to-agent autonomous flows
 agent_runs         — fine-grained per-tool-call log (dashboard/audit)
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -64,7 +65,7 @@ from .turn_queue import (
     BackingStoreError,
 )
 if False:  # typing-only forward refs for the strict helper signatures
-    from .turn_queue import ClaimToken, StartAuthorization, CompletionResult, RecoveryResolution
+    from .turn_queue import ClaimToken, StartAuthorization, CompletionResult, RecoveryResolution, TurnAdmission
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +195,14 @@ _TRUTHY_FLAG_VALUES = ("1", "true", "yes", "on")
 # as lost/dishonest state (a result never recorded), so the transaction START is
 # retried with bounded backoff before giving up. Only acquisition is retried —
 # nothing has been written yet, so it is idempotent.
+# [A82 Stage 4a] The managed open-row predicate, spelled EXACTLY like the
+# `idx_mesh_turns_session_open` partial-index WHERE clause so SQLite can prove
+# the index usable (partial-index use requires the index terms verbatim).
+_MANAGED_OPEN_PREDICATE = (
+    "queue_protocol = 1 "
+    "AND status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')"
+)
+
 _WRITE_BEGIN_MAX_ATTEMPTS = 4
 _WRITE_BEGIN_BACKOFF_SEC = 0.1
 _BUSY_TIMEOUT_MS = 15000
@@ -1432,6 +1441,52 @@ class MeshDB:
                 conn.execute("ROLLBACK;")
                 raise
 
+    @contextmanager
+    def _managed_write(
+        self, op: str, deadline_sec: float = 5.0,
+    ) -> Generator[sqlite3.Connection, None, None]:
+        """[A82 Stage 4a] Bounded write transaction for queue mutations (design §8
+        "Time"): ONE monotonic deadline covers the in-process write lock AND the
+        SQLite lock (busy_timeout = remaining time, single BEGIN, none of the
+        legacy 4x15 s retry path). Exhausting it raises a typed 503
+        ``BackingStoreError`` — nothing was written, so a caller can never be
+        told "accepted". The thread-local busy_timeout is restored afterwards.
+        COMMIT runs before control returns to the caller, so an acknowledgement
+        built after this block always refers to a committed row."""
+        end = time.monotonic() + max(0.0, deadline_sec)
+        if not self._write_lock.acquire(timeout=max(0.0, deadline_sec)):
+            raise BackingStoreError(
+                f"managed {op} deadline exceeded waiting for the write lock", op=op,
+            )
+        try:
+            conn = self._conn()
+            remaining_ms = max(1, int((end - time.monotonic()) * 1000))
+            conn.execute(f"PRAGMA busy_timeout={remaining_ms};")
+            try:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                except sqlite3.OperationalError as exc:
+                    raise BackingStoreError(
+                        f"managed {op} deadline exceeded acquiring the database lock: {exc}",
+                        op=op,
+                    )
+                try:
+                    yield conn
+                    conn.execute("COMMIT;")
+                except BaseException:
+                    try:
+                        conn.execute("ROLLBACK;")
+                    except Exception:
+                        pass
+                    raise
+            finally:
+                try:
+                    conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS};")
+                except Exception:
+                    pass
+        finally:
+            self._write_lock.release()
+
     def checkpoint_wal(self, mode: str = "PASSIVE") -> Optional[tuple]:
         """Checkpoint the WAL to bound its on-disk growth. Best-effort.
 
@@ -2357,12 +2412,14 @@ class MeshDB:
 
     def enqueue_turn(
         self,
-        task_id: str,
-        session_id: str,
-        backend: str,
-        action: str,
-        payload: Dict[str, Any],
+        task_id: Optional[str] = None,
+        session_id: str = "",
+        backend: Optional[str] = None,
+        action: str = "resume_session",
+        payload: Optional[Dict[str, Any]] = None,
         *,
+        body: Optional[str] = None,
+        operation_id: Optional[str] = None,
         turn_source: str = "system",
         turn_kind: str = "instruction",
         sender_session_id: Optional[str] = None,
@@ -2375,32 +2432,96 @@ class MeshDB:
         parent_task_id: Optional[str] = None,
         not_before: Optional[str] = None,
         expires_at: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Admit a MANAGED (protocol-1) turn in ONE transaction (design §4).
+        require_enrolled: bool = False,
+        external_waiting: int = 0,
+        fleet_cap: Optional[int] = None,
+        per_session_cap: Optional[int] = None,
+        deadline_sec: Optional[float] = None,
+    ) -> "TurnAdmission":
+        """Admit a MANAGED (protocol-1) turn in ONE bounded transaction
+        (design §4 + §8; A82 Stage 4a).
 
         Order inside the transaction:
-          1. Durable idempotency lookup — a matching (scope, key) with the SAME
-             admission_hash returns the EXISTING row's id + current status/
-             revision (idempotent replay, even after edit/withdraw/close);
+          1. Durable idempotency — a matching (scope, key) with the SAME
+             admission hash returns the EXISTING row's id + current status/
+             revision (replay, even after edit/withdraw/close or a full queue);
              the same key with a DIFFERENT hash raises `OwnershipConflictError`
-             (409). (Full capacity/permission checks are Stage 4.)
-          2. Allocate the per-session monotonic `queue_sequence` via the
-             session-sequence index (MAX+1 over this session's protocol-1 rows).
-          3. Insert the bounded intent as `queue_protocol=1`, `status='queued'`,
-             with explicit Case (`flow_run_id`) linkage.
+             (409). An absent hash is derived from the canonical request.
+          2. Active coalesce — an internal producer's `coalesce_key` that
+             already names an open row returns that row (never for human turns).
+          3. Recipient validation — with `require_enrolled` the session row must
+             exist, carry the durable enrollment marker and not be closed.
+          4. Capacity — fleet queued+pending managed rows + `external_waiting`
+             (legacy occupancy of the SAME shared allowance) < `fleet_cap`
+             (`config.system.max_queue_size`), per-session queued+pending <
+             `per_session_cap` (20), stored intent bytes <= 2 MiB/row and the
+             fleet persisted `intent_bytes` sum <= 100 MiB.
+          5. Per-session monotonic sequence + insert (`queue_protocol=1`,
+             `status='queued'`, explicit Case `flow_run_id`, `intent_bytes`).
+        The acknowledgement (`TurnAdmission`, a str equal to the turn id) is
+        built only after COMMIT; any failure raises a typed error (429/413/409/
+        422/503) and nothing is acknowledged.
 
-        `queue_protocol` is SERVER-OWNED here (design §3) — a caller can never
-        select it. Returns {id, status, revision, queue_sequence,
-        idempotent_replay}."""
-        now = _now()
-        prompt = payload.get("prompt") if isinstance(payload.get("prompt"), str) else None
+        Convenience form (producers/tests): `body=` alone builds the payload,
+        `operation_id=` is the idempotency key, `task_id`/`backend` default to a
+        fresh id / the session's backend. `queue_protocol` is SERVER-OWNED."""
+        from .turn_queue import (
+            ADMISSION_DEADLINE_SEC, MAX_INTENT_BYTES_FLEET, MAX_INTENT_BYTES_PER_ROW,
+            PER_SESSION_WAITING_CAP, TurnAdmission,
+        )
+
+        sid = (session_id or "").strip()
+        if not sid:
+            raise MalformedTurnError("managed turn requires a session_id")
+        if payload is None:
+            if body is None:
+                raise MalformedTurnError("managed turn requires a body or payload", session_id=sid)
+            payload = {"prompt": body}
+        if not isinstance(payload, dict):
+            raise MalformedTurnError("managed turn payload must be an object", session_id=sid)
+        prompt: Optional[str] = body if body is not None else (
+            payload.get("prompt") if isinstance(payload.get("prompt"), str) else None
+        )
+        if coalesce_key is not None and turn_source == "human":
+            # design §3: a coalesce key is never used to merge human instructions.
+            raise MalformedTurnError("human turns cannot carry a coalesce_key", session_id=sid)
+        if idempotency_key is None and operation_id is not None:
+            idempotency_key = operation_id
+        if idempotency_key is not None and idempotency_scope is None:
+            idempotency_scope = f"{turn_source}:{sid}"
+        if admission_hash is None:
+            admission_hash = _canonical_admission_hash({
+                "session_id": sid, "action": action, "turn_kind": turn_kind,
+                "prompt": prompt, "flow_run_id": flow_run_id,
+                "coalesce_key": coalesce_key,
+            })
         try:
-            with self._write() as conn:
+            payload_json = json.dumps(payload)
+        except (TypeError, ValueError) as e:
+            raise MalformedTurnError(f"managed turn payload is not JSON: {e}", session_id=sid)
+        intent_bytes = len(payload_json.encode("utf-8")) + (
+            len(prompt.encode("utf-8")) if prompt is not None else 0
+        )
+        if intent_bytes > MAX_INTENT_BYTES_PER_ROW:
+            raise ByteCapError(
+                "stored intent exceeds the per-row cap", session_id=sid,
+                intent_bytes=intent_bytes, cap=MAX_INTENT_BYTES_PER_ROW,
+            )
+        if fleet_cap is None:
+            from config import config as _cfg
+            fleet_cap = int(_cfg.system.max_queue_size)
+        per_cap = PER_SESSION_WAITING_CAP if per_session_cap is None else int(per_session_cap)
+        deadline = ADMISSION_DEADLINE_SEC if deadline_sec is None else float(deadline_sec)
+        new_id = task_id or f"turn_{uuid.uuid4().hex[:12]}"
+        now = _now()
+        admitted: Optional[Dict[str, Any]] = None
+        try:
+            with self._managed_write("enqueue_turn", deadline) as conn:
                 # 1. Idempotency resolution (design §4 step 1).
                 if idempotency_key is not None:
                     existing = conn.execute(
                         """
-                        SELECT id, status, revision, admission_hash
+                        SELECT id, status, revision, admission_hash, queue_sequence
                         FROM mesh_tasks
                         WHERE queue_protocol = 1 AND idempotency_scope IS ?
                           AND idempotency_key = ?
@@ -2408,69 +2529,340 @@ class MeshDB:
                         (idempotency_scope, idempotency_key),
                     ).fetchone()
                     if existing is not None:
-                        if admission_hash is not None and existing["admission_hash"] not in (None, admission_hash):
+                        if existing["admission_hash"] not in (None, admission_hash):
                             raise OwnershipConflictError(
                                 "idempotency key reused with a different original "
                                 "request (design §4)",
                                 task_id=existing["id"],
                             )
-                        return {
-                            "id": existing["id"],
-                            "status": existing["status"],
+                        admitted = {
+                            "task_id": existing["id"], "status": existing["status"],
                             "revision": existing["revision"],
-                            "queue_sequence": None,
-                            "idempotent_replay": True,
+                            "queue_sequence": existing["queue_sequence"],
+                            "idempotent_replay": True, "coalesced": False,
                         }
-                # 2. Allocate per-session monotonic sequence (design §3/§4).
-                # An ordered LIMIT-1 lets the `idx_mesh_turns_session_sequence`
-                # partial index serve the latest sequence directly (design §3:
-                # "Latest-sequence lookup uses the session-sequence index, not an
-                # aggregate scan over completed history").
-                seq_row = conn.execute(
-                    """
-                    SELECT queue_sequence FROM mesh_tasks
-                    WHERE queue_protocol = 1 AND session_id = ?
-                      AND queue_sequence IS NOT NULL
-                    ORDER BY queue_sequence DESC LIMIT 1
-                    """,
-                    (session_id,),
-                ).fetchone()
-                sequence = (int(seq_row[0]) + 1) if seq_row and seq_row[0] is not None else 1
-                # 3. Insert the managed row (design §4 step 3).
-                conn.execute(
-                    """
-                    INSERT INTO mesh_tasks (
-                        id, session_id, machine_id, backend, action, payload, prompt,
-                        status, parent_task_id, created_at, updated_at,
-                        queue_protocol, queue_sequence, turn_source, sender_session_id,
-                        turn_kind, idempotency_scope, idempotency_key, admission_hash,
-                        revision, not_before, expires_at, coalesce_key, flow_run_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?,
-                              1, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-                    """,
-                    (
-                        task_id, session_id, machine_id, backend, action,
-                        json.dumps(payload), prompt, parent_task_id, now, now,
-                        sequence, turn_source, sender_session_id, turn_kind,
-                        idempotency_scope, idempotency_key, admission_hash,
-                        not_before, expires_at, coalesce_key, flow_run_id,
-                    ),
-                )
-                return {
-                    "id": task_id,
-                    "status": "queued",
-                    "revision": 1,
-                    "queue_sequence": sequence,
-                    "idempotent_replay": False,
-                }
+                # 2. Active coalesce (internal producers only, design §3/§7).
+                if admitted is None and coalesce_key is not None:
+                    existing = conn.execute(
+                        """
+                        SELECT id, status, revision, queue_sequence FROM mesh_tasks
+                        WHERE queue_protocol = 1 AND coalesce_key = ?
+                          AND status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')
+                        """,
+                        (coalesce_key,),
+                    ).fetchone()
+                    if existing is not None:
+                        admitted = {
+                            "task_id": existing["id"], "status": existing["status"],
+                            "revision": existing["revision"],
+                            "queue_sequence": existing["queue_sequence"],
+                            "idempotent_replay": True, "coalesced": True,
+                        }
+                if admitted is None:
+                    # 3. Canonical recipient + durable enrollment marker.
+                    srow = conn.execute(
+                        "SELECT backend, status, turn_queue_enrolled FROM sessions "
+                        "WHERE session_id = ?",
+                        (sid,),
+                    ).fetchone()
+                    if require_enrolled:
+                        if srow is None:
+                            raise TurnNotFoundError("unknown session", session_id=sid)
+                        if not srow["turn_queue_enrolled"]:
+                            raise OwnershipConflictError(
+                                "session is not enrolled in the managed turn queue",
+                                session_id=sid,
+                            )
+                        if (srow["status"] or "") == "closed":
+                            raise OwnershipConflictError(
+                                "session is closed; admission refused", session_id=sid,
+                            )
+                    row_backend = backend or (srow["backend"] if srow is not None else None)
+                    if not row_backend:
+                        raise MalformedTurnError("managed turn has no backend", session_id=sid)
+                    # 4. Capacity, counted INSIDE the transaction (design §8).
+                    fleet = conn.execute(
+                        f"""
+                        SELECT COUNT(*) AS n, COALESCE(SUM(intent_bytes), 0) AS b
+                        FROM mesh_tasks
+                        WHERE {_MANAGED_OPEN_PREDICATE}
+                          AND status IN ('queued', 'pending')
+                        """
+                    ).fetchone()
+                    if int(fleet["n"]) + max(0, int(external_waiting)) + 1 > fleet_cap:
+                        raise CapacityError(
+                            "fleet waiting capacity reached", session_id=sid,
+                            managed_waiting=int(fleet["n"]),
+                            legacy_waiting=int(external_waiting), cap=fleet_cap,
+                            retry_after=1,
+                        )
+                    if int(fleet["b"]) + intent_bytes > MAX_INTENT_BYTES_FLEET:
+                        raise CapacityError(
+                            "fleet stored-intent byte budget reached", session_id=sid,
+                            stored_bytes=int(fleet["b"]), cap=MAX_INTENT_BYTES_FLEET,
+                            retry_after=1,
+                        )
+                    per_session = conn.execute(
+                        f"""
+                        SELECT COUNT(*) FROM mesh_tasks
+                        WHERE session_id = ? AND {_MANAGED_OPEN_PREDICATE}
+                          AND status IN ('queued', 'pending')
+                        """,
+                        (sid,),
+                    ).fetchone()[0]
+                    if int(per_session) + 1 > per_cap:
+                        raise CapacityError(
+                            "per-session waiting capacity reached", session_id=sid,
+                            session_waiting=int(per_session), cap=per_cap,
+                            retry_after=1,
+                        )
+                    # 5. Allocate per-session monotonic sequence via the
+                    # session-sequence index (ordered LIMIT 1, design §3).
+                    seq_row = conn.execute(
+                        """
+                        SELECT queue_sequence FROM mesh_tasks
+                        WHERE queue_protocol = 1 AND session_id = ?
+                          AND queue_sequence IS NOT NULL
+                        ORDER BY queue_sequence DESC LIMIT 1
+                        """,
+                        (sid,),
+                    ).fetchone()
+                    sequence = (int(seq_row[0]) + 1) if seq_row and seq_row[0] is not None else 1
+                    conn.execute(
+                        """
+                        INSERT INTO mesh_tasks (
+                            id, session_id, machine_id, backend, action, payload, prompt,
+                            status, parent_task_id, created_at, updated_at,
+                            queue_protocol, queue_sequence, turn_source, sender_session_id,
+                            turn_kind, idempotency_scope, idempotency_key, admission_hash,
+                            revision, not_before, expires_at, coalesce_key, flow_run_id,
+                            intent_bytes
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?,
+                                  1, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            new_id, sid, machine_id, row_backend, action,
+                            payload_json, prompt, parent_task_id, now, now,
+                            sequence, turn_source, sender_session_id, turn_kind,
+                            idempotency_scope, idempotency_key, admission_hash,
+                            not_before, expires_at, coalesce_key, flow_run_id,
+                            intent_bytes,
+                        ),
+                    )
+                    admitted = {
+                        "task_id": new_id, "status": "queued", "revision": 1,
+                        "queue_sequence": sequence, "idempotent_replay": False,
+                        "coalesced": False,
+                    }
         except TurnQueueError:
             raise
         except sqlite3.IntegrityError as e:
             raise OwnershipConflictError(
-                f"managed enqueue integrity conflict: {e}", task_id=task_id,
+                f"managed enqueue integrity conflict: {e}", task_id=new_id,
             )
         except Exception as e:
-            raise _turn_backing_error("enqueue_turn", task_id=task_id, err=e)
+            raise _turn_backing_error("enqueue_turn", task_id=new_id, err=e)
+        # COMMITTED — only now build the acknowledgement (design §3.4).
+        assert admitted is not None
+        return TurnAdmission(
+            admitted["task_id"],
+            status=admitted["status"],
+            revision=admitted["revision"],
+            queue_sequence=admitted["queue_sequence"],
+            idempotent_replay=admitted["idempotent_replay"],
+            coalesced=admitted["coalesced"],
+        )
+
+    def managed_waiting_totals(self) -> Dict[str, int]:
+        """[A82 Stage 4a] Fleet managed queued+pending count and persisted
+        stored-intent bytes (design §8). Bounded: served by the open-row partial
+        index; the waiting subset itself is capped (count + bytes)."""
+        row = self._conn().execute(
+            f"""
+            SELECT COUNT(*) AS n, COALESCE(SUM(intent_bytes), 0) AS b,
+                   COALESCE(SUM(status = 'queued'), 0) AS q
+            FROM mesh_tasks
+            WHERE {_MANAGED_OPEN_PREDICATE} AND status IN ('queued', 'pending')
+            """
+        ).fetchone()
+        return {"count": int(row["n"]), "bytes": int(row["b"]), "queued": int(row["q"])}
+
+    def managed_queued_bytes(self) -> int:
+        """[A82 Stage 4a] Persisted stored-intent byte accounting for the waiting
+        (queued+pending) managed subset — the figure admission enforces against
+        `MAX_INTENT_BYTES_FLEET` inside its transaction (design §8)."""
+        return self.managed_waiting_totals()["bytes"]
+
+    def find_turn_by_idempotency(
+        self, idempotency_scope: Optional[str], idempotency_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        """[A82 Stage 4a] Read-only durable idempotency probe (index-served) so a
+        producer can short-circuit a replay BEFORE side effects such as Case
+        lineage writes. The admission transaction re-checks authoritatively."""
+        row = self._conn().execute(
+            """
+            SELECT id, status, revision, admission_hash, queue_sequence
+            FROM mesh_tasks
+            WHERE queue_protocol = 1 AND idempotency_scope IS ? AND idempotency_key = ?
+            """,
+            (idempotency_scope, idempotency_key),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def select_eligible_turn_heads(
+        self, limit: int = 25, now: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """[A82 Stage 4a] Fair-scheduler head selection (design §5 step 1-2).
+
+        Reads ONLY the bounded waiting subset (`idx_mesh_turns_waiting`; the
+        whole subset is capped by the fleet waiting cap) and applies EVERY
+        eligibility filter BEFORE the LIMIT: the row is its session's head (no
+        earlier open managed row — a delayed/blocked head holds only its own
+        session and a later request can never overtake it), no active slot
+        holder, `not_before` reached, session enrolled / not paused / not
+        closed. Ordered by acceptance time + stable id. Returns small summaries
+        (no prompt/payload bodies); the caller fetches one full row at a time."""
+        ts = now or _now()
+        rows = self._conn().execute(
+            f"""
+            SELECT t.id, t.session_id, t.revision, t.queue_sequence, t.created_at,
+                   t.expires_at, t.turn_source, s.config_revision
+            FROM mesh_tasks t
+            JOIN sessions s ON s.session_id = t.session_id
+            WHERE t.queue_protocol = 1 AND t.status = 'queued'
+              AND (t.not_before IS NULL OR t.not_before <= ?)
+              AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
+              AND COALESCE(s.status, '') != 'closed'
+              AND NOT EXISTS (
+                  SELECT 1 FROM mesh_tasks e
+                  WHERE e.session_id = t.session_id
+                    AND e.{_MANAGED_OPEN_PREDICATE}
+                    AND e.queue_sequence < t.queue_sequence
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM mesh_tasks a
+                  WHERE a.session_id = t.session_id
+                    AND a.queue_protocol = 1 AND a.session_id IS NOT NULL
+                    AND a.status IN ('pending', 'claimed', 'running', 'recovery_required')
+              )
+            ORDER BY t.created_at ASC, t.id ASC
+            LIMIT ?
+            """,
+            (ts, max(0, int(limit))),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def activate_prepared_turn(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        expected_config_revision: int,
+        action: str,
+        payload: Dict[str, Any],
+        machine_id: Optional[str],
+        deadline_sec: Optional[float] = None,
+    ) -> str:
+        """[A82 Stage 4a] Conditionally commit `queued -> pending` with the
+        IMMUTABLE prepared execution payload + carrier assignment (design §5
+        step 4). Preparation happened OUTSIDE this transaction; here only
+        predicates are re-checked (no file/network/model work):
+
+          * the row is still queued at `expected_revision` (else ``"stale"`` —
+            re-prepare against the new revision; ``"gone"`` if no longer queued);
+          * the session is enrolled, not paused, not closed, and its
+            `config_revision` is unchanged (else ``"stale"`` / ``"ineligible"``);
+          * the row is still its session's head and no slot holder exists
+            (else ``"ineligible"``; the one-active index is the backstop);
+          * the prepared payload fits the per-row cap (else ``"oversize"``,
+            recorded as a bounded `blocked_reason`, row stays queued).
+        Returns ``"activated"`` on commit."""
+        from .turn_queue import ADMISSION_DEADLINE_SEC, MAX_INTENT_BYTES_PER_ROW
+
+        payload_json = json.dumps(payload)
+        prepared_bytes = len(payload_json.encode("utf-8"))
+        now = _now()
+        deadline = ADMISSION_DEADLINE_SEC if deadline_sec is None else float(deadline_sec)
+        try:
+            with self._managed_write("activate_turn", deadline) as conn:
+                row = conn.execute(
+                    "SELECT session_id, status, revision, prompt FROM mesh_tasks "
+                    "WHERE id = ? AND queue_protocol = 1",
+                    (task_id,),
+                ).fetchone()
+                if row is None or row["status"] != "queued":
+                    return "gone"
+                if int(row["revision"]) != int(expected_revision):
+                    return "stale"
+                srow = conn.execute(
+                    "SELECT status, turn_queue_enrolled, turn_queue_paused, config_revision "
+                    "FROM sessions WHERE session_id = ?",
+                    (row["session_id"],),
+                ).fetchone()
+                if (
+                    srow is None or not srow["turn_queue_enrolled"]
+                    or srow["turn_queue_paused"] or (srow["status"] or "") == "closed"
+                ):
+                    return "ineligible"
+                if int(srow["config_revision"]) != int(expected_config_revision):
+                    return "stale"
+                blocker = conn.execute(
+                    f"""
+                    SELECT 1 FROM mesh_tasks e
+                    WHERE e.session_id = ? AND e.{_MANAGED_OPEN_PREDICATE}
+                      AND (e.queue_sequence < (SELECT queue_sequence FROM mesh_tasks WHERE id = ?)
+                           OR e.status IN ('pending', 'claimed', 'running', 'recovery_required'))
+                    LIMIT 1
+                    """,
+                    (row["session_id"], task_id),
+                ).fetchone()
+                if blocker is not None:
+                    return "ineligible"
+                prompt_bytes = len((row["prompt"] or "").encode("utf-8"))
+                if prepared_bytes + prompt_bytes > MAX_INTENT_BYTES_PER_ROW:
+                    conn.execute(
+                        "UPDATE mesh_tasks SET blocked_reason = ?, updated_at = ? "
+                        "WHERE id = ? AND queue_protocol = 1 AND status = 'queued'",
+                        (f"prepared_payload_oversize bytes={prepared_bytes}"[:500], now, task_id),
+                    )
+                    return "oversize"
+                conn.execute(
+                    """
+                    UPDATE mesh_tasks
+                    SET status = 'pending', activated_at = ?, updated_at = ?,
+                        action = ?, payload = ?, machine_id = ?,
+                        intent_bytes = ?, blocked_reason = NULL
+                    WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
+                      AND revision = ?
+                    """,
+                    (now, now, action, payload_json, machine_id,
+                     prepared_bytes + prompt_bytes, task_id, int(expected_revision)),
+                )
+                if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                    return "stale"
+                return "activated"
+        except TurnQueueError:
+            raise
+        except sqlite3.IntegrityError:
+            return "ineligible"
+        except Exception as e:
+            raise _turn_backing_error("activate_prepared_turn", task_id=task_id, err=e)
+
+    def set_turn_blocked_reason(self, task_id: str, reason: Optional[str]) -> None:
+        """[A82 Stage 4a] Bounded reason on a still-queued head that could not be
+        activated (design §5 step 3). Writes only when the value changes."""
+        try:
+            with self._managed_write("set_turn_blocked_reason") as conn:
+                conn.execute(
+                    "UPDATE mesh_tasks SET blocked_reason = ?, updated_at = ? "
+                    "WHERE id = ? AND queue_protocol = 1 AND status = 'queued' "
+                    "AND blocked_reason IS NOT ?",
+                    ((reason or None) and reason[:500], _now(), task_id, (reason or None) and reason[:500]),
+                )
+        except TurnQueueError:
+            raise
+        except Exception as e:
+            raise _turn_backing_error("set_turn_blocked_reason", task_id=task_id, err=e)
 
     def activate_turn(self, task_id: str) -> bool:
         """Transition a managed head `queued -> pending` (design §5 activation).
@@ -2566,6 +2958,35 @@ class MeshDB:
                     raise OwnershipConflictError(
                         "revise lost the state race", task_id=task_id,
                     )
+                if body is not None:
+                    # [A82 Stage 4a] Re-account the stored intent and hold the
+                    # per-row + fleet byte caps (design §8: an edit cannot grow
+                    # the budget beyond its cap). Raising rolls the edit back.
+                    from .turn_queue import MAX_INTENT_BYTES_FLEET, MAX_INTENT_BYTES_PER_ROW
+                    conn.execute(
+                        "UPDATE mesh_tasks SET intent_bytes = "
+                        "COALESCE(length(CAST(payload AS BLOB)), 0) + "
+                        "COALESCE(length(CAST(prompt AS BLOB)), 0) WHERE id = ?",
+                        (task_id,),
+                    )
+                    own = conn.execute(
+                        "SELECT intent_bytes FROM mesh_tasks WHERE id = ?", (task_id,),
+                    ).fetchone()[0]
+                    if int(own) > MAX_INTENT_BYTES_PER_ROW:
+                        raise ByteCapError(
+                            "edited intent exceeds the per-row cap", task_id=task_id,
+                            intent_bytes=int(own), cap=MAX_INTENT_BYTES_PER_ROW,
+                        )
+                    total = conn.execute(
+                        f"SELECT COALESCE(SUM(intent_bytes), 0) FROM mesh_tasks "
+                        f"WHERE {_MANAGED_OPEN_PREDICATE} AND status IN ('queued', 'pending')"
+                    ).fetchone()[0]
+                    if int(total) > MAX_INTENT_BYTES_FLEET:
+                        raise CapacityError(
+                            "edit would exceed the fleet stored-intent budget",
+                            task_id=task_id, stored_bytes=int(total),
+                            cap=MAX_INTENT_BYTES_FLEET,
+                        )
                 # Atomic audit row (design §3: inserted with the queued revision).
                 conn.execute(
                     """
@@ -7212,6 +7633,10 @@ def _get_migrations() -> List[tuple]:
                # `mesh_turn_revisions` is the append-only edit audit (design §3);
                # sessions.turn_queue_enrolled/paused/config_revision are the
                # per-session enrollment + queue-pause + activation-config markers.
+        (35, """
+            ALTER TABLE mesh_tasks ADD COLUMN intent_bytes INTEGER
+        """),  # A82 Stage 4a: persisted stored-intent byte accounting for the
+               # managed waiting budget (design §8). NULL on every legacy row.
     ]
 
 
@@ -7341,6 +7766,14 @@ def _event_outcome(event: Dict[str, Any]) -> Optional[str]:
     """[A46] The ``outcome`` recorded in a flow_event's payload, or None."""
     pl = _event_payload(event)
     return str(pl["outcome"]) if isinstance(pl, dict) and pl.get("outcome") else None
+
+
+def _canonical_admission_hash(request: Dict[str, Any]) -> str:
+    """[A82 Stage 4a] Stable hash of the ORIGINAL admission request (design §4:
+    target, body, attachments, relevant options). Canonical JSON (sorted keys,
+    no whitespace variance) so a byte-identical retry hashes identically."""
+    blob = json.dumps(request, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _turn_backing_error(op: str, err: Exception, **ctx: Any) -> BackingStoreError:

@@ -636,6 +636,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._mesh_reconcile_in_progress: bool = False
         # [M3.4] Wake-Dispatcher loop handle (autonomous Case continuation).
         self._wake_dispatcher_task: Optional[asyncio.Task] = None
+        # [A82 Stage 4a] Managed turn-queue scheduler loop handle.
+        self._turn_scheduler: Any = None
+        self._turn_scheduler_task: Optional[asyncio.Task] = None
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -4533,6 +4536,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         await self._recover_stale_busy_sessions()
         self._start_stale_busy_reconciler()
         self._start_wake_dispatcher()
+        self._start_turn_scheduler()
 
         # Start the job completion poller (T3 — Watched Jobs)
         asyncio.create_task(self._job_completion_poller())
@@ -4615,6 +4619,15 @@ class TaskOrchestrator(ITaskOrchestrator):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._wake_dispatcher_task
         self._wake_dispatcher_task = None
+
+        if self._turn_scheduler is not None:
+            self._turn_scheduler.stop()
+        if self._turn_scheduler_task and not self._turn_scheduler_task.done():
+            self._turn_scheduler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._turn_scheduler_task
+        self._turn_scheduler_task = None
+        self._turn_scheduler = None
 
         # Cancel worker tasks
         for worker in self.worker_tasks:
@@ -5012,6 +5025,16 @@ class TaskOrchestrator(ITaskOrchestrator):
                 {"task_id": task.id, "reason": "harness_level3_needs_approval"},
             )
             raise HarnessAdmissionBlocked(task.id)
+
+        # [A82 Stage 4a] A session carrying the DURABLE enrollment marker takes the
+        # managed admission path (commit-before-ack; no BUSY/last_task_id write,
+        # no in-memory queue). Unenrolled / mesh-off ⇒ the legacy path below,
+        # unchanged. The marker is read from the canonical DB, never a flag.
+        _sid = str((task.metadata or {}).get("session_id") or "").strip()
+        if _sid and self._session_turn_queue_enrolled(_sid):
+            return await self._admit_managed_session_turn(task)
+        if task.metadata:
+            task.metadata.pop(self._TURN_OPERATION_META_KEY, None)
 
         logger.info(f"event=task_created task_id={task.id} source={(task.metadata or {}).get('source', 'runtime')}")
         self._emit_event("task_created", task, {"source": (task.metadata or {}).get("source", "runtime")})
@@ -6305,6 +6328,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         dispatched_by: Optional[str] = None,
         dispatch_file: Optional[str] = None,
         join_case_id: Optional[str] = None,
+        operation_id: Optional[str] = None,
     ) -> str:
         """Direct runtime entrypoint for Telegram/CLI instructions.
 
@@ -6342,6 +6366,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         # lineage above; the attach itself is flag-guarded in _record_flow_run_start.
         if join_case_id:
             self._stash_task_meta(task, self._JOIN_CASE_META_KEY, join_case_id)
+        # [A82 Stage 4a] Durable admission operation id (e.g. the web
+        # Idempotency-Key). Consumed by the managed path only; the legacy path
+        # strips it so its task metadata stays byte-identical.
+        if operation_id:
+            self._stash_task_meta(task, self._TURN_OPERATION_META_KEY, operation_id)
         return await self._enqueue_task(task)
 
     async def compact_session(self, session_id: str):
@@ -9480,6 +9509,282 @@ Generated from user description: {description}
     # mesh_reconcile_status()      — operator read of spool health.
     # ===========================================================================
 
+    # ===========================================================================
+    # [A82 Stage 4a] Managed session turn queue — producer 1 (web / Telegram /
+    # runtime session instructions) admission + the fair scheduler's
+    # preparation seam. Design: docs/SESSION_TURN_QUEUE_DESIGN.md §4/§5/§8.
+    # ===========================================================================
+    _TURN_OPERATION_META_KEY = "__turn_operation_id"
+    # Producer-1 sources converted to managed admission. Every other producer
+    # (continuation, watched job, retry, heartbeat, respawn, compaction, file
+    # ingestion) is converted in its own later sub-stage; until then it FAILS
+    # CLOSED for an enrolled session instead of bypassing the managed queue.
+    _MANAGED_PRODUCER1_SOURCES = frozenset(
+        {"web_session", "telegram_session", "runtime", "telegram"}
+    )
+    _MANAGED_SOURCE_PRINCIPAL = {
+        "web_session": "operator",
+        "telegram_session": "telegram",
+        "telegram": "telegram",
+        "runtime": "runtime",
+    }
+
+    def _session_turn_queue_enrolled(self, session_id: str) -> bool:
+        """Durable enrollment marker from the canonical DB (never a flag).
+
+        Mesh DB absent ⇒ no managed queue exists ⇒ False (legacy). A DB that
+        exists but cannot answer FAILS CLOSED: an enrolled session must never
+        receive unmanaged execution because the marker was unreadable. One
+        indexed primary-key read, done inline like the rest of ``_enqueue_task``
+        (its lineage writes are inline too) so the legacy flow gains no await."""
+        from src.control.db import get_db
+        from src.control.turn_queue import BackingStoreError
+
+        db = get_db()
+        if db is None:
+            return False
+        try:
+            return bool(db.is_session_enrolled(session_id))
+        except Exception as e:
+            raise BackingStoreError(
+                f"turn-queue enrollment marker unreadable: {e}", session_id=session_id,
+            )
+
+    async def _admit_managed_session_turn(self, task: Task) -> str:
+        """Admit ``task`` as ONE durable managed turn for its enrolled session.
+
+        Preserves the legacy admission semantics that matter (harness gate
+        already ran in ``_enqueue_task``; Case/role lineage via the SAME
+        ``_record_flow_run_start`` exactly once — join / attach / birth), then
+        commits the bounded intent through the admission service. Nothing is
+        acknowledged, emitted, or scheduled unless the row committed; a durable
+        replay short-circuits BEFORE any lineage write (no double flow). Does
+        NOT touch BUSY / last_task_id / last_user_message / native id."""
+        from src.control.db import get_db, _canonical_admission_hash
+        from src.control.turn_admission import AdmissionRequest, admit_turn_async
+        from src.control.turn_queue import (
+            ManagedUnsupportedError, OwnershipConflictError, TurnAdmission,
+        )
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        meta = task.metadata or {}
+        sid = str(meta.get("session_id") or "").strip()
+        source = str(meta.get("source") or "runtime")
+        operation_id = str(meta.pop(self._TURN_OPERATION_META_KEY, "") or "").strip()
+        if source not in self._MANAGED_PRODUCER1_SOURCES:
+            raise ManagedUnsupportedError(
+                f"producer '{source}' is not converted to managed admission yet; "
+                "refusing unmanaged execution into an enrolled session",
+                session_id=sid, source=source,
+            )
+        if meta.get("staged_file") or meta.get("task_type") == "fetch_staged_file":
+            raise ManagedUnsupportedError(
+                "session-scoped file ingestion is not converted to managed "
+                "admission yet (A82 producer 8)", session_id=sid,
+            )
+        db = get_db()
+        principal = self._MANAGED_SOURCE_PRINCIPAL.get(source, source)
+        scope = f"{principal}:{sid}:instruction"
+        # Original-request hash (design §4): target, body, attachments, options —
+        # computed BEFORE lineage stamps the per-attempt flow ids.
+        admission_hash = _canonical_admission_hash({
+            "session_id": sid,
+            "prompt": task.prompt,
+            "target_files": list(task.target_files or []),
+            "type": getattr(task.type, "value", str(task.type)),
+            "metadata": {k: v for k, v in meta.items() if k != "session_id"},
+        })
+        if not operation_id:
+            # No client operation id ⇒ no replay protection (same as the legacy
+            # path without an Idempotency-Key); the key is still non-NULL.
+            operation_id = f"task:{task.id}"
+        existing = await asyncio.to_thread(db.find_turn_by_idempotency, scope, operation_id)
+        if existing is not None:
+            if existing.get("admission_hash") not in (None, admission_hash):
+                raise OwnershipConflictError(
+                    "idempotency key reused with a different original request",
+                    task_id=existing["id"],
+                )
+            return TurnAdmission(
+                existing["id"], status=existing["status"], revision=existing["revision"],
+                queue_sequence=existing.get("queue_sequence"), idempotent_replay=True,
+            )
+        flow_run_id = self._record_flow_run_start(task)
+        meta = task.metadata or {}
+        case_id = (
+            meta.get(self._CASE_ID_META_KEY)
+            or meta.get(self._FLOW_RUN_META_KEY)
+            or flow_run_id
+        )
+        intent_payload: Dict[str, Any] = {
+            "task_id": task.id,
+            "prompt": task.prompt,
+            "metadata": meta,
+            "task": {
+                "type": getattr(task.type, "value", str(task.type)),
+                "priority": getattr(task.priority, "value", str(task.priority)),
+                "created": task.created,
+                "title": task.title,
+                "target_files": list(task.target_files or []),
+                "success_criteria": list(task.success_criteria or []),
+                "context": task.context,
+            },
+        }
+        request = AdmissionRequest(
+            session_id=sid,
+            task_id=task.id,
+            body=task.prompt or "",
+            payload=intent_payload,
+            backend=self._resolve_task_backend(task),
+            action="resume_session",
+            turn_source="human" if source in ("web_session", "telegram_session", "telegram") else "system",
+            turn_kind="instruction",
+            operation_id=operation_id,
+            idempotency_scope=scope,
+            admission_hash=admission_hash,
+            flow_run_id=str(case_id) if case_id else None,
+        )
+        admission = await admit_turn_async(
+            db, request, fleet_cap=int(config.system.max_queue_size),
+        )
+        if not admission.idempotent_replay:
+            # COMMITTED — only now emit acceptance and wake the scheduler.
+            logger.info(
+                "event=managed_turn_admitted task_id=%s session_id=%s source=%s seq=%s",
+                admission, sid, source, admission.queue_sequence,
+            )
+            self._emit_event("task_created", task, {"source": source, "managed": True})
+            self._emit_turn_telemetry(
+                "turn.accepted", task, {"task_id": task.id, "source": source},
+            )
+            self._emit_turn_telemetry(
+                "turn.queued", task,
+                {"priority": getattr(task.priority, "value", str(task.priority))},
+            )
+            if self._harness_flow_drive_enabled():
+                self._record_flow_stage(flow_run_id, "objective_lock")
+            else:
+                self._record_flow_stage(flow_run_id, "queued")
+            notify_turn_queue_changed()
+        return admission
+
+    async def _prepare_managed_turn(
+        self, head: Dict[str, Any], row: Dict[str, Any],
+    ) -> "PreparedTurn":
+        """Scheduler preparation seam (design §4/§5): rebuild the task from the
+        CURRENT revision's intent, assemble restart/compact context ONCE for it,
+        and build the carrier payload against the session's configuration AT
+        ACTIVATION. Runs outside any DB transaction; never mutates the row."""
+        from src.control.turn_scheduler import PreparedTurn
+
+        intent = row.get("payload")
+        intent = json.loads(intent) if isinstance(intent, str) else dict(intent or {})
+        spec = intent.get("task") or {}
+        sid = str(row.get("session_id") or "")
+        metadata = dict(intent.get("metadata") or {})
+        metadata["session_id"] = sid
+        type_enum = TaskType.ANALYZE
+        for candidate in TaskType:
+            if candidate.value == spec.get("type"):
+                type_enum = candidate
+                break
+        task = Task(
+            id=str(row["id"]),
+            type=type_enum,
+            priority=TaskPriority.MEDIUM,
+            status=TaskStatus.PENDING,
+            created=str(spec.get("created") or row.get("created_at") or now_iso()),
+            title=str(spec.get("title") or "Runtime task"),
+            target_files=list(spec.get("target_files") or []),
+            prompt=str(row.get("prompt") or ""),
+            success_criteria=list(spec.get("success_criteria") or []),
+            context=str(spec.get("context") or ""),
+            metadata=metadata,
+        )
+        # Context is assembled once per prepared revision: clear the in-memory
+        # once-guard so a re-preparation (stale revision) injects exactly once
+        # into the fresh raw intent, and drop it afterwards (no growth).
+        self._compact_injected_ids.discard(task.id)
+        try:
+            await self._maybe_inject_restart_recovery_context(task)
+            await self._maybe_inject_compact_context(task)
+        finally:
+            self._compact_injected_ids.discard(task.id)
+        session = self.session_store.get(sid) if sid else None
+        action, payload = self._mesh_dispatch_payload(task, sid, session, socket.gethostname())
+        machine_id = (session.machine_id or None) if session else None
+        return PreparedTurn(action=action, payload=payload, machine_id=machine_id)
+
+    def _start_turn_scheduler(self) -> None:
+        """Start the single managed-turn scheduler loop when a mesh DB exists and
+        share the legacy queue's allowance with managed admission (design §8).
+        Idle cost: one bounded pass at start, then it sleeps until a hint unless
+        queued managed rows exist (3 s fallback only then)."""
+        from src.control.db import get_db
+
+        if self._turn_scheduler_task and not self._turn_scheduler_task.done():
+            return
+        db = get_db()
+        if db is None:
+            return
+        from src.control.turn_admission import ALLOWANCE
+        from src.control.turn_scheduler import TurnScheduler
+
+        ALLOWANCE.register_legacy_probe(self.task_queue.qsize)
+        self.task_queue.share_allowance(ALLOWANCE)
+        self._turn_scheduler = TurnScheduler(db, self._prepare_managed_turn)
+        self._turn_scheduler_task = asyncio.create_task(
+            self._turn_scheduler.run(), name="turn-scheduler",
+        )
+
+    def _mesh_dispatch_payload(
+        self,
+        task: Task,
+        session_id: Optional[str],
+        session: Any,
+        host: str,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """The carrier-executable ``(action, payload)`` for ``task`` — shared by the
+        legacy shadow-write (``_mesh_enqueue_task``) and the A82 managed activation
+        preparation, so both paths dispatch the identical shape. Pure."""
+        action_override = (task.metadata or {}).get("task_type", "")
+        if action_override == "fetch_staged_file":
+            action = "fetch_staged_file"
+        elif session_id and session and not session.backend_session_id:
+            action = "create_session"
+        elif session_id:
+            action = "resume_session"
+        else:
+            action = "run_oneoff"
+        payload: Dict[str, Any] = {
+            "prompt": task.prompt,
+            "task_id": task.id,
+            "action": action,
+            "metadata": task.metadata or {},
+            "telemetry": {
+                "schema_version": 1,
+                "turn_id": task.id,
+                "session_id": session_id,
+                "gateway_node_id": host,
+                "attempt": 1,
+                "spawn_reason": "initial",
+            },
+        }
+        if session:
+            payload["session"] = _session_dispatch_payload(session)
+            # [Remote first-turn] The node worker's create_session path seeds the
+            # FIRST user message from session.last_user_message
+            # (claude_code.create_session → start_session(session.last_user_message)),
+            # NOT from payload["prompt"]. The gateway only sets last_user_message
+            # LATER, inside process_task (after this snapshot) — so a node-pinned
+            # create_session (every Manager's first turn) would ship an EMPTY first
+            # message and the objective/injected prior-context would be dropped
+            # (the Manager boots and reports "your message is empty"). Snapshot THIS
+            # turn's prompt (already compact-context-injected above) as the first
+            # message so a remote create_session carries the objective + prior context.
+            payload["session"]["last_user_message"] = task.prompt
+        return action, payload
+
     def _mesh_enqueue_task(self, task: Task, backend_name: str) -> None:
         """Shadow-write a dispatched task into mesh_tasks.
 
@@ -9516,42 +9821,7 @@ Generated from user description: {description}
             session = self.session_store.get(session_id) if session_id else None
             machine_id = (session.machine_id or None) if session else None
             host = socket.gethostname()
-            action_override = (task.metadata or {}).get("task_type", "")
-            if action_override == "fetch_staged_file":
-                action = "fetch_staged_file"
-            elif session_id and session and not session.backend_session_id:
-                action = "create_session"
-            elif session_id:
-                action = "resume_session"
-            else:
-                action = "run_oneoff"
-            payload = {
-                "prompt": task.prompt,
-                "task_id": task.id,
-                "action": action,
-                "metadata": task.metadata or {},
-                "telemetry": {
-                    "schema_version": 1,
-                    "turn_id": task.id,
-                    "session_id": session_id,
-                    "gateway_node_id": host,
-                    "attempt": 1,
-                    "spawn_reason": "initial",
-                },
-            }
-            if session:
-                payload["session"] = _session_dispatch_payload(session)
-                # [Remote first-turn] The node worker's create_session path seeds the
-                # FIRST user message from session.last_user_message
-                # (claude_code.create_session → start_session(session.last_user_message)),
-                # NOT from payload["prompt"]. The gateway only sets last_user_message
-                # LATER, inside process_task (after this snapshot) — so a node-pinned
-                # create_session (every Manager's first turn) would ship an EMPTY first
-                # message and the objective/injected prior-context would be dropped
-                # (the Manager boots and reports "your message is empty"). Snapshot THIS
-                # turn's prompt (already compact-context-injected above) as the first
-                # message so a remote create_session carries the objective + prior context.
-                payload["session"]["last_user_message"] = task.prompt
+            action, payload = self._mesh_dispatch_payload(task, session_id, session, host)
             # Runs on THIS host ⟺ no pin, or the pin names this host. Only a pin
             # to a DIFFERENT host is a true remote dispatch. This MUST mirror
             # process_task's `_pinned_elsewhere` test, or a host-pinned task both

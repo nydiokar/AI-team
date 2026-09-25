@@ -23,6 +23,7 @@ from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionStatus
 from src.services.path_resolver import PathResolver, PathResolution
 from src.backends.registry import valid_backend_names
+from src.control.turn_queue import TurnAdmission, TurnQueueError
 
 try:
     from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -48,6 +49,17 @@ except ImportError:
         DEFAULT_TYPE = Context
 
 logger = logging.getLogger(__name__)
+
+
+def _turn_queued_text(admission: TurnAdmission) -> str:
+    """[A82 Stage 4a] Reply for a durably queued managed turn (not 'Working')."""
+    seq = f" #{admission.queue_sequence}" if admission.queue_sequence else ""
+    return f"📥 Queued{seq} `{admission}`"
+
+
+def _turn_queue_refusal(err: TurnQueueError) -> str:
+    """[A82 Stage 4a] Honest refusal: nothing was queued."""
+    return f"❌ Not queued ({getattr(err, 'code', 'error')}): {str(err)[:200]}"
 
 _DANGEROUS_EXTENSIONS: set[str] = {
     ".exe", ".bat", ".cmd", ".com", ".msi", ".msp", ".scr", ".pif", ".cpl",
@@ -320,14 +332,25 @@ class TelegramInterface:
             if not self._user_can_access_session(user_id, active_session):
                 await self.app.bot.send_message(chat_id=chat_id, text="❌ You do not own the active session.")
                 return
+            prior = (active_session.last_user_message, active_session.status)
             active_session.last_user_message = message_text
             active_session.status = SessionStatus.BUSY
-            task_id = await self.orchestrator.submit_instruction(
-                description=message_text,
-                session_id=active_session.session_id,
-                cwd=active_session.repo_path,
-                source="telegram_session",
-            )
+            try:
+                task_id = await self.orchestrator.submit_instruction(
+                    description=message_text,
+                    session_id=active_session.session_id,
+                    cwd=active_session.repo_path,
+                    source="telegram_session",
+                )
+            except TurnQueueError as err:
+                active_session.last_user_message, active_session.status = prior
+                await self.app.bot.send_message(chat_id=chat_id, text=_turn_queue_refusal(err))
+                return
+            if isinstance(task_id, TurnAdmission):
+                # [A82 Stage 4a] Enrolled session: durably queued, not BUSY.
+                active_session.last_user_message, active_session.status = prior
+                await self.app.bot.send_message(chat_id=chat_id, text=_turn_queued_text(task_id))
+                return
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
             await self.app.bot.send_message(
@@ -1228,14 +1251,25 @@ class TelegramInterface:
             if not self._user_can_access_session(update.effective_user.id, active_session):
                 await update.message.reply_text("❌ You do not own the active session.")
                 return
+            prior = (active_session.last_user_message, active_session.status)
             active_session.last_user_message = message_text
             active_session.status = SessionStatus.BUSY
-            task_id = await self.orchestrator.submit_instruction(
-                description=message_text,
-                session_id=active_session.session_id,
-                cwd=active_session.repo_path,
-                source="telegram_session",
-            )
+            try:
+                task_id = await self.orchestrator.submit_instruction(
+                    description=message_text,
+                    session_id=active_session.session_id,
+                    cwd=active_session.repo_path,
+                    source="telegram_session",
+                )
+            except TurnQueueError as err:
+                active_session.last_user_message, active_session.status = prior
+                await update.message.reply_text(_turn_queue_refusal(err))
+                return
+            if isinstance(task_id, TurnAdmission):
+                # [A82 Stage 4a] Enrolled session: durably queued, not BUSY.
+                active_session.last_user_message, active_session.status = prior
+                await update.message.reply_text(_turn_queued_text(task_id))
+                return
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
             await update.message.reply_text(f"⏳ Working... {self._session_message_ref(active_session, task_id)}")

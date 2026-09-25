@@ -8,9 +8,10 @@ parsed or reaches the route. Buffering is bounded by the cap itself.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from typing import Any, Awaitable, Callable, Dict, List, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 Scope = Dict[str, Any]
 Message = Dict[str, Any]
@@ -25,9 +26,17 @@ class BodyCapMiddleware:
     rule for a POST/PUT/PATCH request applies. Other requests pass through
     untouched (streamed, unbuffered)."""
 
-    def __init__(self, app: Callable[..., Awaitable[None]], rules: List[Tuple[str, int]]) -> None:
+    def __init__(
+        self,
+        app: Callable[..., Awaitable[None]],
+        rules: List[Tuple[str, int]],
+        read_deadline_sec: Optional[float] = None,
+    ) -> None:
         self.app = app
         self.rules = [(re.compile(p), int(n)) for p, n in rules]
+        # [A82 Stage 4a] Optional total body-read deadline for capped routes
+        # (design §8 "Body-read deadline"); None keeps the prior behavior.
+        self.read_deadline_sec = read_deadline_sec
 
     def _cap_for(self, scope: Scope) -> int:
         if scope.get("type") != "http" or scope.get("method") not in ("POST", "PUT", "PATCH"):
@@ -54,8 +63,20 @@ class BodyCapMiddleware:
                     return
         chunks: List[bytes] = []
         total = 0
+        loop_deadline = (
+            asyncio.get_running_loop().time() + self.read_deadline_sec
+            if self.read_deadline_sec is not None else None
+        )
         while True:
-            message = await receive()
+            if loop_deadline is None:
+                message = await receive()
+            else:
+                remaining = loop_deadline - asyncio.get_running_loop().time()
+                try:
+                    message = await asyncio.wait_for(receive(), timeout=max(0.0, remaining))
+                except asyncio.TimeoutError:
+                    await _reject(send, status=408, reason="body_read_timeout")
+                    return
             if message["type"] == "http.disconnect":
                 return
             body = message.get("body", b"") or b""

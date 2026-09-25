@@ -1021,6 +1021,7 @@ def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    _hint_turn_scheduler()  # [A82 Stage 4a] waiting count dropped
     # [A82 Stage 3 rework] The carrier executes THIS response, so it must carry
     # the routing fields the executor needs (backend/action) from the committed
     # row — non-secret columns only.
@@ -1268,7 +1269,7 @@ def _commit_managed_result(
             f"backend error result ({downgraded})" if downgraded else "worker reported failure"
         )
     try:
-        return db.complete_turn(
+        completion = db.complete_turn(
             task_id=task_id,
             claim_token=claim_token,
             result=result_dict,
@@ -1279,6 +1280,19 @@ def _commit_managed_result(
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    _hint_turn_scheduler()  # [A82 Stage 4a] slot freed → next head may activate
+    return completion
+
+
+def _hint_turn_scheduler() -> None:
+    """[A82 Stage 4a] Post-commit hint to the gateway turn scheduler (a no-op
+    when none runs in this process). Hints never carry authority."""
+    try:
+        from .turn_scheduler import notify_turn_queue_changed
+
+        notify_turn_queue_changed()
+    except Exception:  # noqa: BLE001 — the 3 s fallback still covers it
+        logger.debug("event=turn_scheduler_hint_failed", exc_info=True)
 
 
 class ManagedTerminalResult(_ManagedResultFields):
@@ -1422,6 +1436,7 @@ def record_quiescence_observation(
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    _hint_turn_scheduler()
     return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.resolved_status}
 
 
