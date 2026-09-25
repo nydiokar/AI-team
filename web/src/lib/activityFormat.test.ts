@@ -28,6 +28,7 @@ const session: Session = {
   continuedFrom: null,
   keepPinned: false,
   keepNote: "",
+  reason: null,
 };
 
 function line(overrides: Partial<LogLine>): LogLine {
