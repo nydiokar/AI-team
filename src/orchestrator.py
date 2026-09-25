@@ -9553,13 +9553,11 @@ Generated from user description: {description}
         ``_record_flow_run_start`` exactly once — join / attach / birth), then
         commits the bounded intent through the admission service. Nothing is
         acknowledged, emitted, or scheduled unless the row committed; a durable
-        replay short-circuits BEFORE any lineage write (no double flow). Does
+        replay never writes lineage (no double flow / link). Does
         NOT touch BUSY / last_task_id / last_user_message / native id."""
         from src.control.db import get_db, _canonical_admission_hash
         from src.control.turn_admission import AdmissionRequest, admit_turn_async
-        from src.control.turn_queue import (
-            ManagedUnsupportedError, OwnershipConflictError, TurnAdmission,
-        )
+        from src.control.turn_queue import ManagedUnsupportedError
         from src.control.turn_scheduler import notify_turn_queue_changed
 
         meta = task.metadata or {}
@@ -9593,20 +9591,38 @@ Generated from user description: {description}
             # No client operation id ⇒ no replay protection (same as the legacy
             # path without an Idempotency-Key); the key is still non-NULL.
             operation_id = f"task:{task.id}"
-        existing = await asyncio.to_thread(db.find_turn_by_idempotency, scope, operation_id)
-        if existing is None:
-            backend = self._resolve_task_backend(task)
-            carrier = self._managed_carrier_assignment(self.session_store.get(sid), backend)
-        if existing is not None:
-            if existing.get("admission_hash") not in (None, admission_hash):
-                raise OwnershipConflictError(
-                    "idempotency key reused with a different original request",
-                    task_id=existing["id"],
-                )
-            return TurnAdmission(
-                existing["id"], status=existing["status"], revision=existing["revision"],
-                queue_sequence=existing.get("queue_sequence"), idempotent_replay=True,
-            )
+        backend = self._resolve_task_backend(task)
+        carrier = self._managed_carrier_assignment(self.session_store.get(sid), backend)
+        # Admit FIRST (no side effect before the durable decision): a refused
+        # admission leaves no Case lineage, and of concurrent same-operation
+        # requests only the one that inserted the row writes lineage (the other
+        # gets the idempotent replay). The row carries a short lineage hold
+        # (`not_before`) so it cannot activate before its Case membership and
+        # lineage metadata are attached; a crash in between only delays it.
+        hold_until = (
+            datetime.now(tz=timezone.utc) + timedelta(seconds=self._LINEAGE_HOLD_SEC)
+        ).isoformat()
+        request = AdmissionRequest(
+            session_id=sid,
+            task_id=task.id,
+            body=task.prompt or "",
+            payload=self._managed_intent_payload(task),
+            backend=backend,
+            machine_id=carrier,
+            action="resume_session",
+            turn_source="human" if source in ("web_session", "telegram_session", "telegram") else "system",
+            turn_kind="instruction",
+            operation_id=operation_id,
+            idempotency_scope=scope,
+            admission_hash=admission_hash,
+            not_before=hold_until,
+        )
+        admission = await admit_turn_async(
+            db, request, fleet_cap=int(config.system.max_queue_size),
+        )
+        if admission.idempotent_replay:
+            return admission
+        # COMMITTED and ours — lineage exactly once (join / attach / birth).
         flow_run_id = self._record_flow_run_start(task)
         meta = task.metadata or {}
         case_id = (
@@ -9614,10 +9630,40 @@ Generated from user description: {description}
             or meta.get(self._FLOW_RUN_META_KEY)
             or flow_run_id
         )
-        intent_payload: Dict[str, Any] = {
+        try:
+            await asyncio.to_thread(
+                db.finalize_turn_lineage, str(admission),
+                str(case_id) if case_id else None, dict(meta),
+            )
+        except Exception as e:  # noqa: BLE001 — the hold expires; lineage is best-effort as in legacy
+            logger.warning("event=managed_turn_lineage_failed task_id=%s err=%s", admission, e)
+        logger.info(
+            "event=managed_turn_admitted task_id=%s session_id=%s source=%s seq=%s",
+            admission, sid, source, admission.queue_sequence,
+        )
+        self._emit_event("task_created", task, {"source": source, "managed": True})
+        self._emit_turn_telemetry(
+            "turn.accepted", task, {"task_id": task.id, "source": source},
+        )
+        self._emit_turn_telemetry(
+            "turn.queued", task,
+            {"priority": getattr(task.priority, "value", str(task.priority))},
+        )
+        if self._harness_flow_drive_enabled():
+            self._record_flow_stage(flow_run_id, "objective_lock")
+        else:
+            self._record_flow_stage(flow_run_id, "queued")
+        notify_turn_queue_changed()
+        return admission
+
+    _LINEAGE_HOLD_SEC = 30
+
+    def _managed_intent_payload(self, task: Task) -> Dict[str, Any]:
+        """Bounded sender intent + task spec (not the prepared execution payload)."""
+        return {
             "task_id": task.id,
             "prompt": task.prompt,
-            "metadata": meta,
+            "metadata": dict(task.metadata or {}),
             "task": {
                 "type": getattr(task.type, "value", str(task.type)),
                 "priority": getattr(task.priority, "value", str(task.priority)),
@@ -9628,44 +9674,6 @@ Generated from user description: {description}
                 "context": task.context,
             },
         }
-        request = AdmissionRequest(
-            session_id=sid,
-            task_id=task.id,
-            body=task.prompt or "",
-            payload=intent_payload,
-            backend=backend,
-            machine_id=carrier,
-            action="resume_session",
-            turn_source="human" if source in ("web_session", "telegram_session", "telegram") else "system",
-            turn_kind="instruction",
-            operation_id=operation_id,
-            idempotency_scope=scope,
-            admission_hash=admission_hash,
-            flow_run_id=str(case_id) if case_id else None,
-        )
-        admission = await admit_turn_async(
-            db, request, fleet_cap=int(config.system.max_queue_size),
-        )
-        if not admission.idempotent_replay:
-            # COMMITTED — only now emit acceptance and wake the scheduler.
-            logger.info(
-                "event=managed_turn_admitted task_id=%s session_id=%s source=%s seq=%s",
-                admission, sid, source, admission.queue_sequence,
-            )
-            self._emit_event("task_created", task, {"source": source, "managed": True})
-            self._emit_turn_telemetry(
-                "turn.accepted", task, {"task_id": task.id, "source": source},
-            )
-            self._emit_turn_telemetry(
-                "turn.queued", task,
-                {"priority": getattr(task.priority, "value", str(task.priority))},
-            )
-            if self._harness_flow_drive_enabled():
-                self._record_flow_stage(flow_run_id, "objective_lock")
-            else:
-                self._record_flow_stage(flow_run_id, "queued")
-            notify_turn_queue_changed()
-        return admission
 
     async def _prepare_managed_turn(
         self, head: Dict[str, Any], row: Dict[str, Any],

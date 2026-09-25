@@ -2678,6 +2678,37 @@ class MeshDB:
             coalesced=admitted["coalesced"],
         )
 
+    def finalize_turn_lineage(
+        self, task_id: str, flow_run_id: Optional[str], metadata: Dict[str, Any],
+    ) -> bool:
+        """[A82 Stage 4a rework] Attach the post-admission Case membership and
+        lineage metadata to a still-QUEUED managed row and release its lineage
+        hold (`not_before`). Re-accounts `intent_bytes`. Returns True on update."""
+        try:
+            with self._managed_write("finalize_turn_lineage") as conn:
+                conn.execute(
+                    """
+                    UPDATE mesh_tasks
+                    SET flow_run_id = ?, not_before = NULL, updated_at = ?,
+                        payload = json_set(COALESCE(payload, '{}'), '$.metadata', json(?))
+                    WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
+                    """,
+                    (flow_run_id, _now(), json.dumps(metadata, default=str), task_id),
+                )
+                changed = conn.execute("SELECT changes()").fetchone()[0] > 0
+                if changed:
+                    conn.execute(
+                        "UPDATE mesh_tasks SET intent_bytes = "
+                        "COALESCE(length(CAST(payload AS BLOB)), 0) + "
+                        "COALESCE(length(CAST(prompt AS BLOB)), 0) WHERE id = ?",
+                        (task_id,),
+                    )
+                return changed
+        except TurnQueueError:
+            raise
+        except Exception as e:
+            raise _turn_backing_error("finalize_turn_lineage", task_id=task_id, err=e)
+
     def managed_waiting_totals(self) -> Dict[str, int]:
         """[A82 Stage 4a] Fleet managed queued+pending count and persisted
         stored-intent bytes (design §8). Bounded: served by the open-row partial

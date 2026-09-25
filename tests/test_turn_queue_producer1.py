@@ -525,3 +525,45 @@ def test_P1_07e_carrier_gone_before_activation_backs_off(tmp_path, monkeypatch):
     assert res.activated == 0 and row["status"] == "queued"
     assert row["blocked_reason"] == "prepare_failed: CarrierUnavailableError"
     assert row["blocked_until"]
+
+
+# P1-12 (A87 rework probes L3/L4) ------------------------------------------ #
+def test_P1_12_concurrent_same_operation_writes_lineage_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
+
+    async def both():
+        kw = dict(description="d", session_id="sess-1", cwd="/tmp/repo", source="runtime",
+                  join_case_id=case_id, operation_id="dup")
+        return await asyncio.gather(o.submit_instruction(**kw), o.submit_instruction(**kw))
+
+    a, b = asyncio.run(both())
+    assert a == b and len(_managed_rows(db)) == 1
+    links = [l for l in db.list_flow_links(flow_run_id=case_id) if l["entity_type"] == "task"]
+    assert [l["entity_id"] for l in links] == [a]
+    assert o.events.count("task_created") == 1
+
+
+def test_P1_12b_refused_admission_leaves_no_lineage(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
+    for i in range(20):
+        _submit(o, description=f"m{i}", join_case_id=case_id, operation_id=f"op{i}")
+    with pytest.raises(tq.CapacityError):
+        _submit(o, description="m20", join_case_id=case_id, operation_id="op20")
+    links = [l["entity_id"] for l in db.list_flow_links(flow_run_id=case_id)
+             if l["entity_type"] == "task"]
+    assert len(links) == 20 and all(db.get_task(x) is not None for x in links)
+
+
+def test_P1_12c_lineage_hold_blocks_activation_until_finalized(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(db, "finalize_turn_lineage",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash-like")))
+    t = _submit(o, operation_id="h")
+    row = db.get_task(t)
+    assert row["status"] == "queued" and row["not_before"]  # held, not lost
+    assert db.select_eligible_turn_heads(25) == []
+    assert db.next_turn_wake_at() == row["not_before"]      # bounded: wakes when it expires

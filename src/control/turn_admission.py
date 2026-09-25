@@ -143,6 +143,7 @@ class AdmissionRequest(BaseModel):
     coalesce_key: Optional[str] = Field(default=None, max_length=256)
     sender_session_id: Optional[str] = Field(default=None, max_length=256)
     machine_id: Optional[str] = Field(default=None, max_length=256)
+    not_before: Optional[str] = Field(default=None, max_length=64)
 
 
 def admit_turn(
@@ -178,6 +179,7 @@ def admit_turn(
                 coalesce_key=request.coalesce_key,
                 sender_session_id=request.sender_session_id,
                 machine_id=request.machine_id,
+                not_before=request.not_before,
                 require_enrolled=True,
                 external_waiting=slot["legacy"],
                 fleet_cap=fleet_cap,
