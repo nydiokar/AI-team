@@ -748,6 +748,25 @@ class _SDKSession:
         # Sink for autonomous turns (background-job continuations). Set by the
         # driver; called as on_proactive(session_key, outcome) off the loop.
         self._on_proactive: Optional[Any] = None
+        # [A82 Stage 2] Native background-task lifecycle tracking for the
+        # quiescence oracle (design §6, Stage 0 §3). The installed SDK 0.2.110
+        # emits TaskUpdatedMessage / TaskNotificationMessage for run_in_background
+        # tasks; we record each task_id's latest status so `is_quiescent()` can
+        # answer the CONJUNCTION Stage 0 requires. Touched only on the SDK loop
+        # thread (reader) except the read in the oracle, which reads a plain dict
+        # snapshot — a benign race that can only make the oracle MORE conservative.
+        self._bg_task_status: Dict[str, str] = {}
+        # True once the terminal ResultMessage of the most recent query has been
+        # observed. A fresh session with no query yet is trivially "last query
+        # terminal" = True. Set False when a managed/legacy query is submitted,
+        # True when its terminal ResultMessage is dispatched.
+        self._last_query_terminal: bool = True
+        # True when an AssistantMessage has arrived with no subsequent terminal
+        # ResultMessage — i.e. a model continuation is IN FLIGHT. A background
+        # task finishing and the agent then autonomously continuing (assistant
+        # text, no result yet) is NOT quiescence even though the task is terminal
+        # and _pending is empty (Stage 0 §3 / SDK04b). Reset on each ResultMessage.
+        self._assistant_in_flight: bool = False
 
     def _log_cli_stderr(self, line: str) -> None:
         """Sink for the CLI subprocess's stderr.
@@ -903,12 +922,28 @@ class _SDKSession:
         if self._client is None:
             return
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock, ThinkingBlock
+        # [A82 Stage 2] Background-task lifecycle messages ship in SDK 0.2.110.
+        # Import them defensively so an older SDK that lacks them still boots
+        # (the oracle then simply never sees a non-terminal background task).
+        try:
+            from claude_agent_sdk import (
+                TaskNotificationMessage,
+                TaskUpdatedMessage,
+                TERMINAL_TASK_STATUSES,
+            )
+        except Exception:  # pragma: no cover - depends on installed SDK version
+            TaskNotificationMessage = TaskUpdatedMessage = ()  # type: ignore
+            TERMINAL_TASK_STATUSES = frozenset()  # type: ignore
 
         acc = _TurnAccumulator(backend_session_id=self.backend_session_id)
         end_reason = "normal EOF from SDK stream"
         try:
             async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
+                    # [A82 Stage 2] A model continuation is now in flight until
+                    # its terminal ResultMessage arrives — a quiescence conjunct
+                    # (SDK04b: task-finished + autonomous continuation ≠ idle).
+                    self._assistant_in_flight = True
                     # Overwrite (not append) so only the last assistant block of
                     # the turn survives as the salvage source.
                     blocks_text = "".join(
@@ -934,9 +969,34 @@ class _SDKSession:
                         acc.backend_session_id = sid
                         self.backend_session_id = sid
                 elif isinstance(msg, ResultMessage):
+                    # [A82 Stage 2] The terminal ResultMessage of the last query
+                    # has now been observed — one of the quiescence conjuncts. The
+                    # in-flight model continuation (if any) has also ended. Set
+                    # BEFORE dispatch so an oracle read racing the dispatch sees
+                    # the updated flags.
+                    self._last_query_terminal = True
+                    self._assistant_in_flight = False
                     outcome = self._outcome_from_result(acc, msg)
                     self._dispatch(outcome)
                     acc = _TurnAccumulator(backend_session_id=self.backend_session_id)
+                elif TaskUpdatedMessage and isinstance(msg, TaskUpdatedMessage):
+                    # [A82 Stage 2] A background task changed status. Track the
+                    # latest per task_id so the oracle knows whether any
+                    # non-terminal background work is still in flight (Stage 0 §3:
+                    # held native work must retain ownership).
+                    tid = getattr(msg, "task_id", None)
+                    status = getattr(msg, "status", None)
+                    if tid and status:
+                        self._bg_task_status[str(tid)] = str(status)
+                elif TaskNotificationMessage and isinstance(msg, TaskNotificationMessage):
+                    # A background task reached a terminal status. Record it —
+                    # but a terminal task alone is NOT quiescence (the model may
+                    # autonomously continue), which is why the oracle also
+                    # requires _last_query_terminal + empty _pending.
+                    tid = getattr(msg, "task_id", None)
+                    status = getattr(msg, "status", None)
+                    if tid and status:
+                        self._bg_task_status[str(tid)] = str(status)
         except asyncio.CancelledError:
             # Session closing. Fall through to `finally` so waiters don't hang.
             end_reason = "reader task cancelled"
@@ -1105,6 +1165,83 @@ class _SDKSession:
                 pass
             raise
         return await future
+
+    def is_quiescent(self) -> bool:
+        """[A82 Stage 2] Native-work quiescence oracle (design §6, Stage 0 §3).
+
+        The session is quiescent IFF ALL hold:
+          1. ``_pending`` is empty (no explicit turn awaiting a reply);
+          2. no tracked background task is in a non-terminal status
+             (a run_in_background job still running retains ownership — SDK03);
+          3. the terminal ``ResultMessage`` of the last query has been observed
+             (``_last_query_terminal``);
+          4. no model continuation is in flight (``_assistant_in_flight`` is
+             False) — a background task finishing and the agent then continuing
+             autonomously is NOT idle (SDK04b).
+
+        Each signal ALONE is insufficient (Stage 0 §3): an empty ``_pending`` with
+        a running background task (SDK04a), or a task-finished notification with a
+        continuation still streaming (SDK04b), are both non-quiescent. Reads a
+        snapshot; any race can only report MORE conservatively (still busy)."""
+        try:
+            from claude_agent_sdk import TERMINAL_TASK_STATUSES
+        except Exception:  # pragma: no cover
+            TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "killed", "stopped"})
+        if self._pending:
+            return False
+        if not self._last_query_terminal:
+            return False
+        if self._assistant_in_flight:
+            return False
+        for status in list(self._bg_task_status.values()):
+            if status not in TERMINAL_TASK_STATUSES:
+                return False
+        return True
+
+    def send_managed(self, message: str, progress_cb=None) -> "TurnOutcome":
+        """[A82 Stage 2 / §15 decision 1] Protocol-1 MANAGED send.
+
+        A DISTINCT path from the legacy :meth:`send`. On a lock conflict (a turn
+        already in flight) it FAILS CLOSED with a typed
+        :class:`OwnershipConflictError` and NEVER calls ``cancel_inflight`` —
+        i.e. it does not interrupt the live turn (the managed queue serialises
+        turns durably at the DB layer, so the driver must not silently interrupt
+        the current owner). The legacy :meth:`send` keeps its byte-identical
+        interrupt-on-conflict behavior for protocol-0 callers.
+
+        This is the ONLY behavioral divergence: once the lock is acquired the
+        managed submit reuses the exact same reader/dispatch machinery."""
+        from src.control.turn_queue import OwnershipConflictError
+
+        timeout = self._turn_timeout_sec()
+        if not self._lock.acquire(blocking=False):
+            logger.warning(
+                "event=sdk_managed_turn_conflict session_key=%s — a turn is in "
+                "flight; the managed path FAILS CLOSED (no interrupt)",
+                self.session_key,
+            )
+            raise OwnershipConflictError(
+                "session is busy with an in-flight turn; managed send is "
+                "fail-closed and does not interrupt the current owner",
+                session_key=self.session_key,
+            )
+        try:
+            return self.submit(
+                self._submit_turn(message, progress_cb=progress_cb), timeout=timeout
+            )
+        finally:
+            self._lock.release()
+
+    def _turn_timeout_sec(self) -> Optional[float]:
+        """Resolve the per-turn deadline (shared by legacy + managed send)."""
+        timeout: Optional[float] = 36000.0
+        try:
+            from config import config as _cfg
+            raw = getattr(_cfg.system, "sdk_turn_timeout_sec", 36000)
+            timeout = None if int(raw) == 0 else float(max(60, int(raw)))
+        except Exception:
+            pass
+        return timeout
 
     def send(self, message: str, progress_cb=None) -> "TurnOutcome":
         # sdk_turn_timeout_sec is the total deadline for one turn (send → full response).

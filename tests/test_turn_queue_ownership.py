@@ -62,14 +62,33 @@ def _node(db: MeshDB, node_id: str = "worker-a", incarnation_id: str = "inc-a") 
 
 
 def _enqueue(db: MeshDB, task_id: str = "t-1", session_id: str = "sess-1") -> None:
-    db.enqueue_task(
+    """Admit a MANAGED (protocol-1) turn and activate it to `pending` so it is
+    claimable (design §3 state machine: queued --activate--> pending --claim-->).
+
+    Stage-1 fixture correction: the original helper used the legacy protocol-0
+    `enqueue_task`, but the ownership contract these tests assert is protocol-1
+    only. `enqueue_turn` is the server-owned managed admission (queue_protocol=1);
+    `activate_turn` performs the atomic queued->pending transition. A second turn
+    on a session that already holds the active slot legitimately stays `queued`
+    (the one-active-session partial unique index backstop), which is exactly the
+    "older active + newer queued" shape OWN07 relies on.
+    """
+    db.enqueue_turn(
         task_id=task_id,
         session_id=session_id,
-        machine_id=None,
         backend="claude",
         action="resume_session",
         payload={"task_id": task_id, "prompt": "hi"},
+        turn_source="human",
+        turn_kind="instruction",
     )
+    try:
+        db.activate_turn(task_id)
+    except Exception:
+        # A second concurrent turn for the same session cannot activate while
+        # the first holds the slot — it stays queued, which is the intended
+        # OWN07 fixture shape.
+        pass
 
 
 def _managed_claim(db: MeshDB, **kw):
