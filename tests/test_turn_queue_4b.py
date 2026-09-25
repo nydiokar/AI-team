@@ -1054,3 +1054,204 @@ def test_R11_unenrolled_case_automation_never_reads_the_hold_record(tmp_path, mo
     assert asyncio.run(auto._continue_case_once(db, case_id)) == 1
     monkeypatch.setattr(type(db), "_conn", real_conn)
     assert not [q for q in stmts if "turn_queue_hold" in q]
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4b final minors (round-3 review)
+# --------------------------------------------------------------------------- #
+def _auto_cls(respawns):
+    import inspect
+
+    from tests.test_case_transient_resume import _Orch
+
+    class _Auto(_Orch):
+        async def _handle_dead_manager_session(self, db, case_id, generation, sid):
+            respawns.append(sid)
+            return True
+
+        def __getattr__(self, name):
+            static = inspect.getattr_static(TaskOrchestrator, name)
+            if isinstance(static, (staticmethod, classmethod)):
+                return getattr(TaskOrchestrator, name)
+            attr = getattr(TaskOrchestrator, name)
+            return attr.__get__(self) if callable(attr) else attr
+    return _Auto
+
+
+def _manager_case(db, o):
+    from src.core.interfaces import SessionStatus as SS
+
+    s = _sess()
+    s.status = SS.AWAITING_INPUT
+    o.session_store.save(s)
+    cid = db.open_case("ship X", "sess-1", role="manager", completion_criteria='{"round_cap": 5}')
+    db.arm_wait_group(cid, "g1", "ALL", ["w1"])
+    db.append_flow_event(cid, "task.finished", "worker", entity_type="task",
+                         entity_id="w1", payload={"outcome": "success"})
+    return cid
+
+
+def _flaky_hold(monkeypatch, db, fail_first=1):
+    real = type(db).operator_stop_hold
+    calls = {"n": 0}
+
+    def flaky(self, sid):
+        calls["n"] += 1
+        if calls["n"] <= fail_first:
+            raise RuntimeError("database is locked (injected)")
+        return real(self, sid)
+    monkeypatch.setattr(type(db), "operator_stop_hold", flaky)
+    return calls
+
+
+def test_F01_unreadable_hold_of_a_held_manager_fails_closed(tmp_path, monkeypatch):
+    """N1 kill: a hold read error is HELD — a stopped Manager is not treated as
+    dead (no crash-respawn, no approval) — and the next healthy tick still
+    holds."""
+    for k in ("HARNESS_FLOW_DRIVE", "CASE_CONTINUATION_ENABLED", "DURABLE_RELAY_ENABLED"):
+        monkeypatch.setenv(k, "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    cid = _manager_case(db, o)
+    t = _submit(o, operation_id="op")
+    _pass(db, o)
+    _run(db, t)
+    assert o.stop_managed_session_turn(_sess())[0] is True
+    respawns = []
+    auto = _auto_cls(respawns)(o.session_store)
+    calls = _flaky_hold(monkeypatch, db)
+    assert asyncio.run(auto._continue_case_once(db, cid)) == 0
+    assert calls["n"] == 1 and respawns == [] and auto.deliveries == []
+    assert asyncio.run(auto._continue_case_once(db, cid)) == 0  # healthy read: still held
+    assert respawns == [] and auto.deliveries == []
+    assert db._conn().execute("SELECT COUNT(*) FROM approvals").fetchone()[0] == 0
+
+
+def test_F01b_unreadable_hold_is_a_skipped_tick_not_a_lost_wake(tmp_path, monkeypatch):
+    """Adopted reviewer probe P1: an unheld Manager whose hold read fails once
+    is skipped for that tick and woken on the next healthy one."""
+    for k in ("HARNESS_FLOW_DRIVE", "CASE_CONTINUATION_ENABLED", "DURABLE_RELAY_ENABLED"):
+        monkeypatch.setenv(k, "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    cid = _manager_case(db, o)
+    respawns = []
+    auto = _auto_cls(respawns)(o.session_store)
+    _flaky_hold(monkeypatch, db)
+    assert asyncio.run(auto._continue_case_once(db, cid)) == 0
+    assert asyncio.run(auto._continue_case_once(db, cid)) == 1
+    assert respawns == []
+
+
+def test_F02_quota_hold_check_falls_back_to_the_case_manager(tmp_path, monkeypatch):
+    """N2 kill: a quota pause that names no session still resolves the Case's
+    Manager and honours its stop hold."""
+    from src.core.interfaces import SessionStatus as SS
+    from tests import test_case_quota_resume as Q
+
+    Q._flags(monkeypatch, auto="1")
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    s = _sess()
+    s.status = SS.AWAITING_INPUT
+    o.session_store.save(s)
+    case_id = Q._case(db, "sess-1")
+    t = _submit(o, operation_id="op")
+    _pass(db, o)
+    _run(db, t)
+    assert o.stop_managed_session_turn(_sess())[0] is True
+    auto = Q._Orch(o.session_store, snapshots=Q._restored_snapshot())
+    resumes = []
+
+    async def resume_case(cid, **kw):
+        resumes.append(cid)
+        return {"ok": True}
+    auto.resume_case = resume_case
+    Q._pause(auto, db, case_id, "sess-1")
+    real_pause = db.case_quota_pause
+    monkeypatch.setattr(db, "case_quota_pause",
+                        lambda cid: {**(real_pause(cid) or {}), "session_id": ""})
+    assert asyncio.run(auto._handle_quota_paused_case(db, case_id)) is True
+    assert resumes == []
+
+
+def test_F03_quota_path_reads_nothing_new_when_nothing_is_enrolled(tmp_path, monkeypatch):
+    from src.core.interfaces import SessionStatus as SS
+    from tests import test_case_quota_resume as Q
+
+    Q._flags(monkeypatch, auto="1")
+    db, o = _setup(tmp_path, monkeypatch, enroll=False)
+    s = _sess()
+    s.status = SS.AWAITING_INPUT
+    o.session_store.save(s)
+    case_id = Q._case(db, "sess-1")
+    auto = Q._Orch(o.session_store, snapshots=Q._restored_snapshot())
+    Q._pause(auto, db, case_id, "sess-1")
+    real_pause = db.case_quota_pause
+    monkeypatch.setattr(db, "case_quota_pause",
+                        lambda cid: {**(real_pause(cid) or {}), "session_id": ""})
+    looked = []
+    real_mgr = db.case_manager_session_id
+    monkeypatch.setattr(db, "case_manager_session_id",
+                        lambda cid: (looked.append(cid), real_mgr(cid))[1])
+    before = len(looked)
+    monkeypatch.setattr(auto, "resume_case", _async_noop, raising=False)
+    asyncio.run(auto._handle_quota_paused_case(db, case_id))
+    assert len(looked) == before  # the hold check did not resolve the Manager
+
+
+async def _async_noop(*_a, **_k):
+    return {"ok": True}
+
+
+def test_F04_coalesced_operator_compaction_releases_the_hold(tmp_path, monkeypatch):
+    """Adopted reviewer probe P6 (inverted): compaction queued behind a running
+    turn → Stop → Compact again (coalesced) ⇒ the operator action releases the
+    hold and the compaction runs next."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    _with_native(db, "bs-1")
+    t1 = _submit(o, operation_id="a")
+    _pass(db, o)
+    tok = _run(db, t1)
+    first = asyncio.run(o.compact_session("sess-1")).parsed_output
+    assert o.stop_managed_session_turn(_sess()) == (True, t1)
+    db.complete_turn(t1, tok, {"success": False}, status="failed")
+    again = asyncio.run(o.compact_session("sess-1")).parsed_output
+    assert again["task_id"] == first["task_id"] and again["coalesced"]
+    assert db.operator_stop_hold("sess-1") is None and _sess().status == SessionStatus.IDLE
+    _pass(db, o)
+    assert db.get_task(first["task_id"])["status"] == "pending"
+
+
+def test_F04b_coalesced_automation_admission_keeps_the_hold(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    _stop_with_queued(o, db)
+    for _ in range(2):
+        db.enqueue_turn(session_id="sess-1", backend="claude", payload={"prompt": "hb"},
+                        body="hb", turn_source="system", operation_id=f"hb-{_}",
+                        idempotency_scope="system:sess-1", machine_id="worker-a",
+                        coalesce_key="heartbeat:sess-1")
+    assert db.operator_stop_hold("sess-1") == "operator_stop"
+
+
+def test_F05_web_upload_into_a_held_enrolled_session_has_no_side_effect(tmp_path, monkeypatch):
+    """Item 4 check: the 4a refusal runs BEFORE any file write or BUSY mark —
+    through the real app, the session status and the repo are untouched."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    s = _sess()
+    s.repo_path = str(repo)
+    s.status = SessionStatus.AWAITING_INPUT
+    o.session_store.save(s)
+    c = _client(monkeypatch, o)
+    for data in ({"instruction": "read it"}, {}):
+        r = c.post("/api/sessions/sess-1/upload", headers={"Authorization": "Bearer tok"},
+                   files={"file": ("a.txt", b"hi")}, data=data)
+        assert r.status_code == 422 and r.json()["detail"]["reason"] == "managed_unsupported"
+    assert _sess().status == SessionStatus.AWAITING_INPUT
+    assert not (repo / "uploads").exists()
+    assert _managed_rows(db) == []

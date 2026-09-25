@@ -2571,6 +2571,11 @@ class MeshDB:
                             "queue_sequence": existing["queue_sequence"],
                             "idempotent_replay": True, "coalesced": True,
                         }
+                        if turn_source in ("human", "operator"):
+                            # [A82 Stage 4b final] A coalesced operator action
+                            # is still an operator action: release the stop
+                            # hold (same statement as a fresh admission).
+                            _release_stop_hold(conn, sid, now)
                 if admitted is None:
                     # 3. Canonical recipient + durable enrollment marker.
                     srow = conn.execute(
@@ -2645,13 +2650,7 @@ class MeshDB:
                         # [A82 Stage 4b rework] An operator action releases the
                         # stop hold (legacy parity: the next send clears
                         # CANCELLED); automation never does.
-                        conn.execute(
-                            "UPDATE sessions SET status = CASE WHEN status = 'cancelled' "
-                            "THEN 'idle' ELSE status END, turn_queue_hold = NULL, "
-                            "updated_at = ? WHERE session_id = ? "
-                            "AND (status = 'cancelled' OR turn_queue_hold IS NOT NULL)",
-                            (now, sid),
-                        )
+                        _release_stop_hold(conn, sid, now)
                     conn.execute(
                         """
                         INSERT INTO mesh_tasks (
@@ -8591,6 +8590,19 @@ def _is_quiescence_evidence(evidence: Any) -> bool:
         or evidence.get("terminal_status")
     )
     return has_attempt and has_terminal
+
+
+def _release_stop_hold(conn: sqlite3.Connection, session_id: str, now: str) -> None:
+    """[A82 Stage 4b rework 2] An operator action releases the operator-stop
+    hold inside the caller's transaction: clears the durable record and turns a
+    `cancelled` status back to `idle` (any other live status is kept)."""
+    conn.execute(
+        "UPDATE sessions SET status = CASE WHEN status = 'cancelled' "
+        "THEN 'idle' ELSE status END, turn_queue_hold = NULL, "
+        "updated_at = ? WHERE session_id = ? "
+        "AND (status = 'cancelled' OR turn_queue_hold IS NOT NULL)",
+        (now, session_id),
+    )
 
 
 def _cancel_requested_for(row: Any, claim_token: str) -> bool:
