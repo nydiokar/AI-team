@@ -803,6 +803,9 @@ class _SDKSession:
         # reason (normal EOF on a clean CLI exit included): the CLI is gone, no
         # backend work can be in flight. Managed-visible only.
         self._reader_ended: bool = False
+        # How long a managed caller waits, after its deadline, for the loop to
+        # run the abandon step before it may attest "not submitted".
+        self._abandon_wait_sec: float = 5.0
         # Late managed replies handed to the sink but not yet accepted by it —
         # the session is not quiescent until the carrier has taken them.
         self._late_handoffs: int = 0
@@ -1525,7 +1528,7 @@ class _SDKSession:
                             abandoned.set()
 
                     self._loop.call_soon_threadsafe(_abandon_and_signal)
-                    if abandoned.wait(5) and ticket.get("pending") is None:
+                    if abandoned.wait(self._abandon_wait_sec) and ticket.get("pending") is None:
                         # The loop never registered (so never submitted) this
                         # prompt: attest "not submitted" (typed conflict ⇒ the
                         # carrier releases it to pending, prompt preserved).
@@ -1957,6 +1960,19 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                             "event=dead_session_close_failed session_id=%s",
                             session.session_id, exc_info=True,
                         )
+                if _managed:
+                    # [A82 Stage 3 round 5] The managed prompt's write was
+                    # refused by a terminated CLI: it was never sent. Attest
+                    # "not submitted" so the carrier releases it as
+                    # not-invoked (prompt preserved, back to pending) instead
+                    # of recording a terminal failure.
+                    return ExecutionResult(
+                        success=False,
+                        output="",
+                        errors=[f"not_submitted: {err_str}"],
+                        error_class="managed_conflict",
+                        execution_time=elapsed,
+                    )
                 return ExecutionResult(
                     success=False,
                     output="",
