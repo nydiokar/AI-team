@@ -25,6 +25,12 @@ from tests.test_turn_queue_producer1 import (  # noqa: F401
 PAST = (datetime.now(tz=timezone.utc) - timedelta(seconds=1)).isoformat()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_allowance(monkeypatch):
+    """The shared legacy+managed allowance is process-global: isolate it so
+    this file's admissions never leak into other suites' capacity."""
+    monkeypatch.setattr(ta, "ALLOWANCE", ta.SharedWaitingAllowance())
+
 class _GatewayBackend:
     """Gateway-local backend stand-in: records legacy close/compact calls (a
     managed session must never reach them)."""
@@ -512,3 +518,68 @@ def test_L04_close_keeps_join_membership_like_legacy(tmp_path, monkeypatch):
     assert db.get_task(tid)["lineage_state"] == "voided"
     assert db.get_flow_run(case_id)["status"] not in db._CLOSED_STATUSES
     assert _sess().current_case_id == case_id
+
+
+# --------------------------------------------------------------------------- #
+# Telegram surfaces (real TelegramInterface handlers over the real orchestrator)
+# --------------------------------------------------------------------------- #
+class _Msg:
+    def __init__(self) -> None:
+        self.replies = []
+
+    async def reply_text(self, text, **_k):
+        self.replies.append(text)
+
+
+class _Upd:
+    def __init__(self) -> None:
+        self.effective_user = type("U", (), {"id": 1})()
+        self.effective_chat = type("C", (), {"id": 100})()
+        self.message = _Msg()
+
+
+class _Ctx:
+    def __init__(self, args) -> None:
+        self.args = args
+
+
+def _bot(o):
+    from src.telegram.interface import TelegramInterface
+
+    bot = TelegramInterface("", o, allowed_users=[1])
+    bot.session_store = o.session_store
+    return bot
+
+
+def test_T01_telegram_session_cancel_targets_the_active_managed_turn(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    t1 = _submit(o, operation_id="a")
+    t2 = _submit(o, operation_id="b")
+    _pass(db, o)
+    tok = _run(db, t1)
+    bot = _bot(o)
+    upd = _Upd()
+    asyncio.run(bot._handle_session_cancel(upd, _Ctx(["sess-1"])))
+    assert t1 in upd.message.replies[-1]
+    assert db.get_task(t1)["cancel_token"] == tok and db.get_task(t2)["status"] == "queued"
+    assert _sess().status != SessionStatus.CANCELLED
+    # Explicit task id through /cancel goes through the fenced cancel_task path.
+    db.complete_turn(t1, tok, {"success": False}, status="failed")
+    _pass(db, o)
+    upd = _Upd()
+    asyncio.run(bot._handle_cancel_command(upd, _Ctx([t2])))
+    assert db.get_task(t2)["status"] == "cancelled"
+
+
+def test_T02_telegram_compact_reports_the_queued_managed_turn(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    _with_native(db)
+    bot = _bot(o)
+    upd = _Upd()
+    asyncio.run(bot._handle_compact(upd, _Ctx(["sess-1"])))
+    assert "queued" in upd.message.replies[-1].lower()
+    [row] = _managed_rows(db)
+    assert row["turn_kind"] == "compaction"
+    assert o._backends["claude"].compacted == []
