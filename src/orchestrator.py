@@ -9752,6 +9752,19 @@ Generated from user description: {description}
                 affiliate(case_id, None)
             return None, case_id
 
+        if prior is not None:
+            # A reused decision whose Case has CLOSED since (close_case cleared
+            # the affiliations): keep the membership that legacy had already
+            # written, but write nothing more — no re-affiliation to a closed
+            # Case and no event after `flow.closed`.
+            prow = db.get_flow_run(prior["flow_run_id"])
+            if prow is not None and (prow.get("status") or "") in db._CLOSED_STATUSES:
+                fid = prior["flow_run_id"]
+                if prior["kind"] == "member":
+                    self._stash_task_meta(task, self._CASE_ID_META_KEY, fid)
+                    return None, fid
+                self._stash_task_meta(task, self._FLOW_RUN_META_KEY, fid)
+                return fid, fid
         if prior is not None and prior["kind"] == "member":
             return member(prior["flow_run_id"], prior["flow_run_id"] == join_case_id)
         if prior is None:
