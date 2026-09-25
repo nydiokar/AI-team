@@ -583,3 +583,51 @@ def test_T02_telegram_compact_reports_the_queued_managed_turn(tmp_path, monkeypa
     [row] = _managed_rows(db)
     assert row["turn_kind"] == "compaction"
     assert o._backends["claude"].compacted == []
+
+
+# --------------------------------------------------------------------------- #
+# Guards added for mutation kills
+# --------------------------------------------------------------------------- #
+def test_L05_admission_and_activation_refused_inside_the_close_window(tmp_path, monkeypatch):
+    """The closed state is durable in the SAME transaction as the withdrawal:
+    between it and the service's own save, a racing admission or scheduler
+    activation already sees the session closed."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    t1 = _submit(o, operation_id="a")
+    _pass(db, o)
+    _run(db, t1)
+    seen = {}
+    real = db.request_turn_cancel
+
+    def in_window(*a, **k):
+        try:
+            _submit(o, operation_id="racer")
+            seen["admitted"] = True
+        except tq.TurnQueueError as e:
+            seen["refused"] = e.status_code
+        return real(*a, **k)
+    monkeypatch.setattr(db, "request_turn_cancel", in_window)
+    assert o.session_service.close_session("sess-1", backends=o._backends).ok
+    assert seen == {"refused": 409}
+    assert [r["id"] for r in _managed_rows(db)] == [t1]
+
+
+def test_L02b_void_clears_affiliation_even_if_case_close_did_not(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    parent = db.open_case(objective="p", session_id="mgr-x", role="manager")
+    tb = _birth(o, "b", parent)
+    child = db.get_task(tb)["flow_run_id"]
+    # close_case closes the Case but its (best-effort) affiliation clear fails.
+    monkeypatch.setattr(o, "_clear_session_case_affiliation", lambda *a, **k: None)
+    assert o.session_service.close_session("sess-1", backends=o._backends).ok
+    assert db.get_flow_run(child)["status"] == "cancelled"
+    assert _sess().current_case_id is None
+
+
+def test_S01_unfinished_void_keeps_a_bounded_idle_wake():
+    res = ts.SchedulerPassResult(void_outstanding=1)
+    assert ts._next_timeout(res, 25, 60.0, 3.0) == ts.FALLBACK_INTERVAL_SEC
+    assert ts._next_timeout(ts.SchedulerPassResult(), 25, 60.0, 3.0) is None
