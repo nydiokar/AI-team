@@ -10489,15 +10489,18 @@ Generated from user description: {description}
 
     async def _managed_turn_obsolete(self, row: Dict[str, Any]) -> Optional[str]:
         """[A82 Stage 4c] Activation-time revalidation of queued AUTOMATION work
-        (design §3.10/§7). Human/operator turns never silently disappear ⇒ None
-        with no read. A system turn of a Case that is now blocked/closed is
-        obsolete (4b residual 4). A continuation is also obsolete once its token
+        (design §3.10/§7) — rows admitted under the automation principal
+        (Manager dispatch, Case continuation). Human/operator/runtime turns never
+        silently disappear ⇒ None with no read. An automation turn of a Case
+        that is now blocked/closed is obsolete (4b residual 4). A continuation is also obsolete once its token
         is no longer linked, the Case's Manager binding changed, or none of the
         work it presents is still unresolved (an intervening review drained it).
         Returns the reason, or None to activate."""
         from src.control.db import get_db
 
-        if str(row.get("turn_source") or "") in ("human", "operator"):
+        if str(row.get("turn_source") or "") != "system" or not str(
+            row.get("idempotency_scope") or ""
+        ).startswith("automation:"):
             return None
         db = get_db()
         continuation = str(row.get("turn_kind") or "") == "continuation"
