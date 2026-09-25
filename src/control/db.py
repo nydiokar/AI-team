@@ -3175,6 +3175,64 @@ class MeshDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_pending_managed_turns(
+        self,
+        node_id: Optional[str] = None,
+        backends: Optional[List[str]] = None,
+        accept_unpinned: bool = True,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """[A82 Stage 3] Return protocol-1 (managed) PENDING turns routable to a
+        carrier that negotiated managed-protocol support (design §6/§7).
+
+        Distinct from :meth:`get_pending_tasks` (which is protocol-0 ONLY) so a
+        legacy carrier that never advertised protocol-1 can never see a managed
+        row. The execution credential is STRIPPED from this poll view — the claim
+        RESPONSE is the only channel that carries the token (design §3.13). The
+        carrier executes the claim response's frozen payload, not this snapshot.
+        """
+        params: List[Any] = []
+        machine_clause = ""
+        if node_id:
+            if accept_unpinned:
+                machine_clause = "AND (machine_id IS NULL OR machine_id = ?)"
+            else:
+                machine_clause = "AND machine_id = ?"
+            params.append(node_id)
+        backend_clause = ""
+        if backends:
+            placeholders = ",".join("?" * len(backends))
+            backend_clause = f"AND backend IN ({placeholders})"
+            params.extend(backends)
+        params.append(limit)
+        rows = self._conn().execute(
+            f"""
+            SELECT * FROM mesh_tasks
+            WHERE status = 'pending'
+            AND queue_protocol = 1
+            {machine_clause}
+            {backend_clause}
+            ORDER BY queue_sequence ASC, created_at ASC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            # Never serialize the execution credential / admission material
+            # through a poll view (design §3.13 — the claim response is the only
+            # place the token may appear).
+            for _secret in ("claim_token", "idempotency_key", "admission_hash"):
+                d.pop(_secret, None)
+            if isinstance(d.get("payload"), str):
+                try:
+                    d["payload"] = json.loads(d["payload"])
+                except Exception:
+                    pass
+            out.append(d)
+        return out
+
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         row = self._conn().execute(
             "SELECT * FROM mesh_tasks WHERE id = ?", (task_id,)

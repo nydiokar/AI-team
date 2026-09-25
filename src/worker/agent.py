@@ -1058,8 +1058,181 @@ class WorkerAgent:
         os.environ[WORKER_NODE_ENV] = self.cfg.node_id
         os.environ[WORKER_INCARNATION_ENV] = self._incarnation_id
         self._activity_forwarder: Optional[_ActivityForwarder] = None
+        # [A82 Stage 3] Managed (protocol-1) result spool + bookkeeping. Stored
+        # under the carrier state dir (outside repo source); replayed on boot so a
+        # delivered-but-unacked result survives restart (design §6, WRK04).
+        from src.worker.managed_result_spool import ManagedResultSpool
+        self._result_spool = ManagedResultSpool(self._carrier_state_dir())
+        # task_ids currently spooled and awaiting a receipt-matched ack — these
+        # retain session ownership even after the backend slot is returned (WRK06).
+        self._pending_result_delivery: set = set()
+        # Separate small bounded capacity for control cancellation (design §7);
+        # already provided by `_codex_control_semaphore` — referenced by the
+        # shutdown-release guard below.
         self._setup_activity_forwarding()
         self._setup_proactive_delivery()
+        try:
+            self._replay_result_spool()
+        except Exception:
+            logger.warning("event=managed_result_spool_replay_failed", exc_info=True)
+
+    def _carrier_state_dir(self) -> str:
+        """Absolute path to this carrier's private state dir for the managed
+        result spool. Prefers an explicit env override, else a per-node dir under
+        the worker's logs root — never inside the repo source tree (design §6)."""
+        base = os.getenv("WORKER_STATE_DIR") or os.path.join("logs", "carrier_state")
+        node = getattr(self.cfg, "node_id", "") or "node"
+        path = os.path.join(base, node)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError:
+            pass
+        return path
+
+    # ------------------------------------------------------------------
+    # [A82 Stage 3] Worker scheduling + result bookkeeping (design §§5-6, §7)
+    # ------------------------------------------------------------------
+    def _is_already_scheduled(self, task_id: str) -> bool:
+        """True if a fetched id is ALREADY scheduled / executing / awaiting
+        result-delivery — so the poll loop must NOT create a second handler for
+        it (WRK01; design §5). Consulted before ``create_task``. The current
+        `_poll_loop` bug overwrote ``_active[task_id]`` unconditionally.
+        """
+        tid = task_id.get("id") if isinstance(task_id, dict) else task_id
+        pending_delivery = getattr(self, "_pending_result_delivery", set())
+        return (
+            tid in self._active
+            or tid in self._active_meta
+            or tid in pending_delivery
+        )
+
+    def _should_schedule(self, task_id: str) -> bool:
+        """True iff a fetched id is NOT already tracked and should get a handler
+        (WRK01). The negation of :meth:`_is_already_scheduled`; consulted before
+        ``create_task`` in the poll loop so an already-scheduled id is skipped."""
+        return not self._is_already_scheduled(task_id)
+
+    def _scheduling_capacity_available(self) -> bool:
+        """True while scheduled+executing work is below 2x configured execution
+        slots (WRK02; design §6). Acquire this bounded scheduling capacity BEFORE
+        ``create_task`` — the backend semaphore alone only bounds concurrent
+        backend calls, not the number of scheduled handlers.
+        """
+        try:
+            slots = int(getattr(self.cfg, "max_concurrent", 0) or 0)
+        except (TypeError, ValueError):
+            slots = 0
+        return len(self._active) < max(1, slots) * 2
+
+    def _reserve_result_envelope(
+        self, task_id: str, claim_token: str, nbytes: int
+    ) -> Optional[Any]:
+        """Reserve a single managed result-envelope allowance BEFORE start
+        (WRK05; design §6). Returns a reservation, or ``None`` when the spool is
+        full / the estimate is oversize — in which case the turn is left PENDING
+        rather than run-and-discarded. Never truncates to claim success.
+        """
+        return self._result_spool.reserve(task_id, claim_token, nbytes)
+
+    def _replay_result_spool(self) -> int:
+        """Re-mark every durably-spooled managed result as pending delivery on
+        boot (WRK04; design §6). Actual re-POST is driven by the delivery path;
+        here we restore the ownership-holding bookkeeping so a restart cannot
+        silently drop a delivered-but-unacked result. Returns the count replayed.
+        """
+        replayed = 0
+        for task_id, _claim_token, _envelope in self._result_spool.list_spooled():
+            self._pending_result_delivery.add(task_id)
+            replayed += 1
+        if replayed:
+            logger.info("event=managed_result_spool_replayed count=%d", replayed)
+        return replayed
+
+    def _prune_result_spool_on_receipt(
+        self, task_id: str, claim_token: str, receipt: Any
+    ) -> bool:
+        """Remove a spooled managed result ONLY on a durable accepted/stale
+        receipt that matches task AND token (WRK04b; design §6). A bare HTTP
+        timeout or a 2xx with no matching receipt does NOT prune — the envelope
+        survives for replay. Clears the ownership-holding marker on a match.
+        """
+        pruned = self._result_spool.prune_on_receipt(task_id, claim_token, receipt)
+        if pruned:
+            self._pending_result_delivery.discard(task_id)
+        return pruned
+
+    def _managed_shutdown_release_ok(self, task_row: Dict[str, Any]) -> bool:
+        """Guard for graceful shutdown (WRK06; design §6/§7): may this task's
+        ownership be released on shutdown?
+
+        NO for a RUNNING managed (protocol-1) turn — releasing it would let a
+        successor start while this backend may still be executing (the recovery
+        hold must be retained). NO while a result is pending delivery. A
+        claimed-only managed turn (not yet started) is safe to release. Legacy
+        protocol-0 rows keep their existing drain behavior.
+        """
+        tid = task_row.get("id")
+        if tid in getattr(self, "_pending_result_delivery", set()):
+            return False
+        proto = task_row.get("queue_protocol", 0)
+        status = str(task_row.get("status", "")).lower()
+        if int(proto or 0) == 1 and status == "running":
+            return False
+        return True
+
+    async def _deliver_managed_result(
+        self, task_id: str, claim_token: str, result: Dict[str, Any]
+    ) -> None:
+        """Spool a managed result BEFORE POST, deliver it, and prune ONLY on a
+        durable receipt matching task+token (design §6). Retains session ownership
+        (``_pending_result_delivery``) until the receipt matches — a restart
+        replays the spool. Oversize/disk failure raises, leaving a visible
+        recovery obligation (never a truncated false success).
+        """
+        from src.worker.managed_result_spool import OversizeResultError, ResultSpoolError
+
+        envelope = {"node_id": self.cfg.node_id, "claim_token": claim_token, **result}
+        # Mark ownership held for delivery even if the backend slot returns.
+        self._pending_result_delivery.add(task_id)
+        try:
+            self._result_spool.commit(task_id, claim_token, envelope)
+        except OversizeResultError:
+            # The full backend artifact is preserved by existing artifact storage;
+            # keep the ownership hold + a bounded reference, stop truncating.
+            logger.error(
+                "event=managed_result_oversize task_id=%s — holding recovery "
+                "obligation, NOT claiming success", task_id,
+            )
+            raise
+        except ResultSpoolError:
+            logger.error(
+                "event=managed_result_spool_write_failed task_id=%s — visible "
+                "recovery obligation, no ack", task_id,
+            )
+            raise
+        # Deliver. The POST response is a durable receipt only if it matches
+        # task+token; a bare timeout/2xx does NOT prune the spool.
+        receipt = None
+        try:
+            receipt = await asyncio.to_thread(
+                self._http.post,
+                f"/tasks/{task_id}/result",
+                envelope,
+                timeout=10,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=managed_result_post_failed task_id=%s err=%s (spooled, "
+                "retained for replay)", task_id, e,
+            )
+            return  # ownership + spool retained; boot/next pass replays it
+        if self._prune_result_spool_on_receipt(task_id, claim_token, receipt):
+            logger.info("event=managed_result_acked task_id=%s", task_id)
+        else:
+            logger.warning(
+                "event=managed_result_unacked task_id=%s — receipt did not match "
+                "task+token; spool retained for replay", task_id,
+            )
 
     def _setup_proactive_delivery(self) -> None:
         """Wire autonomous (background-job continuation) turns back to the gateway.
@@ -1556,6 +1729,18 @@ class WorkerAgent:
                         if self._shutdown.is_set():
                             break
                         task_id = row.get("id", "unknown")
+                        # [A82 Stage 3] Dedup a fetched id already scheduled /
+                        # executing / awaiting result-delivery (WRK01, design §5),
+                        # and acquire bounded scheduling capacity BEFORE
+                        # create_task (WRK02, design §6). The backend semaphore
+                        # bounds concurrent backend CALLS; these bound scheduled
+                        # HANDLERS so a busy poll cannot pile up duplicate work.
+                        if self._is_already_scheduled(task_id):
+                            continue
+                        if not self._scheduling_capacity_available():
+                            # Leave the rest queued server-side; a nudge/next poll
+                            # picks them up once a slot frees. No unbounded fan-out.
+                            break
                         self._active_meta[task_id] = {
                             "task_id": task_id,
                             "backend": row.get("backend", ""),
@@ -1625,9 +1810,14 @@ class WorkerAgent:
         async with self._semaphore:
             self._slots_used += 1
             try:
-                # Claim — optimistic lock
+                # Claim — optimistic lock. [A82 Stage 3] The claim RESPONSE is
+                # authoritative: for a managed (protocol-1) turn the server
+                # returns the FROZEN execution payload; the worker must execute
+                # THAT response, not the earlier poll snapshot (design §5, WRK03).
+                # A lost claim response is resolved by re-claiming the same task
+                # with the same node — the server returns the existing ownership.
                 try:
-                    await asyncio.to_thread(
+                    claim_response = await asyncio.to_thread(
                         self._http.post,
                         f"/tasks/{task_id}/claim",
                         {"node_id": self.cfg.node_id},
@@ -1642,6 +1832,19 @@ class WorkerAgent:
                     logger.warning("claim_failed err=%s", e)
                     return
 
+                # Execute the claim response's frozen task when present; otherwise
+                # fall back to the poll row (legacy protocol-0 claim returns the
+                # same row). This binds execution to the authoritative response.
+                if isinstance(claim_response, dict) and isinstance(
+                    claim_response.get("task"), dict
+                ):
+                    task_row = claim_response["task"]
+                    claim_token = claim_response.get("claim_token") or task_row.get(
+                        "claim_token"
+                    )
+                    if claim_token:
+                        meta_ct = self._active_meta.setdefault(task_id, {"task_id": task_id})
+                        meta_ct["claim_token"] = claim_token
                 logger.info("task_claimed")
                 meta = self._active_meta.setdefault(task_id, {"task_id": task_id})
                 meta.update({
@@ -1663,16 +1866,28 @@ class WorkerAgent:
                     node_id=self.cfg.node_id,
                 )
 
-                # Post result
+                # Post result. [A82 Stage 3] A managed (protocol-1) turn spools its
+                # result BEFORE the POST and keeps ownership until a receipt-matched
+                # ack (design §6); a legacy protocol-0 turn keeps the exact
+                # byte-identical in-memory post path (flag OFF ⇒ unchanged).
+                claim_token = self._active_meta.get(task_id, {}).get("claim_token")
+                is_managed = int(task_row.get("queue_protocol", 0) or 0) == 1 and bool(
+                    claim_token
+                )
                 try:
-                    delivered = await _post_result_until_accepted(
-                        self._http,
-                        f"/tasks/{task_id}/result",
-                        {"node_id": self.cfg.node_id, **result},
-                        label="result_post",
-                    )
-                    if not delivered:
-                        raise RuntimeError("controller_unreachable_until_delivery_deadline")
+                    if is_managed:
+                        await self._deliver_managed_result(
+                            task_id, claim_token, result
+                        )
+                    else:
+                        delivered = await _post_result_until_accepted(
+                            self._http,
+                            f"/tasks/{task_id}/result",
+                            {"node_id": self.cfg.node_id, **result},
+                            label="result_post",
+                        )
+                        if not delivered:
+                            raise RuntimeError("controller_unreachable_until_delivery_deadline")
                     logger.info(
                         "task_result_posted success=%s elapsed=%.1fs",
                         result["success"], result["execution_time"],
