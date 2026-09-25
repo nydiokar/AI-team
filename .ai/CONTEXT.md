@@ -69,6 +69,23 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-09-25 — Docker migration regressions fixed. PRs #162/#163 MERGED; gateway + task-server recreated on `76a25a9`.**
+**UID:** containers dropped to hardcoded uid 10001, host repos are uid 1000 → workers could read but never write
+(proven live: 10001 `Permission denied`, 1000 OK). Entrypoint now drops to the owner of the mounted `/app/state`
+(never root; fallback 10001; `APP_UID`/`APP_GID` override) — no `.env` edit needed, ownership of
+`~/ai-team-data` decides. `controller/` chowned to 1000 → gateway/task-server run as uid 1000.
+**`workers/kanebra-worker/` is still 10001 and the worker container still runs the old image as 10001 — rollout is
+operator-gated** (had a live Claude session): `sudo chown -R 1000:1000 ~/ai-team-data/workers/kanebra-worker` then
+`docker compose --env-file .env -f deploy/compose.worker.yaml up -d --build`. Horse needs the same if it runs Docker.
+**Phantom nodes:** task server registered `socket.gethostname()` (container id) as a gateway self-node; now only when
+`local_execution_enabled` (compose sets it false on task-server too). Deleted phantom `e8d0cac9b780` and stale
+PM2-era `kanebra` (online in DB since 2026-09-24 22:27Z — nothing marks rows offline that the restarted
+registry never loaded). **Deferred:** load the node registry from mesh.db on task-server start so stale rows age
+out and a restart doesn't cause a 404/re-register storm. **Banner:** `~/scripts/aiteam-healthcheck.sh` (cron, source
+now in `~/dev/server-ops` `e0421cc`, no remote) probed PM2 and wrote to the old repo `state/mesh.db`; now probes
+Docker container state and the live `~/ai-team-data/controller/state/mesh.db`. Stale alert #6 resolved.
+Branch `feat/docker-production-bundle` (+ its worktree) deleted: identical Docker content, its "deletions" were a stale base.
+
 **2026-09-19 — CI green again; deps locked + upgraded; token injection restored for trusted requests. PRs #154–#159 MERGED + DEPLOYED.**
 CI had been red since #150: prod `.venv` sat on fastapi 0.115 (pyproject `>=` only; `pip install -e` never upgrades) while
 CI pulled 0.141, which returns 401 not 403 for a missing bearer. **#154** — `_require_auth` owns the missing-token 401
