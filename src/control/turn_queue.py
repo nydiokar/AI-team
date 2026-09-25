@@ -283,6 +283,51 @@ class RecoveryResolution(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# A82 Stage 4b — producer 2: operator cancel of the ACTIVE managed turn, and
+# session close with managed rows.
+# --------------------------------------------------------------------------- #
+# Protocol-0 control action that carries a cancel request to the carrier that
+# holds the attempt (outside the turn slot, like close_session/cancel_codex).
+CANCEL_MANAGED_ACTION = "cancel_managed"
+
+
+class TurnCancelOutcome(BaseModel):
+    """Result of ``MeshDB.request_turn_cancel`` (one transaction).
+
+    ``outcome``:
+      * ``cancelled``     — pending (unclaimed) or claimed-not-started: made
+                            terminal ``cancelled`` directly (no backend ran);
+      * ``requested``     — running / recovery_required: the cancel is recorded
+                            against the CURRENT attempt token and a control row
+                            ``control_task_id`` was delivered to ``node_id``; the
+                            attempt's own failed/interrupted result commits as
+                            ``cancelled``;
+      * ``already_terminal`` / ``not_active`` (queued) — nothing changed.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    task_id: str
+    outcome: str
+    status: str
+    node_id: Optional[str] = None
+    control_task_id: Optional[str] = None
+
+
+class SessionCloseTurns(BaseModel):
+    """Result of ``MeshDB.close_session_turns``: the session is durably closed
+    and every queued row withdrawn in ONE transaction. ``withdrawn`` lists the
+    withdrawn turn ids; ``active_task_id`` is the slot holder (if any), which
+    the caller then cancels through the fenced path."""
+
+    model_config = {"extra": "forbid"}
+
+    session_id: str
+    withdrawn: list[str] = Field(default_factory=list)
+    active_task_id: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
 # A82 Stage 4a — admission bounds (design §8) + the admission result.
 # --------------------------------------------------------------------------- #
 # Per-session waiting cap (queued + pending managed rows of one session).

@@ -369,6 +369,42 @@ class ClaudeCodeBackend(CodingBackend):
         return self._driver.driver_type() == "sdk" and _replay_user_messages_enabled()
 
     def run_managed_turn(self, session: Session, message: str, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
+        return self._run_managed(
+            "managed_turn", session, ownership, telemetry_context, telemetry_sink,
+            lambda proc_env: self._driver.run_managed_turn(
+                session,
+                message,
+                model=_resolve_model(session),
+                telemetry_context=telemetry_context,
+                proc_env=proc_env,
+                on_process=on_process,
+                turn_uuid=getattr(ownership, "turn_uuid", None),
+            ),
+        )
+
+    def run_managed_compaction(self, session: Session, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
+        """[A82 Stage 4b] Managed `/compact` on the continuous SDK driver (see
+        ``ClaudeSDKClientDriver.run_managed_compaction``)."""
+        return self._run_managed(
+            "managed_compaction", session, ownership, telemetry_context, telemetry_sink,
+            lambda proc_env: self._driver.run_managed_compaction(
+                session,
+                model=_resolve_model(session),
+                telemetry_context=telemetry_context,
+                proc_env=proc_env,
+                on_process=on_process,
+                turn_uuid=getattr(ownership, "turn_uuid", None),
+            ),
+        )
+
+    def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+        """[A82 Stage 4b] Operator cancel of exactly the managed turn ``turn_uuid``."""
+        sessions = getattr(self._driver, "_sessions", None)
+        sdk_sess = sessions.get(session.session_id) if sessions is not None else None
+        cancel = getattr(sdk_sess, "cancel_managed_turn", None)
+        return bool(callable(cancel) and cancel(turn_uuid))
+
+    def _run_managed(self, label: str, session: Session, ownership, telemetry_context, telemetry_sink, invoke) -> ExecutionResult:
         from src.control.turn_queue import ManagedUnsupportedError, OwnershipConflictError
 
         if not self.supports_managed_turns():
@@ -380,21 +416,13 @@ class ClaudeCodeBackend(CodingBackend):
             raise OwnershipConflictError(
                 "managed ownership does not match the session", task_id=ownership.task_id,
             )
-        self._log_driver_turn("managed_turn", session.session_id or "")
+        self._log_driver_turn(label, session.session_id or "")
         from src.core.test_guard import assert_live_calls_allowed
         assert_live_calls_allowed("claude")
         proc_env = self._build_proc_env(session.session_id, telemetry_context)
         before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
 
-        result = self._driver.run_managed_turn(
-            session,
-            message,
-            model=_resolve_model(session),
-            telemetry_context=telemetry_context,
-            proc_env=proc_env,
-            on_process=on_process,
-            turn_uuid=getattr(ownership, "turn_uuid", None),
-        )
+        result = invoke(proc_env)
         self._observe_driver_state(session, result)
         result = self._observe_cache_health(session, result)
         if session.repo_path:

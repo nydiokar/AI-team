@@ -1540,7 +1540,7 @@ def submit_result(
     # A close_session control task carries a session_id for pinning, but it is
     # not a conversational turn — the session is already CLOSED. Skip the turn
     # event so it doesn't render a phantom "turn" against a closed session.
-    is_control_action = task.get("action") in ("close_session", "cancel_codex")
+    is_control_action = task.get("action") in ("close_session", "cancel_codex", "cancel_managed")
     if effective_success:
         db.complete_task(task_id, result_dict, payload.artifact_path)
         # Append event for the session if present

@@ -43,7 +43,8 @@ class SessionService:
 
     def __init__(self, session_store: SessionStore,
                  repo_path_validator: Optional[Callable[[str], Optional["CommandResult"]]] = None,
-                 remote_close_dispatcher: Optional[Callable[[Session], None]] = None):
+                 remote_close_dispatcher: Optional[Callable[[Session], None]] = None,
+                 managed_close: Optional[Callable[[Session], Optional[str]]] = None):
         # Reuse the orchestrator's store — never construct a second one.
         self.store = session_store
         # Injectable so tests can supply a permissive validator and the real path
@@ -54,6 +55,12 @@ class SessionService:
         # close_session task pinned to its owning node so the worker tears down
         # the live backend process. Absent ⇒ legacy no-op (remote close skipped).
         self._remote_close_dispatcher = remote_close_dispatcher
+        # [A82 Stage 4b] Injected by the orchestrator: for a session ENROLLED in
+        # the managed turn queue, durably close it + withdraw queued turns +
+        # cancel the active turn through the fenced path + dispatch the carrier
+        # teardown. Returns None for an unenrolled session (legacy path below,
+        # unchanged); raises a typed TurnQueueError when it cannot decide.
+        self._managed_close = managed_close
 
     def create_session(self, *, backend: str, repo_path: str,
                         chat_id: Optional[int] = None,
@@ -160,7 +167,20 @@ class SessionService:
         if not s:
             return CommandResult(False, reason="session_not_found")
         host = host or socket.gethostname()
-        if s.backend_session_id:
+        managed_carrier: Optional[str] = None
+        if self._managed_close is not None:
+            try:
+                managed_carrier = self._managed_close(s)
+            except Exception as e:  # typed TurnQueueError: fail closed, nothing half-done
+                logger.warning(
+                    "event=session_managed_close_failed session_id=%s err=%s", s.session_id, e,
+                )
+                return CommandResult(False, reason="turn_queue_unavailable", session=s,
+                                     detail=str(e)[:300])
+        # Enrolled (managed_carrier is not None): the managed close already
+        # cancelled the active turn and dispatched the teardown to the carrier
+        # that owns the process — skip the gateway-side backend close.
+        if managed_carrier is None and s.backend_session_id:
             is_local = (not s.machine_id) or (s.machine_id == host)
             backend = (backends or {}).get(s.backend)
             if backend and is_local:
@@ -189,6 +209,7 @@ class SessionService:
                         "event=session_backend_close_remote_skipped session_id=%s backend=%s node=%s",
                         s.session_id, s.backend, s.machine_id,
                     )
+        if s.backend_session_id:
             # Preserve the native (Claude Code) session id for the Info panel /
             # audit before clearing the *active* field. Clearing stays (so no
             # resume path picks up a closed backend session), but the value is

@@ -228,3 +228,15 @@ async def session_enrollment(db: Any, session_id: str) -> bool:
     if db.any_session_enrolled() is False:
         return False
     return await asyncio.to_thread(_read_marker, db, session_id)
+
+
+def session_enrollment_sync(db: Any, session_id: str) -> bool:
+    """[A82 Stage 4b] Synchronous twin of :func:`session_enrollment` for sync
+    callers (session close, operator stop/cancel). Same contract: no DB or no
+    enrollment anywhere ⇒ False with NO marker read (legacy byte-identical);
+    otherwise one marker read; unreadable ⇒ typed 503 (fail closed)."""
+    if db is None:
+        return False
+    if db.any_session_enrolled() is False:
+        return False
+    return _read_marker(db, session_id)

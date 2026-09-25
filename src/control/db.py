@@ -66,6 +66,7 @@ from .turn_queue import (
 )
 if False:  # typing-only forward refs for the strict helper signatures
     from .turn_queue import ClaimToken, StartAuthorization, CompletionResult, RecoveryResolution, TurnAdmission
+    from .turn_queue import TurnCancelOutcome, SessionCloseTurns
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,7 @@ FLOW_EVENT_TYPES = (
     "flow.linked",
     "flow.unlinked",
     "task.dispatched",
+    "task.dispatch_voided",
     "worker.wait_pending",
     "worker.wait_resolved",
     "session.attached",
@@ -3252,6 +3254,246 @@ class MeshDB:
         except Exception as e:
             raise _turn_backing_error("withdraw_turn", task_id=task_id, err=e)
 
+    # ------------------------------------------------------------------ #
+    # [A82 Stage 4b] Producer 2 — operator cancel of the ACTIVE managed turn
+    # and session close with managed rows. Strict: one bounded transaction
+    # each, typed errors, never swallowed.
+    # ------------------------------------------------------------------ #
+    def request_turn_cancel(self, task_id: str, *, actor: str = "operator") -> "TurnCancelOutcome":
+        """Cancel ONE managed turn, token-fenced, in ONE transaction.
+
+        * ``pending`` (never claimed) / ``claimed`` never started: nothing ran,
+          so the row becomes terminal ``cancelled`` here (the slot frees; a
+          late ``/start-managed`` for the old token is refused 409 and the
+          carrier drops the attempt).
+        * ``running`` / ``recovery_required``: the backend may be executing.
+          Record the cancel against the CURRENT claim token (``cancel_token``)
+          and deliver ONE protocol-0 ``cancel_managed`` control row, pinned to
+          the claiming carrier, keyed on (task, token) so a repeat is a no-op.
+          The row stays owned by that attempt; its own result/recovery
+          resolution commits ``cancelled`` (``complete_turn``). Queued rows of
+          the session are untouched.
+        * terminal ⇒ ``already_terminal``; ``queued`` ⇒ ``not_active``.
+        Idempotent: a repeat converges on the same state/control row."""
+        from .turn_queue import CANCEL_MANAGED_ACTION, TurnCancelOutcome
+
+        now = _now()
+        try:
+            with self._managed_write("request_turn_cancel") as conn:
+                row = conn.execute(
+                    "SELECT id, session_id, backend, status, queue_protocol, claim_token, "
+                    "claimed_by, started_at FROM mesh_tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+                if row is None or row["queue_protocol"] != 1:
+                    raise TurnNotFoundError("no managed turn to cancel", task_id=task_id)
+                status = row["status"]
+                if status in ("completed", "failed", "cancelled", "failed_node_offline", "withdrawn"):
+                    return TurnCancelOutcome(task_id=task_id, outcome="already_terminal", status=status)
+                if status == "queued":
+                    return TurnCancelOutcome(task_id=task_id, outcome="not_active", status=status)
+                note = f"cancelled by {actor or 'operator'} before start"[:200]
+                if status == "pending" and row["claim_token"] is None:
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET status = 'cancelled', error = ?, cancel_requested_at = ?,
+                            completed_at = ?, updated_at = ?
+                        WHERE id = ? AND queue_protocol = 1 AND status = 'pending'
+                          AND claim_token IS NULL
+                        """,
+                        (note, now, now, now, task_id),
+                    )
+                elif status == "claimed" and row["started_at"] is None:
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET status = 'cancelled', error = ?, cancel_token = claim_token,
+                            cancel_requested_at = ?, completed_at = ?, updated_at = ?
+                        WHERE id = ? AND queue_protocol = 1 AND status = 'claimed'
+                          AND started_at IS NULL AND claim_token = ?
+                        """,
+                        (note, now, now, now, task_id, row["claim_token"]),
+                    )
+                elif status in ("running", "recovery_required", "claimed") and row["claim_token"]:
+                    token = str(row["claim_token"])
+                    node = str(row["claimed_by"] or "")
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET cancel_token = claim_token,
+                            cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                            updated_at = ?
+                        WHERE id = ? AND queue_protocol = 1 AND claim_token = ?
+                          AND status IN ('claimed', 'running', 'recovery_required')
+                        """,
+                        (now, now, task_id, token),
+                    )
+                    if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                        raise OwnershipConflictError("cancel lost the state race", task_id=task_id)
+                    control_id = (
+                        f"cancelm-{task_id}-"
+                        f"{hashlib.sha256(token.encode()).hexdigest()[:12]}"
+                    )
+                    payload = {
+                        "target_task_id": task_id,
+                        "session": {"session_id": row["session_id"], "backend": row["backend"]},
+                    }
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO mesh_tasks (
+                            id, session_id, machine_id, backend, action, payload,
+                            status, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                        """,
+                        (control_id, row["session_id"], node or None, row["backend"],
+                         CANCEL_MANAGED_ACTION, json.dumps(payload), now, now),
+                    )
+                    return TurnCancelOutcome(
+                        task_id=task_id, outcome="requested", status=status,
+                        node_id=node or None, control_task_id=control_id,
+                    )
+                else:
+                    raise OwnershipConflictError(
+                        "managed turn in an uncancellable shape", task_id=task_id, status=status,
+                    )
+                if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                    raise OwnershipConflictError("cancel lost the state race", task_id=task_id)
+                return TurnCancelOutcome(task_id=task_id, outcome="cancelled", status="cancelled")
+        except TurnQueueError:
+            raise
+        except Exception as e:
+            raise _turn_backing_error("request_turn_cancel", task_id=task_id, err=e)
+
+    def close_session_turns(self, session_id: str, *, actor: str = "operator") -> "SessionCloseTurns":
+        """Durably close an ENROLLED session and withdraw ALL its queued managed
+        rows in ONE transaction (design §7: close persists the authoritative
+        closed state + the withdrawal, checked by admission and activation,
+        which both refuse a closed session inside their own transactions).
+
+        A withdrawn row whose Case lineage was written or is being written is
+        marked ``lineage_state='void'`` (the caller/scheduler then voids any
+        child Case born for it — ``list_void_lineage``). A still-leased
+        lineage writer keeps its lease expiry so the void cleanup waits for it.
+        Returns the withdrawn ids and the active slot holder (cancelled by the
+        caller through ``request_turn_cancel``). Idempotent."""
+        from .turn_queue import SessionCloseTurns
+
+        sid = (session_id or "").strip()
+        now = _now()
+        try:
+            with self._managed_write("close_session_turns") as conn:
+                srow = conn.execute(
+                    "SELECT status FROM sessions WHERE session_id = ?", (sid,),
+                ).fetchone()
+                if srow is None:
+                    raise TurnNotFoundError("unknown session", session_id=sid)
+                conn.execute(
+                    "UPDATE sessions SET status = 'closed', updated_at = ? WHERE session_id = ?",
+                    (now, sid),
+                )
+                queued = conn.execute(
+                    f"""
+                    SELECT id, revision FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open
+                    WHERE session_id = ? AND {_MANAGED_OPEN_PREDICATE} AND status = 'queued'
+                    ORDER BY queue_sequence ASC
+                    """,
+                    (sid,),
+                ).fetchall()
+                withdrawn: List[str] = []
+                for q in queued:
+                    new_rev = int(q["revision"]) + 1
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET status = 'withdrawn', revision = ?, completed_at = ?, updated_at = ?,
+                            lineage_lease_until = CASE WHEN lineage_state = 'pending'
+                                                       THEN lineage_lease_until ELSE NULL END,
+                            lineage_state = CASE WHEN lineage_state IN ('pending', 'done')
+                                                 THEN 'void' ELSE lineage_state END,
+                            lineage_token = NULL
+                        WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
+                        """,
+                        (new_rev, now, now, q["id"]),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO mesh_turn_revisions
+                            (task_id, revision, actor, change_kind, body,
+                             attachments_json, created_at)
+                        VALUES (?, ?, ?, 'withdraw', NULL, NULL, ?)
+                        """,
+                        (q["id"], new_rev, f"session_close:{actor or 'operator'}"[:128], now),
+                    )
+                    withdrawn.append(str(q["id"]))
+                active = conn.execute(
+                    """
+                    SELECT id FROM mesh_tasks
+                    WHERE session_id = ? AND queue_protocol = 1
+                      AND status IN ('pending', 'claimed', 'running', 'recovery_required')
+                    LIMIT 1
+                    """,
+                    (sid,),
+                ).fetchone()
+                return SessionCloseTurns(
+                    session_id=sid, withdrawn=withdrawn,
+                    active_task_id=str(active["id"]) if active else None,
+                )
+        except TurnQueueError:
+            raise
+        except Exception as e:
+            raise _turn_backing_error("close_session_turns", session_id=sid, err=e)
+
+    def list_void_lineage(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """[A82 Stage 4b] Withdrawn managed rows whose Case lineage still has to
+        be voided (``lineage_state='void'``), oldest first, bounded. Served by
+        the ``idx_mesh_turns_lineage_void`` partial index (rows leave it once
+        voided). Includes each row's inherited writer lease expiry."""
+        rows = self._conn().execute(
+            """
+            SELECT id, session_id, status, lineage_state, lineage_lease_until
+            FROM mesh_tasks INDEXED BY idx_mesh_turns_lineage_void
+            WHERE queue_protocol = 1 AND lineage_state = 'void'
+            ORDER BY created_at ASC, id ASC LIMIT ?
+            """,
+            (max(0, int(limit)),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_lineage_voided(self, task_id: str) -> bool:
+        """[A82 Stage 4b] CAS ``void`` → ``voided`` once the void cleanup has
+        converged (the row leaves the void index). Raises on DB error."""
+        try:
+            with self._managed_write("mark_lineage_voided") as conn:
+                conn.execute(
+                    "UPDATE mesh_tasks SET lineage_state = 'voided', lineage_lease_until = NULL, "
+                    "updated_at = ? WHERE id = ? AND queue_protocol = 1 "
+                    "AND status = 'withdrawn' AND lineage_state = 'void'",
+                    (_now(), task_id),
+                )
+                return conn.execute("SELECT changes()").fetchone()[0] > 0
+        except TurnQueueError:
+            raise
+        except Exception as e:
+            raise _turn_backing_error("mark_lineage_voided", task_id=task_id, err=e)
+
+    def clear_session_case_if(self, session_id: str, case_id: str) -> bool:
+        """[A82 Stage 4b] Strict conditional affiliation clear: only when the
+        session is still affiliated to ``case_id`` (a newer affiliation is never
+        touched). Raises on DB error (unlike ``set_session_case``)."""
+        try:
+            with self._managed_write("clear_session_case_if") as conn:
+                conn.execute(
+                    "UPDATE sessions SET current_case_id = NULL, case_role = NULL, updated_at = ? "
+                    "WHERE session_id = ? AND current_case_id = ?",
+                    (_now(), session_id, case_id),
+                )
+                return conn.execute("SELECT changes()").fetchone()[0] > 0
+        except TurnQueueError:
+            raise
+        except Exception as e:
+            raise _turn_backing_error("clear_session_case_if", session_id=session_id, err=e)
+
     def get_turn_revisions(self, task_id: str) -> List[Dict[str, Any]]:
         """Return the append-only edit audit for a managed turn (design §3)."""
         rows = self._conn().execute(
@@ -3674,7 +3916,7 @@ class MeshDB:
         try:
             with self._write() as conn:
                 row = conn.execute(
-                    "SELECT id, session_id, status, queue_protocol, claim_token "
+                    "SELECT id, session_id, status, queue_protocol, claim_token, cancel_token "
                     "FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
@@ -3703,6 +3945,12 @@ class MeshDB:
                         "turn not in a completable state (never started)",
                         task_id=task_id, status=cur_status,
                     )
+                # [A82 Stage 4b] The attempt was cancelled by the operator
+                # (recorded against THIS token): its failed/interrupted result
+                # is truthfully `cancelled`. A turn that finished successfully
+                # before the interrupt landed stays `completed`.
+                if status == "failed" and _cancel_requested_for(row, claim_token):
+                    status = "cancelled"
                 # Write the canonical outcome + terminal transition.
                 conn.execute(
                     """
@@ -3758,7 +4006,13 @@ class MeshDB:
         sets = ["updated_at = ?", "config_revision = config_revision + 1"]
         params: List[Any] = [_now()]
         if native_session_id is not None:
-            sets.insert(0, "backend_session_id = ?")
+            # [A82 Stage 4b] A session closed meanwhile keeps its cleared native
+            # id (legacy close parity: no resume path may pick up a closed
+            # backend session), even when its cancelled turn reports later.
+            sets.insert(
+                0, "backend_session_id = CASE WHEN status = 'closed' "
+                   "THEN backend_session_id ELSE ? END",
+            )
             params.insert(0, native_session_id)
         if last_task_id is not None:
             sets.insert(0, "last_task_id = ?")
@@ -3856,7 +4110,7 @@ class MeshDB:
         try:
             with self._write() as conn:
                 row = conn.execute(
-                    "SELECT id, status, queue_protocol, claim_token "
+                    "SELECT id, status, queue_protocol, claim_token, cancel_token "
                     "FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
@@ -3872,6 +4126,11 @@ class MeshDB:
                         "turn is not in recovery_required",
                         task_id=task_id, status=row["status"],
                     )
+                # [A82 Stage 4b] An operator cancel recorded against THIS
+                # attempt makes a result-less failed resolution truthful as
+                # `cancelled`.
+                if resolved_status == "failed" and _cancel_requested_for(row, claim_token):
+                    resolved_status = "cancelled"
                 # [A82 Stage 3 rework] Record the evidence/decision that
                 # resolved the hold (bounded) on the row itself.
                 evidence_note = "recovery_resolved: " + json.dumps(
@@ -8033,6 +8292,15 @@ def _get_migrations() -> List[tuple]:
         """),  # A82 Stage 4a: persisted stored-intent byte accounting for the
                # managed waiting budget (design §8) + blocked-head retry backoff
                # (design §5.2). NULL/0 on every legacy row. Unreleased (branch-only).
+        (36, """
+            ALTER TABLE mesh_tasks ADD COLUMN cancel_token TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN cancel_requested_at TEXT;
+            CREATE INDEX IF NOT EXISTS idx_mesh_turns_lineage_void
+                ON mesh_tasks(created_at, id)
+                WHERE queue_protocol = 1 AND lineage_state = 'void'
+        """),  # A82 Stage 4b: operator cancel recorded against the attempt token
+               # (cancel_token) + a small partial index over withdrawn rows whose
+               # Case lineage still needs voiding. NULL on every legacy row.
     ]
 
 
@@ -8251,6 +8519,16 @@ def _is_quiescence_evidence(evidence: Any) -> bool:
         or evidence.get("terminal_status")
     )
     return has_attempt and has_terminal
+
+
+def _cancel_requested_for(row: Any, claim_token: str) -> bool:
+    """[A82 Stage 4b] True iff an operator cancel was recorded against the
+    attempt presenting ``claim_token`` (cancel_token is set from the claim token
+    at request time, so a superseded attempt never inherits it)."""
+    import hmac
+
+    recorded = row["cancel_token"] if "cancel_token" in row.keys() else None
+    return bool(recorded) and hmac.compare_digest(str(recorded), str(claim_token or ""))
 
 
 def _now() -> str:

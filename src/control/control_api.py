@@ -74,6 +74,8 @@ _REASON_STATUS = {
     "invalid_repo_path": 400,
     "session_not_found": 404,
     "not_closed": 409,
+    # [A82 Stage 4b] managed close could not reach the turn ledger (fail closed)
+    "turn_queue_unavailable": 503,
     # Move H — approvals
     "not_found": 404,
     "already_resolved": 409,
@@ -2481,6 +2483,18 @@ def build_control_api(orchestrator) -> FastAPI:
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session_not_found")
+        # [A82 Stage 4b] Enrolled: stop = cancel the turn owning the ACTIVE slot
+        # (ledger truth, never last_task_id); the turn row, not a whole-session
+        # CANCELLED save, is the truth. None ⇒ legacy (unchanged below).
+        from src.control.turn_queue import TurnQueueError
+
+        stop_managed = getattr(orchestrator, "stop_managed_session_turn", None)
+        try:
+            managed = stop_managed(session) if callable(stop_managed) else None
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        if managed is not None:
+            return JSONResponse({"ok": True, "cancelled": managed[0], "task_id": managed[1]})
         cancelled = False
         if session.last_task_id:
             cancelled = bool(orchestrator.cancel_task(session.last_task_id))
@@ -2490,16 +2504,32 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse({"ok": True, "cancelled": cancelled, "task_id": session.last_task_id})
 
     @app.post("/api/sessions/{session_id}/compact", dependencies=[Depends(_require_auth)])
-    async def api_compact_session(session_id: str) -> JSONResponse:
+    async def api_compact_session(session_id: str, request: Request) -> JSONResponse:
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session_not_found")
-        result = await orchestrator.compact_session(session_id)
-        return JSONResponse({
+        from src.control.turn_queue import TurnQueueError
+
+        # [A82 Stage 4b] Idempotency-Key = the managed compaction's durable
+        # operation id (only consulted for an enrolled session).
+        idem = (request.headers.get("Idempotency-Key") or "").strip()[:256] or None
+        try:
+            result = await (
+                orchestrator.compact_session(session_id, operation_id=idem)
+                if idem else orchestrator.compact_session(session_id)
+            )
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        body: Dict[str, Any] = {
             "ok": bool(getattr(result, "success", False)),
             "output": getattr(result, "output", ""),
             "errors": list(getattr(result, "errors", []) or []),
-        })
+        }
+        managed = getattr(result, "parsed_output", None)
+        if isinstance(managed, dict) and managed.get("managed"):
+            body.update({"queued": True, "task_id": managed.get("task_id"),
+                         "status": managed.get("status")})
+        return JSONResponse(body)
 
     @app.post("/api/sessions/{session_id}/close", dependencies=[Depends(_require_auth)])
     async def api_close_session(session_id: str) -> JSONResponse:
