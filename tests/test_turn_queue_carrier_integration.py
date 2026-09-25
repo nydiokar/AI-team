@@ -22,7 +22,7 @@ import src.worker.agent as agent_mod
 from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus
 from src.worker.agent import WorkerAgent
-from src.worker.managed_result_spool import MAX_ENVELOPE_BYTES, ManagedResultSpool
+from src.worker.managed_result_spool import MAX_ENVELOPE_BYTES, ManagedClaimStore, ManagedResultSpool
 
 NODE = "Horse"
 TOKEN = "tok"
@@ -52,6 +52,9 @@ class _ManagedCapableBackend:
     (execution itself is faked via `_execute_task` in most tests)."""
 
     def supports_managed_turns(self) -> bool:
+        return True
+
+    def is_quiescent(self, session) -> bool:
         return True
 
 
@@ -127,6 +130,8 @@ def _worker(tmp_path, http, *, managed: bool = True, incarnation: str = "inc-1",
     w._result_spool = ManagedResultSpool(str(tmp_path / "carrier_state"), **kw)
     w._pending_result_delivery = set()
     w._managed_claims = {}
+    w._claim_store = ManagedClaimStore(str(tmp_path / "carrier_state"))
+    w._start_retry_delays = (0.0, 0.0, 0.0)
     w._result_delivery_semaphore = asyncio.Semaphore(2)
     w._delivering = set()
     w._managed_claims_blocked = None
@@ -600,8 +605,15 @@ def real_claude(monkeypatch):
 
     sess.send, sess.send_managed = _send, _send_managed
     monkeypatch.setattr(ClaudeSDKClientDriver, "_get_or_create", lambda self, *a, **k: sess)
+
+    class _Pool(dict):
+        """The driver pool: every session id maps to the fake live session."""
+
+        def get(self, key, default=None):
+            return sess
     monkeypatch.setattr(tg, "assert_live_calls_allowed", lambda name: None)
     backend = ClaudeCodeBackend("sdk")
+    backend._driver._sessions = _Pool()
     assert backend.supports_managed_turns() is True
     real_rmt = backend.run_managed_turn
 

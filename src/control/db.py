@@ -2065,7 +2065,7 @@ class MeshDB:
                     UPDATE mesh_tasks
                     SET status = 'claimed', claimed_by = ?, claimed_at = ?, updated_at = ?,
                         claimer_incarnation = (SELECT incarnation_id FROM nodes WHERE node_id = ?)
-                    WHERE id = ? AND status = 'pending'
+                    WHERE id = ? AND status = 'pending' AND COALESCE(queue_protocol, 0) = 0
                     """,
                     (node_id, now, now, node_id, task_id),
                 )
@@ -2090,7 +2090,7 @@ class MeshDB:
                     UPDATE mesh_tasks
                     SET status = 'pending', claimed_by = NULL, claimed_at = NULL,
                         claimer_incarnation = NULL, updated_at = ?
-                    WHERE id = ? AND claimed_by = ? AND status = 'claimed'
+                    WHERE id = ? AND claimed_by = ? AND status = 'claimed' AND COALESCE(queue_protocol, 0) = 0
                     """,
                     (now, task_id, node_id),
                 )
@@ -2112,7 +2112,7 @@ class MeshDB:
         try:
             with self._write() as conn:
                 rows = conn.execute(
-                    "SELECT id FROM mesh_tasks WHERE claimed_by = ? AND status = 'claimed'",
+                    "SELECT id FROM mesh_tasks WHERE claimed_by = ? AND status = 'claimed' AND COALESCE(queue_protocol, 0) = 0",
                     (node_id,),
                 ).fetchall()
                 task_ids = [r[0] for r in rows]
@@ -2122,7 +2122,7 @@ class MeshDB:
                         UPDATE mesh_tasks
                         SET status = 'pending', claimed_by = NULL, claimed_at = NULL,
                             claimer_incarnation = NULL, updated_at = ?
-                        WHERE claimed_by = ? AND status = 'claimed'
+                        WHERE claimed_by = ? AND status = 'claimed' AND COALESCE(queue_protocol, 0) = 0
                         """,
                         (now, node_id),
                     )
@@ -2239,6 +2239,7 @@ class MeshDB:
                 LEFT JOIN nodes n ON t.claimed_by = n.node_id
                 WHERE t.status = 'claimed'
                   AND t.claimed_at IS NOT NULL
+                  AND COALESCE(t.queue_protocol, 0) = 0
                 """,
             ).fetchall()
             conn.close()
@@ -2299,7 +2300,7 @@ class MeshDB:
                     UPDATE mesh_tasks
                     SET status = 'completed', result = ?, artifact_path = COALESCE(?, artifact_path),
                         completed_at = ?, updated_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND COALESCE(queue_protocol, 0) = 0
                     """,
                     (json.dumps(result), artifact_path, now, now, task_id),
                 )
@@ -2324,7 +2325,7 @@ class MeshDB:
                     SET status = ?, error = ?, result = COALESCE(?, result),
                         artifact_path = COALESCE(?, artifact_path),
                         completed_at = ?, updated_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND COALESCE(queue_protocol, 0) = 0
                     """,
                     (
                         status,
@@ -2851,16 +2852,42 @@ class MeshDB:
         self,
         task_id: str,
         claim_token: str,
+        *,
+        backend_not_invoked: bool = False,
+        node_id: Optional[str] = None,
     ) -> bool:
         """Release a CLAIMED-but-not-started managed turn back to `pending` for
         the current token only (design §6: release before start is safe only for
         the current token; release AFTER start is forbidden without quiescence).
 
         Returns True if released; a started/running or foreign-token row is left
-        untouched and returns False (the caller must go through recovery)."""
+        untouched and returns False (the caller must go through recovery).
+
+        [A82 Stage 3 rework] ``backend_not_invoked=True`` is the carrier's
+        write-ahead attestation that the backend was NEVER invoked for this
+        attempt (persisted before invocation) — the strongest quiescence evidence
+        — so a ``running``/``recovery_required`` row of the claiming node + token
+        may also return to pending (start response lost, or conflict detected
+        before submit). The prompt is preserved; token/carrier/incarnation/start
+        are cleared so the old attempt can do nothing further."""
         now = _now()
         try:
             with self._write() as conn:
+                if backend_not_invoked:
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET status = 'pending', claim_token = NULL, claimed_by = NULL,
+                            claim_carrier_kind = NULL, claim_incarnation = NULL,
+                            claimer_incarnation = NULL, claimed_at = NULL,
+                            started_at = NULL, blocked_reason = NULL, updated_at = ?
+                        WHERE id = ? AND queue_protocol = 1 AND claim_token = ?
+                          AND claimed_by = ?
+                          AND status IN ('claimed', 'running', 'recovery_required')
+                        """,
+                        (now, task_id, claim_token, node_id or ""),
+                    )
+                    return conn.execute("SELECT changes()").fetchone()[0] > 0
                 conn.execute(
                     """
                     UPDATE mesh_tasks
@@ -3111,15 +3138,22 @@ class MeshDB:
                         "turn is not in recovery_required",
                         task_id=task_id, status=row["status"],
                     )
+                # [A82 Stage 3 rework] Record the evidence/decision that
+                # resolved the hold (bounded) on the row itself.
+                evidence_note = "recovery_resolved: " + json.dumps(
+                    {k: v for k, v in (quiescence_evidence or {}).items()
+                     if k not in ("claim_token", "result")},
+                    default=str, sort_keys=True,
+                )[:1800]
                 conn.execute(
                     """
                     UPDATE mesh_tasks
                     SET status = ?, completed_at = ?, updated_at = ?,
-                        blocked_reason = NULL
+                        blocked_reason = NULL, error = ?
                     WHERE id = ? AND queue_protocol = 1 AND claim_token = ?
                       AND status = 'recovery_required'
                     """,
-                    (resolved_status, now, now, task_id, claim_token),
+                    (resolved_status, now, now, evidence_note, task_id, claim_token),
                 )
                 if conn.execute("SELECT changes()").fetchone()[0] == 0:
                     raise OwnershipConflictError(

@@ -287,11 +287,18 @@ def test_DB08_managed_complete_refuses_never_started_turn(tmp_path):
     db.activate_turn("m1")  # -> pending (never claimed/started)
     with pytest.raises(OwnershipConflictError):
         db.complete_turn("m1", claim_token="no-such-token", result={"output": "x"})
-    # And the legacy helper is UNCHANGED: it still marks any task complete with
-    # no predicate (proving we did not touch it).
-    _enqueue(db, "leg1")
+    # The legacy helper still marks a LEGACY (protocol-0) task complete with no
+    # predicate. [A82 Stage 3 rework, M5 — fixture correction] The original line
+    # used a MANAGED row here, i.e. it asserted the legacy bypass of token
+    # fencing that A87 ruled forbidden: a legacy write must never complete a
+    # protocol-1 row. Both halves are now asserted.
+    db.enqueue_task("leg1", "sess-1", "worker-a", "claude", "run_oneoff", {"prompt": "legacy"})
     db.complete_task("leg1", {"output": "legacy"})
     assert db.get_task("leg1")["status"] == "completed"
+    _enqueue(db, "m2", session_id="sess-1")
+    db.complete_task("m2", {"output": "bypass"})
+    db.fail_task("m2", "bypass")
+    assert db.get_task("m2")["status"] == "queued", "legacy helper mutated a managed row"
 
 
 def test_DB08b_full_claim_start_complete_lifecycle_commits_native_id_atomically(tmp_path):

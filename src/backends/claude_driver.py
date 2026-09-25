@@ -317,6 +317,11 @@ class TurnOutcome:
     # live session continued on its own (a run_in_background job finished and the
     # agent produced a follow-up). These are delivered as proactive messages.
     proactive: bool = False
+    # [A82 Stage 3 rework] The late real reply of a MANAGED turn whose caller
+    # already hit its deadline (turn held in recovery). Delivered through the
+    # proactive sink so the carrier can commit it to the held turn — never
+    # dropped into an unread future.
+    late_managed: bool = False
 
 
 @dataclass
@@ -356,6 +361,9 @@ class _PendingTurn:
     progress_cb: Any = None
     managed: bool = False
     response_started: bool = False
+    # [A82 Stage 3 rework] The managed caller hit its deadline; the eventual
+    # reply is routed as ``late_managed`` instead of an unread future.
+    abandoned: bool = False
 
 
 class SDKStreamEndedError(RuntimeError):
@@ -769,6 +777,14 @@ class _SDKSession:
         # thread (reader) except the read in the oracle, which reads a plain dict
         # snapshot — a benign race that can only make the oracle MORE conservative.
         self._bg_task_status: Dict[str, str] = {}
+        # [A82 Stage 3 rework] Autonomous turns the CLI owes us: each terminal
+        # background-task notification makes the CLI run one autonomous
+        # continuation turn. While >0, a ResultMessage cannot belong to a managed
+        # head (P5: the continuation must not be adopted as the managed reply).
+        self._autonomous_expected: int = 0
+        # Late managed replies handed to the sink but not yet accepted by it —
+        # the session is not quiescent until the carrier has taken them.
+        self._late_handoffs: int = 0
         # True once the terminal ResultMessage of the most recent query has been
         # observed. A fresh session with no query yet is trivially "last query
         # terminal" = True. Set False when a managed/legacy query is submitted,
@@ -1025,6 +1041,7 @@ class _SDKSession:
                     status = getattr(msg, "status", None)
                     if tid and status:
                         self._bg_task_status[str(tid)] = str(status)
+                    self._autonomous_expected += 1
                 elif (
                     SystemMessage
                     and isinstance(msg, SystemMessage)
@@ -1152,39 +1169,60 @@ class _SDKSession:
         # exactly as before Stage 3 — including a bare result-only reply — so the
         # shared reader never deadlocks a legacy send (§15 decision 1, M5/M6).
         if self._pending and self._pending[0].managed:
-            head = self._pending.popleft()
-            if head.response_started:
+            head = self._pending[0]
+            if head.abandoned:
+                # Late real reply of a managed turn whose caller hit its
+                # deadline: hand it to the carrier as late_managed (M3).
+                self._pending.popleft()
+                outcome.late_managed = True
+            elif self._autonomous_expected > 0:
+                # The CLI is finishing an autonomous continuation owed for a
+                # completed background task; its result (and any assistant
+                # frame that marked the head started) are not this turn's (M4).
+                self._autonomous_expected -= 1
+                head.response_started = False
+            elif head.response_started:
+                self._pending.popleft()
                 if not head.future.done():
                     head.future.set_result(outcome)
                 return
-            # A ResultMessage before this managed query's own response stream
-            # began cannot be attributed to it (it may be an autonomous background
-            # result). Fail the managed turn closed with a typed recovery error —
-            # never serve it as the explicit reply, never leave the caller blocked
-            # until the turn deadline, never interrupt — and surface the output
-            # through the proactive sink below. The query itself has NOT been
-            # proven terminal, so the quiescence oracle keeps the session held
-            # until a further terminal ResultMessage is observed.
-            self._last_query_terminal = False
-            if not head.future.done():
-                from src.control.turn_queue import RecoveryRequiredError
-                head.future.set_exception(RecoveryRequiredError(
-                    "managed turn received a ResultMessage before its own response "
-                    "stream began; result is uncorrelated — recovery required",
-                    session_key=self.session_key, reason="uncorrelated_result",
-                ))
-            logger.warning(
-                "event=sdk_managed_result_uncorrelated session_key=%s chars=%d — "
-                "managed turn failed closed; output routed to proactive sink",
-                self.session_key, len(outcome.output or ""),
-            )
+            else:
+                # A ResultMessage before this managed query's own response
+                # stream began cannot be attributed to it (it may be an
+                # autonomous background result). Fail the managed turn closed
+                # with a typed recovery error — never serve it as the explicit
+                # reply, never leave the caller blocked until the deadline, never
+                # interrupt — and surface the output through the proactive sink.
+                # The query has NOT been proven terminal, so the oracle keeps
+                # the session held until a further terminal ResultMessage.
+                self._pending.popleft()
+                self._last_query_terminal = False
+                if not head.future.done():
+                    from src.control.turn_queue import RecoveryRequiredError
+                    head.future.set_exception(RecoveryRequiredError(
+                        "managed turn received a ResultMessage before its own response "
+                        "stream began; result is uncorrelated — recovery required",
+                        session_key=self.session_key, reason="uncorrelated_result",
+                    ))
+                logger.warning(
+                    "event=sdk_managed_result_uncorrelated session_key=%s chars=%d — "
+                    "managed turn failed closed; output routed to proactive sink",
+                    self.session_key, len(outcome.output or ""),
+                )
         elif self._pending:
+            # Legacy FIFO (unchanged routing). A legacy turn absorbs any owed
+            # autonomous continuation, so the owed count resets.
+            self._autonomous_expected = 0
             pending = self._pending.popleft()
             if not pending.future.done():
                 pending.future.set_result(outcome)
             return
+        elif self._autonomous_expected > 0:
+            self._autonomous_expected -= 1
         # No one asked for this turn — it's a background-job continuation.
         outcome.proactive = True
+        if outcome.late_managed and self._on_proactive is not None:
+            self._late_handoffs += 1
         if self._on_proactive is None:
             logger.info(
                 "event=sdk_proactive_turn_dropped session_key=%s chars=%d "
@@ -1203,6 +1241,9 @@ class _SDKSession:
                 "event=sdk_proactive_delivery_failed session_key=%s",
                 self.session_key, exc_info=True,
             )
+        finally:
+            if getattr(outcome, "late_managed", False):
+                self._late_handoffs = max(0, self._late_handoffs - 1)
 
     def _fail_pending(self, err: Exception) -> None:
         """Reject every waiting turn — used when the stream dies."""
@@ -1274,6 +1315,8 @@ class _SDKSession:
             return False
         if self._assistant_in_flight:
             return False
+        if self._late_handoffs:
+            return False
         for status in list(self._bg_task_status.values()):
             if status not in TERMINAL_TASK_STATUSES:
                 return False
@@ -1339,6 +1382,11 @@ class _SDKSession:
             )
         return await self._submit_turn(message, progress_cb=progress_cb, managed=True)
 
+    def _abandon_managed_pending(self) -> None:
+        for p in self._pending:
+            if p.managed and not p.future.done():
+                p.abandoned = True
+
     def _submit_managed_no_interrupt(self, coro, timeout: Optional[float]) -> "TurnOutcome":
         """Run a managed coroutine on the SDK loop WITHOUT the legacy
         interrupt-on-failure of :meth:`submit` (§15 decision 1: the managed path
@@ -1363,6 +1411,12 @@ class _SDKSession:
                 "interrupt; turn held for recovery",
                 self.session_key, timeout,
             )
+            # M3: the eventual real reply must reach the carrier, not an unread
+            # future — mark the outstanding managed turn abandoned (on the loop).
+            try:
+                self._loop.call_soon_threadsafe(self._abandon_managed_pending)
+            except RuntimeError:
+                pass
             raise RecoveryRequiredError(
                 "managed turn exceeded its deadline without a terminal result; "
                 "backend not interrupted — recovery required",
