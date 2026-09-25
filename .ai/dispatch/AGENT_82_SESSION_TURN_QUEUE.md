@@ -2,11 +2,11 @@
 job_id: AGENT_82_SESSION_TURN_QUEUE
 created_at: "2026-09-22T11:39:06.841262+00:00"        # CANONICAL — set once at dispatch, never derive again
 status: active              # ready | active | blocked | done | dead
-owner: mgr-a2a819ff:stage0
+owner: worker-a82-stage2
 depends_on: []
 results_ref: DISPATCH_LOG.md#A82             # -> DISPATCH_LOG.md section with the verdict prose
 evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-25T08:45:50.267928+00:00"
+updated_at: "2026-09-25T09:33:04.329154+00:00"
 ```
 
 # A82 — Build the unified session turn queue
@@ -772,6 +772,67 @@ re-verified from code by the Manager (A87). Key verified facts:
    Stage 2 skeletons land. Migration-survival DB cases may be authored once migration 34 exists.
 
 Stage 2+ (behavior-changing) remains GATED on the Manager's review of the Stage 1 red tests.
+
+### Stage 2 — schema + transaction seams + session ownership (2026-09-25, on `feat/session-turn-queue`)
+Delivered the design §6 Stage-2 subset. **STOP for Manager review + adversarial review before Stages 4-6.**
+
+- **Migration 34** (`src/control/db.py` `_get_migrations`): ADDITIVE, NULLable/DEFAULT-safe on `mesh_tasks`
+  (`queue_protocol` DEFAULT 0, `queue_sequence`, `turn_source`, `sender_session_id`, `turn_kind`,
+  `idempotency_scope/idempotency_key/admission_hash`, `revision` DEFAULT 1, `not_before/expires_at`,
+  `activated_at/started_at`, `claim_token/claim_carrier_kind/claim_incarnation`, `coalesce_key`,
+  `blocked_reason`) + `mesh_turn_revisions` audit table + `sessions.turn_queue_enrolled/turn_queue_paused/
+  config_revision`. Six partial indexes exactly per design §3 (one-active-session, session-sequence,
+  waiting, session-open, idempotency, active-coalesce) — ALL partial on `queue_protocol = 1` so they
+  cannot fire on legacy data. Verified installs cleanly over a v33 fixture carrying duplicate legacy
+  active rows (l1/l2 pending + l3 claimed same session), a cancellation row, and a NULL-session sentinel
+  token; all preserved as protocol 0.
+- **Strict managed DB helpers** (new, protocol-1 only, one transaction each, typed errors, NO swallow):
+  `enqueue_turn` (idempotency→sequence→insert), `activate_turn` (queued→pending), `revise_turn`/
+  `withdraw_turn` (CAS on revision + atomic `mesh_turn_revisions` audit), `claim_turn` (fresh opaque
+  token bound to carrier/incarnation), `start_turn` (once-only claimed→running, idempotent same-token,
+  incarnation-fenced), `release_turn`, `complete_turn` (atomic terminal + native-id + active identity),
+  `_commit_completion_identity`/`update_session_fields` (field-scoped versioned session write),
+  `enter_recovery`/`resolve_recovery` (evidence-gated), `get_active_turn`, `enroll_session`,
+  `get_turn_revisions`. Legacy `complete_task`/`fail_task`/`claim_task`/`enqueue_task`/`upsert_session`
+  are **byte-identical** (zero deletions in `db.py`).
+- **Typed outcomes + models**: `src/control/turn_queue.py` (401/403/404/409/413/422/429/503 typed errors
+  carrying `.status_code`; `ClaimToken` str-subclass; `StartAuthorization`/`CompletionResult`/
+  `RecoveryResolution` Pydantic v2; state-set constants). No HTTP objects, no framework.
+- **Managed SDK ownership path** (`src/backends/claude_driver.py`, additive only, zero deletions):
+  `_SDKSession.send_managed` (protocol-1 fail-closed typed `OwnershipConflictError` on lock conflict,
+  NEVER `cancel_inflight`); `is_quiescent()` oracle (conjunction: empty `_pending` + no non-terminal
+  tracked background task + last-query terminal + no in-flight continuation); reader-loop now tracks
+  `TaskUpdatedMessage`/`TaskNotificationMessage` + assistant-in-flight. Legacy `send`/`cancel_inflight`
+  UNCHANGED.
+- **Tests**: authored `tests/test_turn_queue_db.py` (DB01-08 + happy-path lifecycle, 12 cases, real
+  file-backed SQLite) — all GREEN. Turned GREEN in `test_turn_queue_ownership.py`: OWN01, OWN02-10 (11/12);
+  in `test_turn_queue_sdk_ownership.py`: SDK01, SDK03, SDK04a/b/c (5/6).
+  **Still RED (out of Stage-2 scope, flagged for Manager):**
+    * `OWN01b` — asserts the LEGACY `claim_task` writes a per-attempt `claim_token`; this contradicts
+      binding §15 decision 2 (legacy path stays byte-identical). The test's own name documents legacy
+      `claimed_by` is node identity, yet the assertion demands a token — a self-inconsistent contract.
+      Left RED, not silently edited (per dispatch instruction).
+    * `SDK02` — no-autonomous-misattribution depends on the Stage-3 carrier reservation/result-correlation
+      contract (design §6 "reserve on the SDK loop before submitting a query"); a bare background
+      `ResultMessage` with a prompt pending carries no lifecycle signal at the DB/ownership layer. Correctly
+      stays RED for Stage 3.
+  One Stage-1 FIXTURE corrected: `test_turn_queue_ownership.py::_enqueue` now uses `enqueue_turn` +
+  `activate_turn` (managed protocol-1) instead of legacy `enqueue_task` — the ownership contract it asserts
+  is protocol-1 only; no assertion was weakened.
+- **Flag-OFF byte-identity**: `queue_protocol` DEFAULTs 0; legacy `enqueue_task` sets no managed columns
+  (verified: protocol-0, NULL sequence, `pending`); zero deletions in `db.py`/`claude_driver.py`; all named
+  adjacent regressions pass (session_service, case_admission, sdk_driver_proactive, task_state_truth,
+  claim_reaper, mesh_enqueue_affinity, lifecycle/payload/case_persist, proactive_turn_delivery,
+  cancellation/close_propagation, case_continuation/interrupt/closure/quota_resume/transient_resume,
+  codex_ownership/native, transcript_read_a81, mesh_reconcile_spool/dispatch_timeout, control_api_write,
+  cache_heartbeat, watched_jobs — 300+ cases, all green).
+- **EXPLAIN plans** (5000-completed-row fixture + ANALYZE): active-slot lookup →
+  `idx_mesh_turns_one_active_session`; waiting-head scan → `idx_mesh_turns_waiting` (SCAN, NO temp B-tree);
+  idempotency → `idx_mesh_turns_idempotency`; latest-sequence (ordered LIMIT 1) →
+  `idx_mesh_turns_session_sequence`; session-open scan → `idx_mesh_turns_session_open`; coalesce →
+  `idx_mesh_turns_active_coalesce`. No full-history scan / temp sort on the hot paths.
+- **NOT done (out of scope, stay RED)**: Stage 4 admission/scheduler (§8), Stage 5 sender (§9), Stage 6
+  UI/API (§10); the api/worker/producers/pressure suites remain red/import-pending by design. NOT merged.
 
 ## 16. Review record
 
