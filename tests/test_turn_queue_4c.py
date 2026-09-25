@@ -315,8 +315,6 @@ def test_Q07_interrupt_withdraws_queued_automation_but_keeps_human_work(tmp_path
     c = _cont_rows(db)[0]["id"]
     human = _submit(o, operation_id="op-human")  # attaches to the Manager's Case
     assert db.get_task(human)["flow_run_id"] == cid
-    runtime = _submit(o, source="runtime", operation_id="op-runtime")  # non-automation principal
-    assert db.get_task(runtime)["turn_source"] == "system"
     # a worker session with a queued automation dispatch joined to the Case
     db.upsert_session(Session(session_id="sess-2", backend="claude", repo_path="/tmp/repo",
                               status=SS.IDLE, created_at=NOW, updated_at=NOW,
@@ -325,6 +323,15 @@ def test_Q07_interrupt_withdraws_queued_automation_but_keeps_human_work(tmp_path
     w = _submit(o, session_id="sess-2", source="automation_session",
                 join_case_id=cid, operation_id="op-dispatch")
     assert db.get_task(w)["turn_source"] == "system" and db.get_task(w)["flow_run_id"] == cid
+    # a runtime-principal (non-automation) system turn joined to the same Case
+    db.upsert_session(Session(session_id="sess-3", backend="claude", repo_path="/tmp/repo",
+                              status=SS.IDLE, created_at=NOW, updated_at=NOW,
+                              machine_id="worker-a"))
+    db.enroll_session("sess-3")
+    runtime = _submit(o, session_id="sess-3", source="runtime", join_case_id=cid,
+                      operation_id="op-runtime")
+    assert db.get_task(runtime)["turn_source"] == "system"
+    assert db.get_task(runtime)["flow_run_id"] == cid
     out = asyncio.run(o.interrupt_case(cid))  # REAL kill path
     assert out["ok"] and db.get_flow_run(cid)["status"] == "blocked"
     tok = db.get_task(t)["claim_token"]
@@ -334,7 +341,7 @@ def test_Q07_interrupt_withdraws_queued_automation_but_keeps_human_work(tmp_path
     assert db.get_task(w)["status"] == "withdrawn"
     assert db.get_task(c)["status"] == "withdrawn"
     assert db.get_task(human)["status"] == "pending"  # humans never silently disappear
-    assert db.get_task(runtime)["status"] == "queued"  # only the automation principal is withdrawn
+    assert db.get_task(runtime)["status"] == "pending"  # only the automation principal is withdrawn
     assert any("case_blocked" in str(a.get("actor")) for a in db.get_turn_revisions(w))
 
 
