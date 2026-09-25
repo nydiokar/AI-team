@@ -8472,8 +8472,16 @@ created: {task.created}
         """
         # [A82 Stage 4b] A managed (protocol-1) turn is cancelled ONLY through
         # the token-fenced ledger path; None ⇒ not managed (legacy below, and no
-        # read at all while no session is enrolled).
-        managed = self._cancel_managed_turn_if_managed(task_id)
+        # read at all while no session is enrolled). This bool contract never
+        # raises: a ledger failure cancels nothing and reports False (callers
+        # such as interrupt_case iterate many ids).
+        from src.control.turn_queue import TurnQueueError
+
+        try:
+            managed = self._cancel_managed_turn_if_managed(task_id)
+        except TurnQueueError as e:
+            logger.warning("event=managed_turn_cancel_failed task_id=%s err=%s", task_id, e)
+            return False
         if managed is not None:
             return managed
         ev = self._task_cancel_events.get(task_id)

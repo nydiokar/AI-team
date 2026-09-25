@@ -49,6 +49,12 @@ def _no_cli_spawn(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _boom)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_allowance(monkeypatch):
+    """The shared legacy+managed allowance is process-global: isolate it so
+    this file's admissions never leak into other suites' capacity."""
+    monkeypatch.setattr(ta, "ALLOWANCE", ta.SharedWaitingAllowance())
+
 def _wait(pred, timeout=5.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:

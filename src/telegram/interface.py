@@ -1219,6 +1219,38 @@ class TelegramInterface:
             "If omitted, `session_id` defaults to the active session."
         )
 
+    def _managed_session_cancel_reply(self, update: Update, args: list[str]) -> Optional[str]:
+        """[A82 Stage 4b] Reply text when a session-scoped /cancel targets an
+        enrolled session (stop = cancel the active managed turn); None for an
+        explicit task id, an unenrolled session, or when nothing is enrolled
+        anywhere (then nothing extra is read)."""
+        from src.control.db import get_db
+
+        db = get_db()
+        if db is None or db.any_session_enrolled() is False:
+            return None
+        stop_managed = getattr(self.orchestrator, "stop_managed_session_turn", None)
+        if not callable(stop_managed):
+            return None
+        if args and not re.fullmatch(r"[0-9a-f]{12}", str(args[0]).strip()):
+            return None  # an explicit task id goes through cancel_task (fenced there)
+        session, error = self._get_accessible_session(
+            update, **({"session_id": str(args[0]).strip()} if args else {"require_active": False}),
+        )
+        if error or session is None:
+            return None
+        try:
+            managed = stop_managed(session)
+        except Exception as e:
+            return f"❌ Cancellation not recorded: {e}"
+        if managed is None:
+            return None
+        cancelled, active_id = managed
+        if cancelled:
+            return (f"🔄 Cancellation requested for session {self._session_tag(session.session_id)} "
+                    f"task `{active_id}`.")
+        return f"No active turn to cancel in session {self._session_tag(session.session_id)}."
+
     def _resolve_task_scope(
         self,
         update: Update,
@@ -1861,6 +1893,14 @@ class TelegramInterface:
         """Compatibility cancellation path for the active session or an explicit task."""
         if not self._check_user_permission(update.effective_user.id):
             await update.message.reply_text("❌ Access denied.")
+            return
+
+        # [A82 Stage 4b] Session-scoped /cancel on an ENROLLED session cancels
+        # the turn owning the ACTIVE slot (ledger truth, never last_task_id).
+        # None ⇒ legacy resolution below, unchanged.
+        managed_reply = self._managed_session_cancel_reply(update, context.args or [])
+        if managed_reply is not None:
+            await update.message.reply_text(managed_reply)
             return
 
         task_id, session, error = self._resolve_task_scope(update, context.args or [])
