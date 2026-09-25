@@ -112,6 +112,9 @@ def test_X01_cancel_interrupts_exactly_the_running_managed_turn(db, tmp_path, re
     assert ctl["status"] == "completed" and "interrupt delivered" in (ctl["result"] or "")
     assert db.get_active_turn("sess-x") is None
     assert "t-x" not in w._managed_claims  # ownership released by the result exit
+    # The control row is not a conversational turn: no session turn event.
+    assert db._conn().execute(
+        "SELECT COUNT(*) FROM task_events WHERE task_id = ?", (ctl["id"],)).fetchone()[0] == 0
 
 
 def test_X02_cancel_before_the_turn_began_is_armed_for_its_echo(db, tmp_path, real_claude):
@@ -301,6 +304,22 @@ def test_K04_compaction_end_to_end_retires_quiescent_process_and_resumes(db, tmp
     assert _sess(db, "sess-k")["backend_session_id"] == "native-2"
     posted = [c[1] for c in http.calls if c[0] == "POST"]
     assert f"/tasks/{kid}/enter-recovery" not in posted
+
+
+def test_K04b_compaction_after_carrier_restart_resumes_the_native_session(pooled_claude):
+    """No pooled process (carrier restarted): the fresh process compaction runs
+    on must RESUME the session's native conversation, not start an empty one."""
+    from src.core.interfaces import Session, SessionStatus
+
+    pooled_claude.script["/compact"] = [_result("", sid="native-9")]
+    s = Session(session_id="sess-r", backend="claude", repo_path="", status=SessionStatus.IDLE,
+                created_at="t", updated_at="t", backend_session_id="native-8")
+    own = tq.ManagedTurnOwnership(task_id="k", session_id="sess-r", node_id=NODE,
+                                  claim_token="tok", incarnation_id="inc", turn_uuid=str(uuid.uuid4()))
+    res = pooled_claude.backend.run_managed_compaction(s, own)
+    assert res.success and res.backend_session_id == "native-9"
+    [fresh] = pooled_claude.booted
+    assert fresh.resume == "native-8" and fresh.fake.queries_sent == ["/compact"]
 
 
 def test_K05_non_quiescent_process_refuses_compaction_without_interrupt(pooled_claude):
