@@ -34,10 +34,34 @@ NOW = datetime(2026, 9, 25, 12, 0, 0).isoformat()
 # --------------------------------------------------------------------------- #
 @pytest.fixture()
 def db(tmp_path, monkeypatch) -> MeshDB:
+    import src.control.db as db_mod
+    import src.control.node_registry as nr_mod
+
     mdb = MeshDB(str(tmp_path / "mesh.db"))
     monkeypatch.setattr(ts, "get_db", lambda: mdb)
+    # The node registry persists through src.control.db.get_db — point it at the
+    # temp DB too, and use a fresh in-memory registry per test.
+    monkeypatch.setattr(db_mod, "get_db", lambda: mdb)
+    monkeypatch.setattr(nr_mod, "_registry", nr_mod.NodeRegistry())
     monkeypatch.setattr(ts, "_worker_token", lambda: TOKEN)
     return mdb
+
+
+class _ManagedCapableBackend:
+    """Placeholder backend instance that declares a managed execution path
+    (execution itself is faked via `_execute_task` in most tests)."""
+
+    def supports_managed_turns(self) -> bool:
+        return True
+
+
+def _register_node(client: TestClient, *, queue_protocols=(0, 1), managed_backends=("claude",)) -> None:
+    r = client.post("/nodes/register", json={
+        "node_id": NODE, "tailscale_ip": "127.0.0.1", "api_port": 0,
+        "capabilities": {"backends": ["claude", "codex"], "queue_protocols": list(queue_protocols),
+                         "managed_backends": list(managed_backends)},
+    }, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert r.status_code == 200, r.text
 
 
 class _ClientHTTP:
@@ -97,7 +121,7 @@ def _worker(tmp_path, http, *, managed: bool = True, incarnation: str = "inc-1",
     w._semaphore = asyncio.Semaphore(2)
     w._codex_control_semaphore = asyncio.Semaphore(1)
     w._heartbeat_now, w._poll_now, w._shutdown = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    w._backends, w._telemetry_sink, w._canary = {}, None, True
+    w._backends, w._telemetry_sink, w._canary = {"claude": _ManagedCapableBackend()}, None, True
     w._model_capabilities = {}
     kw = {} if max_retained is None else {"max_retained_bytes": max_retained}
     w._result_spool = ManagedResultSpool(str(tmp_path / "carrier_state"), **kw)
@@ -106,6 +130,8 @@ def _worker(tmp_path, http, *, managed: bool = True, incarnation: str = "inc-1",
     w._result_delivery_semaphore = asyncio.Semaphore(2)
     w._delivering = set()
     w._managed_claims_blocked = None
+    if managed and isinstance(http, _ClientHTTP):
+        w._register()  # registers queue protocol 1 + managed backends via the real route
     return w
 
 
@@ -132,8 +158,8 @@ class _FakeBackend:
         self.rows: List[Dict[str, Any]] = []
         self.native_id = native_id
 
-    async def __call__(self, task_row, backends, http=None, telemetry_sink=None, node_id=""):
-        self.rows.append(dict(task_row))
+    async def __call__(self, task_row, backends, http=None, telemetry_sink=None, node_id="", ownership=None):
+        self.rows.append({**task_row, "_ownership": ownership})
         return {
             "success": True, "output": f"answer to {task_row['payload']['prompt']}",
             "errors": [], "files_modified": [], "execution_time": 0.01,
@@ -178,7 +204,8 @@ def test_INT01_managed_turn_end_to_end_remote_native_id(db, tmp_path, monkeypatc
 
     # Polled managed, claimed via the managed route with a token, started fenced.
     posted = [c[1] for c in http.calls if c[0] == "POST"]
-    assert posted[:3] == ["/tasks/t-1/claim-managed", "/tasks/t-1/start-managed", "/tasks/t-1/result-managed"]
+    assert posted[0] == "/nodes/register"
+    assert posted[1:4] == ["/tasks/t-1/claim-managed", "/tasks/t-1/start-managed", "/tasks/t-1/result-managed"]
     assert "/tasks/t-1/claim" not in posted and "/tasks/t-1/result" not in posted
     assert any(c[1] == "/tasks/pending-managed" for c in http.calls)
     # Executed the claim response (frozen payload + token), not the poll snapshot.
@@ -186,6 +213,11 @@ def test_INT01_managed_turn_end_to_end_remote_native_id(db, tmp_path, monkeypatc
     ran = backend.rows[0]
     assert ran["payload"]["prompt"] == "frozen prompt"
     assert ran["queue_protocol"] == 1 and ran["claim_token"]
+    own = ran["_ownership"]
+    assert own is not None, "managed row not executed with typed ownership"
+    assert (own.task_id, own.session_id, own.node_id, own.claim_token, own.incarnation_id) == (
+        "t-1", "sess-1", NODE, ran["claim_token"], "inc-1")
+    assert ran["claim_token"] not in repr(own), "claim token leaked into repr"
     # Atomic complete_turn: terminal + result + native id + active identity.
     row = _row(db, "t-1")
     assert row["status"] == "completed"
@@ -377,6 +409,8 @@ def test_INT05_flag_off_legacy_poll_and_claim_only(db, tmp_path, monkeypatch):
     w.cfg.managed_turns = True
     w._register()
     assert reg.calls[-1][2]["capabilities"]["queue_protocols"] == [0, 1]
+    assert reg.calls[-1][2]["capabilities"]["managed_backends"] == ["claude"]
+    assert backend.rows[0]["_ownership"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -384,6 +418,7 @@ def test_INT05_flag_off_legacy_poll_and_claim_only(db, tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 def _claim_start(client: TestClient, task_id: str, node: str = NODE) -> str:
     h = {"Authorization": f"Bearer {TOKEN}"}
+    _register_node(client)
     r = client.post(f"/tasks/{task_id}/claim-managed", json={"node_id": node, "incarnation_id": "i"}, headers=h)
     assert r.status_code == 200, r.text
     tok = r.json()["claim_token"]
@@ -458,6 +493,7 @@ def test_INT09_restarted_incarnation_cannot_start_old_claim(db):
     client = TestClient(ts.app)
     h = {"Authorization": f"Bearer {TOKEN}"}
     _seed_turn(db, "t-9", "sess-9")
+    _register_node(client)
     r = client.post("/tasks/t-9/claim-managed", json={"node_id": NODE, "incarnation_id": "old"}, headers=h)
     tok = r.json()["claim_token"]
     assert r.json()["task"]["backend"] == "claude" and r.json()["task"]["action"] == "resume_session"
@@ -470,3 +506,286 @@ def test_INT09_restarted_incarnation_cannot_start_old_claim(db):
     r = client.post("/tasks/t-9/release-managed", json={"node_id": NODE, "claim_token": tok}, headers=h)
     assert r.status_code == 409
     assert _row(db, "t-9")["status"] == "running"
+
+
+# --------------------------------------------------------------------------- #
+# INT10 — /pending-managed + /claim-managed gate on REGISTERED capability
+# --------------------------------------------------------------------------- #
+def test_INT10_managed_rows_gated_on_registered_capability(db):
+    client = TestClient(ts.app)
+    h = {"Authorization": f"Bearer {TOKEN}"}
+    _seed_turn(db, "t-10", "sess-10")
+    q = {"node_id": NODE, "backends": "claude", "queue_protocols": "1"}
+    # Unregistered node: the query param alone grants nothing.
+    assert client.get("/tasks/pending-managed", params=q, headers=h).json() == []
+    # Registered legacy-only (no protocol 1): still nothing, claim refused.
+    _register_node(client, queue_protocols=(0,), managed_backends=())
+    assert client.get("/tasks/pending-managed", params=q, headers=h).json() == []
+    r = client.post("/tasks/t-10/claim-managed", json={"node_id": NODE}, headers=h)
+    assert r.status_code == 409
+    # Protocol 1 but only codex registered as managed: a claude row is not offered.
+    _register_node(client, managed_backends=("codex",))
+    assert client.get("/tasks/pending-managed", params=q, headers=h).json() == []
+    assert client.post("/tasks/t-10/claim-managed", json={"node_id": NODE}, headers=h).status_code == 409
+    # Registered protocol 1 for claude: offered and claimable.
+    _register_node(client)
+    rows = client.get("/tasks/pending-managed", params={"node_id": NODE}, headers=h).json()
+    assert [r["id"] for r in rows] == ["t-10"]
+    assert client.post("/tasks/t-10/claim-managed", json={"node_id": NODE}, headers=h).status_code == 200
+    assert _row(db, "t-10")["status"] == "claimed"
+
+
+class _UnsupportedBackend:
+    """Stands in for a CodingBackend that keeps the interface default."""
+
+    def supports_managed_turns(self) -> bool:
+        from src.core.interfaces import CodingBackend
+
+        return CodingBackend.supports_managed_turns(self)
+
+
+def test_INT10b_worker_advertises_only_backends_with_a_managed_path(tmp_path):
+    from src.backends.codex_native import CodexBackend
+    from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend
+    from src.core.interfaces import CodingBackend
+
+    # Codex/OpenCode keep the interface default today (verified: no override).
+    for cls in (CodexBackend, OpenCodeBackend, OpenCodeServerBackend):
+        assert cls.supports_managed_turns is CodingBackend.supports_managed_turns
+        assert cls.run_managed_turn is CodingBackend.run_managed_turn
+    reg = _RecordingHTTP()
+    w = _worker(tmp_path, reg)
+    w.cfg.backends = ["claude", "codex"]
+    w._backends = {"claude": _ManagedCapableBackend(), "codex": _UnsupportedBackend()}
+    assert w._managed_backends() == ["claude"]
+    w._backends = {"codex": _UnsupportedBackend()}
+    w._register()
+    assert "queue_protocols" not in reg.calls[-1][2]["capabilities"]
+    assert asyncio.run(w._fetch_pending_managed({"node_id": NODE})) == []
+    assert all(c[1] != "/tasks/pending-managed" for c in reg.calls)
+    # A managed row for an unsupported backend is never claimed by the carrier.
+    asyncio.run(w._handle_task({"id": "t-x", "backend": "codex", "queue_protocol": 1,
+                                "session_id": "s", "action": "resume_session"}))
+    assert not any("claim" in c[1] for c in reg.calls)
+
+
+# --------------------------------------------------------------------------- #
+# INT11-13 — the REAL Claude SDK driver managed path (fake SDK client, no CLI)
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def real_claude(monkeypatch):
+    """A REAL ClaudeCodeBackend on the SDK driver whose pooled session is a
+    real `_SDKSession` driven by a fake claude_agent_sdk client. The pool lookup
+    is pinned to that session so no subprocess can ever be spawned."""
+    pytest.importorskip("claude_agent_sdk")
+    from src.backends.claude_code import ClaudeCodeBackend
+    from src.backends.claude_driver import ClaudeSDKClientDriver
+    import src.core.test_guard as tg
+    from tests.test_turn_queue_sdk_ownership import _FakeClient, _start_fake_session
+
+    fake = _FakeClient()
+    sess = _start_fake_session(fake)
+    proactive: List[Any] = []
+    sess._on_proactive = lambda key, outcome: proactive.append(outcome)
+    calls = {"send": 0, "send_managed": 0}
+    real_send, real_managed = sess.send, sess.send_managed
+
+    def _send(*a, **k):
+        calls["send"] += 1
+        return real_send(*a, **k)
+
+    def _send_managed(*a, **k):
+        calls["send_managed"] += 1
+        return real_managed(*a, **k)
+
+    sess.send, sess.send_managed = _send, _send_managed
+    monkeypatch.setattr(ClaudeSDKClientDriver, "_get_or_create", lambda self, *a, **k: sess)
+    monkeypatch.setattr(tg, "assert_live_calls_allowed", lambda name: None)
+    backend = ClaudeCodeBackend("sdk")
+    assert backend.supports_managed_turns() is True
+    real_rmt = backend.run_managed_turn
+
+    def _rmt(*a, **k):
+        calls["run_managed_turn"] += 1
+        return real_rmt(*a, **k)
+
+    calls["run_managed_turn"] = 0
+    backend.run_managed_turn = _rmt
+    yield SimpleNamespace(backend=backend, fake=fake, sess=sess, calls=calls, proactive=proactive)
+    sess.close()
+
+
+def _seed_session_turn(db: MeshDB, task_id: str, sid: str, prompt: str) -> None:
+    db.upsert_session(Session(
+        session_id=sid, backend="claude", repo_path="", status=SessionStatus.IDLE,
+        created_at=NOW, updated_at=NOW, machine_id=NODE,
+    ))
+    db.enroll_session(sid)
+    db.enqueue_turn(
+        task_id=task_id, session_id=sid, backend="claude", action="resume_session",
+        payload={"task_id": task_id, "prompt": prompt,
+                 "session": {"session_id": sid, "backend": "claude", "repo_path": "",
+                             "backend_session_id": "native-prev"}},
+        turn_source="human", turn_kind="instruction", machine_id=NODE,
+    )
+    db.activate_turn(task_id)
+
+
+def _run_one(w: WorkerAgent, task_id: str) -> None:
+    async def scenario():
+        rows = await w._fetch_pending()
+        await w._handle_task([r for r in rows if r["id"] == task_id][0])
+
+    asyncio.run(scenario())
+
+
+def test_INT11_managed_row_reaches_send_managed_on_real_driver(db, tmp_path, real_claude):
+    from tests.test_turn_queue_sdk_ownership import _assistant, _result
+
+    real_claude.fake.replies["managed prompt"] = [_assistant("hi", sid="native-new"), _result("managed reply", sid="native-new")]
+    w = _worker(tmp_path, _ClientHTTP(TestClient(ts.app)))
+    w._backends = {"claude": real_claude.backend}
+    _seed_session_turn(db, "t-11", "sess-11", "managed prompt")
+    _run_one(w, "t-11")
+
+    assert real_claude.calls == {"send": 0, "send_managed": 1, "run_managed_turn": 1}
+    assert real_claude.fake.queries_sent == ["managed prompt"]
+    row = _row(db, "t-11")
+    assert row["status"] == "completed"
+    assert json.loads(row["result"])["output"] == "managed reply"
+    assert _sess(db, "sess-11")["backend_session_id"] == "native-new"
+    assert real_claude.fake.interrupts == 0
+    assert db.get_active_turn("sess-11") is None
+
+
+def test_INT12_uncorrelated_managed_result_enters_recovery_and_holds(db, tmp_path, real_claude):
+    from tests.test_turn_queue_sdk_ownership import _result
+
+    real_claude.fake.replies["bare prompt"] = [_result("BARE OUTPUT")]
+    http = _ClientHTTP(TestClient(ts.app))
+    w = _worker(tmp_path, http)
+    w._backends = {"claude": real_claude.backend}
+    _seed_session_turn(db, "t-12", "sess-12", "bare prompt")
+    _run_one(w, "t-12")
+    import time as _t
+    _t.sleep(0.2)  # proactive delivery runs on the SDK loop via to_thread
+
+    assert real_claude.calls == {"send": 0, "send_managed": 1, "run_managed_turn": 1}
+    posted = [c[1] for c in http.calls if c[0] == "POST"]
+    assert "/tasks/t-12/enter-recovery" in posted
+    assert "/tasks/t-12/result-managed" not in posted, "uncertain outcome reported as a result"
+    row = _row(db, "t-12")
+    assert row["status"] == "recovery_required"
+    assert "uncorrelated" in (row["blocked_reason"] or "")
+    # Ownership held: DB slot retained, carrier keeps the claim, drain refuses release.
+    assert db.get_active_turn("sess-12")["id"] == "t-12"
+    assert w._managed_claims["t-12"]["status"] == "recovery_required"
+    assert w._managed_shutdown_release_ok({"id": "t-12", "queue_protocol": 1, "status": "recovery_required"}) is False
+    assert w._result_spool.reserved_bytes() == 0 and _spooled(w) == []
+    # Never interrupted; the output reached the proactive sink, not the turn.
+    assert real_claude.fake.interrupts == 0
+    assert [o.output for o in real_claude.proactive] == ["BARE OUTPUT"]
+    # The route is token-fenced: a foreign token cannot move/complete anything.
+    r = TestClient(ts.app).post("/tasks/t-12/enter-recovery", json={"node_id": NODE, "claim_token": "x"},
+                                headers={"Authorization": f"Bearer {TOKEN}"})
+    assert r.status_code == 409
+
+
+def test_INT13_legacy_row_with_flag_on_still_uses_legacy_send(db, tmp_path, real_claude):
+    from tests.test_turn_queue_sdk_ownership import _result
+
+    real_claude.fake.replies["legacy prompt"] = [_result("legacy bare reply")]
+    http = _ClientHTTP(TestClient(ts.app))
+    w = _worker(tmp_path, http)  # WORKER_MANAGED_TURNS=ON
+    w._backends = {"claude": real_claude.backend}
+    db.upsert_session(Session(session_id="sess-13", backend="claude", repo_path="",
+                              status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id=NODE))
+    db.enqueue_task("t-13", "sess-13", NODE, "claude", "resume_session", {
+        "prompt": "legacy prompt",
+        "session": {"session_id": "sess-13", "backend": "claude", "repo_path": "",
+                    "backend_session_id": "native-prev"},
+    })
+    _run_one(w, "t-13")
+
+    assert real_claude.calls == {"send": 1, "send_managed": 0, "run_managed_turn": 0}
+    posted = [c[1] for c in http.calls if c[0] == "POST"]
+    assert "/tasks/t-13/claim" in posted and "/tasks/t-13/result" in posted
+    assert not any("managed" in p or "recovery" in p for p in posted[1:])
+    assert _row(db, "t-13")["status"] == "completed"
+    assert json.loads(_row(db, "t-13")["result"])["output"] == "legacy bare reply"
+
+
+# --------------------------------------------------------------------------- #
+# INT14 — backends without a managed path fail closed before anything runs
+# --------------------------------------------------------------------------- #
+def test_INT14_interface_default_is_fail_closed():
+    from src.control.turn_queue import ManagedTurnOwnership, ManagedUnsupportedError
+    from src.core.interfaces import CodingBackend, ExecutionResult
+
+    ran: List[str] = []
+
+    class _LegacyOnly(CodingBackend):
+        def create_session(self, session, *, telemetry_context=None, telemetry_sink=None):
+            ran.append("create")
+            return ExecutionResult(success=True, output="x")
+
+        def resume_session(self, session, message, *, telemetry_context=None, telemetry_sink=None):
+            ran.append("resume")
+            return ExecutionResult(success=True, output="x")
+
+        def run_oneoff(self, cwd, message, *, telemetry_context=None, telemetry_sink=None):
+            ran.append("oneoff")
+            return ExecutionResult(success=True, output="x")
+
+        def cancel(self, session):
+            pass
+
+        def close(self, session):
+            pass
+
+    b = _LegacyOnly()
+    own = ManagedTurnOwnership(task_id="t", session_id="s", node_id=NODE, claim_token="secret-tok")
+    assert b.supports_managed_turns() is False
+    assert b.is_quiescent(None) is False
+    with pytest.raises(ManagedUnsupportedError):
+        b.run_managed_turn(None, "m", own)
+    assert "secret-tok" not in repr(own)
+    # Carrier dispatch with ownership: typed refusal, NO legacy fallback ran.
+    row = {"id": "t", "backend": "codex", "action": "resume_session", "payload": {
+        "prompt": "p", "session": {"session_id": "s", "backend": "codex", "backend_session_id": "n"}}}
+    out = asyncio.run(agent_mod._execute_task(row, {"codex": b}, ownership=own))
+    assert ran == [] and out["success"] is False
+    assert out["error_class"] == "managed_unsupported"
+    out = asyncio.run(agent_mod._execute_task({**row, "action": "run_oneoff"}, {"codex": b}, ownership=own))
+    assert ran == [] and out["error_class"] == "managed_unsupported"
+    # Legacy dispatch (no ownership) is unchanged.
+    out = asyncio.run(agent_mod._execute_task(row, {"codex": b}))
+    assert ran == ["resume"] and out["success"] is True
+
+
+# --------------------------------------------------------------------------- #
+# INT15 — oversize result: bounded diagnostic + recovery hold, claims stopped
+# --------------------------------------------------------------------------- #
+def test_INT15_oversize_result_is_recovery_hold_with_bounded_diagnostic(db, tmp_path, monkeypatch):
+    class _Huge(_FakeBackend):
+        async def __call__(self, *a, **k):
+            out = await super().__call__(*a, **k)
+            out["output"] = "x" * 4096
+            return out
+
+    monkeypatch.setattr(agent_mod, "_execute_task", _Huge())
+    http = _ClientHTTP(TestClient(ts.app))
+    w = _worker(tmp_path, http)
+    w._result_spool.max_envelope_bytes = 1024  # small cap for the test
+    _seed_turn(db, "t-15", "sess-15")
+    _run_one(w, "t-15")
+
+    posted = [c[1] for c in http.calls if c[0] == "POST"]
+    assert "/tasks/t-15/result-managed" not in posted, "oversize result was reported"
+    row = _row(db, "t-15")
+    assert row["status"] == "recovery_required"
+    assert row["blocked_reason"].startswith("managed_result_oversize") and len(row["blocked_reason"]) <= 500
+    assert row["result"] in (None, ""), "no truncated result may be committed"
+    assert db.get_active_turn("sess-15")["id"] == "t-15"
+    assert w._managed_claims_blocked == "oversize_result:t-15"
+    assert asyncio.run(w._fetch_pending_managed({"node_id": NODE})) == []

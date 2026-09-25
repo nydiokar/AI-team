@@ -37,6 +37,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.control.turn_queue import ManagedTurnOwnership
+
 from src.core.process_utils import (
     WORKER_INCARNATION_ENV,
     WORKER_NODE_ENV,
@@ -621,8 +623,16 @@ async def _execute_task(
     http: Optional["_HTTP"] = None,
     telemetry_sink: Any = None,
     node_id: str = "",
+    ownership: Any = None,
 ) -> Dict[str, Any]:
-    """Execute one task row from mesh_tasks. Returns an ExecutionResultPayload-compatible dict."""
+    """Execute one task row from mesh_tasks. Returns an ExecutionResultPayload-compatible dict.
+
+    [A82 Stage 3] ``ownership`` (a ``turn_queue.ManagedTurnOwnership``) marks a
+    claimed protocol-1 row: its session turn goes ONLY through the backend
+    interface ``CodingBackend.run_managed_turn`` — no backend-specific branching
+    and no legacy fallback (an unsupported backend raises a typed refusal before
+    anything runs). ``ownership=None`` is the unchanged legacy path."""
+    managed = ownership is not None
     payload = task_row.get("payload") or {}
     if isinstance(payload, str):
         try:
@@ -631,6 +641,17 @@ async def _execute_task(
             payload = {}
 
     action = task_row.get("action", "run_oneoff")
+    if managed and action not in ("create_session", "resume_session"):
+        return {
+            "success": False,
+            "output": "",
+            "errors": [f"managed turn refused: action {action!r} has no managed execution path"],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 1,
+            "error_class": "managed_unsupported",
+        }
 
     # Fetch any file staged on the controller before backend execution
     staged = (payload.get("metadata") or {}).get("staged_file")
@@ -803,7 +824,17 @@ async def _execute_task(
             session = _make_session_from_payload(payload)
             if session is None:
                 raise ValueError("Session payload missing for session action")
-            if action == "create_session" or not session.backend_session_id:
+            if managed:
+                raw = await asyncio.to_thread(
+                    call_backend,
+                    backend.run_managed_turn,
+                    session,
+                    prompt or session.last_user_message or "",
+                    ownership,
+                    telemetry_context=context,
+                    telemetry_sink=sink,
+                )
+            elif action == "create_session" or not session.backend_session_id:
                 raw = await asyncio.to_thread(
                     call_backend,
                     backend.create_session,
@@ -952,6 +983,7 @@ async def _execute_task(
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "return_code": 1,
             "telemetry_invocation_id": context.invocation_id if context else "",
+            **({"error_class": getattr(e, "code", "") or error_class} if managed else {}),
         }
 
 
@@ -1242,7 +1274,7 @@ class WorkerAgent:
             return False
         proto = task_row.get("queue_protocol", 0)
         status = str(task_row.get("status", "")).lower()
-        if int(proto or 0) == 1 and status == "running":
+        if int(proto or 0) == 1 and status in ("running", "recovery_required"):
             return False
         return True
 
@@ -1250,6 +1282,23 @@ class WorkerAgent:
         """[A82 Stage 3] Managed carrier flag (``WORKER_MANAGED_TURNS``, default
         OFF). OFF ⇒ legacy protocol-0 poll/claim only, byte-identical."""
         return bool(getattr(getattr(self, "cfg", None), "managed_turns", False))
+
+    def _managed_backends(self) -> List[str]:
+        """[A82 Stage 3 rework] Backends on this worker with a REAL managed
+        execution path (``supports_managed_turns()``; today Claude on the SDK
+        driver only). Codex/opencode have none, so they are never advertised and
+        their managed rows are never polled/claimed here (fail closed)."""
+        if not self._managed_enabled():
+            return []
+        out: List[str] = []
+        for name in self.cfg.backends:
+            probe = getattr((self._backends or {}).get(name), "supports_managed_turns", None)
+            try:
+                if callable(probe) and probe():
+                    out.append(name)
+            except Exception:
+                logger.warning("event=managed_capability_probe_failed backend=%s", name, exc_info=True)
+        return out
 
     async def _claim_and_start_managed(
         self, task_id: str
@@ -1264,8 +1313,6 @@ class WorkerAgent:
         3. Conditional start via ``/start-managed`` (token + incarnation fenced).
         Returns ``(task_row, claim_token)`` when authorized to execute, else None.
         """
-        from src.worker.managed_result_spool import MAX_ENVELOPE_BYTES
-
         try:
             claim_response = await asyncio.to_thread(
                 self._http.post,
@@ -1292,7 +1339,7 @@ class WorkerAgent:
             logger.warning("managed_claim_malformed_response task_id=%s", task_id)
             return None
         self._managed_claims[task_id] = {"claim_token": claim_token, "status": "claimed"}
-        if self._reserve_result_envelope(task_id, claim_token, MAX_ENVELOPE_BYTES) is None:
+        if self._reserve_result_envelope(task_id, claim_token, self._result_spool.max_envelope_bytes) is None:
             logger.warning(
                 "event=managed_result_budget_exhausted task_id=%s — releasing the "
                 "unstarted claim; turn stays pending", task_id,
@@ -1318,6 +1365,32 @@ class WorkerAgent:
             return None
         self._managed_claims[task_id]["status"] = "running"
         return task_row, claim_token
+
+    async def _enter_managed_recovery(self, task_id: str, claim_token: str, reason: str) -> bool:
+        """[A82 Stage 3 rework] Move a STARTED managed turn to
+        ``recovery_required`` via ``/enter-recovery`` (token-fenced; Stage-2
+        ``enter_recovery``). Ownership stays held here (drain guard refuses a
+        recovery hold) and on the server until operator/quiescence resolution.
+        The unused result-envelope reservation is returned (no result exists).
+        A failed POST leaves the row ``running`` — still held, never released."""
+        self._result_spool.release_reservation(task_id, claim_token)
+        claim = self._managed_claims.setdefault(task_id, {"claim_token": claim_token})
+        claim["status"] = "recovery_required"
+        try:
+            await asyncio.to_thread(
+                self._http.post,
+                f"/tasks/{task_id}/enter-recovery",
+                {"node_id": self.cfg.node_id, "claim_token": claim_token,
+                 "incarnation_id": self._incarnation_id, "reason": (reason or "")[:500]},
+            )
+        except Exception as e:
+            logger.error(
+                "event=managed_enter_recovery_failed task_id=%s err=%s — row stays "
+                "running (ownership held)", task_id, e,
+            )
+            return False
+        logger.warning("event=managed_turn_recovery_required task_id=%s", task_id)
+        return True
 
     async def _release_managed_claim(self, task_id: str, claim_token: str) -> bool:
         """Release a claimed-NOT-started managed turn (current token only) and
@@ -1393,12 +1466,26 @@ class WorkerAgent:
                 "event=managed_result_oversize task_id=%s — holding recovery "
                 "obligation, NOT claiming success; new managed claims stopped", task_id,
             )
+            # [A82 Stage 3 rework] Bounded server-side diagnostic: the attempt
+            # moves to recovery_required with a short reason (<=500 chars) —
+            # never a truncated "success". Slot stays held.
+            self._pending_result_delivery.discard(task_id)
+            await self._enter_managed_recovery(
+                task_id, claim_token,
+                f"managed_result_oversize: serialized envelope exceeds "
+                f"{self._result_spool.max_envelope_bytes} bytes; output_chars="
+                f"{len(str(result.get('output') or ''))}",
+            )
             raise
-        except ResultSpoolError:
+        except ResultSpoolError as e:
             self._managed_claims_blocked = f"spool_write_failed:{task_id}"
             logger.error(
                 "event=managed_result_spool_write_failed task_id=%s — visible "
                 "recovery obligation, no ack; new managed claims stopped", task_id,
+            )
+            self._pending_result_delivery.discard(task_id)
+            await self._enter_managed_recovery(
+                task_id, claim_token, f"managed_result_spool_write_failed: {e}"[:500],
             )
             raise
         self._delivering.add(task_id)
@@ -1597,6 +1684,8 @@ class WorkerAgent:
     # ------------------------------------------------------------------
 
     def _register(self) -> None:
+        # [A82 Stage 3] Advertise protocol 1 only for backends with a managed path.
+        managed_backends = self._managed_backends()
         self._http.post("/nodes/register", {
             "node_id": self.cfg.node_id,
             "tailscale_ip": self.cfg.tailscale_ip,
@@ -1613,7 +1702,10 @@ class WorkerAgent:
                 "models": self._model_capabilities,
                 # [A82 Stage 3] Advertise managed protocol 1 only when enabled;
                 # flag OFF sends the byte-identical legacy capability set.
-                **({"queue_protocols": [0, 1]} if self._managed_enabled() else {}),
+                **(
+                    {"queue_protocols": [0, 1], "managed_backends": managed_backends}
+                    if managed_backends else {}
+                ),
             },
         }, timeout=_REGISTRATION_TIMEOUT_SECONDS)
         logger.info("event=registered node_id=%s controller=%s projects_root=%s",
@@ -2092,11 +2184,14 @@ class WorkerAgent:
                 self._managed_claims_blocked,
             )
             return []
+        managed_backends = self._managed_backends()
+        if not managed_backends:
+            return []
         try:
             rows = await asyncio.to_thread(
                 self._http.get,
                 "/tasks/pending-managed",
-                {**params, "queue_protocols": "1"},
+                {**params, "backends": ",".join(managed_backends)},
             )
         except Exception as exc:
             logger.warning("event=fetch_pending_managed_failed err=%s", exc)
@@ -2133,6 +2228,14 @@ class WorkerAgent:
                 # byte-identical /claim path and execute the poll row.
                 managed = self._managed_enabled() and int(task_row.get("queue_protocol", 0) or 0) == 1
                 claim_token: Optional[str] = None
+                if managed and task_row.get("backend", "") not in self._managed_backends():
+                    # Fail closed: never claim a managed row for a backend without
+                    # a managed execution path (no legacy fallback).
+                    logger.warning(
+                        "event=managed_row_backend_unsupported task_id=%s backend=%s",
+                        task_id, task_row.get("backend", ""),
+                    )
+                    return
                 if managed:
                     claim_response = await self._claim_and_start_managed(task_id)
                     if claim_response is None:
@@ -2174,7 +2277,24 @@ class WorkerAgent:
                     self._http,
                     telemetry_sink=self._telemetry_sink,
                     node_id=self.cfg.node_id,
+                    **({"ownership": ManagedTurnOwnership(
+                        task_id=task_id,
+                        session_id=str(task_row.get("session_id") or session_id or ""),
+                        node_id=self.cfg.node_id,
+                        claim_token=claim_token,
+                        incarnation_id=self._incarnation_id,
+                    )} if managed and claim_token else {}),
                 )
+
+                # [A82 Stage 3 rework] Uncertain managed outcome (uncorrelated
+                # result / deadline): move the started turn to recovery_required
+                # through the token-fenced carrier route and KEEP ownership — no
+                # result is reported, nothing is auto-released.
+                if managed and claim_token and result.get("error_class") == "recovery_required":
+                    await self._enter_managed_recovery(
+                        task_id, claim_token, "; ".join(result.get("errors") or [])
+                    )
+                    return
 
                 # Post result. [A82 Stage 3] A managed (protocol-1) turn spools its
                 # result BEFORE the POST to /result-managed and keeps ownership

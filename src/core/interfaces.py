@@ -328,6 +328,36 @@ class CodingBackend(ABC):
         """
         return self.resume_session(session, "/compact")
 
+    # ------------------------------------------------------------------ #
+    # [A82 Stage 3] Managed (protocol-1) turn contract — the ONE seam a carrier
+    # uses for a claimed managed row. Default: unsupported (fail closed). A
+    # backend opts in by overriding all three; it is then advertised for queue
+    # protocol 1. Legacy create/resume/run_oneoff are untouched.
+    # ------------------------------------------------------------------ #
+    def supports_managed_turns(self) -> bool:
+        """True iff this backend implements :meth:`run_managed_turn`."""
+        return False
+
+    def run_managed_turn(
+        self, session: "Session", message: str, ownership: Any, *,
+        telemetry_context: Any = None, telemetry_sink: Any = None
+    ) -> ExecutionResult:
+        """Execute one managed turn for ``ownership`` (a
+        ``turn_queue.ManagedTurnOwnership``). Must NEVER interrupt an in-flight
+        turn on conflict (typed ``OwnershipConflictError`` instead) and must
+        raise/report a typed ``RecoveryRequiredError`` when the outcome cannot
+        be attributed (uncorrelated result / deadline). Default: unsupported."""
+        from src.control.turn_queue import ManagedUnsupportedError
+
+        raise ManagedUnsupportedError(
+            "backend has no managed execution path", backend=type(self).__name__,
+        )
+
+    def is_quiescent(self, session: "Session") -> bool:
+        """True iff no native work for ``session`` is in flight. Default False
+        (unknown ⇒ not quiescent, fail closed)."""
+        return False
+
 
 class ITaskOrchestrator(ABC):
     """Main orchestrator interface"""

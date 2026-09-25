@@ -358,6 +358,52 @@ class ClaudeCodeBackend(CodingBackend):
         self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
         return result
 
+    # ------------------------------------------------------------------ #
+    # [A82 Stage 3] Managed (protocol-1) turn contract (CodingBackend).
+    # ------------------------------------------------------------------ #
+    def supports_managed_turns(self) -> bool:
+        """Managed execution exists only on the continuous SDK driver (its
+        no-interrupt, loop-reserved send). The print/resume driver has none."""
+        return self._driver.driver_type() == "sdk"
+
+    def run_managed_turn(self, session: Session, message: str, ownership, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        from src.control.turn_queue import ManagedUnsupportedError, OwnershipConflictError
+
+        if not self.supports_managed_turns():
+            raise ManagedUnsupportedError(
+                "active Claude driver has no managed execution path",
+                driver=self._driver.driver_type(),
+            )
+        if (ownership.session_id or "") != (session.session_id or ""):
+            raise OwnershipConflictError(
+                "managed ownership does not match the session", task_id=ownership.task_id,
+            )
+        self._log_driver_turn("managed_turn", session.session_id or "")
+        from src.core.test_guard import assert_live_calls_allowed
+        assert_live_calls_allowed("claude")
+        proc_env = self._build_proc_env(session.session_id, telemetry_context)
+        before_snapshot = _snapshot_worktree(session.repo_path) if session.repo_path else {}
+
+        result = self._driver.run_managed_turn(
+            session,
+            message,
+            model=_resolve_model(session),
+            telemetry_context=telemetry_context,
+            proc_env=proc_env,
+        )
+        self._observe_driver_state(session, result)
+        result = self._observe_cache_health(session, result)
+        if session.repo_path:
+            after_snapshot = _snapshot_worktree(session.repo_path)
+            result.file_changes = _compute_turn_changes(session.repo_path, before_snapshot, after_snapshot)
+            result.files_modified = [item["path"] for item in result.file_changes]
+        self._maybe_emit_telemetry(result, telemetry_context, telemetry_sink)
+        return result
+
+    def is_quiescent(self, session: Session) -> bool:
+        probe = getattr(self._driver, "is_session_quiescent", None)
+        return bool(callable(probe) and probe(session.session_id))
+
     def run_oneoff(self, cwd: str, message: str, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
         proc_env = self._build_proc_env(None, telemetry_context)
         before_snapshot = _snapshot_worktree(cwd) if cwd else {}

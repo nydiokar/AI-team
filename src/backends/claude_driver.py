@@ -1665,7 +1665,22 @@ class ClaudeSDKClientDriver(ClaudeDriver):
     def send_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
         return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
 
-    def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None) -> ExecutionResult:
+    def run_managed_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
+        """[A82 Stage 3] Driver half of ``CodingBackend.run_managed_turn``: the
+        same turn pipeline, but submitted through the private no-interrupt,
+        loop-reserved ``_SDKSession.send_managed``."""
+        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context, _managed=True)
+
+    def is_session_quiescent(self, session_id: str) -> bool:
+        """Quiescence of the pooled SDK session. No live pooled process ⇒ no
+        native work in flight on this carrier ⇒ quiescent."""
+        with self._lock:
+            sdk_sess = self._sessions.get(session_id)
+        if sdk_sess is None or sdk_sess._closed:
+            return True
+        return sdk_sess.is_quiescent()
+
+    def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, _managed: bool = False) -> ExecutionResult:
         start = time.time()
         try:
             sdk_sess = self._get_or_create(session, model, effort, proc_env)
@@ -1676,7 +1691,12 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             sess_id = getattr(telemetry_context, "session_id", None) or (session.session_id if session else None)
             t_id = getattr(telemetry_context, "turn_id", None)
             progress_cb = _make_activity_cb(sess_id, t_id)
-            outcome = sdk_sess.send(message, progress_cb=progress_cb)
+            # [A82 Stage 3 rework] Managed (protocol-1) rows take the
+            # no-interrupt, loop-reserved send; legacy rows keep `send`.
+            if _managed:
+                outcome = sdk_sess.send_managed(message, progress_cb=progress_cb)
+            else:
+                outcome = sdk_sess.send(message, progress_cb=progress_cb)
             elapsed = time.time() - start
             session.driver_status = "live"
 
@@ -1762,6 +1782,24 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                     raw_stdout=e.raw_ndjson,
                     raw_stderr=f"error_class=sdk_stream_closed\nreason={e.reason}",
                 )
+            if _managed:
+                from src.control.turn_queue import RecoveryRequiredError, TurnQueueError
+
+                if isinstance(e, TurnQueueError):
+                    # Typed managed outcome: RecoveryRequiredError = backend
+                    # outcome uncertain (hold the session); any other typed
+                    # conflict was raised BEFORE the query was submitted.
+                    return ExecutionResult(
+                        success=False,
+                        output="",
+                        errors=[err_str],
+                        error_class=(
+                            "recovery_required"
+                            if isinstance(e, RecoveryRequiredError)
+                            else "managed_conflict"
+                        ),
+                        execution_time=elapsed,
+                    )
             return ExecutionResult(
                 success=False,
                 output="",

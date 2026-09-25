@@ -120,6 +120,15 @@ class RecoveryRequiredError(OwnershipConflictError):
     code = "recovery_required"
 
 
+class ManagedUnsupportedError(TurnQueueError):
+    """422 — a managed (protocol-1) turn reached a backend method that has no
+    managed execution path. Raised BEFORE anything runs; never silently falls
+    back to the legacy send (fail-closed)."""
+
+    status_code = 422
+    code = "managed_unsupported"
+
+
 class ByteCapError(TurnQueueError):
     """413 — byte cap exceeded (design §8)."""
 
@@ -192,6 +201,21 @@ class ClaimToken(str):
         self.status = status
         self.payload = payload or {}
         return self
+
+
+class ManagedTurnOwnership(BaseModel):
+    """[A82 Stage 3 rework] The typed ownership a carrier passes to
+    ``CodingBackend.run_managed_turn``: the claimed protocol-1 attempt the
+    backend call executes on behalf of. The claim token is an execution
+    credential — excluded from repr so it never lands in logs/tracebacks."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    task_id: str
+    session_id: str
+    node_id: str
+    claim_token: str = Field(repr=False)
+    incarnation_id: Optional[str] = None
 
 
 class StartAuthorization(BaseModel):
