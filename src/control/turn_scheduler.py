@@ -66,6 +66,7 @@ class SchedulerPassResult(BaseModel):
     slot_waiting: int = 0
     lineage_recovered: int = 0
     carrier_requeued: int = 0
+    pending: int = 0
 
 
 PrepareFn = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[PreparedTurn]]
@@ -185,6 +186,7 @@ async def run_scheduler_pass(
     totals: Dict[str, int] = await asyncio.to_thread(db.managed_waiting_totals)
     shared.refresh_managed(totals["count"], generation)
     result.waiting = int(totals["queued"])
+    result.pending = int(totals["count"]) - int(totals["queued"])
     if result.waiting:
         result.slot_waiting = int(await asyncio.to_thread(db.count_slot_waiting_sessions))
         wake = await asyncio.to_thread(db.next_turn_wake_at)
@@ -210,7 +212,10 @@ def _next_timeout(
     if res.activated >= limit:
         return 0
     if not res.waiting:
-        return None
+        # Activated-but-unclaimed rows exist: keep the bounded safety-net wake so
+        # a carrier that dies with the fleet otherwise idle is still detected
+        # and its rows requeued (no wedge). Nothing pending ⇒ sleep until a hint.
+        return safety_net_sec if res.pending else None
     candidates = [safety_net_sec]
     if res.next_wake_sec is not None:
         candidates.append(res.next_wake_sec)

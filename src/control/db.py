@@ -2748,6 +2748,16 @@ class MeshDB:
         except Exception as e:
             raise _turn_backing_error("finalize_turn_lineage", task_id=task_id, err=e)
 
+    def turn_lineage_owner(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """[A82 Stage 4a rework 3] (status, lineage_state, lineage_token) for the
+        lease fence of the managed-lineage procedure."""
+        row = self._conn().execute(
+            "SELECT status, lineage_state, lineage_token FROM mesh_tasks "
+            "WHERE id = ? AND queue_protocol = 1",
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def turn_lineage_state(self, task_id: str) -> Optional[str]:
         row = self._conn().execute(
             "SELECT lineage_state FROM mesh_tasks WHERE id = ? AND queue_protocol = 1",
@@ -3209,10 +3219,16 @@ class MeshDB:
                         expected=expected_revision, current=row["revision"],
                     )
                 new_rev = int(row["revision"]) + 1
+                # [A82 Stage 4a rework 3] A withdrawal resolves a pending
+                # lineage (`void`): the in-flight writer's fence/finalize then
+                # reports withdrawn, and replays see the withdrawn status.
                 conn.execute(
                     """
                     UPDATE mesh_tasks
-                    SET status = 'withdrawn', revision = ?, completed_at = ?, updated_at = ?
+                    SET status = 'withdrawn', revision = ?, completed_at = ?, updated_at = ?,
+                        lineage_state = CASE WHEN lineage_state = 'pending'
+                                             THEN 'void' ELSE lineage_state END,
+                        lineage_token = NULL, lineage_lease_until = NULL
                     WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
                     """,
                     (new_rev, now, now, task_id),
@@ -3310,6 +3326,18 @@ class MeshDB:
         recovery machinery's, untouched. Bounded (LIMIT)."""
         cutoff = _carrier_fresh_cutoff()
         moved: List[str] = []
+        # Read first (no write lock): the common case — nothing to requeue — never
+        # takes BEGIN IMMEDIATE on every scheduler pass.
+        if self._conn().execute(
+            """
+            SELECT 1 FROM mesh_tasks t LEFT JOIN nodes n ON n.node_id = t.machine_id
+            WHERE t.queue_protocol = 1 AND t.status = 'pending'
+              AND (n.node_id IS NULL OR n.status != 'online' OR n.last_heartbeat < ?)
+            LIMIT 1
+            """,
+            (cutoff,),
+        ).fetchone() is None:
+            return moved
         try:
             with self._managed_write("requeue_turns_on_dead_carriers") as conn:
                 rows = conn.execute(
@@ -4256,6 +4284,78 @@ class MeshDB:
                 vals,
             )
         return flow_run_id
+
+    def get_or_create_task_flow_run(
+        self,
+        task_id: str,
+        current_stage: str,
+        objective_lock: Optional[str] = None,
+        **fields: Optional[str],
+    ) -> str:
+        """[A82 Stage 4a rework 3] Convergent flow_run birth keyed on the task:
+        return the flow_run already created FOR ``task_id``, else create it — in
+        ONE write transaction, so two concurrent/stalled managed-lineage writers
+        converge on the SAME Case and never birth a second one. Raises on DB
+        error (the managed lineage path must not swallow)."""
+        unknown = set(fields) - set(self._FLOW_EXTRA_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown flow_run field(s): {sorted(unknown)}")
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT flow_run_id FROM flow_runs WHERE task_id = ? "
+                "ORDER BY created_at ASC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if row is not None:
+                return str(row[0])
+            flow_run_id = uuid.uuid4().hex
+            cols = ["flow_run_id", "task_id", "current_stage", "objective_lock", "created_at"]
+            vals: List[Any] = [flow_run_id, task_id, current_stage, objective_lock, _now()]
+            for name in self._FLOW_EXTRA_FIELDS:
+                if name in fields:
+                    cols.append(name)
+                    vals.append(fields[name])
+            conn.execute(
+                f"INSERT INTO flow_runs ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+                vals,
+            )
+            return flow_run_id
+
+    def append_flow_event_once(
+        self,
+        flow_run_id: str,
+        event_type: str,
+        actor: str,
+        from_state: Optional[str] = None,
+        to_state: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Optional[int]:
+        """[A82 Stage 4a rework 3] Idempotent append for the managed lineage:
+        the event keyed by (flow_run_id, event_type, entity_type, entity_id) is
+        written at most once (existence check + insert in one transaction).
+        Returns the existing or new id. Raises on DB error."""
+        payload_json = json.dumps(payload) if payload is not None else None
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT id FROM flow_events WHERE flow_run_id = ? AND event_type = ? "
+                "AND entity_type IS ? AND entity_id IS ? LIMIT 1",
+                (flow_run_id, event_type, entity_type, entity_id),
+            ).fetchone()
+            if row is not None:
+                return int(row[0])
+            cur = conn.execute(
+                """
+                INSERT INTO flow_events (
+                    flow_run_id, event_type, actor, from_state, to_state,
+                    entity_type, entity_id, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (flow_run_id, event_type, actor, from_state, to_state,
+                 entity_type, entity_id, payload_json, _now()),
+            )
+            return int(cur.lastrowid)
 
     def update_flow_stage(self, flow_run_id: str, current_stage: str) -> None:
         """Update the current_stage of an existing flow_runs row (A19 path).

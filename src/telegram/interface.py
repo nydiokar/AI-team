@@ -53,6 +53,8 @@ logger = logging.getLogger(__name__)
 
 def _turn_queued_text(admission: TurnAdmission) -> str:
     """[A82 Stage 4a] Reply for a durably queued managed turn (not 'Working')."""
+    if admission.status == "withdrawn":
+        return f"↩️ Withdrawn before it ran `{admission}`"
     seq = f" #{admission.queue_sequence}" if admission.queue_sequence else ""
     return f"📥 Queued{seq} `{admission}`"
 
