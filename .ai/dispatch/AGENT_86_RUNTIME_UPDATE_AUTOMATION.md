@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_86_RUNTIME_UPDATE_AUTOMATION
 created_at: "2026-09-24T18:00:20+00:00"
-status: blocked
+status: dead
 owner: ""
 depends_on: [AGENT_85_WORKER_CONTAINER_ACCEPTANCE]
 results_ref: DISPATCH_LOG.md#A86
 evidence: []
-updated_at: "2026-09-24T18:00:20+00:00"
+updated_at: "2026-09-25T10:40:36.283600+00:00"
 ```
 
 # DISPATCH — A86 · Approved, reversible worker runtime update automation
@@ -58,6 +58,21 @@ No host-global runtime installation, in-place package update/downgrade, auto-mer
 - [ ] A82/A84 managed-turn continuity and full service-boundary review pass
 - [ ] A87 accepts behavioral evidence; activation remains operator-gated
 
-## Closure (fill on completion)
+## Closure — DROPPED / DESCOPED 2026-09-25 (operator decision, Case 58c2f812)
 
-List image identities, tests, any external publication/deployment gate, and confirmation that no running worker was changed by a merge.
+**Status: dead (descoped, not built).** The operator decided workers will be taken **OUT of the
+container**. This job's entire design — Renovate discovery of pinned Codex/Claude-SDK versions →
+labeled `runtime-update` PRs → in-image CI → **merge produces an immutable available worker IMAGE**
+→ per-node approval → maintenance/drain/verify/**rollback to the prior immutable digest** — is built
+end-to-end on the containerized-worker deployment unit (the "immutable image" is the release/rollback
+identity). With no container, the plan is no longer legible: there is no image to build, publish,
+approve, or roll back to. Nothing was implemented (job was `blocked`, zero code, only A85 upstream).
+
+**Reversibility:** if a future direction re-containerizes workers, re-open from this packet — the
+design is intact and still valid for a container target; it simply has no substrate today.
+
+**Successor need (surfaced, not built):** a non-container worker runtime STILL needs *some* approved,
+reversible way to update Codex/Claude-SDK versions on a host-process worker (pin discovery + approval +
+rollback), but that is a DIFFERENT mechanism (host package/venv management, not image digests) and a
+DIFFERENT job to be authored once the operator's non-container worker plan exists. Do not silently
+morph A86 into it.

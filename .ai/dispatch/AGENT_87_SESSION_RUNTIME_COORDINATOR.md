@@ -64,7 +64,28 @@ Coordinator: Manager session `a2a819ff55c0`. Built from repository + running-env
 ### Cross-job reconciliation gates (A87 owns these)
 - **A83.`waiting_workers` ↔ A84 outbox cutover:** A83 derives `waiting_workers` from the legacy wait-group substrate. When A84 moves new Cases to the outbox, A83 must report the correct *durable source per Case* without the UI label ever becoming control authority. → reviewed jointly at A84 cutover.
 - **A84 gated on A82:** do not start A84 until A82's queue ownership/admission contract is built AND independently reviewed (my gate). Correct sequencing, not idleness.
-- **A86 gated on A85:** A86 stays `blocked` until A85 produces *executable* acceptance evidence and I review it.
+- **A86 gated on A85:** A86 stays `blocked` until A85 produces *executable* acceptance evidence and I review it. — **SUPERSEDED 2026-09-25 (see scope change below).**
+
+### SCOPE CHANGE 2026-09-25 — container track retired (operator decision, Case 58c2f812)
+Operator decided **workers move OUT of the container**, and to drop the "SDK-upgrades-via-PR" job (A86).
+Coordinator ruling (cross-job contradiction the operator did not name explicitly): the container-exit
+retires the premise of **BOTH** container-track jobs, not just A86 —
+- **A86 → dead (dropped).** Its entire design keys on an immutable worker *image* as the release/rollback
+  identity (Renovate→PR→image→approval→drain→rollback-to-digest). No container ⇒ no image ⇒ not legible.
+  Zero code was written. Reversible from the packet if workers are ever re-containerized.
+- **A85 → deferred (premise retired).** Its only downstream consumer was A86; a container-acceptance
+  baseline has no purpose if workers aren't containerized. Built code preserved on
+  `feat/worker-container-acceptance` @ `1cd15b3` (unmerged, no docker ever run). Resume-or-drop pending
+  the operator's non-container worker plan.
+- **Session-runtime track (A82/A83/A84) is UNAFFECTED** — turn ordering / session-reason / completion
+  delivery are session+DB concerns independent of worker packaging. A82's carrier abstraction works for a
+  host-process worker exactly as for a container. Continue driving them.
+- **Surfaced successor need (not built, no job yet):** a non-container worker still needs *some* approved,
+  reversible runtime-version update path (host venv/package pin + approval + rollback) — a DIFFERENT
+  mechanism from image digests. To be authored once the operator's non-container worker plan exists; do
+  not silently morph A86 into it.
+
+### Cross-job reconciliation gates (A87 owns these)
 
 ### Execution environment facts (binding on every dispatched worker — packets predate the Docker migration)
 - **Python:** `/opt/venv/bin/python` (NOT `.venv/bin/python`, which no longer has a working interpreter). Editable install ⇒ `import src` resolves to THIS checkout — verify `src.__file__` before trusting any test.
