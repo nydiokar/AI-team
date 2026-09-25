@@ -991,6 +991,79 @@ legacy-helper/process users 255. Still red (later stages, unchanged): api 2, pre
 - **MINOR-3** (the `_turn_owner` clear in `forget_managed_turn` is redundant, because the owner is also cleared on the next dispatch) is left untested by design.
 - **Verification:** turn-queue (10 files) 137 passed; driver 121; carrier/legacy 122; session/case/control 96; interface 139; legacy-helper/process users 255. Still red (Stages 4/6/7, unchanged): api 2, pressure 3, producers 7.
 
+### Stage 4a — admission service, fair scheduler, producer 1 (2026-09-25, commits `1a58247`..`163cd6b` + this record)
+
+**Built.**
+- **Admission (DB, one bounded txn)** — `MeshDB.enqueue_turn` (db.py:2413). It runs under `_managed_write` (db.py:1445): one 5 s monotonic deadline covers the in-process lock and the SQLite lock (busy_timeout = remaining time, a single BEGIN, no legacy 4×15 s retry). Exhaustion ⇒ typed 503, and busy_timeout is restored afterwards. Steps in order:
+  1. Idempotency by (scope, key). A missing hash is derived with `_canonical_admission_hash`, so the same key with a different body ⇒ 409.
+  2. Active coalesce, for internal producers only. A human turn with a coalesce key ⇒ 422.
+  3. With `require_enrolled`: the session must exist (404), carry the durable `turn_queue_enrolled` marker (409), and not be closed (409).
+  4. Capacity counted inside the txn: fleet managed queued+pending + `external_waiting` (legacy occupancy) against `max_queue_size`; per-session queued+pending < 20; stored intent ≤ 2 MiB/row (413) and ≤ 100 MiB fleet (429). Bytes are persisted in the new `intent_bytes` column (migration 35, db.py:7639).
+  5. Sequence + insert. The `TurnAdmission` acknowledgement (a str subclass equal to the id, turn_queue.py) is constructed only after COMMIT.
+
+  `revise_turn` re-accounts `intent_bytes` and holds both caps. Open-subset aggregates are pinned `INDEXED BY idx_mesh_turns_session_open`.
+- **Service** — `turn_admission.admit_turn` (turn_admission.py:148):
+  - a process-wide `threading.BoundedSemaphore(4)`, taken and released inside the worker thread; excess ⇒ immediate 429 with `retry_after`.
+  - `SharedWaitingAllowance` (:41): one legacy+managed allowance. A managed admission reserves a slot (visible to legacy puts) and passes the legacy depth into the txn. `SessionTaskQueue.full/put_nowait` counts managed rows plus reservations under the same arithmetic-only lock. Unshared ⇒ plain `asyncio.Queue`.
+- **Pre-parse gate** — `/api/instructions` gets a streamed 2 MiB cap and a 5 s body-read deadline (`_preparse_byte_guard`, control_api.py:193; `BodyCapMiddleware(read_deadline_sec)`). This turns LOAD02 green.
+- **Fair scheduler** — `turn_scheduler.py`.
+  - `select_eligible_turn_heads` (db.py:2712) applies every filter BEFORE `LIMIT 25`: head (no earlier open row), no slot holder, `not_before`, enrolled/not paused/not closed. It is ordered by `created_at, id` and returns summaries only.
+  - Preparation (`_prepare_managed_turn`, orchestrator.py:9671) runs outside any txn. It rebuilds the task from the current revision's intent, injects restart/compact context once, and builds the carrier payload with the same `_mesh_dispatch_payload` (extracted pure helper, :9745) as the legacy shadow-write.
+  - `activate_prepared_turn` (db.py:2756) rechecks revision, `config_revision`, head/slot and session state, then freezes payload + `machine_id` and sets `pending`. A stale revision ⇒ one re-prepare. Oversize or a prepare failure ⇒ row stays queued with a bounded `blocked_reason`.
+  - Expired non-human intent is withdrawn; humans never expire.
+  - `TurnScheduler` (:163) is one loop. `notify_turn_queue_changed()` is a coalesced, thread-safe hint fired on admission, `/claim-managed`, `/result-managed`, `/quiescence` and operator resolve-recovery. The 3 s fallback runs only while queued rows exist; otherwise it sleeps until a hint. After activation nothing is held per row. Started and stopped by the orchestrator (`_start_turn_scheduler`, :9723) when a mesh DB exists.
+  - Carrier assignment: a pinned session keeps its node. An unpinned session → this host (never left claimable by an accept-unpinned remote node).
+- **Producer 1** — `_enqueue_task` (orchestrator.py:5035) branches only on the durable marker (`_session_turn_queue_enrolled`, :9532; mesh-off ⇒ legacy; unreadable ⇒ 503 fail-closed). This happens after the local-execution and harness gates and before any legacy side effect.
+  - `_admit_managed_session_turn` (:9553):
+    - durable replay probe BEFORE lineage (no double flow);
+    - `_record_flow_run_start` exactly once (join/attach/birth), with Case → `flow_run_id`;
+    - accepted events/telemetry and the scheduler hint only after commit;
+    - no BUSY / last_task_id / last_user_message / native-id write.
+  - Web (`_submit_managed_instruction`, control_api.py:167): `Idempotency-Key` = operation id; the 200 `{ok, task_id, session}` envelope is preserved; typed errors map via `_turn_queue_http` (429 + Retry-After).
+  - Telegram session text: an enrolled reply is "📥 Queued #n"; a refusal says nothing was queued and the BUSY write is reverted.
+  - Unconverted producers (`manager_continuation`, `watched_job`, `cache_heartbeat`, `manager_respawn`, `manager_*_resume`, `manager_invoke`, …) and file ingestion (web upload, Telegram document, `staged_file`) FAIL CLOSED (422 `managed_unsupported`) for an enrolled session. They never fall back to legacy.
+
+**Producer 1 trace.** web `POST /api/instructions` / Telegram session text / runtime `submit_instruction(session_id)` → durable trigger identity `(principal:session:instruction, operation id)`. Web: `Idempotency-Key`. Telegram: none (see below). Runtime: the caller's `operation_id`, else `task:<id>`. → turn id = the `task_…` id (`mesh_tasks` protocol 1, `queued`) → scheduler `pending` (frozen payload, `machine_id`) → carrier `/claim-managed` → `/start-managed` → `/result-managed` → `complete_turn` (terminal + native id + active identity, Stage 3) → scheduler hint → next head. Tested end to end with the real `_prepare_managed_turn` (P1-07).
+
+**Tests (all offline; an autouse guard makes `_SDKSession.start` / `ClaudeSDKClient.connect` / `create_subprocess_exec` raise).**
+- New: `tests/test_turn_queue_admission.py` (ADM01-10, 17), `tests/test_turn_queue_scheduler.py` (SCH01-08, 13), `tests/test_turn_queue_producer1.py` (P1-01..10, 24).
+- Turned green: SYS01, SYS08, LOAD01b, LOAD02, LOAD04. LOAD01 and LOAD03 were vacuously green before via TypeError and now pass on the real contract.
+- Still red: SYS03-07 (producers 3/5/6/7 + finalizer reconcile → Stage 4b-4h), `test_turn_queue_api` ×2 (new `/turn-requests` route + compat-route 503 on a generic failure → Stage 6).
+- Counts: turn-queue files 201 passed / 7 red (above); named regression group 303 passed; adjacent case/control/flow/task-server/watched-jobs/queue suites 262 passed.
+
+**Mutation check.** Scratch worktree under the scratchpad, removed with plain `git worktree remove`; spawn guard active. Killed:
+- per-session cap (ADM02, LOAD01)
+- fleet cap (ADM03)
+- idempotency conflict (ADM01/01b)
+- COMMIT swallowed (ADM06)
+- legacy side ignores managed (ADM04b)
+- txn ignores legacy (ADM04e, added after it survived)
+- head rule (SCH01/SCH03)
+- session filters moved after LIMIT (SCH02b, added after it survived)
+- enrollment branch ignored (P1 ×12)
+
+Equivalent, survives: dropping the legacy term from `reserve()` alone. The txn check (ADM04e) is authoritative; the reserve term is only early rejection.
+
+**Service boundary (§7).**
+| Item | Admission | Scheduler |
+|---|---|---|
+| Concurrency | 4 process-wide permits (thread-held; cancel-safe, ADM09/09b); DB writes serialized by `_managed_write` | one loop; ≤25 activations/pass, one per session, small txns; no per-row task (SCH07) |
+| Memory | ≤2 MiB/row, ≤100 MiB fleet persisted bytes, ≤50 waiting rows shared with legacy; compat body ≤2 MiB pre-parse | head query returns summaries only; one full row at a time; waiting set bounded by the caps |
+| Request size | 2 MiB streamed cap on `/api/instructions` (chunked incl.); 16 KiB on resolve-recovery; strict `AdmissionRequest` | n/a (internal) |
+| Timeout | 5 s body read (408); 5 s total lock+DB deadline ⇒ 503 (ADM08, LOAD03) | same 5 s activation txn deadline; prepare runs outside txns |
+| Malformed input | 422 (no body/session, non-JSON payload, human coalesce); 409 idempotency mismatch | prepare failure ⇒ queued + `blocked_reason` (SCH05d) |
+| Backing failure | DB error / failed COMMIT ⇒ 503, no ack, no event (ADM06); unreadable marker ⇒ 503, no legacy fallback (P1-06) | pass failure logged (rate-limited) and retried on the 3 s clock; rows stay authoritative |
+
+**Deferrals / residuals (for CONTEXT.md).**
+1. Telegram has no stable inbound id in these paths (no `update_id` use), so Telegram retries are not deduplicated (key = `task:<id>`). Plumb `update.update_id` in a later producer/surface stage.
+2. The shared-allowance cache is cold (0) until the scheduler's first pass at boot. During that window a legacy put could exceed the shared cap by the pre-restart managed backlog. The managed side is exact (the txn counts DB rows).
+3. The 4-permit admission bound covers managed admission only. Legacy `/api/instructions` concurrency is unchanged. RSS at 100 concurrent callers has not been measured (Stage 7 load gate).
+4. Queue-mutation deadlines apply to enqueue/activation only. Stage-2 `revise_turn` / `withdraw_turn` still use the legacy `_write` (Stage 6 surfaces).
+5. Enrollment itself (quiescence / no-legacy-work checks, capability refusal) is not implemented. `enroll_session` is only the marker (Stage 7 rollout).
+6. `compact_session` and other direct execution paths are not guarded yet (producer 2+). Only the `submit_instruction` lane and uploads fail closed.
+7. After a managed turn completes, session BUSY/IDLE display is not driven by the queue (Stage 6 UI truth).
+8. There is no gateway-in-process carrier. Managed rows execute only on a Stage-3 managed carrier (the local daemon for unpinned sessions), so an enrolled session requires `WORKER_MANAGED_TURNS` on its carrier.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
