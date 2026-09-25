@@ -1,5 +1,12 @@
 # Production Docker Deployment Design
 
+> **Superseded in part (2026-09-25).** The "Docker replaces PM2 as the supported
+> production supervisor" goal below applies to the **control plane** (gateway +
+> task-server) only. The **execution worker was cut back to a native host process
+> supervised by PM2** — Docker does **not** supervise the worker. Treat the
+> containerized-worker portions of this design as non-canonical / experimental.
+> Canonical worker operations: [`RUNBOOKS/OPERATIONS_PM2.md` → "Native Worker"](RUNBOOKS/OPERATIONS_PM2.md#native-worker-canonical-execution-node).
+
 **Status:** proposed implementation design. This document is the build contract for
 the Docker deployment work; it is not a claim that the artifacts exist yet.
 
