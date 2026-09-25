@@ -252,3 +252,20 @@ def test_R5d_pending_on_carrier_that_went_offline_is_requeued_visibly(tmp_path, 
     assert json.loads(db.get_task(tid)["payload"])["task"]["title"]  # spec survived requeue
     tok = db.claim_turn(tid, "worker-a", "worker_daemon", "inc-1")
     assert tok and db.get_task(tid)["blocked_reason"] is None
+
+
+def test_R2b_lost_lease_without_finalize_is_not_acknowledged(tmp_path, monkeypatch):
+    """The finalize return value is handled: a writer whose lease was taken over
+    (recovery claimed it but has not finalized yet) must not acknowledge."""
+    db, o = _setup(tmp_path, monkeypatch)
+    real_fin = db.finalize_turn_lineage
+
+    def stolen(tid, token, frid, meta):
+        db._conn().execute("UPDATE mesh_tasks SET lineage_token='recovery' WHERE id=?", (tid,))
+        return real_fin(tid, token, frid, meta)
+
+    monkeypatch.setattr(db, "finalize_turn_lineage", stolen)
+    with pytest.raises(tq.BackingStoreError):
+        _submit(o, operation_id="s1")
+    [row] = _managed_rows(db)
+    assert row["lineage_state"] == "pending" and db.select_eligible_turn_heads(25) == []
