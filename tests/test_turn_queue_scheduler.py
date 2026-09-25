@@ -263,7 +263,7 @@ def test_SCH06_query_plans_are_index_served(tmp_path):
     sql = src.split('f"""', 1)[1].split('"""', 1)[0]
     from src.control.db import _MANAGED_OPEN_PREDICATE
     sql = sql.replace("{_MANAGED_OPEN_PREDICATE}", _MANAGED_OPEN_PREDICATE)
-    plan = " | ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, (NOW, 25)))
+    plan = " | ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, (NOW, NOW, 25)))
     assert "idx_mesh_turns_waiting" in plan, plan
     assert "SCAN mesh_tasks" not in plan.replace("SCAN mesh_tasks USING", ""), plan
     totals = " | ".join(r[3] for r in conn.execute(
@@ -278,7 +278,7 @@ def test_SCH07_loop_hint_and_lazy_fallback(tmp_path):
     _session(db, "a")
 
     async def scenario():
-        sched = ts.TurnScheduler(db, _Prep(), fallback_sec=0.05,
+        sched = ts.TurnScheduler(db, _Prep(), fallback_sec=0.05, safety_net_sec=30,
                                  allowance=ta.SharedWaitingAllowance())
         task = asyncio.create_task(sched.run())
         await asyncio.sleep(0.3)
@@ -297,14 +297,25 @@ def test_SCH07_loop_hint_and_lazy_fallback(tmp_path):
             if totals["count"] - totals["queued"] == 9:
                 break
         assert db.get_task(t1)["status"] == "pending"
-        # A blocked head keeps the bounded fallback alive (queued rows exist)...
+        # A head waiting on a slot holder cannot progress: NO steady polling
+        # (only hints or the long safety net) ...
         before = sched.passes
-        await asyncio.sleep(0.3)
-        assert sched.passes > before
+        await asyncio.sleep(0.4)
+        assert sched.passes == before, "polled a session that cannot progress"
         # ...and nothing is held per pending/running row: 9 pending rows, at
-        # most the one wait_for helper task of the fallback timer is added.
+        # most the one wait_for helper task of the timer is added.
         assert db.managed_waiting_totals()["count"] - db.managed_waiting_totals()["queued"] == 9
         assert len(asyncio.all_tasks()) <= baseline_tasks + 1
+        # A delayed head wakes the loop at its own eligibility time.
+        _session(db, "later")
+        soon = (datetime.now(tz=timezone.utc) + timedelta(seconds=0.4)).isoformat()
+        t_late = _q(db, "later", "x", not_before=soon, turn_source="system")
+        ts.notify_turn_queue_changed()
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if db.get_task(t_late)["status"] == "pending":
+                break
+        assert db.get_task(t_late)["status"] == "pending"
         sched.stop()
         await asyncio.wait_for(task, 2)
 
@@ -338,3 +349,67 @@ def test_SCH02b_paused_or_unenrolled_heads_do_not_consume_the_limit(tmp_path):
     _session(db, "free")
     t = _q(db, "free", "go")
     assert [h["id"] for h in db.select_eligible_turn_heads(25)] == [t]
+
+
+# SCH09 (A87 rework probe) -------------------------------------------------- #
+def test_SCH09_blocked_heads_do_not_starve_other_sessions(tmp_path):
+    """Adopted A87 probe: 25 older heads whose preparation keeps failing must
+    not monopolize LIMIT 25; they back off (exponential, capped) and a healthy
+    session is activated."""
+    db = _db(tmp_path)
+    for i in range(25):
+        _session(db, f"bad{i:02d}")
+        _q(db, f"bad{i:02d}", "x")
+    _session(db, "good")
+    good = _q(db, "good", "y")
+
+    async def prep(head, row):
+        if str(row["session_id"]).startswith("bad"):
+            raise RuntimeError("prepare keeps failing")
+        return ts.PreparedTurn(action="resume_session", payload={"prompt": "y"},
+                               machine_id="worker-a")
+
+    for _ in range(3):
+        asyncio.run(ts.run_scheduler_pass(db, prep, allowance=ta.SharedWaitingAllowance()))
+    assert db.get_task(good)["status"] == "pending", "healthy session starved"
+    rows = db._conn().execute(
+        "SELECT blocked_attempts, blocked_until, blocked_reason FROM mesh_tasks "
+        "WHERE session_id LIKE 'bad%'").fetchall()
+    assert all(r["blocked_attempts"] == 1 and r["blocked_until"] for r in rows), \
+        "blocked heads retried every pass instead of backing off"
+
+
+def test_SCH09b_backoff_is_exponential_capped_and_edit_rearms(tmp_path):
+    from src.control import db as dbm
+
+    db = _db(tmp_path)
+    _session(db, "a")
+    t = _q(db, "a", "x")
+    delays = []
+    for _ in range(10):
+        db.mark_turn_blocked(t, "prepare_failed: X")
+        until = db.get_task(t)["blocked_until"]
+        delays.append((datetime.fromisoformat(until) - datetime.now(tz=timezone.utc)).total_seconds())
+    assert 2 < delays[0] < 3.5 and 5 < delays[1] < 6.5
+    assert max(delays) <= dbm._TURN_BLOCK_BACKOFF_CAP_SEC + 1
+    assert db.select_eligible_turn_heads(25) == []
+    assert db.next_turn_wake_at() is not None
+    db.revise_turn(t, 1, body="fixed")
+    assert [h["id"] for h in db.select_eligible_turn_heads(25)] == [t]
+
+
+def test_SCH09c_blocked_state_change_logged_once(tmp_path, caplog):
+    db = _db(tmp_path)
+    _session(db, "a")
+    t = _q(db, "a", "x")
+
+    async def bad(head, row):
+        raise ValueError("boom")
+
+    import logging
+    caplog.set_level(logging.WARNING, logger="src.control.turn_scheduler")
+    for _ in range(3):
+        db._conn().execute("UPDATE mesh_tasks SET blocked_until = NULL WHERE id = ?", (t,))
+        _pass(db, bad)
+    assert sum("turn_prepare_failed" in r.getMessage() for r in caplog.records) == 1
+    assert db.get_task(t)["blocked_attempts"] == 3

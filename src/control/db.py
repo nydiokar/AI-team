@@ -2731,6 +2731,7 @@ class MeshDB:
             JOIN sessions s ON s.session_id = t.session_id
             WHERE t.queue_protocol = 1 AND t.status = 'queued'
               AND (t.not_before IS NULL OR t.not_before <= ?)
+              AND (t.blocked_until IS NULL OR t.blocked_until <= ?)
               AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
               AND COALESCE(s.status, '') != 'closed'
               AND NOT EXISTS (
@@ -2749,7 +2750,7 @@ class MeshDB:
             ORDER BY t.created_at ASC, t.id ASC
             LIMIT ?
             """,
-            (ts, max(0, int(limit))),
+            (ts, ts, max(0, int(limit))),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -2822,10 +2823,8 @@ class MeshDB:
                     return "ineligible"
                 prompt_bytes = len((row["prompt"] or "").encode("utf-8"))
                 if prepared_bytes + prompt_bytes > MAX_INTENT_BYTES_PER_ROW:
-                    conn.execute(
-                        "UPDATE mesh_tasks SET blocked_reason = ?, updated_at = ? "
-                        "WHERE id = ? AND queue_protocol = 1 AND status = 'queued'",
-                        (f"prepared_payload_oversize bytes={prepared_bytes}"[:500], now, task_id),
+                    _apply_turn_block(
+                        conn, task_id, f"prepared_payload_oversize bytes={prepared_bytes}",
                     )
                     return "oversize"
                 conn.execute(
@@ -2833,7 +2832,8 @@ class MeshDB:
                     UPDATE mesh_tasks
                     SET status = 'pending', activated_at = ?, updated_at = ?,
                         action = ?, payload = ?, machine_id = ?,
-                        intent_bytes = ?, blocked_reason = NULL
+                        intent_bytes = ?, blocked_reason = NULL,
+                        blocked_until = NULL, blocked_attempts = 0
                     WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
                       AND revision = ?
                     """,
@@ -2850,21 +2850,36 @@ class MeshDB:
         except Exception as e:
             raise _turn_backing_error("activate_prepared_turn", task_id=task_id, err=e)
 
-    def set_turn_blocked_reason(self, task_id: str, reason: Optional[str]) -> None:
-        """[A82 Stage 4a] Bounded reason on a still-queued head that could not be
-        activated (design §5 step 3). Writes only when the value changes."""
+    def mark_turn_blocked(self, task_id: str, reason: str) -> bool:
+        """[A82 Stage 4a rework] A still-queued head that could not be activated
+        gets a bounded reason AND an exponential, capped retry backoff
+        (`blocked_until`), so it drops out of head selection until then and
+        cannot monopolize the per-pass LIMIT (design §5.2: a blocked head holds
+        only its own session). Returns True when the reason CHANGED (callers log
+        only on a state change)."""
         try:
-            with self._managed_write("set_turn_blocked_reason") as conn:
-                conn.execute(
-                    "UPDATE mesh_tasks SET blocked_reason = ?, updated_at = ? "
-                    "WHERE id = ? AND queue_protocol = 1 AND status = 'queued' "
-                    "AND blocked_reason IS NOT ?",
-                    ((reason or None) and reason[:500], _now(), task_id, (reason or None) and reason[:500]),
-                )
+            with self._managed_write("mark_turn_blocked") as conn:
+                return _apply_turn_block(conn, task_id, reason)
         except TurnQueueError:
             raise
         except Exception as e:
-            raise _turn_backing_error("set_turn_blocked_reason", task_id=task_id, err=e)
+            raise _turn_backing_error("mark_turn_blocked", task_id=task_id, err=e)
+
+    def next_turn_wake_at(self, now: Optional[str] = None) -> Optional[str]:
+        """[A82 Stage 4a rework] Earliest future time a queued row becomes
+        time-eligible again (`not_before` / `blocked_until`), or None. Bounded:
+        reads only the waiting subset (`idx_mesh_turns_waiting`)."""
+        ts_now = now or _now()
+        row = self._conn().execute(
+            """
+            SELECT MIN(w) FROM (
+                SELECT max(COALESCE(not_before, ''), COALESCE(blocked_until, '')) AS w
+                FROM mesh_tasks WHERE queue_protocol = 1 AND status = 'queued'
+            ) WHERE w > ?
+            """,
+            (ts_now,),
+        ).fetchone()
+        return row[0] if row and row[0] else None
 
     def activate_turn(self, task_id: str) -> bool:
         """Transition a managed head `queued -> pending` (design §5 activation).
@@ -2945,7 +2960,9 @@ class MeshDB:
                         max_edits=max_edits,
                     )
                 new_rev = expected_revision + 1
-                sets = ["revision = ?", "updated_at = ?"]
+                # An edit re-arms a blocked head (its backoff is cleared).
+                sets = ["revision = ?", "updated_at = ?", "blocked_until = NULL",
+                        "blocked_attempts = 0"]
                 params: List[Any] = [new_rev, now]
                 if body is not None:
                     sets.append("prompt = ?")
@@ -7652,9 +7669,12 @@ def _get_migrations() -> List[tuple]:
                # sessions.turn_queue_enrolled/paused/config_revision are the
                # per-session enrollment + queue-pause + activation-config markers.
         (35, """
-            ALTER TABLE mesh_tasks ADD COLUMN intent_bytes INTEGER
+            ALTER TABLE mesh_tasks ADD COLUMN intent_bytes INTEGER;
+            ALTER TABLE mesh_tasks ADD COLUMN blocked_until TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN blocked_attempts INTEGER NOT NULL DEFAULT 0
         """),  # A82 Stage 4a: persisted stored-intent byte accounting for the
-               # managed waiting budget (design §8). NULL on every legacy row.
+               # managed waiting budget (design §8) + blocked-head retry backoff
+               # (design §5.2). NULL/0 on every legacy row. Unreleased (branch-only).
     ]
 
 
@@ -7784,6 +7804,34 @@ def _event_outcome(event: Dict[str, Any]) -> Optional[str]:
     """[A46] The ``outcome`` recorded in a flow_event's payload, or None."""
     pl = _event_payload(event)
     return str(pl["outcome"]) if isinstance(pl, dict) and pl.get("outcome") else None
+
+
+_TURN_BLOCK_BACKOFF_BASE_SEC = 3.0
+_TURN_BLOCK_BACKOFF_CAP_SEC = 300.0
+
+
+def _apply_turn_block(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
+    """[A82 Stage 4a rework] Inside an open write txn: record a bounded
+    `blocked_reason`, bump `blocked_attempts` and set `blocked_until` =
+    now + min(3 s * 2^(attempts-1), 300 s). Returns True if the reason changed."""
+    row = conn.execute(
+        "SELECT blocked_reason, blocked_attempts FROM mesh_tasks "
+        "WHERE id = ? AND queue_protocol = 1 AND status = 'queued'",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    bounded = (reason or "blocked")[:500]
+    attempts = int(row["blocked_attempts"] or 0) + 1
+    delay = min(_TURN_BLOCK_BACKOFF_BASE_SEC * (2 ** min(attempts - 1, 16)),
+                _TURN_BLOCK_BACKOFF_CAP_SEC)
+    until = (datetime.now(tz=timezone.utc) + timedelta(seconds=delay)).isoformat()
+    conn.execute(
+        "UPDATE mesh_tasks SET blocked_reason = ?, blocked_attempts = ?, blocked_until = ?, "
+        "updated_at = ? WHERE id = ? AND queue_protocol = 1 AND status = 'queued'",
+        (bounded, attempts, until, _now(), task_id),
+    )
+    return row["blocked_reason"] != bounded
 
 
 def _canonical_admission_hash(request: Dict[str, Any]) -> str:

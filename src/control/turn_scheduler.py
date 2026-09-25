@@ -34,7 +34,11 @@ from .turn_admission import ALLOWANCE, SharedWaitingAllowance
 logger = logging.getLogger(__name__)
 
 ACTIVATION_LIMIT_PER_PASS = 25
+# Retry clock after a FAILED pass (design §12: 3 s scheduler fallback).
 FALLBACK_INTERVAL_SEC = 3.0
+# Lost-hint safety net while queued rows exist but none is time-eligible
+# (heads waiting on a slot holder / paused session progress only on hints).
+SAFETY_NET_SEC = 60.0
 _PREPARE_ATTEMPTS = 2
 
 
@@ -58,6 +62,7 @@ class SchedulerPassResult(BaseModel):
     blocked: int = 0
     withdrawn: int = 0
     waiting: int = 0
+    next_wake_sec: Optional[float] = None
 
 
 PrepareFn = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[PreparedTurn]]
@@ -82,11 +87,12 @@ async def _activate_head(
             return "gone"
         try:
             prepared = await prepare(current, row)
-        except Exception as e:  # noqa: BLE001 — leave queued with a reason
-            logger.warning("event=turn_prepare_failed task_id=%s err=%s", task_id, e)
-            await asyncio.to_thread(
-                db.set_turn_blocked_reason, task_id, f"prepare_failed: {type(e).__name__}",
+        except Exception as e:  # noqa: BLE001 — leave queued with a reason + backoff
+            changed = await asyncio.to_thread(
+                db.mark_turn_blocked, task_id, f"prepare_failed: {type(e).__name__}",
             )
+            if changed:  # log on state change only, not every retry
+                logger.warning("event=turn_prepare_failed task_id=%s err=%s", task_id, e)
             return "blocked"
         expected_config = int(current["config_revision"])
         outcome = await asyncio.to_thread(
@@ -157,7 +163,29 @@ async def run_scheduler_pass(
     totals: Dict[str, int] = await asyncio.to_thread(db.managed_waiting_totals)
     shared.refresh_managed(totals["count"], generation)
     result.waiting = int(totals["queued"])
+    if result.waiting:
+        wake = await asyncio.to_thread(db.next_turn_wake_at)
+        if wake:
+            try:
+                delay = (datetime.fromisoformat(wake) - datetime.now(tz=timezone.utc)).total_seconds()
+                result.next_wake_sec = max(0.05, delay)
+            except ValueError:
+                result.next_wake_sec = None
     return result
+
+
+def _next_timeout(res: SchedulerPassResult, limit: int, safety_net_sec: float) -> Optional[float]:
+    """When to run the next pass without a hint: immediately if the pass hit
+    its LIMIT (more eligible heads may remain); at the earliest time a delayed
+    or backed-off head becomes eligible; else a long lost-hint safety net while
+    queued rows exist; else never (sleep until a hint)."""
+    if res.activated >= limit:
+        return 0
+    if not res.waiting:
+        return None
+    if res.next_wake_sec is not None:
+        return min(res.next_wake_sec, safety_net_sec)
+    return safety_net_sec
 
 
 class TurnScheduler:
@@ -171,10 +199,12 @@ class TurnScheduler:
         fallback_sec: float = FALLBACK_INTERVAL_SEC,
         limit: int = ACTIVATION_LIMIT_PER_PASS,
         allowance: Optional[SharedWaitingAllowance] = None,
+        safety_net_sec: float = SAFETY_NET_SEC,
     ) -> None:
         self._db = db
         self._prepare = prepare
         self._fallback_sec = fallback_sec
+        self._safety_net_sec = safety_net_sec
         self._limit = limit
         self._allowance = allowance
         self._event: Optional[asyncio.Event] = None
@@ -205,14 +235,14 @@ class TurnScheduler:
         try:
             while self._running:
                 self._event.clear()
-                waiting = 0
+                timeout: Optional[float] = None
                 try:
                     res = await run_scheduler_pass(
                         self._db, self._prepare, limit=self._limit,
                         allowance=self._allowance,
                     )
-                    waiting = res.waiting
                     self.passes += 1
+                    timeout = _next_timeout(res, self._limit, self._safety_net_sec)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # noqa: BLE001 — keep the loop alive
@@ -220,10 +250,11 @@ class TurnScheduler:
                     if now - self._last_error_log > 60:
                         self._last_error_log = now
                         logger.warning("event=turn_scheduler_pass_failed err=%s", e)
-                    waiting = 1  # retry on the fallback clock
+                    timeout = self._fallback_sec  # retry on the fallback clock
                 if not self._running:
                     break
-                timeout = self._fallback_sec if waiting > 0 else None
+                if timeout == 0:
+                    continue
                 try:
                     await asyncio.wait_for(self._event.wait(), timeout=timeout)
                 except asyncio.TimeoutError:
