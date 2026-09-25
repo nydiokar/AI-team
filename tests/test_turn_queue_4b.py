@@ -940,3 +940,33 @@ def test_R03c_hold_is_enforced_by_head_selection_and_by_activation(tmp_path, mon
         action="resume_session", payload={"prompt": "x"}, machine_id="worker-a",
     )
     assert out == "ineligible" and db.get_task(t1)["status"] == "queued"
+
+
+def test_R10_quota_auto_resume_does_not_resume_a_stopped_manager(tmp_path, monkeypatch):
+    from src.core.interfaces import SessionStatus as SS
+    from tests import test_case_quota_resume as Q
+
+    Q._flags(monkeypatch, auto="1")
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    db.upsert_node(__import__("socket").gethostname(), "", 9001, ["claude"], 2)
+
+    def scenario(stop: bool):
+        s = _sess()
+        s.status = SS.AWAITING_INPUT
+        o.session_store.save(s)
+        case_id = Q._case(db, "sess-1")
+        if stop:
+            t = _submit(o, operation_id=f"op-{case_id}")
+            _pass(db, o)
+            _run(db, t)
+            assert o.stop_managed_session_turn(_sess())[0] is True
+        auto = Q._Orch(o.session_store, snapshots=Q._restored_snapshot())
+        Q._pause(auto, db, case_id, "sess-1")
+        owned = asyncio.run(auto._handle_quota_paused_case(db, case_id))
+        return owned, auto.deliveries
+
+    owned, deliveries = scenario(stop=False)  # control: auto-resume acts
+    assert owned is True and len(deliveries) == 1
+    owned, deliveries = scenario(stop=True)
+    assert owned is True and deliveries == []
