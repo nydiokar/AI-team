@@ -915,6 +915,36 @@ reaches its deadline, then goes to recovery. Fail-closed, but the late reply is 
 the proactive transcript. Oversize full output is still not written to carrier artifact storage (A87 to record in CONTEXT.md).
 The operator route uses the existing dashboard auth (which also accepts the mesh worker token, as all `/api` routes do).
 
+### Stage 3 rework 4 — A87 round-2 adversarial review closed (2026-09-25, commit `4eaf369`)
+
+**Live spike (authorized by A87):** 3 single-line turns on `haiku`, `max_turns=1`, all tools disallowed, throwaway cwd, SDK
+0.2.110, `extra_args={"replay-user-messages": None}`. Script + raw log kept in the worker scratchpad (`spike.py`, `spike_out.log`). Observed stream per turn:
+`SystemMessage(init)` → (turn 1 only: `RateLimitEvent`) → `SystemMessage(thinking_tokens)`×N → **`UserMessage` echo** →
+`AssistantMessage`(thinking) → `AssistantMessage`(text) → `ResultMessage`.
+- Turn 1 (AsyncIterable, caller uuid `d9cc3f10-df82-41a9-8f0d-f54e98b093b6`): echo `UserMessage.uuid == d9cc3f10-…` ✔; result "ONE".
+- Turn 2 (caller uuid `4cd1ce9c-f4ea-4b9a-86b6-68d9d660cbba`): echo uuid `4cd1ce9c-…` ✔; result "TWO".
+- Turn 3 (string form, no uuid): echo carries a CLI-minted uuid (`b366badb-…`); result "THREE".
+**Conclusion: the CLI PRESERVES the caller uuid, and the echo comes from inside the turn that processes the prompt: after that
+turn's `init`, before its reply.** NOT verified live (no tools under the authorized budget): where a background
+task-notification / autonomous continuation sits relative to our echo. The design does not depend on that. Only the turn begun by
+our echo is ours; A87's transcript finding that notifications are folded into the running turn is covered by D1.
+
+| Finding | Fix | Test |
+|---|---|---|
+| **B1** counter refuted | `_autonomous_expected` REMOVED (and its legacy reset). Echo correlation: sessions of a managed carrier (`WORKER_MANAGED_TURNS`) run `--replay-user-messages`; managed prompt written via AsyncIterable `query` with a caller uuid; the turn begun by that echo is served exactly the `ResultMessage` that closes it; other turns → proactive sink. Legacy FIFO unchanged (echoes ignored; no replay when the flag is OFF). `send_managed` refuses (`ManagedUnsupportedError`, nothing submitted) without replay. Wedge exits: abandoned head popped by its own result, or by the next foreign result if its echo never came (kept as a bounded ghost → a later echo still routes `late_managed`), or close/stream end; `is_quiescent` recovers. | D1, D1b, D2, D3, D4, SDK02 (defer-echo = spike ordering), SDK06b, P5, INT12 |
+| **B2** unchecked `carrier_restarted` | backend pid + create_time recorded at invoke via `CodingBackend.run_managed_turn(on_process=…)` → `ManagedClaimStore`; reconciler posts `carrier_restarted` only with `process_proof` (pid absent / create_time mismatch); server requires it. No proof (no psutil / denied / alive / pid unrecorded) → held for the operator route. `psutil>=5.9.0` in pyproject + `psutil==7.2.2` in constraints.txt. | B2 ×5 (no-psutil, denied, alive, pid-reused, absent), B2 server proof, S2 |
+| **M1** poll loop death | managed poll-pass work wrapped (logged, legacy polling continues); dead-dir mkdir inside try | S3, M1 poll-survival |
+| **M2** dead letters / starvation | dead letter retired once recovery is acked (leaves budget, `.reason` audit bounded); cap/unwritable → parked, never re-POSTed; rotating cursors for replay + reconcile | M2 cap-park, M2 cursor, m3 (updated) |
+| **M3** test honesty | mutation-checked in a scratch worktree (removed without `--force`): (a) drop `_late_handoffs` conjunct → M3a fails; (b) drop `observer != claim_inc` → S2 fails; (c) drop reconciler delivery-skip → M3c fails; (d) no legacy reset remains; extra: drop m1 re-check → m1 fails; FIFO-ignore echoes → D3/SDK02/P5 fail | M3a, S2, M3c, m1 |
+| m1–m5 + harness | m1 re-check after probe await; m2 streamed ASGI byte cap (`src/control/body_cap.py`) on every managed carrier route + operator route, chunked included; m3 spool sized with the ASCII wire serialization; m4 `_fail_offline_tasks` skips managed rows; m5 reply served between timeout and abandon → `late_managed`; fake SDK client emulates the verified echo; fake session close awaits the reader (P5 hang) | S1, S1b, m3, m4, m5 |
+
+Round-2 file `tests/test_turn_queue_r2.py`: 22 of 24 tests fail on `789449d` (every adopted probe except the mutation guard M3a); 24/24 pass on `4eaf369`.
+**Verification:** turn-queue incl. carrier/recovery/r2: 110 passed; driver 121; carrier/legacy regressions 122; session/case/control 96;
+interface-touching 139; legacy-DB-helper users 242. Still red (later stages, unchanged): api 2, pressure 3, producers 7.
+**Deploy note:** the live venv has no psutil. Until the prod install workflow runs (`pip install -e … -c constraints.txt`),
+`carrier_restarted` cannot be proven and every crashed-invoked attempt waits for the operator route (fail-closed).
+`reap_stale_worker_children` was also a silent no-op without it.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
