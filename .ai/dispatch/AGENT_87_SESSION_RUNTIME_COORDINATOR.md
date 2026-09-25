@@ -87,12 +87,10 @@ retires the premise of **BOTH** container-track jobs, not just A86 —
 
 ### Cross-job reconciliation gates (A87 owns these)
 
-### Execution environment facts (binding on every dispatched worker — packets predate the Docker migration)
-- **Python:** `/opt/venv/bin/python` (NOT `.venv/bin/python`, which no longer has a working interpreter). Editable install ⇒ `import src` resolves to THIS checkout — verify `src.__file__` before trusting any test.
-- **pytest:** absent from the read-only `/opt/venv`; run as `PYTHONPATH=/tmp/tvenv/lib/python3.11/site-packages /opt/venv/bin/python -m pytest <paths>`. Proven green: `tests/test_session_timeline.py` (5 passed).
-- **web:** node v22 + pnpm 10.30 present, `web/node_modules` installed.
-- **No live gateway** (`curl :9003/health` dead here) ⇒ acceptance = targeted tests + import smoke, NOT live-health probe.
-- **No `gh`, no docker/podman**; git remote `origin` (SSH) exists. ⇒ PR-via-CLI impossible; deliverable = reviewed local commit on `feat/*`; push/PR/merge-to-remote is operator-gated.
+### Execution environment facts (REPLACED 2026-09-25 — previous block described the retired worker container)
+- **Topology (operator decision 2026-09-25):** gateway + task-server run in Docker (`compose.yaml`, data under `DOCKER_DATA_ROOT`); the worker runs **natively under pm2 on the host** as the operator user (PR #165 activity/quota cross the boundary over HTTP; PR #167 publishes the control API on the tailnet IP for mesh nodes). Docker worker is non-canonical (PR #166).
+- **Python:** `/home/cifran/dev/AI-team/.venv/bin/python`. Develop ONLY in a git worktree (e.g. `/home/cifran/dev/AI-team-wt/<job>`); run pytest with cwd = the worktree so `import src` resolves there (verified). **Never switch branches in `/home/cifran/dev/AI-team`** — the live pm2 worker runs from that checkout.
+- **`gh` available**; push/PR/merge per repo branch policy. Live probe: `curl http://127.0.0.1:9003/health`.
 
 ### Coordination decision (this Case)
 1. **Track-1 src editors run SEQUENTIALLY** (A83 → A82 → A84) — because the shared editable install would make parallel worktrees mistest each other's `src` (A82 §1.5 trap). A83 is small; the serialization cost is low and it eliminates the collision the operator warned about.
@@ -138,6 +136,12 @@ retires the premise of **BOTH** container-track jobs, not just A86 —
   - Minors m1 (`/quiescence` accepts any non-null result as evidence), m2 (stale-receipt echoes unverified token).
   - **Holds up:** DB claim/start/complete/recovery fencing is real; SDK02 reader-gate is non-vacuous; flag-off/poll isolation + credential-strip on `get_pending_managed_turns`; `classify_completion_outcome` behavior-preserving.
 - **Disposition: REWORK sent back to the Stage-3 worker** (has context) with the full findings. Priority: M5/M6 (legacy regression + forbidden interrupt) and M4 (loop-thread reservation) are correctness-critical; B1/B2 + M1/M2/M3 must wire the managed path and add a fake-carrier integration test. Re-verify + re-review after remediation. Stage 3 NOT accepted; A84 stays blocked.
+
+### A87 architecture rulings 2026-09-25 (binding on A82 remaining stages and A84)
+1. **One pathway is the end state.** Protocol 0 (legacy poll/claim/result + legacy `send`) and protocol 1 (managed) coexist ONLY while A82 is being built, behind default-OFF flags. A82 gains a mandatory final **Stage 8 — cutover and legacy deletion**: enroll all sessions, drain in-flight protocol-0 work, then delete the protocol-0 routes, the legacy send branch, and the enrollment/`WORKER_MANAGED_TURNS` flags. A82 is not closed while two paths exist.
+2. **The managed-turn contract lives once on `CodingBackend`** (`supports_managed_turns` / `run_managed_turn` / `is_quiescent`). The carrier calls only the interface — no backend-name branching, no private side doors into a driver. Unsupported backends fail closed (claim refused at worker and server), never fall back to legacy.
+3. **Codex and OpenCode must implement the contract** before Stage 8 can delete protocol 0 (scope added to A82; each adapter implements against its own native protocol).
+4. **A84 is built only on the managed path** — no completion-delivery logic for protocol 0.
 
 ## Milestone (burndown)
 
