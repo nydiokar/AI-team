@@ -97,6 +97,10 @@ class ManagedResultSpool:
         self.dir = Path(state_dir) / "managed_result_spool"
         self.max_envelope_bytes = int(max_envelope_bytes)
         self.max_retained_bytes = int(max_retained_bytes)
+        # [A82 Stage 3 rework, M2] Outstanding pre-start reservations, keyed by
+        # (task_id, claim_token). Counted against the retained budget so N
+        # concurrent turns cannot each pass the check and then overrun it.
+        self._reserved: Dict[Tuple[str, str], int] = {}
 
     # --- filesystem helpers ---------------------------------------------- #
     def _ensure_dir(self) -> None:
@@ -134,10 +138,24 @@ class ManagedResultSpool:
         nbytes = max(0, int(nbytes))
         if nbytes > self.max_envelope_bytes:
             return None
-        # Reserve against the current retained footprint plus this envelope.
-        if self._retained_bytes() + max(nbytes, 1) > self.max_retained_bytes:
+        key = (task_id, claim_token)
+        if key in self._reserved:
+            # Idempotent for the same attempt (a repeated start of one claim).
+            return SpoolReservation(task_id=task_id, claim_token=claim_token, nbytes=self._reserved[key])
+        # Reserve against the retained footprint PLUS every outstanding
+        # reservation plus this envelope.
+        outstanding = sum(self._reserved.values())
+        if self._retained_bytes() + outstanding + max(nbytes, 1) > self.max_retained_bytes:
             return None
+        self._reserved[key] = max(nbytes, 1)
         return SpoolReservation(task_id=task_id, claim_token=claim_token, nbytes=nbytes)
+
+    def release_reservation(self, task_id: str, claim_token: str) -> None:
+        """Return an unused reservation (the turn never started / was released)."""
+        self._reserved.pop((task_id, claim_token), None)
+
+    def reserved_bytes(self) -> int:
+        return sum(self._reserved.values())
 
     # --- commit (spool BEFORE the result POST) --------------------------- #
     def commit(self, task_id: str, claim_token: str, envelope: Dict[str, Any]) -> Path:
@@ -170,6 +188,8 @@ class ManagedResultSpool:
                 os.close(fd)
             os.chmod(tmp, 0o600)
             os.replace(tmp, final)  # atomic on POSIX
+            # The envelope now occupies retained bytes; drop its reservation.
+            self._reserved.pop((task_id, claim_token), None)
         except OSError as e:
             # Disk-write failure leaves a visible recovery obligation; it CANNOT
             # produce a successful ack (design §6).
@@ -216,7 +236,7 @@ class ManagedResultSpool:
         return True
 
     # --- boot / transient-failure replay --------------------------------- #
-    def list_spooled(self) -> List[Tuple[str, str, Dict[str, Any]]]:
+    def list_spooled(self, limit: Optional[int] = None) -> List[Tuple[str, str, Dict[str, Any]]]:
         """Return ``(task_id, claim_token, envelope)`` for every retained result.
 
         Reads one envelope at a time (bounded replay batches — the caller iterates
@@ -226,6 +246,8 @@ class ManagedResultSpool:
         if not self.dir.exists():
             return out
         for p in sorted(self.dir.glob("*.json")):
+            if limit is not None and len(out) >= limit:
+                break
             try:
                 body = json.loads(p.read_text(encoding="utf-8"))
                 tid = str(body["task_id"])

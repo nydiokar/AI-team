@@ -35,6 +35,11 @@ class WorkerConfig:
     # lives) and shipped to the controller. Free control request, not a turn.
     quota_observe_enabled: bool = False
     quota_observe_interval_sec: int = 300
+    # [A82 Stage 3] Managed (protocol-1) turn-queue carrier. OFF by default: the
+    # worker then polls/claims ONLY the legacy protocol-0 routes, byte-identical
+    # to before. ON: it additionally advertises queue protocol 1, polls
+    # /tasks/pending-managed and claims via /claim-managed (fresh claim token).
+    managed_turns: bool = False
 
     @classmethod
     def from_env(cls) -> "WorkerConfig":
@@ -69,6 +74,7 @@ class WorkerConfig:
         else:
             quota_observe_enabled = coordinator_on and ("claude" in backends)
         quota_observe_interval_sec = int(os.getenv("QUOTA_OBSERVE_INTERVAL_SEC") or 300)
+        managed_turns = os.getenv("WORKER_MANAGED_TURNS", "").strip().lower() in _TRUE
 
         return cls(
             node_id=node_id,
@@ -83,6 +89,7 @@ class WorkerConfig:
             shares_controller_fs=shares_controller_fs,
             quota_observe_enabled=quota_observe_enabled,
             quota_observe_interval_sec=quota_observe_interval_sec,
+            managed_turns=managed_turns,
         )
 
     def list_repos(self) -> List[dict]:
