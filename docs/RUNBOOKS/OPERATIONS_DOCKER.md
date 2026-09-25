@@ -68,11 +68,11 @@ docker compose --env-file /srv/ai-team-worker/compose.env -f deploy/compose.work
 docker compose --env-file /srv/ai-team-worker/compose.env -f deploy/compose.worker.yaml logs -f worker
 ```
 
-The entrypoint starts as root only to drop to `APP_UID`/`APP_GID` (default
-`10001`). Set both in the repo-root `.env` to the host owner of the projects root
-(`id -u` / `id -g`) so the worker can write and commit there; `safe.directory`
-only silences git's ownership warning, it does not grant write access. Prepare
-and own the data root with the same identity:
+The entrypoint starts as root only to drop to the owner of the mounted
+`/app/state` directory (never root; falls back to `10001`). `APP_UID`/`APP_GID`
+in `.env` override it. Own the data root as the host owner of the projects root
+so the worker can write and commit there; `safe.directory` only silences git's
+ownership warning, it does not grant write access:
 
 ```bash
 sudo APP_UID=$(id -u) APP_GID=$(id -g) ./scripts/prepare_docker_data_dirs.sh "$DOCKER_DATA_ROOT" "$WORKER_NODE_ID"
