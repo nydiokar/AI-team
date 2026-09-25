@@ -357,3 +357,39 @@ def test_P1_09b_telegram_refusal_is_honest():
     asyncio.run(tg._submit_buffered_instruction(chat_id=1, user_id=1, message_text="do it now"))
     assert sess.status == SessionStatus.IDLE and saved == []
     assert sent[0].startswith("❌ Not queued (capacity)")
+
+
+def test_P1_10_web_upload_into_enrolled_session_refused_before_side_effects(tmp_path, monkeypatch):
+    orch, c = _web(tmp_path, monkeypatch)
+    r = c.post("/api/sessions/sess-1/upload", headers={"Authorization": "Bearer tok"},
+               files={"file": ("a.txt", b"hi")}, data={"instruction": "read it"})
+    assert r.status_code == 422 and r.json()["detail"]["reason"] == "managed_unsupported"
+    assert orch.busy_marks == [] and orch.calls == []
+
+
+def test_P1_10b_telegram_document_into_enrolled_session_refused(tmp_path, monkeypatch):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(db_mod, "get_db", lambda: db)
+    db.upsert_session(Session(session_id="sess-1", backend="claude", repo_path="/tmp/repo",
+                              status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW))
+    db.enroll_session("sess-1")
+    tg, sess, sent, saved = _tg(tq.TurnAdmission("x", status="queued", revision=1,
+                                                 queue_sequence=1, idempotent_replay=False))
+    replies = []
+
+    async def reply_text(text, **k):
+        replies.append(text)
+
+    update = types.SimpleNamespace(
+        effective_chat=types.SimpleNamespace(id=1), effective_user=types.SimpleNamespace(id=1),
+        message=types.SimpleNamespace(reply_text=reply_text, document=None, photo=None, caption=""),
+    )
+    tg._check_user_permission = lambda *_a: True
+
+    async def _no_flush(_chat):
+        return None
+
+    tg._flush_buffer = _no_flush
+    asyncio.run(tg._handle_document(update, None))
+    assert replies and "not supported yet" in replies[-1]
+    assert sess.status == SessionStatus.IDLE and saved == []
