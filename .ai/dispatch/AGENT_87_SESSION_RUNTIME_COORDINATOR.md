@@ -97,6 +97,15 @@ Coordinator: Manager session `a2a819ff55c0`. Built from repository + running-env
 - **Three escalated decisions resolved** (recorded in A82 §15): (1) distinct managed no-interrupt send path, legacy byte-identical; (2) new strict completion helpers on the protocol-1 path only, legacy swallowing helpers untouched; (3) Stage-1 red scoped to assertion-capable suites, module-dependent suites accepted ImportError-red until Stage 2.
 - **Disposition:** Stage 1 (assertion-capable red tests) authorized on branch `feat/session-turn-queue`. **Stage 2+ (behavior-changing) remains gated on my review of Stage 1.** A82 is a multi-session build; A84 stays blocked until A82's ownership/admission contract is built AND reviewed.
 
+### A82 — Session turn queue — Stage 1 + Stage 2 gate 2026-09-25 — VERDICT: ACCEPT (Stage 3 authorized)
+- **Stage 1 (red tests) review:** ran the 6 suites myself → 40 red / 2 green (compat guards), zero skip/xfail; spot-checked SDK01 non-vacuity (drives real `_SDKSession`, asserts `interrupts==0` + fails via explicit `pytest.fail` on the missing managed path). ACCEPT.
+- **Stage 2 (schema + strict helpers + managed ownership) — commit `f2119c2` then remediation `0f6964d`:**
+  - Independently verified: migration 34 additive (all `ADD COLUMN`, no renumber of 1–33), legacy `complete_task`/`fail_task`/`send`/`cancel_inflight` byte-identical (zero deletions), flag-gated on `queue_protocol DEFAULT 0`; DB01–08 + ownership/SDK = 28→30 pass.
+  - **Fresh adversarial reviewer found a REAL introduced regression (REWORK):** migration-34's `claim_token`/`idempotency_key`/`admission_hash` leaked through the `SELECT *` in `list_tasks` → `/api/tasks` (design §6/§3.13 forbids serializing the claim credential); plus a latent Stage-4 bypass (`get_pending_tasks` lacked `queue_protocol=0`).
+  - **Remediated (narrow Manager correction):** `list_tasks` strips the three sensitive columns; `get_pending_tasks` guarded `AND queue_protocol=0`; OWN01b amended to the legacy/managed boundary (legacy mints no token) per §15 dec.2; added OWN01c leak regression. Re-run: 30 pass / 1 (SDK02, Stage-3). Legacy regressions (claim_reaper/task_state_truth/mesh_enqueue_affinity) 47 pass.
+  - **Reviewer re-verified the revised candidate from git objects in an isolated worktree:** ACCEPT — both findings closed, OWN01c non-vacuous (fails when the strip is removed), OWN01b faithful, legacy byte-identity preserved. Remaining out-of-scope: SDK02 + reviewer nit #3 (`send_managed` not gated on `is_quiescent`) — both the **managed-path correlation** facet, to be CLOSED in Stage 3; nit #4 (NULL-hash idempotency) benign.
+- **Disposition:** Stage 2 ACCEPTED. **Stage 3 (carrier protocol / result spool / recovery + managed correlation that closes SDK02) authorized.** A82 full-contract review still pending before A84 can start.
+
 ## Milestone (burndown)
 
 - [x] Current compatibility ledger created from repository evidence (2026-09-25)
