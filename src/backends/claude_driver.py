@@ -338,6 +338,14 @@ class _TurnAccumulator:
     ndjson_lines: List[str] = field(default_factory=list)
 
 
+def _replay_user_messages_enabled() -> bool:
+    """[A82 Stage 3 rework 4] Managed correlation needs the CLI's replayed
+    user-message echoes. Enabled only when this process runs the managed
+    carrier (``WORKER_MANAGED_TURNS``), so a legacy-only worker's CLI stream is
+    byte-identical to before (and the legacy reader ignores echoes anyway)."""
+    return os.getenv("WORKER_MANAGED_TURNS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class _PendingTurn:
     """A user query we sent and are still awaiting the terminal result for.
@@ -346,23 +354,25 @@ class _PendingTurn:
     ``progress_cb`` is the activity callback for *this* turn, routed by the
     reader while this turn is the active (head) one.
 
-    [A82 Stage 3 rework] ``managed`` marks a protocol-1 turn submitted through
-    :meth:`_SDKSession.send_managed`. ONLY managed turns are subject to result
-    correlation (design §6, SDK02): a ``ResultMessage`` is served to a managed
-    head only once the reader has seen *this query's own response stream* begin
-    (``response_started`` — a ``SystemMessage`` init or ``AssistantMessage``).
-    A result arriving before that is uncorrelated: the managed turn fails closed
-    with a typed recovery error (no deadlock, no ``cancel_inflight``) and the
-    output is surfaced through the proactive sink. Legacy (protocol-0) turns keep
-    the exact pre-Stage-3 FIFO routing: any ``ResultMessage`` serves the head,
-    including a bare result-only reply (§15 decision 1: legacy byte-identical).
+    [A82 Stage 3 rework 4] ``managed`` marks a protocol-1 turn submitted through
+    :meth:`_SDKSession.send_managed`. Managed turns are correlated by ECHO: the
+    query is written with a caller-chosen ``turn_uuid`` and the session runs
+    with ``--replay-user-messages``, so the CLI echoes a ``UserMessage`` whose
+    ``uuid`` is ours when (and only when) it begins the turn that processes our
+    prompt (verified live, §15 spike). The managed turn is served EXACTLY the
+    ``ResultMessage`` that closes the turn begun by that echo; any other turn's
+    result (an autonomous continuation, a turn already running at submit) goes
+    to the proactive sink. Legacy (protocol-0) turns keep the exact FIFO routing
+    (§15 decision 1: legacy byte-identical); replayed echoes are ignored for
+    them.
     """
     future: "asyncio.Future"
     progress_cb: Any = None
     managed: bool = False
-    response_started: bool = False
-    # [A82 Stage 3 rework] The managed caller hit its deadline; the eventual
-    # reply is routed as ``late_managed`` instead of an unread future.
+    turn_uuid: Optional[str] = None
+    echo_seen: bool = False
+    # The managed caller hit its deadline; the eventual reply is routed as
+    # ``late_managed`` instead of being set on an unread future.
     abandoned: bool = False
 
 
@@ -777,11 +787,18 @@ class _SDKSession:
         # thread (reader) except the read in the oracle, which reads a plain dict
         # snapshot — a benign race that can only make the oracle MORE conservative.
         self._bg_task_status: Dict[str, str] = {}
-        # [A82 Stage 3 rework] Autonomous turns the CLI owes us: each terminal
-        # background-task notification makes the CLI run one autonomous
-        # continuation turn. While >0, a ResultMessage cannot belong to a managed
-        # head (P5: the continuation must not be adopted as the managed reply).
-        self._autonomous_expected: int = 0
+        # [A82 Stage 3 rework 4] Echo correlation state. `_turn_owner` is the
+        # managed pending whose echoed UserMessage began the CURRENT CLI turn;
+        # the next ResultMessage closes that turn and is served to it.
+        # `_ghosts` remembers (bounded) abandoned managed turns popped before
+        # their echo, so a later echo still routes their reply as late_managed.
+        self._turn_owner: Optional["_PendingTurn"] = None
+        self._ghosts: "Dict[str, _PendingTurn]" = {}
+        self._last_managed: Optional["_PendingTurn"] = None
+        # Managed correlation needs the CLI's user-message echo; the flag is
+        # decided per process (managed carrier ON) so a legacy-only worker's
+        # CLI stream is byte-identical to before.
+        self._replay_user_messages: bool = _replay_user_messages_enabled()
         # Late managed replies handed to the sink but not yet accepted by it —
         # the session is not quiescent until the carrier has taken them.
         self._late_handoffs: int = 0
@@ -870,6 +887,8 @@ class _SDKSession:
             **({"system_prompt": self.system_prompt} if self.system_prompt else {}),
             **({"setting_sources": self.setting_sources} if self.setting_sources else {}),
             **_governor_option_kwargs(self.max_turns, self.max_budget_usd),
+            # [A82 Stage 3 rework 4] Echo correlation for managed turns.
+            **({"extra_args": {"replay-user-messages": None}} if self._replay_user_messages else {}),
         )
 
         self._client = ClaudeSDKClient(options=options)
@@ -951,14 +970,12 @@ class _SDKSession:
         if self._client is None:
             return
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock, ThinkingBlock
-        # [A82 Stage 3] SystemMessage(subtype="init") is the first frame the CLI
-        # emits for a real query's response (verified against the installed SDK);
-        # observing it marks the head pending turn's response as started so a
-        # racing autonomous ResultMessage cannot be mis-served. Import defensively.
+        # [A82 Stage 3 rework 4] Replayed user-message echoes carry the uuid of
+        # the prompt that begins a turn (managed correlation). Import defensively.
         try:
-            from claude_agent_sdk import SystemMessage
+            from claude_agent_sdk import UserMessage
         except Exception:  # pragma: no cover - depends on installed SDK version
-            SystemMessage = ()  # type: ignore
+            UserMessage = ()  # type: ignore
         # [A82 Stage 2] Background-task lifecycle messages ship in SDK 0.2.110.
         # Import them defensively so an older SDK that lacks them still boots
         # (the oracle then simply never sees a non-terminal background task).
@@ -977,13 +994,6 @@ class _SDKSession:
         try:
             async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
-                    # [A82 Stage 3] The head pending turn's own response stream
-                    # has begun (design §6 correlation): mark it started so its
-                    # terminal ResultMessage is served to it even though it will
-                    # arrive many ticks after submit settled. A background result
-                    # racing the real reply never sets this, so it stays autonomous.
-                    if self._pending:
-                        self._pending[0].response_started = True
                     # [A82 Stage 2] A model continuation is now in flight until
                     # its terminal ResultMessage arrives — a quiescence conjunct
                     # (SDK04b: task-finished + autonomous continuation ≠ idle).
@@ -1041,21 +1051,22 @@ class _SDKSession:
                     status = getattr(msg, "status", None)
                     if tid and status:
                         self._bg_task_status[str(tid)] = str(status)
-                    self._autonomous_expected += 1
-                elif (
-                    SystemMessage
-                    and isinstance(msg, SystemMessage)
-                    and getattr(msg, "subtype", None) == "init"
-                ):
-                    # [A82 Stage 3] The CLI's init frame for a query's response.
-                    # Its arrival proves the head pending turn's own response
-                    # stream has begun, so a subsequent ResultMessage is served to
-                    # it (managed correlation). Only the plain ``init`` subtype
-                    # counts: Task*/hook/mirror frames are SystemMessage
-                    # subclasses that background work can emit, so they must not
-                    # mark a managed head's response as started.
-                    if self._pending:
-                        self._pending[0].response_started = True
+                elif UserMessage and isinstance(msg, UserMessage):
+                    # [A82 Stage 3 rework 4] A replayed echo of a prompt the CLI
+                    # is now beginning a turn for. If its uuid is one of OUR
+                    # managed prompts, that turn (closed by the next
+                    # ResultMessage) is the managed turn. Tool-result user
+                    # messages and legacy echoes match nothing and are ignored,
+                    # exactly as before.
+                    uid = getattr(msg, "uuid", None)
+                    if uid:
+                        owner = next(
+                            (p for p in self._pending if p.managed and p.turn_uuid == uid),
+                            None,
+                        ) or self._ghosts.pop(uid, None)
+                        if owner is not None:
+                            owner.echo_seen = True
+                            self._turn_owner = owner
         except asyncio.CancelledError:
             # Session closing. Fall through to `finally` so waiters don't hang.
             end_reason = "reader task cancelled"
@@ -1164,61 +1175,44 @@ class _SDKSession:
         """Route a finished turn: fulfil the oldest pending query, or — if none
         is waiting — treat it as an autonomous turn and hand it to the proactive
         sink. Runs on the SDK loop thread."""
-        # [A82 Stage 3 rework] Result correlation applies ONLY to a managed
-        # (protocol-1) head (design §6, SDK02). A legacy head is served FIFO
-        # exactly as before Stage 3 — including a bare result-only reply — so the
-        # shared reader never deadlocks a legacy send (§15 decision 1, M5/M6).
-        if self._pending and self._pending[0].managed:
-            head = self._pending[0]
-            if head.abandoned:
-                # Late real reply of a managed turn whose caller hit its
-                # deadline: hand it to the carrier as late_managed (M3).
-                self._pending.popleft()
+        # [A82 Stage 3 rework 4] Managed turns are correlated by ECHO (see
+        # _PendingTurn): this result closes the turn begun by `_turn_owner`'s
+        # echoed prompt, if any.
+        owner = self._turn_owner
+        self._turn_owner = None
+        if owner is not None:
+            try:
+                self._pending.remove(owner)
+            except ValueError:
+                pass  # a ghost (abandoned + popped before its echo)
+            if owner.abandoned or owner.future is None or owner.future.done():
+                # Late reply of a deadline-held managed turn (M3): route it to
+                # the carrier as late_managed, never to an unread future.
                 outcome.late_managed = True
-            elif self._autonomous_expected > 0:
-                # The CLI is finishing an autonomous continuation owed for a
-                # completed background task; its result (and any assistant
-                # frame that marked the head started) are not this turn's (M4).
-                self._autonomous_expected -= 1
-                head.response_started = False
-            elif head.response_started:
-                self._pending.popleft()
-                if not head.future.done():
-                    head.future.set_result(outcome)
-                return
             else:
-                # A ResultMessage before this managed query's own response
-                # stream began cannot be attributed to it (it may be an
-                # autonomous background result). Fail the managed turn closed
-                # with a typed recovery error — never serve it as the explicit
-                # reply, never leave the caller blocked until the deadline, never
-                # interrupt — and surface the output through the proactive sink.
-                # The query has NOT been proven terminal, so the oracle keeps
-                # the session held until a further terminal ResultMessage.
-                self._pending.popleft()
-                self._last_query_terminal = False
-                if not head.future.done():
-                    from src.control.turn_queue import RecoveryRequiredError
-                    head.future.set_exception(RecoveryRequiredError(
-                        "managed turn received a ResultMessage before its own response "
-                        "stream began; result is uncorrelated — recovery required",
-                        session_key=self.session_key, reason="uncorrelated_result",
-                    ))
-                logger.warning(
-                    "event=sdk_managed_result_uncorrelated session_key=%s chars=%d — "
-                    "managed turn failed closed; output routed to proactive sink",
-                    self.session_key, len(outcome.output or ""),
-                )
-        elif self._pending:
-            # Legacy FIFO (unchanged routing). A legacy turn absorbs any owed
-            # autonomous continuation, so the owed count resets.
-            self._autonomous_expected = 0
-            pending = self._pending.popleft()
-            if not pending.future.done():
-                pending.future.set_result(outcome)
-            return
-        elif self._autonomous_expected > 0:
-            self._autonomous_expected -= 1
+                owner.future.set_result(outcome)
+                return
+        else:
+            legacy = next((p for p in self._pending if not p.managed), None)
+            if legacy is not None:
+                # Legacy FIFO — with no managed turn outstanding this is
+                # exactly the original `popleft()` (byte-identical).
+                self._pending.remove(legacy)
+                if not legacy.future.done():
+                    legacy.future.set_result(outcome)
+                return
+            # Only managed turns are waiting and none has begun (no echo yet):
+            # this result belongs to another turn (autonomous continuation /
+            # a turn already running) → proactive sink. An ABANDONED managed
+            # head that never saw its echo is popped here (wedge exit) and
+            # remembered as a bounded ghost so a later echo still routes its
+            # reply as late_managed.
+            for p in [p for p in self._pending if p.managed and p.abandoned and not p.echo_seen]:
+                self._pending.remove(p)
+                if p.turn_uuid:
+                    self._ghosts[p.turn_uuid] = p
+                    while len(self._ghosts) > 16:
+                        self._ghosts.pop(next(iter(self._ghosts)))
         # No one asked for this turn — it's a background-job continuation.
         outcome.proactive = True
         if outcome.late_managed and self._on_proactive is not None:
@@ -1247,6 +1241,7 @@ class _SDKSession:
 
     def _fail_pending(self, err: Exception) -> None:
         """Reject every waiting turn — used when the stream dies."""
+        self._turn_owner = None
         while self._pending:
             pending = self._pending.popleft()
             if not pending.future.done():
@@ -1277,7 +1272,25 @@ class _SDKSession:
             # session_id here is the SDK's *internal* conversation-thread
             # selector, not the gateway session id; one _SDKSession owns one
             # claude process, so the default thread is correct.
-            await self._client.query(message)
+            if managed:
+                # [A82 Stage 3 rework 4] Caller-chosen uuid, echoed back by the
+                # CLI when it begins the turn that processes this prompt.
+                import uuid as _uuid
+
+                pending.turn_uuid = str(_uuid.uuid4())
+                self._last_managed = pending
+
+                async def _one(text: str = message, uid: str = pending.turn_uuid):
+                    yield {
+                        "type": "user",
+                        "message": {"role": "user", "content": text},
+                        "parent_tool_use_id": None,
+                        "uuid": uid,
+                    }
+
+                await self._client.query(_one())
+            else:
+                await self._client.query(message)
         except Exception:
             # Query never landed — drop the pending entry so it can't swallow a
             # later result and re-introduce an offset.
@@ -1367,8 +1380,13 @@ class _SDKSession:
         interleave between the check and the reservation (no caller-thread
         TOCTOU). Not quiescent ⇒ typed :class:`OwnershipConflictError`; the
         durable queue re-activates the turn once the session settles."""
-        from src.control.turn_queue import OwnershipConflictError
+        from src.control.turn_queue import ManagedUnsupportedError, OwnershipConflictError
 
+        if not self._replay_user_messages:
+            raise ManagedUnsupportedError(
+                "managed turns need --replay-user-messages (echo correlation) on this session",
+                session_key=self.session_key,
+            )
         if not self.is_quiescent():
             logger.warning(
                 "event=sdk_managed_turn_not_quiescent session_key=%s — native "
@@ -1382,10 +1400,39 @@ class _SDKSession:
             )
         return await self._submit_turn(message, progress_cb=progress_cb, managed=True)
 
+    def process_identity(self) -> Dict[str, Any]:
+        """pid (+ create_time when psutil is available) of this session's CLI
+        subprocess; empty when unknown."""
+        proc = getattr(getattr(self._client, "_transport", None), "_process", None)
+        pid = getattr(proc, "pid", None)
+        if not isinstance(pid, int):
+            return {}
+        ident: Dict[str, Any] = {"pid": pid}
+        try:
+            import psutil  # type: ignore
+
+            ident["create_time"] = psutil.Process(pid).create_time()
+        except Exception:
+            pass
+        return ident
+
     def _abandon_managed_pending(self) -> None:
-        for p in self._pending:
-            if p.managed and not p.future.done():
-                p.abandoned = True
+        """Deadline expired (runs on the loop). If the reply was served to the
+        future between the caller's timeout and now (m5), route that outcome as
+        late_managed instead of leaving it on an unread future; otherwise mark
+        the outstanding managed turn abandoned so its eventual reply is."""
+        p = self._last_managed
+        if p is None:
+            return
+        p.abandoned = True
+        fut = p.future
+        if fut.done() and not fut.cancelled() and fut.exception() is None:
+            outcome = fut.result()
+            outcome.late_managed = True
+            outcome.proactive = True
+            if self._on_proactive is not None:
+                self._late_handoffs += 1
+                asyncio.create_task(self._run_proactive(outcome))
 
     def _submit_managed_no_interrupt(self, coro, timeout: Optional[float]) -> "TurnOutcome":
         """Run a managed coroutine on the SDK loop WITHOUT the legacy
@@ -1719,11 +1766,11 @@ class ClaudeSDKClientDriver(ClaudeDriver):
     def send_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
         return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context)
 
-    def run_managed_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None) -> ExecutionResult:
+    def run_managed_turn(self, session, message, *, model=None, telemetry_context=None, proc_env=None, on_process=None) -> ExecutionResult:
         """[A82 Stage 3] Driver half of ``CodingBackend.run_managed_turn``: the
         same turn pipeline, but submitted through the private no-interrupt,
         loop-reserved ``_SDKSession.send_managed``."""
-        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context, _managed=True)
+        return self._run_turn(session, message, model=model, effort=getattr(session, "effort", None), proc_env=proc_env or {}, telemetry_context=telemetry_context, _managed=True, _on_process=on_process)
 
     def is_session_quiescent(self, session_id: str) -> bool:
         """Quiescence of the pooled SDK session. No live pooled process ⇒ no
@@ -1734,7 +1781,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             return True
         return sdk_sess.is_quiescent()
 
-    def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, _managed: bool = False) -> ExecutionResult:
+    def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, _managed: bool = False, _on_process=None) -> ExecutionResult:
         start = time.time()
         try:
             sdk_sess = self._get_or_create(session, model, effort, proc_env)
@@ -1745,6 +1792,14 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             sess_id = getattr(telemetry_context, "session_id", None) or (session.session_id if session else None)
             t_id = getattr(telemetry_context, "turn_id", None)
             progress_cb = _make_activity_cb(sess_id, t_id)
+            # [A82 Stage 3 rework 4] Report the backend process identity BEFORE
+            # the managed prompt is submitted, so a crashed carrier's successor
+            # can prove this exact process is gone (B2 carrier_restarted).
+            if _managed and _on_process is not None:
+                try:
+                    _on_process(sdk_sess.process_identity())
+                except Exception:
+                    logger.warning("event=sdk_process_identity_report_failed", exc_info=True)
             # [A82 Stage 3 rework] Managed (protocol-1) rows take the
             # no-interrupt, loop-reserved send; legacy rows keep `send`.
             if _managed:

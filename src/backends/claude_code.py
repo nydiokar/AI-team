@@ -364,9 +364,11 @@ class ClaudeCodeBackend(CodingBackend):
     def supports_managed_turns(self) -> bool:
         """Managed execution exists only on the continuous SDK driver (its
         no-interrupt, loop-reserved send). The print/resume driver has none."""
-        return self._driver.driver_type() == "sdk"
+        from src.backends.claude_driver import _replay_user_messages_enabled
 
-    def run_managed_turn(self, session: Session, message: str, ownership, *, telemetry_context=None, telemetry_sink=None) -> ExecutionResult:
+        return self._driver.driver_type() == "sdk" and _replay_user_messages_enabled()
+
+    def run_managed_turn(self, session: Session, message: str, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
         from src.control.turn_queue import ManagedUnsupportedError, OwnershipConflictError
 
         if not self.supports_managed_turns():
@@ -390,6 +392,7 @@ class ClaudeCodeBackend(CodingBackend):
             model=_resolve_model(session),
             telemetry_context=telemetry_context,
             proc_env=proc_env,
+            on_process=on_process,
         )
         self._observe_driver_state(session, result)
         result = self._observe_cache_health(session, result)

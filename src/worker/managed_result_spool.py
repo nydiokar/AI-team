@@ -121,6 +121,16 @@ def _clean_orphan_tmps(dir_path: Path) -> int:
     return n
 
 
+def _rotate(paths: List[Path], after: Optional[str]) -> List[Path]:
+    """[M2] Start AFTER the given id (task id prefix of the file name) and wrap
+    around — bounded batches then cycle through every record, so a stuck head
+    can never starve later ones."""
+    if not after:
+        return paths
+    split = next((i for i, p in enumerate(paths) if p.name.split(".", 1)[0] > after), len(paths))
+    return paths[split:] + paths[:split]
+
+
 def _validate_id(kind: str, value: str) -> str:
     if not isinstance(value, str) or not _SAFE_ID.match(value):
         raise ResultSpoolError(f"invalid {kind} for spool path: {value!r}")
@@ -182,6 +192,28 @@ class ManagedResultSpool:
         """Boot hygiene (m4): drop crash-orphaned temp files; returns count."""
         return _clean_orphan_tmps(self.dir)
 
+    def discard(self, task_id: str, claim_token: str) -> None:
+        """Drop a spooled envelope whose attempt the server definitively refused
+        and whose recovery hold is acknowledged (it backs no obligation)."""
+        try:
+            self._path(task_id, claim_token).unlink(missing_ok=True)
+            _fsync_dir(self.dir)
+        except OSError:
+            logger.warning("event=managed_spool_discard_failed task_id=%s", task_id)
+
+    def retire_dead_letter(self, task_id: str, claim_token: str) -> None:
+        """[M2] Exit for a dead letter: once the server has ACKNOWLEDGED the
+        attempt's recovery hold, the refused envelope no longer backs any
+        obligation — delete it (it leaves the retained budget). The small
+        ``.reason`` record stays as the audit trace, itself bounded."""
+        try:
+            (self.dead_dir / self._path(task_id, claim_token).name).unlink(missing_ok=True)
+            reasons = sorted(self.dead_dir.glob("*.json.reason"), key=lambda p: p.stat().st_mtime)
+            for old in reasons[:-MAX_DEAD_LETTERS]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("event=managed_dead_letter_retire_failed task_id=%s", task_id)
+
     def dead_letter(self, task_id: str, claim_token: str, reason: str) -> bool:
         """[m3] Move an envelope the server DEFINITIVELY refused (4xx) out of the
         replay queue into a bounded dead-letter dir (it still counts against the
@@ -191,11 +223,11 @@ class ManagedResultSpool:
         src = self._path(task_id, claim_token)
         if not src.exists():
             return True
-        self.dead_dir.mkdir(parents=True, exist_ok=True)
-        if len(list(self.dead_dir.glob("*.json"))) >= MAX_DEAD_LETTERS:
-            logger.error("event=managed_dead_letter_full task_id=%s", task_id)
-            return False
         try:
+            self.dead_dir.mkdir(parents=True, exist_ok=True)
+            if len(list(self.dead_dir.glob("*.json"))) >= MAX_DEAD_LETTERS:
+                logger.error("event=managed_dead_letter_full task_id=%s", task_id)
+                return False
             os.replace(src, self.dead_dir / src.name)
             _atomic_write_json(
                 self.dead_dir, self.dead_dir / (src.name + ".reason"),
@@ -249,18 +281,25 @@ class ManagedResultSpool:
         holds the recovery obligation), or :class:`ResultSpoolError` on a disk
         write failure (a visible recovery obligation — never a false ack).
         """
-        self._ensure_dir()
         body = {
             "task_id": _validate_id("task_id", task_id),
             "claim_token": _validate_id("claim_token", claim_token),
             "envelope": envelope,
         }
-        data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(data) > self.max_envelope_bytes:
+        # m3: size with the SAME serialization the carrier puts on the wire
+        # (`_HTTP.post` = `json.dumps(body)`: ASCII escapes, default separators),
+        # so an envelope that fits here also fits the server's byte cap.
+        wire_bytes = len(json.dumps(envelope).encode("utf-8"))
+        if wire_bytes > self.max_envelope_bytes:
             raise OversizeResultError(
-                f"managed result envelope {len(data)}B exceeds cap "
+                f"managed result envelope {wire_bytes}B exceeds cap "
                 f"{self.max_envelope_bytes}B (task={task_id})"
             )
+        data = json.dumps(body).encode("utf-8")
+        try:
+            self._ensure_dir()
+        except OSError as e:
+            raise ResultSpoolError(f"failed to create spool dir for {task_id}: {e}") from e
         final = self._path(task_id, claim_token)
         try:
             fd, tmp = tempfile.mkstemp(dir=str(self.dir), prefix=".spool-", suffix=".tmp")
@@ -320,7 +359,9 @@ class ManagedResultSpool:
         return True
 
     # --- boot / transient-failure replay --------------------------------- #
-    def list_spooled(self, limit: Optional[int] = None) -> List[Tuple[str, str, Dict[str, Any]]]:
+    def list_spooled(
+        self, limit: Optional[int] = None, after: Optional[str] = None
+    ) -> List[Tuple[str, str, Dict[str, Any]]]:
         """Return ``(task_id, claim_token, envelope)`` for every retained result.
 
         Reads one envelope at a time (bounded replay batches — the caller iterates
@@ -329,7 +370,7 @@ class ManagedResultSpool:
         out: List[Tuple[str, str, Dict[str, Any]]] = []
         if not self.dir.exists():
             return out
-        for p in sorted(self.dir.glob("*.json")):
+        for p in _rotate(sorted(self.dir.glob("*.json")), after):
             if limit is not None and len(out) >= limit:
                 break
             try:
@@ -388,11 +429,11 @@ class ManagedClaimStore:
         except OSError:
             logger.warning("event=managed_claim_remove_failed task_id=%s", task_id)
 
-    def list(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def list(self, limit: Optional[int] = None, after: Optional[str] = None) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         if not self.dir.exists():
             return out
-        for p in sorted(self.dir.glob("*.json")):
+        for p in _rotate(sorted(self.dir.glob("*.json")), after):
             if limit is not None and len(out) >= limit:
                 break
             try:

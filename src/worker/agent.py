@@ -17,6 +17,7 @@ Run locally (no Tailscale required):
 """
 
 import asyncio
+import functools
 import faulthandler
 import json
 import logging
@@ -624,6 +625,7 @@ async def _execute_task(
     telemetry_sink: Any = None,
     node_id: str = "",
     ownership: Any = None,
+    on_process: Any = None,
 ) -> Dict[str, Any]:
     """Execute one task row from mesh_tasks. Returns an ExecutionResultPayload-compatible dict.
 
@@ -827,7 +829,7 @@ async def _execute_task(
             if managed:
                 raw = await asyncio.to_thread(
                     call_backend,
-                    backend.run_managed_turn,
+                    functools.partial(backend.run_managed_turn, on_process=on_process),
                     session,
                     prompt or session.last_user_message or "",
                     ownership,
@@ -1163,6 +1165,9 @@ class WorkerAgent:
         from src.worker.managed_result_spool import MAX_CONCURRENT_DELIVERIES
         self._result_delivery_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DELIVERIES)
         self._delivering: set = set()
+        # Envelopes the server refused whose dead-letter move failed: skipped by
+        # replay (never re-POSTed forever).
+        self._delivery_parked: set = set()
         # Set when a managed result cannot be reconciled (oversize / disk
         # failure): stop claiming NEW managed turns (design §7).
         self._managed_claims_blocked: Optional[str] = None
@@ -1357,8 +1362,7 @@ class WorkerAgent:
             logger.warning("event=managed_quiescence_probe_failed backend=%s", backend_name, exc_info=True)
             return False
 
-    @staticmethod
-    def _is_definitive_refusal(exc: BaseException) -> bool:
+    def _is_definitive_refusal(self, exc: BaseException) -> bool:
         return (
             isinstance(exc, urllib.error.HTTPError)
             and 400 <= exc.code < 500
@@ -1475,6 +1479,20 @@ class WorkerAgent:
         self._claim_record(task_id, status="running")
         return task_row, claim_token
 
+    def _record_backend_process(self, task_id: str, ident: Dict[str, Any]) -> None:
+        """[A82 Stage 3 rework 4, B2] Persist the backend process identity for
+        this attempt (called by the backend right before the prompt is
+        submitted) — the only basis on which a successor carrier may claim the
+        backend is gone."""
+        if not isinstance(ident, dict) or not isinstance(ident.get("pid"), int):
+            return
+        try:
+            self._claim_record(
+                task_id, backend_pid=ident["pid"], backend_create_time=ident.get("create_time"),
+            )
+        except Exception:
+            logger.warning("event=managed_backend_identity_persist_failed task_id=%s", task_id)
+
     async def _release_managed_claim(
         self, task_id: str, claim_token: str, *, not_invoked: bool = False
     ) -> str:
@@ -1563,15 +1581,7 @@ class WorkerAgent:
                 )
             except Exception as e:
                 if self._is_definitive_refusal(e):
-                    logger.error(
-                        "event=managed_result_refused task_id=%s err=%s — dead-lettered, "
-                        "attempt to recovery", task_id, e,
-                    )
-                    if self._result_spool.dead_letter(task_id, claim_token, str(e)):
-                        self._pending_result_delivery.discard(task_id)
-                        await self._enter_managed_recovery(
-                            task_id, claim_token, f"managed_result_refused: {e}"[:500],
-                        )
+                    await self._retire_refused_result(task_id, claim_token, e)
                     return False
                 logger.warning(
                     "event=managed_result_post_failed task_id=%s err=%s (spooled, "
@@ -1586,6 +1596,30 @@ class WorkerAgent:
             "task+token; spool retained for replay", task_id,
         )
         return False
+
+    async def _retire_refused_result(self, task_id: str, claim_token: str, err: BaseException) -> None:
+        """[m3/M2] The server DEFINITIVELY refused this envelope. It must never
+        be re-POSTed forever: move it to the bounded dead-letter dir (or, if
+        that is full/unwritable, park it in memory), stop delivering it, and put
+        the attempt in recovery. Once the recovery hold is acknowledged — or the
+        attempt is definitively not ours — the envelope leaves the budget."""
+        logger.error(
+            "event=managed_result_refused task_id=%s err=%s — dead-letter + recovery",
+            task_id, err,
+        )
+        dead = self._result_spool.dead_letter(task_id, claim_token, str(err))
+        if not dead:
+            self._delivery_parked.add(task_id)
+        self._pending_result_delivery.discard(task_id)
+        acked = await self._enter_managed_recovery(
+            task_id, claim_token, f"managed_result_refused: {err}"[:500],
+        )
+        if acked or task_id not in self._managed_claims:
+            if dead:
+                self._result_spool.retire_dead_letter(task_id, claim_token)
+            else:
+                self._result_spool.discard(task_id, claim_token)
+                self._delivery_parked.discard(task_id)
 
     async def _deliver_managed_result(
         self, task_id: str, claim_token: str, result: Dict[str, Any]
@@ -1651,8 +1685,13 @@ class WorkerAgent:
         if self._result_spool is None:
             return 0
         acked = 0
-        for task_id, claim_token, envelope in self._result_spool.list_spooled(limit=batch):
-            if task_id in self._delivering:
+        items = self._result_spool.list_spooled(
+            limit=batch, after=getattr(self, "_redeliver_cursor", None),
+        )
+        # M2: rotating cursor — a stuck head cannot starve later envelopes.
+        self._redeliver_cursor = items[-1][0] if len(items) >= batch else None
+        for task_id, claim_token, envelope in items:
+            if task_id in self._delivering or task_id in self._delivery_parked:
                 continue
             self._pending_result_delivery.add(task_id)
             self._delivering.add(task_id)
@@ -1696,6 +1735,30 @@ class WorkerAgent:
             return True
         return False
 
+    def _backend_process_gone(self, rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """[A82 Stage 3 rework 4, B2] Proof the recorded backend process is
+        gone: the pid is absent, or its create_time differs (pid reused).
+        Returns None when there is no proof — pid never recorded, psutil not
+        importable, access denied, or the process is still alive."""
+        pid = rec.get("backend_pid")
+        if not isinstance(pid, int):
+            return None
+        try:
+            import psutil  # type: ignore
+        except Exception:
+            return None
+        try:
+            proc = psutil.Process(pid)
+            now_ct = proc.create_time()
+        except psutil.NoSuchProcess:
+            return {"pid": pid, "observed": "absent"}
+        except Exception:
+            return None
+        recorded = rec.get("backend_create_time")
+        if recorded is not None and abs(float(now_ct) - float(recorded)) > 1e-3:
+            return {"pid": pid, "observed": "create_time_mismatch"}
+        return None
+
     async def _reconcile_managed_claims(self, batch: int = 8) -> int:
         """[A82 Stage 3 rework, B2] Give every durably held managed attempt a
         live exit (boot + every poll pass, bounded batch, no background tasks).
@@ -1717,7 +1780,10 @@ class WorkerAgent:
         if self._claim_store is None:
             return 0
         done = 0
-        for rec in self._claim_store.list(limit=batch):
+        recs = self._claim_store.list(limit=batch, after=getattr(self, "_reconcile_cursor", None))
+        # M2: rotating cursor — a stuck record can never starve later ones.
+        self._reconcile_cursor = recs[-1].get("task_id") if len(recs) >= batch else None
+        for rec in recs:
             tid = str(rec.get("task_id") or "")
             tok = str(rec.get("claim_token") or "")
             if not tid or not tok or tid in self._active or tid in self._delivering:
@@ -1737,20 +1803,35 @@ class WorkerAgent:
                     if tid not in self._managed_claims:
                         done += 1  # definitively refused ⇒ record dropped
                     continue
+            proof: Optional[Dict[str, Any]] = None
             if rec.get("incarnation_id") != self._incarnation_id:
+                # B2: a previous process's attempt resolves ONLY with proof that
+                # the recorded backend process is gone; otherwise it is held for
+                # the operator route (no auto-resolve on a guess).
+                proof = self._backend_process_gone(rec)
+                if proof is None:
+                    logger.warning(
+                        "event=managed_recovery_needs_operator task_id=%s — no proof the "
+                        "previous backend process is gone (pid unrecorded / psutil "
+                        "unavailable / access denied / still alive)", tid,
+                    )
+                    continue
                 kind = "carrier_restarted"
             else:
                 session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
                 if not await self._backend_quiescent(str(rec.get("backend") or ""), session):
                     continue
                 kind = "backend_quiescent"
+            if tid in self._pending_result_delivery:
+                continue  # m1: a late result was captured during the probe
             try:
                 await asyncio.to_thread(
                     self._http.post,
                     f"/tasks/{tid}/quiescence",
                     {"node_id": self.cfg.node_id, "claim_token": tok, "quiescent": True,
                      "terminal": True, "terminal_status": "failed", "stop_evidence": kind,
-                     "observer_incarnation": self._incarnation_id},
+                     "observer_incarnation": self._incarnation_id,
+                     **({"process_proof": proof} if proof else {})},
                 )
             except Exception as e:
                 if self._is_definitive_refusal(e):
@@ -2361,10 +2442,17 @@ class WorkerAgent:
                 # [A82 Stage 3 rework, M3/B2] Re-send unacknowledged managed
                 # results and move durably held attempts (bounded batches; no
                 # background retry tasks). No-op when no carrier state exists.
-                if self._pending_result_delivery - self._delivering:
-                    await self._redeliver_spooled_results()
-                if self._claim_store is not None:
-                    await self._reconcile_managed_claims()
+                # M1: managed-path failures (disk full, bad state) are logged
+                # and never kill legacy polling.
+                try:
+                    if self._pending_result_delivery - self._delivering:
+                        await self._redeliver_spooled_results()
+                    if self._claim_store is not None:
+                        await self._reconcile_managed_claims()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.error("event=managed_poll_pass_failed", exc_info=True)
                 tasks = await self._fetch_pending()
                 if tasks:
                     empty_count = 0
@@ -2561,7 +2649,8 @@ class WorkerAgent:
                         node_id=self.cfg.node_id,
                         claim_token=claim_token,
                         incarnation_id=self._incarnation_id,
-                    )} if managed and claim_token else {}),
+                    ), "on_process": functools.partial(self._record_backend_process, task_id),
+                    } if managed and claim_token else {}),
                 )
 
                 # [A82 Stage 3 rework] Uncertain managed outcome (uncorrelated

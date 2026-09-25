@@ -163,12 +163,45 @@ class _Crash(Exception):
 
 
 def _crashing_backend():
-    async def run(task_row, backends, http=None, telemetry_sink=None, node_id="", ownership=None):
+    async def run(task_row, backends, http=None, telemetry_sink=None, node_id="", ownership=None, on_process=None):
+        if on_process is not None:
+            on_process({"pid": 424242, "create_time": 1000.0})  # the backend child
         raise _Crash("worker process died mid-turn")
     return run
 
 
+def fake_psutil(alive: Dict[int, float] = None, denied: bool = False):
+    """A stand-in `psutil` module (the live venv lacks psutil): `alive` maps
+    pid -> create_time of processes that exist."""
+    import types
+
+    mod = types.ModuleType("psutil")
+
+    class NoSuchProcess(Exception):
+        pass
+
+    class AccessDenied(Exception):
+        pass
+
+    class Process:
+        def __init__(self, pid):
+            if denied:
+                raise AccessDenied(pid)
+            if pid not in (alive or {}):
+                raise NoSuchProcess(pid)
+            self._ct = (alive or {})[pid]
+
+        def create_time(self):
+            return self._ct
+
+    mod.NoSuchProcess, mod.AccessDenied, mod.Process = NoSuchProcess, AccessDenied, Process
+    return mod
+
+
 def test_B2_crash_mid_turn_resolved_at_boot_by_new_incarnation(db, tmp_path, monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil(alive={}))  # pid 424242 is gone
     monkeypatch.setattr(agent_mod, "_execute_task", _crashing_backend())
     client = TestClient(ts.app)
     w1 = _worker(tmp_path, _ClientHTTP(client), incarnation="inc-old")
@@ -405,6 +438,7 @@ def test_P4b_late_reply_completes_the_held_turn_via_carrier(db, tmp_path, real_c
 # =========================================================================== #
 def test_P5_autonomous_continuation_not_served_as_managed_reply():
     fake = _FakeClient()
+    fake.defer_echo = True  # our prompt is queued behind the autonomous turn
     sess = _start_fake_session(fake)
     proactive: List[str] = []
     sess._on_proactive = lambda k, o: proactive.append(o.output)
@@ -421,8 +455,8 @@ def test_P5_autonomous_continuation_not_served_as_managed_reply():
         # The CLI's autonomous continuation for the finished task streams first…
         _emit_autonomous(sess, fake, _assistant("AUTONOMOUS"), _result("AUTONOMOUS"))
         time.sleep(0.1)
-        # …then the real reply to the managed query.
-        _emit_autonomous(sess, fake, _assistant("REAL"), _result("REAL"))
+        # …then the CLI begins OUR turn (echo) and replies.
+        _emit_autonomous(sess, fake, fake.echo_for(), _assistant("REAL"), _result("REAL"))
         t.join(2)
         assert out["o"].output == "REAL"
         assert proactive == ["AUTONOMOUS"]
@@ -497,7 +531,11 @@ def test_m3_definitive_4xx_dead_letters_and_enters_recovery(db, tmp_path, monkey
     _seed_turn(db, "m-3", "sm-3")
     _run_one(w, "m-3")
     assert _spooled(w) == []
-    assert len(list(w._result_spool.dead_dir.glob("*.json"))) == 1
+    # M2 exit: recovery acknowledged ⇒ the refused envelope left the budget;
+    # only the bounded `.reason` audit record remains.
+    assert len(list(w._result_spool.dead_dir.glob("*.json"))) == 0
+    assert len(list(w._result_spool.dead_dir.glob("*.json.reason"))) == 1
+    assert w._result_spool._retained_bytes() == 0
     assert "m-3" not in w._pending_result_delivery
     assert _row(db, "m-3")["status"] == "recovery_required"
     n_before = len(http.calls)
