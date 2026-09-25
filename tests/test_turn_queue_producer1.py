@@ -70,6 +70,8 @@ def _setup(tmp_path, monkeypatch, *, enroll=True, machine="worker-a"):
     ))
     if enroll:
         db.enroll_session("sess-1")
+    # A registered managed-capable carrier for the session's assignment.
+    _register_carrier(db, "worker-a")
     o = TaskOrchestrator.__new__(TaskOrchestrator)
     from src.services.session_store import SessionStore
 
@@ -81,6 +83,11 @@ def _setup(tmp_path, monkeypatch, *, enroll=True, machine="worker-a"):
     o._emit_event = lambda name, task, data=None: o.events.append(name)
     o._emit_turn_telemetry = lambda name, task, data=None, **k: o.events.append(name)
     return db, o
+
+
+def _register_carrier(db, node_id, managed=("claude",)):
+    db.upsert_node(node_id=node_id, tailscale_ip="", api_port=9001, backends=["claude"],
+                   max_concurrent=2, managed_backends=list(managed))
 
 
 def _submit(o, **kw):
@@ -225,15 +232,63 @@ def test_P1_07_end_to_end_admit_schedule_claim_complete(tmp_path, monkeypatch):
     assert json.loads(db.get_task(t2)["payload"])["action"] == "resume_session"
 
 
-def test_P1_07b_unpinned_session_assigned_to_this_host(tmp_path, monkeypatch):
+def test_P1_07b_unpinned_session_assigned_to_configured_local_carrier(tmp_path, monkeypatch):
+    """Adopted A87 finding 4: never the hostname — the registered local
+    carrier id (WORKER_NODE_ID) that will actually claim."""
     import socket
+    from config import config
 
     db, o = _setup(tmp_path, monkeypatch, machine=None)
+    _register_carrier(db, "local-daemon")
+    monkeypatch.setattr(config.mesh, "local_carrier_node_id", "local-daemon")
     t1 = _submit(o, operation_id="a")
+    assert db.get_task(t1)["machine_id"] == "local-daemon"
     asyncio.run(ts.run_scheduler_pass(db, o._prepare_managed_turn,
                                       allowance=ta.SharedWaitingAllowance()))
-    assert db.get_task(t1)["machine_id"] == socket.gethostname()
-    assert db.get_pending_managed_turns(node_id="some-remote-node", accept_unpinned=True) == []
+    row = db.get_task(t1)
+    assert row["status"] == "pending" and row["machine_id"] == "local-daemon"
+    assert row["machine_id"] != socket.gethostname()
+
+
+def test_P1_07c_no_claimable_carrier_refuses_admission(tmp_path, monkeypatch):
+    """Adopted A87 finding 4: a turn nobody can claim is refused (typed 503),
+    with no row and no Case lineage side effect."""
+    import socket
+    from config import config
+
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db, o = _setup(tmp_path, monkeypatch, machine=None)
+    monkeypatch.setattr(config.mesh, "local_carrier_node_id", "")
+    case_id = db.open_case(objective="obj", session_id="mgr-x", role="manager")
+    with pytest.raises(tq.CarrierUnavailableError) as ei:
+        _submit(o, join_case_id=case_id)
+    assert ei.value.status_code == 503
+    # host-pinned with no carrier registered under the hostname: refused too
+    db._conn().execute("UPDATE sessions SET machine_id = ? WHERE session_id='sess-1'",
+                       (socket.gethostname(),))
+    with pytest.raises(tq.CarrierUnavailableError):
+        _submit(o, join_case_id=case_id)
+    # pinned to a node that registered legacy-only (no managed backends)
+    _register_carrier(db, "legacy-node", managed=())
+    db._conn().execute("UPDATE sessions SET machine_id = 'legacy-node' WHERE session_id='sess-1'")
+    with pytest.raises(tq.CarrierUnavailableError):
+        _submit(o, join_case_id=case_id)
+    assert _managed_rows(db) == []
+    assert [l for l in db.list_flow_links(flow_run_id=case_id) if l["entity_type"] == "task"] == []
+
+
+def test_P1_07d_registration_persists_managed_capability(tmp_path, monkeypatch):
+    from src.control.node_registry import NodeCapabilities, NodeInfo, NodeRegistry
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(db_mod, "get_db", lambda: db)
+    reg = NodeRegistry()
+    reg.register(NodeInfo(node_id="n1", tailscale_ip="", api_port=9001, capabilities=NodeCapabilities(
+        backends=["claude", "codex"], queue_protocols=[0, 1], managed_backends=["claude"])))
+    reg.register(NodeInfo(node_id="n0", tailscale_ip="", api_port=9001, capabilities=NodeCapabilities(
+        backends=["claude"], queue_protocols=[0], managed_backends=["claude"])))
+    assert db.node_managed_backends("n1") == ["claude"]
+    assert db.node_managed_backends("n0") == []  # not protocol-1 ⇒ not managed
 
 
 # P1-08 --------------------------------------------------------------------- #
@@ -458,3 +513,15 @@ def test_P1_11d_presence_flag_lifecycle(tmp_path):
     assert MeshDB(str(tmp_path / "mesh.db")).any_session_enrolled() is True  # loaded at start
     db._conn().execute("UPDATE sessions SET turn_queue_enrolled = 0")
     assert db.refresh_enrollment_presence() is False  # cleared when none
+
+
+def test_P1_07e_carrier_gone_before_activation_backs_off(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    t1 = _submit(o, operation_id="a")
+    db._conn().execute("UPDATE nodes SET managed_backends = '[]' WHERE node_id = 'worker-a'")
+    res = asyncio.run(ts.run_scheduler_pass(db, o._prepare_managed_turn,
+                                            allowance=ta.SharedWaitingAllowance()))
+    row = db.get_task(t1)
+    assert res.activated == 0 and row["status"] == "queued"
+    assert row["blocked_reason"] == "prepare_failed: CarrierUnavailableError"
+    assert row["blocked_until"]

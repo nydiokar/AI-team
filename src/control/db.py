@@ -2870,6 +2870,29 @@ class MeshDB:
         except Exception as e:
             raise _turn_backing_error("mark_turn_blocked", task_id=task_id, err=e)
 
+    def count_slot_waiting_sessions(self) -> int:
+        """[A82 Stage 4a rework] Sessions whose queued work waits ONLY on their
+        own active slot holder (enrolled, unpaused, open). Their progress comes
+        from a completion, which is hinted in-process but may commit in another
+        process (out-of-process task server), so the scheduler rechecks them on
+        a bounded backoff. Bounded by the waiting subset."""
+        row = self._conn().execute(
+            """
+            SELECT COUNT(DISTINCT t.session_id)
+            FROM mesh_tasks t JOIN sessions s ON s.session_id = t.session_id
+            WHERE t.queue_protocol = 1 AND t.status = 'queued'
+              AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
+              AND COALESCE(s.status, '') != 'closed'
+              AND EXISTS (
+                  SELECT 1 FROM mesh_tasks a
+                  WHERE a.session_id = t.session_id
+                    AND a.queue_protocol = 1 AND a.session_id IS NOT NULL
+                    AND a.status IN ('pending', 'claimed', 'running', 'recovery_required')
+              )
+            """
+        ).fetchone()
+        return int(row[0] or 0)
+
     def next_turn_wake_at(self, now: Optional[str] = None) -> Optional[str]:
         """[A82 Stage 4a rework] Earliest future time a queued row becomes
         time-eligible again (`not_before` / `blocked_until`), or None. Bounded:
@@ -3126,6 +3149,23 @@ class MeshDB:
                 )
         except Exception as e:
             raise _turn_backing_error("enroll_session", session_id=sid, err=e)
+
+    def node_managed_backends(self, node_id: str) -> List[str]:
+        """[A82 Stage 4a rework] Backends the node REGISTERED as managed-capable
+        (persisted at registration, so any gateway process can resolve a carrier
+        assignment even when the task server runs out of process)."""
+        if not node_id:
+            return []
+        row = self._conn().execute(
+            "SELECT managed_backends FROM nodes WHERE node_id = ?", (node_id,),
+        ).fetchone()
+        if row is None:
+            return []
+        try:
+            vals = json.loads(row[0] or "[]")
+        except (TypeError, ValueError):
+            return []
+        return [v for v in vals if isinstance(v, str)] if isinstance(vals, list) else []
 
     def refresh_enrollment_presence(self) -> Optional[bool]:
         """[A82 Stage 4a rework] Reload the process-level presence flag with one
@@ -5798,6 +5838,7 @@ class MeshDB:
         repos: Optional[List[dict]] = None,
         models: Optional[Dict[str, List[dict]]] = None,
         incarnation_id: Optional[str] = None,
+        managed_backends: Optional[List[str]] = None,
     ) -> str:
         """Upsert a node record and return the new incarnation_id.
 
@@ -5816,8 +5857,9 @@ class MeshDB:
                     INSERT INTO nodes
                         (node_id, tailscale_ip, api_port, backends, max_concurrent,
                          status, last_heartbeat, registered_at, updated_at,
-                         projects_root, repos, model_capabilities, incarnation_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         projects_root, repos, model_capabilities, incarnation_id,
+                         managed_backends)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(node_id) DO UPDATE SET
                         tailscale_ip   = excluded.tailscale_ip,
                         api_port       = excluded.api_port,
@@ -5829,7 +5871,8 @@ class MeshDB:
                         projects_root  = excluded.projects_root,
                         repos          = excluded.repos,
                         model_capabilities = excluded.model_capabilities,
-                        incarnation_id = excluded.incarnation_id
+                        incarnation_id = excluded.incarnation_id,
+                        managed_backends = excluded.managed_backends
                     """,
                     (
                         node_id,
@@ -5845,6 +5888,7 @@ class MeshDB:
                         json.dumps(repos or []),
                         json.dumps(models or {}),
                         incarnation_id,
+                        json.dumps(list(managed_backends or [])),
                     ),
                 )
         except Exception as e:
@@ -7705,7 +7749,8 @@ def _get_migrations() -> List[tuple]:
         (35, """
             ALTER TABLE mesh_tasks ADD COLUMN intent_bytes INTEGER;
             ALTER TABLE mesh_tasks ADD COLUMN blocked_until TEXT;
-            ALTER TABLE mesh_tasks ADD COLUMN blocked_attempts INTEGER NOT NULL DEFAULT 0
+            ALTER TABLE mesh_tasks ADD COLUMN blocked_attempts INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE nodes ADD COLUMN managed_backends TEXT NOT NULL DEFAULT '[]'
         """),  # A82 Stage 4a: persisted stored-intent byte accounting for the
                # managed waiting budget (design §8) + blocked-head retry backoff
                # (design §5.2). NULL/0 on every legacy row. Unreleased (branch-only).
