@@ -6,11 +6,8 @@ x-runtime-security: &runtime-security
     - no-new-privileges:true
   cap_drop:
     - ALL
-  # The root bootstrap needs this one capability to read Docker Compose's
-  # host-owned 0600 secret before it drops to the unprivileged app user.
+  # Entry point starts as root only to drop permanently to ai-team.
   cap_add:
-    - DAC_OVERRIDE
-    - CHOWN
     - SETUID
     - SETGID
   tmpfs:
@@ -22,30 +19,46 @@ x-runtime-security: &runtime-security
       max-file: "5"
 
 x-controller-volumes: &controller-volumes
-  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/state:/app/state
-  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/logs:/app/logs
-  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/tasks:/app/tasks
-  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/results:/app/results
-  - ${DEPLOY_DATA_ROOT:?set DEPLOY_DATA_ROOT}/summaries:/app/summaries
+  - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/controller/state:/app/state
+  - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/controller/logs:/app/logs
+  - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/controller/tasks:/app/tasks
+  - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/controller/results:/app/results
+  - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/controller/summaries:/app/summaries
 
 services:
   task-server:
     <<: *runtime-security
+
     image: ${AI_TEAM_IMAGE:-ai-team:local}
+
     build:
       context: .
       target: runtime
+
     command: ["python", "server_main.py"]
+
+    env_file:
+      - ./.env
+
+    environment:
+      # Docker-internal topology only.
+      MESH_ENABLED: "true"
+      MESH_EMBEDDED_SERVER: "false"
+      MESH_BIND_HOST: "0.0.0.0"
+
     restart: unless-stopped
-    secrets:
-      - source: controller_env
-        target: role.env
-        mode: 0444
+
     volumes: *controller-volumes
+
     ports:
-      - "${MESH_BIND_IP:?set MESH_BIND_IP}:${MESH_PUBLISHED_PORT:-9002}:9002"
+      - "${MESH_TAILSCALE_IP:?set MESH_TAILSCALE_IP}:${MESH_TASK_SERVER_PORT:-9002}:${MESH_TASK_SERVER_PORT:-9002}"
+
     healthcheck:
-      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:9002/health', timeout=3).status == 200"]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"from urllib.request import urlopen; assert urlopen('http://127.0.0.1:' + '$${MESH_TASK_SERVER_PORT:-9002}' + '/health', timeout=3).status == 200\"",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -53,25 +66,44 @@ services:
 
   gateway:
     <<: *runtime-security
+
     image: ${AI_TEAM_IMAGE:-ai-team:local}
+
     build:
       context: .
       target: runtime
+
+    command: ["python", "main.py"]
+
+    env_file:
+      - ./.env
+
+    environment:
+      # Docker topology only. These override the process binding INSIDE
+      # the container, not the host exposure.
+      MESH_ENABLED: "true"
+      MESH_EMBEDDED_SERVER: "false"
+      CONTROL_API_ENABLED: "true"
+      CONTROL_API_BIND_HOST: "0.0.0.0"
+
+      # Dedicated Docker controller delegates work to workers.
+      GATEWAY_LOCAL_EXECUTION_ENABLED: "false"
+
     restart: unless-stopped
-    secrets:
-      - source: controller_env
-        target: role.env
-        mode: 0444
+
     volumes: *controller-volumes
+
     ports:
-      - "${CONTROL_BIND_IP:?set CONTROL_BIND_IP}:${CONTROL_PUBLISHED_PORT:-9003}:9003"
+      # Normally 127.0.0.1 because Tailscale Serve proxies this port.
+      - "${DOCKER_GATEWAY_PUBLISH_HOST:-127.0.0.1}:${DASHBOARD_PORT:-9003}:${DASHBOARD_PORT:-9003}"
+
     healthcheck:
-      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:9003/health', timeout=3).status == 200"]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"from urllib.request import urlopen; assert urlopen('http://127.0.0.1:' + '$${DASHBOARD_PORT:-9003}' + '/health', timeout=3).status == 200\"",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 20s
-
-secrets:
-  controller_env:
-    file: ${CONTROLLER_ENV_FILE:?set CONTROLLER_ENV_FILE}
