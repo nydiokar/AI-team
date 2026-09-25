@@ -125,10 +125,21 @@ _CONTINUE_INLINE_MAX = 48000
 # that, so no realistic caller (web composer, MCP Manager, Manager-internal
 # dispatch) can hit it; it only blunts runaway/accidental oversized posts.
 _MAX_INSTRUCTION_CHARS = 262144
-# [A82 Stage 4a] Compatibility-route serialized request ceiling (design §8):
-# above the worst-case valid body (262144-char prompt + 48000-char carry, JSON-
-# escaped) so no previously valid request is refused, but bounded pre-parse.
-_INSTRUCTIONS_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+# [A82 Stage 4a] Compatibility-route serialized request ceiling (design §8),
+# DERIVED from the existing character limits so no previously valid request is
+# refused: the worst JSON encoding of one character is 12 bytes (a non-BMP char
+# ASCII-escaped as a surrogate pair, e.g. \ud83d\ude00), applied to the prompt and
+# carry limits, plus a 256 KiB allowance for the envelope/other fields. ≈3.8 MiB
+# — a documented deviation from design §8's 2 MiB (which would refuse valid
+# 262144-char prompts of escaped non-BMP text).
+_JSON_MAX_BYTES_PER_CHAR = 12
+_INSTRUCTIONS_ENVELOPE_ALLOWANCE = 256 * 1024
+_INSTRUCTIONS_MAX_REQUEST_BYTES = (
+    _JSON_MAX_BYTES_PER_CHAR * (_MAX_INSTRUCTION_CHARS + _CONTINUE_INLINE_MAX)
+    + _INSTRUCTIONS_ENVELOPE_ALLOWANCE
+)
+# New turn-request route (Stage 6) whole-request cap (design §8: 256 KiB).
+_TURN_REQUESTS_MAX_REQUEST_BYTES = 256 * 1024
 # Body-read deadline for the capped routes (design §8 "Time").
 _BODY_READ_DEADLINE_SEC = 5.0
 
@@ -214,6 +225,7 @@ def _preparse_byte_guard(app: Any) -> None:
         rules=[
             (r"/api/turn-requests/[^/]+/resolve-recovery", 16 * 1024),
             (r"/api/instructions", _INSTRUCTIONS_MAX_REQUEST_BYTES),
+            (r"/api/sessions/[^/]+/turn-requests", _TURN_REQUESTS_MAX_REQUEST_BYTES),
         ],
         read_deadline_sec=_BODY_READ_DEADLINE_SEC,
     )

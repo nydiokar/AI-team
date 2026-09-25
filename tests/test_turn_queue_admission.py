@@ -374,3 +374,60 @@ def test_ADM04e_db_transaction_counts_legacy_even_with_cold_cache(tmp_path):
     with pytest.raises(tq.CapacityError):
         _admit(db, _req(op="new", body="n"), cap=5, allowance=cold)
     assert db.managed_waiting_totals()["count"] == 3
+
+
+def test_ADM04f_shared_blocking_put_never_leaks_raw_queuefull(tmp_path):
+    """A87 m9: the legacy throttle branch (blocking put under wait_for) must end
+    in TimeoutError (→ the orchestrator's RuntimeError('Task queue is full')),
+    never a raw QueueFull, when a managed reservation holds the allowance; and it
+    succeeds once room frees on another thread."""
+    shared = ta.SharedWaitingAllowance()
+
+    async def scenario():
+        q = SessionTaskQueue(2, lambda _t: "")
+        shared.register_legacy_probe(q.qsize)
+        q.share_allowance(shared)
+        q.put_nowait(_fake_task("l1"))
+        with shared.reserve(2):  # a racing managed admission holds the last slot
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(q.put(_fake_task("l2")), 0.2)
+            waiter = asyncio.ensure_future(asyncio.wait_for(q.put(_fake_task("l2")), 2))
+            await asyncio.sleep(0.1)
+        await waiter  # reservation released ⇒ put completes
+        assert q.qsize() == 2
+
+    asyncio.run(scenario())
+
+
+def test_ADM04g_orchestrator_throttle_maps_to_runtime_error(tmp_path, monkeypatch):
+    from src.orchestrator import TaskOrchestrator
+    import types
+
+    shared = ta.SharedWaitingAllowance()
+    o = TaskOrchestrator.__new__(TaskOrchestrator)
+
+    async def scenario():
+        o.task_queue = SessionTaskQueue(1, lambda _t: "")
+        shared.register_legacy_probe(o.task_queue.qsize)
+        o.task_queue.share_allowance(shared)
+        o.active_tasks = {}
+        o._emit_event = lambda *a, **k: None
+        o._emit_turn_telemetry = lambda *a, **k: None
+        o._record_flow_run_start = lambda t: None
+        o._record_flow_stage = lambda *a, **k: None
+        o._task_requires_local_execution = lambda t: False
+        task = types.SimpleNamespace(id="t1", metadata={"source": "runtime"},
+                                     priority=types.SimpleNamespace(value="medium"))
+        monkeypatch.setattr(asyncio, "wait_for", _fast_wait_for)
+        with shared.reserve(1):
+            with pytest.raises(RuntimeError, match="Task queue is full"):
+                await o._enqueue_task(task)
+
+    asyncio.run(scenario())
+
+
+_real_wait_for = asyncio.wait_for
+
+
+async def _fast_wait_for(aw, timeout):
+    return await _real_wait_for(aw, min(timeout, 0.2))
