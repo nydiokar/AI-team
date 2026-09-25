@@ -64,7 +64,28 @@ Coordinator: Manager session `a2a819ff55c0`. Built from repository + running-env
 ### Cross-job reconciliation gates (A87 owns these)
 - **A83.`waiting_workers` ↔ A84 outbox cutover:** A83 derives `waiting_workers` from the legacy wait-group substrate. When A84 moves new Cases to the outbox, A83 must report the correct *durable source per Case* without the UI label ever becoming control authority. → reviewed jointly at A84 cutover.
 - **A84 gated on A82:** do not start A84 until A82's queue ownership/admission contract is built AND independently reviewed (my gate). Correct sequencing, not idleness.
-- **A86 gated on A85:** A86 stays `blocked` until A85 produces *executable* acceptance evidence and I review it.
+- **A86 gated on A85:** A86 stays `blocked` until A85 produces *executable* acceptance evidence and I review it. — **SUPERSEDED 2026-09-25 (see scope change below).**
+
+### SCOPE CHANGE 2026-09-25 — container track retired (operator decision, Case 58c2f812)
+Operator decided **workers move OUT of the container**, and to drop the "SDK-upgrades-via-PR" job (A86).
+Coordinator ruling (cross-job contradiction the operator did not name explicitly): the container-exit
+retires the premise of **BOTH** container-track jobs, not just A86 —
+- **A86 → dead (dropped).** Its entire design keys on an immutable worker *image* as the release/rollback
+  identity (Renovate→PR→image→approval→drain→rollback-to-digest). No container ⇒ no image ⇒ not legible.
+  Zero code was written. Reversible from the packet if workers are ever re-containerized.
+- **A85 → deferred (premise retired).** Its only downstream consumer was A86; a container-acceptance
+  baseline has no purpose if workers aren't containerized. Built code preserved on
+  `feat/worker-container-acceptance` @ `1cd15b3` (unmerged, no docker ever run). Resume-or-drop pending
+  the operator's non-container worker plan.
+- **Session-runtime track (A82/A83/A84) is UNAFFECTED** — turn ordering / session-reason / completion
+  delivery are session+DB concerns independent of worker packaging. A82's carrier abstraction works for a
+  host-process worker exactly as for a container. Continue driving them.
+- **Surfaced successor need (not built, no job yet):** a non-container worker still needs *some* approved,
+  reversible runtime-version update path (host venv/package pin + approval + rollback) — a DIFFERENT
+  mechanism from image digests. To be authored once the operator's non-container worker plan exists; do
+  not silently morph A86 into it.
+
+### Cross-job reconciliation gates (A87 owns these)
 
 ### Execution environment facts (binding on every dispatched worker — packets predate the Docker migration)
 - **Python:** `/opt/venv/bin/python` (NOT `.venv/bin/python`, which no longer has a working interpreter). Editable install ⇒ `import src` resolves to THIS checkout — verify `src.__file__` before trusting any test.
@@ -96,6 +117,27 @@ Coordinator: Manager session `a2a819ff55c0`. Built from repository + running-env
 - **Independently re-verified (Manager, 5/5 pillars):** control_api.py:1789 root-cause window; db.py:2268 `complete_task` swallow + no ownership predicate; claude_driver.py:1127-1134 `cancel_inflight`-on-lock-conflict; SDK `TERMINAL_TASK_STATUSES`/`TaskNotificationMessage`/`TaskUpdatedMessage` present (types.py:1074/1115/1140) while driver code references none; `flow_run_id` added by `_ensure_substrate_columns` ALTER not a numbered migration.
 - **Three escalated decisions resolved** (recorded in A82 §15): (1) distinct managed no-interrupt send path, legacy byte-identical; (2) new strict completion helpers on the protocol-1 path only, legacy swallowing helpers untouched; (3) Stage-1 red scoped to assertion-capable suites, module-dependent suites accepted ImportError-red until Stage 2.
 - **Disposition:** Stage 1 (assertion-capable red tests) authorized on branch `feat/session-turn-queue`. **Stage 2+ (behavior-changing) remains gated on my review of Stage 1.** A82 is a multi-session build; A84 stays blocked until A82's ownership/admission contract is built AND reviewed.
+
+### A82 — Session turn queue — Stage 1 + Stage 2 gate 2026-09-25 — VERDICT: ACCEPT (Stage 3 authorized)
+- **Stage 1 (red tests) review:** ran the 6 suites myself → 40 red / 2 green (compat guards), zero skip/xfail; spot-checked SDK01 non-vacuity (drives real `_SDKSession`, asserts `interrupts==0` + fails via explicit `pytest.fail` on the missing managed path). ACCEPT.
+- **Stage 2 (schema + strict helpers + managed ownership) — commit `f2119c2` then remediation `0f6964d`:**
+  - Independently verified: migration 34 additive (all `ADD COLUMN`, no renumber of 1–33), legacy `complete_task`/`fail_task`/`send`/`cancel_inflight` byte-identical (zero deletions), flag-gated on `queue_protocol DEFAULT 0`; DB01–08 + ownership/SDK = 28→30 pass.
+  - **Fresh adversarial reviewer found a REAL introduced regression (REWORK):** migration-34's `claim_token`/`idempotency_key`/`admission_hash` leaked through the `SELECT *` in `list_tasks` → `/api/tasks` (design §6/§3.13 forbids serializing the claim credential); plus a latent Stage-4 bypass (`get_pending_tasks` lacked `queue_protocol=0`).
+  - **Remediated (narrow Manager correction):** `list_tasks` strips the three sensitive columns; `get_pending_tasks` guarded `AND queue_protocol=0`; OWN01b amended to the legacy/managed boundary (legacy mints no token) per §15 dec.2; added OWN01c leak regression. Re-run: 30 pass / 1 (SDK02, Stage-3). Legacy regressions (claim_reaper/task_state_truth/mesh_enqueue_affinity) 47 pass.
+  - **Reviewer re-verified the revised candidate from git objects in an isolated worktree:** ACCEPT — both findings closed, OWN01c non-vacuous (fails when the strip is removed), OWN01b faithful, legacy byte-identity preserved. Remaining out-of-scope: SDK02 + reviewer nit #3 (`send_managed` not gated on `is_quiescent`) — both the **managed-path correlation** facet, to be CLOSED in Stage 3; nit #4 (NULL-hash idempotency) benign.
+- **Disposition:** Stage 2 ACCEPTED. **Stage 3 (carrier protocol / result spool / recovery + managed correlation that closes SDK02) authorized.** A82 full-contract review still pending before A84 can start.
+
+### A82 — Session turn queue — Stage 3 gate 2026-09-25 — VERDICT: REWORK (commit `b309f84`)
+- **Manager independent verify:** 38 turn-queue tests pass (SDK02 flipped green); no legacy signature removed vs Stage 2. BUT those are unit tests of predicates — they do NOT prove the carrier protocol is wired end-to-end. Sent to a fresh adversarial reviewer with a hard falsification brief.
+- **Fresh adversarial reviewer → REWORK. Real defects (green tests hid them):**
+  - **B1 (blocker):** `_deliver_managed_result` (`worker/agent.py:1219`) POSTs to legacy `/tasks/{id}/result`, not `/result-managed` → the `{status:accepted}` receipt never matches `task_id`+`claim_token` → spool never pruned → **session ownership held forever**; also routes through the swallowing `complete_task` (bypasses atomic `complete_turn`, §15 dec.2).
+  - **B2 (blocker):** worker still polls `/tasks/pending` + claims `/claim` (protocol-0) → `is_managed` always False → the entire managed worker path is **dead at the integration seam**; §7 "carrier protocol" gate + the required fake-carrier remote-native-ID integration test are UNMET.
+  - **M1/M2/M3 (major, dead code):** `_managed_shutdown_release_ok` (WRK06 drain guard), `_reserve_result_envelope` (WRK05 pre-start reservation / 128MiB budget), and boot-replay re-delivery are never called → the safety properties aren't actually enforced (drain still releases a running backend; "run-and-discard" possible; unacked result never re-sent).
+  - **M4 (major):** `is_quiescent` checked on the caller thread, not the SDK loop → TOCTOU vs binding §6 "reserve on the SDK loop before submitting."
+  - **M5/M6 (major, incl. LEGACY regression):** a bare terminal `ResultMessage` reply hits the new `_dispatch` gate → routes to proactive → pending future never fulfilled → deadlock → after `sdk_turn_timeout` triggers the **forbidden `cancel_inflight`**; and because `_dispatch` is shared, this **regresses the legacy `send` path** (§15 dec.1). Proactive suites don't cover bare-result, so they didn't catch it.
+  - Minors m1 (`/quiescence` accepts any non-null result as evidence), m2 (stale-receipt echoes unverified token).
+  - **Holds up:** DB claim/start/complete/recovery fencing is real; SDK02 reader-gate is non-vacuous; flag-off/poll isolation + credential-strip on `get_pending_managed_turns`; `classify_completion_outcome` behavior-preserving.
+- **Disposition: REWORK sent back to the Stage-3 worker** (has context) with the full findings. Priority: M5/M6 (legacy regression + forbidden interrupt) and M4 (loop-thread reservation) are correctness-critical; B1/B2 + M1/M2/M3 must wire the managed path and add a fake-carrier integration test. Re-verify + re-review after remediation. Stage 3 NOT accepted; A84 stays blocked.
 
 ## Milestone (burndown)
 

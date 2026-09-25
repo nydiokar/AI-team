@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import List
 
 
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
 @dataclass
 class WorkerConfig:
     node_id: str
@@ -19,6 +23,18 @@ class WorkerConfig:
     max_concurrent: int = 2
     projects_root: str = ""
     accept_unpinned: bool = True
+    # EXPLICIT transport semantics (never inferred from network identity):
+    # True only for a legacy single-host deployment where this worker writes
+    # DIRECTLY into the controller's events.ndjson (same process / shared
+    # filesystem). Under Docker the worker and controller are separate
+    # containers with separate volumes even on the same host, so this stays
+    # False and activity is always forwarded over the explicit HTTP interface.
+    shares_controller_fs: bool = False
+    # Harness-side quota observation: the controller container has no Claude
+    # binary/credentials, so quota telemetry is read here (where the harness
+    # lives) and shipped to the controller. Free control request, not a turn.
+    quota_observe_enabled: bool = False
+    quota_observe_interval_sec: int = 300
 
     @classmethod
     def from_env(cls) -> "WorkerConfig":
@@ -33,8 +49,27 @@ class WorkerConfig:
         projects_root = os.getenv("WORKER_PROJECTS_ROOT", "")
         accept_unpinned = (
             os.getenv("WORKER_ACCEPT_UNPINNED", "true").strip().lower()
-            not in {"0", "false", "no", "off"}
+            not in _FALSE
         )
+        shares_controller_fs = (
+            os.getenv("WORKER_SHARES_CONTROLLER_FS", "").strip().lower() in _TRUE
+        )
+
+        # Quota observation defaults ON for a claude-capable worker whenever the
+        # controller's coordinator is enabled; WORKER_QUOTA_OBSERVE forces it
+        # either way for per-node control.
+        coordinator_on = (
+            os.getenv("QUOTA_COORDINATOR_ENABLED", "").strip().lower() in _TRUE
+        )
+        observe_override = os.getenv("WORKER_QUOTA_OBSERVE", "").strip().lower()
+        if observe_override in _TRUE:
+            quota_observe_enabled = True
+        elif observe_override in _FALSE:
+            quota_observe_enabled = False
+        else:
+            quota_observe_enabled = coordinator_on and ("claude" in backends)
+        quota_observe_interval_sec = int(os.getenv("QUOTA_OBSERVE_INTERVAL_SEC") or 300)
+
         return cls(
             node_id=node_id,
             worker_token=token,
@@ -45,6 +80,9 @@ class WorkerConfig:
             max_concurrent=max_concurrent,
             projects_root=projects_root,
             accept_unpinned=accept_unpinned,
+            shares_controller_fs=shares_controller_fs,
+            quota_observe_enabled=quota_observe_enabled,
+            quota_observe_interval_sec=quota_observe_interval_sec,
         )
 
     def list_repos(self) -> List[dict]:
