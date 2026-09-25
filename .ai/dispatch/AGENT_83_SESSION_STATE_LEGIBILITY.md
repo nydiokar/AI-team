@@ -5,8 +5,8 @@ status: done
 owner: mgr-a2a819ff:worker
 depends_on: []
 results_ref: DISPATCH_LOG.md#A83
-evidence: tests/test_session_reason.py,tests/test_session_reason_view.py,web/src/transport/sessionReason.test.ts,src/core/session_reason.py
-updated_at: "2026-09-25T08:43:28.300058+00:00"
+evidence: tests/test_session_reason.py
+updated_at: "2026-09-25T08:45:04.479434+00:00"
 ```
 
 # DISPATCH — A83 · Session state legibility (primary state + secondary reason)
