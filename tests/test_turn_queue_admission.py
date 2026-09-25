@@ -359,3 +359,18 @@ def test_ADM10_edit_reaccounts_bytes_and_holds_cap(tmp_path):
         db.revise_turn(a, 2, body="y" * tq.MAX_INTENT_BYTES_PER_ROW)
     row = db.get_task(a)
     assert row["revision"] == 2 and row["intent_bytes"] == grown
+
+
+def test_ADM04e_db_transaction_counts_legacy_even_with_cold_cache(tmp_path):
+    """After a restart the in-process managed cache is cold (0) while managed
+    rows already wait in the DB; the admission TRANSACTION must still add the
+    legacy occupancy to the durable managed count (the authoritative check)."""
+    db = _db(tmp_path)
+    _session(db)
+    for i in range(3):
+        _admit(db, _req(op=f"pre{i}", body=f"p{i}"), cap=50)
+    cold = ta.SharedWaitingAllowance()
+    cold.register_legacy_probe(lambda: 2)
+    with pytest.raises(tq.CapacityError):
+        _admit(db, _req(op="new", body="n"), cap=5, allowance=cold)
+    assert db.managed_waiting_totals()["count"] == 3

@@ -291,7 +291,11 @@ def test_SCH07_loop_hint_and_lazy_fallback(tmp_path):
             _session(db, f"o{i}")
             _q(db, f"o{i}", "x")
         ts.notify_turn_queue_changed()
-        await asyncio.sleep(0.2)
+        for _ in range(60):  # timing-robust: wait for the hinted pass(es)
+            await asyncio.sleep(0.05)
+            totals = db.managed_waiting_totals()
+            if totals["count"] - totals["queued"] == 9:
+                break
         assert db.get_task(t1)["status"] == "pending"
         # A blocked head keeps the bounded fallback alive (queued rows exist)...
         before = sched.passes
@@ -319,3 +323,18 @@ def test_SCH08_expired_system_intent_withdrawn_humans_kept(tmp_path):
     res = _pass(db, _Prep())
     assert db.get_task(sys_t)["status"] == "withdrawn" and res.withdrawn == 1
     assert db.get_task(hum_t)["status"] == "pending"
+
+
+def test_SCH02b_paused_or_unenrolled_heads_do_not_consume_the_limit(tmp_path):
+    """Session-state eligibility is applied in the head query, BEFORE LIMIT:
+    26 older paused/unenrolled heads must not starve a newer eligible one."""
+    db = _db(tmp_path)
+    for i in range(26):
+        sid = f"held-{i:02d}"
+        _session(db, sid)
+        _q(db, sid, "x")
+        col = "turn_queue_paused=1" if i % 2 else "turn_queue_enrolled=0"
+        db._conn().execute(f"UPDATE sessions SET {col} WHERE session_id=?", (sid,))
+    _session(db, "free")
+    t = _q(db, "free", "go")
+    assert [h["id"] for h in db.select_eligible_turn_heads(25)] == [t]
