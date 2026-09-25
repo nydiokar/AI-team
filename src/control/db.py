@@ -1371,6 +1371,8 @@ class MeshDB:
         # the legacy path does no enrollment-marker read while none exists.
         self._any_enrolled: Optional[bool] = None
         self._enroll_generation = 0
+        self._enrolls_in_flight = 0
+        self._presence_lock = threading.Lock()
         self.refresh_enrollment_presence()
 
     # ------------------------------------------------------------------
@@ -2438,6 +2440,8 @@ class MeshDB:
         not_before: Optional[str] = None,
         expires_at: Optional[str] = None,
         require_enrolled: bool = False,
+        lineage_token: Optional[str] = None,
+        lineage_lease_sec: float = 30.0,
         external_waiting: int = 0,
         fleet_cap: Optional[int] = None,
         per_session_cap: Optional[int] = None,
@@ -2526,7 +2530,8 @@ class MeshDB:
                 if idempotency_key is not None:
                     existing = conn.execute(
                         """
-                        SELECT id, status, revision, admission_hash, queue_sequence
+                        SELECT id, status, revision, admission_hash, queue_sequence,
+                               lineage_state
                         FROM mesh_tasks
                         WHERE queue_protocol = 1 AND idempotency_scope IS ?
                           AND idempotency_key = ?
@@ -2545,6 +2550,7 @@ class MeshDB:
                             "revision": existing["revision"],
                             "queue_sequence": existing["queue_sequence"],
                             "idempotent_replay": True, "coalesced": False,
+                            "lineage_pending": existing["lineage_state"] == "pending",
                         }
                 # 2. Active coalesce (internal producers only, design §3/§7).
                 if admitted is None and coalesce_key is not None:
@@ -2641,9 +2647,9 @@ class MeshDB:
                             queue_protocol, queue_sequence, turn_source, sender_session_id,
                             turn_kind, idempotency_scope, idempotency_key, admission_hash,
                             revision, not_before, expires_at, coalesce_key, flow_run_id,
-                            intent_bytes
+                            intent_bytes, lineage_state, lineage_token, lineage_lease_until
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?,
-                                  1, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                                  1, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             new_id, sid, machine_id, row_backend, action,
@@ -2652,12 +2658,15 @@ class MeshDB:
                             idempotency_scope, idempotency_key, admission_hash,
                             not_before, expires_at, coalesce_key, flow_run_id,
                             intent_bytes,
+                            "pending" if lineage_token else None,
+                            lineage_token,
+                            _iso_in(lineage_lease_sec) if lineage_token else None,
                         ),
                     )
                     admitted = {
                         "task_id": new_id, "status": "queued", "revision": 1,
                         "queue_sequence": sequence, "idempotent_replay": False,
-                        "coalesced": False,
+                        "coalesced": False, "lineage_pending": bool(lineage_token),
                     }
         except TurnQueueError:
             raise
@@ -2676,24 +2685,54 @@ class MeshDB:
             queue_sequence=admitted["queue_sequence"],
             idempotent_replay=admitted["idempotent_replay"],
             coalesced=admitted["coalesced"],
+            lineage_pending=bool(admitted.get("lineage_pending")),
         )
 
+    def claim_turn_lineage(self, task_id: str, token: str, lease_sec: float = 30.0) -> bool:
+        """[A82 Stage 4a rework 2] CAS-claim the durable "lineage pending" state
+        of a QUEUED row for a recovery writer: only when its lease expired (the
+        admitting writer died or stalled). Returns True if this token owns it."""
+        now = _now()
+        try:
+            with self._managed_write("claim_turn_lineage") as conn:
+                conn.execute(
+                    """
+                    UPDATE mesh_tasks
+                    SET lineage_token = ?, lineage_lease_until = ?, updated_at = ?
+                    WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
+                      AND lineage_state = 'pending'
+                      AND (lineage_lease_until IS NULL OR lineage_lease_until <= ?)
+                    """,
+                    (token, _iso_in(lease_sec), now, task_id, now),
+                )
+                return conn.execute("SELECT changes()").fetchone()[0] > 0
+        except TurnQueueError:
+            raise
+        except Exception as e:
+            raise _turn_backing_error("claim_turn_lineage", task_id=task_id, err=e)
+
     def finalize_turn_lineage(
-        self, task_id: str, flow_run_id: Optional[str], metadata: Dict[str, Any],
+        self, task_id: str, token: str, flow_run_id: Optional[str], metadata: Dict[str, Any],
     ) -> bool:
-        """[A82 Stage 4a rework] Attach the post-admission Case membership and
-        lineage metadata to a still-QUEUED managed row and release its lineage
-        hold (`not_before`). Re-accounts `intent_bytes`. Returns True on update."""
+        """[A82 Stage 4a rework 2] Commit Case membership + lineage metadata and
+        clear the durable "lineage pending" state — a CAS on
+        `status='queued' AND lineage_state='pending' AND lineage_token=token`.
+        A lineage-pending row can never be activated, and an activated row is
+        never lineage-pending, so a finalize can never write into an activated
+        (frozen) payload. Returns True on commit; False ⇒ the caller lost the
+        lease (a recovery writer owns it now) and must not assume success."""
         try:
             with self._managed_write("finalize_turn_lineage") as conn:
                 conn.execute(
                     """
                     UPDATE mesh_tasks
-                    SET flow_run_id = ?, not_before = NULL, updated_at = ?,
+                    SET flow_run_id = ?, lineage_state = 'done', lineage_token = NULL,
+                        lineage_lease_until = NULL, updated_at = ?,
                         payload = json_set(COALESCE(payload, '{}'), '$.metadata', json(?))
                     WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
+                      AND lineage_state = 'pending' AND lineage_token = ?
                     """,
-                    (flow_run_id, _now(), json.dumps(metadata, default=str), task_id),
+                    (flow_run_id, _now(), json.dumps(metadata, default=str), task_id, token),
                 )
                 changed = conn.execute("SELECT changes()").fetchone()[0] > 0
                 if changed:
@@ -2708,6 +2747,47 @@ class MeshDB:
             raise
         except Exception as e:
             raise _turn_backing_error("finalize_turn_lineage", task_id=task_id, err=e)
+
+    def turn_lineage_state(self, task_id: str) -> Optional[str]:
+        row = self._conn().execute(
+            "SELECT lineage_state FROM mesh_tasks WHERE id = ? AND queue_protocol = 1",
+            (task_id,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def list_lineage_recovery(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """[A82 Stage 4a rework 2] Queued lineage-pending rows whose writer lease
+        expired (crash / stall). Bounded: waiting subset, LIMIT."""
+        rows = self._conn().execute(
+            """
+            SELECT * FROM mesh_tasks
+            WHERE queue_protocol = 1 AND status = 'queued' AND lineage_state = 'pending'
+              AND (lineage_lease_until IS NULL OR lineage_lease_until <= ?)
+            ORDER BY created_at ASC, id ASC LIMIT ?
+            """,
+            (_now(), max(0, int(limit))),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def existing_task_lineage(self, task_id: str) -> Optional[Dict[str, str]]:
+        """[A82 Stage 4a rework 2] Lineage already written for ``task_id`` by an
+        earlier (crashed) writer, so recovery never births a second Case:
+        a flow_runs row created FOR the task (birth / dispatch record), else a
+        Case membership link (join / attach). Index-served."""
+        row = self._conn().execute(
+            "SELECT flow_run_id FROM flow_runs WHERE task_id = ? ORDER BY created_at LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is not None:
+            return {"kind": "own_flow", "flow_run_id": row[0]}
+        row = self._conn().execute(
+            "SELECT flow_run_id FROM flow_links WHERE entity_type = 'task' AND entity_id = ? "
+            "AND role = 'task' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is not None:
+            return {"kind": "member", "flow_run_id": row[0]}
+        return None
 
     def managed_waiting_totals(self) -> Dict[str, int]:
         """[A82 Stage 4a] Fleet managed queued+pending count and persisted
@@ -2768,6 +2848,7 @@ class MeshDB:
             WHERE t.queue_protocol = 1 AND t.status = 'queued'
               AND (t.not_before IS NULL OR t.not_before <= ?)
               AND (t.blocked_until IS NULL OR t.blocked_until <= ?)
+              AND (t.lineage_state IS NULL OR t.lineage_state != 'pending')
               AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
               AND COALESCE(s.status, '') != 'closed'
               AND NOT EXISTS (
@@ -2824,12 +2905,14 @@ class MeshDB:
         try:
             with self._managed_write("activate_turn", deadline) as conn:
                 row = conn.execute(
-                    "SELECT session_id, status, revision, prompt FROM mesh_tasks "
+                    "SELECT session_id, status, revision, prompt, lineage_state FROM mesh_tasks "
                     "WHERE id = ? AND queue_protocol = 1",
                     (task_id,),
                 ).fetchone()
                 if row is None or row["status"] != "queued":
                     return "gone"
+                if row["lineage_state"] == "pending":
+                    return "ineligible"  # never activate before Case lineage
                 if int(row["revision"]) != int(expected_revision):
                     return "stale"
                 srow = conn.execute(
@@ -2871,6 +2954,7 @@ class MeshDB:
                         intent_bytes = ?, blocked_reason = NULL,
                         blocked_until = NULL, blocked_attempts = 0
                     WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
+                      AND (lineage_state IS NULL OR lineage_state != 'pending')
                       AND revision = ?
                     """,
                     (now, now, action, payload_json, machine_id,
@@ -2932,7 +3016,10 @@ class MeshDB:
         row = self._conn().execute(
             """
             SELECT MIN(w) FROM (
-                SELECT max(COALESCE(not_before, ''), COALESCE(blocked_until, '')) AS w
+                SELECT CASE WHEN lineage_state = 'pending'
+                            THEN COALESCE(lineage_lease_until, '')
+                            ELSE max(COALESCE(not_before, ''), COALESCE(blocked_until, ''))
+                       END AS w
                 FROM mesh_tasks WHERE queue_protocol = 1 AND status = 'queued'
             ) WHERE w > ?
             """,
@@ -2964,6 +3051,7 @@ class MeshDB:
                             SELECT NULLIF(s.machine_id, '') FROM sessions s
                             WHERE s.session_id = mesh_tasks.session_id))
                     WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
+                      AND (lineage_state IS NULL OR lineage_state != 'pending')
                     """,
                     (now, now, task_id),
                 )
@@ -3169,8 +3257,10 @@ class MeshDB:
             return
         # Raised BEFORE the marker commits: a legacy admission racing the
         # enrollment then reads the marker instead of skipping it.
-        self._enroll_generation += 1
-        self._any_enrolled = True
+        with self._presence_lock:
+            self._enroll_generation += 1
+            self._enrolls_in_flight += 1
+            self._any_enrolled = True
         try:
             with self._write() as conn:
                 conn.execute(
@@ -3180,15 +3270,26 @@ class MeshDB:
                 )
         except Exception as e:
             raise _turn_backing_error("enroll_session", session_id=sid, err=e)
+        finally:
+            # AFTER the commit: re-raise and bump again, so any refresh that read
+            # before the commit can never lower the flag afterwards.
+            with self._presence_lock:
+                self._enroll_generation += 1
+                self._enrolls_in_flight -= 1
+                self._any_enrolled = True
 
     def node_managed_backends(self, node_id: str) -> List[str]:
         """[A82 Stage 4a rework] Backends the node REGISTERED as managed-capable
         (persisted at registration, so any gateway process can resolve a carrier
-        assignment even when the task server runs out of process)."""
+        assignment even when the task server runs out of process). Only a LIVE
+        carrier counts (rework 2): status online AND a heartbeat within
+        `mesh.node_heartbeat_timeout_sec`; an offline/stale node ⇒ []."""
         if not node_id:
             return []
         row = self._conn().execute(
-            "SELECT managed_backends FROM nodes WHERE node_id = ?", (node_id,),
+            "SELECT managed_backends FROM nodes WHERE node_id = ? "
+            "AND status = 'online' AND last_heartbeat >= ?",
+            (node_id, _carrier_fresh_cutoff()),
         ).fetchone()
         if row is None:
             return []
@@ -3198,20 +3299,63 @@ class MeshDB:
             return []
         return [v for v in vals if isinstance(v, str)] if isinstance(vals, list) else []
 
+    def requeue_turns_on_dead_carriers(self, limit: int = 25) -> List[str]:
+        """[A82 Stage 4a rework 2] A managed row activated to a carrier that then
+        went offline / stopped heart-beating must not wedge silently. An
+        UNCLAIMED `pending` row (nothing started, no token) on such a carrier is
+        returned to `queued` with an operator-visible `blocked_reason`
+        (`carrier_offline: <node>`) and the blocked-head backoff; activation
+        re-resolves the assignment when a live carrier exists again (a pinned
+        session is never relocated). Claimed/running rows are the Stage-3
+        recovery machinery's, untouched. Bounded (LIMIT)."""
+        cutoff = _carrier_fresh_cutoff()
+        moved: List[str] = []
+        try:
+            with self._managed_write("requeue_turns_on_dead_carriers") as conn:
+                rows = conn.execute(
+                    """
+                    SELECT t.id, t.machine_id FROM mesh_tasks t
+                    LEFT JOIN nodes n ON n.node_id = t.machine_id
+                    WHERE t.queue_protocol = 1 AND t.status = 'pending'
+                      AND (n.node_id IS NULL OR n.status != 'online' OR n.last_heartbeat < ?)
+                    LIMIT ?
+                    """,
+                    (cutoff, max(0, int(limit))),
+                ).fetchall()
+                for r in rows:
+                    conn.execute(
+                        "UPDATE mesh_tasks SET status = 'queued', activated_at = NULL, "
+                        "updated_at = ? WHERE id = ? AND queue_protocol = 1 AND status = 'pending'",
+                        (_now(), r["id"]),
+                    )
+                    if conn.execute("SELECT changes()").fetchone()[0]:
+                        _apply_turn_block(conn, r["id"], f"carrier_offline: {r['machine_id']}")
+                        moved.append(r["id"])
+            return moved
+        except TurnQueueError:
+            raise
+        except Exception as e:
+            raise _turn_backing_error("requeue_turns_on_dead_carriers", err=e)
+
     def refresh_enrollment_presence(self) -> Optional[bool]:
         """[A82 Stage 4a rework] Reload the process-level presence flag with one
         bounded query. On failure the previous value is kept (None = unknown ⇒
         callers treat enrollment as possibly present and fail closed)."""
-        generation = self._enroll_generation
+        with self._presence_lock:
+            generation = self._enroll_generation
         try:
             row = self._conn().execute(
                 "SELECT 1 FROM sessions WHERE turn_queue_enrolled = 1 LIMIT 1"
             ).fetchone()
             present = row is not None
-            # Never lower the flag across a concurrently starting enrollment
-            # (its marker may not have committed when we read).
-            if present or generation == self._enroll_generation:
-                self._any_enrolled = present
+            with self._presence_lock:
+                # Never lower the flag while an enrollment is in flight or one
+                # started/committed since our read began (its marker may not
+                # have been visible to the read).
+                if present or (
+                    generation == self._enroll_generation and not self._enrolls_in_flight
+                ):
+                    self._any_enrolled = present
         except Exception as e:
             logger.warning("event=turn_queue_enrollment_presence_failed err=%s", e)
         return self._any_enrolled
@@ -3305,7 +3449,8 @@ class MeshDB:
                     UPDATE mesh_tasks
                     SET status = 'claimed', claim_token = ?, claimed_by = ?,
                         claim_carrier_kind = ?, claim_incarnation = ?,
-                        claimer_incarnation = ?, claimed_at = ?, updated_at = ?
+                        claimer_incarnation = ?, claimed_at = ?, updated_at = ?,
+                        blocked_reason = NULL
                     WHERE id = ? AND queue_protocol = 1
                       AND status IN ('pending', 'claimed')
                       AND machine_id = ?
@@ -7781,7 +7926,10 @@ def _get_migrations() -> List[tuple]:
             ALTER TABLE mesh_tasks ADD COLUMN intent_bytes INTEGER;
             ALTER TABLE mesh_tasks ADD COLUMN blocked_until TEXT;
             ALTER TABLE mesh_tasks ADD COLUMN blocked_attempts INTEGER NOT NULL DEFAULT 0;
-            ALTER TABLE nodes ADD COLUMN managed_backends TEXT NOT NULL DEFAULT '[]'
+            ALTER TABLE nodes ADD COLUMN managed_backends TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE mesh_tasks ADD COLUMN lineage_state TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN lineage_token TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN lineage_lease_until TEXT
         """),  # A82 Stage 4a: persisted stored-intent byte accounting for the
                # managed waiting budget (design §8) + blocked-head retry backoff
                # (design §5.2). NULL/0 on every legacy row. Unreleased (branch-only).
@@ -7942,6 +8090,20 @@ def _apply_turn_block(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
         (bounded, attempts, until, _now(), task_id),
     )
     return row["blocked_reason"] != bounded
+
+
+def _carrier_fresh_cutoff() -> str:
+    """Oldest heartbeat that still counts as a live carrier."""
+    try:
+        from config import config as _cfg
+        timeout = float(_cfg.mesh.node_heartbeat_timeout_sec)
+    except Exception:
+        timeout = 90.0
+    return (datetime.now(tz=timezone.utc) - timedelta(seconds=timeout)).isoformat()
+
+
+def _iso_in(seconds: float) -> str:
+    return (datetime.now(tz=timezone.utc) + timedelta(seconds=float(seconds))).isoformat()
 
 
 def _canonical_admission_hash(request: Dict[str, Any]) -> str:

@@ -9594,14 +9594,13 @@ Generated from user description: {description}
         backend = self._resolve_task_backend(task)
         carrier = self._managed_carrier_assignment(self.session_store.get(sid), backend)
         # Admit FIRST (no side effect before the durable decision): a refused
-        # admission leaves no Case lineage, and of concurrent same-operation
-        # requests only the one that inserted the row writes lineage (the other
-        # gets the idempotent replay). The row carries a short lineage hold
-        # (`not_before`) so it cannot activate before its Case membership and
-        # lineage metadata are attached; a crash in between only delays it.
-        hold_until = (
-            datetime.now(tz=timezone.utc) + timedelta(seconds=self._LINEAGE_HOLD_SEC)
-        ).isoformat()
+        # admission leaves no Case lineage. The row is inserted in the DURABLE
+        # "lineage pending" state (never activatable) under this request's
+        # writer token + lease; only after the Case lineage is written and
+        # finalized (CAS on that state) can it be scheduled. A crash in between
+        # is repaired by the scheduler's lineage recovery from the persisted
+        # metadata — the turn never runs without its Case link.
+        token = uuid.uuid4().hex
         request = AdmissionRequest(
             session_id=sid,
             task_id=task.id,
@@ -9615,28 +9614,19 @@ Generated from user description: {description}
             operation_id=operation_id,
             idempotency_scope=scope,
             admission_hash=admission_hash,
-            not_before=hold_until,
+            lineage_token=token,
         )
         admission = await admit_turn_async(
             db, request, fleet_cap=int(config.system.max_queue_size),
         )
         if admission.idempotent_replay:
+            if admission.lineage_pending:
+                # Never ack a replay without lineage: wait (bounded) for the live
+                # writer, or run the recovery ourselves once its lease expired.
+                await self._await_or_recover_lineage(str(admission))
             return admission
         # COMMITTED and ours — lineage exactly once (join / attach / birth).
-        flow_run_id = self._record_flow_run_start(task)
-        meta = task.metadata or {}
-        case_id = (
-            meta.get(self._CASE_ID_META_KEY)
-            or meta.get(self._FLOW_RUN_META_KEY)
-            or flow_run_id
-        )
-        try:
-            await asyncio.to_thread(
-                db.finalize_turn_lineage, str(admission),
-                str(case_id) if case_id else None, dict(meta),
-            )
-        except Exception as e:  # noqa: BLE001 — the hold expires; lineage is best-effort as in legacy
-            logger.warning("event=managed_turn_lineage_failed task_id=%s err=%s", admission, e)
+        flow_run_id = await self._write_managed_lineage(task, str(admission), token)
         logger.info(
             "event=managed_turn_admitted task_id=%s session_id=%s source=%s seq=%s",
             admission, sid, source, admission.queue_sequence,
@@ -9656,7 +9646,93 @@ Generated from user description: {description}
         notify_turn_queue_changed()
         return admission
 
-    _LINEAGE_HOLD_SEC = 30
+    async def _write_managed_lineage(self, task: Task, turn_id: str, token: str) -> Optional[str]:
+        """Write the Case lineage for a lineage-pending managed row and finalize
+        it under the CAS (``lineage_token``). Idempotent against a crashed
+        earlier writer: an already-created own flow (birth / dispatch record)
+        or membership link is REUSED — never a second Case. Raises typed 503 if
+        the lease was lost (a recovery writer owns it) or finalize failed."""
+        from src.control.db import get_db
+        from src.control.turn_queue import BackingStoreError
+
+        db = get_db()
+        prior = await asyncio.to_thread(db.existing_task_lineage, turn_id)
+        if prior is None:
+            flow_run_id = self._record_flow_run_start(task)
+        else:
+            flow_run_id = prior["flow_run_id"]
+            if prior["kind"] == "own_flow":
+                self._stash_task_meta(task, self._FLOW_RUN_META_KEY, flow_run_id)
+                self._record_flow_link(
+                    flow_run_id, "task", turn_id, "root_task", created_by="system",
+                )
+            else:
+                self._stash_task_meta(task, self._CASE_ID_META_KEY, flow_run_id)
+        meta = task.metadata or {}
+        case_id = (
+            meta.get(self._CASE_ID_META_KEY)
+            or meta.get(self._FLOW_RUN_META_KEY)
+            or flow_run_id
+        )
+        ok = await asyncio.to_thread(
+            db.finalize_turn_lineage, turn_id, token,
+            str(case_id) if case_id else None, dict(meta),
+        )
+        if not ok:
+            if await asyncio.to_thread(db.turn_lineage_state, turn_id) == "done":
+                return flow_run_id  # another writer finalized the same lineage
+            raise BackingStoreError(
+                "managed turn lineage not finalized (lease lost); recovery will retry",
+                task_id=turn_id,
+            )
+        return flow_run_id
+
+    async def _await_or_recover_lineage(self, turn_id: str) -> None:
+        """A replay that finds its row lineage-pending: wait (bounded) for the
+        live writer; if its lease expires, recover it here. Otherwise refuse
+        with a typed 503 — never acknowledge a turn whose Case link is missing."""
+        from src.control.db import get_db
+        from src.control.turn_queue import BackingStoreError
+
+        db = get_db()
+        deadline = asyncio.get_running_loop().time() + self._LINEAGE_REPLAY_WAIT_SEC
+        while True:
+            if await asyncio.to_thread(db.turn_lineage_state, turn_id) != "pending":
+                return
+            row = await asyncio.to_thread(db.get_task, turn_id)
+            if row is not None and await self._recover_managed_lineage(row):
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                raise BackingStoreError(
+                    "turn accepted but its Case lineage is still being written; retry",
+                    task_id=turn_id, retry_after=1,
+                )
+            await asyncio.sleep(0.05)
+
+    async def _recover_managed_lineage(self, row: Dict[str, Any]) -> bool:
+        """Scheduler / replay lineage recovery for a lineage-pending row whose
+        writer lease expired: CAS-claim it, rebuild the task from the persisted
+        intent (``__join_case_id`` / lineage keys are in its metadata), write the
+        lineage (reusing any partial prior write) and finalize. Returns True when
+        finalized by this call."""
+        from src.control.db import get_db
+
+        db = get_db()
+        turn_id = str(row["id"])
+        token = uuid.uuid4().hex
+        if not await asyncio.to_thread(db.claim_turn_lineage, turn_id, token, self._LINEAGE_LEASE_SEC):
+            return False
+        task = self._task_from_managed_row(row)
+        try:
+            flow_run_id = await self._write_managed_lineage(task, turn_id, token)
+        except Exception as e:  # noqa: BLE001 — stays pending; retried after the lease
+            logger.warning("event=managed_lineage_recovery_failed task_id=%s err=%s", turn_id, e)
+            return False
+        logger.info("event=managed_lineage_recovered task_id=%s flow_run_id=%s", turn_id, flow_run_id)
+        return True
+
+    _LINEAGE_LEASE_SEC = 30.0
+    _LINEAGE_REPLAY_WAIT_SEC = 5.0
 
     def _managed_intent_payload(self, task: Task) -> Dict[str, Any]:
         """Bounded sender intent + task spec (not the prepared execution payload)."""
@@ -9675,15 +9751,9 @@ Generated from user description: {description}
             },
         }
 
-    async def _prepare_managed_turn(
-        self, head: Dict[str, Any], row: Dict[str, Any],
-    ) -> "PreparedTurn":
-        """Scheduler preparation seam (design §4/§5): rebuild the task from the
-        CURRENT revision's intent, assemble restart/compact context ONCE for it,
-        and build the carrier payload against the session's configuration AT
-        ACTIVATION. Runs outside any DB transaction; never mutates the row."""
-        from src.control.turn_scheduler import PreparedTurn
-
+    def _task_from_managed_row(self, row: Dict[str, Any]) -> Task:
+        """Rebuild the runtime Task from a managed row's CURRENT persisted intent
+        (prompt column = winning revision; payload = task spec + metadata)."""
         intent = row.get("payload")
         intent = json.loads(intent) if isinstance(intent, str) else dict(intent or {})
         spec = intent.get("task") or {}
@@ -9695,7 +9765,7 @@ Generated from user description: {description}
             if candidate.value == spec.get("type"):
                 type_enum = candidate
                 break
-        task = Task(
+        return Task(
             id=str(row["id"]),
             type=type_enum,
             priority=TaskPriority.MEDIUM,
@@ -9708,6 +9778,18 @@ Generated from user description: {description}
             context=str(spec.get("context") or ""),
             metadata=metadata,
         )
+
+    async def _prepare_managed_turn(
+        self, head: Dict[str, Any], row: Dict[str, Any],
+    ) -> "PreparedTurn":
+        """Scheduler preparation seam (design §4/§5): rebuild the task from the
+        CURRENT revision's intent, assemble restart/compact context ONCE for it,
+        and build the carrier payload against the session's configuration AT
+        ACTIVATION. Runs outside any DB transaction; never mutates the row."""
+        from src.control.turn_scheduler import PreparedTurn
+
+        task = self._task_from_managed_row(row)
+        sid = str(row.get("session_id") or "")
         # Context is assembled once per prepared revision: clear the in-memory
         # once-guard so a re-preparation (stale revision) injects exactly once
         # into the fresh raw intent, and drop it afterwards (no growth).
@@ -9722,6 +9804,12 @@ Generated from user description: {description}
         # that deregistered makes the head back off instead of activating).
         machine_id = self._managed_carrier_assignment(session, str(row.get("backend") or ""))
         action, payload = self._mesh_dispatch_payload(task, sid, session, socket.gethostname())
+        # Keep the task spec so a row returned to `queued` (dead carrier) can be
+        # re-prepared from the same intent.
+        spec = (json.loads(row["payload"]) if isinstance(row.get("payload"), str)
+                else dict(row.get("payload") or {})).get("task")
+        if spec:
+            payload["task"] = spec
         return PreparedTurn(action=action, payload=payload, machine_id=machine_id)
 
     def _managed_carrier_assignment(self, session: Any, backend: str) -> str:
@@ -9770,7 +9858,9 @@ Generated from user description: {description}
 
         ALLOWANCE.register_legacy_probe(self.task_queue.qsize)
         self.task_queue.share_allowance(ALLOWANCE)
-        self._turn_scheduler = TurnScheduler(db, self._prepare_managed_turn)
+        self._turn_scheduler = TurnScheduler(
+            db, self._prepare_managed_turn, recover_lineage=self._recover_managed_lineage,
+        )
         self._turn_scheduler_task = asyncio.create_task(
             self._turn_scheduler.run(), name="turn-scheduler",
         )

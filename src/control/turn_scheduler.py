@@ -64,9 +64,12 @@ class SchedulerPassResult(BaseModel):
     waiting: int = 0
     next_wake_sec: Optional[float] = None
     slot_waiting: int = 0
+    lineage_recovered: int = 0
+    carrier_requeued: int = 0
 
 
 PrepareFn = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[PreparedTurn]]
+RecoverFn = Callable[[Dict[str, Any]], Awaitable[bool]]
 
 
 def _utc_now_iso() -> str:
@@ -90,7 +93,8 @@ async def _activate_head(
             prepared = await prepare(current, row)
         except Exception as e:  # noqa: BLE001 — leave queued with a reason + backoff
             changed = await asyncio.to_thread(
-                db.mark_turn_blocked, task_id, f"prepare_failed: {type(e).__name__}",
+                db.mark_turn_blocked, task_id,
+                f"prepare_failed: {type(e).__name__}: {str(e)[:200]}",
             )
             if changed:  # log on state change only, not every retry
                 logger.warning("event=turn_prepare_failed task_id=%s err=%s", task_id, e)
@@ -125,10 +129,23 @@ async def run_scheduler_pass(
     *,
     limit: int = ACTIVATION_LIMIT_PER_PASS,
     allowance: Optional[SharedWaitingAllowance] = None,
+    recover_lineage: Optional[RecoverFn] = None,
 ) -> SchedulerPassResult:
     """One bounded activation pass. ``prepare(head, row)`` builds the
-    execution payload for the full row (outside any transaction)."""
+    execution payload for the full row (outside any transaction).
+    ``recover_lineage(row)`` repairs rows left in the durable "lineage pending"
+    state by a writer that died/stalled past its lease (bounded, first)."""
     result = SchedulerPassResult()
+    requeue = getattr(db, "requeue_turns_on_dead_carriers", None)
+    if callable(requeue):
+        result.carrier_requeued = len(await asyncio.to_thread(requeue, limit))
+    if recover_lineage is not None:
+        for row in await asyncio.to_thread(db.list_lineage_recovery, limit):
+            try:
+                if await recover_lineage(row):
+                    result.lineage_recovered += 1
+            except Exception as e:  # noqa: BLE001 — stays pending; retried later
+                logger.debug("event=turn_lineage_recovery_error task_id=%s err=%s", row.get("id"), e)
     heads: List[Dict[str, Any]] = await asyncio.to_thread(
         db.select_eligible_turn_heads, limit,
     )
@@ -218,9 +235,11 @@ class TurnScheduler:
         limit: int = ACTIVATION_LIMIT_PER_PASS,
         allowance: Optional[SharedWaitingAllowance] = None,
         safety_net_sec: float = SAFETY_NET_SEC,
+        recover_lineage: Optional[RecoverFn] = None,
     ) -> None:
         self._db = db
         self._prepare = prepare
+        self._recover_lineage = recover_lineage
         self._fallback_sec = fallback_sec
         self._safety_net_sec = safety_net_sec
         self._slot_backoff_k = 0
@@ -258,7 +277,7 @@ class TurnScheduler:
                 try:
                     res = await run_scheduler_pass(
                         self._db, self._prepare, limit=self._limit,
-                        allowance=self._allowance,
+                        allowance=self._allowance, recover_lineage=self._recover_lineage,
                     )
                     self.passes += 1
                     if res.activated:

@@ -306,7 +306,8 @@ class TurnAdmission(str):
     the Stage-2 mapping shape; any other subscript is ordinary ``str`` indexing.
     Only ever constructed AFTER the admitting transaction committed."""
 
-    _FIELDS = ("id", "status", "revision", "queue_sequence", "idempotent_replay", "coalesced")
+    _FIELDS = ("id", "status", "revision", "queue_sequence", "idempotent_replay", "coalesced",
+               "lineage_pending")
 
     id: str
     status: str
@@ -314,6 +315,7 @@ class TurnAdmission(str):
     queue_sequence: Optional[int]
     idempotent_replay: bool
     coalesced: bool
+    lineage_pending: bool
 
     def __new__(
         cls,
@@ -324,6 +326,7 @@ class TurnAdmission(str):
         queue_sequence: Optional[int],
         idempotent_replay: bool,
         coalesced: bool = False,
+        lineage_pending: bool = False,
     ) -> "TurnAdmission":
         self = super().__new__(cls, task_id)
         self.id = task_id
@@ -332,6 +335,7 @@ class TurnAdmission(str):
         self.queue_sequence = queue_sequence
         self.idempotent_replay = idempotent_replay
         self.coalesced = coalesced
+        self.lineage_pending = lineage_pending
         return self
 
     def __getitem__(self, key: Any) -> Any:  # type: ignore[override]
