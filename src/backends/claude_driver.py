@@ -799,6 +799,10 @@ class _SDKSession:
         # decided per process (managed carrier ON) so a legacy-only worker's
         # CLI stream is byte-identical to before.
         self._replay_user_messages: bool = _replay_user_messages_enabled()
+        # [A82 Stage 3 rework 6] True once the reader loop has ended for ANY
+        # reason (normal EOF on a clean CLI exit included): the CLI is gone, no
+        # backend work can be in flight. Managed-visible only.
+        self._reader_ended: bool = False
         # Late managed replies handed to the sink but not yet accepted by it —
         # the session is not quiescent until the carrier has taken them.
         self._late_handoffs: int = 0
@@ -1081,6 +1085,7 @@ class _SDKSession:
             )
             self._closed = True
         finally:
+            self._reader_ended = True
             # Any turn still waiting when the stream stops will never get a
             # result — fail it rather than block the worker thread forever, but
             # carry the agent's accumulated text so the caller can DELIVER the
@@ -1330,6 +1335,10 @@ class _SDKSession:
             TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "killed", "stopped"})
         if self._pending:
             return False
+        if self._reader_ended:
+            # [A82 Stage 3 rework 6] The CLI exited (clean EOF or error): no
+            # native work can be in flight — only an un-handed-off late reply.
+            return not self._late_handoffs
         if not self._last_query_terminal:
             return False
         if self._assistant_in_flight:
@@ -1426,6 +1435,37 @@ class _SDKSession:
 
         return process_identity(pid)
 
+    def forget_managed_turn(self, turn_uuid: str) -> bool:
+        """[A82 Stage 3 rework 6] The carrier learned this managed turn's row is
+        terminal (operator-resolved / definitively refused): drop its pending
+        entry so the session can become quiescent again without close/restart.
+        A later echo of it matches nothing (its result → proactive sink).
+        Thread-safe; returns True iff an entry was removed."""
+        if not turn_uuid or not self._loop or not self._loop.is_running():
+            return False
+        done = threading.Event()
+        removed = {"v": False}
+
+        def _drop() -> None:
+            try:
+                for p in [p for p in self._pending if p.managed and p.turn_uuid == turn_uuid]:
+                    self._pending.remove(p)
+                    removed["v"] = True
+                    if p.future is not None and not p.future.done():
+                        p.future.cancel()
+                    if self._turn_owner is p:
+                        self._turn_owner = None
+                if removed["v"] and not self._pending:
+                    # The operator/server resolved the uncertainty; the query
+                    # this entry stood for no longer holds the session.
+                    self._last_query_terminal = True
+            finally:
+                done.set()
+
+        self._loop.call_soon_threadsafe(_drop)
+        done.wait(5)
+        return removed["v"]
+
     def _abandon_managed_pending(self, ticket: Dict[str, Any]) -> None:
         """Deadline expired (runs on the loop). If the reply was served to the
         future between the caller's timeout and now (m5), route that outcome as
@@ -1476,7 +1516,25 @@ class _SDKSession:
             # future — mark the outstanding managed turn abandoned (on the loop).
             try:
                 if ticket is not None:
-                    self._loop.call_soon_threadsafe(self._abandon_managed_pending, ticket)
+                    abandoned = threading.Event()
+
+                    def _abandon_and_signal() -> None:
+                        try:
+                            self._abandon_managed_pending(ticket)
+                        finally:
+                            abandoned.set()
+
+                    self._loop.call_soon_threadsafe(_abandon_and_signal)
+                    if abandoned.wait(5) and ticket.get("pending") is None:
+                        # The loop never registered (so never submitted) this
+                        # prompt: attest "not submitted" (typed conflict ⇒ the
+                        # carrier releases it to pending, prompt preserved).
+                        from src.control.turn_queue import OwnershipConflictError
+
+                        raise OwnershipConflictError(
+                            "managed turn deadline expired before submission (not submitted)",
+                            session_key=self.session_key, reason="not_submitted",
+                        )
             except RuntimeError:
                 pass
             raise RecoveryRequiredError(
@@ -1690,6 +1748,19 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                 existing.close()
                 self._sessions.pop(key, None)
                 existing = None
+            if (
+                existing is not None
+                and not existing._closed
+                and existing._reader_ended
+                and existing._replay_user_messages
+            ):
+                # [A82 Stage 3 rework 6] A managed-carrier session whose CLI
+                # exited cleanly (reader ended, not marked closed) is dead:
+                # stop its idle loop and respawn below. Flag OFF sessions never
+                # take this branch (legacy byte-identical).
+                existing._closed = True
+                if existing._loop and existing._loop.is_running():
+                    existing._loop.call_soon_threadsafe(lambda: None)
             if existing is not None and existing._closed:
                 # A prior turn force-closed this session (its interrupt never
                 # landed — see _SDKSession.cancel_inflight), or its stdout
@@ -1792,8 +1863,8 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         native work in flight on this carrier ⇒ quiescent."""
         with self._lock:
             sdk_sess = self._sessions.get(session_id)
-        if sdk_sess is None or sdk_sess._closed:
-            return True
+        if sdk_sess is None or sdk_sess._closed or sdk_sess._reader_ended:
+            return True  # no live CLI for this session ⇒ no backend work in flight
         return sdk_sess.is_quiescent()
 
     def _run_turn(self, session: Session, message: str, *, model: Optional[str], effort: Optional[str], proc_env: Dict[str, str], telemetry_context=None, _managed: bool = False, _on_process=None, _turn_uuid=None) -> ExecutionResult:

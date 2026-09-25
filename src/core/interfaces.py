@@ -362,6 +362,12 @@ class CodingBackend(ABC):
         (unknown ⇒ not quiescent, fail closed)."""
         return False
 
+    def forget_managed_turn(self, session: "Session", turn_uuid: str) -> bool:
+        """The carrier learned the managed turn ``turn_uuid`` is terminal on the
+        server (operator-resolved / definitively refused): drop any in-memory
+        wait for it so the session can become quiescent again. Default: no-op."""
+        return False
+
 
 class ITaskOrchestrator(ABC):
     """Main orchestrator interface"""
