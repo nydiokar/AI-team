@@ -127,6 +127,18 @@ retires the premise of **BOTH** container-track jobs, not just A86 —
   - **Reviewer re-verified the revised candidate from git objects in an isolated worktree:** ACCEPT — both findings closed, OWN01c non-vacuous (fails when the strip is removed), OWN01b faithful, legacy byte-identity preserved. Remaining out-of-scope: SDK02 + reviewer nit #3 (`send_managed` not gated on `is_quiescent`) — both the **managed-path correlation** facet, to be CLOSED in Stage 3; nit #4 (NULL-hash idempotency) benign.
 - **Disposition:** Stage 2 ACCEPTED. **Stage 3 (carrier protocol / result spool / recovery + managed correlation that closes SDK02) authorized.** A82 full-contract review still pending before A84 can start.
 
+### A82 — Session turn queue — Stage 3 gate 2026-09-25 — VERDICT: REWORK (commit `b309f84`)
+- **Manager independent verify:** 38 turn-queue tests pass (SDK02 flipped green); no legacy signature removed vs Stage 2. BUT those are unit tests of predicates — they do NOT prove the carrier protocol is wired end-to-end. Sent to a fresh adversarial reviewer with a hard falsification brief.
+- **Fresh adversarial reviewer → REWORK. Real defects (green tests hid them):**
+  - **B1 (blocker):** `_deliver_managed_result` (`worker/agent.py:1219`) POSTs to legacy `/tasks/{id}/result`, not `/result-managed` → the `{status:accepted}` receipt never matches `task_id`+`claim_token` → spool never pruned → **session ownership held forever**; also routes through the swallowing `complete_task` (bypasses atomic `complete_turn`, §15 dec.2).
+  - **B2 (blocker):** worker still polls `/tasks/pending` + claims `/claim` (protocol-0) → `is_managed` always False → the entire managed worker path is **dead at the integration seam**; §7 "carrier protocol" gate + the required fake-carrier remote-native-ID integration test are UNMET.
+  - **M1/M2/M3 (major, dead code):** `_managed_shutdown_release_ok` (WRK06 drain guard), `_reserve_result_envelope` (WRK05 pre-start reservation / 128MiB budget), and boot-replay re-delivery are never called → the safety properties aren't actually enforced (drain still releases a running backend; "run-and-discard" possible; unacked result never re-sent).
+  - **M4 (major):** `is_quiescent` checked on the caller thread, not the SDK loop → TOCTOU vs binding §6 "reserve on the SDK loop before submitting."
+  - **M5/M6 (major, incl. LEGACY regression):** a bare terminal `ResultMessage` reply hits the new `_dispatch` gate → routes to proactive → pending future never fulfilled → deadlock → after `sdk_turn_timeout` triggers the **forbidden `cancel_inflight`**; and because `_dispatch` is shared, this **regresses the legacy `send` path** (§15 dec.1). Proactive suites don't cover bare-result, so they didn't catch it.
+  - Minors m1 (`/quiescence` accepts any non-null result as evidence), m2 (stale-receipt echoes unverified token).
+  - **Holds up:** DB claim/start/complete/recovery fencing is real; SDK02 reader-gate is non-vacuous; flag-off/poll isolation + credential-strip on `get_pending_managed_turns`; `classify_completion_outcome` behavior-preserving.
+- **Disposition: REWORK sent back to the Stage-3 worker** (has context) with the full findings. Priority: M5/M6 (legacy regression + forbidden interrupt) and M4 (loop-thread reservation) are correctness-critical; B1/B2 + M1/M2/M3 must wire the managed path and add a fake-carrier integration test. Re-verify + re-review after remediation. Stage 3 NOT accepted; A84 stays blocked.
+
 ## Milestone (burndown)
 
 - [x] Current compatibility ledger created from repository evidence (2026-09-25)
