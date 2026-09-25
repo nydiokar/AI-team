@@ -110,6 +110,16 @@ class OwnershipConflictError(TurnQueueError):
     code = "ownership_conflict"
 
 
+class RecoveryRequiredError(OwnershipConflictError):
+    """409 — the managed backend outcome is uncertain (design §3.3: uncertainty
+    retains the active slot). Raised by the managed SDK path when a result cannot
+    be correlated to the managed query, or the turn deadline expires without a
+    terminal result. The carrier must hold the session (``recovery_required``);
+    it is NEVER a reason to interrupt the backend or to report success."""
+
+    code = "recovery_required"
+
+
 class ByteCapError(TurnQueueError):
     """413 — byte cap exceeded (design §8)."""
 
