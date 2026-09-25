@@ -42,6 +42,17 @@ SAFETY_NET_SEC = 60.0
 _PREPARE_ATTEMPTS = 2
 
 
+class TurnObsolete(Exception):
+    """[A82 Stage 4c] Raised by ``prepare`` when activation-time revalidation
+    finds a queued AUTOMATION turn obsolete (its Case blocked/closed, its
+    continuation already reviewed, the Manager binding changed). The scheduler
+    withdraws it with the reason instead of activating it (design §3.10/§7)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class PreparedTurn(BaseModel):
     """Immutable execution payload prepared outside the activation txn."""
 
@@ -95,6 +106,19 @@ async def _activate_head(
             return "gone"
         try:
             prepared = await prepare(current, row)
+        except TurnObsolete as ob:
+            try:
+                await asyncio.to_thread(
+                    lambda: db.withdraw_turn(
+                        task_id, int(row["revision"]),
+                        actor=f"scheduler:obsolete:{ob.reason}"[:128],
+                    )
+                )
+            except Exception:  # noqa: BLE001 — raced (edited/moved); next pass re-reads
+                logger.debug("event=turn_obsolete_withdraw_race task_id=%s", task_id)
+                return "ineligible"
+            logger.info("event=turn_withdrawn_obsolete task_id=%s reason=%s", task_id, ob.reason)
+            return "withdrawn"
         except Exception as e:  # noqa: BLE001 — leave queued with a reason + backoff
             changed = await asyncio.to_thread(
                 db.mark_turn_blocked, task_id,
@@ -193,6 +217,8 @@ async def run_scheduler_pass(
             result.blocked += 1
         elif outcome == "ineligible":
             result.ineligible += 1
+        elif outcome == "withdrawn":
+            result.withdrawn += 1
         await asyncio.sleep(0)  # yield between small transactions
     # Keep the process-level enrollment presence honest (cleared when none).
     refresh = getattr(db, "refresh_enrollment_presence", None)

@@ -1299,6 +1299,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         if continuation_enabled:
             # Read-only DB scans run in a worker thread so the Wake-Dispatcher never
             # blocks the shared event loop (see _continue_case_once for the rationale).
+            # [A82 Stage 4c] Finalize managed wake turns BEFORE evaluating Cases,
+            # so this tick sees the counted round / re-armed token.
+            try:
+                await self._reconcile_continuation_finalizers(db)
+            except Exception as e:
+                logger.debug("event=continuation_finalizer_reconcile_failed err=%s", e)
             cases = await asyncio.to_thread(db.list_open_cases)
             case_ids = [str(c.get("flow_run_id") or "") for c in cases]
             case_ids = [c for c in case_ids if c]
@@ -1795,6 +1801,13 @@ class TaskOrchestrator(ITaskOrchestrator):
             # strand escalation exactly as before A55.
             await self._escalate_headless_case(db, case_id, session_id)
             return 0
+        # [A82 Stage 4c] An ENROLLED Manager takes the wake as ONE durable managed
+        # turn — admitted even while it is busy (it queues behind the active
+        # turn, never interrupts it). No marker read while nothing is enrolled
+        # (legacy byte-identical); an unreadable marker fails closed (raises).
+        from src.control.turn_admission import session_enrollment
+        if await session_enrollment(db, session_id):
+            return await self._continue_case_managed(db, case_id, session, generation, tick)
         if session.status != SessionStatus.AWAITING_INPUT:
             return 0
 
@@ -1846,6 +1859,96 @@ class TaskOrchestrator(ITaskOrchestrator):
              "presented_task_ids": presented, "continuation_id": cont_id},
         )
         return 1
+
+    async def _continue_case_managed(
+        self, db, case_id: str, session: Any, generation: int, tick: Dict[str, Any],
+    ) -> int:
+        """[A82 Stage 4c] Producer 3 for an ENROLLED Manager. The generation-N
+        token row (``cont:{case}:{N}``, protocol 0, sentinel) is the durable
+        trigger identity; it is linked to a deterministic managed turn in the
+        admission transaction, so a crash between the token write and admission
+        (or anywhere after) replays to the SAME id — never a second turn. A token
+        already linked (in flight / queued) or finalized is owned by the durable
+        finalizer (``MeshDB.reconcile_finalizers``). Returns 1 iff THIS call
+        admitted a new turn."""
+        from src.control.db import (
+            CONTINUATION_ACTION, CONTINUATION_MACHINE_SENTINEL, continuation_task_id,
+            producer_turn_id, _token_attempt,
+        )
+        from src.control.turn_queue import TurnQueueError
+
+        session_id = str(session.session_id)
+        cont_id = continuation_task_id(case_id, generation)
+        token = await asyncio.to_thread(db.get_task, cont_id)
+        if token is not None and (
+            token.get("producer_turn_id") or str(token.get("status") or "") != "pending"
+        ):
+            return 0
+        presented = list(tick.get("presented_task_ids") or [])
+        retired = [g["wait_group_id"] for g in tick.get("satisfied_groups", []) if g.get("retire")]
+        if token is None:
+            await asyncio.to_thread(
+                lambda: db.enqueue_task(
+                    cont_id,
+                    session_id=None,
+                    machine_id=CONTINUATION_MACHINE_SENTINEL,
+                    backend=(session.backend or "claude"),
+                    action=CONTINUATION_ACTION,
+                    payload={"case_id": case_id, "generation": generation,
+                             "session_id": session_id, "presented_task_ids": presented},
+                )
+            )
+        attempt = _token_attempt(token.get("payload") if token else None)
+        task = self._make_task(
+            description=self._render_wake_turn(case_id, presented),
+            session_id=session_id,
+            cwd=session.repo_path,
+            source="manager_continuation",
+        )
+        self._stash_task_meta(task, self._TURN_ENROLLED_META_KEY, True)
+        self._stash_task_meta(task, self._TURN_PRODUCER_META_KEY, {
+            "token_id": cont_id,
+            "turn_id": producer_turn_id(cont_id, session_id, attempt),
+            "attempt": attempt,
+            "case_id": case_id,
+            "generation": generation,
+            "presented_task_ids": presented,
+            "retired_group_ids": retired,
+        })
+        try:
+            admission = await self._enqueue_task(task)
+        except (TurnQueueError, HarnessAdmissionBlocked) as e:
+            # Nothing linked (the link is in the admission txn): the token stays
+            # pending and the next tick replays to the same deterministic id.
+            logger.warning("event=managed_wake_refused case=%s err=%s", case_id, e)
+            return 0
+        if getattr(admission, "idempotent_replay", False) or getattr(admission, "status", "") == "withdrawn":
+            return 0
+        self._emit_event(
+            "case_continuation_delivered", None,
+            {"case_id": case_id, "generation": generation, "managed": True,
+             "presented_task_ids": presented, "continuation_id": cont_id,
+             "turn_id": str(admission)},
+        )
+        return 1
+
+    async def _reconcile_continuation_finalizers(self, db) -> int:
+        """[A82 Stage 4c] Durable, restart-safe finalization of managed wake turns
+        (round accounting + wait-group resolution + token finalize from the turn's
+        terminal outcome). No read at all while nothing is enrolled."""
+        if db.any_session_enrolled() is False:
+            return 0
+        items = await asyncio.to_thread(db.reconcile_finalizers)
+        for item in items:
+            consumed = item.get("outcome") == "consumed"
+            self._emit_event(
+                "case_continuation_consumed" if consumed else "case_continuation_rearmed", None,
+                {"case_id": item.get("case_id"), "generation": item.get("generation"),
+                 "consumed_task_ids": item.get("presented_task_ids") if consumed else [],
+                 "continuation_id": item.get("token_id"), "turn_id": item.get("turn_id"),
+                 "turn_status": item.get("turn_status")},
+            )
+        return len(items)
 
     def _render_wake_turn(self, case_id: str, presented: List[str]) -> str:
         """Compose the ONE coalesced Case-level wake message. Presents ALL
@@ -9609,6 +9712,9 @@ Generated from user description: {description}
     # Enrollment already resolved by the caller (web route) — avoids a second
     # marker read per request. Popped before any legacy use.
     _TURN_ENROLLED_META_KEY = "__turn_enrolled"
+    # [A82 Stage 4c] Producer trigger (Case continuation token) facts, stashed
+    # by the Wake-Dispatcher's managed branch only; popped at admission.
+    _TURN_PRODUCER_META_KEY = "__turn_producer"
     # Producer-1 sources converted to managed admission. Every other producer
     # (continuation, watched job, retry, heartbeat, respawn, compaction, file
     # ingestion) is converted in its own later sub-stage; until then it FAILS
@@ -9655,6 +9761,11 @@ Generated from user description: {description}
         sid = str(meta.get("session_id") or "").strip()
         source = str(meta.get("source") or "runtime")
         operation_id = str(meta.pop(self._TURN_OPERATION_META_KEY, "") or "").strip()
+        producer = meta.pop(self._TURN_PRODUCER_META_KEY, None)
+        if isinstance(producer, dict) and source == "manager_continuation":
+            # [A82 Stage 4c] Producer 3: a Case continuation whose durable
+            # token is linked to this deterministic turn in the admission txn.
+            return await self._admit_managed_producer_turn(task, sid, producer)
         if source not in self._MANAGED_PRODUCER1_SOURCES:
             raise ManagedUnsupportedError(
                 f"producer '{source}' is not converted to managed admission yet; "
@@ -9740,6 +9851,88 @@ Generated from user description: {description}
             self._record_flow_stage(flow_run_id, "objective_lock")
         else:
             self._record_flow_stage(flow_run_id, "queued")
+        notify_turn_queue_changed()
+        return admission
+
+    async def _admit_managed_producer_turn(
+        self, task: Task, sid: str, producer: Dict[str, Any],
+    ) -> str:
+        """[A82 Stage 4c] Admit a Case continuation as ONE managed turn with a
+        DURABLE trigger identity: the turn id is derived from (token, session,
+        attempt), the idempotency key is ``<token>#<attempt>`` under the
+        automation principal (``turn_source='system'`` — it never releases an
+        operator-stop hold), and the token is linked to the turn inside the
+        admission transaction. A crash anywhere replays to the SAME id. Case
+        lineage runs through the same convergent procedure as producer 1."""
+        from src.control.db import get_db, _canonical_admission_hash
+        from src.control.turn_admission import AdmissionRequest, admit_turn_async
+        from src.control.turn_queue import TurnAdmission
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        db = get_db()
+        token_id = str(producer["token_id"])
+        attempt = int(producer["attempt"])
+        task.id = str(producer["turn_id"])
+        backend = self._resolve_task_backend(task)
+        carrier = self._managed_carrier_assignment(self.session_store.get(sid), backend)
+        lineage_token = uuid.uuid4().hex
+        request = AdmissionRequest(
+            session_id=sid,
+            task_id=task.id,
+            body=task.prompt or "",
+            payload=self._managed_intent_payload(task),
+            backend=backend,
+            machine_id=carrier,
+            action="resume_session",
+            turn_source="system",
+            turn_kind="continuation",
+            operation_id=f"{token_id}#{attempt}",
+            idempotency_scope=f"automation:{sid}:continuation",
+            # The trigger identity IS the request: two racing ticks that
+            # rendered a slightly different wake still collapse (no 409).
+            admission_hash=_canonical_admission_hash(
+                {"session_id": sid, "producer_token": token_id, "attempt": attempt}
+            ),
+            coalesce_key=f"case:{producer['case_id']}:gen:{producer['generation']}",
+            lineage_token=lineage_token,
+            producer_token=token_id,
+            producer_meta={
+                "case_id": producer["case_id"],
+                "generation": int(producer["generation"]),
+                "session_id": sid,
+                "attempt": attempt,
+                "presented_task_ids": list(producer.get("presented_task_ids") or []),
+                "retired_group_ids": list(producer.get("retired_group_ids") or []),
+            },
+        )
+        admission = await admit_turn_async(
+            db, request, fleet_cap=int(config.system.max_queue_size),
+        )
+        if admission.idempotent_replay:
+            if admission.lineage_pending:
+                await self._await_or_recover_lineage(str(admission))
+            return admission
+        outcome, flow_run_id = await self._write_managed_lineage(task, str(admission), lineage_token)
+        if outcome == "withdrawn":
+            return TurnAdmission(
+                str(admission), status="withdrawn", revision=admission.revision,
+                queue_sequence=admission.queue_sequence, idempotent_replay=False,
+            )
+        logger.info(
+            "event=managed_continuation_admitted task_id=%s session_id=%s token=%s seq=%s",
+            admission, sid, token_id, admission.queue_sequence,
+        )
+        self._emit_event("task_created", task, {"source": "manager_continuation", "managed": True})
+        self._emit_turn_telemetry(
+            "turn.accepted", task, {"task_id": task.id, "source": "manager_continuation"},
+        )
+        self._emit_turn_telemetry(
+            "turn.queued", task,
+            {"priority": getattr(task.priority, "value", str(task.priority))},
+        )
+        self._record_flow_stage(
+            flow_run_id, "objective_lock" if self._harness_flow_drive_enabled() else "queued",
+        )
         notify_turn_queue_changed()
         return admission
 
@@ -10260,8 +10453,11 @@ Generated from user description: {description}
         CURRENT revision's intent, assemble restart/compact context ONCE for it,
         and build the carrier payload against the session's configuration AT
         ACTIVATION. Runs outside any DB transaction; never mutates the row."""
-        from src.control.turn_scheduler import PreparedTurn
+        from src.control.turn_scheduler import PreparedTurn, TurnObsolete
 
+        reason = await self._managed_turn_obsolete(row)
+        if reason:
+            raise TurnObsolete(reason)
         task = self._task_from_managed_row(row)
         sid = str(row.get("session_id") or "")
         # Context is assembled once per prepared revision: clear the in-memory
@@ -10290,6 +10486,49 @@ Generated from user description: {description}
         if spec:
             payload["task"] = spec
         return PreparedTurn(action=action, payload=payload, machine_id=machine_id)
+
+    async def _managed_turn_obsolete(self, row: Dict[str, Any]) -> Optional[str]:
+        """[A82 Stage 4c] Activation-time revalidation of queued AUTOMATION work
+        (design §3.10/§7). Human/operator turns never silently disappear ⇒ None
+        with no read. A system turn of a Case that is now blocked/closed is
+        obsolete (4b residual 4). A continuation is also obsolete once its token
+        is no longer linked, the Case's Manager binding changed, or none of the
+        work it presents is still unresolved (an intervening review drained it).
+        Returns the reason, or None to activate."""
+        from src.control.db import get_db
+
+        if str(row.get("turn_source") or "") in ("human", "operator"):
+            return None
+        db = get_db()
+        continuation = str(row.get("turn_kind") or "") == "continuation"
+        presented: List[str] = []
+        if continuation:
+            token = await asyncio.to_thread(db.continuation_token_for_turn, str(row["id"]))
+            if token is None:
+                return "continuation_unlinked"
+            case_id = str(token["payload"].get("case_id") or "")
+            presented = [str(t) for t in token["payload"].get("presented_task_ids") or []]
+        else:
+            case_id = str(row.get("flow_run_id") or "")
+        if not case_id:
+            return "case_missing" if continuation else None
+        case = await asyncio.to_thread(db.get_flow_run, case_id)
+        status = str((case or {}).get("status") or "").strip().lower()
+        if case is None:
+            return "case_missing" if continuation else None
+        if status == "blocked":
+            return "case_blocked"
+        if status in db._CLOSED_STATUSES:
+            return "case_closed"
+        if not continuation:
+            return None
+        manager = await asyncio.to_thread(db.case_manager_session_id, case_id)
+        if str(manager or "") != str(row.get("session_id") or ""):
+            return "manager_rebound"
+        tick = await asyncio.to_thread(db.compute_continuation_tick, case_id)
+        if not set(presented) & set(tick.get("presented_task_ids") or []):
+            return "reviewed"
+        return None
 
     def _managed_carrier_assignment(self, session: Any, backend: str) -> str:
         """Registered carrier node id that will claim this session's managed
