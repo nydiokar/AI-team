@@ -24,6 +24,10 @@ class NodeCapabilities:
     repos: List[dict] = field(default_factory=list)  # [{name, path}] snapshot from worker
     # Backend-owned model descriptors: {backend: [{name, is_default, efforts}]}
     models: Dict[str, List[dict]] = field(default_factory=dict)
+    # [A82 Stage 3] Managed turn-queue capability as REGISTERED by the carrier.
+    # Default legacy-only; protocol-1 rows are offered only for managed_backends.
+    queue_protocols: List[int] = field(default_factory=lambda: [0])
+    managed_backends: List[str] = field(default_factory=list)
 
 
 @dataclass

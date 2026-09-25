@@ -401,6 +401,9 @@ class _Capabilities(BaseModel):
     # negotiation happens BEFORE managed pending rows are visible). A carrier
     # advertises 1 here once it runs the managed claim/result/spool path.
     queue_protocols: List[int] = Field(default_factory=lambda: [0])
+    # [A82 Stage 3 rework] Backends on this carrier with a real managed
+    # execution path; protocol-1 rows for any other backend are never offered.
+    managed_backends: List[str] = Field(default_factory=list)
 
 
 class NodeRegisterPayload(BaseModel):
@@ -765,6 +768,8 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
             projects_root=payload.capabilities.projects_root,
             repos=list(payload.capabilities.repos),
             models=dict(payload.capabilities.models),
+            queue_protocols=list(payload.capabilities.queue_protocols),
+            managed_backends=list(payload.capabilities.managed_backends),
         ),
         incarnation_id=payload.incarnation_id or None,
     )
@@ -916,23 +921,37 @@ def get_pending_managed(
     a legacy carrier can never see or claim a managed turn. The execution
     credential is stripped from this view — the claim response carries it.
     """
-    try:
-        supported = {int(p) for p in queue_protocols.split(",") if p.strip()}
-    except ValueError:
-        supported = set()
-    if 1 not in supported:
-        # Not a managed-capable carrier — no managed rows are visible to it.
+    # [A82 Stage 3 rework] Gate on the node's REGISTERED capability, not on a
+    # query parameter the caller controls: an unregistered node, a node that
+    # did not register protocol 1, or a backend it did not register as managed
+    # sees no managed rows. (`queue_protocols` is accepted for compatibility
+    # and ignored.)
+    managed_backends = _registered_managed_backends(node_id)
+    if not managed_backends:
         return []
     db = get_db()
     if db is None:
         return []
-    backend_list = [b.strip() for b in backends.split(",") if b.strip()] if backends else None
+    requested = [b.strip() for b in backends.split(",") if b.strip()] if backends else list(managed_backends)
+    backend_list = [b for b in requested if b in managed_backends]
+    if not backend_list:
+        return []
     return db.get_pending_managed_turns(
         node_id=node_id,
         backends=backend_list,
         accept_unpinned=accept_unpinned,
         limit=limit,
     )
+
+
+def _registered_managed_backends(node_id: Optional[str]) -> List[str]:
+    """Backends the node REGISTERED as managed-capable (protocol 1), else []."""
+    if not node_id:
+        return []
+    node = get_registry().get(node_id)
+    if node is None or 1 not in set(node.capabilities.queue_protocols or []):
+        return []
+    return list(node.capabilities.managed_backends or [])
 
 
 @app.post("/tasks/{task_id}/claim-managed", dependencies=[Depends(_require_auth)])
@@ -951,6 +970,14 @@ def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
+    # [A82 Stage 3 rework] Fail closed on the REGISTERED capability: the node
+    # must have registered protocol 1 for this row's backend.
+    pre = db.get_task(task_id)
+    if pre is not None and (pre.get("backend") or "") not in _registered_managed_backends(payload.node_id):
+        raise HTTPException(
+            status_code=409,
+            detail="node has not registered a managed execution path for this backend",
+        )
     try:
         token = db.claim_turn(
             task_id=task_id,
@@ -1034,6 +1061,41 @@ def release_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, A
             detail="managed turn not releasable (started, superseded or not claimed)",
         )
     return {"status": "released", "task_id": task_id}
+
+
+class ManagedRecoveryPayload(ManagedAttemptPayload):
+    reason: str = Field(default="", max_length=500)
+
+
+@app.post("/tasks/{task_id}/enter-recovery", dependencies=[Depends(_require_auth)])
+def enter_managed_recovery(task_id: str, payload: ManagedRecoveryPayload) -> Dict[str, Any]:
+    """[A82 Stage 3 rework] Carrier reports an UNCERTAIN managed outcome
+    (uncorrelated result / managed deadline): move its claimed/running attempt
+    to ``recovery_required`` via the Stage-2 ``enter_recovery`` helper. Fenced by
+    the current claim token AND the claiming node. The slot stays held until
+    resolved with recorded evidence (``/quiescence`` / operator) — this route
+    never releases or completes anything."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    from .turn_queue import TurnQueueError
+
+    task = db.get_task(task_id)
+    if not task or int(task.get("queue_protocol") or 0) != 1:
+        raise HTTPException(status_code=404, detail="no managed turn")
+    if not _token_matches(task.get("claim_token"), payload.claim_token) or str(
+        task.get("claimed_by") or ""
+    ) != payload.node_id:
+        raise HTTPException(status_code=409, detail="recovery request from a superseded or foreign attempt")
+    if str(task.get("status")) == "recovery_required":
+        return {"status": "recovery_required", "task_id": task_id}  # idempotent
+    try:
+        moved = db.enter_recovery(task_id=task_id, claim_token=payload.claim_token, reason=payload.reason)
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 503), detail=str(e))
+    if not moved:
+        raise HTTPException(status_code=409, detail="turn not in a recoverable state")
+    return {"status": "recovery_required", "task_id": task_id}
 
 
 class ManagedResultPayload(BaseModel):
