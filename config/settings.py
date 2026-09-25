@@ -24,11 +24,13 @@ _MANAGED_ENV_KEYS = {
     "CLAUDE_TIMEOUT_SEC",
     "CODEX_DEFAULT_MODEL",
     "CONTROL_API_ENABLED",
+    "CONTROL_API_BIND_HOST",
     "CONTROL_API_HOST",
     "DASHBOARD_PORT",
     "DASHBOARD_TOKEN",
     "GATEWAY_HEARTBEAT_INTERVAL_SEC",
     "GATEWAY_INACTIVITY_TIMEOUT_SEC",
+    "GATEWAY_LOCAL_EXECUTION_ENABLED",
     "GATEWAY_SDK_TURN_TIMEOUT_SEC",
     "GATEWAY_TASK_TIMEOUT_SEC",
     "GATEWAY_TELEGRAM_ALLOWED_USERS",
@@ -40,6 +42,7 @@ _MANAGED_ENV_KEYS = {
     "MAX_QUEUE_SIZE",
     "MESH_CLAIM_LEASE_SEC",
     "MESH_CLAIM_MAX_RUNTIME_SEC",
+    "MESH_BIND_HOST",
     "MESH_DB_PATH",
     "MESH_EMBEDDED_SERVER",
     "MESH_ENABLED",
@@ -198,6 +201,10 @@ class SystemConfig:
     logs_dir: str = "logs"
     log_level: str = "INFO"
     max_concurrent_tasks: int = 3
+    # Docker controller deployments disable local execution explicitly. The
+    # gateway still runs its queue workers to dispatch remote-pinned tasks; this
+    # flag rejects work that would otherwise enter the local backend path.
+    local_execution_enabled: bool = True
     task_timeout: int = 0  # explicit wall-clock kill (0 = use driver fallback of 4x inactivity_timeout_sec; drivers always enforce a hard cap now)
     inactivity_timeout_sec: int = 36000  # PrintResume driver: kill process after N seconds of no stdout (10 hours)
     sdk_turn_timeout_sec: int = 36000   # SDK driver: total-turn deadline in seconds (10 hours; 0 = no limit)
@@ -233,6 +240,9 @@ class MeshConfig:
     enabled: bool = False                   # MESH_ENABLED — activates worker dispatch
     db_path: str = "state/mesh.db"          # MESH_DB_PATH — SQLite file location
     tailscale_ip: str = ""                  # MESH_TAILSCALE_IP — this node's TS IP
+    # Container bind addresses are distinct from the host's Tailscale address.
+    # Empty preserves the legacy bind-to-tailscale behavior.
+    bind_host: str = ""                      # MESH_BIND_HOST
     task_server_port: int = 9002            # MESH_TASK_SERVER_PORT
     worker_token: str = ""                  # WORKER_TOKEN — shared mesh auth secret
     node_heartbeat_timeout_sec: int = 90    # MESH_HEARTBEAT_TIMEOUT_SEC
@@ -279,6 +289,8 @@ class MeshConfig:
     # then 127.0.0.1. Set to the machine's Tailscale IP to expose only to the tailnet.
     # Never set 0.0.0.0 unless you intend to expose it on every interface.
     control_api_host: str = ""               # CONTROL_API_HOST
+    # Empty preserves CONTROL_API_HOST's existing external/bind behavior.
+    control_api_bind_host: str = ""          # CONTROL_API_BIND_HOST
 
 
 @dataclass
@@ -537,6 +549,12 @@ class Config:
         except Exception:
             pass
         try:
+            local_execution = os.getenv("GATEWAY_LOCAL_EXECUTION_ENABLED")
+            if local_execution is not None:
+                self.system.local_execution_enabled = local_execution.lower() in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+        try:
             max_queue = os.getenv("MAX_QUEUE_SIZE")
             if max_queue is not None:
                 self.system.max_queue_size = max(1, int(max_queue))
@@ -735,6 +753,12 @@ class Config:
         except Exception:
             pass
         try:
+            v = os.getenv("MESH_BIND_HOST")
+            if v is not None:
+                self.mesh.bind_host = v.strip()
+        except Exception:
+            pass
+        try:
             v = os.getenv("MESH_TASK_SERVER_PORT")
             if v is not None:
                 self.mesh.task_server_port = int(v)
@@ -774,6 +798,12 @@ class Config:
             v = os.getenv("CONTROL_API_HOST")
             if v is not None:
                 self.mesh.control_api_host = v.strip()
+        except Exception:
+            pass
+        try:
+            v = os.getenv("CONTROL_API_BIND_HOST")
+            if v is not None:
+                self.mesh.control_api_bind_host = v.strip()
         except Exception:
             pass
         try:

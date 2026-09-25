@@ -79,8 +79,9 @@ Start the gateway, then open `http://127.0.0.1:9003/` in your browser:
 Check liveness: `curl http://127.0.0.1:9003/health`
 
 For a full first-session walkthrough see [`docs/QUICK_START.md`](docs/QUICK_START.md).
-For a production deployment (auth token, network binding) see the
-[operations runbook](docs/RUNBOOKS/OPERATIONS_PM2.md).
+For the Docker Compose production deployment (gateway + included Web UI + standalone
+mesh task server), see [Docker Operations](docs/RUNBOOKS/OPERATIONS_DOCKER.md).
+The [PM2 runbook](docs/RUNBOOKS/OPERATIONS_PM2.md) remains for existing installations.
 
 ## Architecture overview
 
