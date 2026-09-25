@@ -162,10 +162,23 @@ class _Crash(Exception):
     pass
 
 
-def _crashing_backend():
+def dead_process_identity() -> Dict[str, Any]:
+    """Real, wall-clock-immune identity of a process that has since exited."""
+    import subprocess
+
+    from src.core.process_utils import process_identity
+
+    proc = subprocess.Popen(["sleep", "30"])
+    ident = process_identity(proc.pid)
+    proc.kill()
+    proc.wait()
+    return ident
+
+
+def _crashing_backend(ident: Dict[str, Any] = None):
     async def run(task_row, backends, http=None, telemetry_sink=None, node_id="", ownership=None, on_process=None):
         if on_process is not None:
-            on_process({"pid": 424242, "create_time": 1000.0})  # the backend child
+            on_process(ident if ident is not None else dead_process_identity())  # the backend child
         raise _Crash("worker process died mid-turn")
     return run
 
@@ -199,10 +212,7 @@ def fake_psutil(alive: Dict[int, float] = None, denied: bool = False):
 
 
 def test_B2_crash_mid_turn_resolved_at_boot_by_new_incarnation(db, tmp_path, monkeypatch):
-    import sys
-
-    monkeypatch.setitem(sys.modules, "psutil", fake_psutil(alive={}))  # pid 424242 is gone
-    monkeypatch.setattr(agent_mod, "_execute_task", _crashing_backend())
+    monkeypatch.setattr(agent_mod, "_execute_task", _crashing_backend())  # backend child exited
     client = TestClient(ts.app)
     w1 = _worker(tmp_path, _ClientHTTP(client), incarnation="inc-old")
     _seed_turn(db, "t-4", "sess-4")

@@ -1168,6 +1168,9 @@ class WorkerAgent:
         # Envelopes the server refused whose dead-letter move failed: skipped by
         # replay (never re-POSTed forever).
         self._delivery_parked: set = set()
+        # Rate limit for re-probing held (no-proof) attempts against the server.
+        self._held_probe_at: Dict[str, float] = {}
+        self._held_probe_interval_sec: float = 60.0
         # Set when a managed result cannot be reconciled (oversize / disk
         # failure): stop claiming NEW managed turns (design §7).
         self._managed_claims_blocked: Optional[str] = None
@@ -1487,9 +1490,7 @@ class WorkerAgent:
         if not isinstance(ident, dict) or not isinstance(ident.get("pid"), int):
             return
         try:
-            self._claim_record(
-                task_id, backend_pid=ident["pid"], backend_create_time=ident.get("create_time"),
-            )
+            self._claim_record(task_id, backend_pid=ident["pid"], backend_identity=dict(ident))
         except Exception:
             logger.warning("event=managed_backend_identity_persist_failed task_id=%s", task_id)
 
@@ -1559,6 +1560,13 @@ class WorkerAgent:
             self._claim_record(task_id, recovery_acked=True)
         except Exception:
             logger.warning("event=managed_recovery_ack_persist_failed task_id=%s", task_id)
+        # MINOR-2: a refused envelope (dead letter / parked) leaves the budget on
+        # ANY acknowledged recovery — including a later reconciler pass.
+        if self._result_spool is not None:
+            self._result_spool.retire_dead_letter(task_id, claim_token)
+            if task_id in self._delivery_parked:
+                self._result_spool.discard(task_id, claim_token)
+                self._delivery_parked.discard(task_id)
         logger.warning("event=managed_turn_recovery_required task_id=%s", task_id)
         return True
 
@@ -1710,9 +1718,17 @@ class WorkerAgent:
         Runs on the driver's sink thread; returns True iff captured."""
         if self._result_spool is None or self._claim_store is None:
             return False
+        # MAJOR-1: bind by the managed TURN identity, never by session — a stale
+        # record for an earlier turn on the same session must not steal it.
+        turn_uuid = getattr(outcome, "managed_turn_uuid", "") or ""
+        if not turn_uuid:
+            return False
         for rec in self._claim_store.list():
-            if rec.get("session_id") != session_id or not rec.get("invoked"):
+            if rec.get("turn_uuid") != turn_uuid or not rec.get("invoked"):
                 continue
+            if rec.get("session_id") and rec.get("session_id") != session_id:
+                logger.error("event=managed_late_result_session_mismatch task_id=%s", rec.get("task_id"))
+                return False
             tid, tok = str(rec.get("task_id")), str(rec.get("claim_token"))
             is_error = bool(getattr(outcome, "is_error", False))
             envelope = {
@@ -1736,28 +1752,16 @@ class WorkerAgent:
         return False
 
     def _backend_process_gone(self, rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """[A82 Stage 3 rework 4, B2] Proof the recorded backend process is
-        gone: the pid is absent, or its create_time differs (pid reused).
-        Returns None when there is no proof — pid never recorded, psutil not
-        importable, access denied, or the process is still alive."""
-        pid = rec.get("backend_pid")
-        if not isinstance(pid, int):
+        """[A82 Stage 3 rework 5, B2/MINOR-3] Proof the recorded backend
+        process is gone (``process_utils.process_gone_proof``: boot-relative
+        /proc identity on Linux, psutil create_time+cmdline elsewhere), or None
+        when there is no unambiguous proof (fail closed → operator route)."""
+        from src.core.process_utils import process_gone_proof
+
+        ident = rec.get("backend_identity")
+        if not isinstance(ident, dict):
             return None
-        try:
-            import psutil  # type: ignore
-        except Exception:
-            return None
-        try:
-            proc = psutil.Process(pid)
-            now_ct = proc.create_time()
-        except psutil.NoSuchProcess:
-            return {"pid": pid, "observed": "absent"}
-        except Exception:
-            return None
-        recorded = rec.get("backend_create_time")
-        if recorded is not None and abs(float(now_ct) - float(recorded)) > 1e-3:
-            return {"pid": pid, "observed": "create_time_mismatch"}
-        return None
+        return process_gone_proof(ident)
 
     async def _reconcile_managed_claims(self, batch: int = 8) -> int:
         """[A82 Stage 3 rework, B2] Give every durably held managed attempt a
@@ -1803,6 +1807,9 @@ class WorkerAgent:
                     if tid not in self._managed_claims:
                         done += 1  # definitively refused ⇒ record dropped
                     continue
+                # The server was just consulted; the held-record probe below
+                # starts its rate-limit window now.
+                self._held_probe_at[tid] = time.monotonic()
             proof: Optional[Dict[str, Any]] = None
             if rec.get("incarnation_id") != self._incarnation_id:
                 # B2: a previous process's attempt resolves ONLY with proof that
@@ -1810,11 +1817,26 @@ class WorkerAgent:
                 # the operator route (no auto-resolve on a guess).
                 proof = self._backend_process_gone(rec)
                 if proof is None:
+                    # Held for the operator. Still consult the server (rate
+                    # limited): re-asserting the recovery hold is idempotent,
+                    # and a definitive refusal (row resolved by an operator /
+                    # terminal) drops the record — no unbounded record growth,
+                    # no per-pass warning spam.
+                    now = time.monotonic()
+                    last = self._held_probe_at.get(tid)
+                    if last is not None and now - last < self._held_probe_interval_sec:
+                        continue
+                    self._held_probe_at[tid] = now
                     logger.warning(
                         "event=managed_recovery_needs_operator task_id=%s — no proof the "
-                        "previous backend process is gone (pid unrecorded / psutil "
-                        "unavailable / access denied / still alive)", tid,
+                        "previous backend process is gone", tid,
                     )
+                    await self._enter_managed_recovery(
+                        tid, tok, rec.get("reason") or "carrier: held for operator (no process proof)",
+                    )
+                    if tid not in self._managed_claims:
+                        self._held_probe_at.pop(tid, None)
+                        done += 1
                     continue
                 kind = "carrier_restarted"
             else:
@@ -2628,9 +2650,11 @@ class WorkerAgent:
                 # [A82 Stage 3 rework, B2] Write-ahead: durably record that the
                 # backend is ABOUT to be invoked. If this cannot be persisted the
                 # backend is not invoked and the attempt is released (prompt kept).
+                turn_uuid: Optional[str] = None
                 if managed and claim_token:
+                    turn_uuid = str(uuid.uuid4())
                     try:
-                        self._claim_record(task_id, invoked=True)
+                        self._claim_record(task_id, invoked=True, turn_uuid=turn_uuid)
                     except Exception:
                         logger.error("event=managed_invoke_persist_failed task_id=%s", task_id)
                         await self._release_managed_claim(task_id, claim_token, not_invoked=True)
@@ -2649,6 +2673,7 @@ class WorkerAgent:
                         node_id=self.cfg.node_id,
                         claim_token=claim_token,
                         incarnation_id=self._incarnation_id,
+                        turn_uuid=turn_uuid,
                     ), "on_process": functools.partial(self._record_backend_process, task_id),
                     } if managed and claim_token else {}),
                 )

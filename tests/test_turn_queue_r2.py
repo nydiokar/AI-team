@@ -110,10 +110,12 @@ def test_D2_batched_notifications_one_continuation_next_reply_served():
         sess.close()
 
 
-def test_D3_abandoned_head_without_echo_is_popped_and_ghost_routes_late_reply():
-    """Wedge exit: an abandoned managed head whose echo never arrived is popped
-    by the next (foreign) result so the session can become quiescent; if its
-    echo then does arrive, the reply is routed as late_managed, not dropped."""
+def test_D3_abandoned_unechoed_prompt_keeps_session_in_flight_until_its_echo():
+    """[rework 5, MINOR-1] A managed prompt written to the CLI but not yet
+    echoed is still owed by the CLI: after the caller's deadline the session
+    stays NOT quiescent — an unrelated result neither pops it nor makes the
+    session quiescent. Its own echo + result route the reply as late_managed
+    (bound to its turn uuid) and only then is the session quiescent."""
     fake = _FakeClient()
     fake.defer_echo = True
     sess = _start_fake_session(fake)
@@ -127,11 +129,56 @@ def test_D3_abandoned_head_without_echo_is_popped_and_ghost_routes_late_reply():
         assert sess.is_quiescent() is False
         _emit_autonomous(sess, fake, _assistant("x"), _result("FOREIGN"))
         time.sleep(0.2)
-        assert len(sess._pending) == 0 and sess.is_quiescent() is True
+        assert len(sess._pending) == 1 and sess.is_quiescent() is False, "queued prompt forgotten"
         _emit_autonomous(sess, fake, fake.echo_for(), _assistant("y"), _result("LATE OURS"))
         time.sleep(0.3)
         assert [(o.output, o.late_managed) for o in got] == [("FOREIGN", False), ("LATE OURS", True)]
+        assert got[1].managed_turn_uuid == fake.query_uuids[-1] and got[0].managed_turn_uuid == ""
         assert sess.is_quiescent() is True and fake.interrupts == 0
+    finally:
+        sess.close()
+
+
+def test_D3b_unechoed_prompt_exit_on_stream_end():
+    """Exit bound: stream end (session close / CLI death) fails the pending
+    entry, so the session never stays wedged in memory."""
+    fake = _FakeClient()
+    fake.defer_echo = True
+    sess = _start_fake_session(fake)
+    sess._turn_timeout_sec = lambda: 0.2
+    out = _managed_in_thread(sess, "never echoed")
+    out["t"].join(2)
+    assert len(sess._pending) == 1
+    sess.close()
+    time.sleep(0.3)
+    assert len(sess._pending) == 0
+
+
+def test_MAJOR2_foreign_tool_result_user_message_does_not_claim_managed_turn():
+    """Mutation guard for `p.turn_uuid == uid`: a foreign turn carrying a
+    tool_result UserMessage (different uuid) must not become the managed turn."""
+    from claude_agent_sdk import ToolResultBlock, UserMessage
+
+    fake = _FakeClient()
+    fake.defer_echo = True
+    sess = _start_fake_session(fake)
+    proactive: List[str] = []
+    sess._on_proactive = lambda k, o: proactive.append(o.output)
+    sess._turn_timeout_sec = lambda: 5
+    try:
+        out = _managed_in_thread(sess, "mine")
+        time.sleep(0.1)
+        tool_result = UserMessage(
+            content=[ToolResultBlock(tool_use_id="tu-1", content="ok", is_error=False)],
+            uuid="some-other-uuid",
+        )
+        _emit_autonomous(sess, fake, _assistant("using a tool"), tool_result, _result("FOREIGN TURN"))
+        time.sleep(0.3)
+        assert proactive == ["FOREIGN TURN"]
+        assert "o" not in out and "e" not in out and out["t"].is_alive(), "managed future resolved by a foreign turn"
+        _emit_autonomous(sess, fake, fake.echo_for(), _assistant("r"), _result("MY REPLY"))
+        out["t"].join(2)
+        assert out["o"].output == "MY REPLY"
     finally:
         sess.close()
 
@@ -286,39 +333,76 @@ def test_B2_carrier_restarted_requires_process_proof(db):
 # =========================================================================== #
 # Worker — B2 proof rules (psutil present/absent/denied/alive)
 # =========================================================================== #
-def _crash_after_invoke(pid=424242, ct=1000.0):
+def _crash_after_invoke(ident):
     async def run(task_row, backends, http=None, telemetry_sink=None, node_id="", ownership=None, on_process=None):
-        on_process({"pid": pid, "create_time": ct})
+        on_process(ident)
         raise RuntimeError("carrier died")
     return run
 
 
-@pytest.mark.parametrize("psutil_mod,expect", [
-    (None, "recovery_required"),                                   # psutil not installed
-    ("denied", "recovery_required"),                               # access denied
-    ({424242: 1000.0}, "recovery_required"),                       # same process still alive
-    ({424242: 2000.0}, "failed"),                                  # pid reused (create_time mismatch)
-    ({}, "failed"),                                                # pid absent
-], ids=["no-psutil", "denied", "alive", "pid-reused", "absent"])
-def test_B2_boot_resolution_only_with_process_gone_proof(db, tmp_path, monkeypatch, psutil_mod, expect):
-    if psutil_mod is None:
-        monkeypatch.setitem(sys.modules, "psutil", None)  # import psutil -> ImportError
-    elif psutil_mod == "denied":
-        monkeypatch.setitem(sys.modules, "psutil", fake_psutil(denied=True))
-    else:
-        monkeypatch.setitem(sys.modules, "psutil", fake_psutil(alive=psutil_mod))
-    monkeypatch.setattr(agent_mod, "_execute_task", _crash_after_invoke())
+def _live_identity():
+    import os
+
+    from src.core.process_utils import process_identity
+    return process_identity(os.getpid())
+
+
+@pytest.mark.parametrize("ident_kind,expect", [
+    ("dead", "failed"),                       # pid absent (Linux /proc)
+    ("reused", "failed"),                     # same pid, different boot-relative start ticks
+    ("rebooted", "failed"),                   # different boot_id
+    ("alive", "recovery_required"),           # the very process still runs
+    ("no-ticks", "recovery_required"),        # identity without boot-relative ticks + no psutil
+    ("unrecorded", "recovery_required"),      # backend never reported a pid
+], ids=["absent", "pid-reused", "rebooted", "alive", "ambiguous", "unrecorded"])
+def test_B2_boot_resolution_only_with_process_gone_proof(db, tmp_path, monkeypatch, ident_kind, expect):
+    from tests.test_turn_queue_carrier_recovery import dead_process_identity
+
+    live = _live_identity()
+    ident = {
+        "dead": dead_process_identity(),
+        "reused": {**live, "starttime_ticks": live["starttime_ticks"] + 7},
+        "rebooted": {**live, "boot_id": "00000000-dead-beef-0000-000000000000"},
+        "alive": live,
+        "no-ticks": {"pid": live["pid"], "create_time": 1000.0},
+        "unrecorded": {},
+    }[ident_kind]
+    monkeypatch.setattr(agent_mod, "_execute_task", _crash_after_invoke(ident))
     client = TestClient(ts.app)
     w1 = _worker(tmp_path, _ClientHTTP(client), incarnation="inc-old")
     _seed_turn(db, "t-b2", "sess-b2")
     with pytest.raises(RuntimeError):
         _run_one(w1, "t-b2")
-    assert w1._claim_store.get("t-b2")["backend_pid"] == 424242
     w2 = _worker(tmp_path, _ClientHTTP(client), incarnation="inc-new")
     asyncio.run(w2._reconcile_managed_claims())
     assert _row(db, "t-b2")["status"] == expect
     held = expect == "recovery_required"
     assert (w2._claim_store.get("t-b2") is not None) is held, "held attempt must stay for the operator"
+
+
+def test_B2_non_linux_proof_is_wall_clock_tolerant_and_fails_closed(monkeypatch):
+    import src.core.process_utils as pu
+
+    monkeypatch.setattr(pu, "_procfs_available", lambda: False)
+    rec = {"pid": 77, "create_time": 1000.0, "cmdline": ["claude", "--x"]}
+    monkeypatch.setattr(pu, "psutil", None)
+    assert pu.process_gone_proof(rec) is None                      # no psutil ⇒ no proof
+    monkeypatch.setattr(pu, "psutil", fake_psutil(alive={}))
+    assert pu.process_gone_proof(rec) == {"pid": 77, "observed": "absent"}
+    monkeypatch.setattr(pu, "psutil", fake_psutil(denied=True))
+    assert pu.process_gone_proof(rec) is None                      # access denied ⇒ no proof
+    step = fake_psutil(alive={77: 1001.5})                          # NTP step of 1.5 s, same cmdline
+    step.Process.cmdline = lambda self: ["claude", "--x"]
+    monkeypatch.setattr(pu, "psutil", step)
+    assert pu.process_gone_proof(rec) is None, "a wall-clock step was taken as pid reuse"
+    reused = fake_psutil(alive={77: 5000.0})
+    reused.Process.cmdline = lambda self: ["bash"]
+    monkeypatch.setattr(pu, "psutil", reused)
+    assert pu.process_gone_proof(rec) == {"pid": 77, "observed": "pid_reused"}
+    same_cmd = fake_psutil(alive={77: 5000.0})
+    same_cmd.Process.cmdline = lambda self: ["claude", "--x"]
+    monkeypatch.setattr(pu, "psutil", same_cmd)
+    assert pu.process_gone_proof(rec) is None                      # ambiguous ⇒ fail closed
 
 
 # =========================================================================== #

@@ -1312,7 +1312,7 @@ class QuiescenceObservationPayload(BaseModel):
     #                       reaped the old incarnation's backend children at boot.
     stop_evidence: Optional[str] = Field(default=None, max_length=32)
     observer_incarnation: Optional[str] = Field(default=None, max_length=128)
-    # carrier_restarted only: {"pid": int, "observed": "absent"|"create_time_mismatch"}
+    # carrier_restarted only: {"pid": int, "observed": "absent"|"pid_reused"|"rebooted"}
     # — the carrier's proof that the attempt's recorded backend process is gone.
     process_proof: Optional[Dict[str, Any]] = None
     result: Optional[Dict[str, Any]] = None
@@ -1386,7 +1386,7 @@ def record_quiescence_observation(
             and payload.observer_incarnation == registered
             and payload.observer_incarnation != claim_inc
             and isinstance(proof.get("pid"), int)
-            and proof.get("observed") in ("absent", "create_time_mismatch")
+            and proof.get("observed") in ("absent", "pid_reused", "rebooted")
         )
     else:
         ok = False

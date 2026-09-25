@@ -216,6 +216,11 @@ class ManagedTurnOwnership(BaseModel):
     node_id: str
     claim_token: str = Field(repr=False)
     incarnation_id: Optional[str] = None
+    # [A82 Stage 3 rework 5] The carrier-chosen managed turn identity (a UUID
+    # persisted write-ahead in the carrier's claim record). The backend submits
+    # the prompt under it, and a late reply is bound back to EXACTLY this
+    # attempt by it — never by session.
+    turn_uuid: Optional[str] = None
 
 
 class StartAuthorization(BaseModel):

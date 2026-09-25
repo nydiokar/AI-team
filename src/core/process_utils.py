@@ -232,3 +232,95 @@ def reap_stale_worker_children(
         except Exception:
             continue
     return reaped
+
+
+# ---------------------------------------------------------------------------
+# [A82 Stage 3 rework 5] Wall-clock-immune process identity + "gone" proof.
+# ---------------------------------------------------------------------------
+_CREATE_TIME_TOLERANCE_SEC = 2.0
+
+
+def _procfs_available() -> bool:
+    return os.path.isdir("/proc/self") and os.path.exists("/proc/sys/kernel/random/boot_id")
+
+
+def _read_boot_id() -> Optional[str]:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _read_starttime_ticks(pid: int) -> Optional[int]:
+    """Field 22 of /proc/<pid>/stat: start time in clock ticks since boot —
+    boot-relative, so immune to wall-clock steps (no-RTC boards, NTP)."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    try:
+        return int(raw.rsplit(")", 1)[1].split()[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def process_identity(pid: int) -> dict:
+    """Identity of a live process, recorded before a managed prompt is sent.
+
+    Linux: ``{pid, boot_id, starttime_ticks}`` (boot-relative; no wall clock).
+    Elsewhere: ``{pid, create_time, cmdline}`` via psutil when available."""
+    ident: dict = {"pid": int(pid)}
+    if _procfs_available():
+        ticks = _read_starttime_ticks(pid)
+        boot = _read_boot_id()
+        if ticks is not None and boot:
+            ident.update(starttime_ticks=ticks, boot_id=boot)
+        return ident
+    if psutil is not None:
+        try:
+            proc = psutil.Process(pid)
+            ident["create_time"] = proc.create_time()
+            ident["cmdline"] = list(proc.cmdline())[:8]
+        except Exception:
+            pass
+    return ident
+
+
+def process_gone_proof(recorded: dict) -> Optional[dict]:
+    """Proof that the recorded process no longer exists, or None (fail closed).
+
+    Linux: absent ``/proc/<pid>`` ⇒ ``absent``; different ``boot_id`` ⇒
+    ``rebooted``; different starttime ticks ⇒ ``pid_reused``. Elsewhere
+    (psutil): NoSuchProcess ⇒ ``absent``; create_time differing by more than
+    the tolerance AND a different cmdline ⇒ ``pid_reused``. Anything ambiguous
+    (identity unrecorded, access denied, psutil missing, same process) ⇒ None."""
+    pid = recorded.get("pid")
+    if not isinstance(pid, int):
+        return None
+    if recorded.get("starttime_ticks") is not None and recorded.get("boot_id"):
+        if not _procfs_available():
+            return None
+        boot = _read_boot_id()
+        if not boot:
+            return None
+        if boot != recorded["boot_id"]:
+            return {"pid": pid, "observed": "rebooted"}
+        if not os.path.exists(f"/proc/{pid}"):
+            return {"pid": pid, "observed": "absent"}
+        ticks = _read_starttime_ticks(pid)
+        if ticks is None:
+            return None
+        return {"pid": pid, "observed": "pid_reused"} if ticks != recorded["starttime_ticks"] else None
+    if recorded.get("create_time") is None or psutil is None:
+        return None
+    try:
+        proc = psutil.Process(pid)
+        ct = proc.create_time()
+        cmd = list(proc.cmdline())[:8]
+    except psutil.NoSuchProcess:
+        return {"pid": pid, "observed": "absent"}
+    except Exception:
+        return None
+    if abs(float(ct) - float(recorded["create_time"])) > _CREATE_TIME_TOLERANCE_SEC and cmd != recorded.get("cmdline"):
+        return {"pid": pid, "observed": "pid_reused"}
+    return None
