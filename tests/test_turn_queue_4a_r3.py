@@ -293,3 +293,38 @@ def test_requeue_reads_before_taking_the_write_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "_managed_write", lambda *a, **k: called.append(a) or (_ for _ in ()).throw(AssertionError("write lock taken")))
     assert db.requeue_turns_on_dead_carriers() == []
     assert called == []
+
+
+@pytest.mark.parametrize("shape", ["join", "attach", "birth"])
+def test_managed_lineage_parity_with_legacy_path(tmp_path, monkeypatch, shape):
+    """The managed procedure writes EXACTLY what the legacy
+    `_record_flow_run_start` writes for the same request (links by
+    type/role/creator, events with payloads, session affiliation)."""
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+
+    def run(sub, enroll):
+        (tmp_path / sub).mkdir()
+        db, o = _setup(tmp_path / sub, monkeypatch, enroll=enroll)
+        mgr = db.open_case(objective="obj", session_id="mgr-x", role="manager")
+        kw = {"operation_id": "p", "source": "runtime"}
+        if shape == "join":
+            kw["join_case_id"] = mgr
+        elif shape == "attach":
+            db.open_case(objective="own", session_id="sess-1", role="manager")
+        else:
+            kw["parent_flow_run_id"] = mgr
+        tid = str(_submit(o, **kw))
+        links = sorted((l["entity_type"], l["role"], l["created_by"] or "",
+                        l["entity_id"] == tid) for l in db._conn().execute(
+                            "SELECT * FROM flow_links WHERE entity_id != 'mgr-x'").fetchall())
+        evs = sorted((e["event_type"], e["entity_type"] or "",
+                      (e["payload_json"] or "").replace(tid, "TID"))
+                     for e in db._conn().execute(
+                         "SELECT * FROM flow_events WHERE event_type != 'flow.created' "
+                         "OR entity_id = ?", (tid,)).fetchall())
+        s = db.get_session("sess-1")
+        return links, evs, bool(s["current_case_id"]), s["case_role"]
+
+    legacy = run("legacy", False)
+    managed = run("managed", True)
+    assert legacy == managed
