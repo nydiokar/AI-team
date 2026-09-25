@@ -567,3 +567,67 @@ def test_P1_12c_lineage_hold_blocks_activation_until_finalized(tmp_path, monkeyp
     assert row["status"] == "queued" and row["not_before"]  # held, not lost
     assert db.select_eligible_turn_heads(25) == []
     assert db.next_turn_wake_at() == row["not_before"]      # bounded: wakes when it expires
+
+
+# P1-13 (A87 rework m7/m8) -------------------------------------------------- #
+def test_P1_13_compat_cap_admits_worst_case_valid_request(tmp_path, monkeypatch):
+    """A previously valid 262144-char prompt of non-BMP text, JSON ASCII-escaped
+    (≈3 MiB), must not be refused by the pre-parse cap; a larger body is 413."""
+    import json as _json
+    from src.control import control_api
+
+    orch, c = _web(tmp_path, monkeypatch)
+    body = _json.dumps({"description": "😀" * control_api._MAX_INSTRUCTION_CHARS,
+                        "session_id": "sess-1",
+                        "continue_inline": "😀" * control_api._CONTINUE_INLINE_MAX},
+                       ensure_ascii=True).encode()
+    assert len(body) > 3 * 1024 * 1024
+    r = c.post("/api/instructions", headers={"Authorization": "Bearer tok",
+                                             "Content-Type": "application/json"}, content=body)
+    assert r.status_code == 200, r.text[:200]
+    over = b" " * (control_api._INSTRUCTIONS_MAX_REQUEST_BYTES + 1)
+    r = c.post("/api/instructions", headers={"Authorization": "Bearer tok",
+                                             "Content-Type": "application/json"}, content=over)
+    assert r.status_code == 413
+
+
+def test_P1_13b_stalled_body_read_times_out_408_before_route(monkeypatch):
+    from src.control import control_api
+
+    monkeypatch.setattr(control_api, "_BODY_READ_DEADLINE_SEC", 0.3)
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
+
+    class _Never:
+        session_service = None
+
+        async def submit_instruction(self, **kw):
+            raise AssertionError("route reached")
+
+    app = control_api.build_control_api(_Never())
+    sent = []
+
+    async def scenario():
+        first = [True]
+
+        async def receive():
+            if first[0]:
+                first[0] = False
+                return {"type": "http.request", "body": b'{"desc', "more_body": True}
+            await asyncio.sleep(3600)
+
+        async def send(m):
+            sent.append(m)
+
+        scope = {"type": "http", "method": "POST", "path": "/api/instructions",
+                 "raw_path": b"/api/instructions", "root_path": "", "scheme": "http",
+                 "query_string": b"", "http_version": "1.1", "server": ("t", 80),
+                 "client": ("c", 1),
+                 "headers": [(b"authorization", b"Bearer tok"),
+                             (b"content-type", b"application/json")]}
+        t0 = asyncio.get_running_loop().time()
+        await asyncio.wait_for(app(scope, receive, send), 5)
+        return asyncio.get_running_loop().time() - t0
+
+    elapsed = asyncio.run(scenario())
+    assert elapsed < 2.0
+    assert sent and sent[0]["status"] == 408

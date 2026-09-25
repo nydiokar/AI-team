@@ -29,6 +29,20 @@ class SessionTaskQueue(asyncio.Queue[Task]):
             return super().full()
         return shared.legacy_blocked(self.qsize(), self.maxsize)
 
+    async def put(self, item: Task) -> None:
+        """Unshared ⇒ plain ``asyncio.Queue.put``. Shared ⇒ retry until the ONE
+        allowance has room; the waiting caller's own timeout (``wait_for``)
+        bounds it, so a racing managed reservation can never surface as a raw
+        ``QueueFull`` from the blocking put (managed room frees on other
+        threads/loops, which do not wake asyncio putters)."""
+        if self._shared is None:
+            return await super().put(item)
+        while True:
+            try:
+                return self.put_nowait(item)
+            except asyncio.QueueFull:
+                await asyncio.sleep(0.05)
+
     def put_nowait(self, item: Task) -> None:
         shared = self._shared
         if shared is None:
