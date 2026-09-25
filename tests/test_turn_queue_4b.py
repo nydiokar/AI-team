@@ -730,8 +730,14 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
     from src.core.interfaces import SessionStatus as SS
     from tests.test_case_transient_resume import _Orch, _append_pause, _iso, _now
 
+    respawns = []
+
     class _Auto(_Orch):
         """The duck-typed automation self, falling back to the REAL methods."""
+
+        async def _do_respawn_manager_for_case(self, db, case_id, generation, dead):
+            respawns.append((case_id, dead))
+            return True
 
         def __getattr__(self, name):
             static = inspect.getattr_static(TaskOrchestrator, name)
@@ -744,6 +750,7 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
     monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
     monkeypatch.setenv("TRANSIENT_PROVIDER_RESUME_ENABLED", "1")
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
+    monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
     db, o = _setup(tmp_path, monkeypatch)
     _wire(o)
 
@@ -771,6 +778,149 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
     assert woke == 1 and deliveries
     woke, deliveries = scenario(stop=True)
     assert woke == 0 and deliveries == []
+    assert respawns == []  # operator-held, not dead: never replaced
+    approvals = db._conn().execute("SELECT COUNT(*) FROM approvals").fetchone()[0] \
+        if db._conn().execute("SELECT name FROM sqlite_master WHERE name='approvals'").fetchone() else 0
+    assert approvals == 0
+
+
+def test_R04b_crash_respawn_approval_is_not_proposed_for_a_stopped_manager(tmp_path, monkeypatch):
+    """Default approval mode ON: a stopped enrolled Manager gets no respawn
+    approval request; a CLOSED (dead) one still takes the crash path."""
+    import inspect
+
+    from src.core.interfaces import SessionStatus as SS
+    from tests.test_case_transient_resume import _Orch
+
+    seen = []
+
+    class _Auto(_Orch):
+        async def _handle_dead_manager_session(self, db, case_id, generation, sid):
+            seen.append(sid)
+            return True
+
+        def __getattr__(self, name):
+            static = inspect.getattr_static(TaskOrchestrator, name)
+            if isinstance(static, (staticmethod, classmethod)):
+                return getattr(TaskOrchestrator, name)
+            attr = getattr(TaskOrchestrator, name)
+            return attr.__get__(self) if callable(attr) else attr
+
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+    monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    s = _sess()
+    s.status = SS.AWAITING_INPUT
+    o.session_store.save(s)
+    case_id = db.open_case("ship X", "sess-1", role="manager",
+                           completion_criteria='{"round_cap": 5}')
+    t = _submit(o, operation_id="op")
+    _pass(db, o)
+    _run(db, t)
+    assert o.stop_managed_session_turn(_sess())[0] is True
+    db.arm_wait_group(case_id, "g1", "ALL", ["w1"])
+    db.append_flow_event(case_id, "task.finished", "worker", entity_type="task",
+                         entity_id="w1", payload={"outcome": "success"})
+    auto = _Auto(o.session_store)
+    assert asyncio.run(auto._continue_case_once(db, case_id)) == 0
+    assert seen == []
+    # Close ⇒ dead (hold cleared): the crash path owns it again.
+    assert o.session_service.close_session("sess-1", backends=o._backends).ok
+    assert db.operator_stop_hold("sess-1") is None
+    asyncio.run(auto._continue_case_once(db, case_id))
+    assert seen == ["sess-1"]
+
+
+def _stop_with_queued(o, db):
+    t1 = _submit(o, operation_id="a")
+    t2 = _submit(o, operation_id="b")
+    _pass(db, o)
+    tok = _run(db, t1)
+    assert o.stop_managed_session_turn(_sess()) == (True, t1)
+    db.complete_turn(t1, tok, {"success": False}, status="failed")
+    return t1, t2
+
+
+def test_R05_automation_dispatch_keeps_the_hold_operator_web_releases(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    _t1, t2 = _stop_with_queued(o, db)
+    c = _client(monkeypatch, o)
+    # dispatch_worker-shaped request (scripts/mcp_manager.py): automation.
+    r = c.post("/api/instructions", json={"description": "worker objective", "session_id": "sess-1"},
+               headers={"Authorization": "Bearer tok", "X-AI-Team-Principal": "automation"})
+    assert r.status_code == 200, r.text
+    auto_row = db.get_task(r.json()["task_id"])
+    assert auto_row["turn_source"] == "system"
+    assert auto_row["idempotency_scope"].startswith("automation:")
+    assert _sess().status == SessionStatus.CANCELLED
+    assert db.operator_stop_hold("sess-1") == "operator_stop"
+    _pass(db, o)
+    assert db.get_task(t2)["status"] == "queued"
+    # Web-UI-shaped request (no principal header): operator ⇒ releases.
+    r = c.post("/api/instructions", json={"description": "go on", "session_id": "sess-1"},
+               headers={"Authorization": "Bearer tok"})
+    assert r.status_code == 200, r.text
+    assert db.get_task(r.json()["task_id"])["turn_source"] == "human"
+    assert _sess().status == SessionStatus.IDLE and db.operator_stop_hold("sess-1") is None
+    _pass(db, o)
+    assert db.get_task(t2)["status"] == "pending"
+
+
+def test_R06_stop_racing_close_never_reopens_a_closed_session(tmp_path, monkeypatch):
+    """M2 kill: the hold write never turns closed → cancelled."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    t1 = _submit(o, operation_id="a")
+    _pass(db, o)
+    _run(db, t1)
+    db.close_session_turns("sess-1")
+    db.request_turn_cancel(t1, hold_session=True)
+    assert _sess().status == SessionStatus.CLOSED
+    assert db.operator_stop_hold("sess-1") is None
+
+
+def test_R07_operator_send_does_not_clobber_a_live_status(tmp_path, monkeypatch):
+    """M3 kill: the release only rewrites a `cancelled` status."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    for st in (SessionStatus.BUSY, SessionStatus.AWAITING_INPUT, SessionStatus.ERROR):
+        s = _sess()
+        s.status = st
+        o.session_store.save(s)
+        _submit(o, operation_id=f"op-{st.value}")
+        assert _sess().status == st
+
+
+def test_R08_hold_survives_a_stale_whole_session_save_for_activation(tmp_path, monkeypatch):
+    """The durable hold record (not status alone) holds activation: a stale
+    whole-row save rewriting status does not release it (legacy consumers that
+    read only status are the carried MINOR 4)."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    _t1, t2 = _stop_with_queued(o, db)
+    s = _sess()
+    s.status = SessionStatus.IDLE
+    db.upsert_session(s)  # stale whole-row save
+    assert db.operator_stop_hold("sess-1") == "operator_stop"
+    assert db.select_eligible_turn_heads(25) == []
+    _pass(db, o)
+    assert db.get_task(t2)["status"] == "queued"
+
+
+def test_R09_slot_waiting_count_ignores_held_sessions(tmp_path, monkeypatch):
+    """M4 kill: a held session does not keep the scheduler's slot backoff busy."""
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    t1 = _submit(o, operation_id="a")
+    _submit(o, operation_id="b")
+    _pass(db, o)
+    _run(db, t1)
+    assert db.count_slot_waiting_sessions() == 1
+    o.stop_managed_session_turn(_sess())
+    assert db.count_slot_waiting_sessions() == 0
 
 
 def test_R03c_hold_is_enforced_by_head_selection_and_by_activation(tmp_path, monkeypatch):
