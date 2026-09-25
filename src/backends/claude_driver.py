@@ -795,7 +795,6 @@ class _SDKSession:
         # the next ResultMessage closes that turn and is served to it.
         # their echo, so a later echo still routes their reply as late_managed.
         self._turn_owner: Optional["_PendingTurn"] = None
-        self._last_managed: Optional["_PendingTurn"] = None
         # Managed correlation needs the CLI's user-message echo; the flag is
         # decided per process (managed carrier ON) so a legacy-only worker's
         # CLI stream is byte-identical to before.
@@ -1246,7 +1245,7 @@ class _SDKSession:
 
     async def _submit_turn(
         self, message: str, progress_cb=None, managed: bool = False,
-        turn_uuid: Optional[str] = None,
+        turn_uuid: Optional[str] = None, ticket: Optional[Dict[str, Any]] = None,
     ) -> "TurnOutcome":
         """Send one user turn and await its terminal result.
 
@@ -1256,6 +1255,14 @@ class _SDKSession:
         """
         if self._client is None:
             raise RuntimeError("SDK client not initialised")
+        if ticket is not None and ticket.get("abandoned"):
+            # The managed caller's deadline expired before this coroutine even
+            # ran (a starved loop): never submit a prompt nobody awaits.
+            from src.control.turn_queue import RecoveryRequiredError
+
+            raise RecoveryRequiredError(
+                "managed turn abandoned before submission", session_key=self.session_key,
+            )
         loop = asyncio.get_event_loop()
         future: "asyncio.Future" = loop.create_future()
         pending = _PendingTurn(future=future, progress_cb=progress_cb, managed=managed)
@@ -1276,7 +1283,8 @@ class _SDKSession:
                 import uuid as _uuid
 
                 pending.turn_uuid = turn_uuid or str(_uuid.uuid4())
-                self._last_managed = pending
+                if ticket is not None:
+                    ticket["pending"] = pending
 
                 async def _one(text: str = message, uid: str = pending.turn_uuid):
                     yield {
@@ -1361,14 +1369,19 @@ class _SDKSession:
                 session_key=self.session_key,
             )
         try:
+            # One ticket per managed call binds the deadline abandon to THIS
+            # call's pending entry (set on the loop at registration).
+            ticket: Dict[str, Any] = {"abandoned": False, "pending": None}
             return self._submit_managed_no_interrupt(
-                self._reserve_and_submit_managed(message, progress_cb, turn_uuid), timeout
+                self._reserve_and_submit_managed(message, progress_cb, turn_uuid, ticket),
+                timeout, ticket,
             )
         finally:
             self._lock.release()
 
     async def _reserve_and_submit_managed(
-        self, message: str, progress_cb=None, turn_uuid: Optional[str] = None
+        self, message: str, progress_cb=None, turn_uuid: Optional[str] = None,
+        ticket: Optional[Dict[str, Any]] = None,
     ) -> "TurnOutcome":
         """[A82 Stage 3 rework, M4] Quiescence reservation ON THE SDK LOOP.
 
@@ -1398,7 +1411,9 @@ class _SDKSession:
                 "managed send is fail-closed",
                 session_key=self.session_key,
             )
-        return await self._submit_turn(message, progress_cb=progress_cb, managed=True, turn_uuid=turn_uuid)
+        return await self._submit_turn(
+            message, progress_cb=progress_cb, managed=True, turn_uuid=turn_uuid, ticket=ticket,
+        )
 
     def process_identity(self) -> Dict[str, Any]:
         """Wall-clock-immune identity of this session's CLI subprocess (see
@@ -1411,14 +1426,15 @@ class _SDKSession:
 
         return process_identity(pid)
 
-    def _abandon_managed_pending(self) -> None:
+    def _abandon_managed_pending(self, ticket: Dict[str, Any]) -> None:
         """Deadline expired (runs on the loop). If the reply was served to the
         future between the caller's timeout and now (m5), route that outcome as
         late_managed instead of leaving it on an unread future; otherwise mark
         the outstanding managed turn abandoned so its eventual reply is."""
-        p = self._last_managed
+        ticket["abandoned"] = True
+        p = ticket.get("pending")
         if p is None:
-            return
+            return  # never submitted; _submit_turn will refuse to submit it
         p.abandoned = True
         fut = p.future
         if fut.done() and not fut.cancelled() and fut.exception() is None:
@@ -1430,7 +1446,9 @@ class _SDKSession:
                 self._late_handoffs += 1
                 asyncio.create_task(self._run_proactive(outcome))
 
-    def _submit_managed_no_interrupt(self, coro, timeout: Optional[float]) -> "TurnOutcome":
+    def _submit_managed_no_interrupt(
+        self, coro, timeout: Optional[float], ticket: Optional[Dict[str, Any]] = None
+    ) -> "TurnOutcome":
         """Run a managed coroutine on the SDK loop WITHOUT the legacy
         interrupt-on-failure of :meth:`submit` (§15 decision 1: the managed path
         never calls ``cancel_inflight``). A deadline expiry raises a typed
@@ -1457,7 +1475,8 @@ class _SDKSession:
             # M3: the eventual real reply must reach the carrier, not an unread
             # future — mark the outstanding managed turn abandoned (on the loop).
             try:
-                self._loop.call_soon_threadsafe(self._abandon_managed_pending)
+                if ticket is not None:
+                    self._loop.call_soon_threadsafe(self._abandon_managed_pending, ticket)
             except RuntimeError:
                 pass
             raise RecoveryRequiredError(
