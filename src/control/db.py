@@ -2646,8 +2646,10 @@ class MeshDB:
                         # stop hold (legacy parity: the next send clears
                         # CANCELLED); automation never does.
                         conn.execute(
-                            "UPDATE sessions SET status = 'idle', updated_at = ? "
-                            "WHERE session_id = ? AND status = 'cancelled'",
+                            "UPDATE sessions SET status = CASE WHEN status = 'cancelled' "
+                            "THEN 'idle' ELSE status END, turn_queue_hold = NULL, "
+                            "updated_at = ? WHERE session_id = ? "
+                            "AND (status = 'cancelled' OR turn_queue_hold IS NOT NULL)",
                             (now, sid),
                         )
                     conn.execute(
@@ -2872,6 +2874,7 @@ class MeshDB:
               AND (t.lineage_state IS NULL OR t.lineage_state != 'pending')
               AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
               AND COALESCE(s.status, '') NOT IN ('closed', 'cancelled')
+              AND s.turn_queue_hold IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM mesh_tasks e
                   WHERE e.session_id = t.session_id
@@ -2937,14 +2940,15 @@ class MeshDB:
                 if int(row["revision"]) != int(expected_revision):
                     return "stale"
                 srow = conn.execute(
-                    "SELECT status, turn_queue_enrolled, turn_queue_paused, config_revision "
-                    "FROM sessions WHERE session_id = ?",
+                    "SELECT status, turn_queue_enrolled, turn_queue_paused, config_revision, "
+                    "turn_queue_hold FROM sessions WHERE session_id = ?",
                     (row["session_id"],),
                 ).fetchone()
                 if (
                     srow is None or not srow["turn_queue_enrolled"]
                     or srow["turn_queue_paused"]
                     or (srow["status"] or "") in ("closed", "cancelled")
+                    or srow["turn_queue_hold"]
                 ):
                     # [A82 Stage 4b rework] `cancelled` = operator stop hold:
                     # nothing activates until an operator action releases it.
@@ -3022,6 +3026,7 @@ class MeshDB:
             WHERE t.queue_protocol = 1 AND t.status = 'queued'
               AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
               AND COALESCE(s.status, '') NOT IN ('closed', 'cancelled')
+              AND s.turn_queue_hold IS NULL
               AND EXISTS (
                   SELECT 1 FROM mesh_tasks a
                   WHERE a.session_id = t.session_id
@@ -3313,7 +3318,8 @@ class MeshDB:
                     "completed", "failed", "cancelled", "failed_node_offline", "withdrawn", "queued",
                 ):
                     conn.execute(
-                        "UPDATE sessions SET status = 'cancelled', updated_at = ? "
+                        "UPDATE sessions SET status = 'cancelled', "
+                        "turn_queue_hold = 'operator_stop', updated_at = ? "
                         "WHERE session_id = ? AND COALESCE(status, '') != 'closed'",
                         (now, row["session_id"]),
                     )
@@ -3418,7 +3424,8 @@ class MeshDB:
                 if srow is None:
                     raise TurnNotFoundError("unknown session", session_id=sid)
                 conn.execute(
-                    "UPDATE sessions SET status = 'closed', updated_at = ? WHERE session_id = ?",
+                    "UPDATE sessions SET status = 'closed', turn_queue_hold = NULL, "
+                    "updated_at = ? WHERE session_id = ?",
                     (now, sid),
                 )
                 queued = conn.execute(
@@ -3665,6 +3672,15 @@ class MeshDB:
         if self._any_enrolled is None:
             return self.refresh_enrollment_presence()
         return self._any_enrolled
+
+    def operator_stop_hold(self, session_id: str) -> Optional[str]:
+        """[A82 Stage 4b rework 2] The durable operator-stop hold record of a
+        session ('operator_stop') or None. One PK read."""
+        row = self._conn().execute(
+            "SELECT turn_queue_hold FROM sessions WHERE session_id = ?",
+            ((session_id or "").strip(),),
+        ).fetchone()
+        return (row[0] or None) if row else None
 
     def is_session_enrolled(self, session_id: str) -> bool:
         row = self._conn().execute(
@@ -8352,6 +8368,11 @@ def _get_migrations() -> List[tuple]:
         """),  # A82 Stage 4b: operator cancel recorded against the attempt token
                # (cancel_token) + a small partial index over withdrawn rows whose
                # Case lineage still needs voiding. NULL on every legacy row.
+        (37, """
+            ALTER TABLE sessions ADD COLUMN turn_queue_hold TEXT
+        """),  # A82 Stage 4b rework 2: durable operator-stop hold record
+               # ('operator_stop' | NULL) — distinguishes "stopped by the operator"
+               # from dead/crashed, for activation and Case automation.
     ]
 
 

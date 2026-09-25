@@ -523,7 +523,11 @@ def _dispatch_worker(args: Dict[str, Any]) -> str:
         # worker JOIN the Manager's Case instead.
         body["parent_flow_run_id"] = parent_flow_run_id
 
-    result = _api_request("POST", "/api/instructions", body)
+    # [A82 Stage 4b rework 2] Declare this caller as automation: for a session
+    # enrolled in the managed turn queue the dispatched turn is non-human and
+    # never releases an operator stop hold (a label, not authentication).
+    result = _api_request("POST", "/api/instructions", body,
+                          headers={"X-AI-Team-Principal": "automation"})
     task_id = result.get("task_id", "?")
     session = result.get("session") or {}
     sess_id = session.get("session_id") if isinstance(session, dict) else None

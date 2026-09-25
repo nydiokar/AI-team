@@ -381,6 +381,25 @@ def _reclassify_salvaged_turn_success(result: TaskResult) -> TaskResult:
     return result
 
 
+def _operator_stop_held(db: Any, session_id: Optional[str]) -> bool:
+    """[A82 Stage 4b rework 2] True iff ``session_id`` carries the durable
+    operator-stop hold (managed stop). Case automation (wake dispatcher, crash
+    respawn, transient / quota resume) must neither wake nor replace such a
+    session — only an operator action releases it. No read at all while no
+    session is enrolled (legacy byte-identical); an unreadable record is
+    treated as HELD (automation skips this tick, fail closed)."""
+    sid = (session_id or "").strip()
+    if db is None or not sid:
+        return False
+    try:
+        if db.any_session_enrolled() is False:
+            return False
+        return bool(db.operator_stop_hold(sid))
+    except Exception:
+        logger.warning("event=operator_stop_hold_unreadable session_id=%s", sid, exc_info=True)
+        return True
+
+
 def _session_status_after_result(result: TaskResult, *, cancel_requested: bool = False) -> SessionStatus:
     # [quota-resume] A quota pause keeps the session REUSABLE: nothing about the
     # session broke, the provider simply refused the turn until the window
@@ -1735,6 +1754,12 @@ class TaskOrchestrator(ITaskOrchestrator):
             await self._escalate_headless_case(db, case_id, None)
             return 0
         session = self.session_store.get(session_id)
+        if session is not None and _operator_stop_held(db, session_id):
+            # [A82 Stage 4b rework 2] Operator-stopped (not dead): no wake, no
+            # crash-respawn, no escalation. The wait state stays intact, so the
+            # operator's release resumes the Case normally on a later tick.
+            logger.debug("event=wake_skipped_operator_stop case=%s session_id=%s", case_id, session_id)
+            return 0
         # A satisfied Case whose registered Manager session is GONE or CLOSED can
         # never self-continue: the wake would target a dead session and the finished
         # workers would strand SILENTLY (observed live 2026-08-01 — a live Manager on
@@ -2457,6 +2482,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         pause = await asyncio.to_thread(db.case_quota_pause, case_id)
         if pause is None:
             return False
+        if _operator_stop_held(
+            db, str(pause.get("session_id") or "") or db.case_manager_session_id(case_id),
+        ):
+            # [A82 Stage 4b rework 2] Operator-stopped Manager: no automatic
+            # resume/respawn; the pause keeps holding the Case.
+            return True
         paused_task_id = str(pause.get("paused_task_id") or "")
         # Quota state is provider-global — identical for every Case in a given tick.
         # Reuse a per-tick cache so N paused Cases trigger at most ONE snapshot read
@@ -2673,6 +2704,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         paused_task_id = str(pause.get("paused_task_id") or "")
         session_id = str(pause.get("session_id") or "") or db.case_manager_session_id(case_id)
         session = self.session_store.get(session_id) if session_id else None
+        if session is not None and _operator_stop_held(db, session_id):
+            # [A82 Stage 4b rework 2] Operator-stopped: hold the pause (it keeps
+            # owning the Case); never retry into, or hand off to respawn of, a
+            # session the operator stopped.
+            return True
         if session is None or session.status in (
             SessionStatus.CLOSED, SessionStatus.CANCELLED,
         ):
@@ -9574,13 +9610,17 @@ Generated from user description: {description}
     # ingestion) is converted in its own later sub-stage; until then it FAILS
     # CLOSED for an enrolled session instead of bypassing the managed queue.
     _MANAGED_PRODUCER1_SOURCES = frozenset(
-        {"web_session", "telegram_session", "runtime", "telegram"}
+        {"web_session", "telegram_session", "runtime", "telegram", "automation_session"}
     )
     _MANAGED_SOURCE_PRINCIPAL = {
         "web_session": "operator",
         "telegram_session": "telegram",
         "telegram": "telegram",
         "runtime": "runtime",
+        # [A82 Stage 4b rework 2] An in-repo automation caller of the web route
+        # (Manager MCP dispatch_worker) — a non-human turn: it never releases an
+        # operator stop hold.
+        "automation_session": "automation",
     }
 
     async def _session_turn_queue_enrolled(self, session_id: str) -> bool:

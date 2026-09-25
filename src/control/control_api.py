@@ -187,8 +187,18 @@ def _turn_queue_http(err: Exception) -> HTTPException:
     )
 
 
+# [A82 Stage 4b rework 2] Caller self-declaration on /api/instructions. An
+# in-repo automation caller (Manager MCP dispatch_worker) sends
+# `X-AI-Team-Principal: automation`; its enrolled turn is then non-human and
+# never releases an operator stop hold. Absent ⇒ operator (web UI). This is a
+# trust-model LABEL, not authentication: both callers hold the same bearer token.
+PRINCIPAL_HEADER = "X-AI-Team-Principal"
+AUTOMATION_PRINCIPAL = "automation"
+
+
 async def _submit_managed_instruction(
     orchestrator: Any, body: Any, session: Any, idempotency_key: Optional[str],
+    principal: Optional[str] = None,
 ) -> str:
     """[A82 Stage 4a] Producer 1 (web) → managed admission. The web
     Idempotency-Key is the durable operation id (replay-safe across restarts)."""
@@ -201,7 +211,11 @@ async def _submit_managed_instruction(
             session_id=session.session_id,
             cwd=session.repo_path or body.cwd,
             target_files=body.target_files,
-            source="web_session",
+            source=(
+                "automation_session"
+                if (principal or "").strip().lower() == AUTOMATION_PRINCIPAL
+                else "web_session"
+            ),
             parent_flow_run_id=body.parent_flow_run_id,
             join_case_id=body.case_id,
             extra_metadata=_instruction_extra_metadata(body),
@@ -1952,6 +1966,7 @@ def build_control_api(orchestrator) -> FastAPI:
     async def api_instructions(
         body: InstructionBody,
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+        principal: Optional[str] = Header(default=None, alias=PRINCIPAL_HEADER),
     ) -> JSONResponse:
         """Submit an instruction. With session_id it mirrors the Telegram session
         path (session → BUSY, source=web_session); otherwise a one-off."""
@@ -1976,7 +1991,7 @@ def build_control_api(orchestrator) -> FastAPI:
                     # durable before this returns and does NOT write BUSY /
                     # last_user_message / last_task_id (queued is not busy).
                     task_id = await _submit_managed_instruction(
-                        orchestrator, body, session, idempotency_key,
+                        orchestrator, body, session, idempotency_key, principal,
                     )
                     session = orchestrator.session_service.store.get(session.session_id)
                     resp = {"ok": True, "task_id": task_id, "session": _session_payload(session)}
