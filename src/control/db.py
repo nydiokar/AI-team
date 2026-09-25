@@ -854,6 +854,29 @@ def respawn_task_id(case_id: str, generation: int) -> str:
     return f"respawn:{case_id}:{int(generation)}"
 
 
+def producer_turn_id(trigger_key: str, session_id: str, attempt: int = 1) -> str:
+    """[A82 Stage 4c] Deterministic managed-turn id for a producer trigger.
+
+    ``trigger_key`` is the producer's durable trigger identity (a Case
+    continuation token id ``cont:{case}:{generation}``), ``session_id`` the
+    recipient and ``attempt`` the token's durable attempt counter (bumped only
+    when a linked turn ended WITHOUT consuming the trigger — withdrawn or
+    cancelled). A crash retry after the token claim therefore rediscovers the
+    SAME id instead of minting a random one (design §7). Pure."""
+    digest = hashlib.sha256(
+        f"{session_id}\0{trigger_key}\0{int(attempt)}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"cturn_{digest}"
+
+
+# [A82 Stage 4c] Managed turn outcomes that CONSUME a continuation trigger
+# (the Manager ran the wake: round counted, presented work consumed — legacy
+# `_finalize_continuation` parity, which also consumed on failure). Any other
+# terminal outcome (withdrawn = obsolete/closed, cancelled = operator stop)
+# re-arms the token for a fresh attempt without counting a round.
+PRODUCER_CONSUMING_STATUSES = ("completed", "failed", "failed_node_offline")
+
+
 def quota_resume_task_id(case_id: str, paused_task_id: str) -> str:
     """[quota-resume] Deterministic single-flight token for resuming ONE quota
     pause of a Case.
@@ -2444,6 +2467,8 @@ class MeshDB:
         require_enrolled: bool = False,
         lineage_token: Optional[str] = None,
         lineage_lease_sec: float = 30.0,
+        producer_token: Optional[str] = None,
+        producer_meta: Optional[Dict[str, Any]] = None,
         external_waiting: int = 0,
         fleet_cap: Optional[int] = None,
         per_session_cap: Optional[int] = None,
@@ -2472,6 +2497,11 @@ class MeshDB:
         The acknowledgement (`TurnAdmission`, a str equal to the turn id) is
         built only after COMMIT; any failure raises a typed error (429/413/409/
         422/503) and nothing is acknowledged.
+
+        [A82 Stage 4c] ``producer_token`` (a Case continuation token id) is
+        linked to the admitted turn in the SAME transaction (every branch —
+        fresh, replay, coalesce); a token that cannot link rolls the admission
+        back (`_link_producer_token`).
 
         Convenience form (producers/tests): `body=` alone builds the payload,
         `operation_id=` is the idempotency key, `task_id`/`backend` default to a
@@ -2680,6 +2710,11 @@ class MeshDB:
                         "queue_sequence": sequence, "idempotent_replay": False,
                         "coalesced": False, "lineage_pending": bool(lineage_token),
                     }
+                if producer_token is not None:
+                    _link_producer_token(
+                        conn, producer_token, admitted["task_id"],
+                        str(admitted["status"]), producer_meta, now,
+                    )
         except TurnQueueError:
             raise
         except sqlite3.IntegrityError as e:
@@ -5923,6 +5958,142 @@ class MeshDB:
                 payload={"wait_group_id": gid, "outcome": "drained"},
             )
 
+    # ------------------------------------------------------------------ #
+    # [A82 Stage 4c] Producer 3 — Case continuation token → managed turn
+    # linkage and durable finalization (design §7, packet §8 item 3).
+    # ------------------------------------------------------------------ #
+    def token_to_turn(self, *, coalesce_key: str, session_id: str) -> str:
+        """The ONE managed turn id a producer trigger maps to: the durably
+        linked id when the token row ``coalesce_key`` (a continuation token id)
+        is linked, else the deterministic id for its CURRENT durable attempt
+        (1 when the token does not exist yet). A crash retry after the token
+        claim rediscovers the same id (SYS03). Read-only."""
+        key = (coalesce_key or "").strip()
+        sid = (session_id or "").strip()
+        row = self._conn().execute(
+            "SELECT payload, producer_turn_id FROM mesh_tasks WHERE id = ? "
+            "AND COALESCE(queue_protocol, 0) = 0",
+            (key,),
+        ).fetchone()
+        if row is not None and row["producer_turn_id"]:
+            return str(row["producer_turn_id"])
+        return producer_turn_id(key, sid, _token_attempt(row["payload"] if row else None))
+
+    def continuation_token_for_turn(self, turn_id: str) -> Optional[Dict[str, Any]]:
+        """The continuation token still LINKED (unfinalized) to ``turn_id``, with
+        its payload decoded, or None. Served by the partial link index."""
+        row = self._conn().execute(
+            "SELECT * FROM mesh_tasks INDEXED BY idx_mesh_tasks_producer_link "
+            "WHERE producer_turn_id = ? AND status = 'claimed'",
+            (turn_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["payload"] = _token_payload(out.get("payload"))
+        return out
+
+    def reconcile_finalizers(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """Durable finalization of linked continuation tokens whose managed turn
+        reached a terminal outcome — the restart-safe completion path (an
+        in-memory finalizer is never the only one; design §7).
+
+        Per token, ONE convergent procedure (a re-run after a crash between the
+        steps converges):
+          * consuming outcome (``PRODUCER_CONSUMING_STATUSES``): append the
+            ``worker.wait_resolved`` markers of the retired groups ONCE, then CAS
+            the token ``claimed``→``completed`` with the consumed watermark —
+            the round is counted exactly once (the token row IS the round);
+          * withdrawn / cancelled: CAS the token back to ``pending`` with its
+            attempt bumped and the link cleared — no round, nothing consumed;
+            the Wake-Dispatcher re-evaluates it (a fresh deterministic id).
+        Bounded (``limit``), served by the partial link index. Returns the
+        tokens finalized by THIS call (a lost CAS is not reported). Raises on a
+        read error; a per-token write error is logged and retried next call."""
+        from .turn_queue import TERMINAL_STATUSES
+
+        placeholders = ",".join("?" * len(TERMINAL_STATUSES))
+        rows = self._conn().execute(
+            f"""
+            SELECT t.id AS token_id, t.payload AS token_payload,
+                   t.producer_turn_id AS turn_id, x.status AS turn_status
+            FROM mesh_tasks t INDEXED BY idx_mesh_tasks_producer_link
+            JOIN mesh_tasks x ON x.id = t.producer_turn_id
+            WHERE t.producer_turn_id IS NOT NULL AND t.status = 'claimed'
+              AND t.action = ? AND x.status IN ({placeholders})
+            LIMIT ?
+            """,
+            (CONTINUATION_ACTION, *TERMINAL_STATUSES, int(limit)),
+        ).fetchall()
+        done: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                item = self._finalize_producer_token(
+                    str(r["token_id"]), str(r["turn_id"]), str(r["turn_status"]),
+                    _token_payload(r["token_payload"]),
+                )
+            except Exception as e:  # noqa: BLE001 — stays linked; next call re-runs
+                logger.warning(
+                    "event=producer_finalize_failed token=%s turn=%s err=%s",
+                    r["token_id"], r["turn_id"], e,
+                )
+                continue
+            if item is not None:
+                done.append(item)
+        return done
+
+    def _finalize_producer_token(
+        self, token_id: str, turn_id: str, turn_status: str, payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        case_id = str(payload.get("case_id") or "")
+        generation = int(payload.get("generation") or 0)
+        presented = [str(t) for t in (payload.get("presented_task_ids") or [])]
+        now = _now()
+        item = {
+            "token_id": token_id, "turn_id": turn_id, "turn_status": turn_status,
+            "case_id": case_id, "generation": generation,
+            "presented_task_ids": presented,
+        }
+        if turn_status in PRODUCER_CONSUMING_STATUSES:
+            for gid in payload.get("retired_group_ids") or []:
+                self.append_flow_event_once(
+                    case_id, "worker.wait_resolved", "system",
+                    entity_type="wait_group", entity_id=str(gid),
+                    payload={"wait_group_id": str(gid), "outcome": "drained"},
+                )
+            result = json.dumps({
+                "generation": generation, "consumed_task_ids": presented,
+                "turn_id": turn_id, "turn_status": turn_status,
+            })
+            with self._managed_write("finalize_producer_token") as conn:
+                conn.execute(
+                    """
+                    UPDATE mesh_tasks
+                    SET status = 'completed', result = ?, completed_at = ?, updated_at = ?
+                    WHERE id = ? AND status = 'claimed' AND producer_turn_id = ?
+                      AND COALESCE(queue_protocol, 0) = 0
+                    """,
+                    (result, now, now, token_id, turn_id),
+                )
+                won = conn.execute("SELECT changes()").fetchone()[0] > 0
+            return dict(item, outcome="consumed") if won else None
+        rearmed = dict(payload)
+        rearmed.pop("turn_id", None)
+        rearmed["attempt"] = _token_attempt(payload) + 1
+        with self._managed_write("rearm_producer_token") as conn:
+            conn.execute(
+                """
+                UPDATE mesh_tasks
+                SET status = 'pending', claimed_by = NULL, claimed_at = NULL,
+                    producer_turn_id = NULL, payload = ?, updated_at = ?
+                WHERE id = ? AND status = 'claimed' AND producer_turn_id = ?
+                  AND COALESCE(queue_protocol, 0) = 0
+                """,
+                (json.dumps(rearmed), now, token_id, turn_id),
+            )
+            won = conn.execute("SELECT changes()").fetchone()[0] > 0
+        return dict(item, outcome="rearmed") if won else None
+
     def list_open_cases(self, limit: int = 200) -> List[Dict[str, Any]]:
         """[M3.4] Open (non-terminal) Cases — the Wake-Dispatcher's per-tick scan set.
 
@@ -8372,6 +8543,15 @@ def _get_migrations() -> List[tuple]:
         """),  # A82 Stage 4b rework 2: durable operator-stop hold record
                # ('operator_stop' | NULL) — distinguishes "stopped by the operator"
                # from dead/crashed, for activation and Case automation.
+        (38, """
+            ALTER TABLE mesh_tasks ADD COLUMN producer_turn_id TEXT;
+            CREATE INDEX IF NOT EXISTS idx_mesh_tasks_producer_link
+                ON mesh_tasks(producer_turn_id)
+                WHERE producer_turn_id IS NOT NULL AND status = 'claimed'
+        """),  # A82 Stage 4c: durable producer-token → managed-turn link (a Case
+               # continuation token names the deterministic protocol-1 turn it
+               # admitted, in the admission txn). NULL on every legacy row; the
+               # partial index holds only linked tokens awaiting finalization.
     ]
 
 
@@ -8603,6 +8783,83 @@ def _release_stop_hold(conn: sqlite3.Connection, session_id: str, now: str) -> N
         "AND (status = 'cancelled' OR turn_queue_hold IS NOT NULL)",
         (now, session_id),
     )
+
+
+def _token_payload(raw: Any) -> Dict[str, Any]:
+    """[A82 Stage 4c] Decoded producer-token payload ({} when absent/garbled)."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        val = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return val if isinstance(val, dict) else {}
+
+
+def _token_attempt(raw: Any) -> int:
+    """[A82 Stage 4c] The token's durable attempt counter (>= 1)."""
+    try:
+        return max(1, int(_token_payload(raw).get("attempt") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _link_producer_token(
+    conn: sqlite3.Connection,
+    token_id: str,
+    turn_id: str,
+    turn_status: str,
+    meta: Optional[Dict[str, Any]],
+    now: str,
+) -> None:
+    """[A82 Stage 4c] Link a Case continuation token to its managed turn INSIDE
+    the admission transaction (design §7: "in one transaction link token/trigger
+    to its deterministic protocol-1 turn"). Converges when already linked to the
+    same turn; raises (rolling the admission back) when the token is missing,
+    already finalized, linked elsewhere, or the turn is no longer open. The
+    linked token is `claimed` with ``claimed_at`` NULL: its owner is the linked
+    turn, so the legacy lease reaper (claimed_at IS NOT NULL) never re-offers
+    it."""
+    from .turn_queue import OPEN_STATUSES
+
+    row = conn.execute(
+        "SELECT status, queue_protocol, action, payload, producer_turn_id "
+        "FROM mesh_tasks WHERE id = ?",
+        (token_id,),
+    ).fetchone()
+    if row is None or int(row["queue_protocol"] or 0) != 0 or row["action"] != CONTINUATION_ACTION:
+        raise TurnNotFoundError("no producer token to link", task_id=token_id)
+    if row["producer_turn_id"] == turn_id:
+        return
+    if row["producer_turn_id"] is not None or row["status"] != "pending":
+        raise OwnershipConflictError(
+            "producer token already linked or finalized", task_id=token_id,
+            linked=row["producer_turn_id"], status=row["status"],
+        )
+    if turn_status not in OPEN_STATUSES:
+        raise OwnershipConflictError(
+            "producer token cannot link a terminal turn", task_id=turn_id,
+            status=turn_status,
+        )
+    try:
+        payload = json.loads(row["payload"]) if row["payload"] else {}
+    except (TypeError, ValueError):
+        payload = {}
+    payload.update(meta or {})
+    payload["turn_id"] = turn_id
+    conn.execute(
+        """
+        UPDATE mesh_tasks
+        SET status = 'claimed', claimed_by = ?, claimed_at = NULL,
+            claimer_incarnation = NULL, producer_turn_id = ?, payload = ?,
+            updated_at = ?
+        WHERE id = ? AND status = 'pending' AND producer_turn_id IS NULL
+          AND COALESCE(queue_protocol, 0) = 0
+        """,
+        (CONTINUATION_MACHINE_SENTINEL, turn_id, json.dumps(payload), now, token_id),
+    )
+    if conn.execute("SELECT changes()").fetchone()[0] == 0:
+        raise OwnershipConflictError("producer token link lost the race", task_id=token_id)
 
 
 def _cancel_requested_for(row: Any, claim_token: str) -> bool:

@@ -146,6 +146,10 @@ class AdmissionRequest(BaseModel):
     # Durable "lineage pending" writer token (Case lineage written after the
     # commit, then finalized under CAS); None ⇒ no post-admission lineage.
     lineage_token: Optional[str] = Field(default=None, max_length=64, repr=False)
+    # [A82 Stage 4c] Producer trigger token (a Case continuation token id)
+    # linked to the admitted turn in the admission txn, with its durable facts.
+    producer_token: Optional[str] = Field(default=None, max_length=256)
+    producer_meta: Optional[Dict[str, Any]] = None
 
 
 def admit_turn(
@@ -182,6 +186,8 @@ def admit_turn(
                 sender_session_id=request.sender_session_id,
                 machine_id=request.machine_id,
                 lineage_token=request.lineage_token,
+                producer_token=request.producer_token,
+                producer_meta=request.producer_meta,
                 require_enrolled=True,
                 external_waiting=slot["legacy"],
                 fleet_cap=fleet_cap,

@@ -751,10 +751,15 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
     monkeypatch.setenv("TRANSIENT_PROVIDER_RESUME_ENABLED", "1")
     monkeypatch.setenv("DURABLE_RELAY_ENABLED", "1")
     monkeypatch.setenv("CASE_RESPAWN_REQUIRES_APPROVAL", "0")
-    db, o = _setup(tmp_path, monkeypatch)
-    _wire(o)
 
     def scenario(stop: bool):
+        # [A82 Stage 4c] Each scenario gets its own DB: the control's wake is
+        # now a durable managed continuation turn that would otherwise hold
+        # sess-1's queue head in the stop scenario.
+        sub = tmp_path / ("stop" if stop else "control")
+        sub.mkdir()
+        db, o = _setup(sub, monkeypatch)
+        _wire(o)
         s = _sess()
         s.status = SS.AWAITING_INPUT
         o.session_store.save(s)
@@ -766,6 +771,7 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
             _run(db, t)
             assert o.stop_managed_session_turn(_sess())[0] is True
         auto = _Auto(o.session_store)
+        auto._emit_turn_telemetry = lambda *a, **k: None
         db.arm_wait_group(case_id, "g1", "ALL", ["w1"])
         db.append_flow_event(case_id, "task.finished", "worker", entity_type="task",
                              entity_id="w1", payload={"outcome": "success"})
@@ -776,12 +782,16 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
             # held: the pause keeps owning the Case (not closed as
             # "session_unavailable" and handed to the dead-manager path)
             assert owned is True and db.transient_pause(case_id) is not None
-        return woke, auto.deliveries
+        cont = [r for r in _managed_rows(db) if r["turn_kind"] == "continuation"]
+        return woke, auto.deliveries, cont, db
 
-    woke, deliveries = scenario(stop=False)  # control: automation does act
-    assert woke == 1 and deliveries
-    woke, deliveries = scenario(stop=True)
-    assert woke == 0 and deliveries == []
+    # control: automation does act — an enrolled Manager's wake is ONE durable
+    # managed continuation turn (A82 Stage 4c), never a legacy delivery.
+    woke, deliveries, cont, _ = scenario(stop=False)
+    assert woke == 1 and len(cont) == 1 and deliveries
+    assert not [d for d in deliveries if d["source"] == "manager_continuation"]
+    woke, deliveries, cont, db = scenario(stop=True)
+    assert woke == 0 and deliveries == [] and cont == []
     assert respawns == []  # operator-held, not dead: never replaced
     approvals = db._conn().execute("SELECT COUNT(*) FROM approvals").fetchone()[0] \
         if db._conn().execute("SELECT name FROM sqlite_master WHERE name='approvals'").fetchone() else 0
