@@ -91,10 +91,17 @@ Coordinator: Manager session `a2a819ff55c0`. Built from repository + running-env
 - **A83↔A84 reconciliation note (carry to A84):** A83's `waiting_workers`/`open_case_idle` derive from the legacy wait-group substrate via `_case_has_unresolved_wait_group`. When A84 moves new Cases to the outbox, A83's derivation MUST switch source per-Case (outbox vs wait-group) so a new-Case Manager isn't mislabeled `open_case_idle` while a durable outbox row is pending. The UI label must never become control authority. → jointly reviewed at A84 cutover.
 - **Disposition:** merged to `main` (local, `--no-ff` `7c5c100`). Remaining operator-gated: remote push/PR (no `gh` here) and `web/dist` rebuild + gateway restart to deploy the pillow.
 
+### A82 — Session turn queue — Stage 0 gate 2026-09-25 — VERDICT: ACCEPT (Stage 1 authorized)
+- **Reviewed:** read-only Stage 0 execution-path/producer inventory + terminal-writer inventory + Claude/Codex SDK ownership oracle + schema baseline + Stage-1 feasibility + design contradictions.
+- **Independently re-verified (Manager, 5/5 pillars):** control_api.py:1789 root-cause window; db.py:2268 `complete_task` swallow + no ownership predicate; claude_driver.py:1127-1134 `cancel_inflight`-on-lock-conflict; SDK `TERMINAL_TASK_STATUSES`/`TaskNotificationMessage`/`TaskUpdatedMessage` present (types.py:1074/1115/1140) while driver code references none; `flow_run_id` added by `_ensure_substrate_columns` ALTER not a numbered migration.
+- **Three escalated decisions resolved** (recorded in A82 §15): (1) distinct managed no-interrupt send path, legacy byte-identical; (2) new strict completion helpers on the protocol-1 path only, legacy swallowing helpers untouched; (3) Stage-1 red scoped to assertion-capable suites, module-dependent suites accepted ImportError-red until Stage 2.
+- **Disposition:** Stage 1 (assertion-capable red tests) authorized on branch `feat/session-turn-queue`. **Stage 2+ (behavior-changing) remains gated on my review of Stage 1.** A82 is a multi-session build; A84 stays blocked until A82's ownership/admission contract is built AND reviewed.
+
 ## Milestone (burndown)
 
 - [x] Current compatibility ledger created from repository evidence (2026-09-25)
 - [x] A83 legacy/new wait-source compatibility reviewed (verdict ACCEPT; reconciliation note carried to A84)
+- [~] A82 ownership/queue review: Stage 0 gate ACCEPT (2026-09-25); Stage 1 authorized, Stage 2+ gated — full contract review still pending before A84
 - [ ] A82 ownership/queue review completed before A84 schema/cutover work
 - [ ] A83 legacy/new wait-source compatibility reviewed with A84
 - [ ] A84 atomicity, recovery, barrier, and liveness evidence independently reviewed
