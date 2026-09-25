@@ -124,8 +124,14 @@ def test_Q01_busy_manager_gets_one_durable_continuation_queued_behind(tmp_path, 
     assert active["status"] == "running" and not active["cancel_token"]
     assert not db._conn().execute(
         "SELECT 1 FROM mesh_tasks WHERE action = 'cancel_managed'").fetchone()
-    # coalesced: further ticks never mint a second turn
+    # coalesced: further ticks never mint a second turn — and never even open
+    # an admission txn (the durable link short-circuits them)
+    real_enqueue = type(db).enqueue_turn
+    admissions = []
+    monkeypatch.setattr(type(db), "enqueue_turn",
+                        lambda self, *a, **k: admissions.append(k) or real_enqueue(self, *a, **k))
     assert _tick(o, db, cid) == 0 and _tick(o, db, cid) == 0
+    assert admissions == []
     assert len(_cont_rows(db)) == 1
     assert db.token_to_turn(coalesce_key=cont_id, session_id="sess-1") == expect
 
@@ -453,3 +459,63 @@ def test_Q13_unenrolled_wake_and_finalizer_touch_no_managed_state(tmp_path, monk
     assert _managed_rows(db) == []
     token = db.get_task(continuation_task_id(cid, 1))
     assert token["status"] == "claimed" and token["claimed_at"] and not token["producer_turn_id"]
+
+
+def test_Q10b_stale_attempt_replay_cannot_relink_a_terminal_turn(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    assert _tick(o, db, cid) == 1
+    c = _cont_rows(db)[0]
+    cont_id = continuation_task_id(cid, 1)
+    db.withdraw_turn(c["id"], int(c["revision"]), actor="test")
+    assert _reconcile(o, db) == 1  # re-armed → attempt 2, unlinked
+    with pytest.raises(tq.OwnershipConflictError):
+        db.enqueue_turn(session_id="sess-1", body=c["prompt"], turn_source="system",
+                        turn_kind="continuation", idempotency_scope=c["idempotency_scope"],
+                        operation_id=c["idempotency_key"], admission_hash=c["admission_hash"],
+                        producer_token=cont_id, require_enrolled=True)
+    token = db.get_task(cont_id)
+    assert token["status"] == "pending" and not token["producer_turn_id"]
+
+
+def test_Q14_wake_dispatcher_tick_finalizes_before_evaluating(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    _drive_to_completion(db, o, cid)
+    o2 = _fresh(o, monkeypatch)
+    assert asyncio.run(o2._wake_dispatcher_tick_once()) == 0  # finalized, nothing new to wake
+    assert db.get_task(continuation_task_id(cid, 1))["status"] == "completed"
+    assert db.compute_continuation_tick(cid)["completed_rounds"] == 1
+    # a NEW finish ⇒ round 2 through the same tick
+    db.arm_wait_group(cid, "g2", "ALL", ["w2"])
+    _finish(db, cid, "w2")
+    assert asyncio.run(o2._wake_dispatcher_tick_once()) == 1
+    assert [r["idempotency_key"] for r in _cont_rows(db)][-1] == f"{continuation_task_id(cid, 2)}#1"
+
+
+def test_Q15_finalizer_cas_is_fenced_to_the_linked_turn(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    assert _tick(o, db, cid) == 1
+    cont_id = continuation_task_id(cid, 1)
+    payload = json.loads(db.get_task(cont_id)["payload"])
+    assert db._finalize_producer_token(cont_id, "cturn_stale", "completed", payload) is None
+    assert db._finalize_producer_token(cont_id, "cturn_stale", "withdrawn", payload) is None
+    token = db.get_task(cont_id)
+    assert token["status"] == "claimed" and token["producer_turn_id"] == _cont_rows(db)[0]["id"]
+
+
+def test_Q16_admission_racing_a_stop_never_releases_or_runs_through_the_hold(tmp_path, monkeypatch):
+    """The automation principal: a wake admitted into a session that got held
+    between the tick's hold check and admission keeps the hold and waits."""
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    t = _running_operator_turn(db, o)
+    assert o.stop_managed_session_turn(_sess())[0] is True
+    tick = db.compute_continuation_tick(cid)
+    assert asyncio.run(o._continue_case_managed(db, cid, _sess(), 1, tick)) == 1
+    assert db.operator_stop_hold("sess-1") == "operator_stop"
+    tok = db.get_task(t)["claim_token"]
+    db.complete_turn(t, tok, {"success": False}, status="failed")
+    assert _pass(db, o).activated == 0
+    assert _cont_rows(db)[0]["status"] == "queued"
