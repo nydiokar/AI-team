@@ -1318,6 +1318,31 @@ The first run left 4 survivors (event-once, strict, decision-reuse, requeue-touc
 5. The carrier teardown `close_session` row still uses the legacy swallowing `enqueue_task` (best-effort, as legacy; the ledger is authoritative). The carrier's close interrupts a still-pending held (recovery_required) prompt; that is the operator's stop, and the attempt then resolves `cancelled` via the Stage-3 reconciler.
 6. Links written by a withdrawn join/attach writer stay (4a residual stands); only born child Cases are voided.
 
+### Stage 4b rework — A87 review (1 major + 3) closed (2026-09-26, commits `874ce07`, `cadefa0` + this record)
+
+| Finding | Fix | Test (mutation killed) |
+|---|---|---|
+| **MAJOR 1** cancel lost in the CLI boot window | Two layers, no await gap between them. (a) **Carrier:** `_handle_cancel_managed` records `cancel_requested` durably on an attempt this process holds BEFORE any await. A **pre-invoke check** runs in `_handle_task` (agent.py:2710), with no await between it and recording the turn uuid; it releases the attempt not-invoked, and `release_turn`'s cancelled branch makes it `cancelled`. (b) **Driver:** `ClaudeCodeBackend.cancel_managed_turn` first ARMS the uuid (`arm_managed_cancel`, claude_driver.py:355; bounded 256, uuid-keyed), then delivers to a registered prompt (and disarms). `_SDKSession._submit_turn` (claude_driver.py:1312) consumes an armed uuid in the same loop step that would register the prompt, and never submits it. The typed not-submitted conflict leads to a not-invoked release and then `cancelled`. The control row now completes "interrupt delivered or armed" or "cancel held for the attempt". | carrier R01 (adopted P1, inverted: row `cancelled`, prompt never sent, 0 interrupts), carrier R02 (cancel before the uuid exists ⇒ backend never called); mutants: driver ignores armed / backend does not arm / always disarms / no pre-invoke check / carrier does not record ⇒ all killed |
+| **2** C07 traced one thread | C07 wraps `MeshDB._conn` so EVERY thread's connection is traced (adopted P2). It asserts ≥2 threads were traced, and that no enrollment/ledger/lineage/cancel SQL runs for stop, compact and close through the real web routes. | C07 |
+| **3** surviving M1/M3 | kill tests | R02 (release of a cancelled attempt by another node ⇒ refused, still running), R01 (void never wipes a NEWER affiliation); both mutants killed |
+| **4** stop did not hold automation | Managed stop = `request_turn_cancel(hold_session=True)`. In the SAME txn it sets session `cancelled`, the legacy stop status that the wake dispatcher, transient/quota resume, resume-mode choice and orphan sweep already honour. Activation honours it too: head selection and `count_slot_waiting_sessions` exclude `cancelled`, and `activate_prepared_turn` refuses it in-txn. The hold is released only by an operator action: a new `human`/`operator` admission sets `idle` in the admission txn (legacy parity: the next send clears CANCELLED). Automation admissions never release it. A plain `cancel_task` (Case interrupt / explicit id) does not hold. **This supersedes the 4b "stop is not a pause" residual.** | R03 (held, then released by a new instruction, FIFO resumes), R03b, R03c (each layer independently), R04 (real `_continue_case_once` + `_handle_transient_paused_case`: control wakes/delivers; after stop: 0 wakes, 0 deliveries); mutants: stop without hold, hold not written, activation / head-select ignore hold, operator never releases, automation releases ⇒ all killed |
+
+**Mutation run** (scratch worktree `mut4br`, removed with plain `git worktree remove`; spawn guard on): 13 mutants, all killed.
+- The first pass left 2 survivors: head select and activation each ignoring the hold, because each was redundant with the other. R03c now tests them separately.
+- One mutant was first "killed" by an IndentationError. It was redone as a valid mutant, and R02 fails on it.
+
+**Verification.**
+- turn-queue files: 306 passed / 7 red. The reds are unchanged: SYS03-07 and api ×2.
+- Regression group: 450 passed. That is the 420 group (the 419 group plus `test_session_cancellation` + `test_compact_context_injection`) plus `test_case_transient_resume` + `test_wake_dispatcher_eventdriven`.
+- The reviewer's probe file now yields `ROW cancelled interrupts 0` for P1, and P2 passes.
+
+**Residuals — carried (A87 → CONTEXT.md).**
+1. The interrupt is scheduled via `ensure_future`, so it may land late. It can then only hit a CLI-autonomous turn, never a managed one: the managed owner's result was already dispatched.
+2. A slow lineage writer running past its lease can birth an open child Case after the void has run (this inherits the 4a lease model).
+3. 4b residuals 2-6 stand as ruled. Residual 1 is superseded: stop now holds.
+4. New: the armed-cancel registry is per carrier process. A carrier restart loses armed entries, but the durable claim record's `cancel_requested` plus the server's `cancel_token` still end the attempt `cancelled` via the not-invoked release / reconciler.
+5. New: a held (`cancelled`) session with queued turns stays held until the operator sends or compacts. Queue-level resume/send-next routes are Stage 6.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
