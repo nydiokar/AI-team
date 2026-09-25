@@ -2879,10 +2879,16 @@ class MeshDB:
         now = _now()
         try:
             with self._write() as conn:
+                # [A82 Stage 4a rework] Activation is also carrier assignment
+                # (design §5): an unassigned row takes its session's pin, since
+                # claim now requires an exact assignment match.
                 conn.execute(
                     """
                     UPDATE mesh_tasks
-                    SET status = 'pending', activated_at = ?, updated_at = ?
+                    SET status = 'pending', activated_at = ?, updated_at = ?,
+                        machine_id = COALESCE(machine_id, (
+                            SELECT NULLIF(s.machine_id, '') FROM sessions s
+                            WHERE s.session_id = mesh_tasks.session_id))
                     WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
                     """,
                     (now, now, task_id),
@@ -3150,7 +3156,7 @@ class MeshDB:
         try:
             with self._write() as conn:
                 row = conn.execute(
-                    "SELECT id, session_id, status, queue_protocol, payload "
+                    "SELECT id, session_id, status, queue_protocol, payload, machine_id "
                     "FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
@@ -3164,6 +3170,14 @@ class MeshDB:
                         "turn not claimable in its current state",
                         task_id=task_id, status=status,
                     )
+                # [A82 Stage 4a rework] Claim independently verifies the carrier
+                # assignment (design §5 step 5) — the poll filter is not a
+                # guard. An unassigned managed row is claimable by nobody.
+                if not node_id or row["machine_id"] != node_id:
+                    raise OwnershipConflictError(
+                        "turn is assigned to a different carrier",
+                        task_id=task_id, assigned=row["machine_id"], claimant=node_id,
+                    )
                 conn.execute(
                     """
                     UPDATE mesh_tasks
@@ -3172,9 +3186,10 @@ class MeshDB:
                         claimer_incarnation = ?, claimed_at = ?, updated_at = ?
                     WHERE id = ? AND queue_protocol = 1
                       AND status IN ('pending', 'claimed')
+                      AND machine_id = ?
                     """,
                     (token, node_id, carrier_kind, incarnation_id,
-                     incarnation_id, now, now, task_id),
+                     incarnation_id, now, now, task_id, node_id),
                 )
                 if conn.execute("SELECT changes()").fetchone()[0] == 0:
                     # Lost the compare-and-swap race (status moved under us).
