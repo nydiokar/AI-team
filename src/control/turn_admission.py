@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, Generator, Optional
 
 from pydantic import BaseModel, Field
 
-from .turn_queue import CapacityError, TurnAdmission
+from .turn_queue import BackingStoreError, CapacityError, TurnAdmission
 
 logger = logging.getLogger(__name__)
 
@@ -200,3 +200,27 @@ async def admit_turn_async(
     return await asyncio.to_thread(
         admit_turn, db, request, fleet_cap=fleet_cap, allowance=allowance,
     )
+
+
+def _read_marker(db: Any, session_id: str) -> bool:
+    try:
+        return bool(db.is_session_enrolled(session_id))
+    except Exception as e:
+        raise BackingStoreError(
+            f"turn-queue enrollment marker unreadable: {e}", session_id=session_id,
+        )
+
+
+async def session_enrollment(db: Any, session_id: str) -> bool:
+    """[A82 Stage 4a rework] Is ``session_id`` enrolled in the managed queue?
+
+    No mesh DB, or the process-level presence flag says NO session is enrolled
+    ⇒ False with NO marker read (the legacy path behaves exactly as before).
+    Otherwise ONE marker read, offloaded from the event loop; an unreadable
+    marker then FAILS CLOSED (typed 503) — an enrolled session must never get
+    unmanaged execution because the marker could not be read."""
+    if db is None:
+        return False
+    if db.any_session_enrolled() is False:
+        return False
+    return await asyncio.to_thread(_read_marker, db, session_id)

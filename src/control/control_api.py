@@ -134,18 +134,28 @@ _BODY_READ_DEADLINE_SEC = 5.0
 
 
 async def _session_turn_queue_enrolled(session_id: str) -> bool:
-    """[A82 Stage 4a] Durable enrollment marker (canonical DB, offloaded).
-    Mesh DB absent ⇒ False; unreadable ⇒ typed 503 (fail closed)."""
+    """[A82 Stage 4a] Durable enrollment marker. No read while no session is
+    enrolled; else one offloaded read; unreadable ⇒ typed 503 (fail closed)."""
     from src.control.db import get_db
-    from src.control.turn_queue import BackingStoreError
+    from src.control.turn_admission import session_enrollment
+    from src.control.turn_queue import TurnQueueError
+
+    try:
+        return await session_enrollment(get_db(), session_id)
+    except TurnQueueError as err:
+        raise _turn_queue_http(err)
+
+
+def _enrollment_kw(orchestrator: Any, enrolled: bool) -> Dict[str, Any]:
+    """[A82 Stage 4a rework] Pass the route's single enrollment decision on
+    (one marker read per request) — only when enrollment can exist, so the
+    no-enrollment legacy call is byte-identical to before."""
+    from src.control.db import get_db
 
     db = get_db()
-    if db is None:
-        return False
-    try:
-        return bool(await asyncio.to_thread(db.is_session_enrolled, session_id))
-    except Exception as e:
-        raise _turn_queue_http(BackingStoreError(f"enrollment marker unreadable: {e}"))
+    if db is None or db.any_session_enrolled() is False:
+        return {}
+    return {"turn_queue_enrolled": enrolled}
 
 
 def _turn_queue_http(err: Exception) -> HTTPException:
@@ -183,6 +193,7 @@ async def _submit_managed_instruction(
             join_case_id=body.case_id,
             extra_metadata=_instruction_extra_metadata(body),
             operation_id=idempotency_key,
+            turn_queue_enrolled=True,
         )
     except HarnessAdmissionBlocked as blocked:
         raise _harness_blocked_http(blocked)
@@ -1971,6 +1982,7 @@ def build_control_api(orchestrator) -> FastAPI:
                         parent_flow_run_id=body.parent_flow_run_id,
                         join_case_id=body.case_id,
                         extra_metadata=_instruction_extra_metadata(body),
+                        **_enrollment_kw(orchestrator, False),
                     )
                 except HarnessAdmissionBlocked as blocked:
                     # No task ran — return the session to IDLE so it stays usable.

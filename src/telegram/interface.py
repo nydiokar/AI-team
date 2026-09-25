@@ -57,17 +57,16 @@ def _turn_queued_text(admission: TurnAdmission) -> str:
     return f"📥 Queued{seq} `{admission}`"
 
 
-def _session_turn_queue_enrolled(session_id: str) -> bool:
-    """[A82 Stage 4a] Durable enrollment marker; unreadable ⇒ treated as
-    enrolled (fail closed: refuse rather than bypass the managed queue)."""
+async def _session_turn_queue_enrolled(session_id: str) -> bool:
+    """[A82 Stage 4a] Durable enrollment marker: no read while no session is
+    enrolled; unreadable while enrollment exists ⇒ treated as enrolled (fail
+    closed: refuse rather than bypass the managed queue)."""
     from src.control.db import get_db
+    from src.control.turn_admission import session_enrollment
 
-    db = get_db()
-    if db is None:
-        return False
     try:
-        return bool(db.is_session_enrolled(session_id))
-    except Exception:  # noqa: BLE001
+        return await session_enrollment(get_db(), session_id)
+    except TurnQueueError:
         logger.warning("event=turn_queue_enrollment_unreadable session_id=%s", session_id)
         return True
 
@@ -1953,7 +1952,7 @@ class TelegramInterface:
         if not self._user_can_access_session(user_id, active_session):
             await update.message.reply_text("❌ You do not own the active session.")
             return
-        if _session_turn_queue_enrolled(active_session.session_id):
+        if await _session_turn_queue_enrolled(active_session.session_id):
             # [A82 Stage 4a] File ingestion into an enrolled session is producer 8
             # (not converted yet): refuse before any download / BUSY mark.
             await update.message.reply_text(

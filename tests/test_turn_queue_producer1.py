@@ -393,3 +393,68 @@ def test_P1_10b_telegram_document_into_enrolled_session_refused(tmp_path, monkey
     asyncio.run(tg._handle_document(update, None))
     assert replies and "not supported yet" in replies[-1]
     assert sess.status == SessionStatus.IDLE and saved == []
+
+
+# P1-11 (A87 rework probes L1/L2) ------------------------------------------ #
+def test_P1_11_no_enrollment_anywhere_means_no_marker_read_and_legacy_survives_db_fault(
+        tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch, enroll=False)
+    stmts = []
+    db._conn().set_trace_callback(stmts.append)
+    _submit(o)
+    db._conn().set_trace_callback(None)
+    assert not [s for s in stmts if "turn_queue_enrolled" in s], stmts
+    assert o.task_queue.qsize() == 1
+
+    def boom(_sid):
+        raise RuntimeError("database disk image is malformed (injected)")
+
+    monkeypatch.setattr(db, "is_session_enrolled", boom)
+    tid = _submit(o)  # main behavior: legacy path unaffected
+    assert type(tid) is str and o.task_queue.qsize() == 2
+
+
+def test_P1_11b_web_unenrolled_marker_unreadable_is_legacy_200(tmp_path, monkeypatch):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(db_mod, "get_db", lambda: db)
+    orch = _WebOrch(db, None)
+
+    async def legacy_submit(**kw):
+        orch.calls.append(kw)
+        return "task_legacy"
+
+    orch.submit_instruction = legacy_submit
+    s = Session(session_id="sess-1", backend="claude", repo_path="/tmp/repo",
+                status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id="worker-a")
+    orch.session_service.store.save(s)
+    db.upsert_session(s)
+    monkeypatch.setattr(db, "is_session_enrolled",
+                        lambda sid: (_ for _ in ()).throw(RuntimeError("x")))
+    c = _client(monkeypatch, orch)
+    r = c.post("/api/instructions", headers={"Authorization": "Bearer tok"},
+               json={"description": "hello", "session_id": "sess-1"})
+    assert r.status_code == 200 and r.json()["task_id"] == "task_legacy"
+    assert "turn_queue_enrolled" not in orch.calls[0]  # byte-identical legacy call
+
+
+def test_P1_11c_enrollment_exists_one_marker_read_per_web_request(tmp_path, monkeypatch):
+    orch, c = _web(tmp_path, monkeypatch)  # sess-1 enrolled ⇒ presence True
+    reads = []
+    real = orch.db.is_session_enrolled
+    monkeypatch.setattr(orch.db, "is_session_enrolled", lambda sid: (reads.append(sid), real(sid))[1])
+    r = c.post("/api/instructions", headers={"Authorization": "Bearer tok"},
+               json={"description": "hello", "session_id": "sess-1"})
+    assert r.status_code == 200 and reads == ["sess-1"]
+    assert orch.calls[0]["turn_queue_enrolled"] is True
+
+
+def test_P1_11d_presence_flag_lifecycle(tmp_path):
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    assert db.any_session_enrolled() is False
+    db.upsert_session(Session(session_id="x", backend="claude", repo_path="/tmp/repo",
+                              status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW))
+    db.enroll_session("x")
+    assert db.any_session_enrolled() is True
+    assert MeshDB(str(tmp_path / "mesh.db")).any_session_enrolled() is True  # loaded at start
+    db._conn().execute("UPDATE sessions SET turn_queue_enrolled = 0")
+    assert db.refresh_enrollment_presence() is False  # cleared when none
