@@ -834,6 +834,31 @@ Delivered the design §6 Stage-2 subset. **STOP for Manager review + adversarial
 - **NOT done (out of scope, stay RED)**: Stage 4 admission/scheduler (§8), Stage 5 sender (§9), Stage 6
   UI/API (§10); the api/worker/producers/pressure suites remain red/import-pending by design. NOT merged.
 
+### Stage 3 rework — A87 REWORK findings closed (2026-09-25, on `feat/session-turn-queue`, commits `e4f766d`, `fb45026`)
+Each finding → fix → proving test. All tests run offline (fake SDK client / fake backend; no paid CLI).
+
+| Finding | Fix | Test ID(s) |
+|---|---|---|
+| **M5/M6** bare `ResultMessage` deadlocked legacy `send` + forced `cancel_inflight` | `_dispatch` (claude_driver.py `_dispatch`) restores legacy FIFO byte-identically; correlation gate applies ONLY to a `managed` head. An uncorrelated managed result fails the managed turn closed with typed `RecoveryRequiredError` (turn_queue.py), surfaces output via the proactive sink, keeps the session non-quiescent. Removed the settle-tick hack. Only `SystemMessage(subtype="init")` marks response start (Task*/hook subclasses excluded). | SDK05a, SDK05b (fails on `b309f84`, verified), SDK06a, SDK06b |
+| **M4** `is_quiescent` on caller thread (TOCTOU) | `_reserve_and_submit_managed` runs the check on the SDK loop in the same step as the `_pending` registration; `_submit_managed_no_interrupt` replaces `submit()` for managed (deadline ⇒ `RecoveryRequiredError`, never `cancel_inflight`). | SDK07, SDK06c, SDK01 |
+| **B1** managed result posted to legacy `/result` | `_post_managed_result_once` → `/result-managed` (atomic `complete_turn` via shared `_commit_managed_result`); prune only on task+token receipt. | INT01, INT02[5xx/timeout/2xx-unmatched] |
+| **B2** worker never polled/claimed managed | Flag `WORKER_MANAGED_TURNS` (default OFF). ON: registers `queue_protocols:[0,1]`, `_fetch_pending_managed`, `_claim_and_start_managed` (`/claim-managed` token → envelope reservation → new fenced `/start-managed`), executes the claim response. OFF: legacy `/tasks/pending` + `/claim` + `/result` only (legacy claim no longer swaps in the claim-response row — restored to pre-Stage-3). | INT01, INT05, INT09 |
+| **M1** drain guard dead | `run()` drain: managed attempts go through `_managed_shutdown_release_ok` + token-fenced `/release-managed`; running/undelivered retained. | INT04 |
+| **M2** reservation dead / budget unenforced | Reservation before start; spool counts outstanding reservations against 128 MiB; no allowance ⇒ release unstarted claim, turn stays pending. | INT03 |
+| **M3** boot replay never re-sends | `run()` re-delivers after registration; unacked results retried each poll pass (batch 8, 2 concurrent, no background tasks); old token accepted after restart unless superseded. | INT02 (via real `run()`) |
+| **m1** `/quiescence` accepted any non-null result | Evidence must match recorded token + claiming node; a `result` must validate as `ManagedTerminalResult` (boolean `success`) and reconciles via `complete_turn` (native id committed); otherwise quiescent+terminal+native id, resolving only failed/cancelled. | INT07, INT08 |
+| **m2** stale receipt echoed unverified token | Stale receipt only if presented token == recorded token (`hmac.compare_digest`); else 409 without echo. | INT06 |
+
+Also fixed while wiring: claim token was stored in `_active_meta` (published in heartbeat `active_task_details`) — moved to `_managed_claims`; `/claim-managed` response now carries `backend`/`action` so the claim response is executable.
+
+**Fixture correction (flagged for review):** SDK02 now submits via the managed send. On the legacy path a bare background `ResultMessage` is indistinguishable from a legitimate result-only reply, and dec.1 + M5/M6 require legacy to keep serving it (SDK05b asserts exactly that). The SDK02 assertion is unchanged and strengthened (no deadlock, no interrupt, output reaches the proactive sink).
+
+**Verification (worktree, targeted only):** turn-queue Stage 1-3 + INT: 55 passed; driver/proactive suites (claude_driver, sdk_driver_proactive, proactive_turn_delivery, sdk_governor, claude_driver_manager_tools): 121 passed; carrier/legacy regressions (claim_reaper, codex_ownership, docker_boundary, heartbeat_live_state, mesh_dispatch_timeout, mesh_enqueue_affinity, mesh_reconcile_spool, mesh_self_awareness, session_close_propagation, task_server_client, task_server_upload_safety, task_state_truth, usage_propagation, worker_pinned_only, worker_startup_registration): 122 passed; session_service/session_cancellation/case_admission/control_api_write/warm_worker_idle_reaper/worker_role/case_observable_worker_session: 96 passed. INT01-09 fail on `b309f84` (verified, non-vacuous).
+
+**Still red, later stages:** `test_turn_queue_api.py` (2: `/turn-requests` routes, commit-before-ack — Stage 6 §10), `test_turn_queue_pressure.py` (3: LOAD01b/02/04 admission byte budgets / pre-parse limits — Stage 4 admission + Stage 7 pressure), `test_turn_queue_producers.py` (7: SYS01/03-08 producers/scheduler — Stage 4 §8).
+
+**Open gap (not in the finding list; not closed):** the backend execution path still calls legacy `_SDKSession.send` (claude_driver.py `_run_turn`) for managed rows — `send_managed` is not yet selected for protocol-1 execution, and the carrier has no route to move a started turn into `recovery_required` on `RecoveryRequiredError`. Wiring it needs a managed marker through `_execute_task`→`call_backend`→`_run_turn` plus an enter-recovery carrier route; proposed as the first Stage 4 item or a follow-up rework, Manager's call. §7 deferrals: `/pending-managed` still trusts the `queue_protocols` query param rather than the registered capability; oversize results block new managed claims but no bounded diagnostic record is posted to the server yet.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
