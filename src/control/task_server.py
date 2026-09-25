@@ -960,6 +960,10 @@ def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    # [A82 Stage 3 rework] The carrier executes THIS response, so it must carry
+    # the routing fields the executor needs (backend/action) from the committed
+    # row — non-secret columns only.
+    row = db.get_task(task_id) or {}
     return {
         "status": "claimed",
         "claim_token": str(token),
@@ -967,12 +971,69 @@ def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
         "task": {
             "id": token.task_id,
             "session_id": token.session_id,
+            "backend": row.get("backend", ""),
+            "action": row.get("action", ""),
             "queue_protocol": 1,
             "claim_token": str(token),
             "status": token.status,
             "payload": token.payload,
         },
     }
+
+
+class ManagedAttemptPayload(BaseModel):
+    """Identifies one managed execution attempt (design §6): the carrier node,
+    its process incarnation and the per-attempt claim token."""
+
+    node_id: str
+    claim_token: str
+    incarnation_id: Optional[str] = None
+
+
+@app.post("/tasks/{task_id}/start-managed", dependencies=[Depends(_require_auth)])
+def start_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, Any]:
+    """[A82 Stage 3 rework, B2] Conditional managed start (``claimed -> running``)
+    for the CURRENT token and carrier incarnation (design §7: "Managed start is a
+    new conditional operation"). A repeated start with the same live attempt
+    returns the same authorization; a superseded token or a restarted carrier
+    incarnation is refused (409) so an old authorization can start nothing."""
+    from .turn_queue import TurnQueueError
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        auth = db.start_turn(
+            task_id=task_id,
+            claim_token=payload.claim_token,
+            incarnation_id=payload.incarnation_id,
+        )
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    return {"status": auth.status, "task_id": auth.task_id, "started_at": auth.started_at}
+
+
+@app.post("/tasks/{task_id}/release-managed", dependencies=[Depends(_require_auth)])
+def release_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, Any]:
+    """[A82 Stage 3 rework] Release a claimed-but-NOT-started managed turn back
+    to pending for the current token only (design §7: release before start is
+    safe only for the current token). A started/foreign-token row is refused
+    (409) — release after start is forbidden without quiescence evidence."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    from .turn_queue import TurnQueueError
+
+    try:
+        released = db.release_turn(task_id=task_id, claim_token=payload.claim_token)
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 503), detail=str(e))
+    if not released:
+        raise HTTPException(
+            status_code=409,
+            detail="managed turn not releasable (started, superseded or not claimed)",
+        )
+    return {"status": "released", "task_id": task_id}
 
 
 class ManagedResultPayload(BaseModel):
@@ -997,52 +1058,96 @@ def submit_managed_result(task_id: str, payload: ManagedResultPayload) -> Dict[s
     spool can prune ONLY on a task/token-matched receipt (never on a bare 2xx or
     timeout — design §6). An identical repeated commit for the current token is
     idempotent; a superseded/foreign token is rejected (409)."""
-    from .turn_queue import TurnQueueError
-
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    # Late arrival from a reaped/superseded attempt whose row is already terminal:
-    # return a durable STALE receipt (matched to task+token) rather than 403, so
-    # the carrier can retire its spool obligation (design §6 stale receipt).
+    # Late arrival for a row that is already terminal: return a durable STALE
+    # receipt so the carrier can retire its spool obligation (design §6) — but
+    # ONLY when the presented token is the row's recorded token. A superseded or
+    # foreign token is refused and never echoed back (m2: no unverified echo).
     task = db.get_task(task_id)
     if task and str(task.get("status")) in ("completed", "failed", "failed_node_offline", "cancelled", "withdrawn"):
+        if not _token_matches(task.get("claim_token"), payload.claim_token):
+            raise HTTPException(status_code=409, detail="stale result presented a superseded or foreign claim token")
         return {"status": "accepted (stale)", "task_id": task_id, "claim_token": payload.claim_token}
-    effective_success, downgraded = classify_completion_outcome(
-        payload.success, payload.output, payload.errors
+    outcome = _commit_managed_result(
+        db, task_id, payload.claim_token,
+        success=payload.success, output=payload.output, errors=payload.errors,
+        backend_session_id=payload.backend_session_id,
+        artifact_path=payload.artifact_path,
     )
-    result_dict = {
-        "success": effective_success,
-        "output": payload.output,
-        "errors": payload.errors,
-        "backend_session_id": payload.backend_session_id,
-        "error_detail": downgraded,
-    }
-    if effective_success:
-        status, error = "completed", None
-    else:
-        status = "failed"
-        error = "; ".join(payload.errors) if payload.errors else (
-            f"backend error result ({downgraded})" if downgraded else "worker reported failure"
-        )
-    try:
-        outcome = db.complete_turn(
-            task_id=task_id,
-            claim_token=payload.claim_token,
-            result=result_dict,
-            status=status,
-            native_session_id=payload.backend_session_id,
-            error=error,
-            artifact_path=payload.artifact_path,
-        )
-    except TurnQueueError as e:
-        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
     return {
         "status": "accepted",
         "task_id": outcome.task_id,
         "claim_token": payload.claim_token,
         "resolved_status": outcome.status,
     }
+
+
+def _token_matches(recorded: Any, presented: str) -> bool:
+    import hmac
+
+    return bool(recorded) and hmac.compare_digest(str(recorded), str(presented or ""))
+
+
+def _commit_managed_result(
+    db: Any,
+    task_id: str,
+    claim_token: str,
+    *,
+    success: bool,
+    output: str,
+    errors: List[str],
+    backend_session_id: Optional[str],
+    artifact_path: Optional[str] = None,
+) -> Any:
+    """Classify through the SHARED helper and commit atomically via
+    ``complete_turn`` (terminal status + result + native id + active identity in
+    one transaction). Used by the managed result route and by quiescence
+    reconciliation of a spooled terminal result, so the two never diverge."""
+    from .turn_queue import TurnQueueError
+
+    effective_success, downgraded = classify_completion_outcome(success, output, errors)
+    result_dict = {
+        "success": effective_success,
+        "output": output,
+        "errors": errors,
+        "backend_session_id": backend_session_id,
+        "error_detail": downgraded,
+    }
+    if effective_success:
+        status, error = "completed", None
+    else:
+        status = "failed"
+        error = "; ".join(errors) if errors else (
+            f"backend error result ({downgraded})" if downgraded else "worker reported failure"
+        )
+    try:
+        return db.complete_turn(
+            task_id=task_id,
+            claim_token=claim_token,
+            result=result_dict,
+            status=status,
+            native_session_id=backend_session_id,
+            error=error,
+            artifact_path=artifact_path,
+        )
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+
+
+class ManagedTerminalResult(BaseModel):
+    """A durable terminal result presented as recovery evidence (m1): it must be
+    a real result envelope — an explicit boolean ``success`` plus its output —
+    not merely any non-null value."""
+
+    model_config = ConfigDict(extra="allow")
+
+    success: bool
+    output: str = ""
+    errors: List[str] = Field(default_factory=list)
+    backend_session_id: Optional[str] = None
+    artifact_path: Optional[str] = None
 
 
 class QuiescenceObservationPayload(BaseModel):
@@ -1080,30 +1185,58 @@ def record_quiescence_observation(
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
+    task = db.get_task(task_id)
+    if not task or int(task.get("queue_protocol") or 0) != 1:
+        raise HTTPException(status_code=404, detail="no managed turn")
+    # [A82 Stage 3 rework, m1] Evidence must be bound to THIS attempt: the
+    # recorded token and the carrier node that holds the claim.
+    if not _token_matches(task.get("claim_token"), payload.claim_token):
+        raise HTTPException(status_code=409, detail="quiescence observation for a superseded or foreign attempt")
+    if str(task.get("claimed_by") or "") != payload.node_id:
+        raise HTTPException(status_code=409, detail="quiescence observation from a carrier that does not hold the claim")
+    if payload.result is not None:
+        # A durable spooled terminal result: validate it is a real result
+        # envelope, then reconcile it through the SAME atomic completion as the
+        # managed result route (result + native id + active identity).
+        try:
+            res = ManagedTerminalResult.model_validate(payload.result)
+        except ValidationError:
+            raise HTTPException(status_code=422, detail="result evidence is not a terminal result envelope")
+        outcome = _commit_managed_result(
+            db, task_id, payload.claim_token,
+            success=res.success, output=res.output, errors=res.errors,
+            backend_session_id=res.backend_session_id or payload.native_session_id,
+            artifact_path=res.artifact_path,
+        )
+        return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.status}
+    # No result: a quiescence observation must carry native execution identity
+    # AND an explicit terminal/stop observation. Without a result the outcome is
+    # not success — only failed/cancelled may be recorded.
+    if not (payload.quiescent and payload.terminal and (payload.native_session_id or "").strip()):
+        raise HTTPException(
+            status_code=409,
+            detail="insufficient quiescence evidence (requires quiescent + terminal + native execution identity)",
+        )
+    if payload.terminal_status not in ("failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail="terminal_status must be failed or cancelled without a durable result",
+        )
     evidence: Dict[str, Any] = {
         "task_id": task_id,
         "claim_token": payload.claim_token,
-        "quiescent": bool(payload.quiescent),
-        "terminal": bool(payload.terminal),
+        "node_id": payload.node_id,
+        "quiescent": True,
+        "terminal": True,
         "terminal_status": payload.terminal_status,
         "native_session_id": payload.native_session_id,
-        "result": payload.result,
     }
-    # Auto-reconcile a matching valid spooled terminal result to its outcome;
-    # otherwise resolve to the observed terminal status (cancelled/failed).
-    resolved_status = "failed"
-    if payload.result is not None:
-        resolved_status = "failed" if payload.result.get("success") is False else "completed"
-    elif payload.terminal_status in ("completed", "failed", "cancelled"):
-        resolved_status = payload.terminal_status
-    else:
-        resolved_status = "cancelled"
     try:
         outcome = db.resolve_recovery(
             task_id=task_id,
             claim_token=payload.claim_token,
             quiescence_evidence=evidence,
-            resolved_status=resolved_status,
+            resolved_status=payload.terminal_status,
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
