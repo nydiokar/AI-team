@@ -2702,6 +2702,15 @@ class WorkerAgent:
                 turn_uuid: Optional[str] = None
                 if managed and claim_token:
                     turn_uuid = str(uuid.uuid4())
+                    # [A82 Stage 4b rework] Pre-invoke cancel check: an operator
+                    # cancel handled before this point (no turn uuid to arm yet)
+                    # is recorded on the attempt. No await between this check
+                    # and recording the uuid below, so a later cancel always
+                    # finds the uuid and arms the backend instead.
+                    if (self._managed_claims.get(task_id) or {}).get("cancel_requested"):
+                        logger.info("event=managed_cancelled_before_invoke task_id=%s", task_id)
+                        await self._release_managed_claim(task_id, claim_token, not_invoked=True)
+                        return
                     try:
                         self._claim_record(task_id, invoked=True, turn_uuid=turn_uuid)
                     except Exception:
@@ -2820,6 +2829,17 @@ class WorkerAgent:
         if not isinstance(target, str) or not target or len(target) > 256:
             detail = "invalid cancellation target"
         else:
+            live = target in self._managed_claims
+            if live:
+                # [A82 Stage 4b rework] This process holds the attempt: record
+                # the cancel on it durably BEFORE any await, so the pre-invoke
+                # check refuses to invoke it even if no turn uuid exists yet.
+                try:
+                    self._claim_record(target, cancel_requested=True)
+                except Exception:
+                    self._managed_claims.setdefault(target, {})["cancel_requested"] = True
+                    logger.warning("event=cancel_managed_persist_failed target=%s", target)
+                detail = "cancel held for the attempt (not invoked yet)"
             rec = dict(self._managed_claims.get(target) or {})
             if not rec and self._claim_store is not None:
                 rec = dict(self._claim_store.get(target) or {})
@@ -2830,7 +2850,7 @@ class WorkerAgent:
                 session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
                 try:
                     delivered = bool(await asyncio.to_thread(cancel, session, turn_uuid))
-                    detail = "interrupt delivered" if delivered else "turn not in flight"
+                    detail = "interrupt delivered or armed" if delivered else "turn not in flight"
                 except Exception as e:
                     detail = f"cancel failed: {type(e).__name__}"
                     logger.warning("event=cancel_managed_failed target=%s", target, exc_info=True)
