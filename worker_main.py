@@ -11,6 +11,7 @@ and runs the WorkerAgent.
 Run directly (no PM2 required):
     python worker_main.py
 """
+import os
 import sys
 from pathlib import Path
 
@@ -20,7 +21,22 @@ src_path = Path(__file__).parent / "src"
 if str(src_path) not in sys.path:
     sys.path.append(str(src_path))
 
-from src.worker.agent import main
+def main() -> None:
+    """Load the role environment before importing worker configuration."""
+    try:
+        from dotenv import load_dotenv
+
+        configured_env = os.getenv("AI_TEAM_ENV_FILE")
+        env_path = Path(configured_env) if configured_env else Path(__file__).parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path, override=bool(configured_env))
+    except ImportError:
+        pass
+
+    from src.worker.agent import main as worker_main
+
+    worker_main()
+
 
 if __name__ == "__main__":
     main()

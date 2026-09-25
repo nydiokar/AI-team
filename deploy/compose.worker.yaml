@@ -1,0 +1,66 @@
+name: ai-team-worker-${WORKER_NODE_ID}
+
+services:
+  worker:
+    image: ${AI_TEAM_WORKER_IMAGE:-ai-team-worker-agents:local}
+
+    build:
+      context: ..
+      target: worker-agents
+
+    command: ["python", "worker_main.py"]
+
+    env_file:
+      - ../.env
+
+    environment:
+      HOME: /app
+      CODEX_HOME: /app/.codex
+
+      # Required for bind-mounted host repositories whose host UID differs
+      # from the container ai-team UID.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
+
+    restart: unless-stopped
+
+    read_only: true
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    # Entry point drops permanently from root to ai-team.
+    cap_add:
+      - SETUID
+      - SETGID
+
+    tmpfs:
+      # Worker tooling may legitimately execute temporary build/test files.
+      - /tmp:rw,nosuid,size=1g
+
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+
+    volumes:
+      - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/workers/${WORKER_NODE_ID}/state:/app/state
+      - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/workers/${WORKER_NODE_ID}/logs:/app/logs
+      - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/workers/${WORKER_NODE_ID}/tasks:/app/tasks
+      - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/workers/${WORKER_NODE_ID}/results:/app/results
+      - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/workers/${WORKER_NODE_ID}/summaries:/app/summaries
+
+      # Persistent backend authentication/runtime state.
+      - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/workers/${WORKER_NODE_ID}/codex:/app/.codex
+      - ${DOCKER_DATA_ROOT:?set DOCKER_DATA_ROOT}/workers/${WORKER_NODE_ID}/claude:/app/.claude
+
+      # Existing application variable remains the source of truth.
+      - ${WORKER_PROJECTS_ROOT:?set WORKER_PROJECTS_ROOT}:${WORKER_PROJECTS_ROOT}:rw
+
+    ports:
+      - "${WORKER_TAILSCALE_IP:-127.0.0.1}:${WORKER_API_PORT:-9001}:${WORKER_API_PORT:-9001}"
