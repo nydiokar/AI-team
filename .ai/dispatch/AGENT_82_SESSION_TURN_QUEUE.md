@@ -874,6 +874,47 @@ Also: envelope reservation now uses the spool's configured cap (was the constant
 
 **Known residuals:** registry capability is in-memory (a gateway restart falls back to `[0]` until the worker re-registers — fail closed); `release_node_claims` on a new incarnation also returns managed `claimed`-not-started rows to pending (safe: not started; stale `claim_token` is re-minted on next claim). A `managed_conflict` (lock busy / not quiescent, raised before submit) is reported as a failed result, not held.
 
+### Stage 3 rework 3 — A87 adversarial review (7 probes) closed (2026-09-25, commit `bcba6e7`)
+Governing rule: every managed state has a live, tested exit. Probes P1-P6b adopted as permanent tests in
+`tests/test_turn_queue_carrier_recovery.py`, rewritten to assert correct behavior; ran that file against `7863895` in a
+temporary worktree: 23/24 fail there (all 7 probes included), 24/24 pass on `bcba6e7`.
+
+**Exit per managed state:**
+
+| State (DB / carrier record) | Exit(s) | Test |
+|---|---|---|
+| `claimed`, never started | carrier release (token); boot/poll reconciler release (not-invoked); operator `requeue` | B2b, P3, INT03, B2e |
+| `running`, start response lost | idempotent start retry; else release w/ not-invoked attestation (running→pending); else durable record → reconciler | P2, P2b, P2c |
+| `running`, backend invoked, carrier crashed | boot reconciler: enter-recovery + `carrier_restarted` evidence → failed | B2 |
+| `running`, loop-thread conflict (never submitted) | release w/ not-invoked → pending | P3b |
+| `recovery_required` (uncorrelated / deadline / oversize / 4xx result) | late reply → `/result-managed` (completed); reconciler `backend_quiescent` → failed once quiescent; operator failed/cancelled | P4b, B2c, B2d, m3, INT15, B2e |
+| enter-recovery POST lost | `recovery_acked=False` persisted → reconciler retries until acked | B2c |
+| result spooled, unacked | replay each poll pass + boot; definitive 4xx → dead-letter + recovery | INT02, m3 |
+
+| Finding | Fix (file) | Test |
+|---|---|---|
+| B1 lost start | `_claim_and_start_managed` bounded retries; `release_turn(backend_not_invoked=True)` (db.py) | P2, P2b, P2c |
+| B2 no exit | `ManagedClaimStore` (managed_result_spool.py), write-ahead `invoked`, `_reconcile_managed_claims` (agent.py), `/quiescence` evidence kinds `carrier_restarted`/`backend_quiescent` checked against the claim + registered incarnation, operator `POST /api/turn-requests/{id}/resolve-recovery` (control_api.py) | B2-B2f |
+| M1 control starvation (legacy) | flag OFF: poll loop exactly as on main; flag ON: capacity gate exempts `close_session`/`cancel_codex` | P1, P1b |
+| M2 prompt lost when not quiescent | pre-start `backend.is_quiescent` → release; `managed_conflict` → release not-invoked | P3, P3b |
+| M3 late reply dropped | driver `_abandon_managed_pending` + `late_managed` routing + `_late_handoffs` quiescence hold; worker `_capture_late_managed_result` | P4, P4b |
+| M4 continuation adopted | `_autonomous_expected` (per terminal TaskNotification); managed head never takes that result | P5 |
+| M5 legacy bypass | protocol-0 fence in `claim_task`/`release_task`/`release_node_claims`/`list_stale_claims`/`complete_task`/`fail_task`; legacy `/claim` `/result` `/release` → 409 on protocol-1; `claim_token` stripped | P6, P6b, P6c |
+| m1–m6 | token cleared on return to pending; 413 body cap as a dependency before validation + `extra=forbid`; dead-letter (≤256, counts toward the 128 MiB budget); dir fsync + orphan `.spool-*.tmp` cleanup; lazy spool/claim-store construction; reservation released in `finally` | P2b, m2–m6 |
+
+**Test changed to match the M5 ruling:** `test_turn_queue_db.py::test_DB08` last lines asserted legacy `complete_task` completes a
+MANAGED row, which is exactly the bypass A87 forbade. The legacy half now uses a protocol-0 row, and the test now also asserts that the managed row is untouched.
+
+**Verification:** turn-queue (incl. carrier integration + recovery): 86 passed; driver suites 121; carrier/legacy regressions 122;
+session/case/control 96; interface-touching 139; suites exercising the fenced legacy DB helpers (14 files) 242. Still red,
+unchanged later stages: api 2, pressure 3, producers 7.
+
+**Residuals (documented, not closed here):** the `_autonomous_expected` correlation assumes the CLI runs exactly one autonomous
+turn per terminal task notification when idle; if it runs none, a managed reply is diverted to the proactive sink and the turn
+reaches its deadline, then goes to recovery. Fail-closed, but the late reply is then not recaptured, because it already went to
+the proactive transcript. Oversize full output is still not written to carrier artifact storage (A87 to record in CONTEXT.md).
+The operator route uses the existing dashboard auth (which also accepts the mesh worker token, as all `/api` routes do).
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
