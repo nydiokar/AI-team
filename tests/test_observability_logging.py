@@ -101,3 +101,16 @@ def test_bracketed_formatter_redacts_secrets_from_exception_text(monkeypatch):
 
     assert secret not in output
     assert "/bot<REDACTED>/getUpdates" in output
+
+
+def test_init_logging_suppresses_sdk_info_but_preserves_sdk_warnings():
+    sdk_logger = logging.getLogger("claude_agent_sdk")
+    previous_level = sdk_logger.level
+    try:
+        observability.init_logging(node_id="worker-1")
+
+        assert sdk_logger.level == logging.WARNING
+        assert not sdk_logger.isEnabledFor(logging.INFO)
+        assert sdk_logger.isEnabledFor(logging.WARNING)
+    finally:
+        sdk_logger.setLevel(previous_level)

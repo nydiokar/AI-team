@@ -286,6 +286,9 @@ def init_logging(
     # Reduce noise from third-party HTTP logs (httpx via python-telegram-bot)
     try:
         logging.getLogger("httpx").setLevel(logging.WARNING)
+        # The SDK reports its expected bundled-CLI selection at INFO once per
+        # CLI connection. Keep SDK warnings/errors, but omit that routine noise.
+        logging.getLogger("claude_agent_sdk").setLevel(logging.WARNING)
     except Exception:
         pass
 
