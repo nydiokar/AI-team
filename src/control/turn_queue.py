@@ -387,3 +387,60 @@ class TurnAdmission(str):
         if isinstance(key, str) and key in self._FIELDS:
             return getattr(self, key)
         return super().__getitem__(key)
+
+
+# --------------------------------------------------------------------------- #
+# [A82 Stage 4e] Producer 5 — the fixed A/B/R retry rule (design §7, packet §3.9)
+# --------------------------------------------------------------------------- #
+#: Only a turn that genuinely RAN and FAILED is retried automatically. Not
+#: ``failed_node_offline`` (the carrier vanished — the backend may have executed),
+#: not ``cancelled`` (operator stop), not ``withdrawn`` (obsolete / closed / the
+#: operator withdrew it), not an open / ``recovery_required`` turn (uncertain).
+RETRYABLE_FAILED_STATUSES = ("failed",)
+
+
+class RetryDecision(BaseModel):
+    """The A/B/R decision for failed turn A once its automatic pause is
+    eligible to end. ``supersede`` releases ONLY that producer's pause and
+    leaves the earlier-accepted real instruction B as head; ``retry`` admits R
+    as head (the pause is closed at R's terminal commit, not now); ``drop``
+    releases the pause without a retry (A is not retryable); ``wait`` changes
+    nothing (pause not yet eligible, or another hold applies)."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    action: str
+    supersede_retry: bool = False
+    admit_retry: bool = False
+    release_pause: bool = False
+    head: Optional[str] = None
+    reason: str = ""
+
+
+def decide_retry(
+    *,
+    failed_task_id: str,
+    earlier_waiting: Any,
+    pause_eligible: bool,
+    failed_status: str = "failed",
+    held: bool = False,
+) -> RetryDecision:
+    """Pure A/B/R rule. ``earlier_waiting`` = real (non-automation) turns B of
+    the same session accepted after A and before any retry, oldest first.
+    Other holds (operator stop, an ineligible pause — approval pending, a
+    future quota/backoff deadline) always win: nothing is cleared."""
+    if held:
+        return RetryDecision(action="wait", reason="held")
+    if not pause_eligible:
+        return RetryDecision(action="wait", reason="pause_not_eligible")
+    if str(failed_status or "") not in RETRYABLE_FAILED_STATUSES:
+        return RetryDecision(
+            action="drop", release_pause=True, reason=f"not_retryable:{failed_status}",
+        )
+    waiting = [str(b) for b in (earlier_waiting or []) if b]
+    if waiting:
+        return RetryDecision(
+            action="supersede", supersede_retry=True, release_pause=True,
+            head=waiting[0], reason="superseded_by_real_instruction",
+        )
+    return RetryDecision(action="retry", admit_retry=True, head=None, reason="retry_head")
