@@ -1502,6 +1502,74 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 1. If the rebound withdrawal loses the race to the old Manager's activation, the wake runs on the old session and is consumed there. The rebound Manager is woken on a later round, which costs one extra tick.
 2. Wait groups on closed Cases stay "pending" in projections, because the finalizer appends no `wait_resolved` after `flow.closed`. This is cosmetic: a closed Case is never ticked.
 
+### Stage 4d — producers 4 (watched-job notification) + 6 (cache heartbeat) (2026-09-26, commits `91ad69f`..HEAD + this record)
+
+**Scope.** For ENROLLED sessions only: a watched-job completion and a due cache heartbeat each become ONE durable managed turn under the automation principal. Unenrolled sessions take the unchanged legacy branches, and while nothing is enrolled neither producer adds a single enrollment/ledger read (U01, all-thread SQL trace).
+
+**Built.**
+- **Shared admission.** `_admit_managed_producer_turn` (orchestrator.py:10161) is generalized. Continuation keeps its exact 4c request. `watched_job` / `cache_heartbeat` are routed there only when the server-set `__turn_producer` facts carry the matching `turn_kind` (`_MANAGED_AUTOMATION_PRODUCERS`, :10018); no HTTP body can set that key. Without the facts, both sources still FAIL CLOSED (4a). Every automation producer row gets principal `system`, scope `automation:<sid>:<kind>`, idempotency key = the trigger key (permanent: a replay collapses even after the turn is terminal), and a hash of the trigger identity. `producer_turn_id(..., prefix=)` (db.py) derives the deterministic ids (`jturn_` / `hturn_`).
+- **Producer 4 — watched job.** `_process_terminal_job` (orchestrator.py:4770) resolves enrollment via `session_enrollment`: no read while nothing is enrolled, and an unreadable marker fails closed (no session turn or record; Telegram notify unchanged).
+  - `notify_agent` → `_admit_managed_watched_job` (:4729): trigger `watched:<job_id>` (= coalesce key, SYS08 shape), `dispatched_by=watched_job:<id>`. Case attachment is the existing watched-job rule, through the shared convergent lineage procedure: attach to the session's open Case and never relabel a Manager. The jobs schema has no Case, so there is nothing to pin (no `__attach_case_id`).
+  - A refused admission (typed 4xx/5xx, harness) falls back to the audit record (legacy parity), never to legacy execution.
+  - notify-only / fallback → `_record_managed_job_audit` (:4679) → `MeshDB.record_audit_turn` (db.py:2157): ONE already-terminal protocol-0 insert (no claimable `pending` window) plus enrich/event, and **NO whole-row session save**. This closes 4b MINOR 4 on the managed path: a stale snapshot cannot rewrite `cancelled`.
+- **Producer 6 — cache heartbeat.** In `_process_due_cache_heartbeats` (:1511), an enrolled session goes to `_admit_managed_cache_heartbeat` (:1593).
+  - The window lease `cachehb:<sid>:<slot>` (protocol 0, sentinel) is the durable trigger. It is linked to `hturn_…` inside the admission txn: `PRODUCER_TOKEN_SENTINELS` (db.py:830) generalizes `_link_producer_token` beyond continuations. An already linked or finalized lease ⇒ 0, with no admission txn.
+  - Eligibility (`managed=True`) takes idleness from the ledger, not from in-memory tasks or BUSY/IDLE; the quota / owner / evidence / pinned-node / driver checks are unchanged.
+  - **Idle-only**: `enqueue_turn(idle_only=True)` re-checks `_session_idle_for_optional_turn` (db.py:9062) INSIDE the txn (db.py:2686). The predicate refuses when: the session is closed / cancelled / errored; the durable hold record is set; the session is paused; any other managed open row exists; or any legacy nonterminal row exists. `MeshDB.heartbeat_eligible` (:3785) exposes it (SYS06).
+  - **Deadline**: `expires_at = admission + MANAGED_HEARTBEAT_TTL_SEC` (300 s, orchestrator.py:176). Expiry is enforced at two points. (a) The existing scheduler head expiry. (b) NEW claim-time expiry in `claim_turn`: a `pending` non-human row past its deadline is withdrawn in the claim txn (audit `claim:expired`) and refused with 409 `reason=expired`. That covers a heartbeat activated in time but released not-invoked while the CLI was busy. The `/claim-managed` route hints the scheduler.
+  - **Activation revalidation**: `_managed_heartbeat_obsolete` (:10878) checks, in order: lease still linked; idle excluding itself; `CACHE_HEARTBEAT_ACTIVE`; controller active (owner live); quota; no Case pause; cache evidence ≥ threshold (`_cache_heartbeat_evidence_sufficient`, :179, shared). Only then does the generic Case check run.
+  - **Durable finalizer**: `MeshDB.reconcile_heartbeat_finalizers` (db.py:6244) runs at the top of each heartbeat tick, and only while something is enrolled. For each linked lease whose turn is terminal it runs ONE txn (`_finalize_heartbeat_lease`, :6293): a fenced CAS moves the lease to `completed`. Only the CAS winner, and only when the turn completed or failed, applies the shared controller transition (`_apply_cache_heartbeat_result`, :8320, which legacy `record_cache_heartbeat_result` now wraps with identical SQL). Withdrawn, cancelled and node-offline turns ⇒ no beat. There is no in-memory finalizer on the managed path.
+
+**Producer inventory.**
+| Producer | Durable trigger identity | Turn id | Completion effect |
+|---|---|---|---|
+| watched-job notification (`notify_agent`, enrolled) | job id: idempotency (`automation:<sid>:watched_job`, `watched:<job_id>`) + coalesce `watched:<job_id>` | `jturn_<sha256(sid, watched:<job>, 1)[:24]>` (protocol 1, `turn_kind=watched_job`, `system`) | scheduler (hold honoured; Case revalidated) → carrier → `complete_turn`; nothing to finalize (legacy has no round) |
+| watched-job record (notify-only / refused, enrolled) | job id = audit row id (`INSERT OR IGNORE`) | none (terminal audit row, protocol 0) | none |
+| cache heartbeat (enrolled) | window lease `cachehb:<sid>:<slot>` linked in the admission txn; idempotency (`automation:<sid>:heartbeat`, lease id) | `hturn_<sha256(sid, lease, 1)[:24]>` (protocol 1, `turn_kind=heartbeat`, `system`, `expires_at`) | scheduler (revalidated, expiry) → carrier → `complete_turn` → next tick `reconcile_heartbeat_finalizers`: beat recorded once (completed/failed) or none (withdrawn/cancelled/offline); lease `completed` |
+
+**Exit table (new managed states).**
+| State | Exits | Tests |
+|---|---|---|
+| heartbeat lease pending, unlinked (admission refused after the lease write) | same-window tick re-admits the same id; window passes ⇒ inert sentinel row (never claimable; legacy parity) | H02b |
+| lease linked (`claimed`, `claimed_at` NULL, sentinel) | linked turn terminal → finalizer CAS → `completed` (+beat iff ran) | H07, H07b, H08, H09 |
+| queued heartbeat | activated when idle + revalidated; withdrawn `scheduler:obsolete:{session_not_idle, heartbeat_disabled, heartbeat_stopped, quota_exhausted, case_pause_active, cache_below_threshold, case_*}`; `scheduler:expired`; session close ⇒ withdrawn | H04, H05, H06, H06b, H08 |
+| pending heartbeat past its deadline | claim ⇒ `withdrawn` (`claim:expired`), slot freed; human rows exempt | H05b |
+| queued watched-job turn | head + not held ⇒ activated; held ⇒ waits for the operator's release (FIFO); Case blocked/closed ⇒ withdrawn; close ⇒ withdrawn | W03, W06 |
+| watched-job audit row | terminal at insert | W04, W05 |
+
+**Tests** (`tests/test_turn_queue_4d.py`, 23; offline, autouse spawn guard). They use a real file-backed MeshDB and the real `_process_terminal_job` / `_process_due_cache_heartbeats` / admission / lineage / scheduler pass / claim / `complete_turn`. State changes go through the real APIs: `stop_managed_session_turn`, `session_service.close_session`, `interrupt_case`, `stop_cache_heartbeat`, a legacy `upsert_session` for the stale save, and `claim_task` / `complete_task` for the cancel control row. The only exceptions are clock / time-of-due fixtures.
+- W01 one turn; double poll, restart, re-reported status and post-terminal replay all collapse. W02 Case attach once, no birth / relabel. W03 hold honoured, not released, FIFO after release. W04 audit-only, no pending window, stale snapshot cannot undo the hold. W05 refusal ⇒ audit fallback. W06 interrupted Case ⇒ withdrawn.
+- H01 one heartbeat per window + linked lease + restart. H02 / H02b not idle (incl. the in-txn recheck against a stale pre-check). H03 / H03b hold (incl. after a stale status save). H04 human work behind ⇒ withdrawn. H05 / H05b expiry at head / at claim (human exempt). H06 / H06b quota / owner revalidation. H07 / H07b durable exactly-once beat across restart and racing finalizers. H08 close ⇒ no beat. H09 failure stops the controller as legacy. SYS06 predicate. U01 unenrolled: all-thread trace shows no managed SQL, legacy deliveries unchanged.
+- Turned green: **SYS06**. SYS08 stays green.
+- turn-queue files: **380 passed / 4 red** (SYS05, SYS07, api ×2; baseline 357 / 5).
+- Named regression group: **547 passed** (baseline 547). `test_watched_jobs`, `test_mcp_jobs`, `test_dispatch_lineage`, `test_heartbeat_live_state`, `test_quota_window_coordinator` / `_prewarmer` and `test_task_server_client`: 122 passed.
+
+**Mutation run** (scratch worktree `mut4d`, removed with plain `git worktree remove`; spawn guard on). 26 mutants; 25 killed.
+- Killed: M1 idle_only in-txn off; M2 activation idle recheck off; M3 claim expiry off; M4 no deadline; M5 / M22 non-durable key / scope; M6 automation counted as operator (hold); M7 beat on every outcome; M8 finalizer CAS ignored (survived the first pass; H07b added); M9 / M25 managed audit via whole-row save / pending window; M10 / M11 enrollment reads when nothing enrolled; M12 / M13 quota / owner not revalidated; M14 finalizer not called; M15 hold record ignored; M16 legacy rows ignored; M17 refusal drops the record; M18 lease not linked; M20 activation sees itself; M21 revalidation branch removed; M23 producer branch ignored; M24 idle_only not requested; M26 human claim exemption dropped.
+- H05b first killed several mutants spuriously through a 1 s wall-clock TTL. It now uses the ledger clock (`db._now`) and is deterministic.
+- **Equivalent:** M19, the tick's managed pre-check (`heartbeat_eligible`) removed. It is advisory; the in-txn `idle_only` check is authoritative (H02b). This is the same shape as 4a's reserve term.
+
+**Service boundary (§7).**
+| Item | watched-job managed branch | heartbeat managed tick | heartbeat finalizer | claim-time expiry |
+|---|---|---|---|---|
+| Concurrency | single job poller; admission via the 4-permit service; the permanent key collapses double polls / restarts | single Wake-Dispatcher loop; ≤20 due / tick; idle-only in-txn ⇒ ≤1 open heartbeat / session | ≤25 leases / tick, one `_managed_write` txn each; CAS ⇒ racing finalizers count once | inside the existing claim txn |
+| Memory | O(1) / job (tail ≤1500 chars in the prompt) | O(20) | O(25) | O(1) |
+| Request size | internal; producer facts server-set, unreachable from HTTP | internal | internal | claim body unchanged (16 KiB route cap) |
+| Timeout | 5 s admission deadline ⇒ typed error ⇒ audit fallback | 5 s admission ⇒ skipped this tick | 5 s per txn; failure logged, lease stays linked, retried | same claim txn deadline |
+| Malformed input | missing session ⇒ skipped (legacy); garbled job fields ⇒ same payload rendering as legacy | missing / garbled heartbeat row ⇒ legacy eligibility stops it | garbled turn result ⇒ `{}` ⇒ success defaults, evidence fallback | non-human only; missing deadline ⇒ unchanged claim |
+| Backing failure | unreadable marker ⇒ fail closed (no session turn / record); DB error in audit ⇒ logged (best-effort record) | unreadable marker ⇒ that heartbeat skipped; no carrier ⇒ skipped | read error ⇒ logged, tick continues | DB error ⇒ typed 503 (unchanged) |
+
+**Residuals (for CONTEXT.md).**
+1. Watched-job delivery is at-most-once across restarts (legacy parity): the poll watermark and processed set are in memory, so a job that finished while the gateway was down is never notified. The durable identity guarantees collapse, not delivery. A refused admission records the audit row and is not retried.
+2. A watched-job turn of a Case that is blocked or closed before activation is withdrawn (the generic 4c automation rule). The agent then never sees that notification, and no audit row is written for it.
+3. Enrolled audit records and managed turns do not write the session summary fields (`last_result_summary` / `task_history` / `last_task_id`). The ledger is the transcript truth, and BUSY/IDLE plus summaries are Stage 6.
+4. Backend quiescence (a CLI-autonomous turn) is not observable at admission. Never-interrupt and never-late rest on the carrier's `managed_conflict` not-invoked release plus the 300 s deadline, so a released heartbeat can be re-claimed until then.
+5. Heartbeat finalization runs only on heartbeat ticks (the Wake-Dispatcher interval, and only while `CACHE_HEARTBEAT_ACTIVE`). With the flag off, linked leases wait.
+6. A heartbeat withdrawn in a window is not retried in that window (legacy lease parity). Heartbeat turns still B-attach to the session's open Case (legacy parity, not improved).
+7. The idle predicate's legacy-row probe uses `idx_mesh_tasks_session`, which is O(session rows). It runs only for enrolled due heartbeats (≤20 / tick) and at heartbeat activation.
+8. `continuation_token_for_turn` is used action-agnostically for heartbeat leases. The name is kept to avoid churn.
+9. Producers 5, 7 and 8, Stage 5/6, and managed Codex/OpenCode are untouched.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
