@@ -29,7 +29,7 @@ COPY src/ ./src/
 COPY config/ ./config/
 COPY __init__.py ./
 RUN --mount=type=cache,id=ai-team-pip,target=/root/.cache/pip \
-    pip install -c constraints.txt .
+    pip install -c constraints.txt ".[push]"
 COPY main.py server_main.py worker_main.py ./
 COPY scripts/ ./scripts/
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint

@@ -758,7 +758,12 @@ export const api = {
   /** GET /api/push/status — is push available + the public VAPID key to subscribe. */
   async pushStatus(
     token: string,
-  ): Promise<{ available: boolean; reason: string | null; vapid_public_key: string }> {
+  ): Promise<{
+    available: boolean;
+    reason: string | null;
+    vapid_public_key: string;
+    missing_env?: string[];
+  }> {
     return get(`/api/push/status`, token);
   },
 

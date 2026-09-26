@@ -19,6 +19,22 @@ export type PushState =
   | "subscribed"
   | "loading";
 
+function unavailableMessage(reason: string | null, missingEnv: string[] | undefined): string {
+  if (reason === "pywebpush_not_installed") {
+    return "Push delivery is not installed on this gateway.";
+  }
+  if (reason === "vapid_not_configured" && missingEnv?.length) {
+    return `Gateway push setup is incomplete (${missingEnv.join(", ")}).`;
+  }
+  if (reason === "vapid_public_key_malformed") {
+    return "Gateway push setup has an invalid public key.";
+  }
+  if (reason === "db_unavailable") {
+    return "Push subscriptions are temporarily unavailable.";
+  }
+  return "Push notifications are unavailable on this gateway.";
+}
+
 function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
   const padding = "=".repeat((4 - (base64.length % 4)) % 4);
   const b64 = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
@@ -49,9 +65,11 @@ export function usePushNotifications() {
     try {
       const status = await api.pushStatus(token);
       if (!status.available) {
+        setError(unavailableMessage(status.reason, status.missing_env));
         setState("unavailable");
         return;
       }
+      setError(null);
       if (Notification.permission === "denied") {
         setState("denied");
         return;
@@ -74,6 +92,7 @@ export function usePushNotifications() {
     try {
       const status = await api.pushStatus(token);
       if (!status.available || !status.vapid_public_key) {
+        setError(unavailableMessage(status.reason, status.missing_env));
         setState("unavailable");
         return;
       }
