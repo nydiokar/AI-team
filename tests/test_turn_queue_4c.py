@@ -462,7 +462,7 @@ def test_Q13_unenrolled_wake_and_finalizer_touch_no_managed_state(tmp_path, monk
                  "idx_mesh_tasks_producer_link", "turn_queue_hold",
                  # the rework's rebound-wake probe reads the token row by id;
                  # legacy never does (it only INSERTs / claims it)
-                 "SELECT * FROM mesh_tasks WHERE id = ?")
+                 "SELECT * FROM mesh_tasks WHERE id = 'cont:")  # trace sees bound values
     assert not [q for q in stmts if any(f in q for f in forbidden)]
     # the legacy delivery happened exactly as before
     assert [d["source"] for d in auto.deliveries] == ["manager_continuation"]
