@@ -385,25 +385,30 @@ def test_H05_expired_heartbeat_is_withdrawn_at_the_head(tmp_path, monkeypatch):
 def test_H05b_expired_activated_heartbeat_is_never_claimed_late(tmp_path, monkeypatch):
     """A heartbeat activated in time but not started within its window (e.g.
     released not-invoked while the backend was busy) is withdrawn at claim."""
-    from src import orchestrator as orch_mod
+    from src.control import db as db_mod
 
     db, o = _env(tmp_path, monkeypatch)
-    monkeypatch.setattr(orch_mod, "MANAGED_HEARTBEAT_TTL_SEC", 1)
     _arm_heartbeat(db)
     assert _beat(o, db) == 1
     hb_turn = _hb_rows(db)[0]["id"]
     assert _pass(db, o).activated == 1
     assert db.get_task(hb_turn)["status"] == "pending"
-    import time as _time
-    _time.sleep(1.2)
+    real_now = db_mod._now
+    later = lambda: (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()  # noqa: E731
+    monkeypatch.setattr(db_mod, "_now", later)  # the ledger clock is past the deadline
     with pytest.raises(tq.OwnershipConflictError):
         db.claim_turn(hb_turn, "worker-a", "worker_daemon", "inc-1")
     assert db.get_task(hb_turn)["status"] == "withdrawn"
+    assert any(a.get("actor") == "claim:expired" for a in db.get_turn_revisions(hb_turn))
     assert db.get_active_turn("sess-1") is None  # the slot is free for real work
-    # a HUMAN turn never expires at claim
-    h = _submit(o, operation_id="op-h")
+    # a HUMAN turn never expires at claim, even with a stamped deadline
+    monkeypatch.setattr(db_mod, "_now", real_now)
+    h = db.enqueue_turn(session_id="sess-1", body="human", turn_source="human",
+                        operation_id="op-h", machine_id="worker-a", require_enrolled=True,
+                        expires_at=datetime.now(timezone.utc).isoformat())
     _pass(db, o)
-    assert db.claim_turn(h, "worker-a", "worker_daemon", "inc-1")
+    monkeypatch.setattr(db_mod, "_now", later)
+    assert db.claim_turn(str(h), "worker-a", "worker_daemon", "inc-1")
 
 
 def test_H06_activation_revalidates_quota(tmp_path, monkeypatch):
