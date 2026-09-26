@@ -8470,6 +8470,19 @@ created: {task.created}
                         backend = self._backends.get(backend_name)
                         if backend is not None:
                             backend.cancel(session)
+                        # When the session is pinned to a remote worker node, the
+                        # gateway's local SDK session pool does not contain this
+                        # session — backend.cancel() above is a no-op.  Send the
+                        # interrupt to the owning process via a lightweight
+                        # cancel_turn control task (codex has its own path).
+                        if backend_name != "codex" and getattr(session, "machine_id", ""):
+                            try:
+                                self._enqueue_remote_cancel_turn(session)
+                            except Exception:
+                                logger.warning(
+                                    "event=remote_cancel_turn_failed task_id=%s",
+                                    task_id, exc_info=True,
+                                )
                 except Exception:
                     logger.warning(
                         "event=cancel_backend_interrupt_failed task_id=%s", task_id, exc_info=True
@@ -9071,6 +9084,58 @@ Generated from user description: {description}
         )
         setattr(result, "backend_name", backend_name)
         return result
+
+    def _enqueue_remote_cancel_turn(self, session: Any) -> None:
+        """Fire-and-forget: ask the owning worker to interrupt its live Claude turn.
+
+        Used by cancel_task when the session is pinned to a remote node — in that
+        case the gateway's own ClaudeSDKClientDriver._sessions pool does not contain
+        the session (it lives in the worker process), so backend.cancel(session)
+        called above is a no-op.  Enqueueing a cancel_turn control task delivers the
+        SDK interrupt to the right process without consuming a work slot, so it is
+        not delayed behind the very turn we want to stop.
+        """
+        machine_id = getattr(session, "machine_id", "") or ""
+        if not machine_id:
+            return
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            logger.warning(
+                "event=remote_cancel_turn_no_db session_id=%s node=%s",
+                getattr(session, "session_id", ""), machine_id,
+            )
+            return
+        session_id = getattr(session, "session_id", "") or ""
+        backend = getattr(session, "backend", "") or "claude"
+        payload = {
+            "session": {
+                "session_id": session_id,
+                "backend": backend,
+                "backend_session_id": getattr(session, "backend_session_id", "") or "",
+                "machine_id": machine_id,
+            }
+        }
+        task_id = f"cancel-turn-{session_id}-{uuid.uuid4().hex[:8]}"
+        try:
+            db.enqueue_task(
+                task_id=task_id,
+                session_id=session_id,
+                machine_id=machine_id,
+                backend=backend,
+                action="cancel_turn",
+                payload=payload,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=remote_cancel_turn_enqueue_failed session_id=%s node=%s err=%s",
+                session_id, machine_id, e,
+            )
+            return
+        logger.info(
+            "event=remote_cancel_turn_enqueued session_id=%s node=%s task_id=%s",
+            session_id, machine_id, task_id,
+        )
 
     def _dispatch_remote_close(self, session: Any) -> None:
         """Enqueue a fire-and-forget close_session task pinned to the session's
