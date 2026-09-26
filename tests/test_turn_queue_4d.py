@@ -457,6 +457,24 @@ def test_H07_completed_heartbeat_is_finalized_durably_exactly_once(tmp_path, mon
     assert db.get_cache_heartbeat(hb_id)["beat_count"] == 1
 
 
+def test_H07b_racing_finalizers_count_the_beat_once(tmp_path, monkeypatch):
+    """Two finalizers that both SELECTed the linked lease (overlapping ticks /
+    a restart overlap): only the CAS winner applies the controller transition."""
+    db, o = _env(tmp_path, monkeypatch)
+    hb_id = _arm_heartbeat(db)
+    assert _beat(o, db) == 1
+    turn = _hb_rows(db)[0]["id"]
+    _pass(db, o)
+    tok = _run(db, turn)
+    db.complete_turn(turn, tok, {"success": True})
+    lease = _lease(db)
+    args = (lease["id"], turn, "completed", json.loads(lease["payload"]),
+            {"success": True}, "sess-1")
+    assert db._finalize_heartbeat_lease(*args)["beat"] is True
+    assert db._finalize_heartbeat_lease(*args) is None  # lost the CAS
+    assert db.get_cache_heartbeat(hb_id)["beat_count"] == 1
+
+
 def test_H08_withdrawn_or_closed_heartbeat_finalizes_without_a_beat(tmp_path, monkeypatch):
     db, o = _env(tmp_path, monkeypatch)
     hb_id = _arm_heartbeat(db)
