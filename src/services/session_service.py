@@ -70,7 +70,8 @@ class SessionService:
                         origin: Optional[SessionOrigin] = None,
                         role_boot: Optional[str] = None,
                         continued_from: Optional[str] = None,
-                        bind_chat: bool = True) -> CommandResult:
+                        bind_chat: bool = True,
+                        session_id: Optional[str] = None) -> CommandResult:
         """Faithful extraction of TelegramInterface._create_and_bind_session.
 
         Preserves node pinning (machine_id), model pinning, and the
@@ -97,7 +98,7 @@ class SessionService:
         pin = node_id if (node_id and node_id != "__local__") else None
         s = self.store.create(backend=backend, repo_path=repo_path,
                               telegram_chat_id=chat_id, owner_user_id=owner_user_id,
-                              machine_id=pin)
+                              machine_id=pin, **({"session_id": session_id} if session_id else {}))
         s.origin = origin or SessionOrigin()
         if model:
             s.model = model
