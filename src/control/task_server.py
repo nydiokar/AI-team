@@ -1020,6 +1020,8 @@ def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
             incarnation_id=payload.incarnation_id,
         )
     except TurnQueueError as e:
+        if (getattr(e, "context", None) or {}).get("reason") == "expired":
+            _hint_turn_scheduler()  # [A82 Stage 4d] expired optional turn freed the slot
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
     _hint_turn_scheduler()  # [A82 Stage 4a] waiting count dropped
     # [A82 Stage 3 rework] The carrier executes THIS response, so it must carry

@@ -305,6 +305,18 @@ def test_H02_not_idle_sessions_get_no_heartbeat(tmp_path, monkeypatch):
     assert _beat(o, db) == 0 and _hb_rows(db) == []
 
 
+def test_H02b_admission_rechecks_idleness_inside_the_transaction(tmp_path, monkeypatch):
+    """The tick's pre-check is advisory: work that lands between it and the
+    admission txn (simulated by a stale pre-check) still refuses the heartbeat."""
+    db, o = _env(tmp_path, monkeypatch)
+    _arm_heartbeat(db)
+    _running_operator_turn(db, o)
+    monkeypatch.setattr(db, "heartbeat_eligible", lambda *a, **k: True)
+    assert _beat(o, db) == 0 and _hb_rows(db) == []
+    lease = _lease(db)
+    assert lease is None or not lease["producer_turn_id"]  # nothing linked
+
+
 def test_H03_held_session_gets_no_heartbeat_and_the_hold_is_kept(tmp_path, monkeypatch):
     db, o = _env(tmp_path, monkeypatch)
     _arm_heartbeat(db)
