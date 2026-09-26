@@ -1570,6 +1570,34 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 8. `continuation_token_for_turn` is used action-agnostically for heartbeat leases. The name is kept to avoid churn.
 9. Producers 5, 7 and 8, Stage 5/6, and managed Codex/OpenCode are untouched.
 
+### Stage 4d rework — A87 review (M1, kill tests R1-R4, m1, residuals 2/5) closed (2026-09-26, commits `ad712bd`..HEAD + this record)
+
+| Finding | Fix | Test (mutation killed) |
+|---|---|---|
+| **M1a** an untyped error escaped managed job admission, so the poller dropped the job (no turn, no audit) and the rest of its batch, legacy included | `_admit_managed_watched_job` catches `Exception`. A typed refusal logs WARNING; an untyped error logs ERROR. Both fall back to the audit record for THAT job, and `_process_terminal_job` never raises out of the managed branch. | RW01 (P1 inverted); N1 (typed-only catch) killed |
+| **M1b** one failing enrolled heartbeat starved the due list | the `_admit_managed_cache_heartbeat` call is wrapped per heartbeat (log, continue) | RW02 (enrolled sess-1 raises; unenrolled sess-2 still gets its legacy heartbeat); N2 killed |
+| **m1** an activated (pending) heartbeat ran ahead of a human admitted behind it | `claim_turn`: a pending non-human row carrying `expires_at` is withdrawn in the claim txn when it is past the deadline (`claim:expired`) OR the session is no longer idle apart from it (`_session_idle_for_optional_turn(conn, sid, task_id)` ⇒ `claim:not_idle`). The claim is refused with 409, and `/claim-managed` hints the scheduler for both reasons. | RW03 (P2 inverted; the human activates next; an idle heartbeat stays claimable); N3 killed |
+| **Residual 2** a withdrawn job notification vanished | `_prepare_managed_turn`: an obsolete `watched_job` row first writes its audit record (`_record_withdrawn_job_audit`: the job-id row, terminal, carrying the notification text + `withdrawn_reason`), `record_audit_turn(strict=True)`, THEN raises `TurnObsolete`. If the audit write fails, the head backs off and stays queued: it is never withdrawn without its record. | RW05, RW05b (storage-layer fault trigger); N6 and N7 (audit best-effort) killed. N7 survived the first pass, while RW05b patched the method rather than the storage. |
+| **Residual 5** leases were not finalized while heartbeats were off | Module helper `_reconcile_heartbeat_leases` (no read while nothing is enrolled). It runs BEFORE the `CACHE_HEARTBEAT_ACTIVE` gate in `_process_due_cache_heartbeats`, and the Wake-Dispatcher tick runs it when heartbeats are off. | RW04 (P3 inverted), RW04b (real `_wake_dispatcher_tick_once`, continuation on, heartbeats off); N4 and N5 killed |
+| **R1-R4** untested guards | kill tests | R1 pause (the column is set directly: there is no pause API before Stage 6, same as `test_turn_queue_scheduler`); R2 `case_pause_active` (real wait-group owner + `flow.quota_paused`); R3 `cache_below_threshold`; R4 unreadable marker on the job path ⇒ no managed row, no audit, no legacy submit, Telegram notify unchanged. N8, N9, N10 and N11 (marker failure ⇒ legacy) killed. |
+
+**Mutation run** (scratch worktree `mut4d`, removed with plain `git worktree remove`; spawn guard on): 11 new mutants (N1-N11), all killed after RW05b was strengthened.
+
+**Verification.**
+- turn-queue files: **391 passed / 4 red** (SYS05, SYS07, api ×2; baseline 380 / 4).
+- Regression group + `test_watched_jobs` + `test_mcp_jobs`: **576 passed** (baseline 576).
+- `tests/test_turn_queue_4d.py`: 33 passed.
+
+**Carried (A87 → CONTEXT.md).**
+- **m3.** The claim-time withdrawal does not run the lineage-void procedure. That is harmless today: automation producers (heartbeat, watched job) never BIRTH a Case, and a join/attach membership stays as written (4a residual). A future deadline-carrying producer that can birth a Case must add the void.
+- **m4.** A `failed_node_offline` (and `cancelled`) heartbeat turn counts NO beat. Legacy counted a failed beat, which STOPS the controller (`heartbeat_failed`). This deviation is deliberate:
+  - `failed_node_offline` means the carrier vanished, not that the heartbeat or the cache failed. Stopping the controller on a carrier outage would permanently lose warmth tracking for a cache that may still be warm, whereas the next window re-evaluates eligibility.
+  - `cancelled` means an operator stop. That stop already HOLDS the session, which blocks heartbeats until the operator releases it. Stopping the controller as well would silently disable heartbeats after the release.
+  - A genuine `failed` result still stops the controller as in legacy (H09).
+- **Residual 2 superseded** (an audit record is written). **Residual 5 narrowed:** finalization is still paused when BOTH `CASE_CONTINUATION_ENABLED` and `CACHE_HEARTBEAT_ACTIVE` are off, because the Wake-Dispatcher loop does not start. Linked leases are then inert: no paid effect, finalized once either flag is on.
+- New: an untyped admission error on the job path now records the audit row and does not retry. That is at-most-once, legacy parity (Stage 4d residual 1).
+- Stage 4d residuals 1, 3, 4, 6, 7, 8 and 9 stand.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
