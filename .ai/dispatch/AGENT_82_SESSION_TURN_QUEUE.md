@@ -1598,6 +1598,38 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 - New: an untyped admission error on the job path now records the audit row and does not retry. That is at-most-once, legacy parity (Stage 4d residual 1).
 - Stage 4d residuals 1, 3, 4, 6, 7, 8 and 9 stand.
 
+### Stage 4d ACCEPTED — final minors (2026-09-26, commits `1b791bf`..HEAD + this record)
+
+**A87 round-2 verdict: ACCEPT with 4 minors.** All four are closed.
+
+1. **Claim-route hint (M2 survivor).**
+   - F01: a real `/claim-managed` 409 with `reason=not_idle` withdraws the row and calls `_hint_turn_scheduler` once.
+   - F01b: an ordinary 409 (turn already running) does not hint.
+2. **No contradicting audit after a committed turn (P6).** The catch-all in `_admit_managed_watched_job` falls back to the audit record ONLY when the deterministic `jturn_` row is absent (`_managed_turn_row_exists`). A probe that cannot read counts as present, since the turn may exist.
+   - F02: a post-commit event error leaves the turn queued and writes no audit row.
+   - F02b: with the probe unreadable, no audit row is written.
+3. **Audit and withdrawal are one transaction (P5b).**
+   - The pre-write in `_prepare_managed_turn` is removed.
+   - `withdraw_turn(..., audit_reason=)` writes the `watched_job` audit via `_insert_watched_job_withdrawal_audit` inside the withdrawal transaction, so both commit or neither. The helper is a no-op for other turn kinds.
+   - The scheduler's `TurnObsolete` handler passes `audit_reason=ob.reason`.
+   - F03: a storage fault on the withdrawal leaves no audit; after the Case is reopened (the status is set directly as a fixture), the turn activates, uncontradicted.
+   - RW05b: a storage fault on the audit leaves the turn queued.
+4. **Close path (P4).** `close_session_turns` writes the same audit (`session_closed`) for each withdrawn `watched_job` row, in its transaction (F04).
+
+**§15 correction (residual 2).** The residual-2 fix now covers both paths that withdraw a notification automatically: activation-time obsolete withdrawal and session close. An operator `withdraw_turn` of a `watched_job` turn (Stage-6 surface) is human-intended and deliberately writes NO audit row; that is out of scope.
+
+**Mutation run** (scratch worktree `mut4d`, removed with plain `git worktree remove`; spawn guard on): Q1-Q6, all killed.
+- Q1: the hint fires only on `expired`.
+- Q2: the audit is written even though the turn committed.
+- Q3: the scheduler withdraws without the audit.
+- Q4: an audit error is swallowed inside the withdrawal.
+- Q5: the close path writes no audit.
+- Q6: a probe failure is treated as "absent". It survived the first pass; F02b was added to kill it.
+
+**Verification.**
+- turn-queue files: **397 passed / 4 red** (SYS05, SYS07, api ×2; baseline 391 / 4).
+- Regression group incl. `watched_jobs` and `mcp_jobs`: **576 passed** (baseline 576).
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
