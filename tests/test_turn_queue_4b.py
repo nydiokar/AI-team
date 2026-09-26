@@ -783,14 +783,17 @@ def test_R04_stopped_enrolled_manager_is_not_woken_by_automation(tmp_path, monke
             # "session_unavailable" and handed to the dead-manager path)
             assert owned is True and db.transient_pause(case_id) is not None
         cont = [r for r in _managed_rows(db) if r["turn_kind"] == "continuation"]
-        return woke, auto.deliveries, cont, db
+        return woke, auto.deliveries, cont, db, owned, case_id
 
     # control: automation does act — an enrolled Manager's wake is ONE durable
-    # managed continuation turn (A82 Stage 4c), never a legacy delivery.
-    woke, deliveries, cont, _ = scenario(stop=False)
-    assert woke == 1 and len(cont) == 1 and deliveries
-    assert not [d for d in deliveries if d["source"] == "manager_continuation"]
-    woke, deliveries, cont, db = scenario(stop=True)
+    # managed continuation turn (A82 Stage 4c), never a legacy delivery; and
+    # [A82 Stage 4e] the elapsed transient pause is DECIDED by the managed A/B/R
+    # rule (here: dropped — its paused turn is not in the ledger, so it is not
+    # a verified failure), never a legacy delivery either.
+    woke, deliveries, cont, db0, owned, cid0 = scenario(stop=False)
+    assert woke == 1 and len(cont) == 1 and deliveries == []
+    assert owned is False and db0.transient_pause(cid0) is None
+    woke, deliveries, cont, db, owned, _ = scenario(stop=True)
     assert woke == 0 and deliveries == [] and cont == []
     assert respawns == []  # operator-held, not dead: never replaced
     approvals = db._conn().execute("SELECT COUNT(*) FROM approvals").fetchone()[0] \
@@ -975,7 +978,14 @@ def test_R10_quota_auto_resume_does_not_resume_a_stopped_manager(tmp_path, monke
             _pass(db, o)
             _run(db, t)
             assert o.stop_managed_session_turn(_sess())[0] is True
-        auto = Q._Orch(o.session_store, snapshots=Q._restored_snapshot())
+        class _AutoQ(Q._Orch):
+            """[A82 Stage 4e] falls back to the REAL methods (managed resume)."""
+
+            def __getattr__(self, name):
+                attr = getattr(TaskOrchestrator, name)
+                return attr.__get__(self) if callable(attr) else attr
+
+        auto = _AutoQ(o.session_store, snapshots=Q._restored_snapshot())
         resumes = []
         real_resume = auto.resume_case
 
@@ -987,12 +997,15 @@ def test_R10_quota_auto_resume_does_not_resume_a_stopped_manager(tmp_path, monke
         owned = asyncio.run(auto._handle_quota_paused_case(db, case_id))
         if stop:
             assert resumes == []
-        return owned, auto.deliveries
+        return owned, auto.deliveries, resumes, db.case_quota_pause(case_id)
 
-    owned, deliveries = scenario(stop=False)  # control: auto-resume acts
-    assert owned is True and len(deliveries) == 1
-    owned, deliveries = scenario(stop=True)
-    assert owned is True and deliveries == []
+    # control: auto-resume acts. [A82 Stage 4e] For an ENROLLED Manager the
+    # resume is decided by the managed A/B/R rule (here: dropped — the paused
+    # turn is not in the ledger), never a legacy delivery.
+    owned, deliveries, resumes, pause = scenario(stop=False)
+    assert owned is True and deliveries == [] and len(resumes) == 1 and pause is None
+    owned, deliveries, resumes, pause = scenario(stop=True)
+    assert owned is True and deliveries == [] and resumes == [] and pause is not None
 
 
 def test_R07b_release_keeps_a_non_cancelled_status_when_the_hold_record_is_set(tmp_path, monkeypatch):

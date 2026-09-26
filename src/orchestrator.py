@@ -81,6 +81,7 @@ import random
 import contextlib
 
 import sys
+import hashlib
 import os
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -412,6 +413,17 @@ def _reclassify_salvaged_turn_success(result: TaskResult) -> TaskResult:
     if _is_salvaged_backend_finalization_error(result):
         result.success = True
     return result
+
+
+def _token_json(raw: Any) -> Dict[str, Any]:
+    """[A82 Stage 4e] A stored JSON column as a dict ({} when absent/garbled)."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        out = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return out if isinstance(out, dict) else {}
 
 
 def _operator_stop_held(db: Any, session_id: Any) -> bool:
@@ -1338,6 +1350,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._reconcile_continuation_finalizers(db)
             except Exception as e:
                 logger.debug("event=continuation_finalizer_reconcile_failed err=%s", e)
+            # [A82 Stage 4e] Producers 5/7: finalize retry / respawn tokens,
+            # then record Case pauses of failed managed Manager turns.
+            try:
+                await self._reconcile_managed_recovery(db)
+            except Exception as e:
+                logger.warning("event=managed_recovery_reconcile_failed err=%s", e)
             cases = await asyncio.to_thread(db.list_open_cases)
             case_ids = [str(c.get("flow_run_id") or "") for c in cases]
             case_ids = [c for c in case_ids if c]
@@ -2115,6 +2133,61 @@ class TaskOrchestrator(ITaskOrchestrator):
         await self._reconcile_continuation_finalizers(db)
         return True
 
+    async def _reconcile_managed_recovery(self, db) -> int:
+        """[A82 Stage 4e] Durable, restart-safe producer 5/7 bookkeeping, run at
+        the top of every Wake-Dispatcher tick BEFORE Cases are evaluated:
+
+          1. finalize retry / respawn tokens whose linked turn is terminal
+             (``reconcile_recovery_finalizers`` — a retry closes its pause at
+             R's terminal commit, never at enqueue);
+          2. record the Case pause of each FAILED managed Manager turn marked in
+             its completion txn (the managed twin of the legacy result-path
+             ``_record_quota_pause`` / ``_record_transient_pause`` — same
+             recorders, raising), then CAS the mark done. A crash between the
+             two re-runs the recorder, which is idempotent (one open pause per
+             Case). A mark whose own retry token is still linked waits one
+             step so its predecessor pause is closed first, then replaced.
+
+        Per-item error containment (one bad row never starves the others). No
+        read at all while nothing is enrolled. Returns the pauses processed."""
+        if db.any_session_enrolled() is False:
+            return 0
+        try:
+            items = await asyncio.to_thread(db.reconcile_recovery_finalizers)
+        except Exception as e:  # noqa: BLE001 — tokens stay linked; next tick
+            logger.warning("event=recovery_finalizer_failed err=%s", e)
+            items = []
+        for item in items:
+            self._emit_event("case_recovery_finalized", None, dict(item))
+        marks = await asyncio.to_thread(db.pending_retry_pauses)
+        done = 0
+        for row in marks:
+            tid = str(row.get("id") or "")
+            try:
+                if await asyncio.to_thread(db.continuation_token_for_turn, tid) is not None:
+                    continue
+                task = self._task_from_managed_row(row)
+                task.metadata[self._FLOW_RUN_META_KEY] = str(row.get("flow_run_id") or "")
+                # The exact failed instruction (the winning revision's intent).
+                setattr(task, "description", task.prompt)
+                res = _token_json(row.get("result"))
+                result = TaskResult(
+                    task_id=tid, success=False,
+                    output=str(res.get("output") or ""),
+                    errors=[str(e) for e in (res.get("errors") or [])] or [str(row.get("error") or "")],
+                    files_modified=[], execution_time=0.0,
+                    timestamp=str(row.get("completed_at") or ""),
+                    error_class=str(row.get("error_class") or ""),
+                )
+                setattr(result, "backend", str(row.get("backend") or "claude"))
+                self._record_quota_pause(task, result, strict=True)
+                self._record_transient_pause(task, result, strict=True)
+                await asyncio.to_thread(db.mark_retry_pause_done, tid)
+                done += 1
+            except Exception as e:  # noqa: BLE001 — mark stays pending; next tick
+                logger.warning("event=managed_pause_record_failed task_id=%s err=%s", tid, e)
+        return done
+
     async def _reconcile_continuation_finalizers(self, db) -> int:
         """[A82 Stage 4c] Durable, restart-safe finalization of managed wake turns
         (round accounting + wait-group resolution + token finalize from the turn's
@@ -2376,7 +2449,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.warning("event=quota_refusal_record_failed err=%s", e)
         return "usage_limit"
 
-    def _record_quota_pause(self, task: "Task", result: TaskResult) -> None:
+    def _record_quota_pause(self, task: "Task", result: TaskResult, *, strict: bool = False) -> None:
         """Record a Manager turn's quota death as a durable Case pause.
 
         Best-effort/isolated exactly like ``_flow_terminal_outcome`` (whose call
@@ -2463,12 +2536,14 @@ class TaskOrchestrator(ITaskOrchestrator):
                 case_id, session_id, getattr(task, "id", "?"), reset_at,
             )
         except Exception as e:
+            if strict:  # [A82 Stage 4e] the durable recorder retries its mark
+                raise
             logger.warning(
                 "event=case_quota_pause_record_failed task_id=%s err=%s",
                 getattr(task, "id", "?"), e,
             )
 
-    def _record_transient_pause(self, task: "Task", result: TaskResult) -> None:
+    def _record_transient_pause(self, task: "Task", result: TaskResult, *, strict: bool = False) -> None:
         """[transient-resume] Record a Manager turn's terminal transient-5xx death
         as a durable, bounded, self-healing Case pause.
 
@@ -2567,6 +2642,8 @@ class TaskOrchestrator(ITaskOrchestrator):
                 case_id, session_id, task_id, attempt, retry_at,
             )
         except Exception as e:
+            if strict:  # [A82 Stage 4e] the durable recorder retries its mark
+                raise
             logger.warning(
                 "event=case_transient_pause_record_failed task_id=%s err=%s",
                 getattr(task, "id", "?"), e,
@@ -2779,6 +2856,15 @@ class TaskOrchestrator(ITaskOrchestrator):
             # resume/respawn; the pause keeps holding the Case.
             return True
         paused_task_id = str(pause.get("paused_task_id") or "")
+        if db.any_session_enrolled() is not False:
+            # [A82 Stage 4e] A managed in-place resume R of THIS pause is linked
+            # (queued / running): the pause keeps owning the Case until the
+            # durable finalizer closes it at R's terminal commit — no re-resume,
+            # no re-proposal, no repeated auto notification meanwhile.
+            from src.control.db import quota_resume_task_id
+            tok = await asyncio.to_thread(db.get_task, quota_resume_task_id(case_id, paused_task_id))
+            if tok is not None and tok.get("producer_turn_id") and str(tok.get("status") or "") == "claimed":
+                return True
         # Quota state is provider-global — identical for every Case in a given tick.
         # Reuse a per-tick cache so N paused Cases trigger at most ONE snapshot read
         # per provider instead of N (latest_snapshots() is a real DB scan).
@@ -3014,6 +3100,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                          "outcome": "session_unavailable"},
             )
             return False
+        # [A82 Stage 4e] ENROLLED: the retry is ONE durable managed turn under
+        # the exact A/B/R rule (the queue serializes it — no BUSY gate). No
+        # marker read while nothing is enrolled; unreadable ⇒ raises (the Case
+        # is skipped this tick, never a legacy retry).
+        from src.control.turn_admission import session_enrollment
+        if await session_enrollment(db, session_id):
+            return await self._transient_retry_managed(db, case_id, pause, session)
         if session.status != SessionStatus.AWAITING_INPUT:
             # BUSY (a turn — operator poke or the prior retry — is in flight) or a
             # transient IDLE/just-restored state: not stuck, resolves on its own.
@@ -3062,6 +3155,132 @@ class TaskOrchestrator(ITaskOrchestrator):
         logger.info(
             "event=case_transient_resumed case=%s session=%s attempt=%s",
             case_id, session_id, attempt,
+        )
+        return True
+
+    async def _admit_managed_recovery_turn(
+        self, db, *, session_id: str, cwd: Optional[str], backend: str,
+        token_id: str, token_action: str, token_payload: Dict[str, Any],
+        turn_kind: str, prefix: str, description: str, source: str,
+        case_id: str, coalesce_key: str, parent_task_id: Optional[str] = None,
+    ) -> str:
+        """[A82 Stage 4e] Admit a producer 5/7 turn as ONE managed turn whose
+        durable trigger is the existing single-flight row (``token_id``, written
+        idempotently here if absent). The token is linked to the deterministic
+        turn ``<prefix>_…(token, session, 1)`` INSIDE the admission txn, under
+        the automation principal (never releases an operator-stop hold), with
+        Case lineage pinned to ``case_id``. A crash anywhere replays to the SAME
+        id; a refusal (typed / harness) raises and leaves the token pending."""
+        from src.control.db import CONTINUATION_MACHINE_SENTINEL, producer_turn_id
+
+        token = await asyncio.to_thread(db.get_task, token_id)
+        if token is None:
+            await asyncio.to_thread(
+                lambda: db.enqueue_task(
+                    token_id, session_id=None, machine_id=CONTINUATION_MACHINE_SENTINEL,
+                    backend=backend, action=token_action, payload=dict(token_payload),
+                )
+            )
+        task = self._make_task(
+            description=description, session_id=session_id, cwd=cwd, source=source,
+        )
+        self._stash_task_meta(task, self._TURN_ENROLLED_META_KEY, True)
+        self._stash_task_meta(task, self._ATTACH_CASE_META_KEY, case_id)
+        self._stash_task_meta(task, self._TURN_PRODUCER_META_KEY, {
+            "turn_kind": turn_kind,
+            "trigger": token_id,
+            "turn_id": producer_turn_id(token_id, session_id, 1, prefix=prefix),
+            "token_id": token_id,
+            "producer_meta": dict(token_payload),
+            "coalesce_key": coalesce_key,
+            "parent_task_id": parent_task_id,
+        })
+        return await self._enqueue_task(task)
+
+    async def _transient_retry_managed(
+        self, db, case_id: str, pause: Dict[str, Any], session: Any,
+    ) -> bool:
+        """[A82 Stage 4e] Producer 5 (transient) for an ENROLLED Manager, once
+        the pause's backoff elapsed. Trigger = the pause's resume token
+        ``tresume:{case}:{A}:{attempt}``. The A/B/R rule decides:
+
+          * ``supersede`` (a real instruction B was accepted after A) / ``drop``
+            (A is not retryable — cancelled, withdrawn, node-offline, …): the
+            token is consumed and ONLY this pause is closed, in one txn; B
+            stays head. Returns False (the pause no longer owns the Case);
+          * ``retry``: admit R (A's exact instruction) as ONE linked managed
+            turn. The pause stays open — it keeps owning the Case (no wake over
+            it) — and is closed by the durable finalizer at R's terminal commit.
+
+        Returns True while the pause owns the Case (R queued / in flight / a
+        refused admission, retried next tick with the same id)."""
+        from src.control.db import (
+            CONTINUATION_MACHINE_SENTINEL, TRANSIENT_RESUME_ACTION, transient_resume_task_id,
+        )
+        from src.control.turn_queue import TurnQueueError
+
+        paused_task_id = str(pause.get("paused_task_id") or "")
+        attempt = int(pause.get("attempt") or 1)
+        sid = str(session.session_id)
+        token_id = transient_resume_task_id(case_id, paused_task_id, attempt)
+        token = await asyncio.to_thread(db.get_task, token_id)
+        if token is not None and (
+            token.get("producer_turn_id") or str(token.get("status") or "") != "pending"
+        ):
+            return True  # R linked (the pause closes at its terminal) / decided
+        token_payload = {
+            "case_id": case_id, "paused_task_id": paused_task_id, "attempt": attempt,
+            "session_id": sid, "pause_event_id": pause.get("event_id"),
+        }
+        decision = await asyncio.to_thread(
+            lambda: db.retry_decision(sid, paused_task_id, pause_eligible=True)
+        )
+        if decision.action in ("supersede", "drop"):
+            if token is None:
+                await asyncio.to_thread(
+                    lambda: db.enqueue_task(
+                        token_id, session_id=None,
+                        machine_id=CONTINUATION_MACHINE_SENTINEL,
+                        backend=(getattr(session, "backend", None) or "claude"),
+                        action=TRANSIENT_RESUME_ACTION, payload=dict(token_payload),
+                    )
+                )
+            won = await asyncio.to_thread(
+                lambda: db.supersede_retry_obligation(
+                    token_id, case_id=case_id, pause_type="transient",
+                    pause_event_id=pause.get("event_id"),
+                    outcome="superseded" if decision.action == "supersede" else "not_retryable",
+                    payload=dict(token_payload, superseded_by=decision.head,
+                                 reason=decision.reason),
+                )
+            )
+            if won:
+                self._emit_event(
+                    "case_transient_retry_superseded", None,
+                    {"case_id": case_id, "session_id": sid, "reason": decision.reason,
+                     "superseded_by": decision.head},
+                )
+            return not won
+        if decision.action != "retry":
+            return True
+        try:
+            admission = await self._admit_managed_recovery_turn(
+                db, session_id=sid, cwd=getattr(session, "repo_path", None),
+                backend=(getattr(session, "backend", None) or "claude"),
+                token_id=token_id, token_action=TRANSIENT_RESUME_ACTION,
+                token_payload=token_payload, turn_kind="retry", prefix="rturn",
+                description=self._render_transient_retry_turn(db, case_id, pause),
+                source="manager_transient_resume", case_id=case_id,
+                coalesce_key=f"retry:{case_id}:{paused_task_id}",
+                parent_task_id=paused_task_id or None,
+            )
+        except (TurnQueueError, HarnessAdmissionBlocked) as e:
+            logger.warning("event=managed_transient_retry_refused case=%s err=%s", case_id, e)
+            return True
+        self._emit_event(
+            "case_transient_retry_queued", None,
+            {"case_id": case_id, "session_id": sid, "attempt": attempt,
+             "turn_id": str(admission)},
         )
         return True
 
@@ -3169,7 +3388,17 @@ class TaskOrchestrator(ITaskOrchestrator):
             out["reason"] = "no_manager_link"
             return out
         session = self.session_store.get(session_id)
-        if session is not None and session.status == SessionStatus.BUSY:
+        # [A82 Stage 4e] An ENROLLED Manager's in-place resume is a managed turn
+        # queued behind any active one (no BUSY gate). No read while nothing is
+        # enrolled; an unreadable marker refuses (never a legacy resume).
+        from src.control.turn_admission import session_enrollment
+        try:
+            enrolled = bool(session is not None and await session_enrollment(db, session_id))
+        except Exception as e:  # noqa: BLE001 — typed 503: fail closed
+            logger.warning("event=quota_resume_enrollment_unreadable case=%s err=%s", case_id, e)
+            out["reason"] = "turn_queue_unavailable"
+            return out
+        if not enrolled and session is not None and session.status == SessionStatus.BUSY:
             # A turn is already running on this Manager — the Case is not stuck.
             out["reason"] = "manager_busy"
             return out
@@ -3186,6 +3415,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         ):
             chosen = "fresh_manager"
         out["mode"] = chosen
+        if enrolled and chosen == "in_place":
+            return await self._quota_resume_managed(
+                db, case_id, row, pause, paused_task_id, session, actor, out,
+            )
 
         # SINGLE-FLIGHT: the same atomic claim the continuation/respawn leases
         # use. This is what makes "operator pressed Resume" and "quota came back"
@@ -3263,6 +3496,90 @@ class TaskOrchestrator(ITaskOrchestrator):
                 pass
             out["reason"] = "resume_failed"
             return out
+
+    async def _quota_resume_managed(
+        self, db, case_id: str, case_row: Dict[str, Any], pause: Optional[Dict[str, Any]],
+        paused_task_id: str, session: Any, actor: str, out: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """[A82 Stage 4e] Producer 5 (quota, in place) for an ENROLLED Manager.
+        Trigger = the pause's resume token ``qresume:{case}:{A}`` (a manual poke
+        with no pause keys ``manual:{n}`` as before). For a pause-bound resume
+        the A/B/R rule applies: a real instruction B accepted after A
+        supersedes it (token consumed + ONLY this pause closed, one txn; B stays
+        head); a non-retryable A drops it; otherwise R is admitted as ONE linked
+        managed turn and ``flow.quota_resumed`` is written by the durable
+        finalizer at R's terminal commit (never at enqueue). Only reached once
+        the pause is eligible (restored + approved / auto) — approval and a
+        future reset deadline are never cleared here."""
+        from src.control.db import (
+            CONTINUATION_MACHINE_SENTINEL, QUOTA_RESUME_ACTION, quota_resume_task_id,
+        )
+        from src.control.turn_queue import TurnQueueError
+
+        sid = str(session.session_id)
+        token_id = quota_resume_task_id(case_id, paused_task_id)
+        token = await asyncio.to_thread(db.get_task, token_id)
+        if token is not None and (
+            token.get("producer_turn_id") or str(token.get("status") or "") != "pending"
+        ):
+            out["reason"] = "resume_in_flight"
+            return out
+        bound = pause is not None and str(pause.get("paused_task_id") or "") == paused_task_id
+        pause_event_id = pause.get("event_id") if bound else None
+        token_payload = {
+            "case_id": case_id, "paused_task_id": paused_task_id, "mode": "in_place",
+            "actor": actor, "session_id": sid, "pause_event_id": pause_event_id,
+        }
+        if bound:
+            decision = await asyncio.to_thread(
+                lambda: db.retry_decision(sid, paused_task_id, pause_eligible=True)
+            )
+            if decision.action in ("supersede", "drop"):
+                if token is None:
+                    await asyncio.to_thread(
+                        lambda: db.enqueue_task(
+                            token_id, session_id=None, machine_id=CONTINUATION_MACHINE_SENTINEL,
+                            backend=(getattr(session, "backend", None) or "claude"),
+                            action=QUOTA_RESUME_ACTION, payload=dict(token_payload),
+                        )
+                    )
+                won = await asyncio.to_thread(
+                    lambda: db.supersede_retry_obligation(
+                        token_id, case_id=case_id, pause_type="quota",
+                        pause_event_id=pause_event_id,
+                        outcome="superseded" if decision.action == "supersede" else "not_retryable",
+                        payload=dict(token_payload, superseded_by=decision.head,
+                                     reason=decision.reason),
+                    )
+                )
+                out["reason"] = (
+                    ("superseded" if decision.action == "supersede" else "not_retryable")
+                    if won else "resume_in_flight"
+                )
+                out["session_id"] = sid
+                return out
+        try:
+            admission = await self._admit_managed_recovery_turn(
+                db, session_id=sid, cwd=getattr(session, "repo_path", None),
+                backend=(getattr(session, "backend", None) or "claude"),
+                token_id=token_id, token_action=QUOTA_RESUME_ACTION,
+                token_payload=token_payload, turn_kind="retry", prefix="rturn",
+                description=self._render_quota_resume_turn(case_id, case_row),
+                source="manager_quota_resume", case_id=case_id,
+                coalesce_key=f"retry:{case_id}:{paused_task_id}",
+                parent_task_id=paused_task_id if bound else None,
+            )
+        except (TurnQueueError, HarnessAdmissionBlocked) as e:
+            logger.warning("event=managed_quota_resume_refused case=%s err=%s", case_id, e)
+            out["reason"] = "deliver_failed"
+            return out
+        self._emit_event(
+            "case_resumed", None,
+            {"case_id": case_id, "mode": "in_place", "actor": actor, "session_id": sid,
+             "managed": True, "turn_id": str(admission)},
+        )
+        out.update(ok=True, session_id=sid, turn_id=str(admission))
+        return out
 
     def _render_quota_resume_turn(self, case_id: str, case_row: Dict[str, Any]) -> str:
         """The in-place resume turn. Deliberately points the Manager at the LEDGER
@@ -3423,6 +3740,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         objective = str(brief.get("objective") or "").strip()
         if not objective:
             return False
+        # [A82 Stage 4e] An ENROLLED dead Manager is replaced on the managed path
+        # (producer 7). No marker read while nothing is enrolled (legacy
+        # byte-identical); an unreadable marker raises (Case skipped this tick).
+        from src.control.turn_admission import session_enrollment
+        if dead_session_id and await session_enrollment(db, dead_session_id):
+            return await self._respawn_manager_managed(
+                db, case_id, generation, dead_session_id, objective,
+            )
 
         # SINGLE-FLIGHT CLAIM (atomic, one winner) — BEFORE any spawn side-effect.
         respawn_id = respawn_task_id(case_id, generation)
@@ -3527,6 +3852,123 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception:
                 pass
             return False
+
+    async def _respawn_manager_managed(
+        self, db, case_id: str, generation: int, dead_session_id: str, objective: str,
+    ) -> bool:
+        """[A82 Stage 4e] Producer 7: respawn an ENROLLED dead Manager on the
+        SAME Case (same approval gate / Case lease / role boot / reconstruction
+        as legacy — this is only the execution + linkage half).
+
+        ONE convergent procedure keyed on the durable respawn token
+        ``respawn:{case}:{gen}`` — every step is get-or-create and a re-run
+        after a crash anywhere converges, so concurrent ticks / processes
+        produce ONE new session and ONE first turn (no double respawn):
+
+          1. token (idempotent) — ``completed`` ⇒ done; a LEGACY claim ⇒ owned;
+          2. the new session under a DETERMINISTIC id derived from the token
+             (created once; a racing creator writes the same row), pinned to
+             the dead Manager's node / repo / backend;
+          3. enrollment: the new session INHERITS the dead Manager's enrollment
+             (the Case's Manager seat never silently downgrades to protocol 0 —
+             A87 ruling 1 / Stage 8 cutover enrolls every session anyway);
+          4. the first (respawn) turn: ONE managed turn linked to the token in
+             the admission txn (``sturn_…``), Case lineage pinned; it cannot
+             ACTIVATE until step 5 bound the session (revalidation), so the
+             role boot always sees case_role=manager;
+          5. the durable new-session link, one txn (``record_respawn_link``):
+             manager flow link + affiliation + ``case.manager_respawned`` once
+             (closes any quota / transient pause, as legacy) + token payload;
+          6. the old session's QUEUED Case automation (wakes / retries) is
+             withdrawn (4c rebound rule; humans untouched) — the finalizers
+             re-arm the wake for the new Manager.
+
+        An operator-stopped (held) Manager is never replaced. Returns True iff
+        a respawn is owned (done / in progress); False when not viable (the
+        caller escalates the strand; the next tick re-runs and converges)."""
+        from src.control.db import RESPAWN_ACTION, respawn_task_id
+        from src.control.turn_queue import TurnQueueError
+        from src.core.interfaces import SessionOrigin
+
+        if _operator_stop_held(db, dead_session_id):
+            logger.info("event=managed_respawn_skipped_held case=%s session=%s",
+                        case_id, dead_session_id)
+            return False
+        token_id = respawn_task_id(case_id, generation)
+        try:
+            token = await asyncio.to_thread(db.get_task, token_id)
+            if token is not None:
+                status = str(token.get("status") or "")
+                if status == "completed":
+                    return True
+                if status == "claimed" and not token.get("producer_turn_id"):
+                    return True  # a legacy single-flight claim owns it
+            node_id, repo_path, backend = "__local__", os.getcwd(), "claude"
+            dead_row = await asyncio.to_thread(db.get_session, dead_session_id)
+            if dead_row is not None:
+                node_id = str(dead_row.get("machine_id") or "") or "__local__"
+                repo_path = str(dead_row.get("repo_path") or "") or repo_path
+                backend = str(dead_row.get("backend") or "") or backend
+            new_sid = hashlib.sha256(f"{token_id}\0respawn".encode("utf-8")).hexdigest()[:12]
+            new_session = self.session_store.get(new_sid)
+            if new_session is None:
+                result = self.session_service.create_session(
+                    backend=backend, repo_path=repo_path, node_id=node_id,
+                    origin=SessionOrigin(channel="web", kind="user"), bind_chat=False,
+                    session_id=new_sid,
+                )
+                if not getattr(result, "ok", False) or getattr(result, "session", None) is None:
+                    logger.warning("event=managed_respawn_create_failed case=%s reason=%s",
+                                   case_id, getattr(result, "reason", ""))
+                    return False
+                new_session = result.session
+            await asyncio.to_thread(db.enroll_session, new_sid)
+            payload = {"case_id": case_id, "generation": int(generation),
+                       "dead_session_id": dead_session_id, "new_session_id": new_sid}
+            try:
+                admission = await self._admit_managed_recovery_turn(
+                    db, session_id=new_sid, cwd=getattr(new_session, "repo_path", None),
+                    backend=backend, token_id=token_id, token_action=RESPAWN_ACTION,
+                    token_payload=payload, turn_kind="respawn", prefix="sturn",
+                    description=self._render_respawn_turn(case_id, objective, dead_session_id),
+                    source="manager_respawn", case_id=case_id,
+                    coalesce_key=f"respawn:{case_id}:{int(generation)}",
+                )
+            except (TurnQueueError, HarnessAdmissionBlocked) as e:
+                logger.warning("event=managed_respawn_refused case=%s err=%s", case_id, e)
+                return False
+            await asyncio.to_thread(
+                lambda: db.record_respawn_link(
+                    token_id, case_id=case_id, new_session_id=new_sid,
+                    dead_session_id=dead_session_id, generation=generation, node_id=node_id,
+                )
+            )
+            withdrawn = await asyncio.to_thread(
+                lambda: db.withdraw_rebound_automation(
+                    dead_session_id, case_id, actor="respawn:manager_rebound",
+                )
+            )
+        except Exception as e:  # noqa: BLE001 — every step converges on re-run
+            logger.warning("event=managed_respawn_failed case=%s err=%s", case_id, e)
+            return False
+        try:
+            db.boot_reconcile_case(case_id, actor="manager")
+        except Exception as e:
+            logger.debug("event=respawn_reconcile_failed case=%s err=%s", case_id, e)
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        notify_turn_queue_changed()  # the bound respawn turn may now activate
+        self._emit_event(
+            "case_manager_respawned", None,
+            {"case_id": case_id, "new_session_id": new_sid,
+             "dead_session_id": dead_session_id, "generation": generation,
+             "managed": True, "turn_id": str(admission), "withdrawn": withdrawn},
+        )
+        logger.info(
+            "event=case_manager_respawned case=%s new_session=%s dead_session=%s managed=1",
+            case_id, new_sid, dead_session_id,
+        )
+        return True
 
     def _render_respawn_turn(
         self, case_id: str, objective: str,
@@ -10055,6 +10497,12 @@ Generated from user description: {description}
     _MANAGED_AUTOMATION_PRODUCERS = {
         "watched_job": "watched_job",
         "cache_heartbeat": "heartbeat",
+        # [A82 Stage 4e] Producer 5 (quota / transient retry R, trigger = the
+        # pause's resume token) and producer 7 (respawned Manager's first turn,
+        # trigger = the respawn token).
+        "manager_transient_resume": "retry",
+        "manager_quota_resume": "retry",
+        "manager_respawn": "respawn",
     }
     _MANAGED_SOURCE_PRINCIPAL = {
         "web_session": "operator",
@@ -10252,6 +10700,8 @@ Generated from user description: {description}
                 "producer_meta": producer.get("producer_meta"),
                 "expires_at": producer.get("expires_at"),
                 "idle_only": bool(producer.get("idle_only")),
+                # [A82 Stage 4e] a retry R names the failed turn A it retries.
+                "parent_task_id": producer.get("parent_task_id"),
             }
         request = AdmissionRequest(
             session_id=sid,
@@ -10884,6 +11334,12 @@ Generated from user description: {description}
             reason = await self._managed_heartbeat_obsolete(db, row)
             if reason:
                 return reason
+        if str(row.get("turn_kind") or "") in ("retry", "respawn"):
+            # [A82 Stage 4e] Producers 5 / 7: token still linked, the token's
+            # Case open, Manager binding, and (retry) the pause still current.
+            reason = await self._managed_recovery_obsolete(db, row)
+            if reason:
+                return reason
         continuation = str(row.get("turn_kind") or "") == "continuation"
         presented: List[str] = []
         if continuation:
@@ -10912,6 +11368,58 @@ Generated from user description: {description}
         tick = await asyncio.to_thread(db.compute_continuation_tick, case_id)
         if not set(presented) & set(tick.get("presented_task_ids") or []):
             return "reviewed"
+        return None
+
+    class _RespawnBindingPending(Exception):
+        """[A82 Stage 4e] A respawn turn whose new session is not yet bound as
+        the Case's Manager: NOT obsolete — activation is deferred (the head is
+        marked blocked and retried) until the respawn procedure binds it, so
+        the role boot never runs without case_role=manager."""
+
+    async def _managed_recovery_obsolete(self, db: Any, row: Dict[str, Any]) -> Optional[str]:
+        """[A82 Stage 4e] Activation-time revalidation of a queued retry R
+        (producer 5) or respawn first turn (producer 7). Obsolete when its
+        trigger token is no longer linked, the TOKEN's Case is blocked /
+        closed / unknown, the Case's Manager is another session (rebound), or —
+        for a retry — the pause it retries is no longer the current one (an
+        operator resume, a decline or a respawn superseded it). A respawn turn
+        whose session was never bound yet raises ``_RespawnBindingPending``."""
+        from src.control.db import QUOTA_RESUME_ACTION
+
+        kind = str(row.get("turn_kind") or "")
+        sid = str(row.get("session_id") or "")
+        token = await asyncio.to_thread(db.continuation_token_for_turn, str(row["id"]))
+        if token is None:
+            return f"{kind}_unlinked"
+        payload = token.get("payload") or {}
+        case_id = str(payload.get("case_id") or "")
+        case = await asyncio.to_thread(db.get_flow_run, case_id) if case_id else None
+        if case is None:
+            return "case_missing"
+        status = str(case.get("status") or "").strip().lower()
+        if status == "blocked":
+            return "case_blocked"
+        if status in db._CLOSED_STATUSES:
+            return "case_closed"
+        manager = await asyncio.to_thread(db.case_manager_session_id, case_id)
+        if str(manager or "") != sid:
+            if kind == "respawn":
+                bound = await asyncio.to_thread(
+                    lambda: db.list_flow_links(
+                        flow_run_id=case_id, entity_type="session", entity_id=sid,
+                        role="manager",
+                    )
+                )
+                if not bound:
+                    raise self._RespawnBindingPending("respawn_binding_pending")
+            return "manager_rebound"
+        if kind == "retry" and payload.get("pause_event_id") is not None:
+            quota = str(token.get("action") or "") == QUOTA_RESUME_ACTION
+            pause = await asyncio.to_thread(
+                db.case_quota_pause if quota else db.transient_pause, case_id,
+            )
+            if pause is None or str(pause.get("event_id")) != str(payload.get("pause_event_id")):
+                return "pause_superseded"
         return None
 
     async def _managed_heartbeat_obsolete(self, db: Any, row: Dict[str, Any]) -> Optional[str]:

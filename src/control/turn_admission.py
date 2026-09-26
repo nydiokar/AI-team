@@ -154,6 +154,8 @@ class AdmissionRequest(BaseModel):
     # withdrawn (never run late) and idle-only admission (cache heartbeat).
     expires_at: Optional[str] = Field(default=None, max_length=64)
     idle_only: bool = False
+    # [A82 Stage 4e] retry/lineage linkage (design §3: preserve parent_task_id).
+    parent_task_id: Optional[str] = Field(default=None, max_length=128)
 
 
 def admit_turn(
@@ -194,6 +196,7 @@ def admit_turn(
                 producer_meta=request.producer_meta,
                 expires_at=request.expires_at,
                 idle_only=request.idle_only,
+                parent_task_id=request.parent_task_id,
                 require_enrolled=True,
                 external_waiting=slot["legacy"],
                 fleet_cap=fleet_cap,
