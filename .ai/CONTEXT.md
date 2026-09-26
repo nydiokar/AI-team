@@ -252,10 +252,16 @@ where Claude executes**. (1) `orchestrator._build_quota_prewarmer` now skips whe
 no activation-capable adapter (`_coordinator_can_activate()`), so an ingest-only controller no longer
 stands up an inert loop; single-process gateways are byte-identical. (2) The worker
 (`src/worker/agent.py`) now builds a LOCAL activation-capable coordinator (`observe_locally=True`) and
-runs the same tested prewarmer brain, gated by `QUOTA_PREWARM_ENABLED` + a `claude` backend
-(`WorkerConfig.quota_prewarm_enabled`). Deployment-shape-independent: works single-process or split.
-**Enablement:** set `QUOTA_PREWARM_ENABLED=1` in the *worker* env (the worker reads it from env, not
-the controller's mesh.db registry where the old value lived). **§7 deferral (multi-worker):** with N
+runs the same tested prewarmer brain. **The enable stays a DYNAMIC registry flag, not env** — a
+supervisor loop in the worker (`_quota_prewarm_supervisor_loop` → `_prewarm_reconcile`) re-reads
+`runtime_flag_enabled("QUOTA_PREWARM_ENABLED")` every cycle and starts/stops warming LIVE, so it can
+be flipped on/off with **no restart** (the whole point of the registry). The only static gate is a
+`claude` backend (can't warm without a harness). `effect_scope` corrected `startup`→`live`.
+Deployment-shape-independent: works single-process or split. **Enablement/toggle:** flip
+`QUOTA_PREWARM_ENABLED` in the mesh.db the *worker* reads (`MESH_DB_PATH` relative to its cwd —
+`state/mesh.db` at the repo; `scripts/ops_flag.sh`). Caveat/pre-existing split: the control-API writes
+the *controller's* mesh.db (a different file under the Docker volume), so an API toggle is not seen by
+the native worker until the two flag stores are unified — out of scope here, flagged. **§7 deferral (multi-worker):** with N
 claude workers each running a prewarmer, up to N minimal `haiku` turns could fire at a window boundary
 before any observes the new window. Bounded and cheap: warming is idempotent (skip-if-open is
 self-correcting once one worker opens it), each worker has its own `MIN_INTERVAL_SEC` + `MAX_PER_DAY`
