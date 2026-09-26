@@ -1399,6 +1399,68 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 3. A quota pause bound to an old held session can keep owning the Case after an operator-approved respawn onto a new session. The held-session check returns True, so the pause keeps holding until closed.
 4. All earlier 4b / rework / rework-2 residuals stand.
 
+### Stage 4c — producer 3: Case continuation token→turn linkage + durable finalization (2026-09-26, commits `9a8db54`..`8dde7d2` + this record)
+
+**Scope.** For an ENROLLED Manager, the Wake-Dispatcher's continuation is ONE durable managed turn. The durable trigger identity is the existing generation token `cont:{case}:{gen}`. Finalization is driven by the turn's terminal outcome in the DB, not by an in-memory task. Unenrolled Managers stay on the unchanged legacy branch.
+
+**Built.**
+- **Migration 38** (db.py `_get_migrations`): `mesh_tasks.producer_turn_id` + partial index `idx_mesh_tasks_producer_link` (`WHERE producer_turn_id IS NOT NULL AND status='claimed'`). NULL on every legacy row.
+- **Deterministic id** `producer_turn_id(token, session, attempt)` (db.py:857) → `cturn_<sha256[:24]>`. The attempt is durable in the token payload and is bumped only by a non-consuming finalize.
+- **In-txn link.** `enqueue_turn(producer_token=…, producer_meta=…)` calls `_link_producer_token` (db.py:8807) inside the admission transaction, on every branch (fresh / replay / coalesce). It links the token as `claimed` with `claimed_by=__manager_continuation__`, `claimed_at=NULL` (the lease reaper selects `claimed_at IS NOT NULL`, so it never re-offers it) and `producer_turn_id`, and merges case / generation / attempt / presented / retired into the token payload. It converges if already linked to the same turn. It raises, rolling the admission back, when the token is missing, finalized, linked elsewhere, or the turn is terminal (a stale-attempt replay).
+- **Admission.** `_continue_case_once` (orchestrator.py:1809) branches on `session_enrollment` after the hold and dead-session checks and before the legacy `AWAITING_INPUT` gate. A BUSY Manager is admitted and queued behind its active turn, with no interrupt.
+  - `_continue_case_managed` (:1863): a linked or finalized token ⇒ 0, with no admission txn. Otherwise it writes the token (legacy `enqueue_task`, idempotent) and admits via `_enqueue_task` (same harness/local gates) → `_admit_managed_producer_turn` (:9857).
+  - The admission itself: principal `automation` (`turn_source='system'`, scope `automation:<sid>:continuation`, key `<token>#<attempt>`, hash of the trigger identity), `turn_kind='continuation'`, coalesce `case:<cid>:gen:<n>`. Lineage comes from the same convergent procedure as producer 1 (B-attach). A refusal (typed 503/429/422, harness block) leaves the token pending, and the next tick replays to the same id.
+- **Durable finalizer.** `MeshDB.reconcile_finalizers` (db.py:5996) runs one bounded query over the link index (≤25). Per token, one convergent procedure (`_finalize_producer_token`):
+  - completed / failed / failed_node_offline (legacy consumed failures too): `worker.wait_resolved` for retired groups via `append_flow_event_once`, then a fenced CAS token→`completed` with `{generation, consumed_task_ids, turn_id, turn_status}`. The token row IS the round, so it is counted once.
+  - withdrawn / cancelled: a fenced CAS token→`pending`, link cleared, attempt+1. No round is counted and nothing is consumed.
+  - It is called at the top of every Wake-Dispatcher tick (`_reconcile_continuation_finalizers`, :1935; gateway process, no read while nothing is enrolled), so it needs no in-memory finalizer and survives a restart. There is no new poller and no event-log scan.
+- **Activation-time revalidation** (`_managed_turn_obsolete`, orchestrator.py:10490, called from `_prepare_managed_turn`). It applies only to automation-principal rows (`system` + `automation:` scope). Human, operator and runtime rows are never touched and cost no read. If the Case (the token's Case for a continuation, else `flow_run_id`) is blocked ⇒ `case_blocked`; closed ⇒ `case_closed`. A continuation is also obsolete when unlinked, when the Manager was rebound (`manager_rebound`), or when none of its presented tasks is still unresolved (`reviewed`). `turn_scheduler._activate_head` catches `TurnObsolete` (turn_scheduler.py:45/109) → `withdraw_turn(actor="scheduler:obsolete:<reason>")`, counted in `withdrawn`. **This closes 4b residual 4**: queued Manager-dispatch and continuation turns of a killed or closed Case are withdrawn when they reach the head.
+
+**Producer inventory.**
+| Producer | Durable trigger identity | Turn id | Completion effect |
+|---|---|---|---|
+| Case continuation (Wake-Dispatcher, enrolled Manager) | token `cont:{case}:{gen}` + durable attempt; idempotency (`automation:<sid>:continuation`, `<token>#<attempt>`), coalesce `case:<cid>:gen:<n>`; linked in the admission txn | `cturn_<sha256(sid,token,attempt)[:24]>` (protocol 1, `turn_kind=continuation`, `system`) | scheduler (revalidated) → carrier → `complete_turn` → next tick `reconcile_finalizers`: consumed ⇒ token `completed` (round + watermark + `wait_resolved`); withdrawn/cancelled ⇒ token re-armed (attempt+1) |
+
+**Exit table (new managed states).**
+| State | Exits | Tests |
+|---|---|---|
+| token pending, unlinked (written, admission not committed) | next satisfied tick admits the SAME id; Case closed/blocked ⇒ inert (as legacy tokens) | Q02 |
+| token linked (`claimed`, `claimed_at` NULL) | linked turn terminal → finalizer consume or re-arm; turn exits = Stage 3/4b exits (carrier, recovery, cancel, session close ⇒ withdrawn) | Q03, Q04, Q05, Q06, Q14 |
+| continuation turn lineage-pending (crash after commit) | 4a lineage recovery after the lease; tick never mints a second turn | Q02b |
+| queued automation turn of a blocked/closed Case, rebound or reviewed wake | withdrawn at activation → token re-armed | Q06, Q07, Q07b, Q08 |
+| re-armed token (attempt n+1) | next satisfied tick admits the new deterministic id; held ⇒ waits for the operator | Q05 |
+
+**Tests** (`tests/test_turn_queue_4c.py`, 21, all offline, spawn guard autouse; real file-backed MeshDB, real orchestrator continuation / admission / lineage / finalizer, real scheduler pass, real `stop_managed_session_turn` / `interrupt_case` / `close_case` / `record_review`): Q01 busy⇒one queued turn, no interrupt, no admission txn on later ticks; Q01b concurrent ticks; Q02/Q02b crash windows; Q03/Q03b restart finalization + exactly-once round; Q04 failed consumes; Q05 cancelled re-arms under hold; Q06 review ⇒ withdraw; Q07 interrupt (automation withdrawn, human + runtime kept); Q07b close; Q08 rebind; Q09 control; Q10/Q10b in-txn link rollback + stale attempt; Q11 reaper exclusion; Q12 index plan; Q13 unenrolled all-thread trace (≥2 threads, no managed SQL, legacy delivery unchanged); Q14 tick end-to-end incl. round 2; Q15 fenced CAS; Q16 admission racing a stop keeps the hold.
+- 4b `R04` control adjusted: each scenario uses its own DB, and the control now asserts ONE managed continuation (no legacy `manager_continuation` delivery) plus the transient delivery. The held scenario assertions are unchanged plus `cont == []`.
+- Turned green: SYS03, SYS04. SYS02 was already green.
+- turn-queue files: **346 passed / 5 red** (SYS05-07, api ×2; baseline 323 / 7).
+- Named regression group: **506 passed**, + `test_control_api_wait_group` / `test_session_cache_heartbeat` 41 passed.
+- schema/flow/control/telemetry users: 136 passed.
+
+**Mutation run** (scratch worktree `mut4c`, removed with plain `git worktree remove`; spawn guard on): 24 mutants, 23 killed.
+- M9 (automation-scope filter dropped) first survived because Q07's runtime row never reached the head. Fixed by giving it its own session; re-run: killed.
+- **Equivalent:** M23 (`token_to_turn` ignores the link), because the link always names the derived id of the current attempt.
+- Also equivalent by construction: the trigger-identity admission hash (a same-key replay with a different body cannot occur except for a concurrent tick, which then gets a harmless 409 → 0), and the `continuation_unlinked` check (no path completes or re-arms a token while its turn is queued).
+
+**Service boundary (§7).**
+| Item | managed wake branch | finalizer | activation revalidation |
+|---|---|---|---|
+| Concurrency | the single Wake-Dispatcher loop; admission via the 4-permit service; the durable link collapses racing ticks | ≤25 tokens per tick, one small `_managed_write` txn each | ≤25 heads/pass; reads only for automation rows |
+| Memory | O(presented tasks) per token | O(25) | one continuation tick per continuation head |
+| Request size | internal only: source/metadata are server-set, and `__turn_producer` is not reachable from any HTTP body | internal | internal |
+| Timeout | 5 s admission / txn deadline ⇒ typed error, token pending, retried next tick | 5 s per txn; failure logged, token stays linked, retried | withdraw race ⇒ `ineligible`, re-read next pass |
+| Malformed input | the human+coalesce guard stays; stale attempt ⇒ 409 rollback | garbled payload ⇒ `{}` (attempt 1, no events) | missing Case/token ⇒ withdraw with reason |
+| Backing failure | unreadable marker ⇒ raises (Case skipped this tick, no legacy fallback) | read error ⇒ logged, tick continues | prepare error ⇒ existing 4a blocked/backoff |
+
+**Residuals (for CONTEXT.md).**
+1. Finalization latency is bounded by the Wake-Dispatcher interval (default 30 s). There is no in-memory accelerator, because the completion commits in the task-server process. With `CASE_CONTINUATION_ENABLED` off, finalization pauses; so do wakes.
+2. **Deviation:** an operator-cancelled wake re-arms (the Manager is re-woken after the operator releases the hold). Legacy consumed it after its 30 min finalize deadline. An intervening operator review makes the re-armed wake obsolete.
+3. Continuation lineage is B-attach to the session's newest open Case (legacy parity). For a multi-Case Manager that can differ from the woken Case. Revalidation and finalization use the token's Case.
+4. Obsolete automation turns are withdrawn when they reach the head, not eagerly at `interrupt_case` / close. A row queued behind a held session keeps its per-session cap slot until then. Written links of withdrawn rows stay (4a residual).
+5. A token claimed by the LEGACY path before enrollment blocks the managed wake until the legacy finalizer or lease reaper resolves it. Re-armed tokens of a closed Case stay pending (inert).
+6. While a wake is in flight, each tick still recomputes that Case's continuation tick and does one marker read + one token read (no write).
+7. Producers 4-8, Stage 5/6 and managed Codex/OpenCode are untouched. `manager_*_resume` / `manager_respawn` / heartbeat still fail closed for enrolled sessions.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
