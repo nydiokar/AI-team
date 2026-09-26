@@ -742,3 +742,38 @@ def test_Q23_partial_review_does_not_withdraw_the_wake(tmp_path, monkeypatch):
     res = _pass(db, o)
     assert res.withdrawn == 0 and res.activated == 1
     assert db.get_task(c)["status"] == "pending"
+
+
+def test_Q18c_pinned_wake_whose_case_closed_before_lineage_runs_standalone(tmp_path, monkeypatch):
+    """Reviewer probe P4 (round 2) adopted: the pinned Case closed before the
+    lineage was written ⇒ standalone (never re-routed to Case B), then
+    withdrawn `case_closed` at activation; nothing written to A or B and the
+    session's current Case untouched."""
+    db, o = _env(tmp_path, monkeypatch)
+    cid_a = _case(db)
+    cid_b = db.open_case("other", "sess-1", role="manager", completion_criteria='{"round_cap": 5}')
+    before_cur = (db.get_session("sess-1") or {}).get("current_case_id")
+    ev_b = len(db.list_flow_events(cid_b))
+
+    async def die(*_a, **_k):
+        raise RuntimeError("died before lineage (injected)")
+    o._write_managed_lineage = die
+    with pytest.raises(RuntimeError):
+        _tick(o, db, cid_a)
+    c = _cont_rows(db)[0]["id"]
+    assert o.close_case(cid_a, outcome="cancelled", force=True).get("ok")  # REAL close
+    ev_a = len(db.list_flow_events(cid_a))
+    db._conn().execute("UPDATE mesh_tasks SET lineage_lease_until = '2000-01-01T00:00:00' "
+                       "WHERE id = ?", (c,)).connection.commit()
+    o2 = _fresh(o, monkeypatch)
+    _pass(db, o2)
+    _pass(db, o2)
+    assert db.get_task(c)["status"] == "withdrawn"
+    assert any("case_closed" in str(a.get("actor")) for a in db.get_turn_revisions(c))
+    _reconcile(o2, db)
+    assert len(db.list_flow_events(cid_a)) == ev_a
+    assert len(db.list_flow_events(cid_b)) == ev_b
+    assert not db.list_flow_links(flow_run_id=cid_a, entity_type="task", entity_id=c)
+    assert not db.list_flow_links(flow_run_id=cid_b, entity_type="task", entity_id=c)
+    assert db.get_task(c)["flow_run_id"] in (None, "")
+    assert (db.get_session("sess-1") or {}).get("current_case_id") in (before_cur, None)

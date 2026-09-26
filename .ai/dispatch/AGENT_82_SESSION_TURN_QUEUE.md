@@ -1488,6 +1488,20 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 - New: the rebound check costs one token read per satisfied Case per tick while anything is enrolled.
 - New: a pinned wake to a Case that closed before lineage was written runs standalone. Revalidation then withdraws it (`case_closed`) at activation.
 
+### Stage 4c ACCEPTED — round-2 follow-up (2026-09-26, this commit)
+
+- **The Manager's (A87) round-2 verdict: ACCEPT.**
+- **Reviewer probe P4 adopted** as `Q18c`. Scenario: a pinned wake whose Case (A) closed before its lineage was written. Result:
+  - it runs standalone, then is withdrawn `case_closed` at activation;
+  - nothing is written to Case A or Case B (no event, no task link);
+  - `flow_run_id` stays empty and the session's `current_case_id` is untouched.
+- **Mutation-verified:** in `_managed_lineage_converge`, changing the pinned-branch closed-check to `if True:` makes Q18c fail. The mutant ran in a scratch worktree, removed afterwards.
+- **Counts:** `tests/test_turn_queue_4c.py` 32 passed.
+
+**Carried residuals (reviewer → CONTEXT.md):**
+1. If the rebound withdrawal loses the race to the old Manager's activation, the wake runs on the old session and is consumed there. The rebound Manager is woken on a later round, which costs one extra tick.
+2. Wait groups on closed Cases stay "pending" in projections, because the finalizer appends no `wait_resolved` after `flow.closed`. This is cosmetic: a closed Case is never ticked.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
