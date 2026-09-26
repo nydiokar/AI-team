@@ -830,6 +830,31 @@ CACHE_HEARTBEAT_ACTION = "cache_heartbeat"
 PRODUCER_TOKEN_SENTINELS = {
     "manager_continuation": "__manager_continuation__",
     "cache_heartbeat": "__cache_heartbeat__",
+    # [A82 Stage 4e] producer 5 (quota / transient retry) and producer 7
+    # (Manager respawn): their existing single-flight rows become the durable
+    # trigger tokens of the managed turn they admit (same sentinel owner).
+    "manager_quota_resume": "__manager_continuation__",
+    "manager_transient_resume": "__manager_continuation__",
+    "manager_respawn": "__manager_continuation__",
+}
+# [A82 Stage 4e] Retry-trigger token actions (producer 5) and the error classes
+# whose FAILED managed Case turn is marked for durable pause recording (the
+# union of the orchestrator's QUOTA_PAUSE_ERROR_CLASSES and
+# TRANSIENT_PAUSE_ERROR_CLASSES — pinned equal by a test).
+RETRY_TOKEN_ACTIONS = ("manager_quota_resume", "manager_transient_resume")
+RETRY_PAUSE_ERROR_CLASSES = ("usage_limit", "rate_limit", "upstream_error")
+# [A82 Stage 4e] Case pause families (append-only flow events): the event that
+# closes a pause and the event types that decide which pause is current (the
+# same sets `case_quota_pause` / `transient_pause` read).
+RETRY_PAUSE_EVENTS = {
+    "quota": ("flow.quota_resumed", (
+        "flow.quota_paused", "flow.quota_resumed", "flow.quota_pause_declined",
+        "case.manager_respawned",
+    )),
+    "transient": ("flow.transient_resumed", (
+        "flow.transient_paused", "flow.transient_resumed",
+        "flow.transient_pause_exhausted", "case.manager_respawned",
+    )),
 }
 # Default round cap when a Case's completion_criteria does not carry an explicit
 # ``round_cap`` — a backstop against a runaway continuation loop, not a tuning knob.
@@ -4122,6 +4147,7 @@ class MeshDB:
         native_session_id: Optional[str] = None,
         error: Optional[str] = None,
         artifact_path: Optional[str] = None,
+        error_class: Optional[str] = None,
     ) -> "CompletionResult":
         """ATOMIC managed completion (design §6, A82 §15 decision 2).
 
@@ -4149,8 +4175,8 @@ class MeshDB:
         try:
             with self._write() as conn:
                 row = conn.execute(
-                    "SELECT id, session_id, status, queue_protocol, claim_token, cancel_token "
-                    "FROM mesh_tasks WHERE id = ?",
+                    "SELECT id, session_id, status, queue_protocol, claim_token, cancel_token, "
+                    "flow_run_id FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
                 if row is None or row["queue_protocol"] != 1:
@@ -4184,17 +4210,27 @@ class MeshDB:
                 # before the interrupt landed stays `completed`.
                 if status == "failed" and _cancel_requested_for(row, claim_token):
                     status = "cancelled"
+                # [A82 Stage 4e] A Case turn that FAILED on a quota / transient
+                # provider class is marked for the durable pause recorder in
+                # THIS txn (the gateway records the Case pause from the mark).
+                eclass = (error_class or "").strip().lower() or None
+                pause_mark = (
+                    "pending" if status == "failed" and row["flow_run_id"]
+                    and eclass in RETRY_PAUSE_ERROR_CLASSES else None
+                )
                 # Write the canonical outcome + terminal transition.
                 conn.execute(
                     """
                     UPDATE mesh_tasks
                     SET status = ?, result = ?, error = COALESCE(?, error),
                         artifact_path = COALESCE(?, artifact_path),
+                        error_class = COALESCE(?, error_class),
+                        retry_pause_state = COALESCE(?, retry_pause_state),
                         completed_at = ?, updated_at = ?
                     WHERE id = ? AND queue_protocol = 1 AND claim_token = ?
                       AND status IN ('running', 'recovery_required')
                     """,
-                    (status, json.dumps(result), error, artifact_path,
+                    (status, json.dumps(result), error, artifact_path, eclass, pause_mark,
                      now, now, task_id, claim_token),
                 )
                 if conn.execute("SELECT changes()").fetchone()[0] == 0:
@@ -6353,6 +6389,339 @@ class MeshDB:
             "lease_id": lease_id, "turn_id": turn_id, "turn_status": turn_status,
             "heartbeat_id": heartbeat_id, "beat": hb is not None,
         }
+
+    # ------------------------------------------------------------------ #
+    # [A82 Stage 4e] Producer 5 (quota / transient retry) + producer 7
+    # (Manager respawn): durable pause marks, the A/B/R rule, supersede,
+    # the retry / respawn token finalizer and the respawn binding.
+    # ------------------------------------------------------------------ #
+    def pending_retry_pauses(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """Failed managed Case turns marked (in their completion txn) for the
+        Case-pause recorder. Bounded; served by the partial index."""
+        rows = self._conn().execute(
+            "SELECT * FROM mesh_tasks INDEXED BY idx_mesh_tasks_retry_pause "
+            "WHERE retry_pause_state = 'pending' LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_retry_pause_done(self, task_id: str) -> bool:
+        """CAS a pause mark ``pending``→``done`` (the recorder ran). Raises."""
+        with self._managed_write("mark_retry_pause_done") as conn:
+            conn.execute(
+                "UPDATE mesh_tasks SET retry_pause_state = 'done', updated_at = ? "
+                "WHERE id = ? AND retry_pause_state = 'pending'",
+                (_now(), task_id),
+            )
+            return conn.execute("SELECT changes()").fetchone()[0] > 0
+
+    def decide_retry(self, **kw: Any) -> "Any":
+        """The pure A/B/R rule (``turn_queue.decide_retry``)."""
+        from .turn_queue import decide_retry
+
+        return decide_retry(**kw)
+
+    def retry_decision(
+        self, session_id: str, failed_task_id: str, *, pause_eligible: bool = True,
+        held: bool = False,
+    ) -> "Any":
+        """A/B/R decision for failed turn A of ``session_id`` from the ledger:
+        B = the session's real (non-automation) managed turns accepted AFTER A
+        (queue sequence; creation time when A is a legacy row) that were not
+        withdrawn / cancelled — whether still waiting or already run (an
+        intervening manual recovery). A missing A is not retryable."""
+        from .turn_queue import decide_retry
+
+        conn = self._conn()
+        a = conn.execute(
+            "SELECT status, queue_protocol, queue_sequence, created_at "
+            "FROM mesh_tasks WHERE id = ?",
+            (failed_task_id,),
+        ).fetchone()
+        if a is None:
+            return decide_retry(
+                failed_task_id=failed_task_id, earlier_waiting=[],
+                pause_eligible=pause_eligible, failed_status="missing", held=held,
+            )
+        if int(a["queue_protocol"] or 0) == 1 and a["queue_sequence"] is not None:
+            after, value = "queue_sequence > ?", int(a["queue_sequence"])
+        else:
+            after, value = "created_at > ?", str(a["created_at"] or "")
+        rows = conn.execute(
+            f"""
+            SELECT id FROM mesh_tasks
+            WHERE session_id = ? AND queue_protocol = 1 AND turn_source != 'system'
+              AND status NOT IN ('withdrawn', 'cancelled') AND id != ? AND {after}
+            ORDER BY queue_sequence LIMIT 20
+            """,
+            ((session_id or "").strip(), failed_task_id, value),
+        ).fetchall()
+        return decide_retry(
+            failed_task_id=failed_task_id, earlier_waiting=[r["id"] for r in rows],
+            pause_eligible=pause_eligible, failed_status=str(a["status"] or ""), held=held,
+        )
+
+    def _close_retry_pause(
+        self, conn: sqlite3.Connection, case_id: str, pause_type: str,
+        pause_event_id: Optional[int], payload: Dict[str, Any], now: str,
+        *, manual: bool = False,
+    ) -> Optional[int]:
+        """Inside the caller's txn: append the pause-closing event iff the Case
+        is open and the pause named by ``pause_event_id`` is still the current
+        one (``manual``: a quota resume with no pause — the resume accounting
+        event is appended while the Case is open). Returns the event id."""
+        close_event, family = RETRY_PAUSE_EVENTS[pause_type]
+        case = conn.execute(
+            "SELECT status FROM flow_runs WHERE flow_run_id = ?", (case_id,),
+        ).fetchone()
+        if case is None or (case["status"] or "") in self._CLOSED_STATUSES:
+            return None
+        if not manual:
+            ph = ",".join("?" * len(family))
+            newest = conn.execute(
+                f"SELECT id, event_type FROM flow_events WHERE flow_run_id = ? "
+                f"AND event_type IN ({ph}) ORDER BY id DESC LIMIT 1",
+                (case_id, *family),
+            ).fetchone()
+            if newest is None or pause_event_id is None or int(newest["id"]) != int(pause_event_id):
+                return None
+        cur = conn.execute(
+            """
+            INSERT INTO flow_events (
+                flow_run_id, event_type, actor, from_state, to_state,
+                entity_type, entity_id, payload_json, created_at
+            ) VALUES (?, ?, 'system', NULL, NULL, 'session', ?, ?, ?)
+            """,
+            (case_id, close_event, payload.get("session_id") or payload.get("resumed_session_id"),
+             json.dumps(payload), now),
+        )
+        return int(cur.lastrowid)
+
+    def supersede_retry_obligation(
+        self, token_id: str, *, case_id: str, pause_type: str,
+        pause_event_id: Optional[int], outcome: str, payload: Dict[str, Any],
+    ) -> bool:
+        """A/B/R ``supersede`` / ``drop`` in ONE transaction: the (unlinked)
+        retry token is consumed with ``outcome`` AND — only if that pause is
+        still current — the pause is closed. Both or neither. A lost CAS (the
+        token is linked or finalized) writes nothing and returns False."""
+        now = _now()
+        body = dict(payload, outcome=outcome)
+        with self._managed_write("supersede_retry_obligation") as conn:
+            conn.execute(
+                """
+                UPDATE mesh_tasks
+                SET status = 'completed', result = ?, completed_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending' AND producer_turn_id IS NULL
+                  AND COALESCE(queue_protocol, 0) = 0 AND action IN (?, ?)
+                """,
+                (json.dumps(body), now, now, token_id, *RETRY_TOKEN_ACTIONS),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                return False
+            self._close_retry_pause(conn, case_id, pause_type, pause_event_id, body, now)
+        return True
+
+    _RECOVERY_OUTCOME = {
+        "completed": "retried", "failed": "retry_failed",
+        "failed_node_offline": "retry_failed", "cancelled": "retry_cancelled",
+        "withdrawn": "retry_withdrawn",
+    }
+
+    def reconcile_recovery_finalizers(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """Durable finalization of retry (producer 5) and respawn (producer 7)
+        tokens linked to a managed turn that reached a terminal outcome — the
+        restart-safe completion path (no in-memory finalizer; design §7).
+
+        Per token ONE transaction: CAS the token ``claimed``→``completed``
+        fenced to the linked turn; for a retry token the CAS winner also closes
+        the pause it was retrying (only if still current and the Case open) —
+        the pause is cleared at R's terminal commit, never at enqueue. Every
+        terminal outcome consumes a retry obligation (a cancelled / withdrawn R
+        is never re-run). Bounded, served by the partial link index; a per-token
+        error is logged and retried next call."""
+        from .turn_queue import TERMINAL_STATUSES
+
+        placeholders = ",".join("?" * len(TERMINAL_STATUSES))
+        actions = (*RETRY_TOKEN_ACTIONS, RESPAWN_ACTION)
+        rows = self._conn().execute(
+            f"""
+            SELECT t.id AS token_id, t.action AS action, t.payload AS token_payload,
+                   t.producer_turn_id AS turn_id, x.status AS turn_status,
+                   x.session_id AS session_id
+            FROM mesh_tasks t INDEXED BY idx_mesh_tasks_producer_link
+            JOIN mesh_tasks x ON x.id = t.producer_turn_id
+            WHERE t.producer_turn_id IS NOT NULL AND t.status = 'claimed'
+              AND t.action IN (?, ?, ?) AND x.status IN ({placeholders})
+            LIMIT ?
+            """,
+            (*actions, *TERMINAL_STATUSES, int(limit)),
+        ).fetchall()
+        done: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                item = self._finalize_recovery_token(
+                    str(r["token_id"]), str(r["action"]), str(r["turn_id"]),
+                    str(r["turn_status"]), _token_payload(r["token_payload"]),
+                    str(r["session_id"] or ""),
+                )
+            except Exception as e:  # noqa: BLE001 — stays linked; next call re-runs
+                logger.warning(
+                    "event=recovery_finalize_failed token=%s turn=%s err=%s",
+                    r["token_id"], r["turn_id"], e,
+                )
+                continue
+            if item is not None:
+                done.append(item)
+        return done
+
+    def _finalize_recovery_token(
+        self, token_id: str, action: str, turn_id: str, turn_status: str,
+        payload: Dict[str, Any], session_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        now = _now()
+        outcome = self._RECOVERY_OUTCOME.get(turn_status, turn_status)
+        case_id = str(payload.get("case_id") or "")
+        body = {
+            "turn_id": turn_id, "turn_status": turn_status, "outcome": outcome,
+            "session_id": session_id,
+        }
+        closed: Optional[int] = None
+        with self._managed_write("finalize_recovery_token") as conn:
+            conn.execute(
+                """
+                UPDATE mesh_tasks
+                SET status = 'completed', result = ?, completed_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'claimed' AND producer_turn_id = ?
+                  AND action = ? AND COALESCE(queue_protocol, 0) = 0
+                """,
+                (json.dumps(body), now, now, token_id, turn_id, action),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                return None
+            if action in RETRY_TOKEN_ACTIONS and case_id:
+                pause_type = "quota" if action == QUOTA_RESUME_ACTION else "transient"
+                event = {
+                    "paused_task_id": payload.get("paused_task_id"),
+                    "attempt": payload.get("attempt"),
+                    "outcome": outcome, "turn_id": turn_id, "turn_status": turn_status,
+                    "session_id": session_id,
+                }
+                if pause_type == "quota":
+                    event.update({
+                        "mode": "in_place", "actor": payload.get("actor"),
+                        "resumed_session_id": session_id,
+                    })
+                closed = self._close_retry_pause(
+                    conn, case_id, pause_type, payload.get("pause_event_id"), event, now,
+                    manual=pause_type == "quota" and payload.get("pause_event_id") is None,
+                )
+        return {
+            "token_id": token_id, "action": action, "turn_id": turn_id,
+            "turn_status": turn_status, "outcome": outcome, "case_id": case_id,
+            "pause_closed": closed is not None,
+        }
+
+    def record_respawn_link(
+        self, token_id: str, *, case_id: str, new_session_id: str,
+        dead_session_id: Optional[str] = None, generation: int = 0,
+        node_id: Optional[str] = None,
+    ) -> str:
+        """[Producer 7] The DURABLE new-session link of a Manager respawn, ONE
+        convergent transaction (a re-run converges; raises on DB error):
+        the Case's ``manager`` session link (unique ⇒ get-or-create), the new
+        session's Case affiliation (role manager), ``case.manager_respawned``
+        once per (Case, new session), and the respawn token's payload naming
+        the new session. Refuses (typed) for a closed Case or a missing
+        session / token. Returns the new session id."""
+        now = _now()
+        sid = (new_session_id or "").strip()
+        with self._managed_write("record_respawn_link") as conn:
+            tok = conn.execute(
+                "SELECT payload FROM mesh_tasks WHERE id = ? AND action = ? "
+                "AND COALESCE(queue_protocol, 0) = 0",
+                (token_id, RESPAWN_ACTION),
+            ).fetchone()
+            if tok is None:
+                raise TurnNotFoundError("no respawn token", task_id=token_id)
+            case = conn.execute(
+                "SELECT status FROM flow_runs WHERE flow_run_id = ?", (case_id,),
+            ).fetchone()
+            if case is None or (case["status"] or "") in self._CLOSED_STATUSES:
+                raise OwnershipConflictError("respawn target Case is closed", case_id=case_id)
+            conn.execute(
+                "UPDATE sessions SET current_case_id = ?, case_role = 'manager', "
+                "updated_at = ? WHERE session_id = ?",
+                (case_id, now, sid),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                raise TurnNotFoundError("respawned session row missing", session_id=sid)
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO flow_links (
+                    flow_run_id, entity_type, entity_id, role, created_at, created_by,
+                    metadata_json
+                ) VALUES (?, 'session', ?, 'manager', ?, 'system', NULL)
+                """,
+                (case_id, sid, now),
+            )
+            seen = conn.execute(
+                "SELECT id FROM flow_events WHERE flow_run_id = ? AND event_type = "
+                "'case.manager_respawned' AND entity_type = 'session' AND entity_id = ? LIMIT 1",
+                (case_id, sid),
+            ).fetchone()
+            if seen is None:
+                conn.execute(
+                    """
+                    INSERT INTO flow_events (
+                        flow_run_id, event_type, actor, from_state, to_state,
+                        entity_type, entity_id, payload_json, created_at
+                    ) VALUES (?, 'case.manager_respawned', 'system', NULL, NULL,
+                              'session', ?, ?, ?)
+                    """,
+                    (case_id, sid, json.dumps({
+                        "reason": "manager_session_dead", "dead_session_id": dead_session_id,
+                        "generation": int(generation), "node_id": node_id, "managed": True,
+                    }), now),
+                )
+            payload = _token_payload(tok["payload"])
+            if payload.get("new_session_id") != sid:
+                payload.update({"new_session_id": sid, "case_id": case_id})
+                conn.execute(
+                    "UPDATE mesh_tasks SET payload = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(payload), now, token_id),
+                )
+        return sid
+
+    def withdraw_rebound_automation(
+        self, session_id: str, case_id: str, *, actor: str,
+    ) -> List[str]:
+        """[Producer 7] Withdraw the QUEUED Case automation turns (continuation
+        wakes, retries) of a replaced Manager session for ``case_id`` — the
+        4c rebound rule applied at respawn. Human / operator / runtime turns are
+        never touched. Each withdrawal is its own conditional txn; a raced row
+        is skipped (activation revalidation still withdraws it). Their tokens
+        are then finalized by the durable finalizers (continuation re-armed for
+        the new Manager; a retry obligation consumed)."""
+        from .turn_queue import TurnQueueError
+
+        rows = self._conn().execute(
+            """
+            SELECT id, revision FROM mesh_tasks
+            WHERE session_id = ? AND queue_protocol = 1 AND status = 'queued'
+              AND turn_source = 'system' AND idempotency_scope LIKE 'automation:%'
+              AND turn_kind IN ('continuation', 'retry') AND flow_run_id = ?
+            """,
+            ((session_id or "").strip(), case_id),
+        ).fetchall()
+        out: List[str] = []
+        for r in rows:
+            try:
+                if self.withdraw_turn(str(r["id"]), int(r["revision"]), actor=actor):
+                    out.append(str(r["id"]))
+            except TurnQueueError:
+                continue
+        return out
 
     def list_open_cases(self, limit: int = 200) -> List[Dict[str, Any]]:
         """[M3.4] Open (non-terminal) Cases — the Wake-Dispatcher's per-tick scan set.
@@ -8834,6 +9203,15 @@ def _get_migrations() -> List[tuple]:
                # continuation token names the deterministic protocol-1 turn it
                # admitted, in the admission txn). NULL on every legacy row; the
                # partial index holds only linked tokens awaiting finalization.
+        (39, """
+            ALTER TABLE mesh_tasks ADD COLUMN retry_pause_state TEXT;
+            CREATE INDEX IF NOT EXISTS idx_mesh_tasks_retry_pause
+                ON mesh_tasks(id) WHERE retry_pause_state = 'pending'
+        """),  # A82 Stage 4e: a FAILED managed Case turn whose error class can
+               # pause its Case (quota / transient 5xx) is marked 'pending' in
+               # its completion txn; the gateway records the pause from it and
+               # marks it 'done'. NULL on every legacy row; the partial index
+               # holds only the marks awaiting the pause recorder.
     ]
 
 

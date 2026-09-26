@@ -1223,6 +1223,7 @@ def submit_managed_result(task_id: str, payload: ManagedResultPayload) -> Dict[s
         success=payload.success, output=payload.output, errors=payload.errors,
         backend_session_id=payload.backend_session_id,
         artifact_path=payload.artifact_path,
+        error_class=payload.error_class,
     )
     return {
         "status": "accepted",
@@ -1248,6 +1249,7 @@ def _commit_managed_result(
     errors: List[str],
     backend_session_id: Optional[str],
     artifact_path: Optional[str] = None,
+    error_class: Optional[str] = None,
 ) -> Any:
     """Classify through the SHARED helper and commit atomically via
     ``complete_turn`` (terminal status + result + native id + active identity in
@@ -1279,6 +1281,9 @@ def _commit_managed_result(
             native_session_id=backend_session_id,
             error=error,
             artifact_path=artifact_path,
+            # [A82 Stage 4e] the carrier's class (a downgraded success keeps its
+            # own class); persisted and used to mark a Case pause candidate.
+            error_class=(error_class or downgraded or None) if not effective_success else None,
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
@@ -1381,6 +1386,7 @@ def record_quiescence_observation(
             success=res.success, output=res.output, errors=res.errors,
             backend_session_id=res.backend_session_id or payload.native_session_id,
             artifact_path=res.artifact_path,
+            error_class=res.error_class,
         )
         return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.status}
     # No result: a quiescence observation must carry an explicit terminal/stop
