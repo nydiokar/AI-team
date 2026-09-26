@@ -337,6 +337,25 @@ def test_H03_held_session_gets_no_heartbeat_and_the_hold_is_kept(tmp_path, monke
     assert db.operator_stop_hold("sess-1") == "operator_stop"
 
 
+def test_H03b_hold_record_blocks_even_after_a_stale_status_save(tmp_path, monkeypatch):
+    """The durable hold RECORD (not the display status) gates the heartbeat: a
+    stale whole-row save that rewrote `cancelled` does not re-enable it."""
+    db, o = _env(tmp_path, monkeypatch)
+    _arm_heartbeat(db)
+    stale = _sess()
+    t = _running_operator_turn(db, o)
+    assert o.stop_managed_session_turn(_sess())[0] is True
+    db.complete_turn(t, db.get_task(t)["claim_token"], {"success": False}, status="failed")
+    for ctl in _legacy_session_rows(db):
+        assert db.claim_task(ctl["id"], "worker-a")
+        db.complete_task(ctl["id"], {"success": True})
+    db.upsert_session(stale)  # legacy stale whole-row save rewrites the status
+    assert db.get_session("sess-1")["status"] == "awaiting_input"
+    assert db.operator_stop_hold("sess-1") == "operator_stop"
+    assert db.heartbeat_eligible("sess-1") is False
+    assert _beat(o, db) == 0 and _hb_rows(db) == []
+
+
 def test_H04_human_work_arriving_behind_a_queued_heartbeat_withdraws_it(tmp_path, monkeypatch):
     db, o = _env(tmp_path, monkeypatch)
     _arm_heartbeat(db)
