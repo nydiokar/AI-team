@@ -1279,6 +1279,60 @@ class WorkerAgent:
                 )
 
     # ------------------------------------------------------------------
+    # Window warming (harness-side)
+    # ------------------------------------------------------------------
+
+    def _emit_prewarm_event(self, name: str, payload: Dict[str, Any]) -> None:
+        """Surface prewarmer decisions in the worker log. A turn actually firing
+        is additionally logged by the prewarmer itself at INFO
+        (event=quota_prewarm_window_opened). The controller's events.ndjson is a
+        separate process/volume, so warming visibility lives in the worker log."""
+        logger.info("event=%s node_id=%s payload=%s", name, self.cfg.node_id, payload)
+
+    async def _start_quota_prewarmer(self) -> Optional[Any]:
+        """Keep the Claude 5-hour window warm from the harness side.
+
+        Opening a window costs one real (haiku, max_turns=1) model turn, which
+        only a claude-capable worker can spend — the controller container has no
+        binary/credentials. So the prewarmer's decision brain runs HERE, against
+        a LOCAL activation-capable coordinator (observe_locally=True). This is
+        deployment-shape-independent: single-process or controller/worker split,
+        warming is always co-located with the harness that can actually fire it.
+
+        Returns the started prewarmer (to stop on drain) or None when disabled.
+        Never raises: a failed start is a skipped capability, not a worker crash.
+        """
+        if not self.cfg.quota_prewarm_enabled:
+            return None
+        try:
+            from src.services.quota_window_coordinator import (
+                build_quota_coordinator_from_config,
+            )
+            from src.services.quota_window_prewarmer import (
+                build_prewarmer_from_config,
+            )
+
+            coordinator = build_quota_coordinator_from_config(
+                enabled=True, observe_locally=True,
+            )
+            prewarmer = build_prewarmer_from_config(
+                coordinator=coordinator,
+                enabled=True,
+                event_sink=self._emit_prewarm_event,
+            )
+            await prewarmer.start()
+            logger.info(
+                "event=quota_prewarmer_worker_started node_id=%s", self.cfg.node_id,
+            )
+            return prewarmer
+        except Exception as e:
+            logger.warning(
+                "event=quota_prewarmer_worker_start_failed node_id=%s err_class=%s",
+                self.cfg.node_id, type(e).__name__,
+            )
+            return None
+
+    # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
 
@@ -1927,6 +1981,7 @@ class WorkerAgent:
         )
         heartbeat = asyncio.create_task(self._heartbeat_loop())
         quota_observer = asyncio.create_task(self._quota_observe_loop())
+        quota_prewarmer = await self._start_quota_prewarmer()
         if self._canary:
             logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
             poller = asyncio.create_task(self._shutdown.wait())
@@ -1961,6 +2016,8 @@ class WorkerAgent:
             for t in pending:
                 t.cancel()
 
+        if quota_prewarmer is not None:
+            await quota_prewarmer.stop()
         for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer):
             t.cancel()
         await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, return_exceptions=True)
