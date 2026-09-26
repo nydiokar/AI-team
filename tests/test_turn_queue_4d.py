@@ -686,14 +686,15 @@ def test_RW05b_audit_write_failure_keeps_the_notification_queued(tmp_path, monke
     job_turn = _kind(db, "watched_job")[0]["id"]
     assert asyncio.run(o.interrupt_case(cid))["ok"]
     db.complete_turn(t, db.get_task(t)["claim_token"], {"success": True})
-    real = db.record_audit_turn
-
-    def failing(*a, **k):
-        raise tq.BackingStoreError("disk full")
-    monkeypatch.setattr(db, "record_audit_turn", failing)
+    # fault injection at the storage layer: the audit INSERT itself fails
+    db._conn().execute(
+        "CREATE TRIGGER fail_audit BEFORE INSERT ON mesh_tasks WHEN NEW.action = 'watched_job' "
+        "BEGIN SELECT RAISE(ABORT, 'disk full'); END")
+    db._conn().commit()
     _pass(db, o)
     assert db.get_task(job_turn)["status"] == "queued"  # not withdrawn without its record
-    monkeypatch.setattr(db, "record_audit_turn", real)
+    assert db.get_task("job_x") is None
+    db._conn().execute("DROP TRIGGER fail_audit")
     db._conn().execute("UPDATE mesh_tasks SET blocked_until = NULL WHERE id = ?", (job_turn,))
     db._conn().commit()  # test clock: skip the backoff
     _pass(db, o)
