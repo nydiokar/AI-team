@@ -35,6 +35,10 @@ class WorkerConfig:
     # lives) and shipped to the controller. Free control request, not a turn.
     quota_observe_enabled: bool = False
     quota_observe_interval_sec: int = 300
+    # Window warming (prewarm) MUST run where Claude executes — the worker —
+    # because opening a 5h window costs a real model turn the controller
+    # container cannot spend. Gated by QUOTA_PREWARM_ENABLED and a claude backend.
+    quota_prewarm_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "WorkerConfig":
@@ -70,6 +74,12 @@ class WorkerConfig:
             quota_observe_enabled = coordinator_on and ("claude" in backends)
         quota_observe_interval_sec = int(os.getenv("QUOTA_OBSERVE_INTERVAL_SEC") or 300)
 
+        # Warming can only fire from a claude-capable harness. Enable it here
+        # (execution side) when the flag is on, regardless of the ingest_only
+        # controller — this is the fix for warming going inert under Docker.
+        prewarm_flag = os.getenv("QUOTA_PREWARM_ENABLED", "").strip().lower() in _TRUE
+        quota_prewarm_enabled = prewarm_flag and ("claude" in backends)
+
         return cls(
             node_id=node_id,
             worker_token=token,
@@ -83,6 +93,7 @@ class WorkerConfig:
             shares_controller_fs=shares_controller_fs,
             quota_observe_enabled=quota_observe_enabled,
             quota_observe_interval_sec=quota_observe_interval_sec,
+            quota_prewarm_enabled=quota_prewarm_enabled,
         )
 
     def list_repos(self) -> List[dict]:
