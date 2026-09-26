@@ -526,3 +526,216 @@ def test_Q16_admission_racing_a_stop_never_releases_or_runs_through_the_hold(tmp
     db.complete_turn(t, tok, {"success": False}, status="failed")
     assert _pass(db, o).activated == 0
     assert _cont_rows(db)[0]["status"] == "queued"
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4c rework (A87 review): adopted probes P1/P2/P3b/P5/P6 + kill tests
+# --------------------------------------------------------------------------- #
+def _rebind_setup(tmp_path, monkeypatch, *, enroll_new):
+    db, o = _env(tmp_path, monkeypatch, status=SS.BUSY)
+    cid = _case(db)
+    t = _running_operator_turn(db, o)
+    assert _tick(o, db, cid) == 1
+    c = _cont_rows(db)[0]["id"]
+    assert o.stop_managed_session_turn(_sess())[0] is True  # S1 operator-held
+    tok = db.get_task(t)["claim_token"]
+    db.complete_turn(t, tok, {"success": False}, status="failed")
+    _pass(db, o)
+    assert db.get_task(c)["status"] == "queued"  # wedged behind the hold
+    s9 = Session(session_id="sess-9", backend="claude", repo_path="/tmp/repo",
+                 status=SS.AWAITING_INPUT, created_at=NOW, updated_at=NOW, machine_id="worker-a")
+    db.upsert_session(s9)
+    o.session_store.save(s9)
+    if enroll_new:
+        db.enroll_session("sess-9")
+    db.create_flow_link(cid, "session", "sess-9", "manager", created_by="system")
+    return db, o, cid, c
+
+
+def test_Q17_rebound_manager_is_woken_while_the_old_one_is_held_legacy(tmp_path, monkeypatch):
+    """P1 adopted: the Case is rebound to an UNENROLLED S2 while S1 is held —
+    S2 is woken on the next tick (legacy parity), S1's hold is untouched."""
+    db, o, cid, c = _rebind_setup(tmp_path, monkeypatch, enroll_new=False)
+    delivered = []
+
+    async def spy(**kw):
+        delivered.append(kw)
+        return "legacy-x"
+
+    async def no_finalize(*_a, **_k):
+        return None
+    monkeypatch.setattr(o, "submit_instruction", spy)
+    monkeypatch.setattr(o, "_finalize_continuation", no_finalize)
+    outs = [_tick(o, db, cid) for _ in range(3)]
+    assert outs[0] == 1 and sum(outs) == 1
+    assert [d["session_id"] for d in delivered] == ["sess-9"]
+    assert db.get_task(c)["status"] == "withdrawn"
+    assert any("manager_rebound" in str(a.get("actor")) for a in db.get_turn_revisions(c))
+    assert db.operator_stop_hold("sess-1") == "operator_stop"
+    tokrow = db.get_task(continuation_task_id(cid, 1))
+    assert tokrow["status"] == "claimed" and not tokrow["producer_turn_id"]  # legacy lease
+
+
+def test_Q17b_rebound_enrolled_manager_gets_the_managed_wake(tmp_path, monkeypatch):
+    db, o, cid, c = _rebind_setup(tmp_path, monkeypatch, enroll_new=True)
+    assert _tick(o, db, cid) == 1
+    rows = {r["session_id"]: r for r in _cont_rows(db)}
+    assert set(rows) == {"sess-1", "sess-9"}
+    assert rows["sess-1"]["status"] == "withdrawn" and rows["sess-9"]["status"] == "queued"
+    assert rows["sess-9"]["id"] == producer_turn_id(continuation_task_id(cid, 1), "sess-9", 2)
+    assert db.operator_stop_hold("sess-1") == "operator_stop"
+    assert _tick(o, db, cid) == 0 and len(_cont_rows(db)) == 2
+
+
+def test_Q17c_running_wake_on_the_old_manager_is_not_withdrawn(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    assert _tick(o, db, cid) == 1
+    c = _cont_rows(db)[0]["id"]
+    _pass(db, o)
+    _run(db, c)
+    db.upsert_session(Session(session_id="sess-9", backend="claude", repo_path="/tmp/repo",
+                              status=SS.AWAITING_INPUT, created_at=NOW, updated_at=NOW,
+                              machine_id="worker-a"))
+    db.create_flow_link(cid, "session", "sess-9", "manager", created_by="system")
+    assert asyncio.run(o._withdraw_rebound_continuation(db, cid, 1, "sess-9")) is False
+    assert db.get_task(c)["status"] == "running"
+
+
+def test_Q18_multicase_manager_wake_lineage_pinned_to_the_woken_case(tmp_path, monkeypatch):
+    """P2 adopted: Manager on open Cases A and B; the wake for A attaches to A
+    only and does not move the session's current Case."""
+    db, o = _env(tmp_path, monkeypatch)
+    cid_a = _case(db)
+    cid_b = db.open_case("other", "sess-1", role="manager", completion_criteria='{"round_cap": 5}')
+    before = (db.get_session("sess-1") or {}).get("current_case_id")
+    assert _tick(o, db, cid_a) == 1
+    c = _cont_rows(db)[0]
+    assert c["flow_run_id"] == cid_a
+
+    def attached(cid):
+        return [e for e in db.list_flow_events(cid)
+                if e["event_type"] == "task.attached" and e.get("entity_id") == c["id"]]
+    assert len(attached(cid_a)) == 1 and attached(cid_b) == []
+    assert not db.list_flow_links(flow_run_id=cid_b, entity_type="task", entity_id=c["id"])
+    assert (db.get_session("sess-1") or {}).get("current_case_id") == before
+    _pass(db, o)
+    _complete(db, c["id"])
+    _reconcile(o, db)
+    assert db.compute_continuation_tick(cid_a)["completed_rounds"] == 1
+    assert db.compute_continuation_tick(cid_b)["completed_rounds"] == 0
+
+
+def test_Q18b_pinned_lineage_recovery_converges_on_the_woken_case(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    cid_a = _case(db)
+    cid_b = db.open_case("other", "sess-1", role="manager", completion_criteria='{"round_cap": 5}')
+
+    async def die(*_a, **_k):
+        raise RuntimeError("died before lineage (injected)")
+    o._write_managed_lineage = die
+    with pytest.raises(RuntimeError):
+        _tick(o, db, cid_a)
+    c = _cont_rows(db)[0]["id"]
+    db._conn().execute("UPDATE mesh_tasks SET lineage_lease_until = '2000-01-01T00:00:00' "
+                       "WHERE id = ?", (c,)).connection.commit()
+    o2 = _fresh(o, monkeypatch)
+    assert _pass(db, o2).lineage_recovered == 1
+    assert db.get_task(c)["flow_run_id"] == cid_a
+    assert not db.list_flow_links(flow_run_id=cid_b, entity_type="task", entity_id=c)
+
+
+def test_Q19_finalizer_appends_nothing_after_flow_closed(tmp_path, monkeypatch):
+    """P3b adopted: the Manager closes the Case during its wake turn."""
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    assert _tick(o, db, cid) == 1
+    c = _cont_rows(db)[0]["id"]
+    _pass(db, o)
+    tok = _run(db, c)
+    assert o.close_case(cid, outcome="cancelled", force=True).get("ok")
+    db.complete_turn(c, tok, {"success": True})
+    assert _reconcile(o, db) == 1
+    evs = db.list_flow_events(cid)
+    closed_at = max(i for i, e in enumerate(evs)
+                    if e["event_type"] in ("flow.closed", "flow.status_changed"))
+    assert [e["event_type"] for e in evs[closed_at + 1:]] == []
+    assert db.get_task(continuation_task_id(cid, 1))["status"] == "completed"
+
+
+def test_Q20_garbled_token_payload_converges(tmp_path, monkeypatch):
+    """P5 adopted: a garbled counter never replays the terminal attempt-1 turn."""
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    assert _tick(o, db, cid) == 1
+    c = _cont_rows(db)[0]["id"]
+    _pass(db, o)
+    tok = _run(db, c)
+    o.stop_managed_session_turn(_sess())
+    db.complete_turn(c, tok, {"success": False}, status="failed")
+    assert _reconcile(o, db) == 1
+    _submit(o, operation_id="rel")  # operator releases the hold
+    cont = continuation_task_id(cid, 1)
+    with db._write() as conn:
+        conn.execute("UPDATE mesh_tasks SET payload='not json' WHERE id=?", (cont,))
+    assert [_tick(o, db, cid) for _ in range(2)] == [1, 0]
+    token = db.get_task(cont)
+    new = _cont_rows(db)[-1]["id"]
+    assert token["status"] == "claimed" and token["producer_turn_id"] == new
+    assert new == producer_turn_id(cont, "sess-1", 2)
+    assert json.loads(token["payload"])["case_id"] == cid  # self-healed on link
+
+
+def test_Q21_rearm_links_the_fresh_presented_set(tmp_path, monkeypatch):
+    """P6 adopted (kills MA): after a re-arm the NEW tick's presented/retired
+    lists win over the stale ones stored at the first link."""
+    db, o = _env(tmp_path, monkeypatch)
+    cid = db.open_case("x", "sess-1", role="manager", completion_criteria='{"round_cap": 5}')
+    db.arm_wait_group(cid, "g1", "ANY", ["w1", "w2"])
+    _finish(db, cid, "w1")
+    assert _tick(o, db, cid) == 1
+    c = _cont_rows(db)[0]["id"]
+    _pass(db, o)
+    tok = _run(db, c)
+    o.stop_managed_session_turn(_sess())
+    db.complete_turn(c, tok, {"success": False}, status="failed")
+    _reconcile(o, db)
+    _finish(db, cid, "w2")
+    _submit(o, operation_id="rel")
+    rel = [r for r in _managed_rows(db) if r["turn_kind"] != "continuation"][-1]["id"]
+    _pass(db, o)
+    t2 = _run(db, rel)
+    db.complete_turn(rel, t2, {"success": True})
+    assert _tick(o, db, cid) == 1
+    c2 = _cont_rows(db)[-1]["id"]
+    _pass(db, o)
+    _complete(db, c2)
+    assert _reconcile(o, db) == 1
+    res = json.loads(db.get_task(continuation_task_id(cid, 1))["result"])
+    assert sorted(res["consumed_task_ids"]) == ["w1", "w2"]
+    assert not db.compute_continuation_tick(cid)["satisfied"]
+    assert len(_resolved_events(db, cid)) == 1  # the fresh retire list (ANY fully finished)
+
+
+def test_Q22_node_offline_wake_consumes_like_legacy(tmp_path, monkeypatch):
+    """Kills MB (carried m4: legacy parity — consumed even if never run)."""
+    db, o = _env(tmp_path, monkeypatch)
+    cid = _case(db)
+    _drive_to_completion(db, o, cid, status="failed_node_offline")
+    assert _reconcile(o, db) == 1
+    assert db.compute_continuation_tick(cid)["completed_rounds"] == 1
+
+
+def test_Q23_partial_review_does_not_withdraw_the_wake(tmp_path, monkeypatch):
+    """Kills MC: the Manager reviewed w1 but w2 is still unresolved ⇒ activate."""
+    db, o = _env(tmp_path, monkeypatch, status=SS.BUSY)
+    cid = _case(db, members=("w1", "w2"), finished=("w1", "w2"))
+    t = _running_operator_turn(db, o)
+    assert _tick(o, db, cid) == 1
+    c = _cont_rows(db)[0]["id"]
+    assert o.record_review(cid, verdict="accepted", task_id="w1")["ok"]
+    tok = db.get_task(t)["claim_token"]
+    db.complete_turn(t, tok, {"success": True})
+    res = _pass(db, o)
+    assert res.withdrawn == 0 and res.activated == 1
+    assert db.get_task(c)["status"] == "pending"
