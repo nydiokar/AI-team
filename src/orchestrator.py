@@ -733,6 +733,20 @@ class TaskOrchestrator(ITaskOrchestrator):
             from src.control.db import runtime_flag_enabled
             if not runtime_flag_enabled("QUOTA_PREWARM_ENABLED"):
                 return
+            # A prewarmer can only open a window by spending a real model turn
+            # through an activation-capable adapter. On a controller-only host
+            # (ingest_only: GATEWAY_LOCAL_EXECUTION_ENABLED=false) the coordinator
+            # has NO such adapter, so a prewarmer here would tick forever and
+            # never fire — the exact regression the Docker split introduced.
+            # Warming runs where the harness lives (the worker, src/worker/agent.py);
+            # skip loudly here instead of standing up an inert loop that looks
+            # alive but can never activate.
+            if not self._coordinator_can_activate():
+                logger.info(
+                    "event=quota_prewarmer_skipped reason=ingest_only_no_activation_adapter "
+                    "(warming runs on the execution host / worker)"
+                )
+                return
             from src.services.quota_window_prewarmer import build_prewarmer_from_config
             self.quota_prewarmer = build_prewarmer_from_config(
                 coordinator=self.quota_coordinator,
@@ -742,6 +756,16 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception as e:
             logger.warning(f"Failed to initialize quota prewarmer: {e}")
             self.quota_prewarmer = None
+
+    def _coordinator_can_activate(self) -> bool:
+        """True iff the coordinator carries a provider adapter that can spend a
+        turn to open a window. False on an ingest-only controller, whose adapter
+        list is empty by construction (build_quota_coordinator_from_config with
+        observe_locally=False)."""
+        for adapter in getattr(self.quota_coordinator, "adapters", []) or []:
+            if callable(getattr(adapter, "activate", None)):
+                return True
+        return False
 
     # ===========================================================================
     # RESULT PARSING & TEXT EXTRACTION

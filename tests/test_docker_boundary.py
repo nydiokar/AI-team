@@ -302,3 +302,63 @@ def test_worker_quota_observe_explicit_override_wins(monkeypatch):
     monkeypatch.setenv("QUOTA_COORDINATOR_ENABLED", "1")
     monkeypatch.setenv("WORKER_QUOTA_OBSERVE", "0")
     assert WorkerConfig.from_env().quota_observe_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Window warming runs where the harness lives (regression: warming went inert
+# under the Docker controller/worker split — controller has adapters == []).
+# ---------------------------------------------------------------------------
+
+def test_worker_prewarm_enabled_for_claude_when_flag_on(monkeypatch):
+    from src.worker.config import WorkerConfig
+
+    _base_worker_env(monkeypatch)
+    monkeypatch.setenv("QUOTA_PREWARM_ENABLED", "1")
+    assert WorkerConfig.from_env().quota_prewarm_enabled is True
+
+
+def test_worker_prewarm_off_when_flag_unset(monkeypatch):
+    from src.worker.config import WorkerConfig
+
+    _base_worker_env(monkeypatch)  # QUOTA_PREWARM_ENABLED unset
+    monkeypatch.delenv("QUOTA_PREWARM_ENABLED", raising=False)
+    assert WorkerConfig.from_env().quota_prewarm_enabled is False
+
+
+def test_worker_prewarm_off_without_claude_backend(monkeypatch):
+    from src.worker.config import WorkerConfig
+
+    _base_worker_env(monkeypatch)
+    monkeypatch.setenv("WORKER_BACKENDS", "codex")
+    monkeypatch.setenv("QUOTA_PREWARM_ENABLED", "1")
+    # Warming needs a claude harness to spend the activation turn.
+    assert WorkerConfig.from_env().quota_prewarm_enabled is False
+
+
+def test_controller_can_activate_reflects_adapter_presence():
+    """The controller only stands up a prewarmer when it can actually fire one.
+    An ingest-only coordinator (adapters == []) must report can-activate False,
+    so orchestrator._build_quota_prewarmer skips the inert loop."""
+    from src.orchestrator import TaskOrchestrator
+
+    class _Coord:
+        def __init__(self, adapters):
+            self.adapters = adapters
+
+    class _Activatable:
+        async def activate(self, bucket_id="five_hour"):
+            return {"ok": True}
+
+    class _Observer:  # no activate() — telemetry-only
+        pass
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+
+    orch.quota_coordinator = _Coord([])                       # ingest_only
+    assert orch._coordinator_can_activate() is False
+
+    orch.quota_coordinator = _Coord([_Observer()])            # no activate
+    assert orch._coordinator_can_activate() is False
+
+    orch.quota_coordinator = _Coord([_Activatable()])         # real adapter
+    assert orch._coordinator_can_activate() is True
