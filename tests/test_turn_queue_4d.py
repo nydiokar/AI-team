@@ -854,3 +854,24 @@ def test_F04_session_close_withdraws_a_job_notification_with_its_audit(tmp_path,
     audit = db.get_task("job_x")
     assert audit["status"] == "completed" and "session_closed" in audit["reply_text"]
     assert "npm test" in audit["reply_text"]
+
+
+def test_F02b_unreadable_turn_probe_writes_no_audit(tmp_path, monkeypatch):
+    """If the committed-turn probe itself cannot read, the turn may exist: no
+    contradicting 'refused' audit is written."""
+    db, o = _env(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("post-commit boom")
+    o._emit_event = boom
+    real_get = db.get_task
+
+    def probe(tid):
+        if str(tid).startswith("jturn_"):
+            raise RuntimeError("database is locked")
+        return real_get(tid)
+    monkeypatch.setattr(db, "get_task", probe)
+    _process(o, _job())
+    monkeypatch.setattr(db, "get_task", real_get)
+    assert [r["status"] for r in _kind(db, "watched_job")] == ["queued"]
+    assert db.get_task("job_x") is None
