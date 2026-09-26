@@ -112,6 +112,9 @@ async def _activate_head(
                     lambda: db.withdraw_turn(
                         task_id, int(row["revision"]),
                         actor=f"scheduler:obsolete:{ob.reason}"[:128],
+                        # [A82 Stage 4d] a withdrawn job notification's audit
+                        # record commits in the same txn (both or neither).
+                        audit_reason=ob.reason,
                     )
                 )
             except Exception:  # noqa: BLE001 — raced (edited/moved); next pass re-reads
