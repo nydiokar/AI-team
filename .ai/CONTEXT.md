@@ -240,6 +240,28 @@ duck-typed fakes gained the new tick-branch delegation) green. **Known boundary 
 first):** an operator manually re-sending the failed instruction while a pause is open can still race
 the one auto-retry — single-flight guards the dispatcher, not the operator. `feat/transient-provider-self-heal`.
 
+**2026-09-26 — Window warming regressed to inert under Docker; moved to the worker (execution side).**
+Root cause: the Docker controller/worker split runs the gateway with `GATEWAY_LOCAL_EXECUTION_ENABLED=false`
+→ `build_quota_coordinator_from_config(observe_locally=False)` builds the coordinator with
+`adapters=[]` (quota is observed harness-side by the worker and POSTed). The `QuotaWindowPrewarmer`
+was constructed **controller-side**, so `_adapter()` returned None and every activation decision
+short-circuited to `skip(no_activatable_adapter)` — the controller has no Claude binary to spend the
+haiku turn, so **no 5h window was ever fired**. The flag was on and the loop even started; only the
+*act* half was wired to nothing. Fix (`feat/worker-side-window-warming`): invariant = **warming runs
+where Claude executes**. (1) `orchestrator._build_quota_prewarmer` now skips when the coordinator has
+no activation-capable adapter (`_coordinator_can_activate()`), so an ingest-only controller no longer
+stands up an inert loop; single-process gateways are byte-identical. (2) The worker
+(`src/worker/agent.py`) now builds a LOCAL activation-capable coordinator (`observe_locally=True`) and
+runs the same tested prewarmer brain, gated by `QUOTA_PREWARM_ENABLED` + a `claude` backend
+(`WorkerConfig.quota_prewarm_enabled`). Deployment-shape-independent: works single-process or split.
+**Enablement:** set `QUOTA_PREWARM_ENABLED=1` in the *worker* env (the worker reads it from env, not
+the controller's mesh.db registry where the old value lived). **§7 deferral (multi-worker):** with N
+claude workers each running a prewarmer, up to N minimal `haiku` turns could fire at a window boundary
+before any observes the new window. Bounded and cheap: warming is idempotent (skip-if-open is
+self-correcting once one worker opens it), each worker has its own `MIN_INTERVAL_SEC` + `MAX_PER_DAY`
+budget. Not a live concern (one claude worker today). Close with a store-backed single-owner lock when
+a second warming worker is added.
+
 **2026-08-19 — Quota windows: keep the rhythm ticking, and resume on the provider's own clock.**
 Two halves of the same problem. **(1) The 5-hour window now gets kept alive.**
 `SESSION_WINDOW_WARMING_SPEC.md` items 1-6 were built long ago; 7-10 (activation, classification,
@@ -273,7 +295,8 @@ deliberately dropped. Three gates were added to close §7/§9A/§13 honestly: **
 (a `reset_at` that moves forward while the old boundary has not elapsed = sliding window ⇒ circuit
 open, i.e. ambiguity disables automation), **cost measured as the provider's own `used_percent`
 delta** across the activation (2 breaches ⇒ circuit), and a **principal-identity gate**. Cross-node
-locking (§9A) is N/A by architecture — only the gateway constructs a prewarmer, never a worker.
+locking (§9A) was N/A while only the single-process gateway constructed a prewarmer — see the
+2026-09-26 entry below, which moved warming to the worker and reopened that concern (bounded/deferred).
 The resume proposal now reaches the operator on **Web Push + Telegram**: push deep-links to
 `/work/{case_id}`, Telegram is **notification-only by design** (no approve affordance — approving
 spends real money, so the decision stays on the authenticated Web UI). AUTO resumes notify too,
