@@ -459,7 +459,10 @@ def test_Q13_unenrolled_wake_and_finalizer_touch_no_managed_state(tmp_path, monk
     monkeypatch.setattr(type(db), "_conn", real_conn)
     assert stmts and len(threads) >= 2  # the offloaded reads were traced too
     forbidden = ("producer_turn_id", "turn_queue_enrolled", "queue_protocol = 1",
-                 "idx_mesh_tasks_producer_link", "turn_queue_hold")
+                 "idx_mesh_tasks_producer_link", "turn_queue_hold",
+                 # the rework's rebound-wake probe reads the token row by id;
+                 # legacy never does (it only INSERTs / claims it)
+                 "SELECT * FROM mesh_tasks WHERE id = ?")
     assert not [q for q in stmts if any(f in q for f in forbidden)]
     # the legacy delivery happened exactly as before
     assert [d["source"] for d in auto.deliveries] == ["manager_continuation"]
