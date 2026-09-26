@@ -1440,7 +1440,7 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 **Mutation run** (scratch worktree `mut4c`, removed with plain `git worktree remove`; spawn guard on): 24 mutants, 23 killed.
 - M9 (automation-scope filter dropped) first survived because Q07's runtime row never reached the head. Fixed by giving it its own session; re-run: killed.
 - **Equivalent:** M23 (`token_to_turn` ignores the link), because the link always names the derived id of the current attempt.
-- Also equivalent by construction: the trigger-identity admission hash (a same-key replay with a different body cannot occur except for a concurrent tick, which then gets a harmless 409 → 0), and the `continuation_unlinked` check (no path completes or re-arms a token while its turn is queued).
+- Also equivalent by construction: the trigger-identity admission hash (a same-key replay with a different body cannot occur except for a concurrent tick, which then gets a harmless 409 → 0). *(Corrected by the rework, m5: the `continuation_unlinked` check is NOT equivalent — see below.)*
 
 **Service boundary (§7).**
 | Item | managed wake branch | finalizer | activation revalidation |
@@ -1449,7 +1449,7 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 | Memory | O(presented tasks) per token | O(25) | one continuation tick per continuation head |
 | Request size | internal only: source/metadata are server-set, and `__turn_producer` is not reachable from any HTTP body | internal | internal |
 | Timeout | 5 s admission / txn deadline ⇒ typed error, token pending, retried next tick | 5 s per txn; failure logged, token stays linked, retried | withdraw race ⇒ `ineligible`, re-read next pass |
-| Malformed input | the human+coalesce guard stays; stale attempt ⇒ 409 rollback | garbled payload ⇒ `{}` (attempt 1, no events) | missing Case/token ⇒ withdraw with reason |
+| Malformed input | the human+coalesce guard stays; stale attempt ⇒ 409 rollback | garbled payload ⇒ `{}`: consumed without events; *(corrected by the rework, m2)* the next attempt is derived from the terminal turns (`producer_token_attempt`), and the link rewrites the payload | missing Case/token ⇒ withdraw with reason |
 | Backing failure | unreadable marker ⇒ raises (Case skipped this tick, no legacy fallback) | read error ⇒ logged, tick continues | prepare error ⇒ existing 4a blocked/backoff |
 
 **Residuals (for CONTEXT.md).**
@@ -1460,6 +1460,33 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 5. A token claimed by the LEGACY path before enrollment blocks the managed wake until the legacy finalizer or lease reaper resolves it. Re-armed tokens of a closed Case stay pending (inert).
 6. While a wake is in flight, each tick still recomputes that Case's continuation tick and does one marker read + one token read (no write).
 7. Producers 4-8, Stage 5/6 and managed Codex/OpenCode are untouched. `manager_*_resume` / `manager_respawn` / heartbeat still fail closed for enrolled sessions.
+
+### Stage 4c rework — A87 review (M1 + kill tests + residual 3 + m2/m3/m5) closed (2026-09-26, commits `d1fd0b4`..HEAD + this record)
+
+| Finding | Fix | Test (mutation killed) |
+|---|---|---|
+| **M1** a late Manager binding was lost while the old Manager was held or long-busy | `_withdraw_rebound_continuation` (orchestrator.py:1944) is called from `_continue_case_once` right after the Manager lookup, before the hold / enrollment branches. It runs only when something is enrolled; otherwise no read. If the generation's token is linked to a wake still QUEUED on a session that is no longer `case_manager_session_id`, it calls `withdraw_turn(actor="scheduler:obsolete:manager_rebound")` (an automation row, so the hold is untouched) and re-arms the token at once via the finalizer. The SAME tick then wakes the rebound Manager on either path: managed (attempt+1, new session ⇒ new id) or legacy (claims the re-armed pending token). A claimed or running wake is left to finish and be consumed. | Q17 (P1 adopted: unenrolled S2 woken on the next tick, exactly once; S1 still held), Q17b (enrolled S2 gets the managed wake), Q17c (a running wake is not withdrawn); mutants R1 (not called), R3 (no immediate re-arm), R8 (read without the enrollment gate; Q13 now forbids the token-row read) — killed |
+| **MA / MB / MC** surviving mutants | kill tests | Q21 (P6 adopted: after a re-arm the fresh presented/retired lists win: consumed `[w1, w2]`, one `wait_resolved`), Q22 (`failed_node_offline` consumes), Q23 (a partial review does not withdraw) — all killed |
+| **Residual 3 (fixed now)** lineage went to the session's newest open Case | New intent-metadata key `__attach_case_id` (`_ATTACH_CASE_META_KEY`, :9765) = the token's Case. It is persisted, so lineage recovery converges on the same Case. `_managed_lineage_converge` (:10091): pinned ⇒ attach to that Case only if it is still open, else standalone. It is never a different Case, and a pinned attach never changes the session's `current_case_id`. | Q18 (P2 adopted: Manager on A and B; wake for A ⇒ task link + `task.attached` on A only, current Case unchanged, round on A only), Q18b (crash before lineage ⇒ recovery attaches to A only); mutants R4 (not pinned), R5 (pinned attach re-affiliates) — killed |
+| **m2** garbled token payload retried forever | `MeshDB.producer_token_attempt` (db.py:5982) takes the payload counter but never an attempt whose turn (key `<token>#<n>` in this session's automation scope, one idempotency-index range read) already ended. The link then rewrites the payload with fresh facts. | Q20 (P5 adopted: ticks `[1, 0]`, attempt-2 id linked, payload self-healed); R6 killed |
+| **m3** `wait_resolved` appended after `flow.closed` | `_finalize_producer_token` reads the Case. If it is closed or unknown, the token is consumed (round + watermark) but nothing is appended to the Case (4a rule). | Q19 (P3b adopted: no event after the close); R7 killed |
+| **m5** (record correction) | The earlier "equivalent by construction" claim for `continuation_unlinked` was WRONG. Legacy `record_continuation_consumed` is an unfenced UPDATE, so at cutover a legacy in-memory finalizer can complete a token that a managed wake is linked to. The activation guard then withdraws the duplicate managed wake. It is a live guard. | M21 (revalidation removed) killed; the path itself is a cutover race and has no dedicated test |
+
+**Mutation run** (scratch worktree `mut4c`, removed with plain `git worktree remove`; spawn guard on): 35 mutants (the 24 from Stage 4c + MA/MB/MC + R1-R8), 33 killed.
+- First pass: R8 survived. The traced SQL carries bound values, so Q13's pattern was fixed to match them; re-run: killed. M22's pattern was updated to the new loop and is killed.
+- **Equivalent:** R2 (the rebound check also tries running wakes) — `withdraw_turn` itself refuses non-queued rows, so the queued check is defence in depth. M23 as before.
+
+**Verification.**
+- turn-queue files: **356 passed / 5 red** (SYS05-07, api ×2; baseline 346 / 5).
+- Regression group incl. `wait_group` + `cache_heartbeat`: **547 passed** (baseline 547).
+
+**Carried (A87 → CONTEXT.md).**
+- m4: `failed` / `failed_node_offline` consume the wake even if the Manager never ran (legacy parity).
+- Residual 2 (re-arm after the operator releases the hold) is ACCEPTED as desired.
+- A84 note: when A84 lands, fold `wait_resolved`, outbox consumption and the token CAS into one transaction.
+- Stage 4c residual 3 is superseded (pinned). Residuals 1, 4-7 stand.
+- New: the rebound check costs one token read per satisfied Case per tick while anything is enrolled.
+- New: a pinned wake to a Case that closed before lineage was written runs standalone. Revalidation then withdraws it (`case_closed`) at activation.
 
 ## 16. Review record
 
