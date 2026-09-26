@@ -4743,38 +4743,17 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception as e:
             logger.warning("event=job_session_turn_db_failed job_id=%s err=%s", job_id, e)
 
-    def _record_withdrawn_job_audit(self, row: Dict[str, Any], reason: str) -> None:
-        """[A82 Stage 4d rework] Audit record of a watched-job notification
-        turn withdrawn as obsolete (its Case blocked/closed): the job id row,
-        already terminal, carrying the notification text and the reason.
-        Raises on a DB error (the head then backs off and retries — the turn is
-        not withdrawn without its record)."""
+    def _managed_turn_row_exists(self, turn_id: str) -> bool:
+        """True when the managed turn row is present, or when that cannot be
+        read (a turn that may exist must not be contradicted by a "refused"
+        audit record)."""
         from src.control.db import get_db
 
-        intent = row.get("payload")
-        intent = json.loads(intent) if isinstance(intent, str) else dict(intent or {})
-        meta = intent.get("metadata") or {}
-        job_id = str(meta.get("job_id") or "")
-        if not job_id:
-            return
-        text = str(row.get("prompt") or "")
-        reply = f"(agent notification withdrawn: {reason})\n\n{text}"
-        db = get_db()
-        db.record_audit_turn(
-            job_id, str(row.get("session_id") or ""), row.get("machine_id"),
-            str(row.get("backend") or "unknown"), "watched_job",
-            {"task": {"id": job_id, "title": "Watched job finished", "prompt": text},
-             "job": {"id": job_id}, "withdrawn_turn_id": str(row["id"]),
-             "withdrawn_reason": reason},
-            text,
-            {"success": True, "output": reply, "errors": [], "files_modified": [],
-             "execution_time": 0.0, "timestamp": now_iso(),
-             "withdrawn_reason": reason},
-            success=True, strict=True,
-        )
-        db.enrich_task(job_id, prompt=text, reply_text=reply,
-                       parsed_output={"type": "watched_job", "withdrawn_reason": reason},
-                       files_modified=[])
+        try:
+            return get_db().get_task(turn_id) is not None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("event=job_turn_probe_failed turn=%s err=%s", turn_id, e)
+            return True
 
     async def _admit_managed_watched_job(
         self, job: Dict[str, Any], session: Any, payload: Dict[str, Any], description: str,
@@ -4794,6 +4773,7 @@ class TaskOrchestrator(ITaskOrchestrator):
 
         job_id = str(payload["job_id"])
         trigger = f"watched:{job_id}"
+        turn_id = producer_turn_id(trigger, session.session_id, 1, prefix="jturn")
         try:
             await self.submit_instruction(
                 description,
@@ -4806,7 +4786,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     self._TURN_PRODUCER_META_KEY: {
                         "turn_kind": "watched_job",
                         "trigger": trigger,
-                        "turn_id": producer_turn_id(trigger, session.session_id, 1, prefix="jturn"),
+                        "turn_id": turn_id,
                         "coalesce_key": trigger,
                     },
                 },
@@ -4818,7 +4798,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             # poller's batch (later jobs, legacy ones included, would be dropped).
             level = logging.WARNING if isinstance(e, (TurnQueueError, HarnessAdmissionBlocked)) else logging.ERROR
             logger.log(level, "event=job_notify_agent_refused job_id=%s err=%s", job_id, e)
-            self._record_managed_job_audit(job, session, payload)
+            # [A82 Stage 4d] An error AFTER the commit (event/telemetry) leaves a
+            # committed turn that will run: the "refused" audit would contradict
+            # it. Fall back only when the deterministic turn row is ABSENT.
+            if not self._managed_turn_row_exists(turn_id):
+                self._record_managed_job_audit(job, session, payload)
 
     async def _process_terminal_job(self, job: Dict[str, Any]) -> None:
         job_id_key = str(job.get("id") or "")
@@ -10846,11 +10830,8 @@ Generated from user description: {description}
 
         reason = await self._managed_turn_obsolete(row)
         if reason:
-            if str(row.get("turn_kind") or "") == "watched_job":
-                # [A82 Stage 4d rework] The notification never silently
-                # disappears: its audit record is written (idempotent, keyed on
-                # the job id) BEFORE the scheduler withdraws the turn.
-                await asyncio.to_thread(self._record_withdrawn_job_audit, row, reason)
+            # [A82 Stage 4d] A withdrawn job notification's audit record is
+            # written by the scheduler's withdrawal, in the SAME transaction.
             raise TurnObsolete(reason)
         task = self._task_from_managed_row(row)
         sid = str(row.get("session_id") or "")

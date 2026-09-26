@@ -761,3 +761,96 @@ def test_R4_unreadable_marker_fails_closed_on_the_job_path(tmp_path, monkeypatch
     assert _managed_rows(db) == [] and db.get_task("job_x") is None
     assert db.get_task("job_y") is None  # no record either (fail closed)
     assert o.notifier.calls == ["job_x", "job_y"]  # Telegram notify unaffected
+
+
+# =========================================================================== #
+# Stage 4d ACCEPTED — final minors (A87 round 2)
+# =========================================================================== #
+def _claim_via_route(db, tid, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import src.control.task_server as ts
+    hints = []
+    monkeypatch.setattr(ts, "get_db", lambda: db)
+    monkeypatch.setattr(ts, "_worker_token", lambda: "tok")
+    monkeypatch.setattr(ts, "_registered_managed_backends", lambda node: {"claude"})
+    monkeypatch.setattr(ts, "_hint_turn_scheduler", lambda: hints.append(1))
+    r = TestClient(ts.app).post(
+        f"/tasks/{tid}/claim-managed",
+        json={"node_id": "worker-a", "incarnation_id": "inc-1", "queue_protocols": [1]},
+        headers={"Authorization": "Bearer tok"})
+    return r, hints
+
+
+def test_F01_claim_route_hints_the_scheduler_on_a_not_idle_withdrawal(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    _arm_heartbeat(db)
+    assert _beat(o, db) == 1
+    hb = _hb_rows(db)[0]["id"]
+    _pass(db, o)
+    _submit(o, operation_id="op-human")
+    r, hints = _claim_via_route(db, hb, monkeypatch)
+    assert r.status_code == 409 and db.get_task(hb)["status"] == "withdrawn"
+    assert hints == [1]  # the freed slot wakes the gateway scheduler
+
+
+def test_F01b_claim_route_does_not_hint_on_an_ordinary_conflict(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    t = _running_operator_turn(db, o)  # already running ⇒ plain 409
+    r, hints = _claim_via_route(db, t, monkeypatch)
+    assert r.status_code == 409 and hints == []
+
+
+def test_F02_post_commit_error_writes_no_contradicting_audit(tmp_path, monkeypatch):
+    """P6: an error AFTER the turn committed (event emission) must not record a
+    'refused' audit for a notification that will run."""
+    db, o = _env(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("post-commit boom")
+    o._emit_event = boom
+    _process(o, _job())
+    assert [r["status"] for r in _kind(db, "watched_job")] == ["queued"]
+    assert db.get_task("job_x") is None
+
+
+def _obsolete_job_turn(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    cid = db.open_case("ship X", "sess-1", role="manager")
+    t = _running_operator_turn(db, o)
+    _process(o, _job())
+    job_turn = _kind(db, "watched_job")[0]["id"]
+    assert asyncio.run(o.interrupt_case(cid))["ok"]
+    db.complete_turn(t, db.get_task(t)["claim_token"], {"success": True})
+    return db, o, cid, job_turn
+
+
+def test_F03_withdraw_failure_writes_no_audit_and_a_later_run_is_not_contradicted(tmp_path, monkeypatch):
+    """P5b: audit + withdrawal are ONE transaction. A failing withdrawal
+    (storage fault on its revision audit) leaves NO audit row; if the Case is
+    then reopened the turn runs, with nothing claiming it was withdrawn."""
+    db, o, cid, job_turn = _obsolete_job_turn(tmp_path, monkeypatch)
+    db._conn().execute(
+        "CREATE TRIGGER fail_withdraw BEFORE INSERT ON mesh_turn_revisions "
+        "BEGIN SELECT RAISE(ABORT, 'database is locked'); END")
+    db._conn().commit()
+    _pass(db, o)
+    assert db.get_task(job_turn)["status"] == "queued" and db.get_task("job_x") is None
+    db._conn().execute("DROP TRIGGER fail_withdraw")
+    db._conn().execute("UPDATE flow_runs SET status = 'running' WHERE flow_run_id = ?", (cid,))
+    db._conn().commit()  # fixture: the Case resumes (no resume API for a killed Case)
+    assert _pass(db, o).activated == 1
+    assert db.get_task(job_turn)["status"] == "pending" and db.get_task("job_x") is None
+
+
+def test_F04_session_close_withdraws_a_job_notification_with_its_audit(tmp_path, monkeypatch):
+    """P4: the close path writes the audit in the same transaction."""
+    db, o = _env(tmp_path, monkeypatch)
+    _running_operator_turn(db, o)
+    _process(o, _job())
+    job_turn = _kind(db, "watched_job")[0]["id"]
+    assert o.session_service.close_session("sess-1", backends=o._backends).ok
+    assert db.get_task(job_turn)["status"] == "withdrawn"
+    audit = db.get_task("job_x")
+    assert audit["status"] == "completed" and "session_closed" in audit["reply_text"]
+    assert "npm test" in audit["reply_text"]

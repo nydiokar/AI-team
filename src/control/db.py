@@ -2167,7 +2167,6 @@ class MeshDB:
         *,
         success: bool,
         error: str = "",
-        strict: bool = False,
     ) -> None:
         """[A82 Stage 4d] Persist an ALREADY-TERMINAL protocol-0 audit turn
         (e.g. a watched-job notification record into an enrolled session) in ONE
@@ -2194,8 +2193,6 @@ class MeshDB:
                     ),
                 )
         except Exception as e:
-            if strict:  # [A82 Stage 4d rework] the caller must not proceed without it
-                raise _turn_backing_error("record_audit_turn", task_id=task_id, err=e)
             logger.warning("event=db_record_audit_turn_failed task_id=%s err=%s", task_id, e)
 
     def claim_task(self, task_id: str, node_id: str) -> bool:
@@ -3315,12 +3312,17 @@ class MeshDB:
         expected_revision: Optional[int] = None,
         *,
         actor: str = "",
+        audit_reason: Optional[str] = None,
     ) -> bool:
         """Conditional withdrawal of a QUEUED managed turn + audit, ONE
         transaction (design §4). A queued withdrawal is a terminal
         `withdrawn` outcome — it NEVER becomes an execution failure (design §3).
         Only a queued row is withdrawable this way; a consumed turn requires
-        cancellation/close (Stage 4). Returns True on withdrawal."""
+        cancellation/close (Stage 4). Returns True on withdrawal.
+
+        [A82 Stage 4d] ``audit_reason`` (scheduler obsolete withdrawal): a
+        ``watched_job`` notification's audit record is written in the SAME
+        transaction — both or neither."""
         now = _now()
         try:
             with self._write() as conn:
@@ -3368,6 +3370,8 @@ class MeshDB:
                     """,
                     (task_id, new_rev, actor, now),
                 )
+                if audit_reason:
+                    _insert_watched_job_withdrawal_audit(conn, task_id, audit_reason, now)
                 return True
         except TurnQueueError:
             raise
@@ -3564,6 +3568,8 @@ class MeshDB:
                         """,
                         (q["id"], new_rev, f"session_close:{actor or 'operator'}"[:128], now),
                     )
+                    # [A82 Stage 4d] a queued job notification leaves its record
+                    _insert_watched_job_withdrawal_audit(conn, str(q["id"]), "session_closed", now)
                     withdrawn.append(str(q["id"]))
                 active = conn.execute(
                     """
@@ -9058,6 +9064,48 @@ def _release_stop_hold(conn: sqlite3.Connection, session_id: str, now: str) -> N
         "updated_at = ? WHERE session_id = ? "
         "AND (status = 'cancelled' OR turn_queue_hold IS NOT NULL)",
         (now, session_id),
+    )
+
+
+def _insert_watched_job_withdrawal_audit(
+    conn: sqlite3.Connection, task_id: str, reason: str, now: str,
+) -> None:
+    """[A82 Stage 4d] Inside the caller's WITHDRAWAL transaction: a withdrawn
+    ``watched_job`` notification turn leaves its terminal audit record (the
+    job-id row carrying the notification text + the reason) — both commit or
+    neither. No-op for any other turn kind. Idempotent on the job id."""
+    row = conn.execute(
+        "SELECT turn_kind, payload, prompt, session_id, machine_id, backend "
+        "FROM mesh_tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or (row["turn_kind"] or "") != "watched_job":
+        return
+    intent = _token_payload(row["payload"])
+    job_id = str((intent.get("metadata") or {}).get("job_id") or "")
+    if not job_id:
+        return
+    text = str(row["prompt"] or "")
+    reply = f"(agent notification withdrawn: {reason})\n\n{text}"
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO mesh_tasks (
+            id, session_id, machine_id, backend, action, payload, prompt, status,
+            result, reply_text, parsed_output_json, created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, 'watched_job', ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id, row["session_id"], row["machine_id"], row["backend"] or "unknown",
+            json.dumps({"task": {"id": job_id, "title": "Watched job finished", "prompt": text},
+                        "job": {"id": job_id}, "withdrawn_turn_id": task_id,
+                        "withdrawn_reason": reason}),
+            text,
+            json.dumps({"success": True, "output": reply, "errors": [], "files_modified": [],
+                        "execution_time": 0.0, "timestamp": now, "withdrawn_reason": reason}),
+            reply,
+            json.dumps({"type": "watched_job", "withdrawn_reason": reason}),
+            now, now, now,
+        ),
     )
 
 
