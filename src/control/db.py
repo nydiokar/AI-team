@@ -5979,6 +5979,30 @@ class MeshDB:
             return str(row["producer_turn_id"])
         return producer_turn_id(key, sid, _token_attempt(row["payload"] if row else None))
 
+    def producer_token_attempt(self, token_id: str, session_id: str, payload: Any) -> int:
+        """[A82 Stage 4c rework] The attempt to admit NEXT for an unlinked token:
+        the durable payload counter, but never one whose turn (this session's
+        automation scope, key ``<token>#<n>``) already ended — so a garbled or
+        lost counter converges instead of replaying a terminal turn forever.
+        One range read on the idempotency index."""
+        from .turn_queue import TERMINAL_STATUSES
+
+        attempt = _token_attempt(payload)
+        rows = self._conn().execute(
+            "SELECT idempotency_key, status FROM mesh_tasks "
+            "WHERE queue_protocol = 1 AND idempotency_scope = ? "
+            "AND idempotency_key >= ? AND idempotency_key < ?",
+            (f"automation:{session_id}:continuation", f"{token_id}#", f"{token_id}$"),
+        ).fetchall()
+        for r in rows:
+            if r["status"] not in TERMINAL_STATUSES:
+                continue
+            try:
+                attempt = max(attempt, int(str(r["idempotency_key"]).rsplit("#", 1)[1]) + 1)
+            except (IndexError, ValueError):
+                continue
+        return attempt
+
     def continuation_token_for_turn(self, turn_id: str) -> Optional[Dict[str, Any]]:
         """The continuation token still LINKED (unfinalized) to ``turn_id``, with
         its payload decoded, or None. Served by the partial link index."""
@@ -6055,7 +6079,11 @@ class MeshDB:
             "presented_task_ids": presented,
         }
         if turn_status in PRODUCER_CONSUMING_STATUSES:
-            for gid in payload.get("retired_group_ids") or []:
+            # [A82 Stage 4c rework] No event after `flow.closed` (4a rule): a
+            # closed (or unknown) Case gets the token consumed, nothing appended.
+            case = self.get_flow_run(case_id) if case_id else None
+            case_open = case is not None and (case.get("status") or "") not in self._CLOSED_STATUSES
+            for gid in (payload.get("retired_group_ids") or []) if case_open else []:
                 self.append_flow_event_once(
                     case_id, "worker.wait_resolved", "system",
                     entity_type="wait_group", entity_id=str(gid),

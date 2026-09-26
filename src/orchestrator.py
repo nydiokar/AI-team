@@ -1763,6 +1763,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             # Satisfied Case with NO manager link at all — headless. Surface it.
             await self._escalate_headless_case(db, case_id, None)
             return 0
+        # [A82 Stage 4c rework] Late Manager binding: a wake still QUEUED on a
+        # previous Manager (held / long-busy) must not wedge the rebound one.
+        # Nothing enrolled anywhere ⇒ no read (a linked token cannot exist).
+        if db.any_session_enrolled() is not False:
+            await self._withdraw_rebound_continuation(db, case_id, generation, session_id)
         session = self.session_store.get(session_id)
         if session is not None and _operator_stop_held(db, session_id):
             # [A82 Stage 4b rework 2] Operator-stopped (not dead): no wake, no
@@ -1873,7 +1878,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         admitted a new turn."""
         from src.control.db import (
             CONTINUATION_ACTION, CONTINUATION_MACHINE_SENTINEL, continuation_task_id,
-            producer_turn_id, _token_attempt,
+            producer_turn_id,
         )
         from src.control.turn_queue import TurnQueueError
 
@@ -1898,7 +1903,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                              "session_id": session_id, "presented_task_ids": presented},
                 )
             )
-        attempt = _token_attempt(token.get("payload") if token else None)
+        attempt = await asyncio.to_thread(
+            db.producer_token_attempt, cont_id, session_id,
+            token.get("payload") if token else None,
+        )
         task = self._make_task(
             description=self._render_wake_turn(case_id, presented),
             session_id=session_id,
@@ -1906,6 +1914,7 @@ class TaskOrchestrator(ITaskOrchestrator):
             source="manager_continuation",
         )
         self._stash_task_meta(task, self._TURN_ENROLLED_META_KEY, True)
+        self._stash_task_meta(task, self._ATTACH_CASE_META_KEY, case_id)
         self._stash_task_meta(task, self._TURN_PRODUCER_META_KEY, {
             "token_id": cont_id,
             "turn_id": producer_turn_id(cont_id, session_id, attempt),
@@ -1931,6 +1940,41 @@ class TaskOrchestrator(ITaskOrchestrator):
              "turn_id": str(admission)},
         )
         return 1
+
+    async def _withdraw_rebound_continuation(
+        self, db, case_id: str, generation: int, manager_sid: str,
+    ) -> bool:
+        """[A82 Stage 4c rework] If the generation's token is linked to a managed
+        wake still QUEUED on a session that is no longer the Case's Manager,
+        withdraw it (automation row — never touches a stop hold) and finalize
+        (re-arm) the token now, so THIS tick can wake the rebound Manager on
+        either path. A claimed/running wake is left to finish (the finalizer
+        consumes it). Returns True iff a wake was withdrawn."""
+        from src.control.db import continuation_task_id
+        from src.control.turn_queue import TurnQueueError
+
+        token = await asyncio.to_thread(db.get_task, continuation_task_id(case_id, generation))
+        linked = str((token or {}).get("producer_turn_id") or "")
+        if not linked or str(token.get("status") or "") != "claimed":
+            return False
+        turn = await asyncio.to_thread(db.get_task, linked)
+        if (
+            turn is None or str(turn.get("status") or "") != "queued"
+            or str(turn.get("session_id") or "") == str(manager_sid)
+        ):
+            return False
+        try:
+            await asyncio.to_thread(
+                lambda: db.withdraw_turn(
+                    linked, int(turn["revision"]), actor="scheduler:obsolete:manager_rebound",
+                )
+            )
+        except TurnQueueError:
+            return False  # raced (activated/edited): the finalizer owns it
+        logger.info("event=managed_wake_withdrawn_rebound case=%s turn=%s new_manager=%s",
+                    case_id, linked, manager_sid)
+        await self._reconcile_continuation_finalizers(db)
+        return True
 
     async def _reconcile_continuation_finalizers(self, db) -> int:
         """[A82 Stage 4c] Durable, restart-safe finalization of managed wake turns
@@ -9715,6 +9759,10 @@ Generated from user description: {description}
     # [A82 Stage 4c] Producer trigger (Case continuation token) facts, stashed
     # by the Wake-Dispatcher's managed branch only; popped at admission.
     _TURN_PRODUCER_META_KEY = "__turn_producer"
+    # [A82 Stage 4c rework] A continuation's lineage is PINNED to the woken
+    # Case (the token's), never the session's newest open Case. Persisted in
+    # the intent metadata so lineage recovery converges on the same Case.
+    _ATTACH_CASE_META_KEY = "__attach_case_id"
     # Producer-1 sources converted to managed admission. Every other producer
     # (continuation, watched job, retry, heartbeat, respawn, compaction, file
     # ingestion) is converted in its own later sub-stage; until then it FAILS
@@ -9997,6 +10045,8 @@ Generated from user description: {description}
                 return
             db.set_session_case(session_id, case_id, role)
 
+        attach_case_id = str(meta.get(self._ATTACH_CASE_META_KEY) or "").strip()
+
         def member(case_id: str, joined: bool) -> Tuple[Optional[str], Optional[str]]:
             fence()
             self._stash_task_meta(task, self._CASE_ID_META_KEY, case_id)
@@ -10016,8 +10066,10 @@ Generated from user description: {description}
                         case_id, "session", session_id, "worker",
                         created_by="manager", strict=True,
                     )
-            else:
+            elif not attach_case_id:
                 affiliate(case_id, None)
+            # A pinned (continuation) attach never moves the session's current
+            # Case: a wake for Case A is not a switch away from Case B.
             return None, case_id
 
         if prior is not None:
@@ -10036,6 +10088,13 @@ Generated from user description: {description}
         if prior is not None and prior["kind"] == "member":
             return member(prior["flow_run_id"], prior["flow_run_id"] == join_case_id)
         if prior is None:
+            if attach_case_id:
+                # [A82 Stage 4c rework] Pinned: the woken Case, or nothing (a
+                # Case closed since ⇒ standalone; never a different Case).
+                row = db.get_flow_run(attach_case_id)
+                if row is not None and (row.get("status") or "") not in db._CLOSED_STATUSES:
+                    return member(attach_case_id, False)
+                return None, None
             if join_case_id:
                 row = db.get_flow_run(join_case_id)
                 if row is not None and (row.get("status") or "") not in db._CLOSED_STATUSES:
