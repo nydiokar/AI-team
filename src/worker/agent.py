@@ -670,6 +670,33 @@ async def _execute_task(
             "return_code": 0,
         }
 
+    if action == "cancel_turn":
+        # Interrupt the in-flight Claude SDK turn on this worker. Does NOT close the
+        # session — the backend process stays pooled so the next turn can reuse it.
+        # Mirrors cancel_codex but targets the SDK interrupt path instead of the
+        # Codex ownership table.
+        session = _make_session_from_payload(payload)
+        if session is not None:
+            backend = backends.get(session.backend or "claude")
+            canceller = getattr(backend, "cancel", None) if backend is not None else None
+            if callable(canceller):
+                try:
+                    await asyncio.to_thread(canceller, session)
+                except Exception as exc:
+                    logger.warning(
+                        "event=cancel_turn_backend_failed session_id=%s err=%s",
+                        getattr(session, "session_id", ""), exc,
+                    )
+        return {
+            "success": True,
+            "output": "cancel_turn requested",
+            "errors": [],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 0,
+        }
+
     if action == "cancel_codex":
         from src.backends.codex_ownership import CodexOwnership
         target = payload.get("target_task_id")
@@ -1856,6 +1883,11 @@ class WorkerAgent:
         set_log_context(task_id=task_id, session_id=session_id)
         # Lightweight control action — must NOT consume a turn slot or it could
         # wait hours behind long-running turns before the process is freed.
+        if task_row.get("action") == "cancel_turn":
+            # Out-of-slot: interrupt the live Claude turn without consuming a work
+            # slot (which would queue behind the very turn we're trying to kill).
+            await self._handle_close_session(task_row)
+            return
         if task_row.get("action") == "cancel_codex":
             async with self._codex_control_semaphore:
                 await self._handle_close_session(task_row)
