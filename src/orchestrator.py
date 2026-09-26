@@ -176,6 +176,18 @@ CACHE_HEARTBEAT_PROMPT = (
 MANAGED_HEARTBEAT_TTL_SEC = 300
 
 
+async def _reconcile_heartbeat_leases(db: Any) -> None:
+    """[A82 Stage 4d] Run the durable heartbeat finalizer (bounded) off the
+    event loop. No read at all while no session is enrolled; errors are logged
+    and retried on the next tick (leases stay linked)."""
+    if db.any_session_enrolled() is False:
+        return
+    try:
+        await asyncio.to_thread(db.reconcile_heartbeat_finalizers)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("event=heartbeat_finalizer_failed err=%s", e)
+
+
 def _cache_heartbeat_evidence_sufficient(db: Any, session_id: str) -> bool:
     """Recent cache-token evidence clears the heartbeat threshold (the cache is
     worth keeping warm). Shared by admission-time eligibility and the A82
@@ -1369,6 +1381,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                 delivered += await self._process_due_cache_heartbeats(db)
             except Exception as e:
                 logger.debug("event=cache_heartbeat_tick_failed err=%s", e)
+        else:
+            # [A82 Stage 4d rework] Heartbeats off: still finalize linked leases.
+            await _reconcile_heartbeat_leases(db)
         return delivered
 
     def _cache_heartbeat_owner_live(self, db, owner: Dict[str, Any]) -> bool:
@@ -1515,16 +1530,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             cache_heartbeat_active_enabled,
             cache_heartbeat_task_id,
         )
+        # [A82 Stage 4d] Durable finalization of managed heartbeat turns (no
+        # in-memory finalizer) — BEFORE the flag gate, so linked leases finalize
+        # even while active heartbeats are switched off. No read at all while
+        # no session is enrolled.
+        await _reconcile_heartbeat_leases(db)
         if not cache_heartbeat_active_enabled():
             return 0
-        # [A82 Stage 4d] Durable finalization of managed heartbeat turns (no
-        # in-memory finalizer). No read at all while no session is enrolled.
         any_enrolled = db.any_session_enrolled() is not False
-        if any_enrolled:
-            try:
-                await asyncio.to_thread(db.reconcile_heartbeat_finalizers)
-            except Exception as e:
-                logger.warning("event=heartbeat_finalizer_failed err=%s", e)
         db.refresh_cache_heartbeats_from_recent_evidence(limit=100)
         self._sync_cache_heartbeat_state(db)
         delivered = 0
@@ -1549,9 +1562,13 @@ class TaskOrchestrator(ITaskOrchestrator):
             slot_epoch = int(time.time() // interval) * interval
             lease_id = cache_heartbeat_task_id(session_id, slot_epoch)
             if managed:
-                delivered += await self._admit_managed_cache_heartbeat(
-                    db, hb, session, lease_id, slot_epoch,
-                )
+                try:
+                    delivered += await self._admit_managed_cache_heartbeat(
+                        db, hb, session, lease_id, slot_epoch,
+                    )
+                except Exception as e:  # noqa: BLE001 — one failing enrolled
+                    # session must not starve the rest of the due list.
+                    logger.warning("event=managed_heartbeat_failed heartbeat=%s err=%s", heartbeat_id, e)
                 continue
             db.enqueue_task(
                 lease_id,
@@ -4726,6 +4743,39 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception as e:
             logger.warning("event=job_session_turn_db_failed job_id=%s err=%s", job_id, e)
 
+    def _record_withdrawn_job_audit(self, row: Dict[str, Any], reason: str) -> None:
+        """[A82 Stage 4d rework] Audit record of a watched-job notification
+        turn withdrawn as obsolete (its Case blocked/closed): the job id row,
+        already terminal, carrying the notification text and the reason.
+        Raises on a DB error (the head then backs off and retries — the turn is
+        not withdrawn without its record)."""
+        from src.control.db import get_db
+
+        intent = row.get("payload")
+        intent = json.loads(intent) if isinstance(intent, str) else dict(intent or {})
+        meta = intent.get("metadata") or {}
+        job_id = str(meta.get("job_id") or "")
+        if not job_id:
+            return
+        text = str(row.get("prompt") or "")
+        reply = f"(agent notification withdrawn: {reason})\n\n{text}"
+        db = get_db()
+        db.record_audit_turn(
+            job_id, str(row.get("session_id") or ""), row.get("machine_id"),
+            str(row.get("backend") or "unknown"), "watched_job",
+            {"task": {"id": job_id, "title": "Watched job finished", "prompt": text},
+             "job": {"id": job_id}, "withdrawn_turn_id": str(row["id"]),
+             "withdrawn_reason": reason},
+            text,
+            {"success": True, "output": reply, "errors": [], "files_modified": [],
+             "execution_time": 0.0, "timestamp": now_iso(),
+             "withdrawn_reason": reason},
+            success=True, strict=True,
+        )
+        db.enrich_task(job_id, prompt=text, reply_text=reply,
+                       parsed_output={"type": "watched_job", "withdrawn_reason": reason},
+                       files_modified=[])
+
     async def _admit_managed_watched_job(
         self, job: Dict[str, Any], session: Any, payload: Dict[str, Any], description: str,
     ) -> None:
@@ -4763,8 +4813,11 @@ class TaskOrchestrator(ITaskOrchestrator):
                 dispatched_by=f"watched_job:{job_id}",
                 turn_queue_enrolled=True,
             )
-        except (TurnQueueError, HarnessAdmissionBlocked) as e:
-            logger.warning("event=job_notify_agent_refused job_id=%s err=%s", job_id, e)
+        except Exception as e:  # noqa: BLE001 — typed refusal OR an untyped backing
+            # error (e.g. a locked carrier-registry read): never escape into the
+            # poller's batch (later jobs, legacy ones included, would be dropped).
+            level = logging.WARNING if isinstance(e, (TurnQueueError, HarnessAdmissionBlocked)) else logging.ERROR
+            logger.log(level, "event=job_notify_agent_refused job_id=%s err=%s", job_id, e)
             self._record_managed_job_audit(job, session, payload)
 
     async def _process_terminal_job(self, job: Dict[str, Any]) -> None:
@@ -10793,6 +10846,11 @@ Generated from user description: {description}
 
         reason = await self._managed_turn_obsolete(row)
         if reason:
+            if str(row.get("turn_kind") or "") == "watched_job":
+                # [A82 Stage 4d rework] The notification never silently
+                # disappears: its audit record is written (idempotent, keyed on
+                # the job id) BEFORE the scheduler withdraws the turn.
+                await asyncio.to_thread(self._record_withdrawn_job_audit, row, reason)
             raise TurnObsolete(reason)
         task = self._task_from_managed_row(row)
         sid = str(row.get("session_id") or "")

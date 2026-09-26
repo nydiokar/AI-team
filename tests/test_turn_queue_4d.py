@@ -550,3 +550,213 @@ def test_U01_unenrolled_producers_touch_no_managed_state(tmp_path, monkeypatch):
     assert delivered == 1
     assert _managed_rows(db) == []
     assert db.get_task("job_y")["status"] == "completed"  # legacy synthetic turn
+
+
+# =========================================================================== #
+# Stage 4d rework (A87 review): P1-P3 inverted + kill tests R1-R4
+# =========================================================================== #
+def test_RW01_untyped_admission_error_falls_back_to_audit_and_never_escapes(tmp_path, monkeypatch):
+    """P1 inverted: an untyped backing error (a locked registry read) during
+    managed job admission ⇒ audit fallback for THAT job; the poller batch goes on."""
+    db, o = _env(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("database is locked")
+    o._managed_carrier_assignment = boom
+    _process(o, _job())  # does not raise
+    assert _kind(db, "watched_job") == []
+    assert db.get_task("job_x")["status"] == "completed"  # audit record
+    assert o.notifier.calls == ["job_x"]
+
+
+def _second_session_heartbeat(db, sid="sess-2"):
+    db.upsert_session(Session(
+        session_id=sid, backend="claude", repo_path="/tmp/repo", status=SS.AWAITING_INPUT,
+        created_at=NOW, updated_at=NOW, machine_id="worker-a", backend_session_id="native-2",
+        driver_type="sdk", driver_status="live"))
+    _cache_evidence(db, session_id=sid, cache_read=1000, task_id="t2", turn_id="turn_2")
+    hb = db.ensure_cache_heartbeat_owner(sid, reason="manual", owner_type="operator",
+                                         owner_id="manual")
+    later = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    with db._write() as conn:  # due AFTER the enrolled one (ordered by next_due_at)
+        conn.execute("UPDATE session_cache_heartbeats SET next_due_at = ? WHERE id = ?",
+                     (later, hb["id"]))
+    return hb["id"]
+
+
+def test_RW02_failing_enrolled_heartbeat_does_not_starve_the_due_list(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    _arm_heartbeat(db)  # enrolled sess-1, due first
+    _second_session_heartbeat(db)  # UNENROLLED sess-2, due second
+    real_submit = o.submit_instruction
+    legacy = []
+
+    async def submit(description, **kw):
+        if kw.get("session_id") == "sess-2":
+            legacy.append(kw["source"])
+            return "task_legacy_hb"
+        return await real_submit(description, **kw)
+    o.submit_instruction = submit
+
+    def boom(*a, **k):
+        raise RuntimeError("database is locked")
+    o._managed_carrier_assignment = boom
+    o.running = False  # the legacy in-memory finalizer exits at once
+    assert _beat(o, db) == 1
+    assert legacy == ["cache_heartbeat"] and _hb_rows(db) == []
+
+
+def test_RW03_human_admitted_behind_an_activated_heartbeat_withdraws_it_at_claim(tmp_path, monkeypatch):
+    """P2 inverted: the heartbeat was activated (pending) before the human
+    arrived; the claim withdraws it (`claim:not_idle`) and the human runs next."""
+    db, o = _env(tmp_path, monkeypatch)
+    _arm_heartbeat(db)
+    assert _beat(o, db) == 1
+    hb = _hb_rows(db)[0]["id"]
+    assert _pass(db, o).activated == 1
+    human = _submit(o, operation_id="op-human")
+    with pytest.raises(tq.OwnershipConflictError):
+        db.claim_turn(hb, "worker-a", "worker_daemon", "inc-1")
+    assert db.get_task(hb)["status"] == "withdrawn"
+    assert any(a.get("actor") == "claim:not_idle" for a in db.get_turn_revisions(hb))
+    assert _pass(db, o).activated == 1
+    assert db.get_task(human)["status"] == "pending"
+    # an idle heartbeat is still claimable (control)
+    db2, o2 = _env(tmp_path / "b", monkeypatch)
+    _arm_heartbeat(db2)
+    assert _beat(o2, db2) == 1
+    _pass(db2, o2)
+    assert db2.claim_turn(_hb_rows(db2)[0]["id"], "worker-a", "worker_daemon", "inc-1")
+
+
+def test_RW04_linked_lease_finalizes_while_heartbeats_are_off(tmp_path, monkeypatch):
+    """P3 inverted: the finalizer runs before the CACHE_HEARTBEAT_ACTIVE gate,
+    and the Wake-Dispatcher tick finalizes even when heartbeats are off."""
+    db, o = _env(tmp_path, monkeypatch)
+    hb_id = _arm_heartbeat(db)
+    assert _beat(o, db) == 1
+    turn = _hb_rows(db)[0]["id"]
+    _pass(db, o)
+    tok = _run(db, turn)
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "0")
+    db.complete_turn(turn, tok, {"success": True, "output": "ok"})
+    assert _beat(o, db) == 0
+    assert _lease(db)["status"] == "completed"
+    assert db.get_cache_heartbeat(hb_id)["beat_count"] == 1
+
+
+def test_RW04b_wake_tick_with_heartbeats_off_finalizes(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    hb_id = _arm_heartbeat(db)
+    assert _beat(o, db) == 1
+    turn = _hb_rows(db)[0]["id"]
+    _pass(db, o)
+    tok = _run(db, turn)
+    db.complete_turn(turn, tok, {"success": True, "output": "ok"})
+    monkeypatch.setenv("CACHE_HEARTBEAT_ACTIVE", "0")
+    monkeypatch.setenv("CASE_CONTINUATION_ENABLED", "1")
+    o._continuation_skip_cache = {}
+    asyncio.run(o._wake_dispatcher_tick_once())
+    assert _lease(db)["status"] == "completed"
+    assert db.get_cache_heartbeat(hb_id)["beat_count"] == 1
+
+
+def test_RW05_withdrawn_job_notification_leaves_an_audit_row(tmp_path, monkeypatch):
+    """Residual 2: a notification withdrawn because its Case was interrupted is
+    not silently gone — the job id carries a terminal audit record."""
+    db, o = _env(tmp_path, monkeypatch)
+    cid = db.open_case("ship X", "sess-1", role="manager")
+    t = _running_operator_turn(db, o)
+    _process(o, _job())
+    job_turn = _kind(db, "watched_job")[0]["id"]
+    assert asyncio.run(o.interrupt_case(cid))["ok"]
+    db.complete_turn(t, db.get_task(t)["claim_token"], {"success": True})
+    _pass(db, o)
+    assert db.get_task(job_turn)["status"] == "withdrawn"
+    audit = db.get_task("job_x")
+    assert audit["status"] == "completed" and audit["action"] == "watched_job"
+    assert "case_blocked" in audit["reply_text"] and "npm test" in audit["reply_text"]
+
+
+def test_RW05b_audit_write_failure_keeps_the_notification_queued(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    cid = db.open_case("ship X", "sess-1", role="manager")
+    t = _running_operator_turn(db, o)
+    _process(o, _job())
+    job_turn = _kind(db, "watched_job")[0]["id"]
+    assert asyncio.run(o.interrupt_case(cid))["ok"]
+    db.complete_turn(t, db.get_task(t)["claim_token"], {"success": True})
+    real = db.record_audit_turn
+
+    def failing(*a, **k):
+        raise tq.BackingStoreError("disk full")
+    monkeypatch.setattr(db, "record_audit_turn", failing)
+    _pass(db, o)
+    assert db.get_task(job_turn)["status"] == "queued"  # not withdrawn without its record
+    monkeypatch.setattr(db, "record_audit_turn", real)
+    db._conn().execute("UPDATE mesh_tasks SET blocked_until = NULL WHERE id = ?", (job_turn,))
+    db._conn().commit()  # test clock: skip the backoff
+    _pass(db, o)
+    assert db.get_task(job_turn)["status"] == "withdrawn" and db.get_task("job_x")
+
+
+def test_R1_paused_session_is_not_idle(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    _arm_heartbeat(db)
+    # No pause API exists before Stage 6; set the durable column directly (as
+    # tests/test_turn_queue_scheduler.py does).
+    db._conn().execute("UPDATE sessions SET turn_queue_paused = 1 WHERE session_id = 'sess-1'")
+    db._conn().commit()
+    assert db.heartbeat_eligible("sess-1") is False
+    assert _beat(o, db) == 0 and _hb_rows(db) == []
+
+
+def test_R2_case_pause_revalidated_at_activation(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    _arm_heartbeat(db)
+    assert _beat(o, db) == 1
+    turn = _hb_rows(db)[0]["id"]
+    case_id = db.create_flow_run("task_case", "execution")
+    db.append_flow_event(case_id, "worker.wait_pending", "manager", entity_type="wait_group",
+                         entity_id="wg", payload={"wait_group_id": "wg", "condition": "ALL",
+                                                  "member_task_ids": ["w"]})
+    db.ensure_cache_heartbeat_owner("sess-1", reason="case_wait_group",
+                                    owner_type="wait_group", owner_id=f"{case_id}:wg")
+    db.append_flow_event(case_id, "flow.quota_paused", "system", entity_type="task",
+                         entity_id="paused", payload={"session_id": "sess-1",
+                                                      "paused_task_id": "paused",
+                                                      "provider": "claude"})
+    _pass(db, o)
+    assert db.get_task(turn)["status"] == "withdrawn"
+    assert any("case_pause_active" in str(a.get("actor")) for a in db.get_turn_revisions(turn))
+
+
+def test_R3_cache_evidence_revalidated_at_activation(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    _arm_heartbeat(db)
+    assert _beat(o, db) == 1
+    turn = _hb_rows(db)[0]["id"]
+    monkeypatch.setenv("CACHE_HEARTBEAT_MIN_CACHE_TOKENS", str(10 ** 9))
+    _pass(db, o)
+    assert db.get_task(turn)["status"] == "withdrawn"
+    assert any("cache_below_threshold" in str(a.get("actor")) for a in db.get_turn_revisions(turn))
+
+
+def test_R4_unreadable_marker_fails_closed_on_the_job_path(tmp_path, monkeypatch):
+    db, o = _env(tmp_path, monkeypatch)
+    legacy = []
+
+    async def submit(description, **kw):
+        legacy.append(kw)
+        return "task_legacy"
+    o.submit_instruction = submit
+
+    def unreadable(*a, **k):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(db, "is_session_enrolled", unreadable)
+    _process(o, _job())
+    _process(o, _job("job_y", notify_agent=0))
+    assert legacy == []  # no legacy execution into a possibly-enrolled session
+    assert _managed_rows(db) == [] and db.get_task("job_x") is None
+    assert db.get_task("job_y") is None  # no record either (fail closed)
+    assert o.notifier.calls == ["job_x", "job_y"]  # Telegram notify unaffected

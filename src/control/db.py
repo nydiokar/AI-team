@@ -2167,6 +2167,7 @@ class MeshDB:
         *,
         success: bool,
         error: str = "",
+        strict: bool = False,
     ) -> None:
         """[A82 Stage 4d] Persist an ALREADY-TERMINAL protocol-0 audit turn
         (e.g. a watched-job notification record into an enrolled session) in ONE
@@ -2193,6 +2194,8 @@ class MeshDB:
                     ),
                 )
         except Exception as e:
+            if strict:  # [A82 Stage 4d rework] the caller must not proceed without it
+                raise _turn_backing_error("record_audit_turn", task_id=task_id, err=e)
             logger.warning("event=db_record_audit_turn_failed task_id=%s err=%s", task_id, e)
 
     def claim_task(self, task_id: str, node_id: str) -> bool:
@@ -3843,15 +3846,18 @@ class MeshDB:
         Raises `TurnNotFoundError` (404) if the row is absent or not protocol-1,
         `OwnershipConflictError` (409) if it is already running/terminal.
 
-        [A82 Stage 4d] A `pending` NON-human turn past its ``expires_at``
-        (optional automation — a cache heartbeat) is withdrawn in this txn
-        (audited ``claim:expired``) and the claim is refused with 409
-        ``reason='expired'``: it is never started late."""
+        [A82 Stage 4d] A `pending` NON-human turn carrying ``expires_at``
+        (optional automation — a cache heartbeat) is withdrawn in this txn and
+        the claim refused with 409 when it is past its deadline
+        (``claim:expired``) or the session is no longer idle apart from it
+        (``claim:not_idle`` — real work admitted behind it, a hold): it never
+        starts late nor ahead of real work. No lineage void is needed:
+        automation turns never birth a Case."""
         from .turn_queue import ClaimToken  # local import: avoid cycle at load
 
         now = _now()
         token = secrets.token_hex(16)
-        expired = False
+        withdraw_reason: Optional[str] = None
         try:
             with self._write() as conn:
                 row = conn.execute(
@@ -3878,14 +3884,16 @@ class MeshDB:
                         "turn is assigned to a different carrier",
                         task_id=task_id, assigned=row["machine_id"], claimant=node_id,
                     )
-                if (
-                    status == "pending" and row["expires_at"]
-                    and str(row["expires_at"]) <= now and row["turn_source"] != "human"
-                ):
-                    # [A82 Stage 4d] Optional automation past its deadline
-                    # (a heartbeat activated in time but released not-invoked
-                    # while the backend was busy) is never started late: it is
-                    # withdrawn here, never invoked, and frees the slot.
+                if status == "pending" and row["expires_at"] and row["turn_source"] != "human":
+                    if str(row["expires_at"]) <= now:
+                        withdraw_reason = "expired"
+                    elif not _session_idle_for_optional_turn(conn, row["session_id"], task_id):
+                        withdraw_reason = "not_idle"
+                if withdraw_reason is not None:
+                    # [A82 Stage 4d] Optional automation (a deadline-carrying
+                    # heartbeat) is never started late, nor ahead of real work
+                    # admitted behind it after activation: withdrawn here,
+                    # never invoked, and the slot is freed.
                     new_rev = int(row["revision"] or 1) + 1
                     conn.execute(
                         """
@@ -3901,12 +3909,11 @@ class MeshDB:
                         INSERT INTO mesh_turn_revisions
                             (task_id, revision, actor, change_kind, body,
                              attachments_json, created_at)
-                        VALUES (?, ?, 'claim:expired', 'withdraw', NULL, NULL, ?)
+                        VALUES (?, ?, ?, 'withdraw', NULL, NULL, ?)
                         """,
-                        (task_id, new_rev, now),
+                        (task_id, new_rev, f"claim:{withdraw_reason}", now),
                     )
-                    expired = True
-                if not expired:
+                if withdraw_reason is None:
                     conn.execute(
                         """
                         UPDATE mesh_tasks
@@ -3947,8 +3954,8 @@ class MeshDB:
             raise _turn_backing_error("claim_turn", task_id=task_id, err=e)
         # Committed withdrawal (outside the txn so it is not rolled back).
         raise OwnershipConflictError(
-            "optional turn expired before claim; withdrawn", task_id=task_id,
-            reason="expired",
+            f"optional turn withdrawn at claim ({withdraw_reason})", task_id=task_id,
+            reason=withdraw_reason,
         )
 
     def start_turn(
