@@ -1289,21 +1289,12 @@ class WorkerAgent:
         separate process/volume, so warming visibility lives in the worker log."""
         logger.info("event=%s node_id=%s payload=%s", name, self.cfg.node_id, payload)
 
-    async def _start_quota_prewarmer(self) -> Optional[Any]:
-        """Keep the Claude 5-hour window warm from the harness side.
-
-        Opening a window costs one real (haiku, max_turns=1) model turn, which
-        only a claude-capable worker can spend — the controller container has no
-        binary/credentials. So the prewarmer's decision brain runs HERE, against
-        a LOCAL activation-capable coordinator (observe_locally=True). This is
-        deployment-shape-independent: single-process or controller/worker split,
-        warming is always co-located with the harness that can actually fire it.
-
-        Returns the started prewarmer (to stop on drain) or None when disabled.
-        Never raises: a failed start is a skipped capability, not a worker crash.
-        """
-        if not self.cfg.quota_prewarm_enabled:
-            return None
+    async def _build_quota_prewarmer(self) -> Optional[Any]:
+        """Construct (do NOT start) a prewarmer against a LOCAL activation-capable
+        coordinator (observe_locally=True). Opening a window costs one real
+        (haiku, max_turns=1) turn, which only a claude-capable worker can spend —
+        the controller container has no binary/credentials. Warming therefore
+        lives here, co-located with the harness that can actually fire it."""
         try:
             from src.services.quota_window_coordinator import (
                 build_quota_coordinator_from_config,
@@ -1315,22 +1306,76 @@ class WorkerAgent:
             coordinator = build_quota_coordinator_from_config(
                 enabled=True, observe_locally=True,
             )
-            prewarmer = build_prewarmer_from_config(
+            return build_prewarmer_from_config(
                 coordinator=coordinator,
                 enabled=True,
                 event_sink=self._emit_prewarm_event,
             )
-            await prewarmer.start()
-            logger.info(
-                "event=quota_prewarmer_worker_started node_id=%s", self.cfg.node_id,
-            )
-            return prewarmer
         except Exception as e:
             logger.warning(
-                "event=quota_prewarmer_worker_start_failed node_id=%s err_class=%s",
+                "event=quota_prewarmer_worker_build_failed node_id=%s err_class=%s",
                 self.cfg.node_id, type(e).__name__,
             )
             return None
+
+    async def _prewarm_reconcile(self, want: bool, prewarmer: Optional[Any]) -> Optional[Any]:
+        """Bring the running prewarmer in line with the desired on/off state.
+        Idempotent: called every supervisor cycle. Returns the (possibly new or
+        cleared) prewarmer handle. This is the whole dynamic-toggle seam."""
+        if want and prewarmer is None:
+            prewarmer = await self._build_quota_prewarmer()
+            if prewarmer is not None:
+                await prewarmer.start()
+                logger.info(
+                    "event=quota_prewarmer_worker_started node_id=%s", self.cfg.node_id,
+                )
+        elif not want and prewarmer is not None:
+            await prewarmer.stop()
+            prewarmer = None
+            logger.info(
+                "event=quota_prewarmer_worker_stopped node_id=%s", self.cfg.node_id,
+            )
+        return prewarmer
+
+    async def _quota_prewarm_supervisor_loop(self) -> None:
+        """Start/stop window warming DYNAMICALLY from the runtime-flag registry.
+
+        Warming can only fire where Claude executes (this worker), but WHETHER it
+        runs stays an operator toggle: the QUOTA_PREWARM_ENABLED boolean in the
+        flag registry (mesh.db, read via runtime_flag_enabled — the SAME source
+        the controller uses, NOT an env var), re-read every cycle so it can be
+        flipped on/off with no restart. That dynamic nature is the point of the
+        registry. The only static gate is the precondition that this worker has a
+        claude harness at all — without it warming can never work, so we never
+        supervise."""
+        if "claude" not in self.cfg.backends:
+            return
+        from src.control.db import runtime_flag_enabled
+
+        interval = max(30, int(self.cfg.quota_observe_interval_sec))
+        logger.info(
+            "event=quota_prewarm_supervisor_started node_id=%s interval_sec=%d",
+            self.cfg.node_id, interval,
+        )
+        prewarmer: Optional[Any] = None
+        try:
+            while not self._shutdown.is_set():
+                try:
+                    want = runtime_flag_enabled("QUOTA_PREWARM_ENABLED")
+                except Exception as e:
+                    logger.warning(
+                        "event=quota_prewarm_flag_read_failed node_id=%s err_class=%s",
+                        self.cfg.node_id, type(e).__name__,
+                    )
+                    want = prewarmer is not None  # hold current state on a read error
+                prewarmer = await self._prewarm_reconcile(want, prewarmer)
+                try:
+                    await asyncio.wait_for(self._shutdown.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if prewarmer is not None:
+                await prewarmer.stop()
 
     # ------------------------------------------------------------------
     # Registration
@@ -1981,7 +2026,7 @@ class WorkerAgent:
         )
         heartbeat = asyncio.create_task(self._heartbeat_loop())
         quota_observer = asyncio.create_task(self._quota_observe_loop())
-        quota_prewarmer = await self._start_quota_prewarmer()
+        quota_prewarm = asyncio.create_task(self._quota_prewarm_supervisor_loop())
         if self._canary:
             logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
             poller = asyncio.create_task(self._shutdown.wait())
@@ -2016,11 +2061,9 @@ class WorkerAgent:
             for t in pending:
                 t.cancel()
 
-        if quota_prewarmer is not None:
-            await quota_prewarmer.stop()
-        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer):
+        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm):
             t.cancel()
-        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, return_exceptions=True)
+        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, return_exceptions=True)
 
         # Terminate any backend subprocesses still alive (e.g. a hung
         # claude.exe that outlived its task). Without this, a worker restart
