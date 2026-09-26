@@ -3841,7 +3841,12 @@ class MeshDB:
             started: RE-mints a fresh token (a reoffer/reclaim SUPERSEDES the old
             token — OWN05). A `running`/terminal row cannot be re-claimed.
         Raises `TurnNotFoundError` (404) if the row is absent or not protocol-1,
-        `OwnershipConflictError` (409) if it is already running/terminal."""
+        `OwnershipConflictError` (409) if it is already running/terminal.
+
+        [A82 Stage 4d] A `pending` NON-human turn past its ``expires_at``
+        (optional automation — a cache heartbeat) is withdrawn in this txn
+        (audited ``claim:expired``) and the claim is refused with 409
+        ``reason='expired'``: it is never started late."""
         from .turn_queue import ClaimToken  # local import: avoid cycle at load
 
         now = _now()

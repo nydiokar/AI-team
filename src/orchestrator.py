@@ -10005,9 +10005,10 @@ Generated from user description: {description}
     # the intent metadata so lineage recovery converges on the same Case.
     _ATTACH_CASE_META_KEY = "__attach_case_id"
     # Producer-1 sources converted to managed admission. Every other producer
-    # (continuation, watched job, retry, heartbeat, respawn, compaction, file
-    # ingestion) is converted in its own later sub-stage; until then it FAILS
-    # CLOSED for an enrolled session instead of bypassing the managed queue.
+    # (continuation 4c, watched job / heartbeat 4d — only WITH their durable
+    # trigger facts; retry, respawn, file ingestion still unconverted) is
+    # admitted by its own branch; anything else FAILS CLOSED for an enrolled
+    # session instead of bypassing the managed queue.
     _MANAGED_PRODUCER1_SOURCES = frozenset(
         {"web_session", "telegram_session", "runtime", "telegram", "automation_session"}
     )
