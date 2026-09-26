@@ -204,7 +204,7 @@ def test_W04_notify_only_record_is_audit_only_and_never_undoes_a_hold(tmp_path, 
     # replay: still one audit row, no error
     o._processed_terminal_jobs = set()
     _process(o, _job(notify_agent=0))
-    assert len(_legacy_session_rows(db)) == 1
+    assert [r["id"] for r in _legacy_session_rows(db) if r["action"] == "watched_job"] == ["job_x"]
 
 
 def test_W05_refused_admission_falls_back_to_audit_without_legacy_execution(tmp_path, monkeypatch):
@@ -311,6 +311,9 @@ def test_H03_held_session_gets_no_heartbeat_and_the_hold_is_kept(tmp_path, monke
     t = _running_operator_turn(db, o)
     assert o.stop_managed_session_turn(_sess())[0] is True
     db.complete_turn(t, db.get_task(t)["claim_token"], {"success": False}, status="failed")
+    for ctl in _legacy_session_rows(db):  # the carrier handles the cancel control row
+        assert db.claim_task(ctl["id"], "worker-a")
+        db.complete_task(ctl["id"], {"success": True})
     assert db.get_active_turn("sess-1") is None  # the ledger is idle ...
     assert _beat(o, db) == 0 and _hb_rows(db) == []  # ... but held ⇒ no heartbeat
     assert db.operator_stop_hold("sess-1") == "operator_stop"

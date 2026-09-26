@@ -824,6 +824,13 @@ TRANSIENT_RESUME_ACTION = "manager_transient_resume"
 # work; the gateway claims the row before sending a paid heartbeat turn.
 CACHE_HEARTBEAT_MACHINE_SENTINEL = "__cache_heartbeat__"
 CACHE_HEARTBEAT_ACTION = "cache_heartbeat"
+# [A82 Stage 4d] Producer-token rows that may be linked to a managed turn in the
+# admission txn, and the sentinel owner the link stamps (claimed_at NULL ⇒ the
+# legacy lease reaper never re-offers a linked token).
+PRODUCER_TOKEN_SENTINELS = {
+    "manager_continuation": "__manager_continuation__",
+    "cache_heartbeat": "__cache_heartbeat__",
+}
 # Default round cap when a Case's completion_criteria does not carry an explicit
 # ``round_cap`` — a backstop against a runaway continuation loop, not a tuning knob.
 DEFAULT_CONTINUATION_ROUND_CAP = 50
@@ -854,7 +861,9 @@ def respawn_task_id(case_id: str, generation: int) -> str:
     return f"respawn:{case_id}:{int(generation)}"
 
 
-def producer_turn_id(trigger_key: str, session_id: str, attempt: int = 1) -> str:
+def producer_turn_id(
+    trigger_key: str, session_id: str, attempt: int = 1, *, prefix: str = "cturn",
+) -> str:
     """[A82 Stage 4c] Deterministic managed-turn id for a producer trigger.
 
     ``trigger_key`` is the producer's durable trigger identity (a Case
@@ -862,11 +871,14 @@ def producer_turn_id(trigger_key: str, session_id: str, attempt: int = 1) -> str
     recipient and ``attempt`` the token's durable attempt counter (bumped only
     when a linked turn ended WITHOUT consuming the trigger — withdrawn or
     cancelled). A crash retry after the token claim therefore rediscovers the
-    SAME id instead of minting a random one (design §7). Pure."""
+    SAME id instead of minting a random one (design §7). Pure.
+
+    [A82 Stage 4d] ``prefix`` names the producer family (``jturn`` watched-job
+    notification, ``hturn`` cache heartbeat); the digest is the same function."""
     digest = hashlib.sha256(
         f"{session_id}\0{trigger_key}\0{int(attempt)}".encode("utf-8")
     ).hexdigest()[:24]
-    return f"cturn_{digest}"
+    return f"{prefix}_{digest}"
 
 
 # [A82 Stage 4c] Managed turn outcomes that CONSUME a continuation trigger
@@ -2142,6 +2154,47 @@ class MeshDB:
         except Exception as e:
             logger.warning("event=db_record_proactive_failed task_id=%s err=%s", task_id, e)
 
+    def record_audit_turn(
+        self,
+        task_id: str,
+        session_id: str,
+        machine_id: Optional[str],
+        backend: str,
+        action: str,
+        payload: Dict[str, Any],
+        prompt: str,
+        result: Dict[str, Any],
+        *,
+        success: bool,
+        error: str = "",
+    ) -> None:
+        """[A82 Stage 4d] Persist an ALREADY-TERMINAL protocol-0 audit turn
+        (e.g. a watched-job notification record into an enrolled session) in ONE
+        insert — never a claimable ``pending`` row, so no legacy carrier can pick
+        it up as execution. Idempotent on the id; best-effort like the legacy
+        record it replaces (an audit write, not an execution)."""
+        now = _now()
+        try:
+            with self._write() as conn:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO mesh_tasks (
+                        id, session_id, machine_id, backend, action, payload,
+                        prompt, status, result, error, created_at, updated_at,
+                        completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id, session_id, machine_id, backend, action,
+                        json.dumps(payload), prompt,
+                        "completed" if success else "failed",
+                        json.dumps(result), None if success else error,
+                        now, now, now,
+                    ),
+                )
+        except Exception as e:
+            logger.warning("event=db_record_audit_turn_failed task_id=%s err=%s", task_id, e)
+
     def claim_task(self, task_id: str, node_id: str) -> bool:
         """Atomically claim a pending task. Returns True if claim succeeded."""
         now = _now()
@@ -2469,6 +2522,7 @@ class MeshDB:
         lineage_lease_sec: float = 30.0,
         producer_token: Optional[str] = None,
         producer_meta: Optional[Dict[str, Any]] = None,
+        idle_only: bool = False,
         external_waiting: int = 0,
         fleet_cap: Optional[int] = None,
         per_session_cap: Optional[int] = None,
@@ -2502,6 +2556,10 @@ class MeshDB:
         linked to the admitted turn in the SAME transaction (every branch —
         fresh, replay, coalesce); a token that cannot link rolls the admission
         back (`_link_producer_token`).
+
+        [A82 Stage 4d] ``idle_only`` (optional automation — cache heartbeat)
+        refuses a fresh insert with 409 unless the session is idle by the
+        ledger (`_session_idle_for_optional_turn`), inside the same txn.
 
         Convenience form (producers/tests): `body=` alone builds the payload,
         `operation_id=` is the idempotency key, `task_id`/`backend` default to a
@@ -2625,6 +2683,14 @@ class MeshDB:
                             raise OwnershipConflictError(
                                 "session is closed; admission refused", session_id=sid,
                             )
+                    if idle_only and not _session_idle_for_optional_turn(conn, sid):
+                        # [A82 Stage 4d] Optional automation (heartbeat) is
+                        # idle-only: never queued behind (or ahead of) real
+                        # work, never into a held/closed session.
+                        raise OwnershipConflictError(
+                            "session is not idle; optional automation refused",
+                            session_id=sid, reason="not_idle",
+                        )
                     row_backend = backend or (srow["backend"] if srow is not None else None)
                     if not row_backend:
                         raise MalformedTurnError("managed turn has no backend", session_id=sid)
@@ -3716,6 +3782,18 @@ class MeshDB:
         ).fetchone()
         return (row[0] or None) if row else None
 
+    def heartbeat_eligible(
+        self, session_id: str, *, exclude_turn_id: Optional[str] = None,
+    ) -> bool:
+        """[A82 Stage 4d] Is the session truly idle for OPTIONAL automation (a
+        cache heartbeat)? See ``_session_idle_for_optional_turn``. Admission
+        re-checks the same predicate inside its transaction (``idle_only``)
+        and activation re-checks it excluding the heartbeat itself."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return False
+        return _session_idle_for_optional_turn(self._conn(), sid, exclude_turn_id)
+
     def is_session_enrolled(self, session_id: str) -> bool:
         row = self._conn().execute(
             "SELECT turn_queue_enrolled FROM sessions WHERE session_id = ?",
@@ -3768,10 +3846,12 @@ class MeshDB:
 
         now = _now()
         token = secrets.token_hex(16)
+        expired = False
         try:
             with self._write() as conn:
                 row = conn.execute(
-                    "SELECT id, session_id, status, queue_protocol, payload, machine_id "
+                    "SELECT id, session_id, status, queue_protocol, payload, machine_id, "
+                    "expires_at, turn_source, revision "
                     "FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
@@ -3793,44 +3873,78 @@ class MeshDB:
                         "turn is assigned to a different carrier",
                         task_id=task_id, assigned=row["machine_id"], claimant=node_id,
                     )
-                conn.execute(
-                    """
-                    UPDATE mesh_tasks
-                    SET status = 'claimed', claim_token = ?, claimed_by = ?,
-                        claim_carrier_kind = ?, claim_incarnation = ?,
-                        claimer_incarnation = ?, claimed_at = ?, updated_at = ?,
-                        blocked_reason = NULL
-                    WHERE id = ? AND queue_protocol = 1
-                      AND status IN ('pending', 'claimed')
-                      AND machine_id = ?
-                    """,
-                    (token, node_id, carrier_kind, incarnation_id,
-                     incarnation_id, now, now, task_id, node_id),
-                )
-                if conn.execute("SELECT changes()").fetchone()[0] == 0:
-                    # Lost the compare-and-swap race (status moved under us).
-                    raise OwnershipConflictError(
-                        "claim lost the state race", task_id=task_id,
+                if (
+                    status == "pending" and row["expires_at"]
+                    and str(row["expires_at"]) <= now and row["turn_source"] != "human"
+                ):
+                    # [A82 Stage 4d] Optional automation past its deadline
+                    # (a heartbeat activated in time but released not-invoked
+                    # while the backend was busy) is never started late: it is
+                    # withdrawn here, never invoked, and frees the slot.
+                    new_rev = int(row["revision"] or 1) + 1
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET status = 'withdrawn', revision = ?, completed_at = ?,
+                            updated_at = ?
+                        WHERE id = ? AND queue_protocol = 1 AND status = 'pending'
+                        """,
+                        (new_rev, now, now, task_id),
                     )
-                payload: Dict[str, Any] = {}
-                try:
-                    payload = json.loads(row["payload"]) if row["payload"] else {}
-                except Exception:
-                    payload = {}
-                return ClaimToken(
-                    token,
-                    task_id=task_id,
-                    session_id=row["session_id"],
-                    node_id=node_id,
-                    carrier_kind=carrier_kind,
-                    incarnation_id=incarnation_id,
-                    status="claimed",
-                    payload=payload,
-                )
+                    conn.execute(
+                        """
+                        INSERT INTO mesh_turn_revisions
+                            (task_id, revision, actor, change_kind, body,
+                             attachments_json, created_at)
+                        VALUES (?, ?, 'claim:expired', 'withdraw', NULL, NULL, ?)
+                        """,
+                        (task_id, new_rev, now),
+                    )
+                    expired = True
+                if not expired:
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET status = 'claimed', claim_token = ?, claimed_by = ?,
+                            claim_carrier_kind = ?, claim_incarnation = ?,
+                            claimer_incarnation = ?, claimed_at = ?, updated_at = ?,
+                            blocked_reason = NULL
+                        WHERE id = ? AND queue_protocol = 1
+                          AND status IN ('pending', 'claimed')
+                          AND machine_id = ?
+                        """,
+                        (token, node_id, carrier_kind, incarnation_id,
+                         incarnation_id, now, now, task_id, node_id),
+                    )
+                    if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                        # Lost the compare-and-swap race (status moved under us).
+                        raise OwnershipConflictError(
+                            "claim lost the state race", task_id=task_id,
+                        )
+                    payload: Dict[str, Any] = {}
+                    try:
+                        payload = json.loads(row["payload"]) if row["payload"] else {}
+                    except Exception:
+                        payload = {}
+                    return ClaimToken(
+                        token,
+                        task_id=task_id,
+                        session_id=row["session_id"],
+                        node_id=node_id,
+                        carrier_kind=carrier_kind,
+                        incarnation_id=incarnation_id,
+                        status="claimed",
+                        payload=payload,
+                    )
         except TurnQueueError:
             raise
         except Exception as e:
             raise _turn_backing_error("claim_turn", task_id=task_id, err=e)
+        # Committed withdrawal (outside the txn so it is not rolled back).
+        raise OwnershipConflictError(
+            "optional turn expired before claim; withdrawn", task_id=task_id,
+            reason="expired",
+        )
 
     def start_turn(
         self,
@@ -6122,6 +6236,106 @@ class MeshDB:
             won = conn.execute("SELECT changes()").fetchone()[0] > 0
         return dict(item, outcome="rearmed") if won else None
 
+    def reconcile_heartbeat_finalizers(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """[A82 Stage 4d] Durable finalization of cache-heartbeat leases linked
+        to a managed heartbeat turn that reached a terminal outcome — the
+        restart-safe completion path (no in-memory finalizer; design §7).
+
+        Per lease, ONE transaction (`_finalize_heartbeat_lease`): CAS the lease
+        ``claimed``→``completed`` fenced to the linked turn and, only when THIS
+        call won the CAS and the turn actually ran (completed / failed), apply
+        the controller transition (beat counted, circuit / stop rules as
+        legacy). Withdrawn (expired / obsolete / session close), cancelled
+        (operator stop) and node-offline turns complete the lease with NO beat.
+        A re-run converges (the CAS is lost ⇒ nothing is counted twice).
+        Bounded, served by the partial link index. Returns the leases finalized
+        by THIS call. Raises on a read error; a per-lease write error is logged
+        and retried next call."""
+        from .turn_queue import TERMINAL_STATUSES
+
+        placeholders = ",".join("?" * len(TERMINAL_STATUSES))
+        rows = self._conn().execute(
+            f"""
+            SELECT t.id AS token_id, t.payload AS token_payload,
+                   t.producer_turn_id AS turn_id, x.status AS turn_status,
+                   x.result AS turn_result, x.session_id AS session_id
+            FROM mesh_tasks t INDEXED BY idx_mesh_tasks_producer_link
+            JOIN mesh_tasks x ON x.id = t.producer_turn_id
+            WHERE t.producer_turn_id IS NOT NULL AND t.status = 'claimed'
+              AND t.action = ? AND x.status IN ({placeholders})
+            LIMIT ?
+            """,
+            (CACHE_HEARTBEAT_ACTION, *TERMINAL_STATUSES, int(limit)),
+        ).fetchall()
+        done: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                item = self._finalize_heartbeat_lease(
+                    str(r["token_id"]), str(r["turn_id"]), str(r["turn_status"]),
+                    _token_payload(r["token_payload"]), _token_payload(r["turn_result"]),
+                    str(r["session_id"] or ""),
+                )
+            except Exception as e:  # noqa: BLE001 — stays linked; next call re-runs
+                logger.warning(
+                    "event=heartbeat_finalize_failed lease=%s turn=%s err=%s",
+                    r["token_id"], r["turn_id"], e,
+                )
+                continue
+            if item is not None:
+                done.append(item)
+        return done
+
+    def _finalize_heartbeat_lease(
+        self, lease_id: str, turn_id: str, turn_status: str,
+        payload: Dict[str, Any], result: Dict[str, Any], session_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        heartbeat_id = str(payload.get("heartbeat_id") or "")
+        beat = turn_status in ("completed", "failed")
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        cache_read = int(usage.get("cache_read_input_tokens") or usage.get("cache_read") or 0)
+        cache_creation = int(
+            usage.get("cache_creation_input_tokens") or usage.get("cache_creation") or 0
+        )
+        if beat and cache_read <= 0 and cache_creation <= 0 and session_id:
+            evidence = self.cache_evidence_for_task(session_id, turn_id)
+            if evidence:
+                cache_read = int(evidence.get("cache_read_tokens") or 0)
+                cache_creation = int(evidence.get("cache_creation_tokens") or 0)
+        success = turn_status == "completed" and bool(result.get("success", True))
+        lease_result = json.dumps({
+            "heartbeat_id": heartbeat_id, "wake_task_id": turn_id,
+            "turn_id": turn_id, "turn_status": turn_status, "beat": beat,
+            "success": success, "cache_read_tokens": cache_read,
+            "cache_creation_tokens": cache_creation,
+        })
+        now = _now()
+        with self._managed_write("finalize_heartbeat_lease") as conn:
+            conn.execute(
+                """
+                UPDATE mesh_tasks
+                SET status = 'completed', result = ?, completed_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'claimed' AND producer_turn_id = ?
+                  AND action = ? AND COALESCE(queue_protocol, 0) = 0
+                """,
+                (lease_result, now, now, lease_id, turn_id, CACHE_HEARTBEAT_ACTION),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                return None
+            hb = conn.execute(
+                "SELECT * FROM session_cache_heartbeats WHERE id = ?", (heartbeat_id,),
+            ).fetchone() if beat and heartbeat_id else None
+            if hb is not None:
+                self._apply_cache_heartbeat_result(
+                    conn, dict(hb), turn_id, success=success,
+                    output=str(result.get("output") or ""),
+                    cache_read_tokens=cache_read, cache_creation_tokens=cache_creation,
+                    error_class=str(result.get("error_class") or ""),
+                )
+        return {
+            "lease_id": lease_id, "turn_id": turn_id, "turn_status": turn_status,
+            "heartbeat_id": heartbeat_id, "beat": hb is not None,
+        }
+
     def list_open_cases(self, limit: int = 200) -> List[Dict[str, Any]]:
         """[M3.4] Open (non-terminal) Cases — the Wake-Dispatcher's per-tick scan set.
 
@@ -8091,6 +8305,29 @@ class MeshDB:
         row = self.get_cache_heartbeat(heartbeat_id)
         if row is None:
             return
+        with self._write() as conn:
+            self._apply_cache_heartbeat_result(
+                conn, row, task_id, success=success, output=output,
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens, error_class=error_class,
+            )
+
+    def _apply_cache_heartbeat_result(
+        self,
+        conn: sqlite3.Connection,
+        row: Dict[str, Any],
+        task_id: str,
+        *,
+        success: bool,
+        output: str = "",
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        error_class: str = "",
+    ) -> None:
+        """The controller transition of one heartbeat outcome, written INSIDE
+        the caller's transaction (legacy ``record_cache_heartbeat_result`` and
+        the A82 Stage 4d durable finalizer share it)."""
+        heartbeat_id = str(row["id"])
         now = _now()
         read_tokens = max(0, int(cache_read_tokens or 0))
         creation_tokens = max(0, int(cache_creation_tokens or 0))
@@ -8115,31 +8352,30 @@ class MeshDB:
         next_due = self._cache_heartbeat_next_due(now, int(row.get("interval_sec") or 2700))
         if status not in ("active", "observe_only"):
             next_due = None
-        with self._write() as conn:
+        conn.execute(
+            """
+            UPDATE session_cache_heartbeats
+            SET beat_count = ?, last_beat_task_id = ?,
+                last_cache_touch_at = CASE WHEN ? > 0 THEN ? ELSE last_cache_touch_at END,
+                last_cache_read_tokens = ?, last_cache_creation_tokens = ?,
+                next_due_at = ?, status = ?, circuit_reason = COALESCE(?, circuit_reason),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                beat_count, task_id, read_tokens, now, read_tokens, creation_tokens,
+                next_due, status, circuit, now, heartbeat_id,
+            ),
+        )
+        if status not in ("active", "observe_only"):
             conn.execute(
                 """
-                UPDATE session_cache_heartbeats
-                SET beat_count = ?, last_beat_task_id = ?,
-                    last_cache_touch_at = CASE WHEN ? > 0 THEN ? ELSE last_cache_touch_at END,
-                    last_cache_read_tokens = ?, last_cache_creation_tokens = ?,
-                    next_due_at = ?, status = ?, circuit_reason = COALESCE(?, circuit_reason),
-                    updated_at = ?
-                WHERE id = ?
+                UPDATE session_cache_heartbeat_owners
+                SET status = 'stopped', stop_reason = ?, updated_at = ?
+                WHERE heartbeat_id = ? AND status = 'active'
                 """,
-                (
-                    beat_count, task_id, read_tokens, now, read_tokens, creation_tokens,
-                    next_due, status, circuit, now, heartbeat_id,
-                ),
+                (circuit or status, now, heartbeat_id),
             )
-            if status not in ("active", "observe_only"):
-                conn.execute(
-                    """
-                    UPDATE session_cache_heartbeat_owners
-                    SET status = 'stopped', stop_reason = ?, updated_at = ?
-                    WHERE heartbeat_id = ? AND status = 'active'
-                    """,
-                    (circuit or status, now, heartbeat_id),
-                )
 
     def expire_cache_heartbeat_state(self) -> int:
         """Stop expired owners/controllers and return changed rows count."""
@@ -8813,6 +9049,47 @@ def _release_stop_hold(conn: sqlite3.Connection, session_id: str, now: str) -> N
     )
 
 
+# [A82 Stage 4d] Session states in which OPTIONAL automation (a cache
+# heartbeat) must not run: dead, operator-stopped, or errored.
+_NOT_IDLE_SESSION_STATUSES = ("closed", "cancelled", "error")
+
+
+def _session_idle_for_optional_turn(
+    conn: sqlite3.Connection, session_id: str, exclude_turn_id: Optional[str] = None,
+) -> bool:
+    """[A82 Stage 4d] Idle-only eligibility of OPTIONAL automation (cache
+    heartbeat, design §7) read from the ledger, never from BUSY/IDLE display
+    (packet §3.5): the session exists, is not closed / held / paused /
+    cancelled / errored, and has NO open work — no managed queued / pending /
+    claimed / running / recovery_required turn and no legacy nonterminal row —
+    other than ``exclude_turn_id`` (the heartbeat itself, at activation).
+    Bounded: one PK read + two ``LIMIT 1`` probes (the managed one on the
+    partial open-subset index)."""
+    srow = conn.execute(
+        "SELECT status, turn_queue_hold, turn_queue_paused FROM sessions "
+        "WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    if srow is None or (srow["status"] or "") in _NOT_IDLE_SESSION_STATUSES:
+        return False
+    if srow["turn_queue_hold"] or int(srow["turn_queue_paused"] or 0):
+        return False
+    managed = conn.execute(
+        f"SELECT 1 FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open "
+        f"WHERE session_id = ? AND {_MANAGED_OPEN_PREDICATE} AND id IS NOT ? LIMIT 1",
+        (session_id, exclude_turn_id),
+    ).fetchone()
+    if managed is not None:
+        return False
+    legacy = conn.execute(
+        "SELECT 1 FROM mesh_tasks WHERE session_id = ? "
+        "AND COALESCE(queue_protocol, 0) = 0 "
+        "AND status IN ('pending', 'claimed', 'running') AND id IS NOT ? LIMIT 1",
+        (session_id, exclude_turn_id),
+    ).fetchone()
+    return legacy is None
+
+
 def _token_payload(raw: Any) -> Dict[str, Any]:
     """[A82 Stage 4c] Decoded producer-token payload ({} when absent/garbled)."""
     if isinstance(raw, dict):
@@ -8855,7 +9132,10 @@ def _link_producer_token(
         "FROM mesh_tasks WHERE id = ?",
         (token_id,),
     ).fetchone()
-    if row is None or int(row["queue_protocol"] or 0) != 0 or row["action"] != CONTINUATION_ACTION:
+    if (
+        row is None or int(row["queue_protocol"] or 0) != 0
+        or row["action"] not in PRODUCER_TOKEN_SENTINELS
+    ):
         raise TurnNotFoundError("no producer token to link", task_id=token_id)
     if row["producer_turn_id"] == turn_id:
         return
@@ -8884,7 +9164,7 @@ def _link_producer_token(
         WHERE id = ? AND status = 'pending' AND producer_turn_id IS NULL
           AND COALESCE(queue_protocol, 0) = 0
         """,
-        (CONTINUATION_MACHINE_SENTINEL, turn_id, json.dumps(payload), now, token_id),
+        (PRODUCER_TOKEN_SENTINELS[row["action"]], turn_id, json.dumps(payload), now, token_id),
     )
     if conn.execute("SELECT changes()").fetchone()[0] == 0:
         raise OwnershipConflictError("producer token link lost the race", task_id=token_id)

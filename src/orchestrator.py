@@ -169,6 +169,27 @@ CACHE_HEARTBEAT_PROMPT = (
     "If you are not actually waiting on useful work, reply exactly STOP_CACHE_HEARTBEAT."
 )
 
+#: [A82 Stage 4d] A managed cache-heartbeat turn is optional work with a
+#: deadline: if it has not STARTED within this many seconds of admission it is
+#: withdrawn (at the head by the scheduler, at claim by the ledger) — never a
+#: late heartbeat competing with real work.
+MANAGED_HEARTBEAT_TTL_SEC = 300
+
+
+def _cache_heartbeat_evidence_sufficient(db: Any, session_id: str) -> bool:
+    """Recent cache-token evidence clears the heartbeat threshold (the cache is
+    worth keeping warm). Shared by admission-time eligibility and the A82
+    Stage 4d activation-time revalidation."""
+    evidence = db.recent_cache_evidence(session_id)
+    min_tokens = 0
+    try:
+        from src.control.db import cache_heartbeat_min_cache_tokens
+        min_tokens = cache_heartbeat_min_cache_tokens()
+    except Exception:
+        min_tokens = 100_000
+    token_sum = int((evidence or {}).get("cache_read_tokens") or 0) + int((evidence or {}).get("cache_creation_tokens") or 0)
+    return token_sum >= min_tokens
+
 #: [quota-resume] How a paused Case comes back.
 #:   ``in_place``      — one turn into the SAME (still alive, AWAITING_INPUT)
 #:                       Manager session. Keeps the full conversation; the
@@ -1435,7 +1456,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception:
             return True
 
-    def _cache_heartbeat_session_eligible(self, db, hb: Dict[str, Any]) -> Tuple[bool, str, Any]:
+    def _cache_heartbeat_session_eligible(
+        self, db, hb: Dict[str, Any], *, managed: bool = False,
+    ) -> Tuple[bool, str, Any]:
+        """[A82 Stage 4d] ``managed`` (ENROLLED session): idleness comes from the
+        ledger (``heartbeat_eligible``; re-checked inside the admission txn),
+        never from in-memory active tasks or the BUSY/IDLE display status."""
         session_id = str(hb.get("session_id") or "")
         heartbeat_id = str(hb.get("id") or "")
         session = self.session_store.get(session_id)
@@ -1449,7 +1475,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             return False, "missing_backend_session_id", session
         if session.driver_status and session.driver_status != "live":
             return False, "driver_not_live", session
-        if self._cache_heartbeat_session_has_inflight_work(session_id, session):
+        if managed:
+            if not db.heartbeat_eligible(session_id):
+                return False, "session_not_idle", session
+        elif self._cache_heartbeat_session_has_inflight_work(session_id, session):
             return False, "session_work_in_flight", session
         if not self._cache_heartbeat_quota_available():
             return False, "quota_exhausted", session
@@ -1464,7 +1493,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     return False, "cache_fresh", session
             except Exception:
                 pass
-        if session.status != SessionStatus.AWAITING_INPUT:
+        if not managed and session.status != SessionStatus.AWAITING_INPUT:
             return False, "session_not_idle", session
         machine_id = str(getattr(session, "machine_id", "") or "")
         if machine_id:
@@ -1475,15 +1504,7 @@ class TaskOrchestrator(ITaskOrchestrator):
                     return False, "pinned_node_unavailable", session
             except Exception:
                 return False, "pinned_node_unverified", session
-        evidence = db.recent_cache_evidence(session_id)
-        min_tokens = 0
-        try:
-            from src.control.db import cache_heartbeat_min_cache_tokens
-            min_tokens = cache_heartbeat_min_cache_tokens()
-        except Exception:
-            min_tokens = 100_000
-        token_sum = int((evidence or {}).get("cache_read_tokens") or 0) + int((evidence or {}).get("cache_creation_tokens") or 0)
-        if token_sum < min_tokens:
+        if not _cache_heartbeat_evidence_sufficient(db, session_id):
             return False, "cache_below_threshold", session
         return True, "", session
 
@@ -1496,6 +1517,14 @@ class TaskOrchestrator(ITaskOrchestrator):
         )
         if not cache_heartbeat_active_enabled():
             return 0
+        # [A82 Stage 4d] Durable finalization of managed heartbeat turns (no
+        # in-memory finalizer). No read at all while no session is enrolled.
+        any_enrolled = db.any_session_enrolled() is not False
+        if any_enrolled:
+            try:
+                await asyncio.to_thread(db.reconcile_heartbeat_finalizers)
+            except Exception as e:
+                logger.warning("event=heartbeat_finalizer_failed err=%s", e)
         db.refresh_cache_heartbeats_from_recent_evidence(limit=100)
         self._sync_cache_heartbeat_state(db)
         delivered = 0
@@ -1503,7 +1532,15 @@ class TaskOrchestrator(ITaskOrchestrator):
         for hb in db.due_cache_heartbeats(limit=20):
             heartbeat_id = str(hb.get("id") or "")
             session_id = str(hb.get("session_id") or "")
-            ok, reason, session = self._cache_heartbeat_session_eligible(db, hb)
+            managed = False
+            if any_enrolled:
+                from src.control.turn_admission import session_enrollment
+                try:
+                    managed = await session_enrollment(db, session_id)
+                except Exception as e:  # unreadable marker ⇒ fail closed: no heartbeat
+                    logger.warning("event=cache_heartbeat_enrollment_unreadable session=%s err=%s", session_id, e)
+                    continue
+            ok, reason, session = self._cache_heartbeat_session_eligible(db, hb, managed=managed)
             if not ok:
                 if reason in {"session_missing", "backend_not_claude", "driver_not_sdk", "missing_backend_session_id", "driver_not_live"}:
                     db.stop_cache_heartbeat(heartbeat_id, reason)
@@ -1511,6 +1548,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             interval = max(60, int(hb.get("interval_sec") or 2700))
             slot_epoch = int(time.time() // interval) * interval
             lease_id = cache_heartbeat_task_id(session_id, slot_epoch)
+            if managed:
+                delivered += await self._admit_managed_cache_heartbeat(
+                    db, hb, session, lease_id, slot_epoch,
+                )
+                continue
             db.enqueue_task(
                 lease_id,
                 session_id=None,
@@ -1547,6 +1589,86 @@ class TaskOrchestrator(ITaskOrchestrator):
             )
             delivered += 1
         return delivered
+
+    async def _admit_managed_cache_heartbeat(
+        self, db, hb: Dict[str, Any], session: Any, lease_id: str, slot_epoch: int,
+    ) -> int:
+        """[A82 Stage 4d] Producer 6 for an ENROLLED session: ONE idle-only
+        managed heartbeat turn per heartbeat window. The window lease row
+        (``cachehb:{sid}:{slot}``, protocol 0, sentinel) is the durable trigger
+        identity; it is linked to the deterministic turn inside the admission
+        transaction, which also re-checks idleness (``idle_only``) and stamps a
+        deadline (``expires_at``). Automation principal (``system``): it never
+        releases an operator-stop hold and is not operator activity. Completion
+        is recorded by ``MeshDB.reconcile_heartbeat_finalizers``. Returns 1 iff
+        THIS call admitted a new turn."""
+        from src.control.db import (
+            CACHE_HEARTBEAT_ACTION, CACHE_HEARTBEAT_MACHINE_SENTINEL, producer_turn_id,
+        )
+        from src.control.turn_queue import TurnQueueError
+
+        heartbeat_id = str(hb.get("id") or "")
+        session_id = str(session.session_id)
+        lease = await asyncio.to_thread(db.get_task, lease_id)
+        if lease is not None and (
+            lease.get("producer_turn_id") or str(lease.get("status") or "") != "pending"
+        ):
+            return 0  # this window's heartbeat is already linked / finalized
+        if lease is None:
+            await asyncio.to_thread(
+                lambda: db.enqueue_task(
+                    lease_id,
+                    session_id=None,
+                    machine_id=CACHE_HEARTBEAT_MACHINE_SENTINEL,
+                    backend="claude",
+                    action=CACHE_HEARTBEAT_ACTION,
+                    payload={"heartbeat_id": heartbeat_id, "session_id": session_id,
+                             "slot_epoch": slot_epoch},
+                )
+            )
+        beat_number = int(hb.get("beat_count") or 0) + 1
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=MANAGED_HEARTBEAT_TTL_SEC)
+        ).isoformat()
+        try:
+            admission = await self.submit_instruction(
+                CACHE_HEARTBEAT_PROMPT,
+                session_id=session_id,
+                cwd=getattr(session, "repo_path", None),
+                source="cache_heartbeat",
+                extra_metadata={
+                    "heartbeat_id": heartbeat_id,
+                    "beat_number": beat_number,
+                    "source": "cache_heartbeat",
+                    self._TURN_PRODUCER_META_KEY: {
+                        "turn_kind": "heartbeat",
+                        "trigger": lease_id,
+                        "turn_id": producer_turn_id(lease_id, session_id, 1, prefix="hturn"),
+                        "token_id": lease_id,
+                        "producer_meta": {"heartbeat_id": heartbeat_id,
+                                          "session_id": session_id,
+                                          "slot_epoch": slot_epoch},
+                        "expires_at": expires_at,
+                        "idle_only": True,
+                    },
+                },
+                turn_queue_enrolled=True,
+            )
+        except (TurnQueueError, HarnessAdmissionBlocked) as e:
+            # Nothing linked (the link is in the admission txn): not idle, held,
+            # no carrier, … ⇒ no heartbeat this tick.
+            logger.info("event=managed_heartbeat_skipped heartbeat=%s err=%s", heartbeat_id, e)
+            return 0
+        if getattr(admission, "idempotent_replay", False) or getattr(admission, "status", "") == "withdrawn":
+            return 0
+        db.record_cache_heartbeat_sent(heartbeat_id, str(admission))
+        self._emit_event(
+            "cache_heartbeat_delivered",
+            None,
+            {"heartbeat_id": heartbeat_id, "session_id": session_id,
+             "task_id": str(admission), "managed": True},
+        )
+        return 1
 
     async def _finalize_cache_heartbeat(
         self,
@@ -4447,13 +4569,25 @@ class TaskOrchestrator(ITaskOrchestrator):
             "reply": "\n".join(lines),
         }
 
-    def _record_job_session_turn(self, job: Dict[str, Any], session: Any, payload: Dict[str, Any]) -> None:
+    def _record_job_session_turn(
+        self, job: Dict[str, Any], session: Any, payload: Dict[str, Any],
+        *, managed: bool = False,
+    ) -> None:
+        """Record a watched-job completion as a synthetic session turn.
+
+        [A82 Stage 4d] ``managed`` (ENROLLED session): ONE already-terminal
+        audit row (never a claimable ``pending`` row) and NO whole-row session
+        save — a stale snapshot must not rewrite an operator-stop ``cancelled``
+        status (4b MINOR 4); the ledger is the transcript's truth."""
         job_id = str(payload["job_id"])
         reply = str(payload["reply"])
         prompt = str(payload["prompt"])
         success = bool(payload["success"])
         now = now_iso()
 
+        if managed:
+            self._record_managed_job_audit(job, session, payload)
+            return
         try:
             from src.control.db import get_db
             db = get_db()
@@ -4542,6 +4676,97 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception as e:
             logger.warning("event=job_session_turn_save_failed job_id=%s err=%s", job_id, e)
 
+    def _record_managed_job_audit(
+        self, job: Dict[str, Any], session: Any, payload: Dict[str, Any],
+    ) -> None:
+        job_id = str(payload["job_id"])
+        reply = str(payload["reply"])
+        prompt = str(payload["prompt"])
+        success = bool(payload["success"])
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return
+            db.record_audit_turn(
+                job_id,
+                session.session_id,
+                getattr(session, "machine_id", None),
+                getattr(session, "backend", None) or "unknown",
+                "watched_job",
+                {
+                    "task": {"id": job_id, "title": prompt, "prompt": prompt},
+                    "job": {"id": job_id, "label": payload["label"], "status": payload["status"]},
+                },
+                prompt,
+                {
+                    "success": success, "output": reply,
+                    "errors": [] if success else [reply], "files_modified": [],
+                    "execution_time": 0.0, "timestamp": now_iso(),
+                    "return_code": job.get("exit_code"),
+                },
+                success=success,
+                error=reply,
+            )
+            db.enrich_task(
+                job_id,
+                prompt=prompt,
+                reply_text=reply,
+                parsed_output={"type": "watched_job", "job": job},
+                files_modified=[],
+                return_code=job.get("exit_code"),
+            )
+            db.append_event(
+                session_id=session.session_id,
+                task_id=job_id,
+                success=success,
+                execution_time=0.0,
+                error="" if success else reply,
+            )
+        except Exception as e:
+            logger.warning("event=job_session_turn_db_failed job_id=%s err=%s", job_id, e)
+
+    async def _admit_managed_watched_job(
+        self, job: Dict[str, Any], session: Any, payload: Dict[str, Any], description: str,
+    ) -> None:
+        """[A82 Stage 4d] Producer 4 for an ENROLLED session: the job completion
+        becomes ONE managed turn. Durable trigger identity = the job id
+        (``watched:{job_id}``) under the automation principal — the permanent
+        idempotency key collapses a double poll, a gateway restart or a
+        re-reported terminal status to the SAME deterministic turn, even after
+        it ran. Case attachment is the existing watched-job rule (the shared
+        convergent lineage procedure: attach to the session's open Case, never
+        relabel a Manager). ``system`` source: it honours and never releases an
+        operator-stop hold. A refused admission falls back to the audit record
+        (legacy parity), never to legacy execution."""
+        from src.control.db import producer_turn_id
+        from src.control.turn_queue import TurnQueueError
+
+        job_id = str(payload["job_id"])
+        trigger = f"watched:{job_id}"
+        try:
+            await self.submit_instruction(
+                description,
+                session_id=session.session_id,
+                cwd=getattr(session, "repo_path", None),
+                source="watched_job",
+                extra_metadata={
+                    "job_id": job_id,
+                    "source": "watched_job",
+                    self._TURN_PRODUCER_META_KEY: {
+                        "turn_kind": "watched_job",
+                        "trigger": trigger,
+                        "turn_id": producer_turn_id(trigger, session.session_id, 1, prefix="jturn"),
+                        "coalesce_key": trigger,
+                    },
+                },
+                dispatched_by=f"watched_job:{job_id}",
+                turn_queue_enrolled=True,
+            )
+        except (TurnQueueError, HarnessAdmissionBlocked) as e:
+            logger.warning("event=job_notify_agent_refused job_id=%s err=%s", job_id, e)
+            self._record_managed_job_audit(job, session, payload)
+
     async def _process_terminal_job(self, job: Dict[str, Any]) -> None:
         job_id_key = str(job.get("id") or "")
         processed = getattr(self, "_processed_terminal_jobs", None)
@@ -4563,10 +4788,21 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.info("event=job_notify_skipped job_id=%s reason=no_session", job_id)
             return
 
+        # [A82 Stage 4d] ENROLLED session ⇒ managed producer. No marker read
+        # while no session is enrolled; unreadable ⇒ fail closed (None): no
+        # session turn/record at all, never a legacy fallback.
+        from src.control.db import get_db
+        from src.control.turn_admission import session_enrollment
+        try:
+            managed: Optional[bool] = await session_enrollment(get_db(), session_id)
+        except Exception as e:
+            logger.warning("event=job_notify_enrollment_unreadable job_id=%s err=%s", job_id, e)
+            managed = None
+
         # With notify_agent the continuation turn below carries the same payload —
         # a synthetic turn too would show the job result twice in the session.
-        if not job.get("notify_agent"):
-            self._record_job_session_turn(job, session, payload)
+        if not job.get("notify_agent") and managed is not None:
+            self._record_job_session_turn(job, session, payload, managed=managed)
 
         if job.get("notify"):
             result = TaskResult(
@@ -4589,11 +4825,16 @@ class TaskOrchestrator(ITaskOrchestrator):
             except Exception as e:
                 logger.warning("event=job_notify_failed job_id=%s err=%s", job_id, e)
 
+        if job.get("notify_agent") and managed is None:
+            return
         if job.get("notify_agent"):
             description = (
                 f"The watched job `{payload['label']}` finished with status "
                 f"`{payload['status']}`.\n\n{payload['reply']}"
             )
+            if managed:
+                await self._admit_managed_watched_job(job, session, payload, description)
+                return
             try:
                 await self.submit_instruction(
                     description,
@@ -9770,6 +10011,13 @@ Generated from user description: {description}
     _MANAGED_PRODUCER1_SOURCES = frozenset(
         {"web_session", "telegram_session", "runtime", "telegram", "automation_session"}
     )
+    # [A82 Stage 4d] Automation producers admitted with a durable trigger
+    # identity (source → turn_kind). The producer facts ride the server-set
+    # ``__turn_producer`` metadata key, which no HTTP body can reach.
+    _MANAGED_AUTOMATION_PRODUCERS = {
+        "watched_job": "watched_job",
+        "cache_heartbeat": "heartbeat",
+    }
     _MANAGED_SOURCE_PRINCIPAL = {
         "web_session": "operator",
         "telegram_session": "telegram",
@@ -9813,6 +10061,13 @@ Generated from user description: {description}
         if isinstance(producer, dict) and source == "manager_continuation":
             # [A82 Stage 4c] Producer 3: a Case continuation whose durable
             # token is linked to this deterministic turn in the admission txn.
+            return await self._admit_managed_producer_turn(task, sid, producer)
+        if (
+            isinstance(producer, dict)
+            and producer.get("turn_kind") == self._MANAGED_AUTOMATION_PRODUCERS.get(source)
+        ):
+            # [A82 Stage 4d] Producers 4 / 6: watched-job notification and cache
+            # heartbeat — a durable trigger identity ⇒ one deterministic turn.
             return await self._admit_managed_producer_turn(task, sid, producer)
         if source not in self._MANAGED_PRODUCER1_SOURCES:
             raise ManagedUnsupportedError(
@@ -9918,12 +10173,48 @@ Generated from user description: {description}
         from src.control.turn_scheduler import notify_turn_queue_changed
 
         db = get_db()
-        token_id = str(producer["token_id"])
-        attempt = int(producer["attempt"])
+        source = str((task.metadata or {}).get("source") or "manager_continuation")
+        kind = str(producer.get("turn_kind") or "continuation")
         task.id = str(producer["turn_id"])
         backend = self._resolve_task_backend(task)
         carrier = self._managed_carrier_assignment(self.session_store.get(sid), backend)
         lineage_token = uuid.uuid4().hex
+        if kind == "continuation":
+            token_id = str(producer["token_id"])
+            attempt = int(producer["attempt"])
+            trigger = {
+                "operation_id": f"{token_id}#{attempt}",
+                # The trigger identity IS the request: two racing ticks that
+                # rendered a slightly different wake still collapse (no 409).
+                "admission_hash": _canonical_admission_hash(
+                    {"session_id": sid, "producer_token": token_id, "attempt": attempt}
+                ),
+                "coalesce_key": f"case:{producer['case_id']}:gen:{producer['generation']}",
+                "producer_token": token_id,
+                "producer_meta": {
+                    "case_id": producer["case_id"],
+                    "generation": int(producer["generation"]),
+                    "session_id": sid,
+                    "attempt": attempt,
+                    "presented_task_ids": list(producer.get("presented_task_ids") or []),
+                    "retired_group_ids": list(producer.get("retired_group_ids") or []),
+                },
+            }
+        else:
+            # [A82 Stage 4d] Watched job / heartbeat: the trigger key (job id /
+            # heartbeat lease = window) is the idempotency key — permanent, so a
+            # replay collapses even after the turn is terminal.
+            trigger = {
+                "operation_id": str(producer["trigger"]),
+                "admission_hash": _canonical_admission_hash(
+                    {"session_id": sid, "trigger": str(producer["trigger"]), "kind": kind}
+                ),
+                "coalesce_key": producer.get("coalesce_key"),
+                "producer_token": producer.get("token_id"),
+                "producer_meta": producer.get("producer_meta"),
+                "expires_at": producer.get("expires_at"),
+                "idle_only": bool(producer.get("idle_only")),
+            }
         request = AdmissionRequest(
             session_id=sid,
             task_id=task.id,
@@ -9933,25 +10224,10 @@ Generated from user description: {description}
             machine_id=carrier,
             action="resume_session",
             turn_source="system",
-            turn_kind="continuation",
-            operation_id=f"{token_id}#{attempt}",
-            idempotency_scope=f"automation:{sid}:continuation",
-            # The trigger identity IS the request: two racing ticks that
-            # rendered a slightly different wake still collapse (no 409).
-            admission_hash=_canonical_admission_hash(
-                {"session_id": sid, "producer_token": token_id, "attempt": attempt}
-            ),
-            coalesce_key=f"case:{producer['case_id']}:gen:{producer['generation']}",
+            turn_kind=kind,
+            idempotency_scope=f"automation:{sid}:{kind}",
             lineage_token=lineage_token,
-            producer_token=token_id,
-            producer_meta={
-                "case_id": producer["case_id"],
-                "generation": int(producer["generation"]),
-                "session_id": sid,
-                "attempt": attempt,
-                "presented_task_ids": list(producer.get("presented_task_ids") or []),
-                "retired_group_ids": list(producer.get("retired_group_ids") or []),
-            },
+            **trigger,
         )
         admission = await admit_turn_async(
             db, request, fleet_cap=int(config.system.max_queue_size),
@@ -9967,12 +10243,12 @@ Generated from user description: {description}
                 queue_sequence=admission.queue_sequence, idempotent_replay=False,
             )
         logger.info(
-            "event=managed_continuation_admitted task_id=%s session_id=%s token=%s seq=%s",
-            admission, sid, token_id, admission.queue_sequence,
+            "event=managed_producer_admitted task_id=%s session_id=%s source=%s trigger=%s seq=%s",
+            admission, sid, source, trigger["operation_id"], admission.queue_sequence,
         )
-        self._emit_event("task_created", task, {"source": "manager_continuation", "managed": True})
+        self._emit_event("task_created", task, {"source": source, "managed": True})
         self._emit_turn_telemetry(
-            "turn.accepted", task, {"task_id": task.id, "source": "manager_continuation"},
+            "turn.accepted", task, {"task_id": task.id, "source": source},
         )
         self._emit_turn_telemetry(
             "turn.queued", task,
@@ -10562,6 +10838,12 @@ Generated from user description: {description}
         ).startswith("automation:"):
             return None
         db = get_db()
+        if str(row.get("turn_kind") or "") == "heartbeat":
+            # [A82 Stage 4d] Optional automation: idle-only + revalidated
+            # owner / quota / cache evidence at activation (design §7).
+            reason = await self._managed_heartbeat_obsolete(db, row)
+            if reason:
+                return reason
         continuation = str(row.get("turn_kind") or "") == "continuation"
         presented: List[str] = []
         if continuation:
@@ -10590,6 +10872,42 @@ Generated from user description: {description}
         tick = await asyncio.to_thread(db.compute_continuation_tick, case_id)
         if not set(presented) & set(tick.get("presented_task_ids") or []):
             return "reviewed"
+        return None
+
+    async def _managed_heartbeat_obsolete(self, db: Any, row: Dict[str, Any]) -> Optional[str]:
+        """[A82 Stage 4d] Activation-time revalidation of a queued cache
+        heartbeat: withdrawn unless its window lease is still linked, the
+        session is still idle by the ledger (no other open work, not held /
+        closed / paused), heartbeat automation is still on, the controller is
+        still active (its owners are live), quota is available, no Case pause
+        owns the Manager and the cache evidence still clears the threshold."""
+        from src.control.db import cache_heartbeat_active_enabled
+
+        turn_id = str(row["id"])
+        sid = str(row.get("session_id") or "")
+        # Action-agnostic: the producer token (here the window lease) still
+        # LINKED to this turn.
+        lease = await asyncio.to_thread(db.continuation_token_for_turn, turn_id)
+        if lease is None:
+            return "heartbeat_unlinked"
+        idle = await asyncio.to_thread(
+            lambda: db.heartbeat_eligible(sid, exclude_turn_id=turn_id)
+        )
+        if not idle:
+            return "session_not_idle"
+        if not cache_heartbeat_active_enabled():
+            return "heartbeat_disabled"
+        hb = await asyncio.to_thread(
+            db.get_cache_heartbeat, str(lease["payload"].get("heartbeat_id") or "")
+        )
+        if hb is None or str(hb.get("status") or "") != "active":
+            return "heartbeat_stopped"
+        if not self._cache_heartbeat_quota_available():
+            return "quota_exhausted"
+        if await asyncio.to_thread(self._cache_heartbeat_blocked_by_case_pause, db, hb):
+            return "case_pause_active"
+        if not await asyncio.to_thread(_cache_heartbeat_evidence_sufficient, db, sid):
+            return "cache_below_threshold"
         return None
 
     def _managed_carrier_assignment(self, session: Any, backend: str) -> str:
