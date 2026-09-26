@@ -330,9 +330,9 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
     },
     "QUOTA_PREWARM_ENABLED": {
         "default": "0",
-        "effect_scope": "startup",
+        "effect_scope": "live",
         "registry_writable": "1",
-        "description": "Keep the Claude 5-hour window ticking: when telemetry shows NO open window, spend one minimal haiku turn to start one, then verify against the provider that a window actually opened. Runs around the clock on purpose — an already-running window is only worth anything before work starts. IMPORTANT: warming runs where Claude executes. Under the Docker controller/worker split the controller is ingest-only (no local Claude) and does NOT warm; set QUOTA_PREWARM_ENABLED=1 in the WORKER host's env (a claude-capable worker), not just this registry row, which the worker process does not read. A single-process local-execution gateway still warms in-process. Bounded by QUOTA_PREWARM_MAX_PER_DAY / QUOTA_PREWARM_MIN_INTERVAL_SEC and a consecutive-failure circuit breaker.",
+        "description": "Keep the Claude 5-hour window ticking: when telemetry shows NO open window, spend one minimal haiku turn to start one, then verify against the provider that a window actually opened. Runs around the clock on purpose — an already-running window is only worth anything before work starts. Warming runs where Claude executes: a claude-capable WORKER re-reads this registry row every cycle and starts/stops warming LIVE — flip it on/off with no restart. The ingest-only Docker controller has no local Claude and does not warm (a single-process local-execution gateway still warms in-process, at startup). NOTE: the worker reads the mesh.db it is pointed at (MESH_DB_PATH, relative to its cwd); toggle the flag in that DB (e.g. scripts/ops_flag.sh at the worker's repo). Bounded by QUOTA_PREWARM_MAX_PER_DAY / QUOTA_PREWARM_MIN_INTERVAL_SEC and a consecutive-failure circuit breaker.",
     },
     "QUOTA_DIGEST_TELEGRAM_ENABLED": {
         "default": "0",

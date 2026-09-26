@@ -309,30 +309,48 @@ def test_worker_quota_observe_explicit_override_wins(monkeypatch):
 # under the Docker controller/worker split — controller has adapters == []).
 # ---------------------------------------------------------------------------
 
-def test_worker_prewarm_enabled_for_claude_when_flag_on(monkeypatch):
-    from src.worker.config import WorkerConfig
+@pytest.mark.asyncio
+async def test_worker_prewarm_reconcile_starts_and_stops_dynamically(monkeypatch):
+    """The worker toggles warming LIVE from the registry flag: reconcile(True)
+    builds+starts once (idempotent on repeat), reconcile(False) stops and clears.
+    This is the dynamic on/off the registry exists for — no restart."""
+    from src.worker.agent import WorkerAgent
 
-    _base_worker_env(monkeypatch)
-    monkeypatch.setenv("QUOTA_PREWARM_ENABLED", "1")
-    assert WorkerConfig.from_env().quota_prewarm_enabled is True
+    class _FakePrewarmer:
+        def __init__(self):
+            self.starts = 0
+            self.stops = 0
 
+        async def start(self):
+            self.starts += 1
 
-def test_worker_prewarm_off_when_flag_unset(monkeypatch):
-    from src.worker.config import WorkerConfig
+        async def stop(self):
+            self.stops += 1
 
-    _base_worker_env(monkeypatch)  # QUOTA_PREWARM_ENABLED unset
-    monkeypatch.delenv("QUOTA_PREWARM_ENABLED", raising=False)
-    assert WorkerConfig.from_env().quota_prewarm_enabled is False
+    agent = WorkerAgent.__new__(WorkerAgent)
+    agent.cfg = types.SimpleNamespace(node_id="kanebra-worker")
+    fake = _FakePrewarmer()
 
+    async def _build():
+        return fake
 
-def test_worker_prewarm_off_without_claude_backend(monkeypatch):
-    from src.worker.config import WorkerConfig
+    monkeypatch.setattr(agent, "_build_quota_prewarmer", _build)
 
-    _base_worker_env(monkeypatch)
-    monkeypatch.setenv("WORKER_BACKENDS", "codex")
-    monkeypatch.setenv("QUOTA_PREWARM_ENABLED", "1")
-    # Warming needs a claude harness to spend the activation turn.
-    assert WorkerConfig.from_env().quota_prewarm_enabled is False
+    # OFF → nothing built.
+    assert await agent._prewarm_reconcile(False, None) is None
+    assert fake.starts == 0
+
+    # OFF → ON: builds and starts exactly once.
+    pw = await agent._prewarm_reconcile(True, None)
+    assert pw is fake and fake.starts == 1
+
+    # ON → ON: idempotent, no second start.
+    pw = await agent._prewarm_reconcile(True, pw)
+    assert pw is fake and fake.starts == 1
+
+    # ON → OFF: stops and clears the handle.
+    assert await agent._prewarm_reconcile(False, pw) is None
+    assert fake.stops == 1
 
 
 def test_controller_can_activate_reflects_adapter_presence():
