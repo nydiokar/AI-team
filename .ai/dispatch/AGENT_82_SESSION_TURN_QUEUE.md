@@ -1645,8 +1645,17 @@ M1 (reviewer) is near-equivalent and noted, not killed.
     goes through its own pause. Emits `case_transient_retry_superseded` / `case_transient_retry_queued`.
   - **SYS05 (A/B/R retry matrix) now GREEN** (was RED through Stage 4d).
 - **Producer 7 — managed respawn** (`517c5ae` orchestrator + `record_respawn_link` DB, `1bef7fb` hardening):
-  **execution + linkage half implemented and hardened; NOT YET WIRED into the tick.**
-  - `_respawn_manager_managed` (`orchestrator.py:3856`) is the managed execution+linkage half: one convergent
+  **implemented, hardened, AND WIRED (enrollment-gated).**
+  *(Correction 2026-09-27: an earlier draft of this record claimed producer 7 was "not wired / no callers in
+  src" — that was a symbol-name grep error (searched `_managed_respawn`; the method is `_respawn_manager_managed`,
+  and log-line substrings masked the truth). Verified against the tree: it IS wired via the gate below.)*
+  - **Wiring (gate).** All five tick respawn paths (`orchestrator.py:2276, 3445, 3621, 3640, 3685`) call
+    `_do_respawn_manager_for_case`, which at `orchestrator.py:3742` gates on
+    `turn_admission.session_enrollment(db, dead_session_id)` (the canonical fail-closed per-session predicate;
+    no marker read + legacy byte-identical when nothing is enrolled) and, for an ENROLLED dead Manager,
+    `return await self._respawn_manager_managed(...)`. An UNENROLLED dead Manager falls through to the legacy
+    single-flight claim unchanged. This is the same enrollment-lane selection producers 1–4/6 use.
+  - `_respawn_manager_managed` (`orchestrator.py:3856`) is the managed execution+linkage path: one convergent
     procedure keyed on the durable respawn token `respawn:{case}:{gen}` — idempotent token check, deterministic
     new-session id, inherited enrollment, ONE admitted respawn turn (`_admit_managed_recovery_turn`,
     `turn_kind="respawn"`), the durable `record_respawn_link` txn (manager flow link + affiliation +
@@ -1658,25 +1667,23 @@ M1 (reviewer) is near-equivalent and noted, not killed.
     `tests/test_turn_queue_respawn_revalidation.py::test_managed_respawn_ignores_stale_store_row_without_db_row`
     (proven RED-without / GREEN-with; drives the genuine method against a real `MeshDB`).
   - `record_respawn_link` (durable new-session/turn link) is wired; **SYS07 (respawn linkage) now GREEN** (was
-    RED through Stage 4d) — but SYS07 is a shallow DB-helper existence check, not an end-to-end respawn.
-  - **REMAINING (the exact place the in-flight work stopped): `_respawn_manager_managed` has no callers in
-    `src/`.** The legacy `_do_respawn_manager_for_case` still owns every tick respawn path
-    (`orchestrator.py:2276, 3445, 3621, 3640, 3685`). Routing an ENROLLED dead Manager to the managed path
-    (parallel to how producers 1–4/6 select the managed lane) is the next increment.
+    RED through Stage 4d) — but SYS07 is only a shallow DB-helper existence check.
+  - **REMAINING (test gap, not a wiring gap): the enrolled→managed ROUTING through the gate was untested
+    end-to-end.** Closed this session by `tests/test_turn_queue_respawn_routing.py` (see below) which drives
+    the real `_do_respawn_manager_for_case` with an ENROLLED dead session and asserts the managed path is taken
+    (no legacy single-flight `RESPAWN_ACTION` control row), plus an UNENROLLED session still takes legacy.
 
 **Verification (this stage, touched modules only — plain pytest, no CLI):** 50 passed across
 `test_turn_queue_respawn_revalidation`, `test_case_respawn`, `test_retry_transient`, `test_turn_queue_r5`,
 `test_turn_queue_carrier_recovery`, `test_turn_queue_producers` (the last incl. SYS05/SYS07 now green).
 
-**NEXT INCREMENT (Stage 4e completion, for the next session):**
-1. Wire `_respawn_manager_managed` selection for enrolled dead Managers into the respawn tick paths behind the
-   managed gate; legacy path stays for protocol-0 sessions until Stage 8.
-2. Add a SYS-level integration test that a dead ENROLLED Manager respawns end-to-end through the managed path
-   (fresh session + admitted respawn turn + durable link + rebound-automation withdrawal), replacing reliance
-   on the SYS07 existence stub.
-3. Close the A83 managed-respawn safety checks for the respawn token: a lost start-ack grants no second
-   invocation; a reader crash/restart refuses the old grant (no replay).
-4. Submit Stage 4e for A87 adversarial review (no prior review round has run on this stage).
+**REMAINING for Stage 4e closure (all producers 1–7 are wired + enrollment-gated; these are review/rollout, not wiring):**
+1. Close the A83 managed-respawn safety checks for the respawn token end-to-end: a lost start-ack grants no
+   second invocation; a reader crash/restart refuses the old grant (no replay). (The convergent get-or-create
+   token procedure is designed for this; add adversarial tests that inject the crash between claim and start.)
+2. Submit Stage 4e for A87 adversarial review (no prior review round has run on this stage).
+3. Stage-8 cutover preconditions (operator-gated; see Carries) — NOT part of 4e, but must all hold before the
+   legacy respawn/turn paths are deleted.
 
 **Carries (unchanged from the A82 row):** the §7 oversize-managed-result → carrier artifact persistence
 deferral still stands (must close before Stage 8 deletes the legacy path); psutil declared/pinned but not
