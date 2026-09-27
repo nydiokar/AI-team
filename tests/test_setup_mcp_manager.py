@@ -29,7 +29,8 @@ def test_register_manager_adds_entry(tmp_path, monkeypatch):
 
     cfg = json.loads((tmp_path / ".claude.json").read_text())
     assert "manager" in cfg["mcpServers"]
-    assert cfg["mcpServers"]["manager"]["args"] == [str(script)]
+    assert cfg["mcpServers"]["manager"]["command"] == setup_mcp.MANAGER_LAUNCHER
+    assert cfg["mcpServers"]["manager"]["args"] == []
 
 
 def test_register_manager_preserves_jobs(tmp_path, monkeypatch):

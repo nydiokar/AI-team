@@ -22,6 +22,14 @@ dependencies = [
   "anyio>=4.0.0",
 ]
 
+[project.scripts]
+# PATH-resolvable, platform-neutral launchers for the MCP stdio servers so the
+# host-authoritative backend config (projected into the worker container) can name a
+# stable command instead of an OS/host-specific "<python> <abs script path>" pair.
+# See src/mcp_launchers.py and scripts/setup_mcp.py.
+ai-team-mcp-jobs = "src.mcp_launchers:jobs_main"
+ai-team-mcp-manager = "src.mcp_launchers:manager_main"
+
 [project.optional-dependencies]
 dev = [
   "ruff>=0.5.0",
