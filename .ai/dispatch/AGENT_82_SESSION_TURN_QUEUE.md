@@ -2,11 +2,11 @@
 job_id: AGENT_82_SESSION_TURN_QUEUE
 created_at: "2026-09-22T11:39:06.841262+00:00"        # CANONICAL — set once at dispatch, never derive again
 status: active              # ready | active | blocked | done | dead
-owner: worker-a82-stage2
+owner: worker-a82-stage4e
 depends_on: []
 results_ref: DISPATCH_LOG.md#A82             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-25T09:33:04.329154+00:00"
+evidence: tests/test_turn_queue_respawn_revalidation.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-09-27T15:38:56.372194+00:00"
 ```
 
 # A82 — Build the unified session turn queue
@@ -1629,6 +1629,58 @@ M1 (reviewer) is near-equivalent and noted, not killed.
 **Verification.**
 - turn-queue files: **397 passed / 4 red** (SYS05, SYS07, api ×2; baseline 391 / 4).
 - Regression group incl. `watched_jobs` and `mcp_jobs`: **576 passed** (baseline 576).
+
+### Stage 4e — producers 5 (quota/transient retry) + 7 (respawn) (2026-09-26..2026-09-27, commits `00586b2`, `517c5ae`, `1bef7fb` + this record) — IN PROGRESS, NOT YET SUBMITTED FOR REVIEW
+
+**Scope.** The last two managed producers on the durable queue:
+- **Producer 5 — quota/transient retry** (`00586b2` DB, `517c5ae` orchestrator): **implemented AND wired.**
+  - DB: retry-pause marks (migration 39), the pure A/B/R rule `turn_queue.decide_retry` (+ `db.decide_retry` /
+    `db.retry_decision` wrappers, `db.py:6418`), the supersede transaction, the retry/respawn token finalizer,
+    `pending_retry_pauses`/`mark_retry_pause_done`.
+  - Orchestrator: the managed pause recorder is wired in the recovery-finalizer loop (`orchestrator.py:~2185`) —
+    it drains `pending_retry_pauses`, replays the exact failed instruction into `_record_quota_pause` /
+    `_record_transient_pause`, so a managed failure lands a durable pause. The A/B/R decision + managed retry
+    admission is wired into the transient-paused handler (`_admit_managed_recovery_turn`, `turn_kind="retry"`,
+    `orchestrator.py:~3267`): a failed A with an earlier waiting B supersedes A's retry and runs B; head retry R
+    goes through its own pause. Emits `case_transient_retry_superseded` / `case_transient_retry_queued`.
+  - **SYS05 (A/B/R retry matrix) now GREEN** (was RED through Stage 4d).
+- **Producer 7 — managed respawn** (`517c5ae` orchestrator + `record_respawn_link` DB, `1bef7fb` hardening):
+  **execution + linkage half implemented and hardened; NOT YET WIRED into the tick.**
+  - `_respawn_manager_managed` (`orchestrator.py:3856`) is the managed execution+linkage half: one convergent
+    procedure keyed on the durable respawn token `respawn:{case}:{gen}` — idempotent token check, deterministic
+    new-session id, inherited enrollment, ONE admitted respawn turn (`_admit_managed_recovery_turn`,
+    `turn_kind="respawn"`), the durable `record_respawn_link` txn (manager flow link + affiliation +
+    `case.manager_respawned`, closes any quota/transient pause), and the 4c rebound-automation withdrawal.
+  - **Activation-revalidation hardening (`1bef7fb`, TDD-backed).** The create-vs-reuse decision is now
+    DB-canonical: the JSON session store is never deleted, so `session_store.get(new_sid)` can return a stale
+    cached row when no canonical `sessions` row exists — reuse is guarded behind `db.get_session(new_sid)`,
+    else a fresh session is created under the deterministic id. Regression:
+    `tests/test_turn_queue_respawn_revalidation.py::test_managed_respawn_ignores_stale_store_row_without_db_row`
+    (proven RED-without / GREEN-with; drives the genuine method against a real `MeshDB`).
+  - `record_respawn_link` (durable new-session/turn link) is wired; **SYS07 (respawn linkage) now GREEN** (was
+    RED through Stage 4d) — but SYS07 is a shallow DB-helper existence check, not an end-to-end respawn.
+  - **REMAINING (the exact place the in-flight work stopped): `_respawn_manager_managed` has no callers in
+    `src/`.** The legacy `_do_respawn_manager_for_case` still owns every tick respawn path
+    (`orchestrator.py:2276, 3445, 3621, 3640, 3685`). Routing an ENROLLED dead Manager to the managed path
+    (parallel to how producers 1–4/6 select the managed lane) is the next increment.
+
+**Verification (this stage, touched modules only — plain pytest, no CLI):** 50 passed across
+`test_turn_queue_respawn_revalidation`, `test_case_respawn`, `test_retry_transient`, `test_turn_queue_r5`,
+`test_turn_queue_carrier_recovery`, `test_turn_queue_producers` (the last incl. SYS05/SYS07 now green).
+
+**NEXT INCREMENT (Stage 4e completion, for the next session):**
+1. Wire `_respawn_manager_managed` selection for enrolled dead Managers into the respawn tick paths behind the
+   managed gate; legacy path stays for protocol-0 sessions until Stage 8.
+2. Add a SYS-level integration test that a dead ENROLLED Manager respawns end-to-end through the managed path
+   (fresh session + admitted respawn turn + durable link + rebound-automation withdrawal), replacing reliance
+   on the SYS07 existence stub.
+3. Close the A83 managed-respawn safety checks for the respawn token: a lost start-ack grants no second
+   invocation; a reader crash/restart refuses the old grant (no replay).
+4. Submit Stage 4e for A87 adversarial review (no prior review round has run on this stage).
+
+**Carries (unchanged from the A82 row):** the §7 oversize-managed-result → carrier artifact persistence
+deferral still stands (must close before Stage 8 deletes the legacy path); psutil declared/pinned but not
+installed in the live venv, so `reap_stale_worker_children` is a no-op until the constraints install at deploy.
 
 ## 16. Review record
 
