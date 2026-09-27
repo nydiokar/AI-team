@@ -69,6 +69,27 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-09-27 — Prewarm circuit was a one-way latch → window warming had been DEAD since 04:12Z. Fixed (PR #172, MERGED to main). Deploy = worker restart, OPERATOR-GATED.**
+Operator reported starting on a **cold, un-ticking** 5h window. Root-caused from the LIVE worker
+(`ai-team-worker` PM2, exec cwd `/home/cifran/dev/AI-team`, running merged PR #168/#169 code, flag
+`QUOTA_PREWARM_ENABLED=1`): the prewarmer *was* running, then its consecutive-failure circuit
+**latched OPEN at 2026-09-27T04:12Z and never recovers** (`skip_circuit_open` every 60s since). Two
+defects: (1) the circuit was a permanent latch — only a worker restart cleared it; (2)
+`consecutive_failures` reset only on our own verified activation, not when an **open window is
+observed** — so 3 failures spread over 5.5h (22:32→04:12), *with a healthy open window seen at 22:46
+in between*, still tripped the breaker. Matches the operator's "logged out" hunch: the 03:12/04:12
+fast `outcome=failed` turns look like a transient auth/network blip that should back off, not kill
+warming forever. **Fix:** a transient circuit now self-heals (cooldown → one half-open trial →
+close on success / doubled-capped backoff on failure); an observed open window clears the tally +
+transient circuit; `cost_exceeded`/`anchor_drift` stay latched by design (spec §13/§18). Knobs
+`QUOTA_PREWARM_CIRCUIT_COOLDOWN_SEC`/`_MAX_SEC` (3600/21600). 9 new tests; prewarmer (28) +
+coordinator (43) green. **NOT YET DEPLOYED:** warming runs worker-side; activating the fix (and
+clearing the currently-stuck in-memory circuit) needs a `pm2 restart ai-team-worker` — a
+node-carrier restart, **operator-gated**, and the worker is currently busy (live session +
+task_9ecc06d8). Surfaced to operator; not done. Once restarted on main, warming self-heals and
+keeps ticking without further restarts. (Gateway restart does nothing here — the Docker controller
+is ingest-only and correctly runs no prewarmer.)
+
 **2026-09-25 — Docker migration regressions fixed. PRs #162/#163 MERGED; gateway + task-server recreated on `76a25a9`.**
 **UID:** containers dropped to hardcoded uid 10001, host repos are uid 1000 → workers could read but never write
 (proven live: 10001 `Permission denied`, 1000 OK). Entrypoint now drops to the owner of the mounted `/app/state`
