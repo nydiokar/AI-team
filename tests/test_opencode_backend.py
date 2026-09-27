@@ -6,6 +6,7 @@ No real opencode binary is required; all subprocess calls are mocked.
 """
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend, _get_repo_lock
+from src.core.interfaces import ExecutionResult
+from src.core.telemetry import TelemetryContext
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +686,7 @@ def test_start_task_successfully(tmp_path):
 # OpenCode server transport failures
 # ---------------------------------------------------------------------------
 
-def test_server_http_timeout_kills_cached_server_process():
+def test_server_http_timeout_aborts_turn_and_preserves_server():
     b = OpenCodeServerBackend()
     key = "/repo"
 
@@ -693,26 +696,21 @@ def test_server_http_timeout_kills_cached_server_process():
     proc = _Proc()
     b._procs[key] = proc
     b._base_urls[key] = "http://127.0.0.1:4096"
-    terminated = []
-
     with (
         patch("src.backends.opencode.urllib.request.urlopen", side_effect=TimeoutError("timed out")),
-        patch(
-            "src.backends.opencode.terminate_many_popen",
-            side_effect=lambda procs: terminated.extend(procs),
-        ),
+        patch.object(b, "_http", wraps=b._http) as http_spy,
     ):
         response, err = b._http(key, "POST", "/session/ses_1/message", {"parts": []}, timeout=7)
 
     assert response == {}
     assert "timed out" in err
-    assert "will restart on next call" in err
-    assert key not in b._procs
-    assert key not in b._base_urls
-    assert terminated == [proc]
+    assert "timed out" in err
+    assert b._procs[key] is proc
+    assert b._base_urls[key] == "http://127.0.0.1:4096"
+    assert http_spy.call_args_list[1].args[2] == "/session/ses_1/abort"
 
 
-def test_server_resume_transport_failure_clears_backend_session_id(tmp_path):
+def test_server_resume_transport_failure_preserves_backend_session_id(tmp_path):
     b = OpenCodeServerBackend()
     session = _make_session(
         repo_path=str(tmp_path),
@@ -722,49 +720,274 @@ def test_server_resume_transport_failure_clears_backend_session_id(tmp_path):
 
     with (
         patch.object(b, "_ensure_server", return_value=None),
-        patch.object(
-            b,
-            "_http",
-            side_effect=[
-                ({"id": "ses_old"}, None),
-                (
-                    {},
-                    "opencode server timed out (POST /session/ses_old/message) after 7s "
-                    "— killed server; will restart on next call",
-                ),
-            ],
-        ),
+        patch.object(b, "_http", return_value=({"id": "ses_old"}, None)),
+        patch.object(b, "_send_message", return_value=ExecutionResult(
+            False, "", backend_session_id="ses_old", errors=["timeout"], error_class="timeout")),
         patch.object(b, "_parse_model", return_value=(None, None)),
     ):
         result = b.resume_session(session, "continue")
 
     assert result.success is False
-    assert session.backend_session_id == ""
-    assert result.backend_session_id == ""
+    assert session.backend_session_id == "ses_old"
+    assert result.backend_session_id == "ses_old"
 
 
-def test_server_create_transport_failure_does_not_persist_backend_session_id(tmp_path):
+def test_server_resume_missing_identity_does_not_create_blank_session(tmp_path):
+    backend = OpenCodeServerBackend()
+    session = _make_session(repo_path=str(tmp_path), backend_session_id="")
+    with patch.object(backend, "create_session") as create:
+        result = backend.resume_session(session, "continue")
+    assert result.success is False
+    assert result.error_class == "session_identity_missing"
+    create.assert_not_called()
+
+
+def test_server_resume_lost_native_session_preserves_identity(tmp_path):
+    backend = OpenCodeServerBackend()
+    session = _make_session(repo_path=str(tmp_path), backend_session_id="ses_lost")
+    with (
+        patch.object(backend, "_ensure_server", return_value=None),
+        patch.object(backend, "_http", return_value=({}, None)),
+    ):
+        result = backend.resume_session(session, "continue")
+    assert result.success is False
+    assert result.error_class == "session_unavailable"
+    assert session.backend_session_id == "ses_lost"
+    assert result.backend_session_id == "ses_lost"
+
+
+def test_server_create_transport_failure_preserves_resumable_backend_session_id(tmp_path):
     b = OpenCodeServerBackend()
     session = _make_session(repo_path=str(tmp_path), last_user_message="start")
 
     with (
         patch.object(b, "_ensure_server", return_value=None),
-        patch.object(
-            b,
-            "_http",
-            side_effect=[
-                ({"id": "ses_new"}, None),
-                (
-                    {},
-                    "opencode server timed out (POST /session/ses_new/message) after 7s "
-                    "— killed server; will restart on next call",
-                ),
-            ],
-        ),
+        patch.object(b, "_http", return_value=({"id": "ses_new"}, None)),
+        patch.object(b, "_send_message", return_value=ExecutionResult(
+            False, "", backend_session_id="ses_new", errors=["timeout"], error_class="timeout")),
         patch.object(b, "_parse_model", return_value=(None, None)),
     ):
         result = b.create_session(session)
 
     assert result.success is False
-    assert session.backend_session_id == ""
-    assert result.backend_session_id == ""
+    assert session.backend_session_id == "ses_new"
+    assert result.backend_session_id == "ses_new"
+
+
+def test_server_close_preserves_native_session_history():
+    backend = OpenCodeServerBackend()
+    session = _make_session(backend_session_id="ses_keep")
+    with patch.object(backend, "_http") as http:
+        backend.close(session)
+    http.assert_not_called()
+
+
+def test_server_startup_capacity_is_bounded(tmp_path):
+    backend = OpenCodeServerBackend()
+    backend._server_slots = threading.BoundedSemaphore(0)
+    with (
+        patch("src.core.test_guard.assert_live_calls_allowed", return_value=None),
+        patch("src.backends.opencode.subprocess.Popen") as popen,
+    ):
+        error = backend._ensure_server(str(tmp_path), str(tmp_path))
+    assert error and "capacity is full" in error
+    popen.assert_not_called()
+
+
+def test_server_compaction_uses_native_summarize_endpoint(tmp_path):
+    backend = OpenCodeServerBackend()
+    session = _make_session(repo_path=str(tmp_path), backend_session_id="ses_keep")
+    with (
+        patch.object(backend, "_ensure_server", return_value=None),
+        patch.object(backend, "_parse_model", return_value=("model", "provider")),
+        patch.object(backend, "_http", return_value=({}, None)) as http,
+    ):
+        result = backend.compact_session(session)
+    assert result.success is True
+    assert http.call_args.args[2] == "/session/ses_keep/summarize"
+    assert http.call_args.args[3] == {"providerID": "provider", "modelID": "model"}
+
+
+def test_server_activity_emits_safe_tool_label_without_arguments(monkeypatch):
+    backend = OpenCodeServerBackend()
+    stop = threading.Event()
+    ready = threading.Event()
+    session_id = "ses_live"
+    event = {
+        "payload": {
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": session_id,
+                "part": {"type": "tool", "tool": "bash", "state": {
+                    "status": "running", "input": {"command": "SECRET_COMMAND"},
+                }},
+            },
+        },
+    }
+
+    class _Stream:
+        def __init__(self):
+            self._lines = [b"data: " + json.dumps(event).encode() + b"\n"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def readline(self, _limit):
+            if self._lines:
+                stop.set()
+                return self._lines.pop(0)
+            return b""
+
+    emitted = []
+    monkeypatch.setattr(backend, "_base_urls", {"/repo": "http://localhost"})
+    monkeypatch.setattr("src.backends.opencode.urllib.request.urlopen", lambda *_a, **_k: _Stream())
+    monkeypatch.setattr("src.core.observability.emit_event", lambda *a, **kw: emitted.append((a, kw)))
+    backend._read_activity_events("/repo", session_id, None, None, stop, ready, {"at": 0.0})
+    assert emitted == [(('task_activity',), {'session_id': None, 'task_id': None, 'label': 'Using bash'})]
+    assert "SECRET_COMMAND" not in str(emitted)
+
+
+def test_server_tool_telemetry_is_structural_and_redacts_arguments():
+    context = TelemetryContext.create(turn_id="turn-1", node_id="worker", session_id="session-1")
+
+    class _Sink:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event):
+            self.events.append(event)
+
+    sink = _Sink()
+    progress = {}
+    backend = OpenCodeServerBackend()
+    backend._emit_tool_telemetry(context, sink, "bash", "call-1", "running", progress)
+    backend._emit_tool_telemetry(context, sink, "bash", "call-1", "completed", progress)
+    assert [event.event_name for event in sink.events] == ["tool.call.started", "tool.call.completed"]
+    assert all("command" not in str(event.attributes).lower() for event in sink.events)
+    assert sink.events[1].attributes["duration_ms"] >= 0
+
+
+def test_server_async_prompt_reconciles_correlated_terminal_message(tmp_path):
+    backend = OpenCodeServerBackend()
+    calls = []
+    statuses = iter([
+        ({"ses_live": {"type": "busy"}}, None),
+        ({"ses_live": {"type": "idle"}}, None),
+    ])
+    terminal = {"info": {"id": "assistant-1", "role": "assistant", "parentID": ""},
+                "parts": [{"type": "text", "text": "done"},
+                          {"type": "step-finish", "reason": "stop"}]}
+
+    def fake_http(_key, method, path, body=None, timeout=300):
+        calls.append((method, path, body))
+        if path.endswith("/prompt_async"):
+            return {}, None
+        if path == "/session/status":
+            return next(statuses)
+        if path.endswith("/message?limit=100"):
+            terminal["info"]["parentID"] = calls[0][2]["messageID"]
+            return [terminal], None
+        raise AssertionError(path)
+
+    def fake_reader(_key, _session, _context, _sink, stop, ready, _progress):
+        ready.set()
+        stop.wait(2)
+
+    backend._base_urls["/repo"] = "http://localhost"
+    with (
+        patch.object(backend, "_http", side_effect=fake_http),
+        patch.object(backend, "_read_activity_events", side_effect=fake_reader),
+        patch("src.backends.opencode._git_changed_files", return_value=[]),
+        patch("src.backends.opencode._run_git", return_value=""),
+        patch("config.config") as config,
+    ):
+        config.opencode.timeout_seconds = 60
+        result = backend._send_message("/repo", "ses_live", "prompt", str(tmp_path), time.time())
+
+    assert result.success is True
+    assert result.output == "done"
+    assert result.backend_session_id == "ses_live"
+    assert calls[0][1] == "/session/ses_live/prompt_async"
+    assert calls[0][2]["messageID"].startswith("msg_")
+
+
+def test_server_async_hard_timeout_aborts_without_dropping_session(tmp_path):
+    backend = OpenCodeServerBackend()
+    calls = []
+
+    def fake_http(_key, method, path, body=None, timeout=300):
+        calls.append((method, path))
+        return ({}, None)
+
+    def fake_reader(_key, _session, _context, _sink, stop, ready, _progress):
+        ready.set()
+        stop.wait(2)
+
+    backend._base_urls["/repo"] = "http://localhost"
+    with (
+        patch.object(backend, "_http", side_effect=fake_http),
+        patch.object(backend, "_read_activity_events", side_effect=fake_reader),
+        patch("src.backends.opencode.time.monotonic", side_effect=[0.0, 0.0, 2.0]),
+        patch("config.config") as config,
+    ):
+        config.opencode.timeout_seconds = 1
+        result = backend._send_message("/repo", "ses_live", "prompt", str(tmp_path), time.time())
+
+    assert result.success is False
+    assert result.error_class == "timeout"
+    assert result.backend_session_id == "ses_live"
+    assert ("POST", "/session/ses_live/abort") in calls
+
+
+def test_server_async_no_progress_timeout_aborts(tmp_path):
+    backend = OpenCodeServerBackend()
+    calls = []
+
+    def fake_http(_key, method, path, body=None, timeout=300):
+        calls.append((method, path))
+        return {}, None
+
+    def fake_reader(_key, _session, _context, _sink, stop, ready, _progress):
+        ready.set()
+        stop.wait(2)
+
+    backend._base_urls["/repo"] = "http://localhost"
+    with (
+        patch.object(backend, "_http", side_effect=fake_http),
+        patch.object(backend, "_read_activity_events", side_effect=fake_reader),
+        patch("src.backends.opencode.time.monotonic", side_effect=[0.0, 0.0, 31.0]),
+        patch("config.config") as config,
+    ):
+        config.opencode.timeout_seconds = 60
+        config.system.inactivity_timeout_sec = 36000
+        result = backend._send_message("/repo", "ses_live", "prompt", str(tmp_path), time.time())
+
+    assert result.success is False
+    assert "inactivity timeout" in result.errors[0]
+    assert ("POST", "/session/ses_live/abort") in calls
+
+
+def test_server_malformed_sse_is_reported_as_transport_error(monkeypatch):
+    backend = OpenCodeServerBackend()
+    ready = threading.Event()
+    stop = threading.Event()
+
+    class _Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def readline(self, _limit):
+            return b"data: {invalid-json}\n"
+
+    progress = {"at": 0.0}
+    monkeypatch.setattr(backend, "_base_urls", {"/repo": "http://localhost"})
+    monkeypatch.setattr("src.backends.opencode.urllib.request.urlopen", lambda *_a, **_k: _Stream())
+    backend._read_activity_events("/repo", "ses_live", None, None, stop, ready, progress)
+    assert ready.is_set()
+    assert "malformed" in progress["error"]
