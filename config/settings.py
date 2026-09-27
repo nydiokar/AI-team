@@ -358,6 +358,12 @@ class QuotaConfig:
     # the circuit — a "minimal" turn that is not minimal means the activation
     # environment is not what we think it is.
     prewarm_max_activation_percent: float = 2.0  # QUOTA_PREWARM_MAX_ACTIVATION_PERCENT
+    # A transient (consecutive-failures) circuit self-heals: after this cooldown
+    # the prewarmer allows ONE half-open trial, doubling the wait per failed trial
+    # up to the cap. This is what keeps warming ticking through a passing provider/
+    # auth blip WITHOUT a manual worker restart. cost/anchor circuits stay latched.
+    prewarm_circuit_cooldown_sec: int = 3600      # QUOTA_PREWARM_CIRCUIT_COOLDOWN_SEC
+    prewarm_circuit_cooldown_max_sec: int = 21600  # QUOTA_PREWARM_CIRCUIT_COOLDOWN_MAX_SEC
     # Bounded history (A78 §4): redundant confirmation snapshots older than
     # this many days are pruned (boundary-FIRST rows are always kept).
     # 0 disables pruning entirely.
@@ -683,6 +689,8 @@ class Config:
             ("QUOTA_PREWARM_MIN_INTERVAL_SEC", "prewarm_min_interval_sec", 0),
             ("QUOTA_PREWARM_MAX_PER_DAY", "prewarm_max_per_day", 0),
             ("QUOTA_PREWARM_DELAY_AFTER_RESET_SEC", "prewarm_delay_after_reset_sec", 0),
+            ("QUOTA_PREWARM_CIRCUIT_COOLDOWN_SEC", "prewarm_circuit_cooldown_sec", 60),
+            ("QUOTA_PREWARM_CIRCUIT_COOLDOWN_MAX_SEC", "prewarm_circuit_cooldown_max_sec", 60),
             ("QUOTA_SNAPSHOT_RETENTION_DAYS", "snapshot_retention_days", 0),
         ):
             try:
