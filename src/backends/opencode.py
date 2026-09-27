@@ -1259,8 +1259,15 @@ class OpenCodeServerBackend(CodingBackend):
                 if poll_err:
                     err = poll_err
                     break
+                # OpenCode 1.18.x omits idle sessions from this map; the live
+                # `/session/status` response is `{}` once a turn has finished.
+                # Treat an absent key as idle and reconcile history below. A
+                # present status entry remains authoritative (including busy).
+                status_present = isinstance(states, dict) and oc_session_id in states
                 status = states.get(oc_session_id, {}) if isinstance(states, dict) else {}
                 state = status.get("type") if isinstance(status, dict) else status
+                if not status_present:
+                    state = "idle"
                 if state == "error":
                     terminal_error = str(status.get("error") or "OpenCode session reported an error")
                     break

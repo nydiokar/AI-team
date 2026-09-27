@@ -875,7 +875,8 @@ def test_server_async_prompt_reconciles_correlated_terminal_message(tmp_path):
     calls = []
     statuses = iter([
         ({"ses_live": {"type": "busy"}}, None),
-        ({"ses_live": {"type": "idle"}}, None),
+        # OpenCode 1.18.32 omits idle sessions from /session/status.
+        ({}, None),
     ])
     terminal = {"info": {"id": "assistant-1", "role": "assistant", "parentID": ""},
                 "parts": [{"type": "text", "text": "done"},
