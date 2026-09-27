@@ -6,14 +6,14 @@ owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A91
 evidence: []
-updated_at: "2026-09-27T12:31:17+00:00"
+updated_at: "2026-09-27T12:32:06+00:00"
 ```
 
 # DISPATCH — A91 · OpenCode backend parity and reliability
 
 **Level:** 3 (backend lifecycle + live activity/telemetry integration) · **Type:** backend implementation + acceptance
 **Status:** blocked (implementation and deterministic tests built; owning-worker live acceptance is gated on Horse returning online)
-**Branch:** `feat/opencode-backend-parity` + PR + self-merge
+**Branch:** `feat/opencode-backend-parity` · draft PR [#174](https://github.com/nydiokar/AI-team/pull/174) · merge waits on owning-worker live acceptance
 **Depends on:** none. Coordinate `cancel()` / `close()` changes with A90 if it is active; do not duplicate its locality refactor.
 
 > **Goal.** Bring `OpenCodeServerBackend` up to the useful execution, progress, lifecycle, and audit capabilities already expected by AI-Team's shared `CodingBackend` harness, using OpenCode's supported server APIs behind the existing adapter. Keep `CodingBackend`, `ExecutionResult`, task dispatch, activity SSE, telemetry sink, UI, and worker protocols as the public path. Do not add a parallel OpenCode-only task/message system or change operator-owned timeout values.
@@ -35,7 +35,7 @@ Implemented on `feat/opencode-backend-parity`:
 - Usage and tool lifecycle facts use the existing default-deny telemetry schema/sink; absent usage is recorded as unavailable coverage. Native compaction calls `/summarize`. Routine close preserves native history; only the explicitly temporary, successful `run_oneoff` session uses `DELETE`. Missing or lost saved session identity fails recoverably without creating a blank replacement.
 - Deterministic tests cover async terminal correlation, request timeout and inactivity abort, bounded server startup, malformed SSE, SSE tool-label privacy, structural tool telemetry, native compaction, history-preserving close, and resumable identity. Targeted OpenCode, telemetry, backend, activity-forwarder, cancellation, Codex, and Claude telemetry suites passed: 122 tests (see test command in the PR).
 
-The local `opencode --version` is `1.18.32`, but this is not the owning worker. `tailscale status` shows Horse offline; no request was sent to the worker and no worker process was started or restarted. Official docs establish `/global/health`, `/doc`, `/event`, `/prompt_async`, `/session/status`, message history, abort, and summarize endpoints, but do not supply the owning worker's generated schema/event payload. The worker-specific event fixture and live acceptance are still required before merge/closure. Optional provider-picker discovery remains deferred; compaction only reads configured defaults when the session has no selected model.
+The local `opencode --version` is `1.18.32`, but this is not the owning worker. `tailscale status` shows Horse offline; no request was sent to the worker and no worker process was started or restarted. Official docs establish `/global/health`, `/doc`, `/event`, `/prompt_async`, `/session/status`, message history, abort, and summarize endpoints, but do not supply the owning worker's generated schema/event payload. The worker-specific event fixture and live acceptance are still required before merge/closure. Draft PR #174 is open. Optional provider-picker discovery remains deferred; compaction only reads configured defaults when the session has no selected model.
 
 **Bounded-resource note (§7):** each backend instance admits at most 8 simultaneous turns/event readers and retains at most 8 repo-scoped OpenCode processes. Requests for a ninth distinct repo fail closed with a recoverable capacity message until a slot is released during normal backend shutdown; idle-server eviction is deferred because killing a repo server can disrupt native session continuity. This is a concrete bounded behavior and does not change timeout config.
 
