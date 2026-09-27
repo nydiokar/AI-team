@@ -670,6 +670,33 @@ async def _execute_task(
             "return_code": 0,
         }
 
+    if action == "cancel_turn":
+        # Interrupt the in-flight Claude SDK turn on this worker. Does NOT close the
+        # session — the backend process stays pooled so the next turn can reuse it.
+        # Mirrors cancel_codex but targets the SDK interrupt path instead of the
+        # Codex ownership table.
+        session = _make_session_from_payload(payload)
+        if session is not None:
+            backend = backends.get(session.backend or "claude")
+            canceller = getattr(backend, "cancel", None) if backend is not None else None
+            if callable(canceller):
+                try:
+                    await asyncio.to_thread(canceller, session)
+                except Exception as exc:
+                    logger.warning(
+                        "event=cancel_turn_backend_failed session_id=%s err=%s",
+                        getattr(session, "session_id", ""), exc,
+                    )
+        return {
+            "success": True,
+            "output": "cancel_turn requested",
+            "errors": [],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 0,
+        }
+
     if action == "cancel_codex":
         from src.backends.codex_ownership import CodexOwnership
         target = payload.get("target_task_id")
@@ -962,26 +989,44 @@ async def _execute_task(
 class _ActivityForwarder:
     """Best-effort background sender for live ``task_activity`` signals.
 
-    A remote worker's granular pill labels ("Using Bash", "Thinking…") are
-    written to *its own* events.ndjson, which the gateway's SSE never tails — so
-    the UI shows a bare "Working…". This forwards them over the existing
-    controller HTTP channel; the gateway re-emits them into the feed the UI reads.
+    A worker's granular pill labels ("Using Bash", "Thinking…") are written to
+    *its own* events.ndjson. Under the controller/worker split (Docker) the two
+    run in separate containers with separate volumes, so the controller's SSE
+    never sees that file — the ONLY way a label reaches the UI is this explicit
+    HTTP forward, which the controller re-emits into the feed the UI tails.
 
-    Single daemon thread + bounded queue: it never blocks the SDK stream thread
-    and drops live signal under backpressure (durable telemetry is unaffected).
-    Only meaningful for genuinely remote workers — a co-located worker already
-    shares the gateway's events.ndjson, so its caller must not register one
-    (that would double-emit).
+    Single daemon thread + bounded queue: never blocks the SDK stream thread and
+    drops live signal under backpressure (durable telemetry is unaffected).
+    Delivery is best-effort and deliberately NOT retried — a dropped label
+    self-heals on the next event, and not retrying means no duplicate or stale
+    labels reach the UI (so no dedupe is needed downstream). Failures are counted
+    and logged (with throttling), never silently swallowed.
     """
 
     def __init__(self, http: "_HTTP", node_id: str, *, max_queue: int = 256) -> None:
         self._http = http
         self._node_id = node_id
         self._q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max_queue)
+        self._stats_lock = threading.Lock()
+        self._sent = 0
+        self._failed = 0
+        self._dropped = 0
+        self._consecutive_failures = 0
+        self._degraded = False
         self._thread = threading.Thread(
             target=self._run, name="activity-forwarder", daemon=True
         )
         self._thread.start()
+
+    def stats(self) -> Dict[str, int]:
+        """Observable counters for tests/health — never silently invisible."""
+        with self._stats_lock:
+            return {
+                "sent": self._sent,
+                "failed": self._failed,
+                "dropped": self._dropped,
+                "consecutive_failures": self._consecutive_failures,
+            }
 
     def offer(self, payload: Dict[str, Any]) -> None:
         """Observability forwarder hook — enqueue a task_activity event, else ignore."""
@@ -1001,15 +1046,50 @@ class _ActivityForwarder:
         try:
             self._q.put_nowait(body)
         except queue.Full:
-            pass  # drop under backpressure; the pill self-heals on the next event
+            # Drop under backpressure; the pill self-heals on the next event.
+            # Counted + logged (throttled) so a persistently full queue is visible.
+            with self._stats_lock:
+                self._dropped += 1
+                dropped = self._dropped
+            if dropped == 1 or dropped % 100 == 0:
+                logger.warning(
+                    "event=activity_forward_dropped reason=queue_full node_id=%s dropped_total=%d",
+                    self._node_id, dropped,
+                )
 
     def _run(self) -> None:
         while True:
             body = self._q.get()
             try:
                 self._http.post("/events/activity", body, timeout=3)
-            except Exception:
-                pass
+            except Exception as e:
+                # A broken control-plane path must be visible, not swallowed. Log
+                # the first failure of a streak, then throttle; a full drop count
+                # is retained in stats() regardless.
+                with self._stats_lock:
+                    self._failed += 1
+                    self._consecutive_failures += 1
+                    streak = self._consecutive_failures
+                    failed_total = self._failed
+                    self._degraded = True
+                if streak == 1 or streak % 50 == 0:
+                    logger.warning(
+                        "event=activity_forward_failed node_id=%s err_class=%s consecutive=%d failed_total=%d",
+                        self._node_id, type(e).__name__, streak, failed_total,
+                    )
+                continue
+            with self._stats_lock:
+                self._sent += 1
+                sent_total = self._sent
+                failed_total = self._failed
+                was_degraded = self._degraded
+                self._degraded = False
+                self._consecutive_failures = 0
+            if was_degraded:
+                logger.info(
+                    "event=activity_forward_recovered node_id=%s sent_total=%d failed_total=%d",
+                    self._node_id, sent_total, failed_total,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1112,29 +1192,217 @@ class WorkerAgent:
             logger.warning("event=proactive_turn_report_failed session_id=%s", session_id, exc_info=True)
 
     def _setup_activity_forwarding(self) -> None:
-        """Forward live task_activity to the gateway when we are a *remote* worker.
+        """Forward live task_activity to the controller over the explicit HTTP
+        event interface.
 
-        Skipped when co-located: a worker whose controller is on this same host
-        already writes into the gateway's events.ndjson, so forwarding would make
-        the gateway re-emit a duplicate. Co-location is detected by the controller
-        host resolving to loopback, our own tailscale IP, or our hostname.
+        Transport is EXPLICIT, never inferred from network identity. Under the
+        controller/worker split the two run in separate containers that do NOT
+        share a filesystem even on the same host / same Tailscale IP, so a worker
+        must ALWAYS forward its activity — the controller owns the SSE feed the UI
+        tails. Forwarding is skipped only for a legacy single-host deployment
+        where this worker writes DIRECTLY into the controller's events.ndjson
+        (same process / shared FS), opted in via ``WORKER_SHARES_CONTROLLER_FS=1``
+        to avoid double-emitting. The old "controller URL looks local ⇒ shared
+        events.ndjson" heuristic was removed: it silently disabled forwarding
+        under Docker and left the pill stuck on "Working…".
         """
         try:
-            host = (urllib.parse.urlparse(self.cfg.controller_url).hostname or "").lower()
-            local = {"", "127.0.0.1", "localhost", "::1", (self.cfg.tailscale_ip or "").lower()}
-            try:
-                local.add(socket.gethostname().lower())
-            except Exception:
-                pass
-            if host in local:
-                logger.info("event=activity_forward_disabled reason=colocated controller_host=%s", host)
+            if self.cfg.shares_controller_fs:
+                logger.info(
+                    "event=activity_forward_disabled reason=shared_controller_fs node_id=%s",
+                    self.cfg.node_id,
+                )
                 return
             self._activity_forwarder = _ActivityForwarder(self._http, self.cfg.node_id)
             from src.core.observability import register_event_forwarder
             register_event_forwarder(self._activity_forwarder.offer)
-            logger.info("event=activity_forward_enabled controller_host=%s node_id=%s", host, self.cfg.node_id)
+            logger.info(
+                "event=activity_forward_enabled controller_url=%s node_id=%s",
+                self.cfg.controller_url, self.cfg.node_id,
+            )
         except Exception:
             logger.warning("event=activity_forward_setup_failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Quota observation (harness-side)
+    # ------------------------------------------------------------------
+
+    async def _quota_observe_loop(self) -> None:
+        """Observe Claude subscription quota where the harness lives and ship a
+        typed observation to the controller over the explicit HTTP interface.
+
+        The controller container has no Claude binary or OAuth credentials by
+        design, so quota telemetry MUST be read here and crossed to the
+        controller — never spawned controller-side. This uses the ``get_usage``
+        control request, which is free (not a model turn); prewarm is a separate,
+        deliberately-OFF concern and is not touched here.
+        """
+        if not self.cfg.quota_observe_enabled:
+            logger.info("event=quota_observe_disabled node_id=%s", self.cfg.node_id)
+            return
+        interval = max(30, int(self.cfg.quota_observe_interval_sec))
+        logger.info(
+            "event=quota_observe_enabled node_id=%s interval_sec=%d",
+            self.cfg.node_id, interval,
+        )
+        while not self._shutdown.is_set():
+            await self._observe_quota_once()
+            try:
+                await asyncio.wait_for(self._shutdown.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _observe_quota_once(self) -> None:
+        """One harness-side read + ship. Never raises: a failed read ships an
+        explicit error observation so the controller can surface
+        harness-unavailable (distinct from a valid empty window)."""
+        provider = "claude"
+        observed_at = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        try:
+            from config import config as _config
+            from src.services.claude_usage_control import (
+                _sdk_version,
+                claude_code_version,
+                read_claude_usage_raw_with_new_client,
+            )
+
+            quota_cfg = getattr(_config, "quota", None)
+            claude_cfg = getattr(_config, "claude", None)
+            cli_path = getattr(claude_cfg, "sdk_cli_path", None)
+            timeout = float(getattr(quota_cfg, "claude_get_usage_timeout_sec", 60.0))
+            raw = await read_claude_usage_raw_with_new_client(cli_path=cli_path, timeout=timeout)
+            body = {
+                "node_id": self.cfg.node_id,
+                "provider": provider,
+                "principal_key": getattr(quota_cfg, "claude_principal_key", "") or "",
+                "sdk_version": _sdk_version(),
+                "claude_code_version": claude_code_version(cli_path=cli_path, timeout_sec=2.0),
+                "observed_at": observed_at,
+                "usage": raw,
+            }
+            await asyncio.to_thread(self._http.post, "/telemetry/quota-observation", body, 15)
+            logger.debug("event=quota_observation_shipped node_id=%s", self.cfg.node_id)
+        except Exception as e:
+            logger.warning(
+                "event=quota_observation_failed node_id=%s err_class=%s",
+                self.cfg.node_id, type(e).__name__,
+            )
+            try:
+                await asyncio.to_thread(
+                    self._http.post,
+                    "/telemetry/quota-observation",
+                    {
+                        "node_id": self.cfg.node_id,
+                        "provider": provider,
+                        "observed_at": observed_at,
+                        "error": type(e).__name__,
+                    },
+                    15,
+                )
+            except Exception as post_err:
+                logger.warning(
+                    "event=quota_observation_error_report_failed node_id=%s err_class=%s",
+                    self.cfg.node_id, type(post_err).__name__,
+                )
+
+    # ------------------------------------------------------------------
+    # Window warming (harness-side)
+    # ------------------------------------------------------------------
+
+    def _emit_prewarm_event(self, name: str, payload: Dict[str, Any]) -> None:
+        """Surface prewarmer decisions in the worker log. A turn actually firing
+        is additionally logged by the prewarmer itself at INFO
+        (event=quota_prewarm_window_opened). The controller's events.ndjson is a
+        separate process/volume, so warming visibility lives in the worker log."""
+        logger.info("event=%s node_id=%s payload=%s", name, self.cfg.node_id, payload)
+
+    async def _build_quota_prewarmer(self) -> Optional[Any]:
+        """Construct (do NOT start) a prewarmer against a LOCAL activation-capable
+        coordinator (observe_locally=True). Opening a window costs one real
+        (haiku, max_turns=1) turn, which only a claude-capable worker can spend —
+        the controller container has no binary/credentials. Warming therefore
+        lives here, co-located with the harness that can actually fire it."""
+        try:
+            from src.services.quota_window_coordinator import (
+                build_quota_coordinator_from_config,
+            )
+            from src.services.quota_window_prewarmer import (
+                build_prewarmer_from_config,
+            )
+
+            coordinator = build_quota_coordinator_from_config(
+                enabled=True, observe_locally=True,
+            )
+            return build_prewarmer_from_config(
+                coordinator=coordinator,
+                enabled=True,
+                event_sink=self._emit_prewarm_event,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=quota_prewarmer_worker_build_failed node_id=%s err_class=%s",
+                self.cfg.node_id, type(e).__name__,
+            )
+            return None
+
+    async def _prewarm_reconcile(self, want: bool, prewarmer: Optional[Any]) -> Optional[Any]:
+        """Bring the running prewarmer in line with the desired on/off state.
+        Idempotent: called every supervisor cycle. Returns the (possibly new or
+        cleared) prewarmer handle. This is the whole dynamic-toggle seam."""
+        if want and prewarmer is None:
+            prewarmer = await self._build_quota_prewarmer()
+            if prewarmer is not None:
+                await prewarmer.start()
+                logger.info(
+                    "event=quota_prewarmer_worker_started node_id=%s", self.cfg.node_id,
+                )
+        elif not want and prewarmer is not None:
+            await prewarmer.stop()
+            prewarmer = None
+            logger.info(
+                "event=quota_prewarmer_worker_stopped node_id=%s", self.cfg.node_id,
+            )
+        return prewarmer
+
+    async def _quota_prewarm_supervisor_loop(self) -> None:
+        """Start/stop window warming DYNAMICALLY from the runtime-flag registry.
+
+        Warming can only fire where Claude executes (this worker), but WHETHER it
+        runs stays an operator toggle: the QUOTA_PREWARM_ENABLED boolean in the
+        flag registry (mesh.db, read via runtime_flag_enabled — the SAME source
+        the controller uses, NOT an env var), re-read every cycle so it can be
+        flipped on/off with no restart. That dynamic nature is the point of the
+        registry. The only static gate is the precondition that this worker has a
+        claude harness at all — without it warming can never work, so we never
+        supervise."""
+        if "claude" not in self.cfg.backends:
+            return
+        from src.control.db import runtime_flag_enabled
+
+        interval = max(30, int(self.cfg.quota_observe_interval_sec))
+        logger.info(
+            "event=quota_prewarm_supervisor_started node_id=%s interval_sec=%d",
+            self.cfg.node_id, interval,
+        )
+        prewarmer: Optional[Any] = None
+        try:
+            while not self._shutdown.is_set():
+                try:
+                    want = runtime_flag_enabled("QUOTA_PREWARM_ENABLED")
+                except Exception as e:
+                    logger.warning(
+                        "event=quota_prewarm_flag_read_failed node_id=%s err_class=%s",
+                        self.cfg.node_id, type(e).__name__,
+                    )
+                    want = prewarmer is not None  # hold current state on a read error
+                prewarmer = await self._prewarm_reconcile(want, prewarmer)
+                try:
+                    await asyncio.wait_for(self._shutdown.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if prewarmer is not None:
+                await prewarmer.stop()
 
     # ------------------------------------------------------------------
     # Registration
@@ -1615,6 +1883,11 @@ class WorkerAgent:
         set_log_context(task_id=task_id, session_id=session_id)
         # Lightweight control action — must NOT consume a turn slot or it could
         # wait hours behind long-running turns before the process is freed.
+        if task_row.get("action") == "cancel_turn":
+            # Out-of-slot: interrupt the live Claude turn without consuming a work
+            # slot (which would queue behind the very turn we're trying to kill).
+            await self._handle_close_session(task_row)
+            return
         if task_row.get("action") == "cancel_codex":
             async with self._codex_control_semaphore:
                 await self._handle_close_session(task_row)
@@ -1784,6 +2057,8 @@ class WorkerAgent:
             )
         )
         heartbeat = asyncio.create_task(self._heartbeat_loop())
+        quota_observer = asyncio.create_task(self._quota_observe_loop())
+        quota_prewarm = asyncio.create_task(self._quota_prewarm_supervisor_loop())
         if self._canary:
             logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
             poller = asyncio.create_task(self._shutdown.wait())
@@ -1818,9 +2093,9 @@ class WorkerAgent:
             for t in pending:
                 t.cancel()
 
-        for t in (poller, heartbeat, nudge_listener, job_watcher):
+        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm):
             t.cancel()
-        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, return_exceptions=True)
+        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, return_exceptions=True)
 
         # Terminate any backend subprocesses still alive (e.g. a hung
         # claude.exe that outlived its task). Without this, a worker restart

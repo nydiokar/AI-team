@@ -46,7 +46,7 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 | Job | Packet | Depends on | Status | What it is |
 |---|---|---|---|---|
-| **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | dispatched | Start the unified durable turn-queue build. Claude is mandatory; background-ordering checks are part of carrier integration, with tests and independent review required before rollout. The former standalone Claude investigation is folded into this job. |
+| **A82** | `AGENT_82_SESSION_TURN_QUEUE.md` | — | active — Stages 3, 4a–4d ACCEPTED 2026-09-26 (`9e25172`, pushed, unmerged); Stage 4e (producers 5 quota/transient retry + 7 respawn) next | Unified durable turn queue on `feat/session-turn-queue` (worktree `~/dev/AI-team-wt/a82`, never merged until reviewed). Stages 1–2 ACCEPT; Stage 3 reworked twice, adversarial review pending. End state = ONE pathway: new Stage 8 cutover deletes protocol 0 (see A87 rulings). **Deferred (§7 trace):** an oversize managed result enters `recovery_required` with a bounded reason, but the full output is not persisted to carrier artifact storage (lives only in worker memory until the handler exits) — must be closed before Stage 8 deletes the legacy path. **Also deferred:** (a) a `run_in_background` shell reparented away from a dead Claude CLI is not covered by the process-gone proof (SDK 0.2.110 exposes no process-group/new-session hook; not patching vendored code) — the next managed turn could overlap it; (b) psutil is declared/pinned on the branch but not installed in the live venv, so `reap_stale_worker_children` is still a no-op until the constraints install runs at deploy. **Stage 4a preconditions/deferrals:** (c) enrollment may only be performed inside the gateway process (per-process presence flag) — Stage 7 must enforce; (d) set `MESH_LOCAL_CARRIER_NODE_ID` = local daemon `WORKER_NODE_ID` before enrolling any session; (e) Stage-6 withdraw of a lineage-pending/partially-lineaged row MUST void/close the child flow_run and clear the session affiliation (else phantom child blocks parent close_case and inflates the task.dispatched gate count); (f) `/api/instructions` body cap is derived ≈3.8 MiB for ALL callers (design said 2 MiB); (g) `node_heartbeat_timeout_sec` must be ≥ 2× the 30 s worker heartbeat; (h) cross-process completion wakes the scheduler within ≤30 s (real wake deferred to A84); (i) Telegram retries are not deduplicated (no stable inbound id). **Stage 4b carries:** (j) operator-stop hold is a durable record, but stale whole-row session saves can still rewrite the displayed status; (k) Stop with no active turn holds nothing (legacy parity); (l) operator `sweep_orphaned_cases` force-closes a stopped Manager's Case; (m) `X-AI-Team-Principal: automation` is self-declared under the shared token — an automation caller that omits it counts as operator until A71 authenticated principals. **Stage 4c carries:** (n) failed/failed_node_offline continuation turns consume the wake even if the Manager never ran (legacy parity); (o) A84 must fold wait_resolved + outbox consumption + token CAS into one txn. **Stage 4d carries:** (p) watched-job notification delivery is at-most-once across gateway restarts (in-memory poll watermark, legacy parity); (q) heartbeat turns ending failed_node_offline/cancelled count no beat (intentional); (r) linked heartbeat leases finalize only while CASE_CONTINUATION or CACHE_HEARTBEAT flag is on. |
 | **A75** | `AGENT_75_DASHBOARD_TOKEN_NOT_IN_HTML.md` | A71 design | dispatched | Remove the control token from served dashboard HTML (`window` global); keep TokenGate working via a non-page-inspectable flow. Sequenced after A71's credential design. |
 | **A71** | `AGENT_71_MESH_PER_NODE_CREDENTIALS.md` | — | dispatched | Replace the single shared `WORKER_TOKEN` with gateway-issued per-node credentials bound to `node_id` on register/heartbeat/claim/result; refuse cross-node claims; stop spoofed incarnation-bump DoS. Flag-gated default OFF. Worker-side lands on surfaced redeploy (Horse). |
 | **A65** | `AGENT_65_COST_MONITORING_VISIBILITY.md` | — | active — final-review remediation | Add the missing bounded browser-push delivery for P3 budget alerts; UI/API and enforcement-off governor seam already landed. |
@@ -68,6 +68,27 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 ---
 
 ## Recent shift notes
+
+**2026-09-27 — Prewarm circuit was a one-way latch → window warming had been DEAD since 04:12Z. Fixed (PR #172, MERGED to main). Deploy = worker restart, OPERATOR-GATED.**
+Operator reported starting on a **cold, un-ticking** 5h window. Root-caused from the LIVE worker
+(`ai-team-worker` PM2, exec cwd `/home/cifran/dev/AI-team`, running merged PR #168/#169 code, flag
+`QUOTA_PREWARM_ENABLED=1`): the prewarmer *was* running, then its consecutive-failure circuit
+**latched OPEN at 2026-09-27T04:12Z and never recovers** (`skip_circuit_open` every 60s since). Two
+defects: (1) the circuit was a permanent latch — only a worker restart cleared it; (2)
+`consecutive_failures` reset only on our own verified activation, not when an **open window is
+observed** — so 3 failures spread over 5.5h (22:32→04:12), *with a healthy open window seen at 22:46
+in between*, still tripped the breaker. Matches the operator's "logged out" hunch: the 03:12/04:12
+fast `outcome=failed` turns look like a transient auth/network blip that should back off, not kill
+warming forever. **Fix:** a transient circuit now self-heals (cooldown → one half-open trial →
+close on success / doubled-capped backoff on failure); an observed open window clears the tally +
+transient circuit; `cost_exceeded`/`anchor_drift` stay latched by design (spec §13/§18). Knobs
+`QUOTA_PREWARM_CIRCUIT_COOLDOWN_SEC`/`_MAX_SEC` (3600/21600). 9 new tests; prewarmer (28) +
+coordinator (43) green. **NOT YET DEPLOYED:** warming runs worker-side; activating the fix (and
+clearing the currently-stuck in-memory circuit) needs a `pm2 restart ai-team-worker` — a
+node-carrier restart, **operator-gated**, and the worker is currently busy (live session +
+task_9ecc06d8). Surfaced to operator; not done. Once restarted on main, warming self-heals and
+keeps ticking without further restarts. (Gateway restart does nothing here — the Docker controller
+is ingest-only and correctly runs no prewarmer.)
 
 **2026-09-25 — Docker migration regressions fixed. PRs #162/#163 MERGED; gateway + task-server recreated on `76a25a9`.**
 **UID:** containers dropped to hardcoded uid 10001, host repos are uid 1000 → workers could read but never write
@@ -240,6 +261,34 @@ duck-typed fakes gained the new tick-branch delegation) green. **Known boundary 
 first):** an operator manually re-sending the failed instruction while a pause is open can still race
 the one auto-retry — single-flight guards the dispatcher, not the operator. `feat/transient-provider-self-heal`.
 
+**2026-09-26 — Window warming regressed to inert under Docker; moved to the worker (execution side).**
+Root cause: the Docker controller/worker split runs the gateway with `GATEWAY_LOCAL_EXECUTION_ENABLED=false`
+→ `build_quota_coordinator_from_config(observe_locally=False)` builds the coordinator with
+`adapters=[]` (quota is observed harness-side by the worker and POSTed). The `QuotaWindowPrewarmer`
+was constructed **controller-side**, so `_adapter()` returned None and every activation decision
+short-circuited to `skip(no_activatable_adapter)` — the controller has no Claude binary to spend the
+haiku turn, so **no 5h window was ever fired**. The flag was on and the loop even started; only the
+*act* half was wired to nothing. Fix (`feat/worker-side-window-warming`): invariant = **warming runs
+where Claude executes**. (1) `orchestrator._build_quota_prewarmer` now skips when the coordinator has
+no activation-capable adapter (`_coordinator_can_activate()`), so an ingest-only controller no longer
+stands up an inert loop; single-process gateways are byte-identical. (2) The worker
+(`src/worker/agent.py`) now builds a LOCAL activation-capable coordinator (`observe_locally=True`) and
+runs the same tested prewarmer brain. **The enable stays a DYNAMIC registry flag, not env** — a
+supervisor loop in the worker (`_quota_prewarm_supervisor_loop` → `_prewarm_reconcile`) re-reads
+`runtime_flag_enabled("QUOTA_PREWARM_ENABLED")` every cycle and starts/stops warming LIVE, so it can
+be flipped on/off with **no restart** (the whole point of the registry). The only static gate is a
+`claude` backend (can't warm without a harness). `effect_scope` corrected `startup`→`live`.
+Deployment-shape-independent: works single-process or split. **Enablement/toggle:** flip
+`QUOTA_PREWARM_ENABLED` in the mesh.db the *worker* reads (`MESH_DB_PATH` relative to its cwd —
+`state/mesh.db` at the repo; `scripts/ops_flag.sh`). Caveat/pre-existing split: the control-API writes
+the *controller's* mesh.db (a different file under the Docker volume), so an API toggle is not seen by
+the native worker until the two flag stores are unified — out of scope here, flagged. **§7 deferral (multi-worker):** with N
+claude workers each running a prewarmer, up to N minimal `haiku` turns could fire at a window boundary
+before any observes the new window. Bounded and cheap: warming is idempotent (skip-if-open is
+self-correcting once one worker opens it), each worker has its own `MIN_INTERVAL_SEC` + `MAX_PER_DAY`
+budget. Not a live concern (one claude worker today). Close with a store-backed single-owner lock when
+a second warming worker is added.
+
 **2026-08-19 — Quota windows: keep the rhythm ticking, and resume on the provider's own clock.**
 Two halves of the same problem. **(1) The 5-hour window now gets kept alive.**
 `SESSION_WINDOW_WARMING_SPEC.md` items 1-6 were built long ago; 7-10 (activation, classification,
@@ -273,7 +322,8 @@ deliberately dropped. Three gates were added to close §7/§9A/§13 honestly: **
 (a `reset_at` that moves forward while the old boundary has not elapsed = sliding window ⇒ circuit
 open, i.e. ambiguity disables automation), **cost measured as the provider's own `used_percent`
 delta** across the activation (2 breaches ⇒ circuit), and a **principal-identity gate**. Cross-node
-locking (§9A) is N/A by architecture — only the gateway constructs a prewarmer, never a worker.
+locking (§9A) was N/A while only the single-process gateway constructed a prewarmer — see the
+2026-09-26 entry below, which moved warming to the worker and reopened that concern (bounded/deferred).
 The resume proposal now reaches the operator on **Web Push + Telegram**: push deep-links to
 `/work/{case_id}`, Telegram is **notification-only by design** (no approve affordance — approving
 spends real money, so the decision stays on the authenticated Web UI). AUTO resumes notify too,

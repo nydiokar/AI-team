@@ -1,3 +1,18 @@
+# ============================================================================
+# NON-CANONICAL / EXPERIMENTAL — containerized worker.
+#
+# As of 2026-09-25 the CANONICAL execution worker is the NATIVE host process
+# supervised by PM2 (see `ecosystem.config.js` app `ai-team-worker` and
+# `docs/RUNBOOKS/OPERATIONS_PM2.md` → "Native Worker"). The control plane
+# (gateway + task-server in `compose.yaml`) stays containerized; the WORKER does
+# not.
+#
+# This file is retained for reference / sandbox experimentation only. It is NOT
+# part of the supported deployment. Do NOT run it for a node that already has a
+# native `ai-team-worker` PM2 process — that yields two workers for one physical
+# node. This container projects a synthetic HOME (/app, /app/.codex, /app/.claude)
+# which is exactly what the native cutover removed.
+# ============================================================================
 name: ai-team-worker-${WORKER_NODE_ID}
 
 services:

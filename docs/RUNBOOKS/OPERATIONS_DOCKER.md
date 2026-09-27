@@ -1,7 +1,18 @@
 # Docker Operations
 
-This is the supported Linux production deployment for the AI-Team gateway. It
-replaces PM2 with Docker Compose. Read [`DEPLOYMENT_DOCKER_DESIGN.md`](../DEPLOYMENT_DOCKER_DESIGN.md)
+> **Scope note (2026-09-25).** Docker is canonical for the **control plane only**
+> (gateway + task-server, `compose.yaml`). The **execution worker is NO LONGER
+> containerized** — it runs as a native host process supervised by PM2. See
+> [`OPERATIONS_PM2.md` → "Native Worker"](OPERATIONS_PM2.md#native-worker-canonical-execution-node).
+> The containerized-worker sections below (`deploy/compose.worker.yaml`, Codex/Claude
+> login *inside the container*, `/app/.codex`, `/app/.claude`,
+> `DOCKER_DATA_ROOT/workers/...`) are **non-canonical / experimental** and retained
+> for reference only. Do not run a container worker for a node already served by the
+> native `ai-team-worker` PM2 process.
+
+This is the supported Linux production deployment for the AI-Team **control plane**
+(gateway + task-server). It replaces PM2 for the control plane with Docker Compose.
+Read [`DEPLOYMENT_DOCKER_DESIGN.md`](../DEPLOYMENT_DOCKER_DESIGN.md)
 for scope and non-goals before deploying.
 
 ## Controller machine

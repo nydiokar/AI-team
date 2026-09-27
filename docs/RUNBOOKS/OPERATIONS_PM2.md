@@ -139,8 +139,117 @@ timeout (the T4 bug). Worker nodes update on their own cadence. After T4
 `DEPLOY_HEALTH_URL`, `DEPLOY_HEALTH_TIMEOUT`, `DEPLOY_BRANCH`. Full list in the
 script header. The script is Linux/bash only (it runs on the gateway-host).
 
+## Native Worker (canonical execution node)
+
+**Canonical architecture (as of 2026-09-25).** The execution worker runs as a
+**native host process supervised by PM2**, as the ordinary host user — *not* in a
+container. The control plane (gateway + task-server) stays containerized (Docker)
+and is independent of the worker. A containerized worker (`deploy/compose.worker.yaml`)
+is **non-canonical / experimental** and must not be run alongside the native worker
+for the same node.
+
+| Concern | Canonical value |
+| --- | --- |
+| Control plane (gateway / task-server) | Docker containers |
+| Execution worker | Native host process |
+| Supervisor | PM2 (`ecosystem.config.js`, app `ai-team-worker`) |
+| Host environment | The normal host user's `HOME`, `PATH`, Claude/Codex/Git/gh/Docker/Python/Node, MCP config, repos — authoritative |
+| Worker ↔ controller | Explicit HTTP over the tailnet (Bearer `WORKER_TOKEN`); no shared filesystem/credentials |
+
+The worker runs as the host user (`whoami` = the login user, `HOME=/home/<user>`),
+resolving `claude`, `codex`, `git`, `gh`, `docker`, `python`, `node`, `npm`, `pnpm`,
+and MCP servers from the normal host `PATH` and `~/.claude.json` / `~/.codex` — never
+synthetic container paths like `/app/.claude` or `/app/.codex`.
+
+### Required env (in `.env`, loaded by `worker_main.py`)
+
+- `WORKER_NODE_ID` — stable node identity (e.g. `kanebra-worker`)
+- `WORKER_TOKEN` — controller worker token (Bearer auth to the task-server)
+- `CONTROLLER_URL` — task-server URL, e.g. `http://<controller-tailscale-ip>:9002`
+- `WORKER_TAILSCALE_IP`, `WORKER_API_PORT` (default `9001`)
+- `WORKER_BACKENDS` (e.g. `claude,codex,opencode,opencode-server`), `WORKER_MAX_CONCURRENT`
+- `WORKER_PROJECTS_ROOT` — repository/workspace root for discovery
+
+Template: [`deploy/worker.env.example`](../../deploy/worker.env.example). Secrets are
+**never** captured into PM2's dump — `ecosystem.config.js` uses `filter_env`
+(prefixes `WORKER_`, `CONTROLLER_`, `CLAUDE_`, …) so `pm2 save` cannot leak them; each
+app re-reads `.env` on start.
+
+### Endpoints
+
+- Task-server (controller API the worker uses): `CONTROLLER_URL` → `:9002`
+- Gateway / Web UI + SSE + read models: `:9003`
+- Worker API (node-local): `:9001`
+
+### Start / Stop / Restart / Logs
+
+```bash
+# Start (worker node only)
+pm2 start ecosystem.config.js --only ai-team-worker --update-env
+
+# Restart (rare — disrupts live sessions; prefer letting autorestart handle crashes)
+pm2 restart ai-team-worker --update-env
+
+# Stop / remove
+pm2 stop ai-team-worker
+pm2 delete ai-team-worker
+
+# Logs
+pm2 logs ai-team-worker
+# files: logs/pm2-worker-out.log , logs/pm2-worker-error.log
+```
+
+PM2 config for the worker: `autorestart: true`, `max_restarts: 10`,
+`kill_timeout: 35000` (longer than the ~30s in-process drain window in
+`src/worker/agent.py`, so an in-flight task drains before the process dies).
+
+### Health verification (do NOT trust `online` alone)
+
+```bash
+pm2 describe ai-team-worker                       # status online, sane restart count
+curl -s http://127.0.0.1:9003/health              # gateway ok
+curl -s http://<controller-ip>:9002/health        # task-server ok (nodes_online)
+# Confirm THIS node heartbeats fresh in the controller read model:
+curl -s -H "Authorization: Bearer $DASHBOARD_TOKEN" \
+  http://127.0.0.1:9003/api/nodes | jq '.[] | {node_id,status,last_heartbeat}'
+```
+
+A healthy worker: exactly one **online** entry for this node with a fresh
+`last_heartbeat`, activity `task_activity` events flowing to `/api/events` and the
+SSE stream `/api/events/stream`, and (if the quota repair is deployed)
+`quota.worker_observation_ingested` events from this node.
+
+### Node identity
+
+`WORKER_NODE_ID` is the stable identity registered with the controller. Only one
+**online** worker per physical node is expected; stale offline registrations
+(old test/canary node ids) are harmless historical rows.
+
+### Recovery after reboot
+
+```bash
+pm2 save        # after a healthy start, persist the process list
+pm2 startup     # run the printed command once to install the boot unit
+```
+
+On reboot PM2 resurrects `ai-team-worker`; it re-reads `.env`, re-registers with the
+controller, and resumes claiming — **no re-authentication or manual env
+reconstruction** (Claude/Codex identity lives in the host user's `~/.claude.json` /
+`~/.codex`, untouched by restarts).
+
+### Basic smoke test
+
+1. `pm2 restart ai-team-worker --update-env` (or rely on autorestart).
+2. `curl .../api/nodes` → this node `online`, fresh heartbeat.
+3. Dispatch/allow a small task; watch `task_activity` on `/api/events/stream`.
+4. Confirm a telemetry turn row appears (`/api/turns`) and the task completes
+   (`/api/tasks`).
+
 ## Notes
 
 - Do not run multiple PM2 instances for the same gateway repo.
 - Do not set PM2 `instances > 1`.
 - The app-level locks are a safety net, not the primary supervision model.
+- Do **not** run the containerized worker (`deploy/compose.worker.yaml`) and the
+  native `ai-team-worker` for the same node at once — that produces two workers for
+  one physical node.

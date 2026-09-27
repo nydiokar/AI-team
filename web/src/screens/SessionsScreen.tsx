@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, Inbox, Pin, Plus, Search, X } from "lucide-react";
+import { ChevronDown, Inbox, Plus, Search, X } from "lucide-react";
 import { motion } from "framer-motion";
 import { CompactTopBar } from "../components/shell/CompactTopBar";
 import { SectionHeader } from "../components/ui/SectionHeader";
@@ -10,6 +10,7 @@ import { useSessionAffiliations } from "../hooks/useWork";
 import type { Session } from "../domain/models";
 import type { SessionAffiliation } from "../domain/work";
 import { cn } from "../lib/cn";
+import { groupSessions } from "../lib/sessionGroups";
 
 function SkeletonCard() {
   return (
@@ -50,55 +51,51 @@ function CardList({
   );
 }
 
-function sessionMatches(session: Session, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  return [
-    session.id,
-    session.backend,
-    session.workspace.path,
-    session.workspace.targetId,
-    session.lastSummary,
-    session.keepNote,
-    session.model ?? "",
-    session.defaultModel ?? "",
-  ].some((value) => value.toLowerCase().includes(q));
-}
-
 export function SessionsScreen() {
   const [closedExpanded, setClosedExpanded] = useState(false);
-  const [keptExpanded, setKeptExpanded] = useState(true);
+  // Collapsed by default: the Kept section is a reminder that pinned work
+  // exists, not the page's primary content. Expand it when you want to resume.
+  const [keptExpanded, setKeptExpanded] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
-  const [keptOnly, setKeptOnly] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const { data, isLoading, error } = useSessions(keptOnly ? true : undefined);
+  // Two server-filtered lists, NOT one list split on a client-side flag. The
+  // unfiltered list is a LIMIT window ordered by updated_at, so deriving Kept
+  // from it dropped kept sessions that hadn't been touched recently (4 shown vs
+  // 5 pinned) — while the server-filtered query showed the truth.
+  // Both are fetched unconditionally: the Kept count must be right even while
+  // collapsed, and each is one indexed SELECT. The Kept section is the only
+  // pinned-session browsing path on this screen.
+  const keptQuery = useSessions(true, 1000);
+  const unpinnedQuery = useSessions(false);
   // Authoritative session→case affiliation labels (empty until the Work
   // substrate records links; never inferred). Absent ⇒ session shows standalone.
   const { index: affiliations } = useSessionAffiliations();
 
-  const groups = useMemo(() => {
-    const all = (data ?? []).filter((s) => (!keptOnly || s.keepPinned) && sessionMatches(s, query));
-    // Kept sessions surface in their own top section (messaging-app pinned
-    // convention) and are pulled out of the normal groups so they never appear
-    // twice. In the exhaustive kept-only view everything is kept, so there's no
-    // separate section — the whole list is the kept set.
-    const kept = keptOnly ? [] : all.filter((s) => s.keepPinned);
-    const rest = keptOnly ? all : all.filter((s) => !s.keepPinned);
-    return {
-      kept,
-      attention: rest.filter((s) => s.lifecycle === "open" && s.needsAttention),
-      open: rest.filter((s) => s.lifecycle === "open" && !s.needsAttention),
-      closed: rest.filter((s) => s.lifecycle === "closed"),
-    };
-  }, [data, keptOnly, query]);
+  const groups = useMemo(
+    () =>
+      groupSessions({
+        kept: keptQuery.data ?? [],
+        unpinned: unpinnedQuery.data ?? [],
+        query,
+      }),
+    [keptQuery.data, unpinnedQuery.data, query],
+  );
 
-  const empty = !isLoading && !error && (data ?? []).length === 0;
+  const isLoading = keptQuery.isLoading || unpinnedQuery.isLoading;
+  // Either list failing invalidates the page: the Kept count is load-bearing
+  // information, so a silent failure would be a silently-wrong number.
+  const error = keptQuery.error ?? unpinnedQuery.error;
+  const empty =
+    !isLoading && !error && !keptQuery.data?.length && !unpinnedQuery.data?.length;
   const filteredEmpty =
     !isLoading &&
     !error &&
     !empty &&
     groups.kept.length + groups.attention.length + groups.open.length + groups.closed.length === 0;
+  // The reminder uses the UNFILTERED count, so a search that happens to match
+  // no kept session doesn't make them look unpinned-and-lost.
+  const keptTotal = keptQuery.data?.length ?? 0;
 
   return (
     <div className="pb-8">
@@ -125,19 +122,6 @@ export function SessionsScreen() {
             >
               {searchOpen ? <X className="size-5" /> : <Search className="size-5" />}
             </button>
-            {/* Kept-only filter, folded into an icon toggle. */}
-            <button
-              onClick={() => setKeptOnly((v) => !v)}
-              aria-label={keptOnly ? "Show all sessions" : "Show kept only"}
-              aria-pressed={keptOnly}
-              title={keptOnly ? "Showing kept only" : "Kept only"}
-              className={cn(
-                "flex size-9 items-center justify-center rounded-full transition-colors",
-                keptOnly ? "bg-accent-dim/60 text-accent ring-1 ring-accent/30" : "text-ink-muted hover:bg-surface-2 hover:text-ink",
-              )}
-            >
-              <Pin className={cn("size-[18px]", keptOnly && "fill-current")} />
-            </button>
             <button
               onClick={() => setNewOpen(true)}
               className="flex size-9 items-center justify-center rounded-full bg-accent-dim/60 text-accent ring-1 ring-accent/30 hover:bg-accent-dim"
@@ -159,7 +143,7 @@ export function SessionsScreen() {
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.currentTarget.value)}
-              placeholder={keptOnly ? "Search kept notes and sessions" : "Search sessions"}
+              placeholder="Search sessions and kept notes"
               className="min-w-0 flex-1 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-muted"
             />
             {query && (
@@ -190,11 +174,11 @@ export function SessionsScreen() {
 
       {!isLoading && !error && (
         <>
-          {groups.kept.length > 0 && (
+          {keptTotal > 0 && (
             <>
               <SectionHeader
                 label="Kept"
-                count={groups.kept.length}
+                count={keptTotal}
                 action={
                   <button
                     onClick={() => setKeptExpanded((v) => !v)}
@@ -208,7 +192,7 @@ export function SessionsScreen() {
                   </button>
                 }
               />
-              {keptExpanded && (
+              {keptExpanded && groups.kept.length > 0 && (
                 <CardList sessions={groups.kept} affiliations={affiliations} />
               )}
             </>
@@ -246,7 +230,7 @@ export function SessionsScreen() {
                   </button>
                 }
               />
-              {(closedExpanded || keptOnly) && (
+              {closedExpanded && (
                 <CardList sessions={groups.closed} affiliations={affiliations} />
               )}
             </>
@@ -261,7 +245,7 @@ export function SessionsScreen() {
           </div>
           <div>
             <p className="text-[15px] font-medium text-ink-soft">No matching sessions</p>
-            <p className="mt-1 text-sm text-ink-muted">Try another search or clear the kept-only filter.</p>
+            <p className="mt-1 text-sm text-ink-muted">Try another search or clear your query.</p>
           </div>
         </div>
       )}
