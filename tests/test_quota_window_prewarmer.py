@@ -222,8 +222,92 @@ def test_repeated_failure_opens_the_circuit_and_stops_spending():
     asyncio.run(warmer.tick_once())            # must NOT spend again
 
     assert warmer.state.circuit_open is True
+    assert warmer.state.circuit_recoverable is True   # a transient circuit
     assert coord.adapters[0].calls == calls_at_circuit
     assert warmer.decide(_closed_window()[0]).action == "skip_circuit_open"
+
+
+# --------------------------------------------------------------------------- #
+# 2b. The transient circuit self-heals — "keep ticking" is the whole point     #
+# --------------------------------------------------------------------------- #
+
+def test_a_healthy_open_window_resets_the_failure_tally():
+    """Failures separated by hours of a HEALTHY open window are not "consecutive"
+    in any meaningful sense. Observing an open window is positive proof the account
+    is fine and must clear the tally — otherwise one transient blip every couple of
+    hours latches the circuit forever (live incident 2026-09-27T04:12Z)."""
+    warmer, _ = _mk(_closed_window(), max_consecutive_failures=3)
+    warmer.state.consecutive_failures = 2
+
+    decision = warmer.decide(_snapshot(reset_in_hours=3))
+
+    assert decision.action == "skip_window_open"
+    assert warmer.state.consecutive_failures == 0
+
+
+def test_a_healthy_open_window_clears_a_transient_circuit():
+    warmer, _ = _mk(_closed_window())
+    warmer._open_circuit("consecutive_failures", recoverable=True)
+
+    decision = warmer.decide(_snapshot(reset_in_hours=3))
+
+    assert warmer.state.circuit_open is False
+    assert decision.action == "skip_window_open"
+
+
+def test_transient_circuit_allows_a_half_open_trial_after_cooldown():
+    warmer, _ = _mk(_closed_window(), circuit_cooldown_sec=3600)
+    warmer._open_circuit("consecutive_failures", recoverable=True)
+
+    # Still cooling down: no trial.
+    assert warmer.decide(_closed_window()[0]).action == "skip_circuit_open"
+
+    # Cooldown elapsed: exactly one trial is allowed.
+    warmer.state.circuit_opened_at = _now() - timedelta(seconds=3601)
+    assert warmer.decide(_closed_window()[0]).action == "activate"
+
+
+def test_a_successful_half_open_trial_closes_the_circuit():
+    # cooldown is floored to 60s in the constructor, so age the circuit past it.
+    warmer, coord = _mk(_closed_window(), circuit_cooldown_sec=60, min_interval_sec=0)
+    warmer._open_circuit("consecutive_failures", recoverable=True)
+    warmer.state.circuit_opened_at = _now() - timedelta(seconds=120)
+
+    decision = asyncio.run(warmer.tick_once())   # trial fires, opens a window
+
+    assert coord.adapters[0].calls == 1
+    assert decision.reason == "opened"
+    assert warmer.state.circuit_open is False
+    assert warmer.state.consecutive_failures == 0
+
+
+def test_a_failed_half_open_trial_reopens_with_longer_backoff():
+    warmer, coord = _mk(_closed_window(),
+                        adapter={"ok": False, "opens_window": False},
+                        circuit_cooldown_sec=60, min_interval_sec=0)
+    warmer._open_circuit("consecutive_failures", recoverable=True)
+    warmer.state.circuit_opened_at = _now() - timedelta(seconds=120)
+
+    asyncio.run(warmer.tick_once())              # the one trial fails
+
+    assert coord.adapters[0].calls == 1
+    assert warmer.state.circuit_open is True
+    assert warmer.state.circuit_backoff_level == 1
+    # Backoff doubled (60s * 2^1 = 120s) and opened_at reset to now, so the next
+    # trial is not immediately due.
+    assert warmer.decide(_closed_window()[0]).action == "skip_circuit_open"
+
+
+def test_cost_and_anchor_circuits_do_not_self_heal_on_an_open_window():
+    """A cost/anchor circuit means the environment or window semantics are not what
+    we think — spec §13/§18 says only a human clears it. An open window must NOT."""
+    warmer, _ = _mk(_closed_window())
+    warmer._open_circuit("anchor_drift", recoverable=False)
+
+    decision = warmer.decide(_snapshot(reset_in_hours=3))
+
+    assert warmer.state.circuit_open is True
+    assert decision.action == "skip_circuit_open"
 
 
 # --------------------------------------------------------------------------- #
