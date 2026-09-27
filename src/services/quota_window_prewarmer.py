@@ -82,6 +82,11 @@ class PrewarmState:
     cost_spikes: int = 0
     circuit_open: bool = False
     circuit_reason: str = ""
+    #: A transient (consecutive-failures) circuit self-heals; a cost/anchor one
+    #: does not (it means the environment/semantics are wrong — a human clears it).
+    circuit_recoverable: bool = False
+    circuit_opened_at: Optional[datetime] = None
+    circuit_backoff_level: int = 0
     last_outcome: str = ""
     last_cost_percent: Optional[float] = None
     #: Newest ``reset_at`` seen for a window believed to still be running — the
@@ -112,6 +117,8 @@ class QuotaWindowPrewarmer:
         verify_delay_sec: int = 90,
         max_consecutive_failures: int = 3,
         max_activation_percent: float = 2.0,
+        circuit_cooldown_sec: int = 3600,
+        circuit_cooldown_max_sec: int = 21600,
         now: Callable[[], datetime] = utc_now,
         event_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> None:
@@ -130,6 +137,15 @@ class QuotaWindowPrewarmer:
         #: silently load settings, MCP schemas and project rules. The only honest
         #: measure is the provider's own utilization delta across the activation.
         self.max_activation_percent = max(0.0, float(max_activation_percent))
+        #: A transient (consecutive-failures) circuit is NOT a permanent latch:
+        #: after this cooldown it allows ONE half-open trial activation, doubling
+        #: the wait per failed trial up to the cap. This is what keeps warming
+        #: "ticking" through a passing provider/auth blip without a manual restart.
+        #: cost/anchor circuits stay latched — those need a human, by design.
+        self.circuit_cooldown_sec = max(60, int(circuit_cooldown_sec))
+        self.circuit_cooldown_max_sec = max(
+            self.circuit_cooldown_sec, int(circuit_cooldown_max_sec)
+        )
         self._now = now
         self._event_sink = event_sink
         self.state = PrewarmState()
@@ -229,8 +245,7 @@ class QuotaWindowPrewarmer:
         if previous <= now:
             return False                          # the old window simply ended
         self.state.semantics_suspect = True
-        self.state.circuit_open = True
-        self.state.circuit_reason = "anchor_drift"
+        self._open_circuit("anchor_drift", recoverable=False)
         self._emit("prewarm.anchor_drift", {
             "previous_reset_at": utc_iso(previous), "reset_at": utc_iso(reset_at),
             "moved_seconds": int(moved),
@@ -253,7 +268,33 @@ class QuotaWindowPrewarmer:
         now = self._now()
         self._roll_day(now)
 
+        reset_at = normalize_utc(snapshot.get("reset_at")) if snapshot is not None else None
+        window_open = reset_at is not None and reset_at > now
+
+        # A healthy OPEN window is positive proof the account and the mechanism
+        # are fine, so it clears a TRANSIENT (consecutive-failures) circuit and
+        # the failure tally. It deliberately does NOT clear a cost/anchor circuit:
+        # those mean the environment or window semantics are not what we think,
+        # which only a human should re-validate (spec §13/§18).
+        if window_open and self.state.circuit_open and self.state.circuit_recoverable:
+            self._close_circuit("window_open")
+
         if self.state.circuit_open:
+            if self.state.circuit_recoverable:
+                due = (self.state.circuit_opened_at or now) + timedelta(
+                    seconds=self._circuit_cooldown_sec()
+                )
+                if now >= due:
+                    # Cooldown elapsed: allow ONE half-open trial. tick_once closes
+                    # the circuit on success, or reopens it with a longer backoff.
+                    return PrewarmDecision(
+                        action="activate", reason="circuit_half_open",
+                    )
+                return PrewarmDecision(
+                    action="skip_circuit_open",
+                    reason=self.state.circuit_reason or "circuit_open",
+                    next_check_at=due,
+                )
             return PrewarmDecision(
                 action="skip_circuit_open",
                 reason=self.state.circuit_reason or "circuit_open",
@@ -265,11 +306,11 @@ class QuotaWindowPrewarmer:
                 next_check_at=now + timedelta(seconds=self.poll_interval_sec),
             )
 
-        reset_at = normalize_utc(snapshot.get("reset_at"))
-        if reset_at is not None and reset_at > now:
+        if window_open:
             # Someone (usually the operator) is already inside a window. Nothing
             # to buy: come back just after it closes, which is the ONLY moment
             # opening a new one is both possible and worth a turn.
+            self.state.consecutive_failures = 0
             return PrewarmDecision(
                 action="skip_window_open", reason="window_already_open",
                 reset_at=reset_at,
@@ -302,6 +343,31 @@ class QuotaWindowPrewarmer:
         return datetime.combine(
             now.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc,
         )
+
+    # -- circuit breaker (self-healing for transient failures) --------------
+    def _circuit_cooldown_sec(self) -> int:
+        """Backoff before the next half-open trial: doubles per failed trial,
+        capped. Bounds cost — at most one trial per cooldown."""
+        level = max(0, int(self.state.circuit_backoff_level))
+        return min(self.circuit_cooldown_sec * (2 ** level), self.circuit_cooldown_max_sec)
+
+    def _open_circuit(self, reason: str, *, recoverable: bool) -> None:
+        self.state.circuit_open = True
+        self.state.circuit_reason = reason
+        self.state.circuit_recoverable = recoverable
+        self.state.circuit_opened_at = self._now()
+
+    def _close_circuit(self, reason: str) -> None:
+        was_open = self.state.circuit_open
+        self.state.circuit_open = False
+        self.state.circuit_reason = ""
+        self.state.circuit_recoverable = False
+        self.state.circuit_backoff_level = 0
+        self.state.circuit_opened_at = None
+        self.state.consecutive_failures = 0
+        if was_open:
+            self._emit("prewarm.circuit_closed", {"reason": reason})
+            logger.info("event=quota_prewarm_circuit_closed reason=%s", reason)
 
     # -- one full cycle -----------------------------------------------------
     async def tick_once(self) -> PrewarmDecision:
@@ -382,12 +448,15 @@ class QuotaWindowPrewarmer:
                 # Spec §13: two unexplained spikes ⇒ open the circuit and require
                 # manual revalidation. A "minimal" turn that is not minimal means
                 # the activation environment is not what we think it is.
-                self.state.circuit_open = True
-                self.state.circuit_reason = "cost_exceeded"
+                self._open_circuit("cost_exceeded", recoverable=False)
                 self._emit("prewarm.circuit_opened", {"reason": "cost_exceeded"})
 
         if bool(result.get("ok")) and opened:
             self.state.consecutive_failures = 0
+            if self.state.circuit_open and self.state.circuit_recoverable:
+                # A half-open trial (or a self-opened window) succeeded — resume
+                # normal ticking instead of staying latched until a restart.
+                self._close_circuit("activation_succeeded")
             self.state.last_outcome = "opened"
             self._record(now, "opened", result, opened_reset_at)
             self._emit("prewarm.activation_succeeded", {
@@ -408,9 +477,22 @@ class QuotaWindowPrewarmer:
         self.state.consecutive_failures += 1
         self.state.last_outcome = "failed" if not result.get("ok") else "no_window_observed"
         self._record(now, self.state.last_outcome, result, opened_reset_at)
-        if self.state.consecutive_failures >= self.max_consecutive_failures:
-            self.state.circuit_open = True
-            self.state.circuit_reason = "consecutive_failures"
+        if decision.reason == "circuit_half_open":
+            # The one trial we allowed after the cooldown failed too — keep the
+            # circuit open but back off longer before the next trial (bounded by
+            # circuit_cooldown_max_sec). Never a permanent latch.
+            self.state.circuit_backoff_level += 1
+            self.state.circuit_opened_at = now
+            self._emit("prewarm.circuit_reopened", {
+                "backoff_level": self.state.circuit_backoff_level,
+                "outcome": self.state.last_outcome,
+            })
+            logger.warning(
+                "event=quota_prewarm_circuit_reopened backoff_level=%d outcome=%s",
+                self.state.circuit_backoff_level, self.state.last_outcome,
+            )
+        elif self.state.consecutive_failures >= self.max_consecutive_failures:
+            self._open_circuit("consecutive_failures", recoverable=True)
             self._emit("prewarm.circuit_opened", {
                 "failures": self.state.consecutive_failures,
                 "last_outcome": self.state.last_outcome,
@@ -500,6 +582,9 @@ class QuotaWindowPrewarmer:
             "cost_spikes": self.state.cost_spikes,
             "circuit_open": self.state.circuit_open,
             "circuit_reason": self.state.circuit_reason,
+            "circuit_recoverable": self.state.circuit_recoverable,
+            "circuit_opened_at": utc_iso(self.state.circuit_opened_at),
+            "circuit_backoff_level": self.state.circuit_backoff_level,
             # False until something falsifies the anchored-window premise; the
             # spec's classification question, answered continuously.
             "semantics_suspect": self.state.semantics_suspect,
@@ -535,6 +620,8 @@ def build_prewarmer_from_config(
         max_per_day=int(getattr(quota, "prewarm_max_per_day", 8)),
         delay_after_reset_sec=int(getattr(quota, "prewarm_delay_after_reset_sec", 120)),
         max_activation_percent=float(getattr(quota, "prewarm_max_activation_percent", 2.0)),
+        circuit_cooldown_sec=int(getattr(quota, "prewarm_circuit_cooldown_sec", 3600)),
+        circuit_cooldown_max_sec=int(getattr(quota, "prewarm_circuit_cooldown_max_sec", 21600)),
         poll_interval_sec=int(getattr(quota, "observe_interval_sec", 300)),
         event_sink=event_sink,
     )
