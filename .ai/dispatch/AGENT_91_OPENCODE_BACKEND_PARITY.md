@@ -1,0 +1,69 @@
+```yaml
+job_id: AGENT_91_OPENCODE_BACKEND_PARITY
+created_at: "2026-09-27T11:43:24.753631+00:00"        # CANONICAL — set once at dispatch, never derive again
+status: ready              # ready | active | blocked | done | dead
+owner: ""
+depends_on: []
+results_ref: DISPATCH_LOG.md#A91
+evidence: []
+updated_at: "2026-09-27T11:43:24.753631+00:00"
+```
+
+# DISPATCH — A91 · OpenCode backend parity and reliability
+
+**Level:** 3 (backend lifecycle + live activity/telemetry integration) · **Type:** backend implementation + acceptance
+**Status:** ready (investigation complete; implementation not started)
+**Branch:** `feat/opencode-backend-parity` + PR + self-merge
+**Depends on:** none. Coordinate `cancel()` / `close()` changes with A90 if it is active; do not duplicate its locality refactor.
+
+> **Goal.** Bring `OpenCodeServerBackend` up to the useful execution, progress, lifecycle, and audit capabilities already expected by AI-Team's shared `CodingBackend` harness, using OpenCode's supported server APIs behind the existing adapter. Keep `CodingBackend`, `ExecutionResult`, task dispatch, activity SSE, telemetry sink, UI, and worker protocols as the public path. Do not add a parallel OpenCode-only task/message system or change operator-owned timeout values.
+
+## Findings to preserve
+
+The timeout incident was `task_285b5b74`, gateway session `00676f82e7ea`, OpenCode session `ses_f1d8b67e8ffeJlno1YvB0ceImi`, on 2026-09-27. Two earlier turns on the same OpenCode session completed (about 152 s and 58 s of backend invocation time). The third HTTP message call returned no response within its configured 300 s socket timeout; `_http()` then terminated the whole managed OpenCode server. The event shows the harness timeout and kill, but does **not** prove whether OpenCode was idle or still executing a tool.
+
+The worker emitted no `task_activity` events for any of these three turns. The worker-to-controller activity forwarder already exists, but only backend code that emits the established `task_activity` event reaches it. The worker is currently absent from this host's tailnet, so the native OpenCode session database/version could not be independently inspected. Validate actual event payloads against the worker's installed OpenCode version before relying on them.
+
+The repo `.env` sets `OPENCODE_TIMEOUT_SEC=300`; the code default is 1800. **The operator owns configuration; this task does not change `.env`, `.env.example`, or timeout values.** The implementation must make live progress observable and distinguish inactivity from progress, while retaining configured hard limits and existing cancellation behavior.
+
+## Comparison: OpenCode docs, current implementation, harness parity
+
+| Capability | OpenCode's documented surface | Current OpenCode implementation | Existing harness reference | A91 disposition |
+|---|---|---|---|---|
+| Turn progress and tool activity | `GET /event` or `/global/event` SSE; session/message/tool/permission events, including `message.part.updated`, `session.status`, `session.idle` | Calls blocking `POST /session/{id}/message`; no event subscription and no `task_activity` emissions | Claude SDK emits “Using …”, “Thinking…”, “Writing response…”; Codex consumes its typed app-server event channel | **Must:** subscribe before dispatch, filter by native session/turn, normalize safe activity labels into the existing task activity feed; never expose private reasoning text |
+| Turn submission and completion | Blocking `/message` and asynchronous `/prompt_async` (204); message/history/status reads | Blocks until final response; a socket timeout is treated as server failure and kills the server | Codex starts a turn then consumes events through terminal `turn/completed`; Claude has a persistent stream reader and explicit result message | **Must:** implement one event-driven turn pump inside the existing backend; correlate acceptance, progress, and terminal result; honor a configured inactivity deadline and hard cap without assuming “no HTTP body” means “no work” |
+| Final answer vs intermediate content | Message parts distinguish text, reasoning, tool state, and step finish | Parser extracts text only after response completion, correctly avoiding tool/reasoning parts as final output; no partial live state survives a failed request | Claude preserves bounded assistant text on stream errors; Codex returns accumulated agent messages only at terminal completion | **Must:** keep final `ExecutionResult.output` terminal-only; expose activity labels only; retain bounded safe partial text in the existing result on failure only if it can be distinguished from a final answer |
+| Timeout, cancellation, transport recovery | `/session/{id}/abort`, status/history reads, and asynchronous request API | `cancel()` calls abort only while the server URL is present; a read timeout kills the server and transport-failure handling clears the native session ID | Codex sends native interrupt and awaits terminal state; Claude distinguishes idle/hard timeout and reports stream failure | **Must:** distinguish cancel, stall/inactivity timeout, configured hard timeout, server loss, and provider error; abort the turn first; retain native session identity when resumable; terminate the server only after a bounded unhealthy-server decision |
+| Session close and compaction | `DELETE /session/{id}` deletes the session and its data; `/session/{id}/summarize` is the native summarize/compact operation | `close()` calls destructive DELETE; `compact_session()` inherits generic `/compact` resume behavior | Codex unloads a thread without deleting its persisted conversation and implements native compaction | **Must:** implement native compaction through OpenCode's API; align close semantics with the shared contract and other backends so routine close does not silently delete resumable conversation history. Keep destructive deletion explicit and deliberate |
+| Usage and execution telemetry | Completed message exposes token/cost info; streamed events provide tool/message facts | Captures `info.tokens`, `info.cost`, and finish in `parsed_output`; does not emit through the existing telemetry adapter/sink | Codex and Claude have backend telemetry adapters and emit invocation/tool/usage facts into the canonical sink | **Must:** map available OpenCode usage/tool/terminal facts to existing telemetry event schema; unavailable metrics must remain explicitly unavailable, not fabricated |
+| Same-repository mutation safety | Server is scoped to a project directory; events may cover multiple sessions | One server per resolved repo path; unlike OpenCode CLI, server backend does not take the existing per-repo lock | OpenCode CLI uses `_get_repo_lock`; Codex has bounded capacity and per-thread ownership | **Must:** serialize mutating OpenCode server turns per repo using the existing repo-lock pattern; keep event queues and HTTP response/event sizes bounded |
+| Provider/model selection | `/provider` and `/config/providers` enumerate locally connected providers/defaults | Uses the static advisory OpenCode catalog; selected model is correctly passed inline on message due observed OpenCode PATCH behavior | Codex discovers its node-local catalog through its existing worker heartbeat/model surface | **Review, optional:** assess live provider discovery only through an already-existing model-discovery surface; no `CodingBackend` API or picker protocol expansion in A91 |
+| Native UI/session extras | APIs also expose file search/read, todo, fork, share, revert, TUI, plugin hooks | Not adapted to the generic harness | Not represented by `CodingBackend` methods | **Out of scope:** do not port features that have no existing universal contract. Preserve them as OpenCode-native capabilities, not new AI-Team-only paths |
+
+OpenCode API references: [Server API](https://opencode.ai/docs/server/) documents blocking and async prompts, session status/history, abort, summarize, providers, and SSE; [event catalog](https://opencode.ai/docs/plugins/) lists message, tool, permission, and session events. The generated API spec at a running worker's `/doc` is the version-specific authority.
+
+## Task
+
+1. **Re-derive the comparison against current code before editing.** Read `CodingBackend` and `ExecutionResult` in `src/core/interfaces.py`; both OpenCode implementations in `src/backends/opencode.py`; Claude stream/activity and Codex app-server/telemetry adapters; worker activity forwarding; remote cancel and close routing; and relevant telemetry/event contracts. Record any changed findings in this packet before implementation.
+2. **Probe the actual OpenCode server version and event wire format on the owning worker.** Check `/global/health`, `/doc`, and a controlled session that exercises text, tool start/completion, idle, error, abort, and event reconnect. If event delivery is absent or differs, identify a documented/version-supported fallback before selecting the implementation. Do not infer active execution solely from a connected SSE socket or `busy` status.
+3. **Implement one bounded event-driven turn path inside `OpenCodeServerBackend`.** Use the existing server process and native session for create, resume, and one-off work. Establish the event reader before submitting `prompt_async`; correlate the request with stable message/session IDs; filter unrelated session events; handle `message.part.updated` tool/reasoning/text state and terminal status without leaking chain-of-thought; reconcile missed events after disconnect using message/status reads; and route normalized activity through the existing `task_activity`/SSE feed. Do not add a new public backend, endpoint, queue, DB table, UI stream, or task result contract.
+4. **Complete lifecycle and audit integration.** Route model/usage/tool facts into the existing `telemetry_sink`/adapter; preserve accurate `ExecutionResult` status, finish, error class, native session ID, elapsed time, and bounded partial output semantics; distinguish application timeout from server death; make stop reach `/abort`; override `compact_session()` using OpenCode summarize; and change close so it does not use OpenCode's destructive DELETE as ordinary cleanup. Coordinate remote locality changes with A90.
+5. **Bound concurrency, memory, and process cleanup.** Enforce per-repo mutation serialization; bound concurrent event readers, SSE frame/event queues, HTTP bodies, and retained partial output; close reader threads/connections on every success/error/cancel path; treat malformed events as a structured backend transport failure; fail the task when startup/backing server is unavailable. No unmanaged child process or task may remain after confirmed abort/termination.
+6. **Test with captured OpenCode API fixtures and deterministic integration tests.** Cover streamed tool and reasoning events, user-visible final text, message completion, disconnect/reconnect reconciliation, permissions/errors, malformed/oversize event/body, no-event stall timeout, progressing long tool activity, hard cap, cancellation, server loss, resumable identity, native compact, non-destructive close, same-repo serialization, and cleanup. No paid live model calls in ordinary tests.
+7. **Live-acceptance gate.** On the owning worker, run a short harmless turn with at least one tool, observe activity in the existing session/task UI, verify final output and usage telemetry, stop a running turn and confirm OpenCode acknowledges abort, then resume the same native session and confirm conversation continuity. Record the OpenCode version, event types observed, timings, and evidence in this packet/dispatch row. Surface worker restart/deploy requirements to the operator; do not restart the worker autonomously.
+
+## Constraints and non-goals
+
+- Do not change `CodingBackend`, `ExecutionResult`, task server APIs, UI event protocol, worker payload protocol, DB schema, or add a JS SDK/runtime dependency. OpenCode-specific protocol translation belongs inside its existing backend adapter.
+- Do not change operator-owned timeout configuration. Keep both a configured hard ceiling and a no-progress/stall policy; do not make long work unbounded. A tool-running event means the agent entered a tool, not that the tool is making progress forever.
+- Do not surface reasoning contents as user activity/output. Do not mark a turn complete until OpenCode reports a terminal assistant/result state and the terminal message is reconciled.
+- Do not delete session history as a timeout recovery tactic. Do not silently create a blank replacement session when the saved native session is missing; return a truthful recoverable error unless continuity can be restored through the existing session/task history contract.
+- Do not add generic OpenCode browser/file/TUI/share/fork/revert features that the shared backend interface does not express.
+
+## Done when
+
+- The table's **Must** items are implemented in the existing backend and mapped through current activity, result, cancellation, and telemetry seams; optional model discovery has a documented keep/defer decision.
+- Tests prove event correlation, bounded resources, timeout/cancel semantics, and session-history preservation; existing OpenCode and cross-backend regression suites pass.
+- Live acceptance proves a tool-using turn is visibly active, terminal output is correct, stop actually aborts the generation, and resume keeps the same OpenCode session.
+- No user-facing universal API, worker protocol, DB schema, or config values changed. Any deferred service-boundary item has a concrete note here before closure.
+- Update `DISPATCH_LOG.md` A91 closure/status and set YAML `status: done` only with evidence paths that exist. Leave deployment/worker restart operator-gated.
