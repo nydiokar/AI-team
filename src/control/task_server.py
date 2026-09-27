@@ -454,6 +454,28 @@ class ActivityPayload(BaseModel):
     label: str = Field(min_length=1, max_length=200)
 
 
+class QuotaObservationPayload(BaseModel):
+    """A worker-originated Claude quota observation.
+
+    The controller container has no Claude binary or OAuth credentials by design,
+    so quota telemetry is read harness-side (on the worker) and shipped here as
+    the provider's raw ``get_usage`` response plus provenance. The controller
+    validates and persists it through the existing quota store/coordinator path,
+    so the quota API/UI contract is unchanged. A non-empty ``error`` means the
+    worker reached us but its harness read failed — recorded as
+    adapter-unavailable, which is DISTINCT from a valid observation with no open
+    window (never collapse transport/harness failure into an empty window).
+    """
+    node_id: str = Field(min_length=1, max_length=128)
+    provider: str = Field(default="claude", max_length=32)
+    principal_key: str = Field(default="", max_length=200)
+    sdk_version: Optional[str] = Field(default=None, max_length=64)
+    claude_code_version: Optional[str] = Field(default=None, max_length=128)
+    observed_at: Optional[str] = Field(default=None, max_length=64)
+    usage: Optional[Dict[str, Any]] = None
+    error: str = Field(default="", max_length=200)
+
+
 # ---------------------------------------------------------------------------
 # Job models (T3)
 # ---------------------------------------------------------------------------
@@ -608,6 +630,33 @@ def submit_activity(payload: ActivityPayload) -> Dict[str, Any]:
         label=payload.label,
     )
     return {"accepted": True}
+
+
+@app.post("/telemetry/quota-observation", dependencies=[Depends(_require_auth)])
+async def submit_quota_observation(payload: QuotaObservationPayload) -> Dict[str, Any]:
+    """Ingest a worker-originated quota observation into the shared quota store.
+
+    Observation happens harness-side (worker); the controller only validates and
+    persists — it never spawns Claude. Reuses the existing coordinator
+    observe→persist pipeline (with an injected ``read_usage``), so the stored rows
+    are identical to the pre-Docker in-process observer, minus the local spawn.
+    The gateway process reads the same ``state/quota_windows.db`` for
+    ``/api/quota-windows`` (both controller services share ``controller/state``),
+    exactly like ``/telemetry/batches`` shares ``mesh.db``.
+    """
+    from src.services.quota_window_coordinator import ingest_worker_quota_observation
+
+    result = await ingest_worker_quota_observation(
+        provider=payload.provider or "claude",
+        node_id=payload.node_id,
+        principal_key=payload.principal_key or "",
+        sdk_version=payload.sdk_version,
+        claude_code_version=payload.claude_code_version,
+        observed_at=payload.observed_at,
+        usage=payload.usage,
+        error=payload.error or "",
+    )
+    return {"accepted": bool(result.get("accepted")), **result}
 
 
 # ---------------------------------------------------------------------------

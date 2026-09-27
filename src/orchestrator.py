@@ -696,8 +696,22 @@ class TaskOrchestrator(ITaskOrchestrator):
                 )
                 self.quota_digest_subscriber = digest
                 event_handlers.append(digest.handle_event)
+            # Observe locally ONLY when this host also executes locally (i.e. the
+            # Claude harness is present). On a controller-only host
+            # (GATEWAY_LOCAL_EXECUTION_ENABLED=false, the Docker controller) the
+            # coordinator is ingest-only: it never spawns Claude, and quota is
+            # observed harness-side by a worker POSTing /telemetry/quota-observation
+            # into the same store this coordinator reads.
+            observe_locally = bool(getattr(config.system, "local_execution_enabled", True))
             self.quota_coordinator = build_quota_coordinator_from_config(
-                enabled=True, event_handlers=event_handlers
+                enabled=True,
+                event_handlers=event_handlers,
+                observe_locally=observe_locally,
+            )
+            logger.info(
+                "event=quota_coordinator_built observe_locally=%s mode=%s",
+                observe_locally,
+                "local_observe" if observe_locally else "ingest_only",
             )
         except Exception as e:
             logger.warning(f"Failed to initialize quota coordinator: {e}")
@@ -719,6 +733,20 @@ class TaskOrchestrator(ITaskOrchestrator):
             from src.control.db import runtime_flag_enabled
             if not runtime_flag_enabled("QUOTA_PREWARM_ENABLED"):
                 return
+            # A prewarmer can only open a window by spending a real model turn
+            # through an activation-capable adapter. On a controller-only host
+            # (ingest_only: GATEWAY_LOCAL_EXECUTION_ENABLED=false) the coordinator
+            # has NO such adapter, so a prewarmer here would tick forever and
+            # never fire — the exact regression the Docker split introduced.
+            # Warming runs where the harness lives (the worker, src/worker/agent.py);
+            # skip loudly here instead of standing up an inert loop that looks
+            # alive but can never activate.
+            if not self._coordinator_can_activate():
+                logger.info(
+                    "event=quota_prewarmer_skipped reason=ingest_only_no_activation_adapter "
+                    "(warming runs on the execution host / worker)"
+                )
+                return
             from src.services.quota_window_prewarmer import build_prewarmer_from_config
             self.quota_prewarmer = build_prewarmer_from_config(
                 coordinator=self.quota_coordinator,
@@ -728,6 +756,16 @@ class TaskOrchestrator(ITaskOrchestrator):
         except Exception as e:
             logger.warning(f"Failed to initialize quota prewarmer: {e}")
             self.quota_prewarmer = None
+
+    def _coordinator_can_activate(self) -> bool:
+        """True iff the coordinator carries a provider adapter that can spend a
+        turn to open a window. False on an ingest-only controller, whose adapter
+        list is empty by construction (build_quota_coordinator_from_config with
+        observe_locally=False)."""
+        for adapter in getattr(self.quota_coordinator, "adapters", []) or []:
+            if callable(getattr(adapter, "activate", None)):
+                return True
+        return False
 
     # ===========================================================================
     # RESULT PARSING & TEXT EXTRACTION
@@ -4764,9 +4802,17 @@ class TaskOrchestrator(ITaskOrchestrator):
         - file_watcher_running: based on watcher state
         """
         
-        # Check Claude Code CLI
-        self.component_status["claude_available"] = self._check_claude_cli_available()
-        
+        # Harness availability. When this host executes locally the Claude CLI is
+        # expected to be present, so probe it. On a controller-only host (the
+        # Docker controller, GATEWAY_LOCAL_EXECUTION_ENABLED=false) the harness
+        # lives on the WORKERS, not here — probing a local CLI that is absent by
+        # design would falsely report the controller "degraded", so derive
+        # availability from online mesh workers instead.
+        if bool(getattr(config.system, "local_execution_enabled", True)):
+            self.component_status["claude_available"] = self._check_claude_cli_available()
+        else:
+            self.component_status["claude_available"] = self._any_worker_backend_available("claude")
+
         # Check LLAMA availability
         llama_status = self.llama_mediator.get_status(probe=False)
         self.component_status["llama_available"] = bool(llama_status.get("helpers_enabled"))
@@ -4840,6 +4886,37 @@ class TaskOrchestrator(ITaskOrchestrator):
             self._artifact_index_path.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             logger.warning(f"event=artifact_index_save_failed task_id={task_id} error={e}")
+
+    def _any_worker_backend_available(self, backend: str) -> bool:
+        """True when at least one ONLINE mesh worker advertises ``backend``.
+
+        Under the controller/worker split, harness availability is a WORKER
+        property — the controller must not report itself degraded merely because
+        it has no local CLI (it has none by design). Best-effort: on any read
+        error, assume delegated-and-available rather than falsely degraded; a
+        successful read that finds no such worker honestly reports unavailable.
+        """
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None:
+                return True
+            for row in db.list_nodes(status="online"):
+                raw = row.get("backends")
+                if isinstance(raw, str):
+                    try:
+                        names = json.loads(raw or "[]")
+                    except Exception:
+                        names = []
+                elif isinstance(raw, (list, tuple)):
+                    names = list(raw)
+                else:
+                    names = []
+                if backend in names:
+                    return True
+            return False
+        except Exception:
+            return True
 
     def _check_claude_cli_available(self) -> bool:
         """Best-effort check that Claude CLI exists and is authenticated."""
@@ -8393,6 +8470,19 @@ created: {task.created}
                         backend = self._backends.get(backend_name)
                         if backend is not None:
                             backend.cancel(session)
+                        # When the session is pinned to a remote worker node, the
+                        # gateway's local SDK session pool does not contain this
+                        # session — backend.cancel() above is a no-op.  Send the
+                        # interrupt to the owning process via a lightweight
+                        # cancel_turn control task (codex has its own path).
+                        if backend_name != "codex" and getattr(session, "machine_id", ""):
+                            try:
+                                self._enqueue_remote_cancel_turn(session)
+                            except Exception:
+                                logger.warning(
+                                    "event=remote_cancel_turn_failed task_id=%s",
+                                    task_id, exc_info=True,
+                                )
                 except Exception:
                     logger.warning(
                         "event=cancel_backend_interrupt_failed task_id=%s", task_id, exc_info=True
@@ -8994,6 +9084,58 @@ Generated from user description: {description}
         )
         setattr(result, "backend_name", backend_name)
         return result
+
+    def _enqueue_remote_cancel_turn(self, session: Any) -> None:
+        """Fire-and-forget: ask the owning worker to interrupt its live Claude turn.
+
+        Used by cancel_task when the session is pinned to a remote node — in that
+        case the gateway's own ClaudeSDKClientDriver._sessions pool does not contain
+        the session (it lives in the worker process), so backend.cancel(session)
+        called above is a no-op.  Enqueueing a cancel_turn control task delivers the
+        SDK interrupt to the right process without consuming a work slot, so it is
+        not delayed behind the very turn we want to stop.
+        """
+        machine_id = getattr(session, "machine_id", "") or ""
+        if not machine_id:
+            return
+        from src.control.db import get_db
+        db = get_db()
+        if db is None:
+            logger.warning(
+                "event=remote_cancel_turn_no_db session_id=%s node=%s",
+                getattr(session, "session_id", ""), machine_id,
+            )
+            return
+        session_id = getattr(session, "session_id", "") or ""
+        backend = getattr(session, "backend", "") or "claude"
+        payload = {
+            "session": {
+                "session_id": session_id,
+                "backend": backend,
+                "backend_session_id": getattr(session, "backend_session_id", "") or "",
+                "machine_id": machine_id,
+            }
+        }
+        task_id = f"cancel-turn-{session_id}-{uuid.uuid4().hex[:8]}"
+        try:
+            db.enqueue_task(
+                task_id=task_id,
+                session_id=session_id,
+                machine_id=machine_id,
+                backend=backend,
+                action="cancel_turn",
+                payload=payload,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=remote_cancel_turn_enqueue_failed session_id=%s node=%s err=%s",
+                session_id, machine_id, e,
+            )
+            return
+        logger.info(
+            "event=remote_cancel_turn_enqueued session_id=%s node=%s task_id=%s",
+            session_id, machine_id, task_id,
+        )
 
     def _dispatch_remote_close(self, session: Any) -> None:
         """Enqueue a fire-and-forget close_session task pinned to the session's
