@@ -3910,7 +3910,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                 repo_path = str(dead_row.get("repo_path") or "") or repo_path
                 backend = str(dead_row.get("backend") or "") or backend
             new_sid = hashlib.sha256(f"{token_id}\0respawn".encode("utf-8")).hexdigest()[:12]
-            new_session = self.session_store.get(new_sid)
+            new_session = (
+                self.session_store.get(new_sid)
+                if await asyncio.to_thread(db.get_session, new_sid) else None
+            )
             if new_session is None:
                 result = self.session_service.create_session(
                     backend=backend, repo_path=repo_path, node_id=node_id,
