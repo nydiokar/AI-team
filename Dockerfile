@@ -44,9 +44,31 @@ CMD ["python", "main.py"]
 
 FROM runtime AS worker-agents
 COPY --from=node-runtime /usr/local /usr/local
+# Coding-agent runtimes are pinned as build ARGs so Renovate can bump them via
+# PR (datasource=npm) rather than editing a RUN line by hand. These are the
+# single source of truth for the requested versions; the acceptance harness
+# asserts requested (this ARG) vs actual (installed) at runtime. Do NOT
+# reintroduce a `RUN npm install <pkg>@<literal>` — that breaks Renovate's
+# ability to track the version and the requested-vs-actual assertion.
+# renovate: datasource=npm depName=pnpm
+ARG PNPM_VERSION=10.30.2
+# renovate: datasource=npm depName=@anthropic-ai/claude-code
+ARG CLAUDE_CODE_VERSION=2.1.281
+# renovate: datasource=npm depName=@openai/codex
+ARG CODEX_VERSION=0.156.1
+# Build-time git SHA of the checkout the image was built from (image identity
+# for the acceptance inventory). Optional; defaults to "unknown" for a plain
+# `docker build` without the harness.
+ARG AI_TEAM_GIT_SHA=unknown
+# Recorded into the image so the running container can report requested versions
+# and its own identity without needing the build context (the harness reads these).
+ENV AI_TEAM_REQUESTED_CODEX_VERSION=${CODEX_VERSION} \
+    AI_TEAM_REQUESTED_CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
+    AI_TEAM_REQUESTED_PNPM_VERSION=${PNPM_VERSION} \
+    AI_TEAM_GIT_SHA=${AI_TEAM_GIT_SHA}
 RUN npm install --global --omit=dev \
-        pnpm@10.30.2 \
-        @anthropic-ai/claude-code@2.1.281 \
-        @openai/codex@0.156.1 \
+        pnpm@${PNPM_VERSION} \
+        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+        @openai/codex@${CODEX_VERSION} \
     && chown -R ai-team:ai-team /usr/local/lib/node_modules
 CMD ["python", "worker_main.py"]
