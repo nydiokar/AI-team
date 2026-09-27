@@ -27,11 +27,11 @@ const POLL_MS = SAFETY_NET_MS;
 // than the underlying signal.
 const SLOW_POLL_MS = 20000;
 
-export function useSessions(keepPinned?: boolean) {
+export function useSessions(keepPinned?: boolean, limit = 200) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["sessions", keepPinned ?? "all"],
-    queryFn: async () => toSessions(await api.sessions(token, 200, keepPinned)),
+    queryKey: ["sessions", keepPinned ?? "all", limit],
+    queryFn: async () => toSessions(await api.sessions(token, limit, keepPinned)),
     enabled: Boolean(token),
     refetchInterval: POLL_MS,
     retry: (count, err) =>

@@ -221,9 +221,16 @@ export function useRestoreSession() {
  * Set or clear the operator keep marker and note.
  *
  * Optimistic: the pin is a one-tap toggle, so we patch every cached sessions
- * list immediately (across the "all" and "kept-only" query variants) and roll
- * back on error. The card jumps into/out of the Kept section without waiting for
- * a poll, and the eventual invalidate reconciles with server truth.
+ * list immediately (both server-filtered variants — `keep_pinned=true` and
+ * `keep_pinned=false` — plus any legacy "all" key) and roll back on error.
+ *
+ * The patch flips the flag, it does NOT move the card between sections: those
+ * lists are server-filtered and disjoint, so the card settles into its new
+ * section on the refetch below. Moving it client-side would need a sort-order
+ * insert into the other list, and a card that vanishes mid-toggle is worse than
+ * one that lands a beat late. `["sessions"]` is a query-key PREFIX, so the
+ * invalidate covers every variant — the Kept count can never drift from the
+ * server.
  */
 export function useKeepSession() {
   const token = useAuthStore((s) => s.token);

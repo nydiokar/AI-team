@@ -1,19 +1,19 @@
 ```yaml
 job_id: AGENT_91_OPENCODE_BACKEND_PARITY
 created_at: "2026-09-27T11:43:24.753631+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
+status: active               # ready | active | blocked | done | dead
 owner: ""
 depends_on: []
 results_ref: DISPATCH_LOG.md#A91
 evidence: []
-updated_at: "2026-09-27T11:43:24.753631+00:00"
+updated_at: "2026-09-27T14:31:42.670426+00:00"
 ```
 
 # DISPATCH — A91 · OpenCode backend parity and reliability
 
 **Level:** 3 (backend lifecycle + live activity/telemetry integration) · **Type:** backend implementation + acceptance
-**Status:** ready (investigation complete; implementation not started)
-**Branch:** `feat/opencode-backend-parity` + PR + self-merge
+**Status:** active (implementation and deterministic tests built; Kanebra direct live acceptance passed; worker UI/forwarding acceptance waits for the operator's worker restart)
+**Branch:** `feat/opencode-backend-parity` · PR [#174](https://github.com/nydiokar/AI-team/pull/174)
 **Depends on:** none. Coordinate `cancel()` / `close()` changes with A90 if it is active; do not duplicate its locality refactor.
 
 > **Goal.** Bring `OpenCodeServerBackend` up to the useful execution, progress, lifecycle, and audit capabilities already expected by AI-Team's shared `CodingBackend` harness, using OpenCode's supported server APIs behind the existing adapter. Keep `CodingBackend`, `ExecutionResult`, task dispatch, activity SSE, telemetry sink, UI, and worker protocols as the public path. Do not add a parallel OpenCode-only task/message system or change operator-owned timeout values.
@@ -22,7 +22,24 @@ updated_at: "2026-09-27T11:43:24.753631+00:00"
 
 The timeout incident was `task_285b5b74`, gateway session `00676f82e7ea`, OpenCode session `ses_f1d8b67e8ffeJlno1YvB0ceImi`, on 2026-09-27. Two earlier turns on the same OpenCode session completed (about 152 s and 58 s of backend invocation time). The third HTTP message call returned no response within its configured 300 s socket timeout; `_http()` then terminated the whole managed OpenCode server. The event shows the harness timeout and kill, but does **not** prove whether OpenCode was idle or still executing a tool.
 
-The worker emitted no `task_activity` events for any of these three turns. The worker-to-controller activity forwarder already exists, but only backend code that emits the established `task_activity` event reaches it. The worker is currently absent from this host's tailnet, so the native OpenCode session database/version could not be independently inspected. Validate actual event payloads against the worker's installed OpenCode version before relying on them.
+The worker emitted no `task_activity` events for any of these three turns. The worker-to-controller activity forwarder already exists, but only backend code that emits the established `task_activity` event reaches it. The initial investigation host was Horse, which was offline; Kanebra was subsequently identified as the requested worker host and was online for direct backend acceptance.
+
+## Code re-derivation and implementation evidence — 2026-09-27
+
+Re-read `CodingBackend` / `ExecutionResult`, both OpenCode adapters, Claude activity callbacks, Codex telemetry, worker activity forwarding, orchestration cancellation/remote close routing, and the typed telemetry allowlist. The interface and forwarding contract match the original comparison. The working tree additionally confirmed that `OpenCodeServerBackend` was dropping `telemetry_context`/`telemetry_sink`, used blocking `/message`, called `DELETE /session/{id}` from ordinary `close()` and successful one-off cleanup, cleared native IDs after transport errors, silently recreated missing/lost sessions, and did not take the CLI adapter's repository lock. A90 remains `ready`; this change does not move locality routing out of the orchestrator or alter its remote dispatch behavior.
+
+Implemented on `feat/opencode-backend-parity`:
+
+- Turn submission uses `/prompt_async` after the project `/event` SSE connection is established. Events are filtered to the native session; tool names are sanitized; text/reasoning contents, command arguments, permission details, and raw event payloads are never forwarded. Activity uses the existing `task_activity` event path; status/history polling reconciles terminal output by matching assistant `parentID` to the stable client message ID. Lost submission acknowledgements are reconciled against history before any retry decision.
+- Configured `opencode.timeout_seconds` remains the hard cap. The existing `system.inactivity_timeout_sec` is also applied with a bounded half-hard-cap ceiling; tool-start/busy states do not refresh it, while text/reasoning part updates and completed tools do. Timeout/cancel requests call `/abort`; native identity is retained. Activity frames are capped at 256 KiB; HTTP request/response/error bodies at 8 MiB; concurrent turn/event readers and resident per-repo server processes are capped at 8 per backend instance.
+- Usage and tool lifecycle facts use the existing default-deny telemetry schema/sink; absent usage is recorded as unavailable coverage. Native compaction calls `/summarize`. Routine close preserves native history; only the explicitly temporary, successful `run_oneoff` session uses `DELETE`. Missing or lost saved session identity fails recoverably without creating a blank replacement.
+- Deterministic tests cover async terminal correlation, request timeout and inactivity abort, bounded server startup, malformed SSE, SSE tool-label privacy, structural tool telemetry, native compaction, history-preserving close, and resumable identity. Targeted OpenCode, telemetry, backend, activity-forwarder, cancellation, Codex, and Claude telemetry suites passed: 122 tests. The OpenCode suite (42 tests) and full repository suite passed after the runtime-specific regression adjustment.
+
+**Kanebra live acceptance (2026-09-27, worker process left running):** the actual imported module was verified as this branch's `src/backends/opencode.py`; OpenCode `/global/health` returned version `1.18.32`, `/doc` was readable, and `/session/status` returned `{}` for idle sessions. A real `glob` turn returned `1 file found: probe.txt`; observed safe activity labels included `Using glob`, `Finished glob`, and `OpenCode finished`; the sink received `tool.call.started`, `tool.call.completed`, and `model.request.usage` with provider-reported token usage. A create/resume pair returned a remembered marker on resume with the same native session ID. A bounded `bash sleep 30` tool call was observed then cancelled; backend returned `error_class=cancelled`, and post-check found no OpenCode server or sleep child. The test used throwaway repositories; PM2 `ai-team-worker` stayed online and was not restarted.
+
+The live status response exposed a concrete implementation mismatch: idle sessions are omitted from `/session/status`. The poller previously waited until its deadline instead of reconciling completed history. It now treats a missing session entry as idle and matches the terminal assistant message; `test_server_async_prompt_reconciles_correlated_terminal_message` uses the observed `{}` response. The operator's eventual worker restart is still required to load the merged module into PM2 and verify forwarded activity/telemetry in the existing gateway UI and persisted telemetry path. Do not restart the worker autonomously. Optional provider-picker discovery remains deferred; compaction only reads configured defaults when the session has no selected model.
+
+**Bounded-resource note (§7):** each backend instance admits at most 8 simultaneous turns/event readers and retains at most 8 repo-scoped OpenCode processes. Requests for a ninth distinct repo fail closed with a recoverable capacity message until a slot is released during normal backend shutdown; idle-server eviction is deferred because killing a repo server can disrupt native session continuity. This is a concrete bounded behavior and does not change timeout config.
 
 The repo `.env` sets `OPENCODE_TIMEOUT_SEC=300`; the code default is 1800. **The operator owns configuration; this task does not change `.env`, `.env.example`, or timeout values.** The implementation must make live progress observable and distinguish inactivity from progress, while retaining configured hard limits and existing cancellation behavior.
 
@@ -45,12 +62,12 @@ OpenCode API references: [Server API](https://opencode.ai/docs/server/) document
 ## Task
 
 1. **Re-derive the comparison against current code before editing.** Read `CodingBackend` and `ExecutionResult` in `src/core/interfaces.py`; both OpenCode implementations in `src/backends/opencode.py`; Claude stream/activity and Codex app-server/telemetry adapters; worker activity forwarding; remote cancel and close routing; and relevant telemetry/event contracts. Record any changed findings in this packet before implementation.
-2. **Probe the actual OpenCode server version and event wire format on the owning worker.** Check `/global/health`, `/doc`, and a controlled session that exercises text, tool start/completion, idle, error, abort, and event reconnect. If event delivery is absent or differs, identify a documented/version-supported fallback before selecting the implementation. Do not infer active execution solely from a connected SSE socket or `busy` status.
+2. **Live acceptance on Kanebra.** `/global/health`, `/doc`, tool start/completion, idle/history reconciliation, usage, abort, and same-session resume have been exercised against Kanebra's OpenCode 1.18.32. After the operator restarts the worker, confirm the activity reaches the existing UI and usage reaches the persisted telemetry reader. Error and event-reconnect behavior remain fixture-tested rather than forced against the live worker.
 3. **Implement one bounded event-driven turn path inside `OpenCodeServerBackend`.** Use the existing server process and native session for create, resume, and one-off work. Establish the event reader before submitting `prompt_async`; correlate the request with stable message/session IDs; filter unrelated session events; handle `message.part.updated` tool/reasoning/text state and terminal status without leaking chain-of-thought; reconcile missed events after disconnect using message/status reads; and route normalized activity through the existing `task_activity`/SSE feed. Do not add a new public backend, endpoint, queue, DB table, UI stream, or task result contract.
 4. **Complete lifecycle and audit integration.** Route model/usage/tool facts into the existing `telemetry_sink`/adapter; preserve accurate `ExecutionResult` status, finish, error class, native session ID, elapsed time, and bounded partial output semantics; distinguish application timeout from server death; make stop reach `/abort`; override `compact_session()` using OpenCode summarize; and change close so it does not use OpenCode's destructive DELETE as ordinary cleanup. Coordinate remote locality changes with A90.
 5. **Bound concurrency, memory, and process cleanup.** Enforce per-repo mutation serialization; bound concurrent event readers, SSE frame/event queues, HTTP bodies, and retained partial output; close reader threads/connections on every success/error/cancel path; treat malformed events as a structured backend transport failure; fail the task when startup/backing server is unavailable. No unmanaged child process or task may remain after confirmed abort/termination.
 6. **Test with captured OpenCode API fixtures and deterministic integration tests.** Cover streamed tool and reasoning events, user-visible final text, message completion, disconnect/reconnect reconciliation, permissions/errors, malformed/oversize event/body, no-event stall timeout, progressing long tool activity, hard cap, cancellation, server loss, resumable identity, native compact, non-destructive close, same-repo serialization, and cleanup. No paid live model calls in ordinary tests.
-7. **Live-acceptance gate.** On the owning worker, run a short harmless turn with at least one tool, observe activity in the existing session/task UI, verify final output and usage telemetry, stop a running turn and confirm OpenCode acknowledges abort, then resume the same native session and confirm conversation continuity. Record the OpenCode version, event types observed, timings, and evidence in this packet/dispatch row. Surface worker restart/deploy requirements to the operator; do not restart the worker autonomously.
+7. **Live-acceptance gate.** Direct driver acceptance on Kanebra passed as recorded above. The remaining operator-gated check is end-to-end worker forwarding after restart: verify the existing session/task UI receives activity and the normal telemetry path persists usage. Record that result before marking this dispatch done. Never restart the worker autonomously.
 
 ## Constraints and non-goals
 
@@ -63,7 +80,7 @@ OpenCode API references: [Server API](https://opencode.ai/docs/server/) document
 ## Done when
 
 - The table's **Must** items are implemented in the existing backend and mapped through current activity, result, cancellation, and telemetry seams; optional model discovery has a documented keep/defer decision.
-- Tests prove event correlation, bounded resources, timeout/cancel semantics, and session-history preservation; existing OpenCode and cross-backend regression suites pass.
-- Live acceptance proves a tool-using turn is visibly active, terminal output is correct, stop actually aborts the generation, and resume keeps the same OpenCode session.
+- Deterministic tests prove event correlation, bounded resources, timeout/cancel semantics, and session-history preservation; existing targeted OpenCode and cross-backend regression suites pass.
+- Direct owning-host execution, output, activity labels, usage/tool sink events, abort, and native resume are verified. **Still required before `done`:** after the operator restarts PM2 worker, verify forwarded activity in the UI and persisted telemetry. The current worker process still has its pre-merge module loaded.
 - No user-facing universal API, worker protocol, DB schema, or config values changed. Any deferred service-boundary item has a concrete note here before closure.
 - Update `DISPATCH_LOG.md` A91 closure/status and set YAML `status: done` only with evidence paths that exist. Leave deployment/worker restart operator-gated.
