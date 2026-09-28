@@ -139,6 +139,24 @@ describe("approvalAdapter — RawApproval → ApprovalRequest (Move H)", () => {
 });
 
 describe("eventAdapter — snake→dotted translation (gap-doc §6)", () => {
+  it("keeps both current session/task IDs for the live activity pill", () => {
+    expect(adaptEvent({
+      event: "task_activity",
+      timestamp: "t",
+      session_id: "session-current",
+      task_id: "task-current",
+      label: "Using Bash",
+    })).toEqual({
+      type: "task.activity",
+      sessionId: "session-current",
+      taskId: "task-current",
+      label: "Using Bash",
+    });
+    expect(adaptEvent({
+      event: "task_activity", timestamp: "t", session_id: "session-current", label: "Using Bash",
+    })).toBeNull();
+  });
+
   it("swallows heartbeat", () => {
     expect(adaptEvent({ event: "heartbeat", timestamp: "t", node_id: "main-pc" })).toBeNull();
   });
