@@ -7,10 +7,12 @@ depends_on:
   AGENT_91_OPENCODE_BACKEND_PARITY
 results_ref: DISPATCH_LOG.md
 evidence:
-  - "A91 PR #174 merged at 0c88c3a3f969c2a713f2d58634f814618deba2c7"
-  - "A92 PR #176 merged at 22c8c74de8deb631a516148897746befb7c1186e"
-  - "Targeted offline pytest: 125 passed; GitHub PR CI passed"
-updated_at: "2026-09-28T09:58:35+00:00"
+  - "src/core/activity.py"
+  - "tests/test_backend_activity.py"
+  - "tests/test_codex_native.py"
+  - "tests/test_opencode_backend.py"
+  - "web/src/transport/adapters.test.ts"
+updated_at: "2026-09-28T09:59:24+00:00"
 ```
 
 # DISPATCH — A92 · Canonical backend activity normalization
