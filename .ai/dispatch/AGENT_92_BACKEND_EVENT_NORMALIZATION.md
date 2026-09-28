@@ -7,7 +7,7 @@ depends_on:
   AGENT_91_OPENCODE_BACKEND_PARITY
 results_ref: DISPATCH_LOG.md
 evidence: []
-updated_at: "2026-09-28T09:52:37+00:00"
+updated_at: "2026-09-28T09:53:27+00:00"
 ```
 
 # DISPATCH — A92 · Canonical backend activity normalization
@@ -120,7 +120,7 @@ Code + focused tests. Branch `feat/backend-event-normalization`; PR and self-mer
 - [x] Add focused fake/fixture tests for mapping, correlation, validation, privacy, and no duplicate durable telemetry.
 - [x] Run targeted offline checks; record exact results and changed files.
 - [x] Complete service-boundary checklist; document bounded behavior and any operator-gated acceptance.
-- [ ] Adversarially review committed diff; resolve P0/P1 findings; update dispatch state/log at closure.
+- [x] Adversarially review committed diff; resolve P0/P1 findings; update dispatch state/log at closure.
 
 **Progress — 2026-09-28:** A91 re-read at merged PR #174, merge commit
 `0c88c3a3f969c2a713f2d58634f814618deba2c7` (present in `main` ancestry). The live
