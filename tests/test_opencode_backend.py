@@ -824,10 +824,24 @@ def test_server_activity_emits_safe_tool_label_without_arguments(monkeypatch):
             },
         },
     }
+    unrecognized_tool_event = {
+        "payload": {
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": session_id,
+                "part": {"type": "tool", "tool": "bash SECRET_COMMAND", "state": {
+                    "status": "running", "input": {"command": "SECRET_COMMAND"},
+                }},
+            },
+        },
+    }
 
     class _Stream:
         def __init__(self):
-            self._lines = [b"data: " + json.dumps(event).encode() + b"\n"]
+            self._lines = [
+                b"data: " + json.dumps(event).encode() + b"\n",
+                b"data: " + json.dumps(unrecognized_tool_event).encode() + b"\n",
+            ]
 
         def __enter__(self):
             return self
@@ -837,16 +851,22 @@ def test_server_activity_emits_safe_tool_label_without_arguments(monkeypatch):
 
         def readline(self, _limit):
             if self._lines:
-                stop.set()
                 return self._lines.pop(0)
+            stop.set()
             return b""
 
     emitted = []
     monkeypatch.setattr(backend, "_base_urls", {"/repo": "http://localhost"})
     monkeypatch.setattr("src.backends.opencode.urllib.request.urlopen", lambda *_a, **_k: _Stream())
     monkeypatch.setattr("src.core.observability.emit_event", lambda *a, **kw: emitted.append((a, kw)))
-    backend._read_activity_events("/repo", session_id, None, None, stop, ready, {"at": 0.0})
-    assert emitted == [(('task_activity',), {'session_id': None, 'task_id': None, 'label': 'Using bash'})]
+    context = TelemetryContext(
+        turn_id="task-live", invocation_id="inv-live", node_id="worker", session_id="gateway-session"
+    )
+    backend._read_activity_events("/repo", session_id, context, None, stop, ready, {"at": 0.0})
+    assert emitted == [(('task_activity',), {
+        'session_id': 'gateway-session', 'task_id': 'task-live',
+        'turn_id': 'task-live', 'label': 'Using Bash',
+    })]
     assert "SECRET_COMMAND" not in str(emitted)
 
 

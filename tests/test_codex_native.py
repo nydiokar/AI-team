@@ -74,6 +74,10 @@ class Runtime(CodexAppServerClient):
             turn_id = f"turn-{len(self.calls)}"
             self.active[tid] = turn_id
             self.emit(tid, "turn/started", turn={"id": turn_id, "status": "inProgress"})
+            self.emit(tid, "item/started", turnId=turn_id,
+                      item={"id": "tool-1", "type": "commandExecution", "command": "SECRET_COMMAND"})
+            self.emit(tid, "item/completed", turnId=turn_id,
+                      item={"id": "tool-1", "type": "commandExecution", "command": "SECRET_COMMAND"})
             self.emit(tid, "item/completed", turnId=turn_id,
                       item={"id": "message", "type": "agentMessage", "text": "native answer"})
             self.started.set()
@@ -115,6 +119,46 @@ def test_generic_contract_and_exact_continuation(native):
     assert second.output == "native answer"
     assert [method for method, _ in runtime.calls] == ["thread/start", "turn/start", "turn/start"]
     assert all(params["cwd"] == cwd for method, params in runtime.calls if method == "turn/start")
+
+
+def test_codex_item_activity_and_durable_tool_telemetry_are_separate_and_once(native, monkeypatch):
+    backend, _runtime, cwd = native
+    activity = []
+    monkeypatch.setattr(
+        "src.core.observability.emit_event",
+        lambda *args, **kwargs: activity.append((args, kwargs)),
+    )
+
+    class Sink:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event):
+            self.events.append(event)
+
+        def emit_many(self, events):
+            self.events.extend(events)
+
+    sink = Sink()
+    context = TelemetryContext(
+        turn_id="task-codex", invocation_id="inv-codex", node_id="worker",
+        session_id="session-codex", backend="codex",
+    )
+    result = backend._run(cwd, "hello", None, "session-codex",
+                          telemetry_context=context, telemetry_sink=sink)
+
+    assert result.success
+    assert [event[1]["label"] for event in activity] == ["Using Bash", "Finished Bash"]
+    tool_events = [event for event in sink.events if event.event_name.startswith("tool.call.")]
+    assert [event.event_name for event in tool_events] == [
+        "tool.call.started", "tool.call.completed"
+    ]
+    assert all(
+        event.turn_id == "task-codex" and event.session_id == "session-codex"
+        for event in tool_events
+    )
+    assert "SECRET_COMMAND" not in str(activity)
+    assert "SECRET_COMMAND" not in str([event.attributes for event in tool_events])
 
 
 def test_restart_reattaches_only_exact_persisted_id(native, monkeypatch):
