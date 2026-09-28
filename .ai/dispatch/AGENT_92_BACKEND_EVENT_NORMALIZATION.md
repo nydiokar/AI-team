@@ -1,19 +1,22 @@
 ```yaml
 job_id: AGENT_92_BACKEND_EVENT_NORMALIZATION
 created_at: "2026-09-27T16:59:55.027719+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: active             # ready | active | blocked | done | dead
+status: done               # ready | active | blocked | done | dead
 owner: ""
 depends_on:
   AGENT_91_OPENCODE_BACKEND_PARITY
 results_ref: DISPATCH_LOG.md
-evidence: []
-updated_at: "2026-09-28T09:53:27+00:00"
+evidence:
+  - "A91 PR #174 merged at 0c88c3a3f969c2a713f2d58634f814618deba2c7"
+  - "A92 PR #176 merged at 22c8c74de8deb631a516148897746befb7c1186e"
+  - "Targeted offline pytest: 125 passed; GitHub PR CI passed"
+updated_at: "2026-09-28T09:58:35+00:00"
 ```
 
 # DISPATCH — A92 · Canonical backend activity normalization
 
 **Level:** 3 (crosses backend/worker/API boundaries) · **Type:** code + tests
-**Authored:** 2026-09-27 · **Status of this packet:** active (implementation and focused offline checks complete; PR closure pending)
+**Authored:** 2026-09-27 · **Status of this packet:** done (merged PR #176; acceptance evidence recorded below)
 **Depends on:** A91 (`AGENT_91_OPENCODE_BACKEND_PARITY`) — integrate after its OpenCode server changes are merged/reviewed; do not edit its in-flight branch or duplicate its implementation.
 **Branch:** `feat/backend-event-normalization` + PR + self-merge at close. Do not auto-enqueue a `.task.md` for this Level-3 job.
 
@@ -104,12 +107,14 @@ Code + focused tests. Branch `feat/backend-event-normalization`; PR and self-mer
 - Codex/OpenCode native runtime upgrades, provider smoke calls, live worker/gateway restarts, production deployment, or A90 locality/lifecycle behavior.
 - Refactoring backend method signatures or changing `CodingBackend` ownership/locality semantics.
 
-## TRAIL / EVIDENCE (fill at close)
+## TRAIL / EVIDENCE
 
-- Dependency commit/PR and merge point: <fill at close>.
-- Focused test commands/results: <fill at close>.
-- Changed files and privacy/correlation review: <fill at close>.
-- Service-boundary answers and any explicit deferred live acceptance: <fill at close>.
+- Dependency: A91 PR #174 merged at `0c88c3a3f969c2a713f2d58634f814618deba2c7`.
+- A92: PR #176 merged at `22c8c74de8deb631a516148897746befb7c1186e`; implementation commit `ad464bc`; dispatch review commit `077987c`.
+- Focused checks: targeted `.venv/bin/pytest --tb=short` suite listed under Progress — **125 passed**; GitHub PR CI passed; `git diff --check` and focused Ruff passed. Web adapter Vitest assertions were **22/22**, but its Node 24.3.0 process exited 134 after printing the passing summary.
+- Evidence paths: `src/core/activity.py`, three source adapters, `tests/test_backend_activity.py`, `tests/test_codex_native.py`, `tests/test_opencode_backend.py`, and `web/src/transport/adapters.test.ts`.
+- Privacy/correlation: fixed activity vocabulary + required session/task IDs; no provider payload content; UI adapter fixture verifies both IDs; Codex test asserts one durable started/completed pair.
+- Service-boundary answers and deferrals: see “Service-boundary answers” and Closure below. No worker restart/live remote UI acceptance was performed; that remains operator-gated. The existing synchronous `emit_event` local file append has no explicit timeout and is deferred to a separate bounded writer design.
 
 ---
 ## Milestone (burndown)
@@ -190,4 +195,11 @@ anomaly is retained as a verification caveat.
 
 ## Closure (fill on completion)
 
-Record the implementation verdict, A91 dependency evidence, files changed, focused verification, privacy/correlation findings, service-boundary answers, F-tag outcomes, and any operator-gated acceptance. Do not mark complete while required code/test work remains.
+**Verdict: implemented and merged.** A91 was re-derived from merged PR #174 (`0c88c3a3f969c2a713f2d58634f814618deba2c7`) before editing the OpenCode server path. A92 branch `feat/backend-event-normalization` merged through PR #176 at `22c8c74de8deb631a516148897746befb7c1186e` after CI passed.
+
+- **Files:** `src/core/activity.py`; `src/backends/claude_driver.py`; `src/backends/codex_native.py`; `src/backends/opencode.py`; focused Python tests in `tests/test_backend_activity.py`, `tests/test_codex_native.py`, `tests/test_opencode_backend.py`; UI adapter fixture in `web/src/transport/adapters.test.ts`; this packet and generated dispatch state.
+- **Privacy and correlation:** the shared Pydantic value requires bounded nonblank session/task IDs and accepts fixed category/tool values only. Source parsers ignore unsupported tool names. No command, file path, arguments, model output, or raw provider payload crosses the activity boundary. `TelemetryContext.turn_id` is the gateway task ID and `session_id` is propagated from the active session; the gateway sets `last_task_id` at submission, the worker reconstructs the same IDs, and the existing event adapter/hook matches both. Durable telemetry mapping and sinks are unchanged; Codex fixture proves exactly one started/completed durable tool pair alongside transient activity.
+- **Verification:** targeted Python command above passed 125 tests. GitHub PR #176 CI passed. `git diff --check` passed; focused Ruff on the new activity module and its contract tests passed. Vitest reported 22/22 adapter tests passed but exited 134 after its summary under Node 24.3.0; this shutdown anomaly is recorded, and the Python/API/forwarder fixtures plus GitHub CI passed.
+- **Scope review:** only Claude SDK, Codex app-server, OpenCode server and tests/docs changed. Claude CLI, OpenCode CLI, A90, telemetry schema/database/read models, external API, worker payload, and frontend event model are unchanged. No paid executable, live provider, runtime restart, migration, or activity persistence table was used or added.
+- **Service boundary:** the producer, memory, bounds, malformed input, timeout, backpressure, and backing-resource answers are recorded above. One inherited limitation is deferred concretely: `emit_event` performs a synchronous local file append without an explicit timeout; bounding it needs a separate observability writer/queue design. Live remote-worker UI acceptance remains operator-gated until the merged worker code is loaded by an operator restart; no worker was restarted.
+- **F-tag outcomes:** F1–F5 are resolved as documented in the adversarial pass. No P0/P1 issue remains in the committed diff.
