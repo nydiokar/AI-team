@@ -1375,7 +1375,7 @@ class OpenCodeServerBackend(CodingBackend):
         base_url = self._base_urls.get(key, "")
         if not base_url:
             return
-        last_label = ""
+        last_activity: tuple[str, str] | None = None
         try:
             while not stop.is_set():
                 request = urllib.request.Request(base_url + "/event", headers={"Accept": "text/event-stream"})
@@ -1422,13 +1422,14 @@ class OpenCodeServerBackend(CodingBackend):
                             if not isinstance(name, str) or not name:
                                 last_progress["error"] = "OpenCode event stream malformed: missing event type."
                                 return
-                            label = ""
+                            activity_category = ""
+                            activity_tool = ""
                             if name == "session.status":
                                 status = props.get("status") or {}
                                 if not isinstance(status, dict):
                                     last_progress["error"] = "OpenCode event stream malformed: session status is not an object."
                                     return
-                                label = "Using OpenCode" if status.get("type") == "busy" else ""
+                                activity_category = "backend_busy" if status.get("type") == "busy" else ""
                             elif name == "message.part.updated":
                                 if part.get("type") == "tool":
                                     tool = part.get("tool", "tool")
@@ -1438,26 +1439,41 @@ class OpenCodeServerBackend(CodingBackend):
                                         last_progress["error"] = "OpenCode event stream malformed: tool state is not an object."
                                         return
                                     tool_status = state.get("status")
-                                    label = f"Using {safe_tool}" if tool_status in ("running", "pending") else f"Finished {safe_tool}" if tool_status in ("completed", "error") else ""
+                                    activity_tool = {
+                                        "bash": "Bash", "read": "Read", "edit": "Edit",
+                                        "write": "Write", "glob": "Glob", "grep": "Grep",
+                                        "task": "Task", "websearch": "WebSearch",
+                                        "webfetch": "WebFetch", "notebookedit": "NotebookEdit",
+                                    }.get(str(tool).casefold(), "")
+                                    activity_category = (
+                                        "tool_started" if tool_status in ("running", "pending")
+                                        else "tool_completed" if tool_status in ("completed", "error")
+                                        else ""
+                                    )
                                     self._emit_tool_telemetry(telemetry_context, telemetry_sink, safe_tool,
                                         str(part.get("callID") or part.get("id") or ""), tool_status, last_progress)
                                 elif part.get("type") == "text":
-                                    label = "Writing response"
+                                    activity_category = "writing"
                             elif name == "session.idle":
-                                label = "OpenCode finished"
+                                activity_category = "finished"
                             elif name == "permission.asked":
-                                label = "Waiting for permission"
+                                activity_category = "waiting_permission"
                             elif name == "session.error":
                                 last_progress["error"] = "OpenCode reported a session error."
                             if name == "message.part.updated" and part.get("type") in ("text", "reasoning"):
                                 last_progress["at"] = time.monotonic()
                             elif name == "message.part.updated" and part.get("type") == "tool" and (part.get("state") or {}).get("status") in ("completed", "error"):
                                 last_progress["at"] = time.monotonic()
-                            if label and label != last_label:
-                                from src.core.observability import emit_event
-                                emit_event("task_activity", session_id=getattr(telemetry_context, "session_id", None),
-                                           task_id=getattr(telemetry_context, "turn_id", None), label=label)
-                                last_label = label
+                            activity_key = (activity_category, activity_tool)
+                            if activity_category and activity_key != last_activity:
+                                from src.core.activity import publish_activity
+                                publish_activity(
+                                    session_id=getattr(telemetry_context, "session_id", None),
+                                    task_id=getattr(telemetry_context, "turn_id", None),
+                                    category=activity_category,
+                                    tool=activity_tool or None,
+                                )
+                                last_activity = activity_key
                     if not stop.wait(0.1):
                         continue
                 except (TimeoutError, socket.timeout, OSError, urllib.error.URLError):
