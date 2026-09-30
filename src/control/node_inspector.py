@@ -89,17 +89,52 @@ async def _nudge_worker(node_id: str, db: Any) -> None:
     await asyncio.to_thread(nudge_node_direct, node_id, db)
 
 
+def node_status(node_id: str) -> Optional[str]:
+    """Canonical "is this a registered mesh node, and what is its status?" lookup.
+
+    Returns the node's status (``"online"`` / ``"offline"``) or ``None`` when the
+    id is not a registered worker node.
+
+    The mesh DB is the source of truth: the task server writes every
+    registration / heartbeat / offline transition to it, and the gateway can
+    always read it. The in-memory ``NodeRegistry`` only exists in whichever
+    process runs the task server, so in the split deployment
+    (``MESH_EMBEDDED_SERVER=false`` — gateway and task-server are separate
+    containers) the gateway's registry is permanently empty. The registry is
+    kept only as a fallback for when the DB is unavailable.
+
+    The gateway's own hostname self-registration (see
+    ``db._is_gateway_self_node``) is liveness plumbing, not a worker, so it is
+    never reported as a node.
+    """
+    try:
+        from src.control.db import _is_gateway_self_node, get_db
+        db = get_db()
+        row = db.get_node(node_id) if db is not None else None
+        if row is not None:
+            return None if _is_gateway_self_node(row) else str(row.get("status") or "offline")
+    except Exception as e:
+        logger.warning("event=node_status_db_failed node_id=%s err=%s", node_id, e)
+    try:
+        from src.control.node_registry import get_registry
+        info = get_registry().get(node_id)
+    except Exception:
+        return None
+    return info.status if info is not None else None
+
+
 def session_node(session: Any) -> Optional[str]:
     """Return the node_id a session is pinned to, or None if it runs locally.
 
     Canonical "where does this session's repo live?" predicate, shared by every
     gateway code path that must decide local vs. remote (inspection, uploads).
 
-    A session is remote iff mesh is enabled and its ``machine_id`` matches a
-    *registered* node (online OR offline). A ``machine_id`` that is just this
-    host's hostname is not a registered node → local. This is what makes the
-    decision survive the VPS migration: it tracks the registry, not the gateway
-    process's hostname.
+    A session is remote iff mesh is enabled and its ``machine_id`` is a
+    *registered* node (online OR offline) per :func:`node_status`. A
+    ``machine_id`` that is just this host's hostname is not a registered node →
+    local. This is what makes the decision survive the VPS migration and the
+    Docker controller split: it tracks the durable registry, not the gateway
+    process's memory or hostname.
     """
     machine_id = getattr(session, "machine_id", "") or ""
     if not machine_id:
@@ -108,11 +143,9 @@ def session_node(session: Any) -> Optional[str]:
         from config import config
         if not config.mesh.enabled:
             return None
-        from src.control.node_registry import get_registry
-        node = get_registry().get(machine_id)
     except Exception:
         return None
-    return machine_id if node is not None else None
+    return machine_id if node_status(machine_id) is not None else None
 
 
 class NodeInspector:
@@ -126,9 +159,7 @@ class NodeInspector:
         node_id = session_node(session)
         if node_id is None:
             return None
-        from src.control.node_registry import get_registry
-        node = get_registry().get(node_id)
-        if node is None or node.status != "online":
+        if node_status(node_id) != "online":
             raise InspectError(
                 f"Session lives on node '{node_id}', which is offline. "
                 "Its filesystem can't be read until it reconnects."

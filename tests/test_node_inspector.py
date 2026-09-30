@@ -99,6 +99,75 @@ async def test_offline_node_raises_instead_of_lying(monkeypatch, tmp_path):
     assert "offline" in str(ei.value)
 
 
+def _split_topology_db(tmp_path, node_id="Horse", status="online") -> MeshDB:
+    """A durable node row written by the *task-server* process; the gateway's
+    own in-memory registry never sees it (compose split: MESH_EMBEDDED_SERVER=false)."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_node(node_id, "100.0.0.2", 9001, ["claude"], 2, status=status)
+    return db
+
+
+def test_session_node_remote_from_db_when_registry_empty(monkeypatch, tmp_path):
+    """Regression: gateway container has an EMPTY registry; the node exists only in
+    the shared DB. Must still resolve remote (was: None -> gateway wrote the
+    worker's repo path on its own read-only FS -> HTTP 500)."""
+    monkeypatch.setattr(config.mesh, "enabled", True, raising=False)
+    db = _split_topology_db(tmp_path)
+    with patch("src.control.node_registry.get_registry", return_value=NodeRegistry()), \
+         patch("src.control.db.get_db", return_value=db):
+        s = _session(machine_id="Horse", repo_path=r"C:\Users\x\repo")
+        assert session_node(s) == "Horse"
+
+
+def test_session_node_remote_for_offline_db_node(monkeypatch, tmp_path):
+    monkeypatch.setattr(config.mesh, "enabled", True, raising=False)
+    db = _split_topology_db(tmp_path, status="offline")
+    with patch("src.control.node_registry.get_registry", return_value=NodeRegistry()), \
+         patch("src.control.db.get_db", return_value=db):
+        assert session_node(_session("Horse", "/r")) == "Horse"
+
+
+def test_session_node_local_when_unknown_everywhere(monkeypatch, tmp_path):
+    monkeypatch.setattr(config.mesh, "enabled", True, raising=False)
+    db = _split_topology_db(tmp_path)
+    with patch("src.control.node_registry.get_registry", return_value=NodeRegistry()), \
+         patch("src.control.db.get_db", return_value=db):
+        assert session_node(_session("not-a-node", "/r")) is None
+
+
+def test_session_node_ignores_gateway_self_node_row(monkeypatch, tmp_path):
+    import socket
+    monkeypatch.setattr(config.mesh, "enabled", True, raising=False)
+    host = socket.gethostname()
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_node(host, "", 9003, [], 3)  # gateway self-claim plumbing, not a worker
+    with patch("src.control.node_registry.get_registry", return_value=NodeRegistry()), \
+         patch("src.control.db.get_db", return_value=db):
+        assert session_node(_session(host, "/r")) is None
+
+
+def test_session_node_falls_back_to_registry_when_db_unavailable(monkeypatch):
+    monkeypatch.setattr(config.mesh, "enabled", True, raising=False)
+    reg = NodeRegistry()
+    reg.register(_online_node("worker-1"))
+    with patch("src.control.node_registry.get_registry", return_value=reg), \
+         patch("src.control.db.get_db", return_value=None):
+        assert session_node(_session("worker-1", "/r")) == "worker-1"
+
+
+def test_is_remote_uses_db_status_when_registry_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(config.mesh, "enabled", True, raising=False)
+    online = _split_topology_db(tmp_path, status="online")
+    with patch("src.control.node_registry.get_registry", return_value=NodeRegistry()), \
+         patch("src.control.db.get_db", return_value=online):
+        assert NodeInspector().is_remote(_session("Horse", "/r")) == "Horse"
+    online.mark_node_offline("Horse")
+    with patch("src.control.node_registry.get_registry", return_value=NodeRegistry()), \
+         patch("src.control.db.get_db", return_value=online):
+        with pytest.raises(InspectError):
+            NodeInspector().is_remote(_session("Horse", "/r"))
+
+
 # ---------------------------------------------------------------------------
 # Remote round-trip — enqueue inspect task, worker-style result, gateway reads
 # ---------------------------------------------------------------------------

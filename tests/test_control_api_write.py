@@ -723,3 +723,114 @@ def test_open_case_unknown_session_returns_404(client, orch):
 
 def test_open_case_requires_auth(client):
     assert client.post("/api/cases", json={"objective": "x", "session_id": "s"}).status_code in (401, 403)
+
+
+# --- upload: canonical node resolution + structured errors ------------------
+
+
+def _pin_session(orch, machine_id, repo_path):
+    res = orch.session_service.create_session(backend="claude", repo_path=repo_path)
+    assert res.ok
+    res.session.machine_id = machine_id
+    orch.session_service.store.save(res.session)
+    return res.session
+
+
+def test_upload_endpoint_remote_session_resolves_via_db_when_registry_empty(
+    client, orch, monkeypatch, tmp_path
+):
+    """Regression (Docker split, MESH_EMBEDDED_SERVER=false): the gateway's in-memory
+    registry is empty and the worker node exists only in the shared mesh DB.
+    session_node is deliberately NOT mocked — the old tests mocked it, which is
+    exactly how this regressed unnoticed. Was: 500 (mkdir of the worker's
+    Windows repo path on the gateway's read-only FS)."""
+    from unittest.mock import patch
+
+    from config import config
+    from src.control.db import MeshDB
+    from src.control.node_registry import NodeRegistry
+
+    monkeypatch.setattr(config.mesh, "enabled", True, raising=False)
+    monkeypatch.setattr(control_api, "_upload_staging_root", lambda: tmp_path / "state" / "uploads")
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    db.upsert_node("Horse", "100.0.0.2", 9001, ["claude"], 2)
+    repo = r"C:\Users\Cicada38\Projects\tokens_ingest"
+    session = _pin_session(orch, "Horse", repo)
+
+    with patch("src.control.node_registry.get_registry", return_value=NodeRegistry()), \
+         patch("src.control.db.get_db", return_value=db):
+        resp = client.post(
+            f"/api/sessions/{session.session_id}/upload",
+            headers=_auth(),
+            files={"file": ("spec.md", b"# spec")},
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["delivery"] == "pending_instruction"
+    assert body["staged_file"]["filename"] == "spec.md"
+    assert len(list((tmp_path / "state" / "uploads").glob("*/spec.md"))) == 1
+
+
+def test_upload_pinned_session_unknown_node_is_structured_409_not_500(
+    client, orch, monkeypatch, tmp_path
+):
+    from unittest.mock import patch
+
+    from config import config
+    from src.control.node_registry import NodeRegistry
+
+    monkeypatch.setattr(config.mesh, "enabled", True, raising=False)
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("x", encoding="utf-8")
+    session = _pin_session(orch, "ghost", str(tmp_path))
+    session.repo_path = str(blocker)  # uploads/ can't be created beneath a file
+    orch.session_service.store.save(session)
+
+    with patch("src.control.node_registry.get_registry", return_value=NodeRegistry()), \
+         patch("src.control.db.get_db", return_value=None):
+        resp = client.post(
+            f"/api/sessions/{session.session_id}/upload",
+            headers=_auth(),
+            files={"file": ("a.txt", b"x")},
+        )
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["reason"] == "session_repo_unreachable"
+    assert "not registered" in detail["detail"]
+
+
+def test_upload_unpinned_unwritable_repo_is_structured_500(client, orch, tmp_path):
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("x", encoding="utf-8")
+    session = _pin_session(orch, "", str(tmp_path))
+    session.repo_path = str(blocker)
+    orch.session_service.store.save(session)
+
+    resp = client.post(
+        f"/api/sessions/{session.session_id}/upload",
+        headers=_auth(),
+        files={"file": ("a.txt", b"x")},
+    )
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["reason"] == "upload_write_failed"
+
+
+def test_upload_remote_staging_failure_is_structured_503(orch, monkeypatch, tmp_path):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    blocker = tmp_path / "ro"
+    blocker.write_text("x", encoding="utf-8")
+    res = orch.session_service.create_session(backend="claude", repo_path=str(tmp_path))
+    monkeypatch.setattr("src.control.node_inspector.session_node", lambda _s: "Horse")
+    monkeypatch.setattr(control_api, "_upload_staging_root", lambda: blocker)  # mkdir under a file
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(control_api._store_session_upload(orch, res.session, "a.txt", b"x"))
+    assert exc.value.status_code == 503
+    assert exc.value.detail["reason"] == "upload_staging_unavailable"

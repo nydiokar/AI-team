@@ -753,6 +753,15 @@ def _upload_attached_instruction(instruction: str, file_path: str) -> str:
     return f"{clean_instruction}\n\n📎 File: `{file_path}`" if clean_instruction else ""
 
 
+def _upload_error(status_code: int, reason: str, detail: str = "") -> HTTPException:
+    """Structured upload failure: the repo-wide ``{"ok": False, "reason": ...}`` envelope
+    (stable machine ``reason`` + optional human ``detail``) instead of a bare 500."""
+    body: Dict[str, Any] = {"ok": False, "reason": reason}
+    if detail:
+        body["detail"] = detail
+    return HTTPException(status_code=status_code, detail=body)
+
+
 async def _store_session_upload(
     orchestrator: Any,
     session: Any,
@@ -774,7 +783,7 @@ async def _store_session_upload(
         ".jar", ".dll", ".reg", ".lnk",
     }
     if ext in blocked_exts:
-        raise HTTPException(status_code=400, detail="dangerous_extension")
+        raise _upload_error(400, "dangerous_extension")
 
     try:
         from config import config as _cfg
@@ -782,7 +791,7 @@ async def _store_session_upload(
     except Exception:
         max_mb = 0
     if max_mb > 0 and len(content) > max_mb * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="file_too_large")
+        raise _upload_error(413, "file_too_large")
 
     safe_name: str = _re.sub(r"[^\w.\-]", "_", raw_name)[:200] or "upload"
     if not safe_name.strip("._"):
@@ -794,13 +803,23 @@ async def _store_session_upload(
     if remote_node is not None:
         stage_id: str = _uuid.uuid4().hex[:16]
         stage_dir = _upload_staging_root() / stage_id
-        stage_dir.mkdir(parents=True, exist_ok=True)
         dest = (stage_dir / safe_name).resolve()
         try:
             dest.relative_to(stage_dir.resolve())
         except ValueError:
-            raise HTTPException(status_code=400, detail="dangerous_extension")
-        dest.write_bytes(content)
+            raise _upload_error(400, "dangerous_extension")
+        try:
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(content)
+        except OSError as exc:
+            logger.error(
+                "event=web_upload_stage_failed session=%s file=%s node=%s error=%s",
+                session.session_id, safe_name, remote_node, exc,
+            )
+            raise _upload_error(
+                503, "upload_staging_unavailable",
+                "Gateway could not stage the file for the remote worker.",
+            ) from exc
         staged_file_meta: dict[str, str] = {"file_id": stage_id, "filename": safe_name}
         if not attached_instruction:
             logger.info(
@@ -842,7 +861,7 @@ async def _store_session_upload(
                 remote_node,
                 exc,
             )
-            raise HTTPException(status_code=500, detail="delivery_enqueue_failed") from exc
+            raise _upload_error(500, "delivery_enqueue_failed") from exc
         logger.info(
             "event=web_upload_attached session=%s file=%s size=%d node=%s task=%s",
             session.session_id,
@@ -864,25 +883,41 @@ async def _store_session_upload(
         }
 
     upload_dir = _Path(session.repo_path) / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    dest = (upload_dir / safe_name).resolve()
-
     try:
-        dest.relative_to(upload_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="dangerous_extension")
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        dest = (upload_dir / safe_name).resolve()
 
-    if dest.exists():
-        stem, suffix = _os.path.splitext(safe_name)
-        counter: int = 1
-        while dest.exists():
-            dest = (upload_dir / f"{stem}_{counter}{suffix}").resolve()
-            counter += 1
-        safe_name = dest.name
-        file_path = f"uploads/{safe_name}"
-        attached_instruction = _upload_attached_instruction(instruction or "", file_path)
+        try:
+            dest.relative_to(upload_dir.resolve())
+        except ValueError:
+            raise _upload_error(400, "dangerous_extension")
 
-    dest.write_bytes(content)
+        if dest.exists():
+            stem, suffix = _os.path.splitext(safe_name)
+            counter: int = 1
+            while dest.exists():
+                dest = (upload_dir / f"{stem}_{counter}{suffix}").resolve()
+                counter += 1
+            safe_name = dest.name
+            file_path = f"uploads/{safe_name}"
+            attached_instruction = _upload_attached_instruction(instruction or "", file_path)
+
+        dest.write_bytes(content)
+    except OSError as exc:
+        # The session's repo is not writable from the gateway. For a session pinned
+        # to a worker node this means the node is unknown to the gateway, so the
+        # remote (staged) path was not taken — never surface it as an unhandled 500.
+        pinned: bool = bool(getattr(session, "machine_id", ""))
+        logger.error(
+            "event=web_upload_local_write_failed session=%s machine_id=%s repo=%s error=%s",
+            session.session_id, getattr(session, "machine_id", ""), session.repo_path, exc,
+        )
+        raise _upload_error(
+            409 if pinned else 500,
+            "session_repo_unreachable" if pinned else "upload_write_failed",
+            f"Gateway cannot write to the session repo path: {exc.strerror or exc}."
+            + (" The session's node is not registered with this gateway." if pinned else ""),
+        ) from exc
     logger.info(
         "event=web_upload session=%s file=%s size=%d", session.session_id, safe_name, len(content)
     )
@@ -906,7 +941,7 @@ async def _store_session_upload(
                 safe_name,
                 exc,
             )
-            raise HTTPException(status_code=500, detail="delivery_enqueue_failed") from exc
+            raise _upload_error(500, "delivery_enqueue_failed") from exc
         session.last_task_id = task_id
         orchestrator.session_service.store.save(session)
         return {
@@ -2793,9 +2828,9 @@ def build_control_api(orchestrator) -> FastAPI:
         """
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
-            raise HTTPException(status_code=404, detail="session_not_found")
+            raise _upload_error(404, "session_not_found")
         if not session.repo_path:
-            raise HTTPException(status_code=400, detail="no_repo_path")
+            raise _upload_error(400, "no_repo_path")
 
         raw_name = file.filename or "upload"
         content = await file.read()
