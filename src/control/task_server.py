@@ -935,7 +935,9 @@ def _refuse_if_managed(db: Any, task_id: str) -> Optional[Dict[str, Any]]:
 class ManagedClaimPayload(BaseModel):
     node_id: str
     carrier_kind: str = "gateway_local"
-    incarnation_id: Optional[str] = None
+    # [A82 Stage 4e review F3] Required: the claim is fenced to the node's
+    # current registered incarnation (a zombie process cannot claim).
+    incarnation_id: str = Field(min_length=1, max_length=128)
     # A carrier MUST advertise it supports the managed protocol to receive a
     # managed claim; a legacy poll/claim never reaches this route.
     queue_protocols: List[int] = Field(default_factory=lambda: [1])

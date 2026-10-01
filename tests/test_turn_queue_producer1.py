@@ -85,9 +85,12 @@ def _setup(tmp_path, monkeypatch, *, enroll=True, machine="worker-a"):
     return db, o
 
 
-def _register_carrier(db, node_id, managed=("claude",)):
+def _register_carrier(db, node_id, managed=("claude",), incarnation_id="inc-1"):
+    # [4e review F3] claims are fenced to the node's registered incarnation:
+    # register the incarnation the test carriers present.
     db.upsert_node(node_id=node_id, tailscale_ip="", api_port=9001, backends=["claude"],
-                   max_concurrent=2, managed_backends=list(managed))
+                   max_concurrent=2, managed_backends=list(managed),
+                   incarnation_id=incarnation_id)
 
 
 def _submit(o, **kw):

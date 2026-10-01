@@ -43,7 +43,7 @@ def _session(db, sid, machine="worker-a", enroll=True):
     # a pending row on a dead/unknown carrier is now returned to queued.
     if machine:
         db.upsert_node(node_id=machine, tailscale_ip="", api_port=9001, backends=["claude"],
-                       max_concurrent=2, managed_backends=["claude"])
+                       max_concurrent=2, managed_backends=["claude"], incarnation_id="inc-1")
 
 
 # --- concurrency: 30 threads, per-session cap 20 / fleet cap 50 ------------- #

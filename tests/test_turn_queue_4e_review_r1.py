@@ -121,3 +121,104 @@ def test_withdraw_rebound_automation_covers_every_case_automation_kind(tmp_path,
     assert out == ["job-turn"]
     assert _row(db, "human")["status"] == "queued"
     assert db.get_task("job-7")["status"] == "completed"  # 4d audit record
+
+
+# ---------------------------------------------------------------- F3
+
+def _fence_db(tmp_path: Any) -> Any:
+    from src.control.db import MeshDB
+
+    db = MeshDB(str(tmp_path / "fence.db"))
+    _enrolled(db, "s")
+    db.upsert_node(node_id="worker-a", tailscale_ip="100.64.0.10", api_port=9001,
+                   backends=["claude"], max_concurrent=2, incarnation_id="inc-1")
+    return db
+
+
+def _pending(db: Any, tid: str) -> None:
+    db.enqueue_turn(tid, "s", body="x", turn_source="human", machine_id="worker-a")
+    assert db.activate_turn(tid)
+
+
+def test_claim_refused_for_a_superseded_incarnation(tmp_path):
+    from src.control.turn_queue import OwnershipConflictError
+
+    db = _fence_db(tmp_path)
+    db.upsert_node(node_id="worker-a", tailscale_ip="100.64.0.10", api_port=9001,
+                   backends=["claude"], max_concurrent=2, incarnation_id="inc-2")
+    _pending(db, "t1")
+    for stale in ("inc-1", None):
+        with pytest.raises(OwnershipConflictError):
+            db.claim_turn("t1", node_id="worker-a", carrier_kind="worker", incarnation_id=stale)
+    assert _row(db, "t1")["status"] == "pending"
+    tok = db.claim_turn("t1", node_id="worker-a", carrier_kind="worker", incarnation_id="inc-2")
+    assert db.start_turn("t1", claim_token=str(tok), incarnation_id="inc-2").status == "running"
+
+
+def test_zombie_cannot_supersede_the_live_incarnation_claim(tmp_path):
+    from src.control.turn_queue import OwnershipConflictError
+
+    db = _fence_db(tmp_path)
+    db.upsert_node(node_id="worker-a", tailscale_ip="100.64.0.10", api_port=9001,
+                   backends=["claude"], max_concurrent=2, incarnation_id="inc-2")
+    _pending(db, "t2")
+    tok = db.claim_turn("t2", node_id="worker-a", carrier_kind="worker", incarnation_id="inc-2")
+    with pytest.raises(OwnershipConflictError):
+        db.claim_turn("t2", node_id="worker-a", carrier_kind="worker", incarnation_id="inc-1")
+    assert db.start_turn("t2", claim_token=str(tok), incarnation_id="inc-2").status == "running"
+
+
+@pytest.mark.parametrize("presented", ["inc-1", None])
+def test_start_refused_after_node_reregistered_new_incarnation(tmp_path, presented):
+    from src.control.turn_queue import OwnershipConflictError
+
+    db = _fence_db(tmp_path)
+    _pending(db, "t3")
+    tok = db.claim_turn("t3", node_id="worker-a", carrier_kind="worker", incarnation_id="inc-1")
+    # The restart registered inc-2 (the release hook may not have run yet).
+    db.upsert_node(node_id="worker-a", tailscale_ip="100.64.0.10", api_port=9001,
+                   backends=["claude"], max_concurrent=2, incarnation_id="inc-2")
+    with pytest.raises(OwnershipConflictError):
+        db.start_turn("t3", claim_token=str(tok), incarnation_id=presented)
+    assert _row(db, "t3")["status"] == "claimed"
+
+
+def test_superseded_grant_release_covers_null_claim_incarnation(tmp_path):
+    db = _fence_db(tmp_path)
+    _pending(db, "t4")
+    tok = db.claim_turn("t4", node_id="worker-a", carrier_kind="worker", incarnation_id="inc-1")
+    with db._write() as conn:  # a pre-fence grant minted without an incarnation
+        conn.execute("UPDATE mesh_tasks SET claim_incarnation = NULL WHERE id = 't4'")
+    assert str(tok)
+    assert db.release_superseded_managed_grants("worker-a", "inc-2") == ["t4"]
+    assert _row(db, "t4")["status"] == "pending"
+
+
+def test_managed_claim_payload_requires_incarnation():
+    from pydantic import ValidationError
+
+    from src.control.task_server import ManagedClaimPayload
+
+    with pytest.raises(ValidationError):
+        ManagedClaimPayload(node_id="worker-a")
+    with pytest.raises(ValidationError):
+        ManagedClaimPayload(node_id="worker-a", incarnation_id="")
+    assert ManagedClaimPayload(node_id="worker-a", incarnation_id="inc-1").incarnation_id == "inc-1"
+
+
+def test_registration_hook_failure_logged_at_warning(monkeypatch, caplog):
+    import logging
+
+    from src.control import db as db_mod
+    from src.control.node_registry import NodeRegistry
+
+    class _Broken:
+        def release_superseded_managed_grants(self, *_a: Any) -> List[str]:
+            raise RuntimeError("db locked")
+
+    monkeypatch.setattr(db_mod, "get_db", lambda: _Broken())
+    reg = NodeRegistry.__new__(NodeRegistry)
+    with caplog.at_level(logging.WARNING, logger="src.control.node_registry"):
+        assert reg._db_release_superseded_managed_grants("worker-a", "inc-2") == []
+    assert any("db_release_superseded_grants_err" in r.getMessage() for r in caplog.records)
+

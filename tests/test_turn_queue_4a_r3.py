@@ -220,7 +220,7 @@ def test_2_requeue_then_reactivate_keeps_case_meta(tmp_path, monkeypatch):
     assert db.requeue_turns_on_dead_carriers() == [tid]
     # race: carrier comes back and tries to claim with the old view
     with pytest.raises(tq.TurnQueueError):
-        db.claim_turn(task_id=tid, node_id="worker-a", carrier_kind="worker", incarnation_id="i")
+        db.claim_turn(task_id=tid, node_id="worker-a", carrier_kind="worker", incarnation_id="inc-1")
     db._conn().execute("UPDATE nodes SET last_heartbeat=? WHERE node_id='worker-a'",
                        (datetime.now(tz=timezone.utc).isoformat(),))
     db._conn().execute("UPDATE mesh_tasks SET blocked_until=NULL WHERE id=?", (tid,))
@@ -268,9 +268,9 @@ def test_requeue_never_touches_claimed_or_running(tmp_path, monkeypatch):
     t1 = _submit(o, operation_id="c1")
     t2 = _submit(o, operation_id="r1", session_id=_sid2)
     assert _pass(db, o).activated == 2
-    tok1 = db.claim_turn(t1, "worker-a", "worker_daemon", "i")
-    tok2 = db.claim_turn(t2, "worker-a", "worker_daemon", "i")
-    db.start_turn(t2, tok2, incarnation_id="i")
+    tok1 = db.claim_turn(t1, "worker-a", "worker_daemon", "inc-1")
+    tok2 = db.claim_turn(t2, "worker-a", "worker_daemon", "inc-1")
+    db.start_turn(t2, tok2, incarnation_id="inc-1")
     db.mark_node_offline("worker-a")
     assert db.requeue_turns_on_dead_carriers() == []
     assert db.get_task(t1)["status"] == "claimed" and db.get_task(t2)["status"] == "running"
