@@ -45,7 +45,8 @@ import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { EffortPickerSheet } from "../components/sessions/EffortPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
 import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
-import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionUsage, useSessionActivity, useJobs, useCacheHeartbeats } from "../hooks/useLiveData";
+import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionTurnQueue, useSessionUsage, useSessionActivity, useJobs, useCacheHeartbeats } from "../hooks/useLiveData";
+import { TurnQueuePanel } from "../components/timeline/TurnQueuePanel";
 import { compactTokens } from "../components/timeline/SessionTurns";
 import { useSessionAffiliations } from "../hooks/useWork";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
@@ -602,9 +603,12 @@ export function SessionDetailScreen() {
     isError: messagesError,
     fetchStatus: messagesFetchStatus,
   } = useSessionMessages(id);
+  const { data: turnQueue } = useSessionTurnQueue(id);
   const { data: approvals } = useApprovals();
   const { data: activity } = useSessionActivity(id, 30);
-  const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? []);
+  const transcriptIds = new Set((turns ?? []).filter((turn) => Boolean(turn.result)).map((turn) => turn.task_id));
+  const queueIds = new Set((turnQueue?.turns ?? []).map((turn) => turn.id));
+  const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? [], queueIds);
   const liveActivity = useTaskActivity(id, session?.lastTaskId ?? undefined);
   const running = session?.opState === "running";
   const closed = session?.lifecycle === "closed";
@@ -1312,6 +1316,8 @@ export function SessionDetailScreen() {
             </button>
           </div>
         )}
+
+        {id && turnQueue?.enrolled && <TurnQueuePanel sessionId={id} page={turnQueue} transcriptIds={transcriptIds} />}
 
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}
         {id && !closed ? (

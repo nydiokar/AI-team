@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from src.control import control_api
 from src.services.session_store import SessionStore
 from src.services.session_service import SessionService
+from src.control.turn_queue import BackingStoreError, TurnAdmission
 
 
 TOKEN = "test-turnqueue-token"
@@ -40,8 +41,11 @@ class _StubOrchestrator:
                                  target_files=None, source="runtime",
                                  parent_flow_run_id=None, **_):
         if self.commit_fails:
-            raise RuntimeError("durable commit failed (simulated DB unavailable)")
+            raise BackingStoreError("durable commit failed (simulated DB unavailable)")
         self.submitted.append((description, session_id, cwd, source))
+        if _.get("turn_queue_enrolled"):
+            return TurnAdmission(self._next_task_id, status="queued", revision=1,
+                                 queue_sequence=1, idempotent_replay=False)
         return self._next_task_id
 
 
@@ -90,10 +94,14 @@ def test_APICOMPAT_turns_telemetry_routes_unchanged(client):
 # --------------------------------------------------------------------------- #
 # TARGET (RED) — commit-before-202 on the new route
 # --------------------------------------------------------------------------- #
-def test_API_new_turn_request_route_returns_202_after_commit(client):
+def test_API_new_turn_request_route_returns_202_after_commit(client, orch, monkeypatch):
     """The new `POST /api/sessions/{id}/turn-requests` returns 202 ONLY after
     durable admission (design §9). RED: route not implemented yet → 404.
     """
+    _save_test_session(orch)
+    async def enrolled(_session_id):
+        return True
+    monkeypatch.setattr(control_api, "_session_turn_queue_enrolled", enrolled)
     r = client.post(
         "/api/sessions/sess-1/turn-requests",
         headers=_auth(),
@@ -103,16 +111,12 @@ def test_API_new_turn_request_route_returns_202_after_commit(client):
         f"new turn-request route did not return 202 (got {r.status_code}); "
         "commit-before-202 route not implemented (design §9)"
     )
+    assert r.json()["turn_id"] == "task_web_1"
+    assert orch.submitted == [("hello", "sess-1", "/tmp/repo", "web_session")]
 
 
-def test_API_commit_failure_does_not_acknowledge(client, orch):
-    """A failed durable commit must NOT be acknowledged as success — it must
-    return 503 with no acceptance (design §6/§8: no accepted envelope on failed
-    commit). RED: current handler surfaces a 500 / optimistic path rather than a
-    clean 503 fail-closed.
-    """
-    # Create the session so admission reaches submit_instruction (and then fails
-    # in the durable commit), rather than 404-ing on an unknown session.
+def _save_test_session(orch):
+    """Create a session so the route reaches the managed admission seam."""
     from src.core.interfaces import Session, SessionStatus
     from datetime import datetime, timezone
 
@@ -128,6 +132,13 @@ def test_API_commit_failure_does_not_acknowledge(client, orch):
             machine_id="worker-a",
         )
     )
+
+def test_API_commit_failure_does_not_acknowledge(client, orch, monkeypatch):
+    """A failed managed commit returns 503 without an acceptance envelope."""
+    _save_test_session(orch)
+    async def enrolled(_session_id):
+        return True
+    monkeypatch.setattr(control_api, "_session_turn_queue_enrolled", enrolled)
     orch.commit_fails = True
     r = client.post("/api/instructions", headers=_auth(), json={"description": "x", "session_id": "sess-1"})
     assert r.status_code == 503, (
@@ -135,3 +146,44 @@ def test_API_commit_failure_does_not_acknowledge(client, orch):
         "acceptance must not be emitted on a failed commit (design §6/§8)"
     )
     assert r.json().get("ok") is not True, "a failed commit still returned ok=True"
+    assert orch.submitted == []
+
+
+def test_queue_read_edit_withdraw_and_pause_routes(client, orch, monkeypatch, tmp_path):
+    """Real SQLite backs the operator queue resources; telemetry stays distinct."""
+    from src.control.db import MeshDB
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _save_test_session(orch)
+    session = orch.session_service.store.get("sess-1")
+    db.upsert_session(session)
+    db.enroll_session("sess-1")
+    db.enqueue_turn("turn-a", "sess-1", body="original", turn_source="human",
+                    turn_kind="instruction")
+    monkeypatch.setattr(control_api, "_db", lambda: db)
+
+    listing = client.get("/api/sessions/sess-1/turn-requests", headers=_auth())
+    assert listing.status_code == 200
+    assert [r["id"] for r in listing.json()["turns"]] == ["turn-a"]
+    assert listing.json()["count"] == 1
+    detail = client.get("/api/turn-requests/turn-a", headers=_auth())
+    assert detail.json()["body"] == "original"
+    assert "claim_token" not in detail.json()
+
+    paused = client.post("/api/sessions/sess-1/turn-requests/pause", headers=_auth())
+    assert paused.status_code == 200 and paused.json()["paused"] is True
+    resumed = client.post("/api/sessions/sess-1/turn-requests/resume", headers=_auth())
+    assert resumed.status_code == 200 and resumed.json()["paused"] is False
+
+    edited = client.patch("/api/turn-requests/turn-a", headers={**_auth(), "If-Match": "1"},
+                          json={"body": "revised"})
+    assert edited.status_code == 200 and edited.json()["revision"] == 2
+    assert db.get_turn_request("turn-a")["body"] == "revised"
+    stale = client.patch("/api/turn-requests/turn-a", headers={**_auth(), "If-Match": "1"},
+                         json={"body": "stale"})
+    assert stale.status_code == 409
+    withdrawn = client.post("/api/turn-requests/turn-a/withdraw",
+                            headers={**_auth(), "If-Match": "2"})
+    assert withdrawn.status_code == 200 and withdrawn.json()["status"] == "withdrawn"
+    assert db.get_task("turn-a")["status"] == "withdrawn"
+    assert client.get("/api/sessions/sess-1/turn-requests", headers=_auth()).json()["turns"] == []

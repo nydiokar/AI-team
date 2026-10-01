@@ -24,6 +24,7 @@ worker reserves an envelope allowance before start, spools before POST, and call
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -39,6 +40,7 @@ MAX_ENVELOPE_BYTES = 8 * 1024 * 1024          # 8 MiB per serialized result
 MAX_RETAINED_BYTES = 128 * 1024 * 1024        # 128 MiB retained per carrier
 MAX_CONCURRENT_DELIVERIES = 2                  # informational; caller enforces
 MAX_DEAD_LETTERS = 256                         # m3: bounded dead-letter count
+MAX_OVERSIZE_ARTIFACT_BYTES = 128 * 1024 * 1024
 
 # Validated identifier syntax for spool paths — reject anything that could
 # escape the spool dir or collide. Task/token ids are server-minted opaque
@@ -53,9 +55,7 @@ class ResultSpoolError(RuntimeError):
 
 
 class OversizeResultError(ResultSpoolError):
-    """The serialized result exceeds the per-envelope byte cap. The full backend
-    artifact is preserved elsewhere; the spool keeps only a bounded reference and
-    the ownership hold — never a truncated success."""
+    """The serialized result exceeds the transport envelope byte cap."""
 
 
 @dataclass(frozen=True)
@@ -318,6 +318,59 @@ class ManagedResultSpool:
             # produce a successful ack (design §6).
             raise ResultSpoolError(f"failed to spool managed result for {task_id}: {e}") from e
         return final
+
+    def preserve_oversize(
+        self, task_id: str, claim_token: str, envelope: Dict[str, Any],
+    ) -> Path:
+        """Keep the complete result for operator recovery when it cannot be POSTed.
+
+        One oversize result stops new managed claims on this carrier. The file is
+        separate from replayable envelopes so boot replay cannot send it through
+        the bounded result route. Its name contains no raw claim credential.
+        """
+        _validate_id("task_id", task_id)
+        _validate_id("claim_token", claim_token)
+        artifact_dir: Path = self.dir / "oversize"
+        digest: str = hashlib.sha256(claim_token.encode("utf-8")).hexdigest()[:24]
+        final: Path = artifact_dir / f"{task_id}.{digest}.json"
+        tmp: Optional[str] = None
+        try:
+            artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(artifact_dir, 0o700)
+            retained: int = sum(p.stat().st_size for p in artifact_dir.glob("*.json"))
+            available: int = MAX_OVERSIZE_ARTIFACT_BYTES - retained
+            if available <= 0:
+                raise ResultSpoolError("oversize recovery artifact budget exhausted")
+            # The existing boot cleanup scans root .spool-*.tmp files. Keeping
+            # the temporary file there also bounds crash leftovers on restart.
+            self._ensure_dir()
+            fd, tmp = tempfile.mkstemp(dir=str(self.dir), prefix=".spool-", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                written: int = 0
+                for part in json.JSONEncoder(ensure_ascii=False).iterencode(envelope):
+                    data: bytes = part.encode("utf-8")
+                    written += len(data)
+                    if written > available:
+                        raise ResultSpoolError("oversize recovery artifact exceeds carrier budget")
+                    stream.write(part)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, final)
+            _fsync_dir(artifact_dir)
+            return final
+        except (OSError, TypeError, ValueError) as exc:
+            raise ResultSpoolError(f"failed to preserve oversize result for {task_id}: {exc}") from exc
+        finally:
+            if tmp is not None and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def has_oversize_artifacts(self) -> bool:
+        """An unresolved recovery file survives restart and bars new claims."""
+        return any((self.dir / "oversize").glob("*.json"))
 
     # --- receipt-matched pruning (NEVER on bare timeout/2xx) ------------- #
     @staticmethod

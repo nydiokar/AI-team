@@ -266,8 +266,13 @@ def test_SCH06_query_plans_are_index_served(tmp_path):
     import inspect
     src = inspect.getsource(MeshDB.select_eligible_turn_heads)
     sql = src.split('f"""', 1)[1].split('"""', 1)[0]
-    from src.control.db import _MANAGED_OPEN_PREDICATE
+    from src.control.db import (
+        _MANAGED_OPEN_PREDICATE, _MANAGED_RETRY_GATE_SQL,
+        _MANAGED_CASE_BINDING_GATE_SQL,
+    )
     sql = sql.replace("{_MANAGED_OPEN_PREDICATE}", _MANAGED_OPEN_PREDICATE)
+    sql = sql.replace("{_MANAGED_RETRY_GATE_SQL}", _MANAGED_RETRY_GATE_SQL)
+    sql = sql.replace("{_MANAGED_CASE_BINDING_GATE_SQL}", _MANAGED_CASE_BINDING_GATE_SQL)
     plan = " | ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, (NOW, NOW, 25)))
     assert "idx_mesh_turns_waiting" in plan, plan
     assert "SCAN mesh_tasks" not in plan.replace("SCAN mesh_tasks USING", ""), plan

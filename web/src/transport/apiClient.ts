@@ -150,7 +150,82 @@ export interface InstructionResponse {
   session: RawSessionView | null;
 }
 
+export interface TurnRequestSummary {
+  id: string;
+  status: string;
+  revision: number;
+  queue_sequence: number;
+  turn_source: string;
+  turn_kind: string;
+  blocked_reason: string | null;
+  created_at: string;
+  preview: string;
+}
+
+export interface TurnRequestPage {
+  turns: TurnRequestSummary[];
+  count: number;
+  next_cursor: number | null;
+  enrolled: boolean;
+  paused: boolean;
+  hold: string | null;
+}
+
+export interface TurnRequestDetail extends TurnRequestSummary {
+  body: string;
+  session_id: string;
+}
+
+async function conditionalTurnMutation<T>(
+  path: string, token: string, revision: number, method: "PATCH" | "POST", body?: unknown,
+): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "If-Match": String(revision),
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data?.detail;
+    throw new ApiError(res.status, String(detail?.reason ?? detail ?? `${res.status} ${res.statusText}`));
+  }
+  return data as T;
+}
+
 export const api = {
+  turnRequests(token: string, sessionId: string, cursor = 0): Promise<TurnRequestPage> {
+    return get<TurnRequestPage>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/turn-requests?cursor=${cursor}`, token,
+    );
+  },
+
+  turnRequest(token: string, turnId: string): Promise<TurnRequestDetail> {
+    return get<TurnRequestDetail>(`/api/turn-requests/${encodeURIComponent(turnId)}`, token);
+  },
+
+  editTurnRequest(token: string, turnId: string, revision: number, body: string): Promise<TurnRequestDetail> {
+    return conditionalTurnMutation<TurnRequestDetail>(
+      `/api/turn-requests/${encodeURIComponent(turnId)}`, token, revision, "PATCH", { body },
+    );
+  },
+
+  withdrawTurnRequest(token: string, turnId: string, revision: number): Promise<unknown> {
+    return conditionalTurnMutation(
+      `/api/turn-requests/${encodeURIComponent(turnId)}/withdraw`, token, revision, "POST",
+    );
+  },
+
+  pauseTurnRequests(token: string, sessionId: string): Promise<TurnRequestPage> {
+    return post(`/api/sessions/${encodeURIComponent(sessionId)}/turn-requests/pause`, token, {});
+  },
+
+  resumeTurnRequests(token: string, sessionId: string): Promise<TurnRequestPage> {
+    return post(`/api/sessions/${encodeURIComponent(sessionId)}/turn-requests/resume`, token, {});
+  },
   async sessions(token: string, limit = 200, keepPinned?: boolean): Promise<RawSessionView[]> {
     const qs = new URLSearchParams({ limit: String(limit) });
     if (keepPinned !== undefined) qs.set("keep_pinned", String(keepPinned));

@@ -97,6 +97,7 @@ export function invalidateLiveTargets(
   for (const sessionId of target.sessions) {
     queryClient.invalidateQueries({ queryKey: ["session-messages", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["session-turns", sessionId] });
+    queryClient.invalidateQueries({ queryKey: ["session-turn-queue", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["session-usage", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["session-activity", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["work-affiliations"] });
@@ -143,6 +144,7 @@ const LIVE_QUERY_KEYS: readonly (readonly [string])[] = [
   ["artifacts"],
   ["session-messages"],
   ["session-turns"],
+  ["session-turn-queue"],
   ["session-usage"],
   ["session-activity"],
   ["work-list"],

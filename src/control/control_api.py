@@ -39,7 +39,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.core import observability
 from src.control import app_metrics
@@ -240,8 +240,11 @@ def _preparse_byte_guard(app: Any) -> None:
         BodyCapMiddleware,
         rules=[
             (r"/api/turn-requests/[^/]+/resolve-recovery", 16 * 1024),
+            (r"/api/turn-requests/[^/]+/withdraw", 16 * 1024),
+            (r"/api/turn-requests/[^/]+", _TURN_REQUESTS_MAX_REQUEST_BYTES),
             (r"/api/instructions", _INSTRUCTIONS_MAX_REQUEST_BYTES),
             (r"/api/sessions/[^/]+/turn-requests", _TURN_REQUESTS_MAX_REQUEST_BYTES),
+            (r"/api/sessions/[^/]+/turn-requests/(pause|resume)", 16 * 1024),
         ],
         read_deadline_sec=_BODY_READ_DEADLINE_SEC,
     )
@@ -285,6 +288,37 @@ class InstructionBody(BaseModel):
     # here (§7) so an oversized payload cannot be a DoS vector — but generously, so a
     # real fork carries in full. Absent on every normal turn ⇒ byte-identical.
     continue_inline: Optional[str] = Field(default=None, max_length=_CONTINUE_INLINE_MAX)
+
+
+class TurnRequestCreateBody(BaseModel):
+    """Small human instruction accepted by the managed queue resource."""
+
+    model_config = {"extra": "forbid"}
+
+    body: str = Field(min_length=1)
+    operation_id: str = Field(min_length=1, max_length=256)
+
+    @field_validator("body")
+    @classmethod
+    def _body_byte_limit(cls, value: str) -> str:
+        try:
+            byte_count = len(value.encode("utf-8"))
+        except UnicodeError as exc:
+            raise ValueError("body is not valid UTF-8") from exc
+        if byte_count > 16 * 1024:
+            raise ValueError("body exceeds 16 KiB UTF-8")
+        return value
+
+
+class TurnRequestEditBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    body: str = Field(min_length=1)
+
+    @field_validator("body")
+    @classmethod
+    def _body_byte_limit(cls, value: str) -> str:
+        return TurnRequestCreateBody._body_byte_limit(value)
 
 
 class CreateSessionBody(BaseModel):
@@ -1961,6 +1995,146 @@ def build_control_api(orchestrator) -> FastAPI:
     # ----------------------------------------------------------------------
     # Write surface (U3) — thin adapters over the same services Telegram calls.
     # ----------------------------------------------------------------------
+
+    @app.post("/api/sessions/{session_id}/turn-requests", dependencies=[Depends(_require_auth)])
+    async def api_create_turn_request(
+        session_id: str, body: TurnRequestCreateBody,
+    ) -> JSONResponse:
+        """Acknowledge a managed instruction only after canonical admission."""
+        from src.control.turn_queue import TurnAdmission
+
+        session = orchestrator.session_service.store.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "session_not_found"})
+        if not await _session_turn_queue_enrolled(session_id):
+            raise HTTPException(status_code=409, detail={"ok": False, "reason": "session_not_enrolled"})
+        admitted = await _submit_managed_instruction(
+            orchestrator, InstructionBody(description=body.body), session,
+            body.operation_id,
+        )
+        if not isinstance(admitted, TurnAdmission):
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "admission_receipt_missing"})
+        return JSONResponse({
+            "turn_id": admitted.id,
+            "task_id": admitted.id,
+            "status": admitted.status,
+            "revision": admitted.revision,
+            "queue_sequence": admitted.queue_sequence,
+        }, status_code=202)
+
+    @app.get("/api/sessions/{session_id}/turn-requests", dependencies=[Depends(_require_auth)])
+    def api_list_turn_requests(
+        session_id: str, cursor: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
+    ) -> JSONResponse:
+        from src.control.turn_queue import TurnQueueError
+
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        try:
+            return JSONResponse(db.list_turn_requests(session_id, after_sequence=cursor, limit=limit))
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+
+    @app.get("/api/turn-requests/{task_id}", dependencies=[Depends(_require_auth)])
+    def api_get_turn_request(task_id: str) -> JSONResponse:
+        from src.control.turn_queue import TurnQueueError
+
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        try:
+            row = db.get_turn_request(task_id)
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        if row is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "turn_not_found"})
+        return JSONResponse(row)
+
+    @app.patch("/api/turn-requests/{task_id}", dependencies=[Depends(_require_auth)])
+    async def api_edit_turn_request(
+        task_id: str, body: TurnRequestEditBody,
+        revision: int = Header(alias="If-Match", ge=1),
+    ) -> JSONResponse:
+        from src.control.turn_queue import TurnQueueError
+        from src.control.turn_admission import run_turn_mutation_async
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        row = await asyncio.to_thread(db.get_turn_request, task_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "turn_not_found"})
+        if row["turn_source"] not in ("human", "operator") or row["turn_kind"] != "instruction":
+            raise HTTPException(status_code=403, detail={"ok": False, "reason": "not_human_turn"})
+        try:
+            updated = await run_turn_mutation_async(
+                lambda: db.revise_turn(task_id, revision, body=body.body, actor="operator"),
+            )
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        notify_turn_queue_changed()
+        return JSONResponse(await asyncio.to_thread(db.get_turn_request, task_id) or updated)
+
+    @app.post("/api/turn-requests/{task_id}/withdraw", dependencies=[Depends(_require_auth)])
+    async def api_withdraw_turn_request(
+        task_id: str, revision: int = Header(alias="If-Match", ge=1),
+    ) -> JSONResponse:
+        from src.control.turn_queue import TurnQueueError
+        from src.control.turn_admission import run_turn_mutation_async
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        row = await asyncio.to_thread(db.get_turn_request, task_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "turn_not_found"})
+        if row["turn_source"] not in ("human", "operator") or row["turn_kind"] != "instruction":
+            raise HTTPException(status_code=403, detail={"ok": False, "reason": "not_human_turn"})
+        try:
+            await run_turn_mutation_async(
+                lambda: db.withdraw_turn(task_id, revision, actor="operator"),
+            )
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        notify_turn_queue_changed()
+        return JSONResponse({"turn_id": task_id, "status": "withdrawn", "revision": revision + 1})
+
+    @app.post("/api/sessions/{session_id}/turn-requests/pause", dependencies=[Depends(_require_auth)])
+    async def api_pause_turn_requests(session_id: str) -> JSONResponse:
+        from src.control.turn_queue import TurnQueueError
+        from src.control.turn_admission import run_turn_mutation_async
+
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        try:
+            state = await run_turn_mutation_async(
+                lambda: db.set_turn_queue_paused(session_id, True),
+            )
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        return JSONResponse(state)
+
+    @app.post("/api/sessions/{session_id}/turn-requests/resume", dependencies=[Depends(_require_auth)])
+    async def api_resume_turn_requests(session_id: str) -> JSONResponse:
+        from src.control.turn_queue import TurnQueueError
+        from src.control.turn_admission import run_turn_mutation_async
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        try:
+            state = await run_turn_mutation_async(
+                lambda: db.set_turn_queue_paused(session_id, False),
+            )
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        notify_turn_queue_changed()
+        return JSONResponse(state)
 
     @app.post("/api/instructions", dependencies=[Depends(_require_auth)])
     async def api_instructions(

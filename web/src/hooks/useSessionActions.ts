@@ -63,6 +63,7 @@ export function useSubmitInstruction() {
       qc.invalidateQueries({ queryKey: ["tasks"] });
       if (vars.sessionId) {
         qc.invalidateQueries({ queryKey: ["session", vars.sessionId] });
+        qc.invalidateQueries({ queryKey: ["session-turn-queue", vars.sessionId] });
       }
     },
   });

@@ -1299,12 +1299,16 @@ class TaskOrchestrator(ITaskOrchestrator):
         """Start the periodic Wake-Dispatcher loop (mirrors the stale-busy
         reconciler). No-op unless mesh routing is active AND the continuation flag
         is ON — so with the flag OFF this is byte-identical to no loop at all."""
-        from src.control.db import cache_heartbeat_active_enabled, case_continuation_enabled
+        from src.control.db import (
+            cache_heartbeat_active_enabled, case_continuation_enabled, get_db,
+        )
         interval = int(getattr(config.mesh, "case_continuation_tick_interval_sec", 30) or 0)
+        db = get_db() if config.mesh.enabled else None
+        managed_present = db is not None and db.any_session_enrolled() is not False
         if (
             not config.mesh.enabled
             or interval <= 0
-            or not (case_continuation_enabled() or cache_heartbeat_active_enabled())
+            or not (case_continuation_enabled() or cache_heartbeat_active_enabled() or managed_present)
         ):
             return
         if self._wake_dispatcher_task and not self._wake_dispatcher_task.done():
@@ -1332,8 +1336,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         from src.control.db import cache_heartbeat_active_enabled, case_continuation_enabled, get_db
         continuation_enabled = case_continuation_enabled()
         heartbeat_active = cache_heartbeat_active_enabled()
-        if not continuation_enabled and not heartbeat_active:
-            return 0
         try:
             db = get_db()
         except Exception:
@@ -1341,6 +1343,16 @@ class TaskOrchestrator(ITaskOrchestrator):
         if db is None:
             return 0
         delivered = 0
+        if db.any_session_enrolled() is not False:
+            # Accepted managed rows must finish their retry/respawn tokens and
+            # provider-pause marks even when new Case continuation is disabled.
+            # This path is bounded by the pending indexes, not an all-Case scan.
+            try:
+                await self._reconcile_managed_recovery(db)
+            except Exception as e:
+                logger.warning("event=managed_recovery_reconcile_failed err=%s", e)
+        if not continuation_enabled and not heartbeat_active:
+            return 0
         if continuation_enabled:
             # Read-only DB scans run in a worker thread so the Wake-Dispatcher never
             # blocks the shared event loop (see _continue_case_once for the rationale).
@@ -1350,12 +1362,6 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._reconcile_continuation_finalizers(db)
             except Exception as e:
                 logger.debug("event=continuation_finalizer_reconcile_failed err=%s", e)
-            # [A82 Stage 4e] Producers 5/7: finalize retry / respawn tokens,
-            # then record Case pauses of failed managed Manager turns.
-            try:
-                await self._reconcile_managed_recovery(db)
-            except Exception as e:
-                logger.warning("event=managed_recovery_reconcile_failed err=%s", e)
             cases = await asyncio.to_thread(db.list_open_cases)
             case_ids = [str(c.get("flow_run_id") or "") for c in cases]
             case_ids = [c for c in case_ids if c]
@@ -5944,7 +5950,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         _sid = str((task.metadata or {}).get("session_id") or "").strip()
         _known = (task.metadata or {}).pop(self._TURN_ENROLLED_META_KEY, None)
         if _sid and (_known if _known is not None else await self._session_turn_queue_enrolled(_sid)):
-            return await self._admit_managed_session_turn(task)
+            admitted = await self._admit_managed_session_turn(task)
+            if getattr(self, "running", False):
+                self._start_wake_dispatcher()
+            return admitted
         if task.metadata:
             task.metadata.pop(self._TURN_OPERATION_META_KEY, None)
 
@@ -7266,6 +7275,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         join_case_id: Optional[str] = None,
         operation_id: Optional[str] = None,
         turn_queue_enrolled: Optional[bool] = None,
+        sender_session_id: Optional[str] = None,
     ) -> str:
         """Direct runtime entrypoint for Telegram/CLI instructions.
 
@@ -7308,6 +7318,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         # strips it so its task metadata stays byte-identical.
         if operation_id:
             self._stash_task_meta(task, self._TURN_OPERATION_META_KEY, operation_id)
+        if sender_session_id:
+            self._stash_task_meta(task, "__turn_sender_session_id", sender_session_id)
         if turn_queue_enrolled is not None:
             self._stash_task_meta(task, self._TURN_ENROLLED_META_KEY, bool(turn_queue_enrolled))
         return await self._enqueue_task(task)
@@ -10492,7 +10504,7 @@ Generated from user description: {description}
     # admitted by its own branch; anything else FAILS CLOSED for an enrolled
     # session instead of bypassing the managed queue.
     _MANAGED_PRODUCER1_SOURCES = frozenset(
-        {"web_session", "telegram_session", "runtime", "telegram", "automation_session"}
+        {"web_session", "telegram_session", "runtime", "telegram", "automation_session", "agent_session"}
     )
     # [A82 Stage 4d] Automation producers admitted with a durable trigger
     # identity (source → turn_kind). The producer facts ride the server-set
@@ -10516,6 +10528,7 @@ Generated from user description: {description}
         # (Manager MCP dispatch_worker) — a non-human turn: it never releases an
         # operator stop hold.
         "automation_session": "automation",
+        "agent_session": "agent",
     }
 
     async def _session_turn_queue_enrolled(self, session_id: str) -> bool:
@@ -10571,7 +10584,10 @@ Generated from user description: {description}
             )
         db = get_db()
         principal = self._MANAGED_SOURCE_PRINCIPAL.get(source, source)
-        scope = f"{principal}:{sid}:instruction"
+        sender_session_id = str(meta.pop("__turn_sender_session_id", "") or "") if source == "agent_session" else ""
+        if source == "agent_session" and (not sender_session_id or not meta.get(self._JOIN_CASE_META_KEY)):
+            raise ManagedUnsupportedError("agent send requires validated sender and Case")
+        scope = f"{principal}:{sender_session_id}:{sid}:instruction" if sender_session_id else f"{principal}:{sid}:instruction"
         # Original-request hash (design §4): target, body, attachments, options —
         # computed BEFORE lineage stamps the per-attempt flow ids.
         admission_hash = _canonical_admission_hash({
@@ -10603,11 +10619,14 @@ Generated from user description: {description}
             backend=backend,
             machine_id=carrier,
             action="resume_session",
-            turn_source="human" if source in ("web_session", "telegram_session", "telegram") else "system",
+            turn_source=("agent" if sender_session_id else "human"
+                         if source in ("web_session", "telegram_session", "telegram") else "system"),
             turn_kind="instruction",
             operation_id=operation_id,
             idempotency_scope=scope,
             admission_hash=admission_hash,
+            sender_session_id=sender_session_id or None,
+            flow_run_id=str(meta.get(self._JOIN_CASE_META_KEY)) if sender_session_id else None,
             lineage_token=token,
         )
         admission = await admit_turn_async(
@@ -11414,6 +11433,12 @@ Generated from user description: {description}
                     )
                 )
                 if not bound:
+                    # A different Manager may have been bound while the new
+                    # session/turn was being created. Only the original dead
+                    # Manager's binding means this respawn is still pending;
+                    # a later binding makes the queued turn obsolete.
+                    if str(manager or "") != str(payload.get("dead_session_id") or ""):
+                        return "manager_rebound"
                     raise self._RespawnBindingPending("respawn_binding_pending")
             return "manager_rebound"
         if kind == "retry" and payload.get("pause_event_id") is not None:

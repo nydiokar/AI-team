@@ -229,6 +229,17 @@ class ManagedTurnOwnership(BaseModel):
     # the prompt under it, and a late reply is bound back to EXACTLY this
     # attempt by it — never by session.
     turn_uuid: Optional[str] = None
+    sender_capability: Optional[str] = Field(default=None, repr=False)
+
+
+class SenderIdentity(BaseModel):
+    """Server-validated agent sender; never contains the bearer capability."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    session_id: str
+    case_id: str
+    role: str
 
 
 class StartAuthorization(BaseModel):

@@ -163,6 +163,19 @@ export function useSessionTurns(sessionId: string | undefined) {
   });
 }
 
+/** Durable managed requests; separate from completed-turn telemetry. */
+export function useSessionTurnQueue(sessionId: string | undefined) {
+  const token = useAuthStore((s) => s.token);
+  return useQuery({
+    queryKey: ["session-turn-queue", sessionId],
+    queryFn: async () => api.turnRequests(token, sessionId!),
+    enabled: Boolean(token) && Boolean(sessionId),
+    refetchInterval: POLL_MS,
+    refetchOnReconnect: true,
+    placeholderData: (prev) => prev,
+  });
+}
+
 /**
  * Per-session token totals + approximate USD cost (Info tab cost panel). Polls
  * so an in-flight turn's spend updates while you watch; keeps previous data to

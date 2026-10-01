@@ -819,6 +819,87 @@ QUOTA_RESUME_ACTION = "manager_quota_resume"
 # model); only the action and id namespace differ. The lease keeps two overlapping
 # Wake-Dispatcher passes from delivering the same retry turn twice.
 TRANSIENT_RESUME_ACTION = "manager_transient_resume"
+
+# A completed provider-refused Manager turn frees its slot before the gateway
+# records the Case pause. Both head selection and the activation transaction
+# use this predicate, so that gap cannot launch B. Once recorded, the indexed
+# latest pause event keeps B held; only R linked to that exact pause can pass.
+# The correlated lookups are bounded by the waiting subset and the
+# (flow_run_id, id) event index; no Case event log is materialized per tick.
+_MANAGED_RETRY_GATE_SQL = """
+    NOT EXISTS (
+        SELECT 1 FROM mesh_tasks pm INDEXED BY idx_mesh_tasks_retry_pause
+        WHERE pm.retry_pause_state = 'pending' AND pm.session_id = t.session_id
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM flow_events pe
+        WHERE t.session_id = (
+            SELECT entity_id FROM flow_links
+            WHERE flow_run_id = COALESCE(t.flow_run_id, s.current_case_id)
+              AND entity_type = 'session' AND role = 'manager'
+            ORDER BY id DESC LIMIT 1
+        ) AND pe.id = (
+            SELECT id FROM flow_events
+            WHERE flow_run_id = COALESCE(t.flow_run_id, s.current_case_id)
+              AND event_type IN ('flow.quota_paused', 'flow.quota_resumed',
+                                 'flow.quota_pause_declined', 'case.manager_respawned')
+            ORDER BY id DESC LIMIT 1
+        )
+          AND pe.event_type = 'flow.quota_paused'
+          AND NOT (t.turn_kind = 'retry' AND EXISTS (
+              SELECT 1 FROM mesh_tasks tok
+              WHERE tok.producer_turn_id = t.id AND tok.status = 'claimed'
+                AND tok.action = 'manager_quota_resume'
+                AND json_valid(tok.payload)
+                AND json_extract(tok.payload, '$.pause_event_id') = pe.id
+                AND json_valid(pe.payload_json)
+                AND t.parent_task_id = json_extract(pe.payload_json, '$.paused_task_id')
+          ))
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM flow_events pe
+        WHERE t.session_id = (
+            SELECT entity_id FROM flow_links
+            WHERE flow_run_id = COALESCE(t.flow_run_id, s.current_case_id)
+              AND entity_type = 'session' AND role = 'manager'
+            ORDER BY id DESC LIMIT 1
+        ) AND pe.id = (
+            SELECT id FROM flow_events
+            WHERE flow_run_id = COALESCE(t.flow_run_id, s.current_case_id)
+              AND event_type IN ('flow.transient_paused', 'flow.transient_resumed',
+                                 'flow.transient_pause_exhausted', 'case.manager_respawned')
+            ORDER BY id DESC LIMIT 1
+        )
+          AND pe.event_type = 'flow.transient_paused'
+          AND NOT (t.turn_kind = 'retry' AND EXISTS (
+              SELECT 1 FROM mesh_tasks tok
+              WHERE tok.producer_turn_id = t.id AND tok.status = 'claimed'
+                AND tok.action = 'manager_transient_resume'
+                AND json_valid(tok.payload)
+                AND json_extract(tok.payload, '$.pause_event_id') = pe.id
+                AND json_valid(pe.payload_json)
+                AND t.parent_task_id = json_extract(pe.payload_json, '$.paused_task_id')
+          ))
+    )
+"""
+
+# A queued human instruction remains visible on its original Manager session
+# when a Case is rebound (quota fresh-manager / crash respawn). It must never
+# execute as stale Case work on the former Manager. Worker sessions have no
+# manager-role link and are unaffected.
+_MANAGED_CASE_BINDING_GATE_SQL = """
+    NOT EXISTS (
+        SELECT 1 FROM flow_links old
+        WHERE old.flow_run_id = t.flow_run_id AND old.entity_type = 'session'
+          AND old.role = 'manager' AND old.entity_id = t.session_id
+          AND EXISTS (
+              SELECT 1 FROM flow_links newer
+              WHERE newer.flow_run_id = old.flow_run_id
+                AND newer.entity_type = 'session' AND newer.role = 'manager'
+                AND newer.id > old.id
+          )
+    )
+"""
 # [session-cache-heartbeat] The heartbeat single-flight action. It uses a
 # distinct sentinel so worker scans never claim heartbeat lease rows as normal
 # work; the gateway claims the row before sending a paid heartbeat turn.
@@ -1587,6 +1668,15 @@ class MeshDB:
                 self._run_migrations(conn)
                 self._ensure_merged_schema(conn)
                 self._ensure_substrate_columns(conn)
+                # ``mesh_tasks.flow_run_id`` is deliberately added by the
+                # optional substrate-column repair after numbered migrations.
+                # Keep this index at that seam so fresh databases do not try
+                # to index the column before it exists.
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_mesh_turns_sender_rate "
+                    "ON mesh_tasks(sender_session_id, flow_run_id, created_at) "
+                    "WHERE queue_protocol = 1 AND sender_session_id IS NOT NULL"
+                )
                 conn.execute("COMMIT;")
             except Exception:
                 try:
@@ -2692,7 +2782,7 @@ class MeshDB:
                 if admitted is None:
                     # 3. Canonical recipient + durable enrollment marker.
                     srow = conn.execute(
-                        "SELECT backend, status, turn_queue_enrolled FROM sessions "
+                        "SELECT backend, status, turn_queue_enrolled, current_case_id, case_role FROM sessions "
                         "WHERE session_id = ?",
                         (sid,),
                     ).fetchone()
@@ -2707,6 +2797,48 @@ class MeshDB:
                         if (srow["status"] or "") == "closed":
                             raise OwnershipConflictError(
                                 "session is closed; admission refused", session_id=sid,
+                            )
+                    if sender_session_id is not None:
+                        if turn_source != "agent" or not flow_run_id:
+                            raise ScopeForbiddenError("agent sender requires a canonical Case")
+                        sender = conn.execute(
+                            "SELECT status, current_case_id, case_role, turn_queue_enrolled "
+                            "FROM sessions WHERE session_id = ?", (sender_session_id,),
+                        ).fetchone()
+                        case = conn.execute(
+                            "SELECT status FROM flow_runs WHERE flow_run_id = ?", (flow_run_id,),
+                        ).fetchone()
+                        if (
+                            sender is None or sender_session_id == sid
+                            or sender["status"] in ("closed", "cancelled")
+                            or not sender["turn_queue_enrolled"]
+                            or sender["current_case_id"] != flow_run_id
+                            or sender["case_role"] not in ("manager", "worker")
+                            or srow is None or srow["current_case_id"] != flow_run_id
+                            or srow["case_role"] not in ("manager", "worker")
+                            or case is None or case["status"] in self._CLOSED_STATUSES
+                        ):
+                            raise ScopeForbiddenError("sender and recipient no longer share an open Case")
+                        recent = conn.execute(
+                            "SELECT COUNT(*) FROM mesh_tasks INDEXED BY idx_mesh_turns_sender_rate "
+                            "WHERE queue_protocol = 1 AND sender_session_id = ? "
+                            "AND flow_run_id = ? AND created_at >= ?",
+                            (sender_session_id, flow_run_id,
+                             (datetime.now(tz=timezone.utc) - timedelta(minutes=10)).isoformat()),
+                        ).fetchone()[0]
+                        if int(recent) >= 30:
+                            raise CapacityError("sender Case fanout limit reached", retry_after=60)
+                    if turn_kind == "retry" and parent_task_id:
+                        # A human B can commit after the producer's read-side
+                        # A/B/R decision. Recheck under the SAME write
+                        # transaction that assigns R its sequence and links its
+                        # token; R must never land behind an earlier B.
+                        decision = self.retry_decision(sid, parent_task_id)
+                        if decision.action != "retry":
+                            raise OwnershipConflictError(
+                                "automatic retry was superseded before admission",
+                                session_id=sid, failed_task_id=parent_task_id,
+                                decision=decision.action,
                             )
                     if idle_only and not _session_idle_for_optional_turn(conn, sid):
                         # [A82 Stage 4d] Optional automation (heartbeat) is
@@ -3000,6 +3132,8 @@ class MeshDB:
               AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
               AND COALESCE(s.status, '') NOT IN ('closed', 'cancelled')
               AND s.turn_queue_hold IS NULL
+              AND {_MANAGED_RETRY_GATE_SQL}
+              AND {_MANAGED_CASE_BINDING_GATE_SQL}
               AND NOT EXISTS (
                   SELECT 1 FROM mesh_tasks e
                   WHERE e.session_id = t.session_id
@@ -3080,6 +3214,17 @@ class MeshDB:
                     return "ineligible"
                 if int(srow["config_revision"]) != int(expected_config_revision):
                     return "stale"
+                # Revalidate the durable pause in THIS write transaction. A
+                # pause or a newer pause event can land after head selection.
+                allowed = conn.execute(
+                    f"SELECT 1 FROM mesh_tasks t JOIN sessions s "
+                    f"ON s.session_id = t.session_id WHERE t.id = ? "
+                    f"AND {_MANAGED_RETRY_GATE_SQL} "
+                    f"AND {_MANAGED_CASE_BINDING_GATE_SQL}",
+                    (task_id,),
+                ).fetchone()
+                if allowed is None:
+                    return "ineligible"
                 blocker = conn.execute(
                     f"""
                     SELECT 1 FROM mesh_tasks e
@@ -3238,7 +3383,7 @@ class MeshDB:
         (design §8). Cannot change recipient/source/Case/sequence."""
         now = _now()
         try:
-            with self._write() as conn:
+            with self._managed_write("revise_turn") as conn:
                 row = conn.execute(
                     "SELECT status, queue_protocol, revision FROM mesh_tasks WHERE id = ?",
                     (task_id,),
@@ -3350,7 +3495,7 @@ class MeshDB:
         transaction — both or neither."""
         now = _now()
         try:
-            with self._write() as conn:
+            with self._managed_write("withdraw_turn") as conn:
                 row = conn.execute(
                     "SELECT status, queue_protocol, revision FROM mesh_tasks WHERE id = ?",
                     (task_id,),
@@ -3706,6 +3851,104 @@ class MeshDB:
                 self._enrolls_in_flight -= 1
                 self._any_enrolled = True
 
+    def issue_sender_capability(
+        self, task_id: str, claim_token: str, node_id: str, incarnation_id: str,
+    ) -> str:
+        """Mint a sender-only bearer from a current claimed carrier attempt."""
+        raw: str = secrets.token_urlsafe(32)
+        digest: str = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        try:
+            with self._managed_write("issue_sender_capability") as conn:
+                row = conn.execute(
+                    "SELECT t.session_id, t.claim_token, t.claimed_by, t.claim_incarnation, "
+                    "t.status, s.status AS session_status, s.current_case_id, s.case_role, "
+                    "s.turn_queue_enrolled, n.incarnation_id AS node_incarnation "
+                    "FROM mesh_tasks t JOIN sessions s ON s.session_id = t.session_id "
+                    "JOIN nodes n ON n.node_id = t.claimed_by "
+                    "WHERE t.id = ? AND t.queue_protocol = 1", (task_id,),
+                ).fetchone()
+                if (
+                    row is None or row["status"] not in ("claimed", "running")
+                    or not secrets.compare_digest(str(row["claim_token"] or ""), claim_token)
+                    or row["claimed_by"] != node_id
+                    or row["claim_incarnation"] != incarnation_id
+                    or row["node_incarnation"] != incarnation_id
+                    or not row["turn_queue_enrolled"]
+                    or row["session_status"] in ("closed", "cancelled")
+                    or row["case_role"] not in ("manager", "worker")
+                    or not row["current_case_id"]
+                ):
+                    raise InvalidCredentialError("current carrier ownership required")
+                case = conn.execute(
+                    "SELECT status FROM flow_runs WHERE flow_run_id = ?",
+                    (row["current_case_id"],),
+                ).fetchone()
+                if case is None or case["status"] in self._CLOSED_STATUSES:
+                    raise InvalidCredentialError("sender Case is closed")
+                conn.execute(
+                    "INSERT INTO mesh_sender_capabilities "
+                    "(token_hash, sender_session_id, case_id, role, node_id, incarnation_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (digest, row["session_id"], row["current_case_id"], row["case_role"],
+                     node_id, incarnation_id, _now()),
+                )
+            return raw
+        except TurnQueueError:
+            raise
+        except Exception as exc:
+            raise _turn_backing_error("issue_sender_capability", task_id=task_id, err=exc)
+
+    def validate_sender_capability(self, raw: str, target_session_id: str) -> "SenderIdentity":
+        """Validate current owner, Case, role and recipient on every send."""
+        from .turn_queue import SenderIdentity
+
+        if not raw or len(raw) > 256:
+            raise InvalidCredentialError("unknown sender capability")
+        digest: str = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        try:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT c.sender_session_id, c.case_id, c.role, c.incarnation_id, "
+                "s.status, s.current_case_id, s.case_role, s.turn_queue_enrolled, "
+                "n.incarnation_id AS node_incarnation "
+                "FROM mesh_sender_capabilities c "
+                "JOIN sessions s ON s.session_id = c.sender_session_id "
+                "JOIN nodes n ON n.node_id = c.node_id "
+                "WHERE c.token_hash = ? AND c.revoked_at IS NULL", (digest,),
+            ).fetchone()
+            if (
+                row is None or row["status"] in ("closed", "cancelled")
+                or not row["turn_queue_enrolled"]
+                or row["current_case_id"] != row["case_id"]
+                or row["case_role"] != row["role"]
+                or row["node_incarnation"] != row["incarnation_id"]
+            ):
+                raise InvalidCredentialError("sender capability revoked or unknown")
+            case = conn.execute(
+                "SELECT status FROM flow_runs WHERE flow_run_id = ?", (row["case_id"],),
+            ).fetchone()
+            if case is None or case["status"] in self._CLOSED_STATUSES:
+                raise InvalidCredentialError("sender Case is closed")
+            target = conn.execute(
+                "SELECT status, current_case_id, case_role, turn_queue_enrolled "
+                "FROM sessions WHERE session_id = ?", (target_session_id,),
+            ).fetchone()
+            if (
+                target is None or target_session_id == row["sender_session_id"]
+                or target["status"] in ("closed", "cancelled")
+                or not target["turn_queue_enrolled"]
+                or target["current_case_id"] != row["case_id"]
+                or target["case_role"] not in ("manager", "worker")
+            ):
+                raise ScopeForbiddenError("recipient is outside sender's open Case")
+            return SenderIdentity(
+                session_id=row["sender_session_id"], case_id=row["case_id"], role=row["role"],
+            )
+        except TurnQueueError:
+            raise
+        except Exception as exc:
+            raise _turn_backing_error("validate_sender_capability", err=exc)
+
     def node_managed_backends(self, node_id: str) -> List[str]:
         """[A82 Stage 4a rework] Backends the node REGISTERED as managed-capable
         (persisted at registration, so any gateway process can resolve a carrier
@@ -3835,6 +4078,107 @@ class MeshDB:
         ).fetchone()
         return bool(row and row[0])
 
+    def list_turn_requests(
+        self, session_id: str, *, after_sequence: int = 0, limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Bounded queue cards for one session, without result/payload secrets."""
+        sid = (session_id or "").strip()
+        page_size = min(100, max(1, int(limit)))
+        try:
+            conn = self._conn()
+            session = conn.execute(
+                "SELECT turn_queue_enrolled, turn_queue_paused, turn_queue_hold "
+                "FROM sessions WHERE session_id = ?", (sid,),
+            ).fetchone()
+            if session is None:
+                raise TurnNotFoundError("unknown session", session_id=sid)
+            rows = conn.execute(
+                f"""
+                SELECT t.id, t.status, t.revision, t.queue_sequence, t.turn_source,
+                       t.turn_kind,
+                       CASE WHEN {_MANAGED_CASE_BINDING_GATE_SQL}
+                            THEN t.blocked_reason ELSE 'manager_rebound' END AS blocked_reason,
+                       t.created_at, t.activated_at, t.started_at,
+                       substr(t.prompt, 1, 2048) AS preview
+                FROM mesh_tasks t INDEXED BY idx_mesh_turns_session_open
+                WHERE t.session_id = ? AND t.queue_protocol = 1
+                  AND t.status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')
+                  AND t.queue_sequence > ?
+                ORDER BY t.queue_sequence ASC LIMIT ?
+                """,
+                (sid, max(0, int(after_sequence)), page_size + 1),
+            ).fetchall()
+            has_more = len(rows) > page_size
+            page = [dict(row) for row in rows[:page_size]]
+            for item in page:
+                item["preview"] = (item["preview"] or "").encode("utf-8")[:2048].decode(
+                    "utf-8", errors="ignore",
+                )
+            count = conn.execute(
+                "SELECT COUNT(*) FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open "
+                "WHERE session_id = ? AND queue_protocol = 1 AND "
+                "status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')",
+                (sid,),
+            ).fetchone()[0]
+            return {
+                "turns": page, "count": int(count),
+                "next_cursor": page[-1]["queue_sequence"] if has_more and page else None,
+                "enrolled": bool(session["turn_queue_enrolled"]),
+                "paused": bool(session["turn_queue_paused"]),
+                "hold": session["turn_queue_hold"],
+            }
+        except TurnQueueError:
+            raise
+        except Exception as exc:
+            raise _turn_backing_error("list_turn_requests", session_id=sid, err=exc)
+
+    def get_turn_request(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """One managed editable intent; never expose claim or sender secrets."""
+        try:
+            row = self._conn().execute(
+                """
+                SELECT id, session_id, status, revision, queue_sequence,
+                       turn_source, turn_kind, blocked_reason, prompt AS body,
+                       created_at, activated_at, started_at, flow_run_id
+                FROM mesh_tasks WHERE id = ? AND queue_protocol = 1
+                """,
+                (task_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        except Exception as exc:
+            raise _turn_backing_error("get_turn_request", task_id=task_id, err=exc)
+
+    def set_turn_queue_paused(self, session_id: str, paused: bool) -> Dict[str, Any]:
+        """Operator pause/resume; resume clears only an operator-stop hold."""
+        sid = (session_id or "").strip()
+        try:
+            with self._managed_write("set_turn_queue_paused") as conn:
+                row = conn.execute(
+                    "SELECT status, turn_queue_enrolled FROM sessions WHERE session_id = ?",
+                    (sid,),
+                ).fetchone()
+                if row is None:
+                    raise TurnNotFoundError("unknown session", session_id=sid)
+                if not row["turn_queue_enrolled"] or row["status"] == "closed":
+                    raise OwnershipConflictError("session cannot change queue pause", session_id=sid)
+                conn.execute(
+                    "UPDATE sessions SET turn_queue_paused = ?, "
+                    "turn_queue_hold = CASE WHEN ? = 0 AND turn_queue_hold = 'operator_stop' "
+                    "THEN NULL ELSE turn_queue_hold END, config_revision = config_revision + 1, "
+                    "updated_at = ? WHERE session_id = ?",
+                    (int(paused), int(paused), _now(), sid),
+                )
+                state = conn.execute(
+                    "SELECT turn_queue_paused, turn_queue_hold FROM sessions WHERE session_id = ?",
+                    (sid,),
+                ).fetchone()
+                return {"session_id": sid, "paused": bool(state["turn_queue_paused"]),
+                        "hold": state["turn_queue_hold"]}
+        except TurnQueueError:
+            raise
+        except Exception as exc:
+            raise _turn_backing_error("set_turn_queue_paused", session_id=sid, err=exc)
+
     def get_active_turn(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Return the single managed row that OWNS the session's active slot
         (design §4: stop must resolve the ACTIVE ledger row, not the newest
@@ -3893,7 +4237,7 @@ class MeshDB:
             with self._write() as conn:
                 row = conn.execute(
                     "SELECT id, session_id, status, queue_protocol, payload, machine_id, "
-                    "expires_at, turn_source, revision "
+                    "expires_at, turn_source, revision, flow_run_id "
                     "FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
@@ -3906,6 +4250,10 @@ class MeshDB:
                     raise OwnershipConflictError(
                         "turn not claimable in its current state",
                         task_id=task_id, status=status,
+                    )
+                if not _turn_case_binding_current(conn, row["flow_run_id"], row["session_id"]):
+                    raise OwnershipConflictError(
+                        "Case Manager changed before claim", task_id=task_id,
                     )
                 # [A82 Stage 4a rework] Claim independently verifies the carrier
                 # assignment (design §5 step 5) — the poll filter is not a
@@ -4011,7 +4359,8 @@ class MeshDB:
             with self._write() as conn:
                 row = conn.execute(
                     "SELECT id, status, queue_protocol, claim_token, "
-                    "claim_incarnation, started_at FROM mesh_tasks WHERE id = ?",
+                    "claim_incarnation, started_at, flow_run_id, session_id "
+                    "FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
                 if row is None or row["queue_protocol"] != 1:
@@ -4037,6 +4386,10 @@ class MeshDB:
                     raise OwnershipConflictError(
                         "turn not in claimed state for start",
                         task_id=task_id, status=row["status"],
+                    )
+                if not _turn_case_binding_current(conn, row["flow_run_id"], row["session_id"]):
+                    raise OwnershipConflictError(
+                        "Case Manager changed before start", task_id=task_id,
                     )
                 conn.execute(
                     """
@@ -4214,9 +4567,17 @@ class MeshDB:
                 # provider class is marked for the durable pause recorder in
                 # THIS txn (the gateway records the Case pause from the mark).
                 eclass = (error_class or "").strip().lower() or None
+                manager = conn.execute(
+                    "SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
+                    "AND entity_type = 'session' AND role = 'manager' "
+                    "ORDER BY id DESC LIMIT 1",
+                    (row["flow_run_id"],),
+                ).fetchone() if row["flow_run_id"] else None
                 pause_mark = (
                     "pending" if status == "failed" and row["flow_run_id"]
-                    and eclass in RETRY_PAUSE_ERROR_CLASSES else None
+                    and eclass in RETRY_PAUSE_ERROR_CLASSES
+                    and manager is not None and manager["entity_id"] == row["session_id"]
+                    else None
                 )
                 # Write the canonical outcome + terminal transition.
                 conn.execute(
@@ -6638,17 +6999,40 @@ class MeshDB:
         sid = (new_session_id or "").strip()
         with self._managed_write("record_respawn_link") as conn:
             tok = conn.execute(
-                "SELECT payload FROM mesh_tasks WHERE id = ? AND action = ? "
+                "SELECT payload, status FROM mesh_tasks WHERE id = ? AND action = ? "
                 "AND COALESCE(queue_protocol, 0) = 0",
                 (token_id, RESPAWN_ACTION),
             ).fetchone()
             if tok is None:
                 raise TurnNotFoundError("no respawn token", task_id=token_id)
+            if token_id != respawn_task_id(case_id, generation):
+                raise OwnershipConflictError("respawn token generation mismatch", task_id=token_id)
+            token_payload = _token_payload(tok["payload"])
+            if (
+                token_payload.get("case_id") not in (None, case_id)
+                or token_payload.get("dead_session_id") not in (None, dead_session_id)
+                or token_payload.get("generation") not in (None, int(generation))
+            ):
+                raise OwnershipConflictError("respawn token binding changed", task_id=token_id)
             case = conn.execute(
                 "SELECT status FROM flow_runs WHERE flow_run_id = ?", (case_id,),
             ).fetchone()
             if case is None or (case["status"] or "") in self._CLOSED_STATUSES:
                 raise OwnershipConflictError("respawn target Case is closed", case_id=case_id)
+            manager = conn.execute(
+                "SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
+                "AND entity_type = 'session' AND role = 'manager' "
+                "ORDER BY id DESC LIMIT 1", (case_id,),
+            ).fetchone()
+            if manager is None or str(manager["entity_id"]) not in (dead_session_id, sid):
+                raise OwnershipConflictError("Case Manager was rebound during respawn", case_id=case_id)
+            if manager["entity_id"] == dead_session_id:
+                old = conn.execute(
+                    "SELECT turn_queue_hold FROM sessions WHERE session_id = ?",
+                    (dead_session_id,),
+                ).fetchone()
+                if old is not None and old["turn_queue_hold"] == "operator_stop":
+                    raise OwnershipConflictError("dead Manager was stopped during respawn", case_id=case_id)
             conn.execute(
                 "UPDATE sessions SET current_case_id = ?, case_role = 'manager', "
                 "updated_at = ? WHERE session_id = ?",
@@ -9212,6 +9596,21 @@ def _get_migrations() -> List[tuple]:
                # its completion txn; the gateway records the pause from it and
                # marks it 'done'. NULL on every legacy row; the partial index
                # holds only the marks awaiting the pause recorder.
+        (40, """
+            CREATE TABLE IF NOT EXISTS mesh_sender_capabilities (
+                token_hash TEXT PRIMARY KEY,
+                sender_session_id TEXT NOT NULL,
+                case_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                incarnation_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                revoked_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_mesh_sender_caps_session
+                ON mesh_sender_capabilities(sender_session_id, case_id)
+                WHERE revoked_at IS NULL;
+        """),  # A82 Stage 5: hashed sender-only credentials and bounded fanout.
     ]
 
 
@@ -9606,6 +10005,31 @@ def _link_producer_token(
     )
     if conn.execute("SELECT changes()").fetchone()[0] == 0:
         raise OwnershipConflictError("producer token link lost the race", task_id=token_id)
+
+
+def _turn_case_binding_current(
+    conn: sqlite3.Connection, case_id: Optional[str], session_id: Optional[str],
+) -> bool:
+    """False only when this turn's former Manager seat was rebound to another.
+
+    Workers and turns without a Case Manager link are unaffected. The check
+    runs under claim/start's write transaction, fencing a rebind after queue
+    activation but before backend start."""
+    if not case_id or not session_id:
+        return True
+    old = conn.execute(
+        "SELECT id FROM flow_links WHERE flow_run_id = ? AND entity_type = 'session' "
+        "AND entity_id = ? AND role = 'manager' LIMIT 1",
+        (case_id, session_id),
+    ).fetchone()
+    if old is None:
+        return True
+    latest = conn.execute(
+        "SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
+        "AND entity_type = 'session' AND role = 'manager' "
+        "ORDER BY id DESC LIMIT 1", (case_id,),
+    ).fetchone()
+    return latest is not None and latest["entity_id"] == session_id
 
 
 def _cancel_requested_for(row: Any, claim_token: str) -> bool:
