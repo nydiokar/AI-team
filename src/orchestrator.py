@@ -1368,9 +1368,19 @@ class TaskOrchestrator(ITaskOrchestrator):
             return 0
         delivered = 0
         if db.any_session_enrolled() is not False:
-            # Accepted managed rows must finish their retry/respawn tokens and
-            # provider-pause marks even when new Case continuation is disabled.
-            # This path is bounded by the pending indexes, not an all-Case scan.
+            # Accepted managed rows must finish their continuation / retry /
+            # respawn tokens and provider-pause marks even when new Case
+            # continuation is disabled (§3.16: a gate never abandons accepted
+            # work). Continuation tokens finalize FIRST: a failed wake's pause
+            # mark waits for its own linked token, so finalizing only while the
+            # flag is ON would wedge the Manager (4e review F1). Bounded by the
+            # producer-link / pause-mark indexes, not an all-Case scan.
+            # [A82 Stage 4c] Also runs BEFORE Cases are evaluated, so this tick
+            # sees the counted round / re-armed token.
+            try:
+                await self._reconcile_continuation_finalizers(db)
+            except Exception as e:
+                logger.warning("event=continuation_finalizer_reconcile_failed err=%s", e)
             try:
                 await self._reconcile_managed_recovery(db)
             except Exception as e:
@@ -1380,12 +1390,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         if continuation_enabled:
             # Read-only DB scans run in a worker thread so the Wake-Dispatcher never
             # blocks the shared event loop (see _continue_case_once for the rationale).
-            # [A82 Stage 4c] Finalize managed wake turns BEFORE evaluating Cases,
-            # so this tick sees the counted round / re-armed token.
-            try:
-                await self._reconcile_continuation_finalizers(db)
-            except Exception as e:
-                logger.debug("event=continuation_finalizer_reconcile_failed err=%s", e)
             cases = await asyncio.to_thread(db.list_open_cases)
             case_ids = [str(c.get("flow_run_id") or "") for c in cases]
             case_ids = [c for c in case_ids if c]
