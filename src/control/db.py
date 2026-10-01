@@ -2210,9 +2210,15 @@ class MeshDB:
         completed_at: Optional[str] = (
             now if status in ("completed", "failed", "failed_node_offline", "cancelled") else None
         )
+        # No read at all while nothing is enrolled (the canonical fail-closed
+        # process presence predicate: unknown ⇒ checked).
+        fence = (
+            status == "pending" and bool(session_id) and action in LEGACY_EXECUTION_ACTIONS
+            and self.any_session_enrolled() is not False
+        )
         try:
             with self._write() as conn:
-                if status == "pending" and session_id and action in LEGACY_EXECUTION_ACTIONS:
+                if fence:
                     enrolled = conn.execute(
                         "SELECT 1 FROM sessions WHERE session_id = ? AND turn_queue_enrolled = 1",
                         (session_id,),
@@ -2359,23 +2365,26 @@ class MeshDB:
 
         now = _now()
         refused = False
+        # No read at all while nothing is enrolled (fail-closed presence).
+        fence = self.any_session_enrolled() is not False
         try:
             with self._write() as conn:
-                placeholders = ",".join("?" * len(LEGACY_EXECUTION_ACTIONS))
-                conn.execute(
-                    f"""
-                    UPDATE mesh_tasks
-                    SET status = 'failed', completed_at = ?, updated_at = ?,
-                        error = 'legacy_execution_refused: session is enrolled in the managed turn queue'
-                    WHERE id = ? AND status = 'pending' AND COALESCE(queue_protocol, 0) = 0
-                      AND action IN ({placeholders})
-                      AND session_id IN (
-                          SELECT session_id FROM sessions WHERE turn_queue_enrolled = 1
-                      )
-                    """,
-                    (now, now, task_id, *LEGACY_EXECUTION_ACTIONS),
-                )
-                refused = conn.execute("SELECT changes()").fetchone()[0] > 0
+                if fence:
+                    placeholders = ",".join("?" * len(LEGACY_EXECUTION_ACTIONS))
+                    conn.execute(
+                        f"""
+                        UPDATE mesh_tasks
+                        SET status = 'failed', completed_at = ?, updated_at = ?,
+                            error = 'legacy_execution_refused: session is enrolled in the managed turn queue'
+                        WHERE id = ? AND status = 'pending' AND COALESCE(queue_protocol, 0) = 0
+                          AND action IN ({placeholders})
+                          AND session_id IN (
+                              SELECT session_id FROM sessions WHERE turn_queue_enrolled = 1
+                          )
+                        """,
+                        (now, now, task_id, *LEGACY_EXECUTION_ACTIONS),
+                    )
+                    refused = conn.execute("SELECT changes()").fetchone()[0] > 0
                 claimed = False
                 if not refused:
                     conn.execute(
