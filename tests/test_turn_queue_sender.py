@@ -690,3 +690,257 @@ def test_INT11_credentialed_worker_sends_to_busy_same_case_manager(tmp_path, mon
     w.db.close_session_turns(WRK)
     assert _send(w, cap, MGR, op="revoked").status_code == 401
     assert len(_agent_rows(w.db, MGR)) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Stage 5 rework (review round 1) — inverted reviewer probes P1/P2/P3 + F3/F5
+# --------------------------------------------------------------------------- #
+NEW_MGR = "mgr-new"
+
+
+def _new_manager_session(w: World, sid: str = NEW_MGR) -> None:
+    w.db.upsert_session(Session(
+        session_id=sid, backend="claude", repo_path="/tmp/repo",
+        status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id=w.node,
+    ))
+    w.db.enroll_session(sid)
+
+
+def _revoked(w: World, cap: str) -> bool:
+    row = w.db._conn().execute(
+        "SELECT revoked_at FROM mesh_sender_capabilities WHERE token_hash = ?", (_sha(cap),),
+    ).fetchone()
+    return row is None or bool(row[0])
+
+
+def _raw_sql(w: World, sql: str, *params: Any) -> None:
+    conn = w.db._conn()
+    conn.execute(sql, params)
+    conn.commit()
+
+
+def _after_validate(w: World, monkeypatch, mutate) -> None:
+    """Race a state change into the window between the route's capability
+    validation and the admission transaction."""
+    orig = w.db.validate_sender_capability
+
+    def racing(raw: str, target: str) -> Any:
+        ident = orig(raw, target)
+        mutate()
+        return ident
+
+    monkeypatch.setattr(w.db, "validate_sender_capability", racing)
+
+
+def test_AUTH07_respawned_manager_loses_sender_authority(tmp_path, monkeypatch):
+    """F1 (P1 inverted): a respawn rebinding the Case's Manager revokes the
+    dead Manager's capability in the same txn; the dead Manager is no longer a
+    permitted recipient; the new Manager mints and sends normally."""
+    from src.control.db import RESPAWN_ACTION
+
+    w = _mk_world(tmp_path, monkeypatch)
+    cap_m = _cap(w, "m-t1", MGR)
+    cap_w = _cap(w, "w-t1", WRK)
+    _new_manager_session(w)
+    tok = f"respawn:{w.case_a}:1"
+    w.db.enqueue_task(tok, None, None, "claude", RESPAWN_ACTION,
+                      {"case_id": w.case_a, "generation": 1, "dead_session_id": MGR})
+    w.db.record_respawn_link(tok, case_id=w.case_a, new_session_id=NEW_MGR,
+                             dead_session_id=MGR, generation=1)
+    assert w.db.case_manager_session_id(w.case_a) == NEW_MGR
+    assert _revoked(w, cap_m)
+    r = _send(w, cap_m, WRK, op="old-mgr")
+    assert r.status_code == 401 and r.headers.get("WWW-Authenticate") == "AITeamSender"
+    assert _send(w, cap_w, MGR, op="to-dead").status_code == 403
+    cap_n = _cap(w, "n-t1", NEW_MGR)
+    assert _send(w, cap_n, WRK, op="new-mgr").status_code == 202
+    assert _send(w, cap_w, NEW_MGR, op="to-new").status_code == 202
+    assert [r["sender_session_id"] for r in _agent_rows(w.db, WRK)] == [NEW_MGR]
+    assert _agent_rows(w.db, MGR) == []
+
+
+def test_AUTH07b_manager_link_rebind_revokes_old_manager(tmp_path, monkeypatch):
+    """F1: the generic ``create_flow_link(..., 'manager')`` rebind path (legacy
+    respawn) revokes the superseded Manager's capability too."""
+    w = _mk_world(tmp_path, monkeypatch)
+    cap_m = _cap(w, "m-t1", MGR)
+    cap_w = _cap(w, "w-t1", WRK)
+    _new_manager_session(w)
+    w.db.create_flow_link(w.case_a, "session", NEW_MGR, "manager", created_by="system")
+    w.db.set_session_case(NEW_MGR, w.case_a, "manager")
+    assert _revoked(w, cap_m)
+    assert _send(w, cap_m, WRK, op="old-mgr").status_code == 401
+    assert _send(w, cap_w, MGR, op="to-old").status_code == 403
+    cap_n = _cap(w, "n-t1", NEW_MGR)
+    assert _send(w, cap_n, WRK, op="new-mgr").status_code == 202
+    # Re-linking the CURRENT Manager (idempotent) never revokes it.
+    w.db.create_flow_link(w.case_a, "session", NEW_MGR, "manager", created_by="system")
+    assert not _revoked(w, cap_n)
+
+
+def test_AUTH07c_superseded_manager_rule_holds_without_revocation(tmp_path, monkeypatch):
+    """F1 (b): even if some rebind path forgot to revoke, validation refuses a
+    Manager sender / Manager recipient that is not the Case's latest Manager."""
+    w = _mk_world(tmp_path, monkeypatch)
+    cap_m = _cap(w, "m-t1", MGR)
+    cap_w = _cap(w, "w-t1", WRK)
+    _new_manager_session(w)
+    _raw_sql(w, "UPDATE sessions SET current_case_id = ?, case_role = 'manager' WHERE session_id = ?",
+             w.case_a, NEW_MGR)
+    _raw_sql(w, "INSERT INTO flow_links (flow_run_id, entity_type, entity_id, role, created_at) "
+                "VALUES (?, 'session', ?, 'manager', ?)", w.case_a, NEW_MGR, NOW)
+    assert not _revoked(w, cap_m)
+    assert _send(w, cap_m, WRK, op="old-mgr").status_code == 401
+    assert _send(w, cap_w, MGR, op="to-old").status_code == 403
+    assert _agent_rows(w.db, WRK) == [] and _agent_rows(w.db, MGR) == []
+
+
+@pytest.mark.parametrize("who", ["sender", "target"])
+def test_AUTH07d_admission_recheck_refuses_superseded_manager(tmp_path, monkeypatch, who):
+    """F1 (b) in the admission txn: a Manager rebind landing between validation
+    and admission ⇒ superseded Manager sender 401 / recipient 403."""
+    w = _mk_world(tmp_path, monkeypatch)
+    cap = _cap(w, "m-t1", MGR) if who == "sender" else _cap(w, "w-t1", WRK)
+    target = WRK if who == "sender" else MGR
+    _new_manager_session(w)
+
+    def rebind() -> None:
+        _raw_sql(w, "UPDATE sessions SET current_case_id = ?, case_role = 'manager' WHERE session_id = ?",
+                 w.case_a, NEW_MGR)
+        _raw_sql(w, "INSERT INTO flow_links (flow_run_id, entity_type, entity_id, role, created_at) "
+                    "VALUES (?, 'session', ?, 'manager', ?)", w.case_a, NEW_MGR, NOW)
+
+    _after_validate(w, monkeypatch, rebind)
+    r = _send(w, cap, target, op="race")
+    assert r.status_code == (401 if who == "sender" else 403), r.text
+    assert _agent_rows(w.db, target) == []
+
+
+@pytest.mark.parametrize("change", ["carrier_replaced", "revoked", "rotated"])
+def test_AUTH08_admission_rechecks_capability_row(tmp_path, monkeypatch, change):
+    """F2 (P2 inverted): carrier replacement / revocation / rotation between
+    validation and admission ⇒ 401 and no agent row."""
+    w = _mk_world(tmp_path, monkeypatch)
+    cap = _cap(w, "w-t1", WRK)
+    mutate = {
+        "carrier_replaced": lambda: _register(w.task, w.node, "inc-2"),
+        "revoked": lambda: w.db.revoke_sender_capabilities(WRK),
+        "rotated": lambda: _claim(w, "w-t1").json()["sender_capability"]["token"],
+    }[change]
+    _after_validate(w, monkeypatch, mutate)
+    r = _send(w, cap, MGR, op="race")
+    assert r.status_code == 401, r.text
+    assert r.headers.get("WWW-Authenticate") == "AITeamSender"
+    assert _agent_rows(w.db, MGR) == []
+
+
+def test_AUTH08b_admission_request_carries_hash_not_secret():
+    """F2: the admission request carries only the capability hash, repr-safe."""
+    from src.control.turn_admission import AdmissionRequest
+    from src.control.turn_queue import SenderIdentity
+
+    ident = SenderIdentity(session_id=WRK, case_id="c", role="worker", capability_hash="h" * 64)
+    assert "h" * 64 not in repr(ident)
+    req = AdmissionRequest(
+        session_id=MGR, body="b", payload={}, turn_source="agent", operation_id="o",
+        idempotency_scope="s", admission_hash="a", sender_session_id=WRK,
+        sender_capability_hash="h" * 64,
+    )
+    assert "h" * 64 not in repr(req)
+
+
+@pytest.mark.parametrize("sql,expected", [
+    ("UPDATE sessions SET status = 'closed' WHERE session_id = 'wrk-1'", 401),
+    ("UPDATE sessions SET current_case_id = NULL WHERE session_id = 'wrk-1'", 401),
+    ("UPDATE sessions SET turn_queue_enrolled = 0 WHERE session_id = 'wrk-1'", 401),
+    ("UPDATE flow_runs SET status = 'closed'", 401),
+    # A recipient closed inside the window hits the generic managed-admission
+    # closed-recipient refusal (409, every source) before the sender recheck.
+    ("UPDATE sessions SET status = 'closed' WHERE session_id = 'mgr-1'", 409),
+    ("UPDATE sessions SET current_case_id = NULL WHERE session_id = 'mgr-1'", 403),
+    ("UPDATE sessions SET case_role = 'reviewer' WHERE session_id = 'mgr-1'", 403),
+])
+def test_AUTH09_admission_recheck_status_codes(tmp_path, monkeypatch, sql, expected):
+    """F3: a sender-side change (closed / left Case / unenrolled / Case closed)
+    inside the admission window is a stale credential (401); a target-side or
+    role-pair change stays 403. Raw SQL so no revocation hides the recheck."""
+    w = _mk_world(tmp_path, monkeypatch)
+    cap = _cap(w, "w-t1", WRK)
+    _after_validate(w, monkeypatch, lambda: _raw_sql(w, sql))
+    r = _send(w, cap, MGR, op="race")
+    assert r.status_code == expected, r.text
+    if expected == 401:
+        assert r.headers.get("WWW-Authenticate") == "AITeamSender"
+    assert _agent_rows(w.db, MGR) == []
+
+
+def test_AUTH10_unauthenticated_garbage_body_is_401_not_422(tmp_path, monkeypatch):
+    """F4 (P3 inverted): auth is enforced before the body is read/decoded."""
+    w = _mk_world(tmp_path, monkeypatch)
+    url = f"/api/sessions/{MGR}/turn-requests"
+    jh = {"Content-Type": "application/json"}
+    assert w.api.post(url, content=b"{not json", headers=jh).status_code == 401
+    r = w.api.post(url, content=b"{not json", headers={**jh, "Authorization": "AITeamSender bogus"})
+    assert r.status_code == 401 and r.headers.get("WWW-Authenticate") == "AITeamSender"
+    assert w.api.post(url, content=b"{not json",
+                      headers={**jh, "Authorization": "Bearer wrong"}).status_code == 401
+    # Authenticated callers still get the validation error for a bad body.
+    assert w.api.post(url, content=b"{not json",
+                      headers={**jh, "Authorization": f"Bearer {ADMIN}"}).status_code == 422
+    cap = _cap(w, "w-t1", WRK)
+    assert w.api.post(url, content=b"{not json",
+                      headers={**jh, "Authorization": f"AITeamSender {cap}"}).status_code == 422
+    assert w.api.post(url, json={"body": "x", "operation_id": "o", "source": "system"},
+                      headers={"Authorization": f"AITeamSender {cap}", "Idempotency-Key": "o"}
+                      ).status_code == 422
+    assert _agent_rows(w.db, MGR) == []
+
+
+def test_AUTH11_sender_http_refuses_redirects():
+    """F5: the tool's HTTP choke point never follows a redirect (which urllib
+    would re-send as GET with the Authorization header to any host)."""
+    import http.server
+    import threading
+
+    hits: List[Dict[str, str]] = []
+
+    class Sink(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            hits.append(dict(self.headers))
+            self.send_response(200)
+            self.end_headers()
+
+        do_POST = do_GET
+
+        def log_message(self, *a: Any) -> None:
+            return None
+
+    sink = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Sink)
+    sink_url = f"http://127.0.0.1:{sink.server_address[1]}/stolen"
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(int(self.path.rsplit("/", 1)[-1]))
+            self.send_header("Location", sink_url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a: Any) -> None:
+            return None
+
+    red = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    for srv in (sink, red):
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{red.server_address[1]}"
+        for code in (301, 302, 303, 307, 308):
+            status, _ = agent_sender._http_post(
+                f"{base}/r/{code}", b"{}", {"Authorization": "AITeamSender s3cret",
+                                            "Content-Type": "application/json"}, 5.0)
+            assert status == code
+        assert hits == []
+    finally:
+        for srv in (sink, red):
+            srv.shutdown()
+            srv.server_close()
