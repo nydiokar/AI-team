@@ -946,6 +946,10 @@ class ManagedClaimPayload(BaseModel):
     # A carrier MUST advertise it supports the managed protocol to receive a
     # managed claim; a legacy poll/claim never reaches this route.
     queue_protocols: List[int] = Field(default_factory=lambda: [1])
+    # [A82 Stage 5] The sender-capability generation this carrier already
+    # holds for the row's session (None ⇒ it holds none ⇒ mint). It can only
+    # avoid a re-mint; it can never choose the capability's binding.
+    sender_capability_generation: Optional[int] = Field(default=None, ge=0, le=2**31)
 
 
 @app.get("/tasks/pending-managed", dependencies=[Depends(_require_auth)])
@@ -1038,6 +1042,10 @@ def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
     return {
         "status": "claimed",
         "claim_token": str(token),
+        # [A82 Stage 5] PRIVATE provisioning: the session's scoped sender
+        # capability (raw secret only when minted for this claim). Top-level,
+        # never inside the frozen task payload the carrier may persist.
+        "sender_capability": _sender_capability_for_claim(db, task_id, str(token), payload),
         # The frozen execution payload the carrier must run (design §5).
         "task": {
             "id": token.task_id,
@@ -1050,6 +1058,26 @@ def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
             "payload": token.payload,
         },
     }
+
+
+def _sender_capability_for_claim(
+    db: Any, task_id: str, claim_token: str, payload: "ManagedClaimPayload",
+) -> Optional[Dict[str, Any]]:
+    """[A82 Stage 5] Mint/confirm the claimed session's sender capability for
+    the CURRENT owner (design §9). A minting failure never fails the claim:
+    the turn runs without the sender tool (fail closed for sending only)."""
+    from .turn_queue import TurnQueueError
+
+    try:
+        grant = db.issue_sender_capability(
+            task_id, claim_token, payload.node_id, payload.incarnation_id,
+            presented_generation=payload.sender_capability_generation,
+        )
+    except TurnQueueError as e:
+        logger.warning("event=sender_capability_not_issued task_id=%s reason=%s",
+                       task_id, getattr(e, "code", type(e).__name__))
+        return None
+    return grant.model_dump() if grant is not None else None
 
 
 class ManagedAttemptPayload(BaseModel):

@@ -66,7 +66,7 @@ from .turn_queue import (
 )
 if False:  # typing-only forward refs for the strict helper signatures
     from .turn_queue import ClaimToken, StartAuthorization, CompletionResult, RecoveryResolution, TurnAdmission
-    from .turn_queue import TurnCancelOutcome, SessionCloseTurns
+    from .turn_queue import TurnCancelOutcome, SessionCloseTurns, SenderCapabilityGrant, SenderIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -1961,6 +1961,10 @@ class MeshDB:
                         "keep_note":             getattr(session, "keep_note", "") or "",
                     },
                 )
+                status_val = session.status.value if hasattr(session.status, "value") else session.status
+                if status_val in ("closed", "cancelled"):
+                    # [A82 Stage 5] A closed session's sender capability is revoked.
+                    _revoke_sender_caps(conn, _now(), session.session_id)
         except Exception as e:
             logger.warning("event=db_upsert_session_failed session_id=%s err=%s", session.session_id, e)
 
@@ -1986,11 +1990,15 @@ class MeshDB:
         rol = (role or None) if cid else None  # role is meaningless without a Case
         try:
             with self._write() as conn:
+                now = _now()
                 conn.execute(
                     "UPDATE sessions SET current_case_id = ?, case_role = ?, "
                     "updated_at = ? WHERE session_id = ?",
-                    (cid, rol, _now(), sid),
+                    (cid, rol, now, sid),
                 )
+                # [A82 Stage 5] A Case-binding change revokes any sender
+                # capability bound to the old (case, role), in the same txn.
+                _revoke_sender_caps(conn, now, sid, keep_case=cid, keep_role=rol)
         except Exception as e:
             logger.warning(
                 "event=set_session_case_failed session_id=%s case_id=%s err=%s",
@@ -2915,9 +2923,8 @@ class MeshDB:
                             or sender["status"] in ("closed", "cancelled")
                             or not sender["turn_queue_enrolled"]
                             or sender["current_case_id"] != flow_run_id
-                            or sender["case_role"] not in ("manager", "worker")
                             or srow is None or srow["current_case_id"] != flow_run_id
-                            or srow["case_role"] not in ("manager", "worker")
+                            or not _sender_pair_allowed(sender["case_role"], srow["case_role"])
                             or case is None or case["status"] in self._CLOSED_STATUSES
                         ):
                             raise ScopeForbiddenError("sender and recipient no longer share an open Case")
@@ -3807,6 +3814,7 @@ class MeshDB:
                     "updated_at = ? WHERE session_id = ?",
                     (now, sid),
                 )
+                _revoke_sender_caps(conn, now, sid)  # [A82 Stage 5] close revokes
                 queued = conn.execute(
                     f"""
                     SELECT id, revision FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open
@@ -3900,12 +3908,16 @@ class MeshDB:
         touched). Raises on DB error (unlike ``set_session_case``)."""
         try:
             with self._managed_write("clear_session_case_if") as conn:
+                now = _now()
                 conn.execute(
                     "UPDATE sessions SET current_case_id = NULL, case_role = NULL, updated_at = ? "
                     "WHERE session_id = ? AND current_case_id = ?",
-                    (_now(), session_id, case_id),
+                    (now, session_id, case_id),
                 )
-                return conn.execute("SELECT changes()").fetchone()[0] > 0
+                cleared = conn.execute("SELECT changes()").fetchone()[0] > 0
+                if cleared:
+                    _revoke_sender_caps(conn, now, session_id)  # [A82 Stage 5]
+                return cleared
         except TurnQueueError:
             raise
         except Exception as e:
@@ -3954,11 +3966,32 @@ class MeshDB:
                 self._any_enrolled = True
 
     def issue_sender_capability(
-        self, task_id: str, claim_token: str, node_id: str, incarnation_id: str,
-    ) -> str:
-        """Mint a sender-only bearer from a current claimed carrier attempt."""
-        raw: str = secrets.token_urlsafe(32)
-        digest: str = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        self,
+        task_id: str,
+        claim_token: str,
+        node_id: str,
+        incarnation_id: str,
+        presented_generation: Optional[int] = None,
+    ) -> Optional["SenderCapabilityGrant"]:
+        """[A82 Stage 5] Mint (or confirm) the session's scoped sender capability
+        at a CURRENT carrier's managed claim — the authenticated provisioning
+        request (design §9). The binding (sender session, Case, role) is read
+        from the canonical claimed row + session/Case state in this txn; the
+        request only proves ownership (task + claim token + node + registered
+        incarnation) and says which generation it already holds.
+
+        * Not the current owner ⇒ ``InvalidCredentialError`` (nothing minted).
+        * Session not an active member of an open Case (or closed/unenrolled)
+          ⇒ its live capabilities are revoked and ``None`` is returned.
+        * A live capability with the SAME binding, carrier incarnation and the
+          presented generation ⇒ the binding without a secret (no re-mint).
+        * Otherwise a fresh secret, generation+1; every older row of that
+          session is deleted (one capability per session; table bounded).
+
+        Only ``sha256(secret)`` is stored; the raw secret is returned once."""
+        from .turn_queue import SenderCapabilityGrant
+
+        now = _now()
         try:
             with self._managed_write("issue_sender_capability") as conn:
                 row = conn.execute(
@@ -3971,42 +4004,78 @@ class MeshDB:
                 ).fetchone()
                 if (
                     row is None or row["status"] not in ("claimed", "running")
-                    or not secrets.compare_digest(str(row["claim_token"] or ""), claim_token)
+                    or not secrets.compare_digest(str(row["claim_token"] or ""), str(claim_token or ""))
                     or row["claimed_by"] != node_id
+                    or not incarnation_id
                     or row["claim_incarnation"] != incarnation_id
                     or row["node_incarnation"] != incarnation_id
-                    or not row["turn_queue_enrolled"]
-                    or row["session_status"] in ("closed", "cancelled")
-                    or row["case_role"] not in ("manager", "worker")
-                    or not row["current_case_id"]
                 ):
-                    raise InvalidCredentialError("current carrier ownership required")
-                case = conn.execute(
-                    "SELECT status FROM flow_runs WHERE flow_run_id = ?",
-                    (row["current_case_id"],),
+                    raise InvalidCredentialError("current carrier ownership required", task_id=task_id)
+                sid: str = row["session_id"]
+                case_id: Optional[str] = row["current_case_id"] or None
+                role: Optional[str] = row["case_role"] or None
+                eligible: bool = (
+                    bool(row["turn_queue_enrolled"])
+                    and row["session_status"] not in ("closed", "cancelled")
+                    and role in _SENDER_ROLES and case_id is not None
+                )
+                if eligible:
+                    case = conn.execute(
+                        "SELECT status FROM flow_runs WHERE flow_run_id = ?", (case_id,),
+                    ).fetchone()
+                    eligible = case is not None and case["status"] not in self._CLOSED_STATUSES
+                if not eligible:
+                    _revoke_sender_caps(conn, now, sid)
+                    return None
+                live = conn.execute(
+                    "SELECT generation FROM mesh_sender_capabilities "
+                    "WHERE sender_session_id = ? AND revoked_at IS NULL AND case_id = ? "
+                    "AND role = ? AND node_id = ? AND incarnation_id = ? "
+                    "ORDER BY generation DESC LIMIT 1",
+                    (sid, case_id, role, node_id, incarnation_id),
                 ).fetchone()
-                if case is None or case["status"] in self._CLOSED_STATUSES:
-                    raise InvalidCredentialError("sender Case is closed")
+                if (
+                    live is not None and presented_generation is not None
+                    and int(live["generation"]) == int(presented_generation)
+                ):
+                    return SenderCapabilityGrant(
+                        session_id=sid, case_id=str(case_id), role=str(role),
+                        generation=int(live["generation"]),
+                    )
+                top = conn.execute(
+                    "SELECT MAX(generation) FROM mesh_sender_capabilities WHERE sender_session_id = ?",
+                    (sid,),
+                ).fetchone()[0]
+                generation: int = int(top or 0) + 1
+                raw: str = secrets.token_urlsafe(32)
+                conn.execute("DELETE FROM mesh_sender_capabilities WHERE sender_session_id = ?", (sid,))
                 conn.execute(
                     "INSERT INTO mesh_sender_capabilities "
-                    "(token_hash, sender_session_id, case_id, role, node_id, incarnation_id, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (digest, row["session_id"], row["current_case_id"], row["case_role"],
-                     node_id, incarnation_id, _now()),
+                    "(token_hash, sender_session_id, case_id, role, node_id, incarnation_id, "
+                    "created_at, generation, issued_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (_sender_cap_hash(raw), sid, case_id, role, node_id, incarnation_id,
+                     now, generation, task_id),
                 )
-            return raw
+            return SenderCapabilityGrant(
+                session_id=sid, case_id=str(case_id), role=str(role),
+                generation=generation, token=raw,
+            )
         except TurnQueueError:
             raise
         except Exception as exc:
             raise _turn_backing_error("issue_sender_capability", task_id=task_id, err=exc)
 
     def validate_sender_capability(self, raw: str, target_session_id: str) -> "SenderIdentity":
-        """Validate current owner, Case, role and recipient on every send."""
+        """[A82 Stage 5] Validate a scoped sender capability on EVERY send:
+        unknown/revoked/stale binding (session closed, Case or role changed,
+        carrier replaced, Case closed) ⇒ ``InvalidCredentialError`` (401); a
+        valid capability whose target is not a permitted same-Case recipient
+        (cross-Case, self, unknown, closed, Manager→Manager) ⇒
+        ``ScopeForbiddenError`` (403). Read-only; returns the canonical sender."""
         from .turn_queue import SenderIdentity
 
         if not raw or len(raw) > 256:
             raise InvalidCredentialError("unknown sender capability")
-        digest: str = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         try:
             conn = self._conn()
             row = conn.execute(
@@ -4015,8 +4084,8 @@ class MeshDB:
                 "n.incarnation_id AS node_incarnation "
                 "FROM mesh_sender_capabilities c "
                 "JOIN sessions s ON s.session_id = c.sender_session_id "
-                "JOIN nodes n ON n.node_id = c.node_id "
-                "WHERE c.token_hash = ? AND c.revoked_at IS NULL", (digest,),
+                "LEFT JOIN nodes n ON n.node_id = c.node_id "
+                "WHERE c.token_hash = ? AND c.revoked_at IS NULL", (_sender_cap_hash(raw),),
             ).fetchone()
             if (
                 row is None or row["status"] in ("closed", "cancelled")
@@ -4032,17 +4101,16 @@ class MeshDB:
             if case is None or case["status"] in self._CLOSED_STATUSES:
                 raise InvalidCredentialError("sender Case is closed")
             target = conn.execute(
-                "SELECT status, current_case_id, case_role, turn_queue_enrolled "
-                "FROM sessions WHERE session_id = ?", (target_session_id,),
+                "SELECT status, current_case_id, case_role FROM sessions WHERE session_id = ?",
+                (target_session_id,),
             ).fetchone()
             if (
                 target is None or target_session_id == row["sender_session_id"]
                 or target["status"] in ("closed", "cancelled")
-                or not target["turn_queue_enrolled"]
                 or target["current_case_id"] != row["case_id"]
-                or target["case_role"] not in ("manager", "worker")
+                or not _sender_pair_allowed(row["role"], target["case_role"])
             ):
-                raise ScopeForbiddenError("recipient is outside sender's open Case")
+                raise ScopeForbiddenError("recipient is not a permitted session of the sender's open Case")
             return SenderIdentity(
                 session_id=row["sender_session_id"], case_id=row["case_id"], role=row["role"],
             )
@@ -4050,6 +4118,18 @@ class MeshDB:
             raise
         except Exception as exc:
             raise _turn_backing_error("validate_sender_capability", err=exc)
+
+    def revoke_sender_capabilities(self, session_id: str) -> int:
+        """[A82 Stage 5] Explicitly revoke every live sender capability of a
+        session (strict; raises typed 503 on DB failure). Returns the count."""
+        try:
+            with self._managed_write("revoke_sender_capabilities") as conn:
+                _revoke_sender_caps(conn, _now(), session_id)
+                return int(conn.execute("SELECT changes()").fetchone()[0])
+        except TurnQueueError:
+            raise
+        except Exception as exc:
+            raise _turn_backing_error("revoke_sender_capabilities", session_id=session_id, err=exc)
 
     def node_managed_backends(self, node_id: str) -> List[str]:
         """[A82 Stage 4a rework] Backends the node REGISTERED as managed-capable
@@ -7174,6 +7254,7 @@ class MeshDB:
             )
             if conn.execute("SELECT changes()").fetchone()[0] == 0:
                 raise TurnNotFoundError("respawned session row missing", session_id=sid)
+            _revoke_sender_caps(conn, now, sid, keep_case=case_id, keep_role="manager")  # [A82 Stage 5]
             conn.execute(
                 """
                 INSERT OR IGNORE INTO flow_links (
@@ -7828,6 +7909,13 @@ class MeshDB:
                         incarnation_id,
                         json.dumps(list(managed_backends or [])),
                     ),
+                )
+                # [A82 Stage 5] Carrier replacement: a new registered incarnation
+                # revokes every sender capability provisioned to an older one.
+                conn.execute(
+                    "UPDATE mesh_sender_capabilities SET revoked_at = ? "
+                    "WHERE node_id = ? AND incarnation_id != ? AND revoked_at IS NULL",
+                    (now, node_id, incarnation_id),
                 )
         except Exception as e:
             logger.warning("event=db_upsert_node_failed node_id=%s err=%s", node_id, e)
@@ -9764,6 +9852,17 @@ def _get_migrations() -> List[tuple]:
                 ON mesh_sender_capabilities(sender_session_id, case_id)
                 WHERE revoked_at IS NULL;
         """),  # A82 Stage 5: hashed sender-only credentials and bounded fanout.
+        (41, """
+            ALTER TABLE mesh_sender_capabilities ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE mesh_sender_capabilities ADD COLUMN issued_task_id TEXT;
+            CREATE INDEX IF NOT EXISTS idx_mesh_sender_caps_node
+                ON mesh_sender_capabilities(node_id, incarnation_id)
+                WHERE revoked_at IS NULL
+        """),  # A82 Stage 5: per-session credential generation (the carrier's
+               # held-generation handshake at claim; monotonic per session) +
+               # the managed claim that minted it (audit), and a partial index
+               # so carrier replacement revokes by node without a table scan.
+               # Additive; 40 stays unchanged (it may already be applied).
     ]
 
 
@@ -9943,6 +10042,45 @@ def _canonical_admission_hash(request: Dict[str, Any]) -> str:
     no whitespace variance) so a byte-identical retry hashes identically."""
     blob = json.dumps(request, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+_SENDER_ROLES = ("manager", "worker")
+
+
+def _sender_cap_hash(raw: str) -> str:
+    """[A82 Stage 5] Stored form of a sender capability (never the raw secret)."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _sender_pair_allowed(sender_role: Optional[str], target_role: Optional[str]) -> bool:
+    """[A82 Stage 5] Same-Case sender→recipient roles: worker→Manager,
+    worker→worker and Manager→worker; never Manager→Manager or a non-member."""
+    return (
+        sender_role in _SENDER_ROLES and target_role in _SENDER_ROLES
+        and not (sender_role == "manager" and target_role == "manager")
+    )
+
+
+def _revoke_sender_caps(
+    conn: sqlite3.Connection, now: str, session_id: str,
+    *, keep_case: Optional[str] = None, keep_role: Optional[str] = None,
+) -> None:
+    """[A82 Stage 5] Revoke a session's live sender capabilities inside the
+    caller's write txn — all of them, or (``keep_case`` given) only those whose
+    binding differs from the session's NEW (case, role). A revoked row is never
+    revalidated, so returning to an old Case does not resurrect a secret."""
+    if keep_case is None:
+        conn.execute(
+            "UPDATE mesh_sender_capabilities SET revoked_at = ? "
+            "WHERE sender_session_id = ? AND revoked_at IS NULL",
+            (now, session_id),
+        )
+        return
+    conn.execute(
+        "UPDATE mesh_sender_capabilities SET revoked_at = ? "
+        "WHERE sender_session_id = ? AND revoked_at IS NULL AND (case_id != ? OR role != ?)",
+        (now, session_id, keep_case, keep_role or ""),
+    )
 
 
 def _turn_backing_error(op: str, err: Exception, **ctx: Any) -> BackingStoreError:
