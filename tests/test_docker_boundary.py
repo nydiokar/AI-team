@@ -302,3 +302,81 @@ def test_worker_quota_observe_explicit_override_wins(monkeypatch):
     monkeypatch.setenv("QUOTA_COORDINATOR_ENABLED", "1")
     monkeypatch.setenv("WORKER_QUOTA_OBSERVE", "0")
     assert WorkerConfig.from_env().quota_observe_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Window warming runs where the harness lives (regression: warming went inert
+# under the Docker controller/worker split — controller has adapters == []).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_worker_prewarm_reconcile_starts_and_stops_dynamically(monkeypatch):
+    """The worker toggles warming LIVE from the registry flag: reconcile(True)
+    builds+starts once (idempotent on repeat), reconcile(False) stops and clears.
+    This is the dynamic on/off the registry exists for — no restart."""
+    from src.worker.agent import WorkerAgent
+
+    class _FakePrewarmer:
+        def __init__(self):
+            self.starts = 0
+            self.stops = 0
+
+        async def start(self):
+            self.starts += 1
+
+        async def stop(self):
+            self.stops += 1
+
+    agent = WorkerAgent.__new__(WorkerAgent)
+    agent.cfg = types.SimpleNamespace(node_id="kanebra-worker")
+    fake = _FakePrewarmer()
+
+    async def _build():
+        return fake
+
+    monkeypatch.setattr(agent, "_build_quota_prewarmer", _build)
+
+    # OFF → nothing built.
+    assert await agent._prewarm_reconcile(False, None) is None
+    assert fake.starts == 0
+
+    # OFF → ON: builds and starts exactly once.
+    pw = await agent._prewarm_reconcile(True, None)
+    assert pw is fake and fake.starts == 1
+
+    # ON → ON: idempotent, no second start.
+    pw = await agent._prewarm_reconcile(True, pw)
+    assert pw is fake and fake.starts == 1
+
+    # ON → OFF: stops and clears the handle.
+    assert await agent._prewarm_reconcile(False, pw) is None
+    assert fake.stops == 1
+
+
+def test_controller_can_activate_reflects_adapter_presence():
+    """The controller only stands up a prewarmer when it can actually fire one.
+    An ingest-only coordinator (adapters == []) must report can-activate False,
+    so orchestrator._build_quota_prewarmer skips the inert loop."""
+    from src.orchestrator import TaskOrchestrator
+
+    class _Coord:
+        def __init__(self, adapters):
+            self.adapters = adapters
+
+    class _Activatable:
+        async def activate(self, bucket_id="five_hour"):
+            return {"ok": True}
+
+    class _Observer:  # no activate() — telemetry-only
+        pass
+
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+
+    orch.quota_coordinator = _Coord([])                       # ingest_only
+    assert orch._coordinator_can_activate() is False
+
+    orch.quota_coordinator = _Coord([_Observer()])            # no activate
+    assert orch._coordinator_can_activate() is False
+
+    orch.quota_coordinator = _Coord([_Activatable()])         # real adapter
+    assert orch._coordinator_can_activate() is True

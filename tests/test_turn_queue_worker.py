@@ -203,3 +203,49 @@ def test_WRK06_shutdown_does_not_release_a_running_backend():
     # A running managed turn must NOT be releasable on shutdown.
     running_ok = guard({"id": "t-run", "status": "running", "queue_protocol": 1})
     assert running_ok in (False, None), "shutdown would release a running managed backend"
+
+
+# --------------------------------------------------------------------------- #
+# Merge seam (main #171 x A82 M1): cancel_turn is a control row
+# --------------------------------------------------------------------------- #
+def test_cancel_turn_control_row_exempt_from_scheduling_capacity():
+    """With the managed carrier ON and scheduling capacity FULL, a remote
+    ``cancel_turn`` control row (main #171) must still be scheduled — like
+    close_session / cancel_codex / cancel_managed it bypasses the slot
+    semaphore, and must never wait behind the very turn it interrupts. An
+    ordinary turn row in the same poll stays queued server-side."""
+    w = _bare_worker(max_concurrent=1)
+    w.cfg = type("C", (), {"max_concurrent": 1, "managed_turns": True})()
+    w._pending_result_delivery = set()
+    w._delivering = set()
+    w._claim_store = None
+    for i in range(2):  # 2x slots => capacity full
+        w._active[f"busy-{i}"] = object()
+    handled: list[str] = []
+
+    calls: list[int] = []
+
+    async def _fetch() -> list:
+        calls.append(1)
+        if len(calls) > 1:  # second poll: stop the loop
+            w._shutdown.set()
+            w._poll_now.set()
+            return []
+        w._poll_now.set()  # skip the inter-poll wait
+        return [
+            {"id": "turn-1", "action": "resume_session", "backend": "claude"},
+            {"id": "cancel-turn-s-1", "action": "cancel_turn", "backend": "claude"},
+        ]
+
+    async def _handle(row: dict) -> None:
+        handled.append(row["id"])
+
+    w._fetch_pending = _fetch
+    w._handle_task = _handle
+
+    async def _run() -> None:
+        await w._poll_loop()
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+    assert handled == ["cancel-turn-s-1"]

@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_86_RUNTIME_UPDATE_AUTOMATION
 created_at: "2026-09-24T18:00:20+00:00"
-status: dead
+status: blocked
 owner: ""
 depends_on: [AGENT_85_WORKER_CONTAINER_ACCEPTANCE]
 results_ref: DISPATCH_LOG.md#A86
 evidence: []
-updated_at: "2026-09-25T10:40:36.283600+00:00"
+updated_at: "2026-09-27T16:04:23.404921+00:00"
 ```
 
 # DISPATCH — A86 · Approved, reversible worker runtime update automation
