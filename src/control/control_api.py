@@ -39,7 +39,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from src.core import observability
 from src.control import app_metrics
@@ -263,12 +263,28 @@ async def _submit_agent_instruction(orchestrator: Any, body: Any, session: Any, 
             operation_id=body.operation_id,
             sender_session_id=sender.session_id,
             sender_case_id=sender.case_id,
+            sender_capability_hash=sender.capability_hash,
             turn_queue_enrolled=True,
         )
     except HarnessAdmissionBlocked as blocked:
         raise _harness_blocked_http(blocked)
     except TurnQueueError as err:
-        raise _turn_queue_http(err)
+        http = _turn_queue_http(err)
+        if http.status_code == 401:  # stale capability at admission (rework F3)
+            http.headers = {"WWW-Authenticate": _SENDER_AUTH_SCHEME}
+        raise http
+
+
+def _parse_turn_request_body(raw: bytes) -> "TurnRequestCreateBody":
+    """[A82 Stage 5 rework] Validate the create-route body AFTER the auth
+    dependency ran (FastAPI decodes a declared body before dependencies, so
+    unauthenticated garbage would be 422 instead of 401). Same 422 shape."""
+    try:
+        return TurnRequestCreateBody.model_validate_json(raw)
+    except ValidationError as e:
+        raise RequestValidationError(
+            [{**err, "loc": ("body", *err.get("loc", ()))} for err in e.errors(include_url=False)]
+        )
 
 
 def _preparse_byte_guard(app: Any) -> None:
@@ -2092,11 +2108,15 @@ def build_control_api(orchestrator) -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/turn-requests")
     async def api_create_turn_request(
-        session_id: str, body: TurnRequestCreateBody, request: Request,
+        session_id: str, request: Request,
         sender: Optional[Any] = Depends(_turn_request_principal),
     ) -> JSONResponse:
-        """Acknowledge a managed instruction only after canonical admission."""
+        """Acknowledge a managed instruction only after canonical admission.
+        The body (byte-capped by ``BodyCapMiddleware``) is read and validated
+        only after authentication: unauthenticated input is 401, never 422."""
         from src.control.turn_queue import TurnAdmission
+
+        body = _parse_turn_request_body(await request.body())
 
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
