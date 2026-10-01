@@ -9654,6 +9654,25 @@ Generated from user description: {description}
                 action=action,
                 payload=payload,
             )
+            # [#177] Reject a remote dispatch pinned to a node that is not
+            # registered at all (e.g. a session whose node was renamed/deleted —
+            # 'kanebra' vs 'kanebra-worker'). Left pending, such a row can never be
+            # claimed and lingers forever, inflating the pending count. Mark it
+            # failed immediately so `_dispatch_to_node`'s first poll fails fast
+            # instead of burning the queue timeout, and so it never becomes an
+            # orphan. An OFFLINE (but registered) node is NOT rejected — it may
+            # re-register, and the affinity-offline grace path owns that case.
+            if not runs_locally and machine_id and db.get_node(machine_id) is None:
+                db.fail_task(
+                    task.id,
+                    f"dispatch rejected: pinned node '{machine_id}' is not a registered mesh node",
+                    status="failed",
+                )
+                logger.warning(
+                    "event=mesh_dispatch_rejected_unknown_node task_id=%s machine_id=%s action=%s",
+                    task.id, machine_id, action,
+                )
+                return
             # Self-claim when this task runs on THIS host so no worker daemon can
             # pick up the row. A row pinned to a DIFFERENT host stays 'pending' so
             # that remote worker can claim it via get_pending_tasks.

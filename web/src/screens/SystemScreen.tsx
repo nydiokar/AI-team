@@ -204,6 +204,7 @@ function MeshHealthPanel({
   const sessionsBusy = current?.sessions_busy ?? 0;
   const sessionsTotal = current?.sessions_total ?? 0;
   const pending = current?.tasks_pending ?? latest?.tasks_pending ?? 0;
+  const stalePending = current?.tasks_stale_pending ?? 0;
   const claimed = current?.tasks_claimed ?? latest?.tasks_claimed ?? 0;
   const completed = current?.tasks_completed ?? 0;
   const failed = current?.tasks_failed ?? 0;
@@ -272,7 +273,12 @@ function MeshHealthPanel({
           value={`${completed}/${failed}`}
           tone={failed > 0 ? "bad" : "default"}
         />
-        <MeshStat label="pending / claimed" value={`${pending}/${claimed}`} tone={pending > 0 ? "warn" : "default"} />
+        <MeshStat
+          label="pending / claimed"
+          value={`${pending}/${claimed}`}
+          tone={stalePending > 0 ? "bad" : pending > 0 ? "warn" : "default"}
+        />
+        <MeshStat label="stale pending" value={String(stalePending)} tone={stalePending > 0 ? "bad" : "default"} />
         <MeshStat label="stale busy" value={String(staleBusy)} tone={staleBusy > 0 ? "bad" : "default"} />
       </div>
 
