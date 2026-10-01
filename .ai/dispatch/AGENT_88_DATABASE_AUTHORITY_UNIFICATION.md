@@ -1,12 +1,12 @@
 ```yaml
 job_id: AGENT_88_DATABASE_AUTHORITY_UNIFICATION
 created_at: "2026-09-26T16:09:11.750309+00:00"        # CANONICAL — set once at dispatch, never derive again
-status: ready              # ready | active | blocked | done | dead
-owner: ""
+status: active              # ready | active | blocked | done | dead
+owner: claude-session-2026-10-02:feat/database-authority-unification
 depends_on: []
 results_ref: DISPATCH_LOG.md#A88             # -> DISPATCH_LOG.md section with the verdict prose
-evidence: []                  # artifact paths that PROVE it ran (checked to exist)
-updated_at: "2026-09-26T16:10:14.857722+00:00"
+evidence: docs/DATABASE_AUTHORITY.md,tests/test_database_authority.py,tests/test_database_authority_process.py,scripts/db_authority_report.py                  # artifact paths that PROVE it ran (checked to exist)
+updated_at: "2026-10-01T22:10:17.101887+00:00"
 ```
 
 # DISPATCH — A88 · Controller/worker database authority unification
@@ -74,12 +74,34 @@ The intended end state is one canonical controller-owned control-plane and runti
 
 ## Milestone (burndown)
 
-- [ ] Full controller/worker state-access inventory and sanitized live topology verification
-- [ ] Authority map + complete cutover/migration design reviewed against current tree
-- [ ] Shared authenticated worker state/config seam implemented; all direct controller-owned DB paths removed
-- [ ] Conflict-safe reconciliation and rollback/dry-run tooling implemented
-- [ ] Separate-root integration tests and service-boundary checklist pass
+- [x] Full controller/worker state-access inventory and sanitized live topology verification
+- [x] Authority map + complete cutover/migration design reviewed against current tree
+- [x] Shared authenticated worker state/config seam implemented; all direct controller-owned DB paths removed
+- [x] Conflict-safe reconciliation and rollback/dry-run tooling implemented
+- [x] Separate-root integration tests and service-boundary checklist pass
 - [ ] Documentation, CONTEXT note, DISPATCH_LOG closure, PR, and operator-gated rollout runbook complete
+
+## Execution record — 2026-10-02 (branch `feat/database-authority-unification`)
+
+- **Live evidence (read-only):** worker PID holds `~/dev/AI-team/state/mesh.db` (frozen at the
+  2026-09-24 Docker migration) + its own `quota_windows.db`; controller uses
+  `~/ai-team-data/controller/state/`. `runtime_flags` identical (14/14, value + `set_at`) ⇒ R1 clean.
+  Report: `mesh_health_samples` (old rolling window), `nodes: kanebra` (deliberately deleted
+  stale row), `push_subscriptions` (stray host `last_error` stamp) — nothing to migrate.
+- **Change:** `src/control/controller_state.py` seam (installed ⇒ `get_db()` None, flag rows
+  from the controller); task-server `GET /control/runtime-flags` + `POST
+  /control/cases/{id}/boot-reconcile` on existing `WORKER_TOKEN` auth;
+  `src/worker/controller_state_client.py` (LKG snapshot, 30 s refresh); worker `main()` installs it;
+  `claude_driver` boot reconcile routes through it; `scripts/db_authority_report.py`.
+  Authority map + runbook: `docs/DATABASE_AUTHORITY.md`.
+- **R2:** worker `quota_windows.db` kept as a classified worker-local observation cache.
+- **Verification:** 21 new tests (incl. a real `server_main.py` subprocess on a separate DB root;
+  mutation-checked: 4 seam tests RED without the `db.py` wiring); 340 existing tests across touched
+  modules green. Merge dry-run: clean vs `main`; vs A82 only the generated `_DISPATCH_STATE.md`.
+  A82 adds no worker-side `get_db()` (its worker gates are env-based).
+- **Rollout hazard:** controller must be redeployed before the worker restarts on this code
+  (old task-server ⇒ 404 ⇒ env/default flags, logged at ERROR). Hence: PR opened, **merge held**
+  for the operator-approved sequence in `docs/DATABASE_AUTHORITY.md` §6.
 
 ## Closure (fill on completion)
 
