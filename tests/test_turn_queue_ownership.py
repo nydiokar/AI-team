@@ -292,7 +292,9 @@ def test_OWN05_superseded_token_result_is_rejected(tmp_path):
     token_a = _managed_claim(
         db, task_id="t-1", node_id="worker-a", carrier_kind="gateway_local", incarnation_id="inc-a"
     )
-    # Reoffer/reclaim produces a NEW token (superseding token_a).
+    # Reoffer/reclaim produces a NEW token (superseding token_a) — by the
+    # carrier's restarted, now-registered incarnation (4e review F3 fence).
+    _node(db, incarnation_id="inc-b")
     token_b = _managed_claim(
         db, task_id="t-1", node_id="worker-a", carrier_kind="gateway_local", incarnation_id="inc-b"
     )

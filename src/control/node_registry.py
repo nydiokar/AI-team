@@ -393,7 +393,7 @@ class NodeRegistry:
             if db:
                 return db.release_superseded_managed_grants(node_id, incarnation_id)
         except Exception as e:
-            logger.debug("event=db_release_superseded_grants_err node_id=%s err=%s", node_id, e)
+            logger.warning("event=db_release_superseded_grants_err node_id=%s err=%s", node_id, e)
         return []
 
 

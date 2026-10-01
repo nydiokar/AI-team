@@ -58,9 +58,13 @@ class _ManagedCapableBackend:
         return True
 
 
-def _register_node(client: TestClient, *, queue_protocols=(0, 1), managed_backends=("claude",)) -> None:
+def _register_node(client: TestClient, *, queue_protocols=(0, 1), managed_backends=("claude",),
+                   incarnation_id: str = "i") -> None:
+    # [4e review F3] Managed claims are fenced to the REGISTERED incarnation:
+    # register the one the test then presents.
     r = client.post("/nodes/register", json={
         "node_id": NODE, "tailscale_ip": "127.0.0.1", "api_port": 0,
+        "incarnation_id": incarnation_id,
         "capabilities": {"backends": ["claude", "codex"], "queue_protocols": list(queue_protocols),
                          "managed_backends": list(managed_backends)},
     }, headers={"Authorization": f"Bearer {TOKEN}"})
@@ -503,7 +507,7 @@ def test_INT09_restarted_incarnation_cannot_start_old_claim(db):
     client = TestClient(ts.app)
     h = {"Authorization": f"Bearer {TOKEN}"}
     _seed_turn(db, "t-9", "sess-9")
-    _register_node(client)
+    _register_node(client, incarnation_id="old")
     r = client.post("/tasks/t-9/claim-managed", json={"node_id": NODE, "incarnation_id": "old"}, headers=h)
     tok = r.json()["claim_token"]
     assert r.json()["task"]["backend"] == "claude" and r.json()["task"]["action"] == "resume_session"
@@ -531,17 +535,17 @@ def test_INT10_managed_rows_gated_on_registered_capability(db):
     # Registered legacy-only (no protocol 1): still nothing, claim refused.
     _register_node(client, queue_protocols=(0,), managed_backends=())
     assert client.get("/tasks/pending-managed", params=q, headers=h).json() == []
-    r = client.post("/tasks/t-10/claim-managed", json={"node_id": NODE}, headers=h)
+    r = client.post("/tasks/t-10/claim-managed", json={"node_id": NODE, "incarnation_id": "i"}, headers=h)
     assert r.status_code == 409
     # Protocol 1 but only codex registered as managed: a claude row is not offered.
     _register_node(client, managed_backends=("codex",))
     assert client.get("/tasks/pending-managed", params=q, headers=h).json() == []
-    assert client.post("/tasks/t-10/claim-managed", json={"node_id": NODE}, headers=h).status_code == 409
+    assert client.post("/tasks/t-10/claim-managed", json={"node_id": NODE, "incarnation_id": "i"}, headers=h).status_code == 409
     # Registered protocol 1 for claude: offered and claimable.
     _register_node(client)
     rows = client.get("/tasks/pending-managed", params={"node_id": NODE}, headers=h).json()
     assert [r["id"] for r in rows] == ["t-10"]
-    assert client.post("/tasks/t-10/claim-managed", json={"node_id": NODE}, headers=h).status_code == 200
+    assert client.post("/tasks/t-10/claim-managed", json={"node_id": NODE, "incarnation_id": "i"}, headers=h).status_code == 200
     assert _row(db, "t-10")["status"] == "claimed"
 
 

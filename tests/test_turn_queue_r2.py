@@ -292,7 +292,7 @@ def test_M3a_late_handoff_keeps_session_non_quiescent_until_sink_returns():
 # Server — streamed byte cap (S1), carrier_restarted proof (S2 + B2)
 # =========================================================================== #
 def _started(c, db, tid, incarnation="i"):
-    _register_node(c)
+    _register_node(c, incarnation_id=incarnation)
     _seed_turn(db, tid, "sess-" + tid)
     tok = c.post(f"/tasks/{tid}/claim-managed", json={"node_id": NODE, "incarnation_id": incarnation}, headers=H).json()["claim_token"]
     assert c.post(f"/tasks/{tid}/start-managed", json={"node_id": NODE, "claim_token": tok, "incarnation_id": incarnation}, headers=H).status_code == 200

@@ -143,11 +143,14 @@ def test_X02_cancel_before_the_turn_began_is_armed_for_its_echo(db, tmp_path, re
 def test_X03_cancel_for_an_attempt_this_carrier_does_not_hold_interrupts_nothing(db, tmp_path, real_claude):
     fake = real_claude.fake
     http = _ClientHTTP(TestClient(ts.app))
-    w = _worker(tmp_path, http)
-    w._backends = {"claude": real_claude.backend}
+    # [4e review F3] The attempt was claimed + started by a PREVIOUS registered
+    # incarnation of this carrier; the restarted process (inc-1) holds nothing.
+    _worker(tmp_path, http, incarnation="inc-old")
     _seed_session_turn(db, "t-z", "sess-z", "p")
     tok = db.claim_turn("t-z", NODE, "worker_daemon", "inc-old")
     db.start_turn("t-z", tok, incarnation_id="inc-old")
+    w = _worker(tmp_path, http)
+    w._backends = {"claude": real_claude.backend}
     assert _gateway_cancel("t-z") is True
     _handle_control(w)
     assert fake.interrupts == 0

@@ -2405,8 +2405,8 @@ class MeshDB:
         stay with the Stage-3 recovery machinery. Bounded by the node's claims."""
         rows = self._conn().execute(
             "SELECT id, claim_token FROM mesh_tasks WHERE queue_protocol = 1 "
-            "AND status = 'claimed' AND claimed_by = ? AND claim_incarnation IS NOT NULL "
-            "AND claim_incarnation != ? LIMIT 100",
+            "AND status = 'claimed' AND claimed_by = ? "
+            "AND (claim_incarnation IS NULL OR claim_incarnation != ?) LIMIT 100",
             (node_id, incarnation_id),
         ).fetchall()
         released: List[str] = []
@@ -4310,6 +4310,8 @@ class MeshDB:
                         "turn is assigned to a different carrier",
                         task_id=task_id, assigned=row["machine_id"], claimant=node_id,
                     )
+                if withdraw_reason is None:
+                    _require_registered_incarnation(conn, node_id, incarnation_id, task_id)
                 if withdraw_reason is not None:
                     pass  # deactivated above (rebound); refused after commit
                 elif status == "pending" and row["expires_at"] and row["turn_source"] != "human":
@@ -4413,7 +4415,7 @@ class MeshDB:
             with self._write() as conn:
                 row = conn.execute(
                     "SELECT id, status, queue_protocol, claim_token, "
-                    "claim_incarnation, started_at, flow_run_id, session_id "
+                    "claim_incarnation, started_at, flow_run_id, session_id, claimed_by "
                     "FROM mesh_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
@@ -4430,6 +4432,14 @@ class MeshDB:
                         "start incarnation mismatch (carrier restarted)",
                         task_id=task_id,
                     )
+                # [A82 Stage 4e review F3] ...nor once the node re-registered
+                # under a new incarnation (the release hook may not have run).
+                # A start that presents no incarnation is fenced on the GRANT's
+                # incarnation: only a grant minted by the current one starts.
+                _require_registered_incarnation(
+                    conn, row["claimed_by"], incarnation_id or row["claim_incarnation"],
+                    task_id,
+                )
                 if row["status"] == "running":
                     # Idempotent repeated start for the SAME token (OWN02).
                     return StartAuthorization(
@@ -9915,6 +9925,30 @@ def _release_stop_hold(conn: sqlite3.Connection, session_id: str, now: str) -> N
         "AND (status = 'cancelled' OR turn_queue_hold IS NOT NULL)",
         (now, session_id),
     )
+
+
+def _require_registered_incarnation(
+    conn: sqlite3.Connection, node_id: Optional[str], presented: Optional[str], task_id: str,
+) -> None:
+    """[A82 Stage 4e review F3] Inside the caller's claim/start transaction:
+    refuse (409) a managed claim or start whose presented incarnation is not
+    the node's CURRENT registered incarnation — a zombie process of a restarted
+    carrier can neither claim a fresh row nor start a grant. A node with no
+    registered incarnation (unregistered / pre-incarnation registration) is not
+    fenced here; the route's registered-capability check covers it."""
+    from .turn_queue import OwnershipConflictError
+
+    if not node_id:
+        return
+    reg = conn.execute(
+        "SELECT incarnation_id FROM nodes WHERE node_id = ?", (node_id,),
+    ).fetchone()
+    current = (reg["incarnation_id"] if reg is not None else None) or None
+    if current is not None and presented != current:
+        raise OwnershipConflictError(
+            "carrier incarnation is not the node's registered incarnation",
+            task_id=task_id, node_id=node_id, reason="incarnation_superseded",
+        )
 
 
 def _insert_watched_job_withdrawal_audit(
