@@ -494,6 +494,10 @@ class ClaudeDriver(ABC):
     @abstractmethod
     def close(self, session: Session) -> None: ...
 
+    def provision_sender_capability(self, session_id: str, token: Optional[str]) -> bool:
+        """[A82 Stage 5] Per-session sender tool; only the SDK driver has one."""
+        return False
+
     def driver_type(self) -> str:
         return type(self).__name__
 
@@ -771,6 +775,7 @@ class _SDKSession:
         max_turns: Optional[int] = None,
         max_budget_usd: Optional[float] = None,
         cli_path: Optional[str] = None,
+        sender_slot: Optional[Any] = None,
     ):
         self.session_key = session_key
         self.cwd = cwd
@@ -798,6 +803,10 @@ class _SDKSession:
         # SDK only emits --setting-sources when this is non-None; None ⇒
         # byte-identical legacy boot.
         self.setting_sources = setting_sources
+        # [A82 Stage 5] This session's sender slot (agent_sender.SenderSlot),
+        # shared by reference with the driver so a rotation/revocation reaches
+        # the live process. None ⇒ no sender tool (byte-identical options).
+        self.sender_slot = sender_slot
         self.backend_session_id: str = ""
         self._lock = threading.Lock()  # serialises concurrent send_turn calls
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -897,24 +906,27 @@ class _SDKSession:
         finally:
             self._loop.close()
 
-    async def _async_run(self) -> None:
-        try:
-            from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
-        except ImportError:
-            self._error = ImportError(
-                "claude-agent-sdk is not installed. Run: pip install claude-agent-sdk"
-            )
-            self._ready.set()
-            return
+    def _sdk_options(self) -> Any:
+        """Build this session's ``ClaudeAgentOptions`` (pure; no spawn).
+
+        [A82 Stage 5] A session with a sender slot gets the in-process
+        ``send_instruction`` SDK MCP server under its own name in
+        ``mcp_servers`` — ADDED to the user/project servers the CLI loads
+        (``strict_mcp_config`` stays off; settings/env untouched). The secret
+        stays in carrier memory: no CLI env, argv or config file carries it."""
+        from claude_agent_sdk import ClaudeAgentOptions
 
         tools = self.allowed_tools if self.allowed_tools is not None else _session_allowed_tools()
+        sender: Dict[str, Any] = {}
+        slot = getattr(self, "sender_slot", None)
+        if slot is not None:
+            from src.control.agent_sender import (
+                SENDER_SERVER_NAME, SENDER_TOOL_FQN, build_claude_sender_server,
+            )
 
-        # A single unparseable stdout frame used to kill the whole session (and
-        # silently drop its conversation). Install the resyncing reader before
-        # the client spawns anything.
-        _install_sdk_stream_resync()
-
-        options = ClaudeAgentOptions(
+            tools = [*tools, SENDER_TOOL_FQN]
+            sender = {"mcp_servers": {SENDER_SERVER_NAME: build_claude_sender_server(slot)}}
+        return ClaudeAgentOptions(
             cwd=self.cwd,
             allowed_tools=tools,
             permission_mode="bypassPermissions",
@@ -935,7 +947,25 @@ class _SDKSession:
             **_governor_option_kwargs(self.max_turns, self.max_budget_usd),
             # [A82 Stage 3 rework 4] Echo correlation for managed turns.
             **({"extra_args": {"replay-user-messages": None}} if self._replay_user_messages else {}),
+            **sender,
         )
+
+    async def _async_run(self) -> None:
+        try:
+            from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+        except ImportError:
+            self._error = ImportError(
+                "claude-agent-sdk is not installed. Run: pip install claude-agent-sdk"
+            )
+            self._ready.set()
+            return
+
+        # A single unparseable stdout frame used to kill the whole session (and
+        # silently drop its conversation). Install the resyncing reader before
+        # the client spawns anything.
+        _install_sdk_stream_resync()
+
+        options = self._sdk_options()
 
         self._client = ClaudeSDKClient(options=options)
         try:
@@ -1801,6 +1831,29 @@ class ClaudeSDKClientDriver(ClaudeDriver):
         # the worker at startup; propagated to every _SDKSession. Signature:
         # on_proactive(session_key: str, outcome: TurnOutcome) -> None.
         self._on_proactive: Optional[Any] = None
+        # [A82 Stage 5] session_id → agent_sender.SenderSlot (carrier memory).
+        self._sender_slots: Dict[str, Any] = {}
+
+    def provision_sender_capability(self, session_id: str, token: Optional[str]) -> bool:
+        """[A82 Stage 5] Set (or withdraw) THIS session's sender capability. The
+        slot object is shared with the session's live SDK process, so a rotation
+        or revocation takes effect on its next tool call without a respawn. A
+        process booted before the session had a slot gets the tool at its next
+        (re)spawn. Never touches os.environ or another session's slot."""
+        from src.control.agent_sender import SenderSlot, sender_base_url
+
+        if not session_id:
+            return False
+        with self._lock:
+            slot = self._sender_slots.get(session_id)
+            if slot is None:
+                if token is None:
+                    return True
+                slot = SenderSlot(base_url=sender_base_url(os.environ))
+                self._sender_slots[session_id] = slot
+            slot.base_url = sender_base_url(os.environ)
+            slot.token = token
+        return True
 
     def set_proactive_sink(self, sink: Any) -> None:
         """Register the callback that delivers autonomous turns. Applies to
@@ -1992,6 +2045,7 @@ class ClaudeSDKClientDriver(ClaudeDriver):
                     max_turns=gov_max_turns,
                     max_budget_usd=gov_max_budget,
                     cli_path=cli_path,
+                    sender_slot=getattr(self, "_sender_slots", {}).get(key),
                 )
                 sdk_sess._on_proactive = self._on_proactive
                 sdk_sess.start()
@@ -2227,6 +2281,10 @@ class ClaudeSDKClientDriver(ClaudeDriver):
 
     def close(self, session: Session) -> None:
         sdk_sess = self._remove(session.session_id)
+        with self._lock:
+            slot = getattr(self, "_sender_slots", {}).pop(session.session_id, None)
+        if slot is not None:
+            slot.token = None  # [A82 Stage 5] closed session: no sender capability
         if sdk_sess is not None:
             sdk_sess.close()
 

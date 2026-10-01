@@ -362,6 +362,13 @@ class CodingBackend(ABC):
         (unknown ⇒ not quiescent, fail closed)."""
         return False
 
+    def provision_sender_capability(self, session_id: str, token: Optional[str]) -> bool:
+        """[A82 Stage 5] Give (or, with ``None``, withdraw) the session's scoped
+        ``send_instruction`` capability to THIS backend instance — memory only,
+        per session, never global env/config. Returns True iff the backend
+        supports a per-session sender tool. Default: unsupported."""
+        return False
+
     def forget_managed_turn(self, session: "Session", turn_uuid: str) -> bool:
         """The carrier learned the managed turn ``turn_uuid`` is terminal on the
         server (operator-resolved / definitively refused): drop any in-memory

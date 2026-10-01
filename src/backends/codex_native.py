@@ -93,6 +93,24 @@ class CodexBackend(CodingBackend):
         self._active: dict[str, ActiveTurn] = {}
         self._execution_cancels: dict[str, threading.Event] = {}
         self._capacity = threading.BoundedSemaphore(8)
+        # [A82 Stage 5] session_key → current sender capability (memory only),
+        # and native thread id → the capability its loaded config carries.
+        self._sender_tokens: dict[str, str] = {}
+        self._sender_attached: dict[str, str | None] = {}
+
+    def provision_sender_capability(self, session_id: str, token: str | None) -> bool:
+        """[A82 Stage 5] Per-thread sender tool: the next attach of this
+        session's thread carries a dedicated stdio server whose OWN env holds
+        the capability; a loaded thread whose capability changed is re-attached
+        at its next turn. No global env/config.toml mutation."""
+        if not session_id:
+            return False
+        with self._lock:
+            if token:
+                self._sender_tokens[session_id] = token
+            else:
+                self._sender_tokens.pop(session_id, None)
+        return True
 
     def _runtime(self) -> CodexAppServerClient:
         with self._runtime_lock:
@@ -148,11 +166,14 @@ class CodexBackend(CodingBackend):
         with self._lock:
             if session.session_id in self._active:
                 return  # The turn's owner unloads after confirmed interruption.
+        with self._lock:
+            self._sender_tokens.pop(session.session_id, None)  # [A82 Stage 5]
         with self._runtime_lock:
             thread_id = session.backend_session_id
             if self._client and thread_id in self._loaded:
                 self._client.unload(thread_id)
                 self._loaded.pop(thread_id, None)
+                self._sender_attached.pop(thread_id, None)
 
     def terminate_active_processes(self) -> None:
         """Compatibility spelling for the existing carrier shutdown hook."""
@@ -170,6 +191,7 @@ class CodexBackend(CodingBackend):
                 self._client.close()
                 self._client = None
             self._loaded.clear()
+            self._sender_attached.clear()
 
     def compact_session(self, session: Session) -> ExecutionResult:
         # Native compaction is a mutation and must use the same ownership path.
@@ -191,6 +213,13 @@ class CodexBackend(CodingBackend):
             for name, server in configured.get("mcp_servers", {}).items():
                 if "command" in server:
                     config[f"mcp_servers.{name}.env"] = {**server.get("env", {}), **identity}
+        token = self._sender_tokens.get(session_id)
+        if token:
+            from src.control.agent_sender import SENDER_SERVER_NAME, codex_sender_server, sender_base_url
+
+            server_def = codex_sender_server(token, sender_base_url(os.environ))
+            for field in ("command", "args", "env"):
+                config[f"mcp_servers.{SENDER_SERVER_NAME}.{field}"] = server_def[field]
         return config
 
     def _run(self, cwd: str, message: str, resume_id: str | None, session_key: str | None,
@@ -244,6 +273,11 @@ class CodexBackend(CodingBackend):
                 terminal = True
                 return ExecutionResult(False, "", native_id, errors=["cancelled"])
             client = self._runtime()
+            if native_id in self._loaded and self._sender_attached.get(native_id) != self._sender_tokens.get(key):
+                # [A82 Stage 5] The session's sender capability changed: re-attach
+                # (no turn is active for this key) so its tool config is current.
+                client.unload(native_id)
+                self._loaded.pop(native_id, None)
             if native_id not in self._loaded:
                 response = client.attach_thread(native_id, workspace, model, self._thread_config(key))
                 thread = response["thread"]
@@ -257,6 +291,7 @@ class CodexBackend(CodingBackend):
                 if thread["status"]["type"] != "idle":
                     raise CodexProtocolError("codex_thread_not_idle")
                 self._loaded[native_id] = workspace
+                self._sender_attached[native_id] = self._sender_tokens.get(key)
             elif self._loaded[native_id] != workspace:
                 raise CodexProtocolError("codex_workspace_mismatch")
             active.thread_id = native_id
