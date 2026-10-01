@@ -21,7 +21,7 @@ and stay out of scope. This is the schema + transaction contract layer only.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -238,17 +238,33 @@ class ManagedTurnOwnership(BaseModel):
     # the prompt under it, and a late reply is bound back to EXACTLY this
     # attempt by it — never by session.
     turn_uuid: Optional[str] = None
-    sender_capability: Optional[str] = Field(default=None, repr=False)
 
 
 class SenderIdentity(BaseModel):
-    """Server-validated agent sender; never contains the bearer capability."""
+    """[A82 Stage 5] Server-validated agent sender, derived from the scoped
+    capability's canonical binding; never contains the bearer capability."""
 
     model_config = {"extra": "forbid", "frozen": True}
 
     session_id: str
     case_id: str
     role: str
+
+
+class SenderCapabilityGrant(BaseModel):
+    """[A82 Stage 5] The sender binding a carrier receives in its PRIVATE managed
+    claim response. ``token`` is the raw capability only when one was minted
+    for this claim (``None`` ⇒ the carrier's held generation is still current).
+    The secret is excluded from repr; the DB stores only its hash."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    session_id: str
+    case_id: str
+    role: str
+    generation: int
+    operations: List[str] = Field(default_factory=lambda: ["send_instruction"])
+    token: Optional[str] = Field(default=None, repr=False)
 
 
 class StartAuthorization(BaseModel):
