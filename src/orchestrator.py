@@ -11476,6 +11476,12 @@ Generated from user description: {description}
         if status in db._CLOSED_STATUSES:
             return "case_closed"
         if not continuation:
+            # [A82 Stage 4e review F2] Every other automation kind carrying a
+            # Case (watched job, heartbeat, ...) on a REPLACED Manager is
+            # obsolete too: head selection exempts it from the binding gate
+            # only so it can be withdrawn here, never re-selected forever.
+            if await asyncio.to_thread(db.turn_held_by_case_rebind, str(row["id"])):
+                return "manager_rebound"
             return None
         manager = await asyncio.to_thread(db.case_manager_session_id, case_id)
         if str(manager or "") != str(row.get("session_id") or ""):

@@ -7131,16 +7131,34 @@ class MeshDB:
                 )
         return sid
 
+    def turn_held_by_case_rebind(self, task_id: str) -> bool:
+        """[A82 Stage 4e review F2] True when the binding gate
+        (``_MANAGED_CASE_BINDING_GATE_SQL``) holds managed row ``task_id``: its
+        session was a Manager of the row's Case and a newer Manager link
+        exists. The SAME predicate head selection exempts automation rows from,
+        so activation revalidation withdraws exactly the rows the exemption
+        admits (none is re-selected and found ineligible forever)."""
+        row = self._conn().execute(
+            f"SELECT NOT ({_MANAGED_CASE_BINDING_GATE_SQL}) AS held "
+            "FROM mesh_tasks t WHERE t.id = ? AND t.queue_protocol = 1",
+            (task_id,),
+        ).fetchone()
+        return bool(row is not None and row["held"])
+
     def withdraw_rebound_automation(
         self, session_id: str, case_id: str, *, actor: str,
     ) -> List[str]:
-        """[Producer 7] Withdraw the QUEUED Case automation turns (continuation
-        wakes, retries) of a replaced Manager session for ``case_id`` — the
-        4c rebound rule applied at respawn. Human / operator / runtime turns are
-        never touched. Each withdrawal is its own conditional txn; a raced row
-        is skipped (activation revalidation still withdraws it). Their tokens
-        are then finalized by the durable finalizers (continuation re-armed for
-        the new Manager; a retry obligation consumed)."""
+        """[Producer 7] Withdraw the QUEUED Case automation turns (every
+        automation kind: continuation wakes, retries, watched-job
+        notifications, heartbeats) of a replaced Manager session for
+        ``case_id`` — the 4c rebound rule applied at respawn, the same rule
+        activation revalidation applies (``turn_held_by_case_rebind``). Human /
+        operator / runtime turns are never touched. Each withdrawal is its own
+        conditional txn (a withdrawn job notification leaves its 4d audit
+        record in it); a raced row is skipped (activation revalidation still
+        withdraws it). Their tokens are then finalized by the durable
+        finalizers (continuation re-armed for the new Manager; a retry
+        obligation consumed)."""
         from .turn_queue import TurnQueueError
 
         rows = self._conn().execute(
@@ -7148,14 +7166,15 @@ class MeshDB:
             SELECT id, revision FROM mesh_tasks
             WHERE session_id = ? AND queue_protocol = 1 AND status = 'queued'
               AND turn_source = 'system' AND idempotency_scope LIKE 'automation:%'
-              AND turn_kind IN ('continuation', 'retry') AND flow_run_id = ?
+              AND flow_run_id = ?
             """,
             ((session_id or "").strip(), case_id),
         ).fetchall()
         out: List[str] = []
         for r in rows:
             try:
-                if self.withdraw_turn(str(r["id"]), int(r["revision"]), actor=actor):
+                if self.withdraw_turn(str(r["id"]), int(r["revision"]), actor=actor,
+                                      audit_reason="manager_rebound"):
                     out.append(str(r["id"]))
             except TurnQueueError:
                 continue
