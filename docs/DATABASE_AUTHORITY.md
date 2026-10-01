@@ -76,11 +76,17 @@ Gateway, task-server, local-execution gateway and tests never install a client �
 ### 3.3 Worker client (`src/worker/controller_state_client.py`)
 - Immutable snapshot (`RuntimeFlagSnapshot`, Pydantic) swapped atomically; reads are memory-only
   (no I/O on the event loop or in the driver).
-- Refresh: one bounded fetch at worker start (before work is claimed), then a supervised loop:
-  every 30 s with a snapshot, every 5 s until the first success.
+- Refresh: one bounded fetch (≤5 s) at worker start, then the refresh loop — the **only**
+  refresher (no concurrent fetches): every 30 s with a snapshot, every 5 s until the first success.
+- **Work gate:** until the first snapshot exists the poll loop claims nothing
+  (`WorkerAgent._controller_state_ready`, top of `_fetch_pending`), so no session boots on
+  env/default flags after a startup outage. Exception: a controller that predates the route (404)
+  does not gate — waiting would stall all work; the worker runs on env/default flags instead.
 - Malformed/oversized response (Pydantic schema: ≤256 rows, bounded field lengths) ⇒ rejected,
   last-known-good kept, warning logged. A 404 on the route logs
-  `event=controller_state_route_missing` at ERROR — the worker is newer than the task-server.
+  `event=controller_state_route_missing` at ERROR once per episode and retries every 30 s — the
+  worker is newer than the task-server. The deploy preflight (`scripts/safe_worker_deploy.py`)
+  refuses to deploy a worker in that state.
 - Disconnected ⇒ last-known-good indefinitely; `event=controller_state_stale age_sec=…` logged
   once when the snapshot is older than 5 refresh intervals, `…_recovered` on the next success.
   Never fetched ⇒ registry rows absent ⇒ env/default (identical to today's no-DB behaviour).
@@ -104,11 +110,13 @@ Gateway, task-server, local-execution gateway and tests never install a client �
 ## 5. Migration / reconciliation
 `scripts/db_authority_report.py --controller-db … --worker-db …` (read-only, `mode=ro`, SQL
 `ATTACH` + `NOT EXISTS`, no row materialisation; URL-shaped/long keys are hashed in output):
-runtime-flag diff (exit 2 on any value conflict or worker-only flag row — R1, operator decides),
-worker-only / worker-newer rows per shared table by primary key (exit 1), else exit 0.
-Idempotent by construction (it never writes either file; verified by checksum).
+exit 3 = runtime-flag conflict or worker-only flag row (R1, operator decides); 4 = some tables
+could not be compared (listed as SKIPPED — never a clean bill); 5 = worker-only / worker-newer rows
+by primary key (review; nothing is migrated); 6 = unreadable database; 0 = clean. Idempotent by
+construction (never writes either database; verified by checksum — a WAL file may still get its
+`-shm` side file created by SQLite on a read-only open).
 
-Live run 2026-10-02 (exit 1, nothing to migrate):
+Live run 2026-10-02 (exit 5, nothing to migrate, nothing skipped):
 
 | Table | Divergence | Classification |
 |---|---|---|
@@ -124,7 +132,8 @@ task-server gets 404 and runs on env/default flags (logged at ERROR) until the t
 1. Merge; rebuild/recreate the controller (`docker compose up -d --build`,
    `docs/RUNBOOKS/OPERATIONS_DOCKER.md`); check `GET /control/runtime-flags` returns 200 with the
    worker token.
-2. Run the report against both files; expect exit 0.
+2. Run the report against both files; expect exit 5 with exactly the classified rows in §5.
+   Exit 3, 4 or 6 — or any new divergence — stops the rollout for an operator decision.
 3. Restart the native worker on the merged code (**operator-gated**: interrupts live sessions).
 4. Verify: `ls -l /proc/$(pm2 pid ai-team-worker)/fd | grep mesh.db` is empty;
    worker log shows `event=controller_flags_refreshed`; flip a flag via `ops_flag.sh` and see
@@ -144,8 +153,20 @@ step 5) and the previous task-server image; the new routes are additive.
 - **Backing failure:** controller DB unavailable ⇒ 503; worker keeps LKG (or env/default when never
   fetched) and retries.
 - **Known bound:** the worker-hosted Manager boot reconcile is a sync HTTP call inside the
-  driver's session-creation lock (in a `to_thread` worker, never on the event loop); on a controller
-  outage it holds that lock ≤5 s, only when `DURABLE_RELAY_ENABLED` is on (OFF live 2026-10-02).
+  driver's session-creation lock (in a `to_thread` worker, never on the event loop). urllib's 5 s
+  timeout is per socket operation, so a controller that accepts but stalls can hold that lock
+  ~10 s, blocking other session creates/cancels on that worker; a timed-out reconcile is logged and
+  not retried. Only when `DURABLE_RELAY_ENABLED` is on (OFF live 2026-10-02). Releasing the lock
+  before the reconcile is deferred until A82 lands (A82 rewrites `_get_or_create`).
 - **Deferred:** shared-token auth until A71 (routes use the same dependency A71 wraps);
   worker/controller `quota_windows.db` retention (A93); the `_http_target_is_colocated`
-  heuristic is now inert for workers (no local sink) and is left in place.
+  heuristic is now inert for workers (no local sink) and is left in place; flags set only in the
+  controller's env (no registry row) are invisible to workers — unchanged from before A88.
+
+## 8. Merging with A82 (`feat/session-turn-queue`)
+- Textual: only the generated `.ai/dispatch/_DISPATCH_STATE.md` / `_dispatch.parquet` conflict
+  (regenerate with `scripts/dispatch/dispatch_state.py`).
+- **Semantic:** A82 splits claiming into legacy `_fetch_pending` + `_fetch_pending_managed`. The
+  `_controller_state_ready()` gate must cover **both** (managed claims too) after the merge.
+- A82's worker-local `ManagedClaimStore` and managed-result spool are worker-private state;
+  add them to §2 when A82 merges.

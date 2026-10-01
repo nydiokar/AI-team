@@ -5,10 +5,14 @@ Run before retiring a worker's local ``state/mesh.db`` (docs/DATABASE_AUTHORITY.
 Never writes either file: both are opened ``mode=ro`` and compared in SQL (no row
 materialisation), so it is safe against a live controller and idempotent.
 
-Exit codes:
-  0  nothing in the worker file that the controller lacks
-  1  worker-only / worker-newer rows exist — review them (they are not migrated)
-  2  runtime-flag conflict or worker-only flag row — operator must choose (R1)
+Exit codes (2 is argparse usage; 1 is an unexpected crash):
+  0  every shared table compared; nothing in the worker file that the controller lacks
+  3  runtime-flag conflict or worker-only flag row — operator must choose (R1)
+  4  some tables could not be compared (no/mismatched primary key, or absent from the
+     controller) — listed under "skipped"; the result is NOT a clean bill
+  5  worker-only / worker-newer rows exist — review them (they are not migrated)
+  6  a database could not be read (locked/corrupt/not SQLite)
+Precedence when several apply: 3 > 4 > 5.
 
     python scripts/db_authority_report.py \
         --controller-db ~/ai-team-data/controller/state/mesh.db \
@@ -21,7 +25,6 @@ import hashlib
 import sqlite3
 import sys
 from pathlib import Path
-from typing import List
 
 from pydantic import BaseModel
 
@@ -45,13 +48,22 @@ class TableDivergence(BaseModel):
     table: str
     worker_only: int
     worker_newer: int
-    sample_keys: List[str]
+    sample_keys: list[str]
+
+
+class SkippedTable(BaseModel):
+    table: str
+    reason: str
 
 
 class AuthorityReport(BaseModel):
-    flag_conflicts: List[FlagConflict]
-    tables: List[TableDivergence]
+    flag_conflicts: list[FlagConflict]
+    tables: list[TableDivergence]
+    skipped: list[SkippedTable]
     exit_code: int
+
+
+EXIT_CLEAN, EXIT_FLAG_CONFLICT, EXIT_SKIPPED, EXIT_ROWS, EXIT_UNREADABLE = 0, 3, 4, 5, 6
 
 
 def _ro_uri(path: Path) -> str:
@@ -62,16 +74,16 @@ def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _pk_columns(conn: sqlite3.Connection, schema: str, table: str) -> List[str]:
+def _pk_columns(conn: sqlite3.Connection, schema: str, table: str) -> list[str]:
     rows = conn.execute(f"PRAGMA {schema}.table_info({_quote(table)})").fetchall()
     return [str(r[1]) for r in sorted((r for r in rows if r[5]), key=lambda r: r[5])]
 
 
-def _columns(conn: sqlite3.Connection, schema: str, table: str) -> List[str]:
+def _columns(conn: sqlite3.Connection, schema: str, table: str) -> list[str]:
     return [str(r[1]) for r in conn.execute(f"PRAGMA {schema}.table_info({_quote(table)})")]
 
 
-def _flag_conflicts(conn: sqlite3.Connection) -> List[FlagConflict]:
+def _flag_conflicts(conn: sqlite3.Connection) -> list[FlagConflict]:
     rows = conn.execute(
         """
         SELECT w.flag_name, c.value, w.value
@@ -84,10 +96,17 @@ def _flag_conflicts(conn: sqlite3.Connection) -> List[FlagConflict]:
     return [FlagConflict(flag_name=r[0], controller_value=r[1], worker_value=str(r[2])) for r in rows]
 
 
+def _skip_reason(conn: sqlite3.Connection, table: str) -> str | None:
+    pk = _pk_columns(conn, "w", table)
+    if not pk:
+        return "no primary key"
+    if pk != _pk_columns(conn, "main", table):
+        return "primary key differs between files"
+    return None
+
+
 def _table_divergence(conn: sqlite3.Connection, table: str) -> TableDivergence | None:
     pk = _pk_columns(conn, "w", table)
-    if not pk or pk != _pk_columns(conn, "main", table):
-        return None
     t = _quote(table)
     join = " AND ".join(f"c.{_quote(k)} = w.{_quote(k)}" for k in pk)
     key_expr = " || '|' || ".join(f"CAST(w.{_quote(k)} AS TEXT)" for k in pk)
@@ -109,26 +128,39 @@ def build_report(controller_db: Path, worker_db: Path) -> AuthorityReport:
     conn = sqlite3.connect(_ro_uri(controller_db), uri=True, timeout=5)
     try:
         conn.execute("ATTACH DATABASE ? AS w", (_ro_uri(worker_db),))
-        shared: List[str] = [
+        controller_tables = {
+            str(r[0]) for r in conn.execute("SELECT name FROM main.sqlite_master WHERE type = 'table'")
+        }
+        worker_tables: list[str] = [
             str(r[0]) for r in conn.execute(
-                """
-                SELECT name FROM w.sqlite_master
-                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                  AND name IN (SELECT name FROM main.sqlite_master WHERE type = 'table')
-                ORDER BY name
-                """
+                "SELECT name FROM w.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
             )
         ]
-        conflicts = _flag_conflicts(conn) if "runtime_flags" in shared else []
-        tables = [d for d in (_table_divergence(conn, t) for t in shared if t != "runtime_flags") if d]
+        skipped: list[SkippedTable] = []
+        compared: list[str] = []
+        for table in worker_tables:
+            reason = "absent from controller" if table not in controller_tables else _skip_reason(conn, table)
+            if reason:
+                skipped.append(SkippedTable(table=table, reason=reason))
+            elif table != "runtime_flags":
+                compared.append(table)
+        conflicts = _flag_conflicts(conn) if "runtime_flags" in controller_tables and "runtime_flags" in worker_tables else []
+        tables = [d for d in (_table_divergence(conn, t) for t in compared) if d]
     finally:
         conn.close()
-    code = 2 if conflicts else (1 if tables else 0)
-    return AuthorityReport(flag_conflicts=conflicts, tables=tables, exit_code=code)
+    if conflicts:
+        code = EXIT_FLAG_CONFLICT
+    elif skipped:
+        code = EXIT_SKIPPED
+    elif tables:
+        code = EXIT_ROWS
+    else:
+        code = EXIT_CLEAN
+    return AuthorityReport(flag_conflicts=conflicts, tables=tables, skipped=skipped, exit_code=code)
 
 
 def _render(report: AuthorityReport) -> str:
-    lines: List[str] = []
+    lines: list[str] = []
     if report.flag_conflicts:
         lines.append("RUNTIME FLAG CONFLICTS (operator decides; nothing is copied):")
         lines += [f"  {c.flag_name}: controller={c.controller_value!r} worker={c.worker_value!r}" for c in report.flag_conflicts]
@@ -139,12 +171,13 @@ def _render(report: AuthorityReport) -> str:
             f"{t.table}: worker_only={t.worker_only} worker_newer={t.worker_newer} sample={t.sample_keys}"
         )
     if not report.tables:
-        lines.append("no worker-only or worker-newer rows in any shared table")
+        lines.append("no worker-only or worker-newer rows in any compared table")
+    lines += [f"SKIPPED {s.table}: {s.reason}" for s in report.skipped]
     lines.append(f"exit={report.exit_code}")
     return "\n".join(lines)
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--controller-db", type=Path, required=True)
     parser.add_argument("--worker-db", type=Path, required=True)
@@ -153,7 +186,11 @@ def main(argv: List[str] | None = None) -> int:
     for p in (args.controller_db, args.worker_db):
         if not p.is_file():
             parser.error(f"not a file: {p}")
-    report = build_report(args.controller_db, args.worker_db)
+    try:
+        report = build_report(args.controller_db, args.worker_db)
+    except sqlite3.Error as exc:
+        print(f"unreadable database: {exc}", file=sys.stderr)
+        return EXIT_UNREADABLE
     print(report.model_dump_json(indent=2) if args.json else _render(report))
     return report.exit_code
 
