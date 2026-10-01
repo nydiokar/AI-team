@@ -222,3 +222,74 @@ def test_registration_hook_failure_logged_at_warning(monkeypatch, caplog):
         assert reg._db_release_superseded_managed_grants("worker-a", "inc-2") == []
     assert any("db_release_superseded_grants_err" in r.getMessage() for r in caplog.records)
 
+
+# ---------------------------------------------------------------- F4
+
+def test_legacy_execution_insert_refused_for_enrolled_session(tmp_path):
+    from src.control.db import MeshDB
+    from src.control.turn_queue import LegacyExecutionRefusedError
+
+    db = MeshDB(str(tmp_path / "l.db"))
+    _enrolled(db, "s")
+    for action in ("create_session", "resume_session", "compact_session"):
+        with pytest.raises(LegacyExecutionRefusedError):
+            db.enqueue_task(f"legacy-{action}", "s", "worker-a", "claude", action,
+                            {"prompt": "x"})
+        assert db.get_task(f"legacy-{action}") is None
+    # Control rows stay allowed for an enrolled session.
+    for action in ("close_session", "cancel_turn"):
+        db.enqueue_task(f"ctl-{action}", "s", "worker-a", "claude", action, {})
+        assert db.get_task(f"ctl-{action}")["status"] == "pending"
+    # An unenrolled session's legacy execution is unchanged.
+    db.upsert_session(Session(session_id="u", backend="claude", repo_path="/tmp/repo",
+                              status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW,
+                              machine_id="worker-a"))
+    db.enqueue_task("legacy-u", "u", "worker-a", "claude", "resume_session", {"prompt": "x"})
+    assert db.claim_task("legacy-u", "worker-a") is True
+
+
+def test_legacy_execution_claim_refused_for_enrolled_session(tmp_path):
+    from src.control.db import MeshDB
+    from src.control.turn_queue import LegacyExecutionRefusedError
+
+    db = MeshDB(str(tmp_path / "l.db"))
+    db.upsert_session(Session(session_id="s", backend="claude", repo_path="/tmp/repo",
+                              status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW,
+                              machine_id="worker-a"))
+    # Inserted while the session was still legacy; enrolled before a poll.
+    db.enqueue_task("legacy-1", "s", "worker-a", "claude", "resume_session", {"prompt": "x"})
+    with db._write() as conn:
+        conn.execute("UPDATE sessions SET turn_queue_enrolled = 1 WHERE session_id = 's'")
+    with pytest.raises(LegacyExecutionRefusedError):
+        db.claim_task("legacy-1", "worker-a")
+    row = _row(db, "legacy-1")
+    assert row["status"] == "failed" and row["claimed_by"] is None
+    assert "legacy_execution_refused" in str(row["error"])
+    assert db.claim_task("legacy-1", "worker-a") is False  # terminal: never re-offered
+
+
+def test_reconcile_row_is_never_claimable(tmp_path, monkeypatch):
+    """The spool-replay row is inserted directly in its terminal state: a
+    remote poll between the insert and the finalize cannot claim (re-run) it."""
+    from src.core.interfaces import Task, TaskPriority, TaskResult, TaskStatus, TaskType
+
+    db, o = _setup(tmp_path, monkeypatch, enroll=False)  # a legacy session's replay
+    seen: List[Any] = []
+    real_complete = o._mesh_complete_task
+
+    def _poll_in_gap(task: Any, result: Any, artifact: Any) -> None:
+        seen.append((_row(db, task.id)["status"], db.claim_task(task.id, "worker-a")))
+        real_complete(task, result, artifact)
+
+    o._mesh_complete_task = _poll_in_gap
+    task = Task(id="spooled-1", type=TaskType.ANALYZE, priority=TaskPriority.MEDIUM,
+                status=TaskStatus.COMPLETED, created=NOW, title="t", target_files=[],
+                prompt="p", success_criteria=[], context="",
+                metadata={"session_id": "sess-1"})
+    result = TaskResult(task_id="spooled-1", success=True, output="done", errors=[],
+                        files_modified=[], execution_time=0.0, timestamp=NOW)
+    o._ensure_reconcile_task_row(db, task, result)
+    o._mesh_complete_task(task, result, None)
+    assert seen == [("completed", False)]
+    assert _row(db, "spooled-1")["status"] == "completed"
+
