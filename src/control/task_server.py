@@ -1140,8 +1140,49 @@ def _reap_stale_claims_once() -> None:
             )
 
 
+def _reap_stale_pending_once() -> None:
+    """[#177] Synchronously cancel pending tasks that can never be claimed.
+
+    Sibling of ``_reap_stale_claims_once`` for the ``pending`` state, which had
+    no TTL before this change (orphans accumulated for up to 58 days live). A row
+    is cancelled — not released — because none of these are claimable: a closed
+    session, an unknown/offline pinned node past the grace window, or an
+    age-ceiling leak (the only reason that retires a stuck continuation lease).
+    Each cancellation writes a ``task_events`` row (via ``cancel_task``) and one
+    bounded log line. Off the event loop: callers wrap this in ``to_thread``.
+    """
+    db = get_db()
+    if db is None:
+        return
+    from config import config as _cfg
+    if not getattr(_cfg.mesh, "pending_reaper_enabled", True):
+        return
+    grace_sec = int(getattr(_cfg.mesh, "pending_reaper_grace_sec", 1800) or 0)
+    max_age_sec = int(getattr(_cfg.mesh, "pending_max_age_sec", 604800) or 0)
+    stale = db.list_stale_pending_tasks(grace_sec=grace_sec, max_age_sec=max_age_sec)
+    for row in stale:
+        task_id = row.get("id", "?")
+        reason = row.get("_stale_reason", "unknown")
+        machine_id = row.get("machine_id")
+        age_sec = int(row.get("_age_sec") or 0)
+        if db.cancel_task(
+            task_id,
+            f"pending reaped: {reason} (machine_id={machine_id!r}, age={age_sec}s)",
+            event_session_id=row.get("session_id"),
+        ):
+            logger.info(
+                "event=stale_pending_cancelled task_id=%s reason=%s machine_id=%s age_sec=%d",
+                task_id, reason, machine_id, age_sec,
+            )
+
+
 async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
-    """Periodically sweep stale claims without blocking gateway request handling."""
+    """Periodically sweep stale claims without blocking gateway request handling.
+
+    The same cadence also sweeps stale PENDING rows (#177) — one loop, two
+    bounded synchronous sweeps, each guarded so a failure in one never starves
+    the other.
+    """
     logger.info("event=stale_claim_reaper_started interval=%ds", interval_sec)
     try:
         while True:
@@ -1149,6 +1190,10 @@ async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
                 await asyncio.to_thread(_reap_stale_claims_once)
             except Exception as e:
                 logger.debug("event=stale_claim_reaper_error err=%s", e)
+            try:
+                await asyncio.to_thread(_reap_stale_pending_once)
+            except Exception as e:
+                logger.debug("event=stale_pending_reaper_error err=%s", e)
             await asyncio.sleep(interval_sec)
     except asyncio.CancelledError:
         logger.info("event=stale_claim_reaper_stopped")
