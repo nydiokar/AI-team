@@ -1737,6 +1737,11 @@ present + driver-code blind, and the `flow_run_id`-outside-numbered-migration fa
 capability limit demonstrated — the SDK exposes the signals the oracle needs. Three escalated decisions
 resolved above. Stage 1 authorized (assertion-capable red tests); Stage 2 gated on Stage-1 review.
 
+### Stage 4e review — fresh-context adversarial reviewer (Manager-dispatched subagent, Opus 5.5) — 2026-10-02 — VERDICT: ACCEPT (round 2)
+- **Round 1 @ `f559fec` — REWORK.** F1 major (failed continuation wake wedged the Manager while `CASE_CONTINUATION` flag OFF — finalizer only ran under the flag; test stubbed the method under test), F2 major (`deccc28` head exemption re-selected stale watched_job/heartbeat automation every pass, could fill LIMIT 25 fleet-wide), F3 minor (no incarnation fence vs registered node at claim/start), F4 minor (§3.2 legacy execution not refused at DB insert/claim; `_ensure_reconcile_task_row` claimable gap), F5 minor (unbound quota resume reported ok while held). Also re-verified sound: A/B/R rule, respawn idempotency/lost-ack/crash-between-claim-and-start, oversize carry, merge `5ae94d0` cancel resolution. Probes: `/tmp/claude-1000/a82-review/`.
+- **Round 2 @ `f5d894c` — ACCEPT.** F1–F5 RESOLVED (commits `75fd705`, `fee0f0a`, `03fe683`, `0dabc28`, `2806c2e`, `dd6fcde`); test edits audited — oracle not weakened (INT09/OWN05/X03 now model real restarts). ~575 offline tests green (all `tests/test_turn_queue*.py` + respawn/retry/claim-reaper/remote-cancel/affinity/quota-resume/continuation).
+- **Carried to final review (non-blocking):** (1) `_managed_turn_obsolete` returns before the rebind check when the `flow_runs` row is missing (unreachable today — flow runs are not deleted); (2) a failed registration upsert leaves a stale incarnation → that worker's managed claims 409 until re-register (fails closed); (3) Stage 3 shared-claim-store race (new process releasing an old process's never-invoked claim record) narrowed by the F3 fence but not separately proven closed; (4) no operator exit for a retry-pause mark whose recorder keeps raising.
+
 ## 17. Closure
 
 Pending implementation. Acceptance of this packet authorizes the work and tests
