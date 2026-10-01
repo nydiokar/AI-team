@@ -258,8 +258,7 @@ def test_legacy_execution_claim_refused_for_enrolled_session(tmp_path):
                               machine_id="worker-a"))
     # Inserted while the session was still legacy; enrolled before a poll.
     db.enqueue_task("legacy-1", "s", "worker-a", "claude", "resume_session", {"prompt": "x"})
-    with db._write() as conn:
-        conn.execute("UPDATE sessions SET turn_queue_enrolled = 1 WHERE session_id = 's'")
+    db.enroll_session("s")
     with pytest.raises(LegacyExecutionRefusedError):
         db.claim_task("legacy-1", "worker-a")
     row = _row(db, "legacy-1")
