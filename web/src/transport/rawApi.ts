@@ -407,6 +407,7 @@ export interface RawMeshHealthCurrent {
   sessions_total?: number;
   sessions_busy?: number;
   tasks_pending?: number;
+  tasks_stale_pending?: number;
   tasks_claimed?: number;
   tasks_completed?: number;
   tasks_failed?: number;
