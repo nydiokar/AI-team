@@ -127,11 +127,24 @@ def sender_base_url(env: Mapping[str, str]) -> str:
     return f"http://127.0.0.1:{port}"
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would re-send a 301/302/303 as GET WITH
+    the Authorization header to whatever host ``Location`` names. Returning
+    None surfaces the 3xx as an ``HTTPError`` (a refused send)."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirects())
+
+
 def _http_post(url: str, body: bytes, headers: Dict[str, str], timeout: float) -> Tuple[int, bytes]:
-    """Single HTTP choke point (tests route it into the in-process app)."""
+    """Single HTTP choke point (tests route it into the in-process app).
+    Redirects are refused (the capability never follows one)."""
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             return int(resp.status), resp.read(64 * 1024)
     except urllib.error.HTTPError as e:
         return int(e.code), e.read(64 * 1024)
