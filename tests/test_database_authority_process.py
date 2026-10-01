@@ -11,8 +11,8 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Tuple
 
 import pytest
 
@@ -33,7 +33,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def controller(tmp_path: Path) -> Iterator[Tuple[str, Path]]:
+def controller(tmp_path: Path) -> Iterator[tuple[str, Path]]:
     root = tmp_path / "controller"
     root.mkdir()
     db_path = root / "state" / "mesh.db"
@@ -43,11 +43,15 @@ def controller(tmp_path: Path) -> Iterator[Tuple[str, Path]]:
         "MESH_ENABLED=true\nMESH_EMBEDDED_SERVER=false\nGATEWAY_LOCAL_EXECUTION_ENABLED=false\n"
         f"MESH_TASK_SERVER_PORT={port}\nMESH_BIND_HOST=127.0.0.1\nMESH_TAILSCALE_IP=\n"
         f"MESH_DB_PATH={db_path}\nMESH_SHADOW_WRITE=true\nWORKER_TOKEN={TOKEN}\n"
+        # Pin the flags asserted below so a developer .env cannot leak in.
+        "QUOTA_PREWARM_ENABLED=0\nDURABLE_RELAY_ENABLED=0\nMANAGER_ROLE_ENABLED=0\n"
     )
     env = dict(os.environ, AI_TEAM_ENV_FILE=str(env_file), AI_TEAM_TEST_MODE="1")
+    stderr_path = root / "server.stderr"
+    stderr_file = stderr_path.open("wb")  # a file, not a pipe: a chatty child can't block
     proc = subprocess.Popen(
         [sys.executable, str(REPO / "server_main.py")],
-        cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=stderr_file,
     )
     base = f"http://127.0.0.1:{port}"
     try:
@@ -57,9 +61,9 @@ def controller(tmp_path: Path) -> Iterator[Tuple[str, Path]]:
                 with urllib.request.urlopen(f"{base}/health", timeout=1) as r:
                     json.loads(r.read())
                 break
-            except Exception:
+            except (OSError, ValueError):
                 if proc.poll() is not None or time.monotonic() > deadline:
-                    err = proc.stderr.read().decode()[-2000:] if proc.stderr else ""
+                    err = stderr_path.read_bytes().decode(errors="replace")[-2000:]
                     pytest.fail(f"task-server did not start: {err}")
                 time.sleep(0.2)
         yield base, db_path
@@ -70,12 +74,15 @@ def controller(tmp_path: Path) -> Iterator[Tuple[str, Path]]:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+        stderr_file.close()
 
 
 @pytest.fixture
-def worker_root(tmp_path: Path) -> Iterator[Path]:
+def worker_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     from config import config
 
+    for name in ("QUOTA_PREWARM_ENABLED", "MANAGER_ROLE_ENABLED", "DURABLE_RELAY_ENABLED"):
+        monkeypatch.delenv(name, raising=False)  # the worker's env fallback must not see a dev .env
     root = tmp_path / "worker"
     config.mesh.db_path = str(root / "state" / "mesh.db")
     db_mod._db_instance = None
@@ -83,7 +90,7 @@ def worker_root(tmp_path: Path) -> Iterator[Path]:
     controller_state.uninstall()
 
 
-def test_worker_reads_controller_state_across_processes(controller: Tuple[str, Path], worker_root: Path) -> None:
+def test_worker_reads_controller_state_across_processes(controller: tuple[str, Path], worker_root: Path) -> None:
     base, controller_db_path = controller
     operator_db = MeshDB(str(controller_db_path))  # the operator's /api/flags write, on the controller DB
     try:
@@ -117,7 +124,7 @@ def test_worker_reads_controller_state_across_processes(controller: Tuple[str, P
         operator_db.close()
 
 
-def test_worker_keeps_last_known_good_when_controller_dies(controller: Tuple[str, Path], worker_root: Path) -> None:
+def test_worker_keeps_last_known_good_when_controller_dies(controller: tuple[str, Path], worker_root: Path) -> None:
     base, controller_db_path = controller
     operator_db = MeshDB(str(controller_db_path))
     try:

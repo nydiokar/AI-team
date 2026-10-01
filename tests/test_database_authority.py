@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 from urllib.error import HTTPError
 
 import pytest
@@ -23,8 +22,15 @@ TOKEN = "a88-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
+# Flags these tests assert on; a developer .env (loaded into os.environ by config)
+# must not leak into the env → default fallback under test.
+_ASSERTED_FLAGS = ("QUOTA_PREWARM_ENABLED", "MANAGER_ROLE_ENABLED", "MANAGER_TOOLS_ENABLED", "DURABLE_RELAY_ENABLED")
+
+
 @pytest.fixture(autouse=True)
-def _no_installed_client():
+def _no_installed_client(monkeypatch: pytest.MonkeyPatch):
+    for name in _ASSERTED_FLAGS:
+        monkeypatch.delenv(name, raising=False)
     controller_state.uninstall()
     yield
     controller_state.uninstall()
@@ -40,11 +46,11 @@ class _FakeHTTP:
     """Stands in for the worker's ``_HTTP`` (get/post returning decoded JSON)."""
 
     def __init__(self) -> None:
-        self.get_responses: List[object] = []
-        self.post_calls: List[Tuple[str, int]] = []
+        self.get_responses: list[object] = []
+        self.post_calls: list[tuple[str, int]] = []
         self.post_response: object = {"ok": True}
 
-    def get(self, path: str, params: Optional[Dict[str, str]] = None, timeout: int = 10) -> object:
+    def get(self, path: str, params: dict[str, str] | None = None, timeout: int = 10) -> object:
         assert path == "/control/runtime-flags"
         item = self.get_responses.pop(0)
         if isinstance(item, Exception):
@@ -56,7 +62,7 @@ class _FakeHTTP:
         return self.post_response
 
 
-def _snapshot(rev: str, **flags: str) -> Dict[str, JsonValue]:
+def _snapshot(rev: str, **flags: str) -> dict[str, JsonValue]:
     return {
         "revision": rev,
         "flags": [{"flag_name": k, "value": v, "set_at": "2026-10-02T00:00:00Z"} for k, v in flags.items()],
@@ -218,9 +224,11 @@ def test_client_logs_missing_route_loudly(caplog: pytest.LogCaptureFixture) -> N
     http = _FakeHTTP()
     http.get_responses.append(HTTPError("http://c/control/runtime-flags", 404, "Not Found", None, None))  # type: ignore[arg-type]
     remote = RemoteControllerState(http)
+    http.get_responses.append(HTTPError("http://c/control/runtime-flags", 404, "Not Found", None, None))  # type: ignore[arg-type]
     caplog.set_level(logging.ERROR, logger="src.worker.controller_state_client")
     assert remote.refresh() is False
-    assert "event=controller_state_route_missing" in caplog.text
+    assert remote.refresh() is False
+    assert caplog.text.count("event=controller_state_route_missing") == 1  # once per episode
 
 
 def test_client_boot_reconcile_posts_and_validates_id() -> None:
@@ -235,7 +243,11 @@ def test_client_boot_reconcile_posts_and_validates_id() -> None:
 
 def test_telemetry_sink_has_no_local_mirror_with_client(tmp_path: Path) -> None:
     from config import config
-    from src.control.telemetry_sink import DatabaseTelemetrySink, FanOutTelemetrySink, build_runtime_telemetry_sink
+    from src.control.telemetry_sink import (
+        DatabaseTelemetrySink,
+        FanOutTelemetrySink,
+        build_runtime_telemetry_sink,
+    )
 
     config.mesh.db_path = str(tmp_path / "worker" / "mesh.db")
     db_mod._db_instance = None
@@ -253,6 +265,7 @@ def test_telemetry_sink_has_no_local_mirror_with_client(tmp_path: Path) -> None:
 
 def _manager_session(case_id: str) -> object:
     from types import SimpleNamespace
+
     from src.core.roles import MANAGER_ROLE_ID
 
     return SimpleNamespace(case_role=MANAGER_ROLE_ID, current_case_id=case_id, session_id="s1")
@@ -285,10 +298,10 @@ def test_controller_hosted_manager_reconciles_locally() -> None:
     assert db is not None
     db.set_runtime_flag("DURABLE_RELAY_ENABLED", True)
     case_id = db.open_case("objective", "sess_local")
-    calls: List[str] = []
+    calls: list[str] = []
     original = type(db).boot_reconcile_case
 
-    def _spy(self: object, cid: str, *, actor: str = "manager") -> Dict[str, object]:
+    def _spy(self: object, cid: str, *, actor: str = "manager") -> dict[str, object]:
         calls.append(cid)
         return original(self, cid, actor=actor)  # type: ignore[arg-type]
 
@@ -301,22 +314,23 @@ def test_controller_hosted_manager_reconciles_locally() -> None:
     assert calls == [case_id]
 
 
-def test_worker_install_fetches_before_work_and_tolerates_outage(tmp_path: Path) -> None:
+def test_worker_install_fetches_once_and_tolerates_outage(tmp_path: Path) -> None:
     from config import config
     from src.worker.agent import _install_controller_state
 
     config.mesh.db_path = str(tmp_path / "worker" / "mesh.db")
     db_mod._db_instance = None
     http = _FakeHTTP()
-    http.get_responses += [OSError("blip"), _snapshot("r1", MANAGER_ROLE_ENABLED="1")]
-    _install_controller_state(http, retry_sleep_sec=0)  # type: ignore[arg-type]
+    http.get_responses.append(_snapshot("r1", MANAGER_ROLE_ENABLED="1"))
+    _install_controller_state(http)  # type: ignore[arg-type]
     assert db_mod.runtime_flag_enabled("MANAGER_ROLE_ENABLED") is True
     assert db_mod.get_db() is None
 
     controller_state.uninstall()
     down = _FakeHTTP()
-    down.get_responses += [OSError("down")] * 3
-    _install_controller_state(down, retry_sleep_sec=0)  # type: ignore[arg-type]
+    down.get_responses.append(OSError("down"))
+    _install_controller_state(down)  # type: ignore[arg-type]  # one attempt, no startup stall
+    assert down.get_responses == []
     assert controller_state.active() is not None  # installed even when the controller is down
     assert db_mod.get_db() is None
     assert not (tmp_path / "worker").exists()
@@ -345,6 +359,7 @@ def test_authority_report_is_read_only_and_classifies(tmp_path: Path) -> None:
     before = _digest()
     clean = build_report(ctl_path, wrk_path)
     assert clean.exit_code == 0 and clean.flag_conflicts == [] and clean.tables == []
+    assert clean.skipped == []
     assert _digest() == before
 
     with sqlite3.connect(wrk_path) as conn:
@@ -354,7 +369,7 @@ def test_authority_report_is_read_only_and_classifies(tmp_path: Path) -> None:
             " VALUES ('https://push.example/x','k','a',1,'2026-10-02','2026-10-02')"
         )
     report = build_report(ctl_path, wrk_path)
-    assert report.exit_code == 2
+    assert report.exit_code == 3  # flag conflict outranks row divergence
     assert [(c.flag_name, c.controller_value, c.worker_value) for c in report.flag_conflicts] == [
         ("MANAGER_ROLE_ENABLED", "1", "0")
     ]
@@ -374,10 +389,11 @@ def test_worker_claims_no_work_before_flags_are_known() -> None:
     controller_state.install(remote)
     agent = WorkerAgent.__new__(WorkerAgent)
 
-    assert asyncio.run(agent._controller_state_ready()) is False  # outage: claim nothing
-    assert asyncio.run(agent._controller_state_ready()) is True   # first snapshot arrives
-    assert asyncio.run(agent._controller_state_ready()) is True   # no further fetch needed
-    assert http.get_responses == []
+    assert remote.refresh() is False                              # outage at startup
+    assert asyncio.run(agent._controller_state_ready()) is False  # claim nothing
+    assert len(http.get_responses) == 1                           # gate never fetches itself
+    assert remote.refresh() is True                               # refresh loop recovers
+    assert asyncio.run(agent._controller_state_ready()) is True
 
 
 def test_worker_degrades_instead_of_stalling_on_old_controller() -> None:
@@ -387,9 +403,12 @@ def test_worker_degrades_instead_of_stalling_on_old_controller() -> None:
 
     http = _FakeHTTP()
     http.get_responses.append(HTTPError("http://c/control/runtime-flags", 404, "Not Found", None, None))  # type: ignore[arg-type]
-    controller_state.install(RemoteControllerState(http))
+    remote = RemoteControllerState(http)
+    controller_state.install(remote)
+    assert remote.refresh() is False
     agent = WorkerAgent.__new__(WorkerAgent)
     assert asyncio.run(agent._controller_state_ready()) is True
+    assert remote.next_delay() == remote.refresh_interval_sec  # no 5 s retry storm
 
 
 def test_controller_process_never_gates_claims() -> None:
@@ -399,3 +418,37 @@ def test_controller_process_never_gates_claims() -> None:
 
     agent = WorkerAgent.__new__(WorkerAgent)
     assert asyncio.run(agent._controller_state_ready()) is True
+
+
+def test_authority_report_never_claims_clean_for_uncompared_tables(tmp_path: Path) -> None:
+    import sqlite3
+
+    from scripts.db_authority_report import build_report, main
+    from src.control.db import MeshDB
+
+    ctl_path, wrk_path = tmp_path / "ctl.db", tmp_path / "wrk.db"
+    MeshDB(str(ctl_path)).close()
+    MeshDB(str(wrk_path)).close()
+    with sqlite3.connect(wrk_path) as conn:
+        conn.execute("CREATE TABLE worker_only_tbl (x TEXT)")
+    report = build_report(ctl_path, wrk_path)
+    assert report.exit_code == 4
+    assert [(s.table, s.reason) for s in report.skipped] == [("worker_only_tbl", "absent from controller")]
+
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(b"not a database" * 100)
+    assert main(["--controller-db", str(garbage), "--worker-db", str(wrk_path)]) == 6
+
+
+def test_deploy_preflight_installs_client_before_building_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The canary preflight builds a WorkerAgent in a child process; it must install the
+    controller-state client first, or it recreates the retired worker mesh.db."""
+    import scripts.safe_worker_deploy as deploy
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(deploy, "_run", lambda cmd, *a, **k: captured.append(cmd))
+    deploy._worker_startup_preflight()
+    code = captured[0][-1]
+    compile(code, "<preflight>", "exec")
+    assert code.index("_install_controller_state(") < code.index("WorkerAgent()")
+    assert "route_missing" in code

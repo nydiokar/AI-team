@@ -824,7 +824,7 @@ class RuntimeFlagRowOut(BaseModel):
 
 class RuntimeFlagSnapshotOut(BaseModel):
     revision: str
-    flags: List[RuntimeFlagRowOut]
+    flags: list[RuntimeFlagRowOut]
 
 
 @app.get("/control/runtime-flags", dependencies=[Depends(_require_auth)])
@@ -838,7 +838,7 @@ def control_runtime_flags() -> RuntimeFlagSnapshotOut:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    rows: List[RuntimeFlagRowOut] = [
+    rows: list[RuntimeFlagRowOut] = [
         RuntimeFlagRowOut(
             flag_name=str(r["flag_name"]),
             value=str(r.get("value") or ""),
@@ -855,7 +855,7 @@ def control_runtime_flags() -> RuntimeFlagSnapshotOut:
 
 
 @app.post("/control/cases/{case_id}/boot-reconcile", dependencies=[Depends(_require_auth)])
-def control_boot_reconcile_case(case_id: str) -> Dict[str, Any]:
+def control_boot_reconcile_case(case_id: str) -> dict[str, Any]:
     """Manager boot reconcile for a worker-hosted Manager session, against the
     controller ledger. Same guards the driver applied locally; the db call is
     idempotent and self-gated on DURABLE_RELAY_ENABLED."""

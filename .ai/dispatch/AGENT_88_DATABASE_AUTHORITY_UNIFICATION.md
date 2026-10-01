@@ -103,6 +103,16 @@ The intended end state is one canonical controller-owned control-plane and runti
   (old task-server ⇒ 404 ⇒ env/default flags, logged at ERROR). Hence: PR opened, **merge held**
   for the operator-approved sequence in `docs/DATABASE_AUTHORITY.md` §6.
 
+- **Pre-merge sweep (independent adversarial review + own pass), all fixed:** deploy preflight
+  recreated the retired `mesh.db` (now installs the client and refuses a worker newer than its
+  controller); work claimed before the first flag snapshot (now gated, read-only gate, single
+  refresher); 404 retry/log storm (now once per episode, 30 s); tests leaked a developer `.env`
+  (now isolated, child env pinned); report could report "clean" for uncompared tables and had
+  colliding exit codes (now SKIPPED + exit 0/3/4/5/6); startup block cut to one ≤5 s attempt.
+  Documented, not changed: reconcile under the driver lock (~10 s worst case, relay OFF live;
+  deferred until A82 rewrites `_get_or_create`). A82 semantic-merge note in the doc §8.
+  Follow-up written: **A93** (quota DB retention — worker never prunes).
+
 ## Closure (fill on completion)
 
 (Do not mark done until the inventory demonstrates that every discovered duplicate authority was either eliminated or explicitly classified as non-canonical worker-private state, with evidence.)

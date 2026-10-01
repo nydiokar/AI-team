@@ -15,22 +15,22 @@ install a client, so their behaviour is unchanged.
 """
 from __future__ import annotations
 
-from typing import Dict, Optional, Protocol
+from typing import Protocol
 
 from pydantic import JsonValue
 
 
 class ControllerStateClient(Protocol):
-    def runtime_flag_row(self, flag_name: str) -> Optional[Dict[str, str]]:
+    def runtime_flag_row(self, flag_name: str) -> dict[str, str] | None:
         """The controller's registry row for ``flag_name`` or None (no row / unknown)."""
         ...
 
-    def boot_reconcile_case(self, case_id: str) -> Dict[str, JsonValue]:
+    def boot_reconcile_case(self, case_id: str) -> dict[str, JsonValue]:
         """Run the controller-side Manager boot reconcile for ``case_id``."""
         ...
 
 
-_active: Optional[ControllerStateClient] = None
+_active: ControllerStateClient | None = None
 
 
 def install(client: ControllerStateClient) -> None:
@@ -43,5 +43,5 @@ def uninstall() -> None:
     _active = None
 
 
-def active() -> Optional[ControllerStateClient]:
+def active() -> ControllerStateClient | None:
     return _active

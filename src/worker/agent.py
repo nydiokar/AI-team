@@ -1371,10 +1371,8 @@ class WorkerAgent:
         from src.worker.controller_state_client import RemoteControllerState
 
         client = controller_state.active()
-        if not isinstance(client, RemoteControllerState) or client.ready_for_work():
-            return True
-        await asyncio.to_thread(client.refresh)
-        return client.ready_for_work()
+        # Read-only: the refresh loop is the single refresher (no concurrent fetches).
+        return not isinstance(client, RemoteControllerState) or client.ready_for_work()
 
     async def _controller_state_loop(self) -> None:
         """[A88] Keep the controller-state snapshot (flag registry) fresh."""
@@ -2145,24 +2143,20 @@ class WorkerAgent:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _install_controller_state(http: _HTTP, *, attempts: int = 3, retry_sleep_sec: float = 2.0) -> None:
+def _install_controller_state(http: _HTTP) -> None:
     """[A88] Controller-owned state (flag registry, Case ledger) is read from the
     controller over HTTP; from here on this process never opens a mesh.db.
 
-    Installed before anything reads a flag. A bounded first fetch runs before work
-    is claimed; if the controller is unreachable the refresh loop keeps retrying and
-    flags resolve env → default meanwhile (docs/DATABASE_AUTHORITY.md §3.3)."""
+    Installed before anything reads a flag, with one bounded first fetch. Until a
+    snapshot exists the poll loop claims no work (``_controller_state_ready``) and
+    the refresh loop retries (docs/DATABASE_AUTHORITY.md §3.3)."""
     from src.control import controller_state
     from src.worker.controller_state_client import RemoteControllerState
 
     client = RemoteControllerState(http)
     controller_state.install(client)
-    for attempt in range(attempts):
-        if client.refresh():
-            return
-        if attempt + 1 < attempts:
-            time.sleep(retry_sleep_sec)
-    logger.warning("event=controller_state_initial_fetch_failed attempts=%d", attempts)
+    if not client.refresh():
+        logger.warning("event=controller_state_initial_fetch_failed route_missing=%s", client.route_missing)
 
 
 def main() -> None:
