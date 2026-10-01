@@ -900,6 +900,14 @@ _MANAGED_CASE_BINDING_GATE_SQL = """
           )
     )
 """
+# Head selection exempts AUTOMATION rows from the binding gate so the
+# scheduler's prepare step can see a stale-Case wake and WITHDRAW it with a
+# reason (design §3.10, 4c Q08) instead of leaving it queued forever on the
+# former Manager. Activation keeps the full gate for every row (defense in
+# depth: automation that prepare did not withdraw still never starts there).
+_MANAGED_AUTOMATION_ROW_SQL = (
+    "(t.turn_source = 'system' AND t.idempotency_scope LIKE 'automation:%')"
+)
 # [session-cache-heartbeat] The heartbeat single-flight action. It uses a
 # distinct sentinel so worker scans never claim heartbeat lease rows as normal
 # work; the gateway claims the row before sending a paid heartbeat turn.
@@ -3133,7 +3141,7 @@ class MeshDB:
               AND COALESCE(s.status, '') NOT IN ('closed', 'cancelled')
               AND s.turn_queue_hold IS NULL
               AND {_MANAGED_RETRY_GATE_SQL}
-              AND {_MANAGED_CASE_BINDING_GATE_SQL}
+              AND ({_MANAGED_AUTOMATION_ROW_SQL} OR {_MANAGED_CASE_BINDING_GATE_SQL})
               AND NOT EXISTS (
                   SELECT 1 FROM mesh_tasks e
                   WHERE e.session_id = t.session_id
