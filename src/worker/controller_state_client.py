@@ -82,6 +82,7 @@ class RemoteControllerState:
         self._rows: Dict[str, RuntimeFlagRow] = {}
         self._fetched_at: Optional[float] = None
         self._stale_reported: bool = False
+        self._route_missing: bool = False
 
     @property
     def revision(self) -> Optional[str]:
@@ -112,6 +113,7 @@ class RemoteControllerState:
             snapshot = RuntimeFlagSnapshot.model_validate(raw)
         except HTTPError as exc:
             if exc.code == 404:
+                self._route_missing = True
                 # Deployment ordering: this worker is newer than the task-server.
                 logger.error(
                     "event=controller_state_route_missing path=%s — deploy the task-server "
@@ -144,11 +146,18 @@ class RemoteControllerState:
         if self._stale_reported:
             logger.info("event=controller_state_recovered revision=%s", snapshot.revision)
             self._stale_reported = False
+        self._route_missing = False
         # Rows before snapshot: a reader seeing the new revision sees its rows.
         self._rows = rows
         self._snapshot = snapshot
         self._fetched_at = self._clock()
         return True
+
+    def ready_for_work(self) -> bool:
+        """True once the controller's flags are known — or the controller predates
+        the route (404), where waiting would stall all work; that case runs on
+        env/default flags and is logged at ERROR by ``refresh``."""
+        return self._snapshot is not None or self._route_missing
 
     def check_stale(self) -> None:
         """Log once when the snapshot (or the first fetch) is overdue."""

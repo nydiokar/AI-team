@@ -95,8 +95,10 @@ Gateway, task-server, local-execution gateway and tests never install a client �
   `quota_windows.db` stays: the prewarmer must decide from *this host's* Claude status line with
   no controller round-trip in the activation path, and the controller already receives the same
   observations via `/telemetry/quota-observation`. It is never read by the controller and is
-  rebuildable (delete ⇒ re-observed). Retention: existing `prune_snapshots`; `coordinator_events`
-  growth (225k rows, 120 MB) is a **deferred** item (§7).
+  rebuildable (delete ⇒ re-observed). Retention is **not bounded today** — tracked as A93
+  (`.ai/dispatch/AGENT_93_QUOTA_DB_AUTO_PRUNING.md`): the worker never runs `_prune_once_daily`
+  (prewarmer calls `observe_once()` directly), so snapshots date back to 2026-07-31, and
+  `coordinator_events` has no retention on either side (worker 225k rows / 120 MB).
 - **R3:** §3.1. **R4:** live cutover is operator-gated (§6).
 
 ## 5. Migration / reconciliation
@@ -145,5 +147,5 @@ step 5) and the previous task-server image; the new routes are additive.
   driver's session-creation lock (in a `to_thread` worker, never on the event loop); on a controller
   outage it holds that lock ≤5 s, only when `DURABLE_RELAY_ENABLED` is on (OFF live 2026-10-02).
 - **Deferred:** shared-token auth until A71 (routes use the same dependency A71 wraps);
-  worker `quota_windows.db` `coordinator_events` retention; the `_http_target_is_colocated`
+  worker/controller `quota_windows.db` retention (A93); the `_http_target_is_colocated`
   heuristic is now inert for workers (no local sink) and is left in place.
