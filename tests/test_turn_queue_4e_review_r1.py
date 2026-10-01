@@ -293,3 +293,25 @@ def test_reconcile_row_is_never_claimable(tmp_path, monkeypatch):
     assert seen == [("completed", False)]
     assert _row(db, "spooled-1")["status"] == "completed"
 
+
+# ---------------------------------------------------------------- F5
+
+def test_unbound_quota_resume_refused_while_a_pause_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    case_id: str = db.open_case("objective", "sess-1", role="manager")
+    db.append_flow_event(case_id, "flow.quota_paused", "system", entity_type="task",
+                         entity_id="failed-a", payload={"paused_task_id": "failed-a"})
+    pause = db.case_quota_pause(case_id)
+    assert pause is not None
+    out: Dict[str, Any] = {"ok": False, "reason": "", "case_id": case_id,
+                           "mode": "in_place", "session_id": None}
+    res = asyncio.run(o._quota_resume_managed(
+        db, case_id, db.get_flow_run(case_id), pause, "other-task",
+        o.session_store.get("sess-1"), "operator", out,
+    ))
+    assert res["ok"] is False and res["reason"] == "pause_not_bound"
+    assert db._conn().execute(
+        "SELECT COUNT(*) FROM mesh_tasks WHERE queue_protocol = 1").fetchone()[0] == 0
+    assert "case_resumed" not in o.events
