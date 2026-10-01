@@ -368,6 +368,10 @@ class ClaudeCodeBackend(CodingBackend):
 
         return self._driver.driver_type() == "sdk" and _replay_user_messages_enabled()
 
+    def provision_sender_capability(self, session_id: str, token: Optional[str]) -> bool:
+        """[A82 Stage 5] Per-session sender tool on the SDK driver only."""
+        return self._driver.provision_sender_capability(session_id, token)
+
     def run_managed_turn(self, session: Session, message: str, ownership, *, telemetry_context=None, telemetry_sink=None, on_process=None) -> ExecutionResult:
         return self._run_managed(
             "managed_turn", session, ownership, telemetry_context, telemetry_sink,

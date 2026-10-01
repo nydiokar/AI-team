@@ -1450,8 +1450,51 @@ class WorkerAgent:
             and exc.code not in (408, 429)
         )
 
+    def _sender_caps(self) -> Dict[str, Tuple[int, str]]:
+        """[A82 Stage 5] session_id → (generation, raw capability) held by THIS
+        carrier process. Memory only: never persisted, logged or published."""
+        caps = self.__dict__.get("_sender_cap_cache")
+        if caps is None:
+            caps = {}
+            self.__dict__["_sender_cap_cache"] = caps
+        return caps
+
+    def _held_sender_generation(self, session_id: str) -> Optional[int]:
+        held = self._sender_caps().get(session_id) if session_id else None
+        return held[0] if held else None
+
+    def _provision_sender_capability(
+        self, session_id: str, backend_name: str, grant: Any,
+    ) -> None:
+        """[A82 Stage 5] Apply the claim response's sender grant: a fresh secret
+        replaces the held one; a confirmation (no secret, same generation)
+        keeps it; no grant (not a Case member / revoked / not issued) drops it.
+        The backend instance for that session is provisioned accordingly."""
+        if not session_id:
+            return
+        caps = self._sender_caps()
+        token: Optional[str] = None
+        if isinstance(grant, dict) and grant.get("session_id") == session_id:
+            gen = grant.get("generation")
+            raw = grant.get("token")
+            if isinstance(raw, str) and raw and isinstance(gen, int):
+                caps[session_id] = (gen, raw)
+                token = raw
+            elif caps.get(session_id) and caps[session_id][0] == gen:
+                token = caps[session_id][1]
+        if token is None:
+            caps.pop(session_id, None)
+        backend = (getattr(self, "_backends", None) or {}).get(backend_name or "claude")
+        provision = getattr(backend, "provision_sender_capability", None)
+        if callable(provision):
+            try:
+                provision(session_id, token)
+            except Exception as e:  # noqa: BLE001 — never fails the claim
+                logger.warning("event=sender_provision_failed session_id=%s err=%s",
+                               session_id, type(e).__name__)
+
     async def _claim_and_start_managed(
-        self, task_id: str
+        self, task_id: str, session_hint: str = "",
     ) -> Optional[Tuple[Dict[str, Any], str]]:
         """[A82 Stage 3 rework] Managed claim → persist → reserve → quiescence →
         fenced start.
@@ -1479,6 +1522,9 @@ class WorkerAgent:
                     "carrier_kind": "worker_daemon",
                     "incarnation_id": self._incarnation_id,
                     "queue_protocols": [1],
+                    # [A82 Stage 5] The sender-capability generation held for
+                    # this session (None ⇒ none held ⇒ the gateway mints).
+                    "sender_capability_generation": self._held_sender_generation(session_hint),
                 },
             )
         except urllib.error.HTTPError as e:
@@ -1497,6 +1543,12 @@ class WorkerAgent:
             return None
         from src.worker.managed_result_spool import ResultSpoolError
 
+        # [A82 Stage 5] Provision the session's scoped sender capability into
+        # its backend instance (carrier memory only — never the claim record).
+        self._provision_sender_capability(
+            str(task_row.get("session_id") or ""), str(task_row.get("backend") or ""),
+            claim_response.get("sender_capability"),
+        )
         try:
             self._claim_record(
                 task_id, claim_token=claim_token, status="claimed", invoked=False,
@@ -2837,7 +2889,9 @@ class WorkerAgent:
                     )
                     return
                 if managed:
-                    claim_response = await self._claim_and_start_managed(task_id)
+                    claim_response = await self._claim_and_start_managed(
+                        task_id, session_hint=str(task_row.get("session_id") or ""),
+                    )
                     if claim_response is None:
                         return
                     task_row, claim_token = claim_response
@@ -3096,6 +3150,8 @@ class WorkerAgent:
             telemetry_sink=self._telemetry_sink,
             node_id=self.cfg.node_id,
         )
+        if session_id and task_row.get("action") == "close_session":
+            self._sender_caps().pop(session_id, None)  # [A82 Stage 5] (server revoked it)
         try:
             delivered = await _post_result_until_accepted(
                 self._http,
