@@ -112,12 +112,18 @@ def test_requested_versions_recorded_in_env(dockerfile: str) -> None:
 # no runtime pip-install of a runtime into a running container.
 # --------------------------------------------------------------------------
 def test_python_deps_come_from_pyproject_with_constraints(dockerfile: str) -> None:
-    # The project root (`.`) installs from pyproject under the constraints lock.
-    # An optional extras group (e.g. `.[push]`) and optional quoting are allowed —
-    # the invariant is "deps come from pyproject + constraints", not a fixed literal.
-    assert re.search(r'pip install -c constraints\.txt "?\.(\[[a-z,]+\])?"?', dockerfile), (
-        "python deps must install from pyproject via `pip install -c constraints.txt .` "
-        "(an optional extras group like `.[push]` is allowed)"
+    # The invariant is "deps come from pyproject + constraints", not a fixed literal.
+    # Third-party deps install from the requirement list derived from pyproject's
+    # [project] table (so src/ edits keep that layer cached), under the constraints
+    # lock; the project itself then installs with --no-deps.
+    assert re.search(r'tomllib\.load\(open\("pyproject\.toml"', dockerfile), (
+        "the python requirement list must be derived from pyproject.toml"
+    )
+    assert re.search(r'pip install -c \S*constraints\.txt -r \S*requirements\.txt', dockerfile), (
+        "python deps must install from the pyproject-derived list under constraints.txt"
+    )
+    assert "pip install --no-deps ." in dockerfile, (
+        "the project must install from pyproject without re-resolving deps"
     )
 
 

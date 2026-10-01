@@ -14,36 +14,52 @@ RUN --mount=type=cache,id=ai-team-pnpm,target=/pnpm/store \
 COPY web/ ./
 RUN pnpm build
 
+# Third-party Python deps must be keyed on the dependency declaration only, not on
+# the whole pyproject.toml (version/tool/script edits) or on src/. Reduce it to the
+# runtime requirement list; an unchanged list keeps the pip layer cached.
+FROM ${PYTHON_IMAGE} AS python-requirements
+WORKDIR /spec
+COPY pyproject.toml ./
+RUN python -c 'import tomllib; p = tomllib.load(open("pyproject.toml", "rb"))["project"]; print("\n".join(p["dependencies"] + p["optional-dependencies"]["push"]))' > requirements.txt
+
 FROM ${PYTHON_IMAGE} AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     PATH=/opt/venv/bin:$PATH
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y git tini curl \
+    && apt-get install --no-install-recommends -y git tini \
     && rm -rf /var/lib/apt/lists/* \
-    && python -m venv /opt/venv
-COPY pyproject.toml constraints.txt ./
-COPY src/ ./src/
-COPY config/ ./config/
-COPY __init__.py ./
-RUN --mount=type=cache,id=ai-team-pip,target=/root/.cache/pip \
-    pip install -c constraints.txt ".[push]"
-COPY main.py server_main.py worker_main.py ./
-COPY scripts/ ./scripts/
-COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
-COPY --from=web-build /build/web/dist ./web/dist
-RUN groupadd --gid 10001 ai-team \
+    && python -m venv /opt/venv \
+    && groupadd --gid 10001 ai-team \
     && useradd --uid 10001 --gid ai-team --home-dir /app --shell /usr/sbin/nologin ai-team \
     && mkdir -p state logs tasks results summaries \
-    && chown -R ai-team:ai-team /app \
-    && chmod 755 /usr/local/bin/docker-entrypoint
+    && chown ai-team:ai-team /app state logs tasks results summaries
+RUN --mount=type=cache,id=ai-team-pip,target=/root/.cache/pip \
+    --mount=type=bind,from=python-requirements,source=/spec/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=constraints.txt,target=/tmp/constraints.txt \
+    pip install -c /tmp/constraints.txt -r /tmp/requirements.txt
+COPY --chown=ai-team:ai-team pyproject.toml constraints.txt __init__.py ./
+COPY --chown=ai-team:ai-team src/ ./src/
+COPY --chown=ai-team:ai-team config/ ./config/
+# Project only (console scripts + package copy); deps are already installed above.
+RUN --mount=type=cache,id=ai-team-pip,target=/root/.cache/pip \
+    pip install --no-deps . \
+    && rm -rf build ai_task_orchestrator.egg-info
+COPY --chown=ai-team:ai-team main.py server_main.py worker_main.py ./
+COPY --chown=ai-team:ai-team scripts/ ./scripts/
+COPY --chmod=755 deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+COPY --chown=ai-team:ai-team --from=web-build /build/web/dist ./web/dist
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint"]
 CMD ["python", "main.py"]
 
 FROM runtime AS worker-agents
 COPY --from=node-runtime /usr/local /usr/local
+# curl is agent-facing tooling (agents probe the gateway with it); the controller
+# image has no use for it (healthchecks use Python).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y curl \
+    && rm -rf /var/lib/apt/lists/*
 # Coding-agent runtimes are pinned as build ARGs so Renovate can bump them via
 # PR (datasource=npm) rather than editing a RUN line by hand. These are the
 # single source of truth for the requested versions; the acceptance harness
