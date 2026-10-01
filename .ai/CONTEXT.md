@@ -69,6 +69,19 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-10-02 — A88 DB authority: MERGED (PR #180, `684b506`) + controller rebuilt. Worker restart PENDING (operator).**
+The native worker read controller flags (`QUOTA_PREWARM`/`MANAGER_ROLE`/`MANAGER_TOOLS`/`DURABLE_RELAY`)
+and did Manager boot-reconcile against its own stale `~/dev/AI-team/state/mesh.db` (frozen 2026-09-24),
+so `/api/flags` toggles never reached it. Now: workers read controller state over the task-server
+(`/control/runtime-flags`, `/control/cases/{id}/boot-reconcile`) and never open a mesh.db.
+Controller containers rebuilt on `684b506` (rollback image `ai-team:pre-a88`); route verified (401
+without token, 14 live flags with the worker token). **Not yet live on the worker** — it still runs
+old code until `pm2 restart ai-team-worker` (operator-gated). Then follow `docs/DATABASE_AUTHORITY.md`
+§6 steps 4-5 (verify no `mesh.db` fd, `controller_flags_refreshed` in logs; move the old file aside).
+Pre-retirement report: `scripts/db_authority_report.py` → exit 5 with the 3 classified rows (expected).
+Follow-up **A93**: worker `quota_windows.db` (120 MB) is never pruned; `coordinator_events` unbounded on
+both sides. A82 merge must keep the `_controller_state_ready()` gate over managed claims too (doc §8).
+
 **2026-09-27 — Prewarm circuit was a one-way latch → window warming had been DEAD since 04:12Z. Fixed (PR #172, MERGED to main). Deploy = worker restart, OPERATOR-GATED.**
 Operator reported starting on a **cold, un-ticking** 5h window. Root-caused from the LIVE worker
 (`ai-team-worker` PM2, exec cwd `/home/cifran/dev/AI-team`, running merged PR #168/#169 code, flag
@@ -278,11 +291,11 @@ supervisor loop in the worker (`_quota_prewarm_supervisor_loop` → `_prewarm_re
 `runtime_flag_enabled("QUOTA_PREWARM_ENABLED")` every cycle and starts/stops warming LIVE, so it can
 be flipped on/off with **no restart** (the whole point of the registry). The only static gate is a
 `claude` backend (can't warm without a harness). `effect_scope` corrected `startup`→`live`.
-Deployment-shape-independent: works single-process or split. **Enablement/toggle:** flip
-`QUOTA_PREWARM_ENABLED` in the mesh.db the *worker* reads (`MESH_DB_PATH` relative to its cwd —
-`state/mesh.db` at the repo; `scripts/ops_flag.sh`). Caveat/pre-existing split: the control-API writes
-the *controller's* mesh.db (a different file under the Docker volume), so an API toggle is not seen by
-the native worker until the two flag stores are unified — out of scope here, flagged. **§7 deferral (multi-worker):** with N
+Deployment-shape-independent: works single-process or split. **Enablement/toggle:** via
+`/api/flags` or `scripts/ops_flag.sh` (controller registry). *(Superseded 2026-10-02 by A88: once the
+worker runs merged code it reads flags from the controller over `GET /control/runtime-flags`, never a
+local mesh.db — see `docs/DATABASE_AUTHORITY.md`. Until that worker restart it still reads its stale
+local copy.)* **§7 deferral (multi-worker):** with N
 claude workers each running a prewarmer, up to N minimal `haiku` turns could fire at a window boundary
 before any observes the new window. Bounded and cheap: warming is idempotent (skip-if-open is
 self-correcting once one worker opens it), each worker has its own `MIN_INTERVAL_SEC` + `MAX_PER_DAY`
