@@ -291,10 +291,14 @@ def test_plans_100k(tmp_path):
     db.enqueue_turn(session_id="a", body="live2", operation_id="live2", turn_source="human", fleet_cap=50)
     print("enqueue ms", (time.perf_counter() - t0) * 1000)
     import inspect
+    import src.control.db as dbmod
+    # The SQL bodies are f-strings that interpolate module-level gate fragments
+    # (e.g. `_MANAGED_RETRY_GATE_SQL`, Stage 4c/4e). Render them exactly as the
+    # f-string does at runtime instead of running the raw `{NAME}` source text.
     src = inspect.getsource(MeshDB.select_eligible_turn_heads)
-    sql = src.split('f"""', 1)[1].split('"""', 1)[0]
+    sql = src.split('f"""', 1)[1].split('"""', 1)[0].format_map(vars(dbmod))
     heads_plan = plan(sql, (NOW, NOW, 25))
     assert "idx_mesh_turns_waiting" in heads_plan, heads_plan
     src = inspect.getsource(MeshDB.activate_prepared_turn)
-    bsql = src.split('f"""', 1)[1].split('"""', 1)[0]
+    bsql = src.split('f"""', 1)[1].split('"""', 1)[0].format_map(vars(dbmod))
     assert "SCAN mesh_tasks" not in plan(bsql, ("a", "x")).replace("USING", "~")
