@@ -64,14 +64,14 @@ def test_D1_notification_folded_mid_turn_managed_reply_still_served():
     sess = _start_fake_session(fake)
     proactive: List[str] = []
     sess._on_proactive = lambda k, o: proactive.append(o.output)
-    sess._turn_timeout_sec = lambda: 0.6
+    sess._turn_timeout_sec = lambda: 5.0
     try:
         out = _managed_in_thread(sess, "run tests in background then report")
-        time.sleep(0.1)
+        _wait_query(fake)  # never emit the turn's frames before its prompt is written
         _emit_autonomous(sess, fake, _init_frame(), _task_updated("bg", "running"),
                          _assistant("started bg"), _task_notification("bg", "completed"),
                          _assistant("REAL"), _result("REAL"))
-        out["t"].join(2)
+        out["t"].join(10)
         assert "o" in out and out["o"].output == "REAL", (out.get("e"), proactive)
         assert proactive == []
     finally:
@@ -82,13 +82,14 @@ def test_D1b_after_folded_notification_session_becomes_quiescent_again():
     fake = _FakeClient()
     sess = _start_fake_session(fake)
     sess._on_proactive = lambda k, o: None
-    sess._turn_timeout_sec = lambda: 0.4
+    sess._turn_timeout_sec = lambda: 5.0
     try:
         out = _managed_in_thread(sess, "p")
-        time.sleep(0.1)
+        _wait_query(fake)  # never emit the turn's frames before its prompt is written
         _emit_autonomous(sess, fake, _init_frame(), _task_updated("bg", "running"),
                          _task_notification("bg", "completed"), _assistant("REAL"), _result("REAL"))
-        out["t"].join(2)
+        out["t"].join(10)
+        assert "o" in out and out["o"].output == "REAL", out.get("e")
         time.sleep(1.0)  # CLI is idle; no further frames will ever arrive
         assert sess.is_quiescent() is True, (
             "wedged: pending=%d abandoned=%s" % (len(sess._pending), [p.abandoned for p in sess._pending]))

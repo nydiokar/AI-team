@@ -268,9 +268,10 @@ def test_SCH06_query_plans_are_index_served(tmp_path):
     sql = src.split('f"""', 1)[1].split('"""', 1)[0]
     from src.control.db import (
         _MANAGED_OPEN_PREDICATE, _MANAGED_RETRY_GATE_SQL,
-        _MANAGED_CASE_BINDING_GATE_SQL,
+        _MANAGED_CASE_BINDING_GATE_SQL, _MANAGED_AUTOMATION_ROW_SQL,
     )
     sql = sql.replace("{_MANAGED_OPEN_PREDICATE}", _MANAGED_OPEN_PREDICATE)
+    sql = sql.replace("{_MANAGED_AUTOMATION_ROW_SQL}", _MANAGED_AUTOMATION_ROW_SQL)
     sql = sql.replace("{_MANAGED_RETRY_GATE_SQL}", _MANAGED_RETRY_GATE_SQL)
     sql = sql.replace("{_MANAGED_CASE_BINDING_GATE_SQL}", _MANAGED_CASE_BINDING_GATE_SQL)
     plan = " | ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, (NOW, NOW, 25)))
