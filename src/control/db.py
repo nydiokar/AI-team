@@ -2394,6 +2394,30 @@ class MeshDB:
             logger.warning("event=db_release_node_claims_failed node_id=%s err=%s", node_id, e)
             return []
 
+    def release_superseded_managed_grants(self, node_id: str, incarnation_id: str) -> List[str]:
+        """[A82 Stage 4e, A83 "restart cannot reuse an old grant"] The node
+        re-registered under ``incarnation_id``: every managed grant a PREVIOUS
+        incarnation minted that never STARTED (``claimed``) is dead. Release each
+        through the token-fenced ``release_turn`` (prompt preserved, token /
+        carrier / incarnation cleared, an operator-cancelled attempt ends
+        ``cancelled``), so a replayed old grant can start nothing. Nothing was
+        invoked: the carrier invokes only after a committed start. Started rows
+        stay with the Stage-3 recovery machinery. Bounded by the node's claims."""
+        rows = self._conn().execute(
+            "SELECT id, claim_token FROM mesh_tasks WHERE queue_protocol = 1 "
+            "AND status = 'claimed' AND claimed_by = ? AND claim_incarnation IS NOT NULL "
+            "AND claim_incarnation != ? LIMIT 100",
+            (node_id, incarnation_id),
+        ).fetchall()
+        released: List[str] = []
+        for r in rows:
+            try:
+                if self.release_turn(str(r["id"]), str(r["claim_token"])):
+                    released.append(str(r["id"]))
+            except Exception as e:  # noqa: BLE001 — raced; the new carrier's reconciler is the fallback
+                logger.debug("event=superseded_grant_release_failed task_id=%s err=%s", r["id"], e)
+        return released
+
     @staticmethod
     def _parse_dt(value: Any) -> Optional[datetime]:
         if not value:

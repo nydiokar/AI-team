@@ -129,6 +129,12 @@ class NodeRegistry:
                     "event=orphaned_claims_released node_id=%s old_incarnation=%s new_incarnation=%s count=%d task_ids=%s",
                     info.node_id, old_incarnation, new_incarnation, len(released), released,
                 )
+            dead_grants = self._db_release_superseded_managed_grants(info.node_id, new_incarnation)
+            if dead_grants:
+                logger.warning(
+                    "event=superseded_managed_grants_released node_id=%s new_incarnation=%s count=%d task_ids=%s",
+                    info.node_id, new_incarnation, len(dead_grants), dead_grants,
+                )
             lost_count = self._db_mark_driver_sessions_lost(info.node_id)
             if lost_count:
                 logger.warning(
@@ -377,6 +383,17 @@ class NodeRegistry:
                 return db.release_node_claims(node_id)
         except Exception as e:
             logger.debug("event=db_release_node_claims_err node_id=%s err=%s", node_id, e)
+        return []
+
+
+    def _db_release_superseded_managed_grants(self, node_id: str, incarnation_id: str) -> list:
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db:
+                return db.release_superseded_managed_grants(node_id, incarnation_id)
+        except Exception as e:
+            logger.debug("event=db_release_superseded_grants_err node_id=%s err=%s", node_id, e)
         return []
 
 
