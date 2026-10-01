@@ -1215,8 +1215,7 @@ class WorkerAgent:
         # Set when a managed result cannot be reconciled (oversize / disk
         # failure): stop claiming NEW managed turns (design §7).
         self._managed_claims_blocked: Optional[str] = None
-        if self._result_spool is not None and self._result_spool.has_oversize_artifacts():
-            self._managed_claims_blocked = "oversize_artifact_requires_recovery"
+        self._restore_managed_claims_block()
         # Separate small bounded capacity for control cancellation (design §7);
         # already provided by `_codex_control_semaphore` — referenced by the
         # shutdown-release guard below.
@@ -1241,6 +1240,15 @@ class WorkerAgent:
         else:
             self._result_spool = None
             self._claim_store = None
+
+    def _restore_managed_claims_block(self) -> None:
+        """[A82 Stage 4e] An unresolved oversize artifact (durable; survives a
+        restart) bars new managed claims; once none remains, an OVERSIZE block
+        lifts. Other blocks (spool write failure) are left untouched."""
+        if self._result_spool is not None and self._result_spool.has_oversize_artifacts():
+            self._managed_claims_blocked = "oversize_artifact_requires_recovery"
+        elif str(self._managed_claims_blocked or "").startswith(("oversize_result:", "oversize_artifact")):
+            self._managed_claims_blocked = None
 
     def _carrier_state_dir(self) -> str:
         """Absolute path to this carrier's private state dir for the managed
@@ -1395,6 +1403,14 @@ class WorkerAgent:
         if not rec and self._claim_store is not None:
             rec = self._claim_store.get(task_id) or {}
         self._claim_forget(task_id)
+        if rec.get("oversize_artifact") and self._result_spool is not None:
+            # [A82 Stage 4e] Resolved elsewhere (operator / server-terminal):
+            # the artifact is retained but no longer bars new managed claims.
+            try:
+                self._result_spool.resolve_oversize(Path(str(rec["oversize_artifact"])))
+            except Exception:
+                logger.error("event=managed_oversize_resolve_failed task_id=%s", task_id, exc_info=True)
+            self._restore_managed_claims_block()
         turn_uuid = rec.get("turn_uuid")
         backend = (self._backends or {}).get(str(rec.get("backend") or ""))
         forget = getattr(backend, "forget_managed_turn", None)
@@ -1714,9 +1730,18 @@ class WorkerAgent:
         except OversizeResultError:
             artifact_path = ""
             try:
+                # [A82 Stage 4e] Record the deterministic artifact path BEFORE
+                # the write: a crash mid-write still leaves a held obligation
+                # that the reconciler routes to the operator (never auto-failed).
+                intended = str(self._result_spool.oversize_artifact_path(task_id, claim_token))
+                self._claim_record(task_id, oversize_artifact=intended)
                 artifact_path = str(self._result_spool.preserve_oversize(task_id, claim_token, envelope))
             except ResultSpoolError:
                 logger.error("event=managed_oversize_artifact_failed task_id=%s", task_id)
+                try:
+                    self._claim_record(task_id, oversize_artifact=None)
+                except Exception:
+                    logger.warning("event=managed_oversize_record_failed task_id=%s", task_id)
             # Keep the ownership hold; an artifact write failure is itself a
             # recovery obligation, never a reason to report a truncated success.
             self._managed_claims_blocked = f"oversize_result:{task_id}"
@@ -1728,12 +1753,14 @@ class WorkerAgent:
             # moves to recovery_required with a short reason (<=500 chars) —
             # never a truncated "success". Slot stays held.
             self._pending_result_delivery.discard(task_id)
+            # The artifact pointer goes first so the 500-char bound can only
+            # cut the diagnostic tail, never the recovery reference.
             await self._enter_managed_recovery(
                 task_id, claim_token,
-                f"managed_result_oversize: serialized envelope exceeds "
+                f"managed_result_oversize: artifact={artifact_path or 'write_failed'}; "
+                f"node={self.cfg.node_id}; serialized envelope exceeds "
                 f"{self._result_spool.max_envelope_bytes} bytes; output_chars="
-                f"{len(str(result.get('output') or ''))}; "
-                f"artifact={artifact_path or 'write_failed'}",
+                f"{len(str(result.get('output') or ''))}",
             )
             raise
         except ResultSpoolError as e:
@@ -1900,6 +1927,14 @@ class WorkerAgent:
                 # The server was just consulted; the held-record probe below
                 # starts its rate-limit window now.
                 self._held_probe_at[tid] = time.monotonic()
+            if rec.get("oversize_artifact"):
+                # [A82 Stage 4e] The complete result sits in carrier artifact
+                # storage: never auto-resolve it to `failed` (that erases the
+                # row's artifact pointer). Hold for the operator; an operator
+                # resolution (definitive refusal) is the exit.
+                if await self._probe_held_attempt(tid, tok, rec, "oversize result artifact"):
+                    done += 1
+                continue
             proof: Optional[Dict[str, Any]] = None
             if rec.get("incarnation_id") != self._incarnation_id:
                 # B2: a previous process's attempt resolves ONLY with proof that

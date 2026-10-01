@@ -328,15 +328,13 @@ class ManagedResultSpool:
         separate from replayable envelopes so boot replay cannot send it through
         the bounded result route. Its name contains no raw claim credential.
         """
-        _validate_id("task_id", task_id)
-        _validate_id("claim_token", claim_token)
-        artifact_dir: Path = self.dir / "oversize"
-        digest: str = hashlib.sha256(claim_token.encode("utf-8")).hexdigest()[:24]
-        final: Path = artifact_dir / f"{task_id}.{digest}.json"
+        final: Path = self.oversize_artifact_path(task_id, claim_token)
+        artifact_dir: Path = final.parent
         tmp: Optional[str] = None
         try:
             artifact_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(artifact_dir, 0o700)
+            # Unresolved artifacts are never evicted; resolved ones are (below).
             retained: int = sum(p.stat().st_size for p in artifact_dir.glob("*.json"))
             available: int = MAX_OVERSIZE_ARTIFACT_BYTES - retained
             if available <= 0:
@@ -358,6 +356,7 @@ class ManagedResultSpool:
             os.chmod(tmp, 0o600)
             os.replace(tmp, final)
             _fsync_dir(artifact_dir)
+            self._evict_resolved_oversize(artifact_dir)
             return final
         except (OSError, TypeError, ValueError) as exc:
             raise ResultSpoolError(f"failed to preserve oversize result for {task_id}: {exc}") from exc
@@ -367,6 +366,44 @@ class ManagedResultSpool:
                     os.unlink(tmp)
                 except OSError:
                     pass
+
+    def oversize_artifact_path(self, task_id: str, claim_token: str) -> Path:
+        """Deterministic artifact path for one attempt (recorded in the claim
+        record BEFORE the write, so a crash mid-write still leaves a held,
+        operator-visible obligation). Contains no raw claim credential."""
+        _validate_id("task_id", task_id)
+        _validate_id("claim_token", claim_token)
+        digest: str = hashlib.sha256(claim_token.encode("utf-8")).hexdigest()[:24]
+        return self.dir / "oversize" / f"{task_id}.{digest}.json"
+
+    def resolve_oversize(self, artifact: Path) -> bool:
+        """The attempt was resolved (operator / server-terminal): the artifact
+        stops barring claims but is RETAINED (``*.resolved``) until a later
+        artifact needs its budget. Returns True iff an artifact was resolved."""
+        path: Path = Path(artifact)
+        if path.parent != self.dir / "oversize" or path.suffix != ".json":
+            return False
+        try:
+            os.replace(path, path.with_name(path.name + ".resolved"))
+            _fsync_dir(path.parent)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ResultSpoolError(f"failed to resolve oversize artifact {path.name}: {exc}") from exc
+        return True
+
+    def _evict_resolved_oversize(self, artifact_dir: Path) -> None:
+        """Keep the whole oversize dir within ``MAX_OVERSIZE_ARTIFACT_BYTES`` by
+        dropping RESOLVED artifacts oldest-first (unresolved ones never)."""
+        resolved: List[Path] = sorted(
+            artifact_dir.glob("*.json.resolved"), key=lambda p: p.stat().st_mtime,
+        )
+        total: int = sum(p.stat().st_size for p in artifact_dir.iterdir() if p.is_file())
+        for old in resolved:
+            if total <= MAX_OVERSIZE_ARTIFACT_BYTES:
+                break
+            total -= old.stat().st_size
+            old.unlink()
 
     def has_oversize_artifacts(self) -> bool:
         """An unresolved recovery file survives restart and bars new claims."""
