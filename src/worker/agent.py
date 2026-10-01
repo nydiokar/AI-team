@@ -1188,6 +1188,8 @@ class WorkerAgent:
         # Set when a managed result cannot be reconciled (oversize / disk
         # failure): stop claiming NEW managed turns (design §7).
         self._managed_claims_blocked: Optional[str] = None
+        if self._result_spool is not None and self._result_spool.has_oversize_artifacts():
+            self._managed_claims_blocked = "oversize_artifact_requires_recovery"
         # Separate small bounded capacity for control cancellation (design §7);
         # already provided by `_codex_control_semaphore` — referenced by the
         # shutdown-release guard below.
@@ -1683,8 +1685,13 @@ class WorkerAgent:
         try:
             self._result_spool.commit(task_id, claim_token, envelope)
         except OversizeResultError:
-            # The full backend artifact is preserved by existing artifact storage;
-            # keep the ownership hold + a bounded reference, stop truncating.
+            artifact_path = ""
+            try:
+                artifact_path = str(self._result_spool.preserve_oversize(task_id, claim_token, envelope))
+            except ResultSpoolError:
+                logger.error("event=managed_oversize_artifact_failed task_id=%s", task_id)
+            # Keep the ownership hold; an artifact write failure is itself a
+            # recovery obligation, never a reason to report a truncated success.
             self._managed_claims_blocked = f"oversize_result:{task_id}"
             logger.error(
                 "event=managed_result_oversize task_id=%s — holding recovery "
@@ -1698,7 +1705,8 @@ class WorkerAgent:
                 task_id, claim_token,
                 f"managed_result_oversize: serialized envelope exceeds "
                 f"{self._result_spool.max_envelope_bytes} bytes; output_chars="
-                f"{len(str(result.get('output') or ''))}",
+                f"{len(str(result.get('output') or ''))}; "
+                f"artifact={artifact_path or 'write_failed'}",
             )
             raise
         except ResultSpoolError as e:

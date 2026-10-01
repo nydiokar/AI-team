@@ -26,7 +26,7 @@ import asyncio
 import logging
 import threading
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, Optional
+from typing import Any, Callable, Dict, Generator, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +36,24 @@ logger = logging.getLogger(__name__)
 
 MAX_CONCURRENT_ADMISSIONS = 4
 _ADMISSION_PERMITS = threading.BoundedSemaphore(MAX_CONCURRENT_ADMISSIONS)
+_MutationResult = TypeVar("_MutationResult")
+
+
+async def run_turn_mutation_async(fn: Callable[[], _MutationResult]) -> _MutationResult:
+    """Bound an operator queue mutation before scheduling its DB thread.
+
+    The done callback owns the permit: cancelling an HTTP waiter cannot release
+    capacity while its SQLite transaction is still running in the executor.
+    Admission uses the same permit pool inside its worker thread."""
+    if not _ADMISSION_PERMITS.acquire(blocking=False):
+        raise CapacityError("admission concurrency limit reached", retry_after=1)
+    try:
+        future = asyncio.get_running_loop().run_in_executor(None, fn)
+    except BaseException:
+        _ADMISSION_PERMITS.release()
+        raise
+    future.add_done_callback(lambda _done: _ADMISSION_PERMITS.release())
+    return await asyncio.shield(future)
 
 
 class SharedWaitingAllowance:

@@ -29,6 +29,7 @@ export function useSessionTimeline(
   session: Session | undefined,
   turns: RawTranscriptTurn[] = [],
   approvals: ApprovalRequest[] = [],
+  queueIds: ReadonlySet<string> = new Set(),
 ): TimelineItem[] {
   const sent = useSentStore((s) =>
     sessionId ? s.bySession[sessionId] : undefined,
@@ -70,6 +71,9 @@ export function useSessionTimeline(
     // 1 — real conversation turns. Each task is one exchange.
     const seenInstructions = new Set<string>();
     for (const t of turns) {
+      // The queue card owns a managed request until there is a completed
+      // exchange. A pending transcript prompt does not mean the model read it.
+      if (queueIds.has(t.task_id) && !t.result) continue;
       // Distinct anchors: the USER bubble is stamped when the turn STARTED (when
       // the message was sent); the ASSISTANT bubble when the reply LANDED (start +
       // time spent working). Older turns without the split fall back to the single
@@ -128,6 +132,7 @@ export function useSessionTimeline(
       return seen.some((s) => s.startsWith(t) || t.startsWith(s));
     };
     for (const m of sent ?? []) {
+      if (m.taskId && queueIds.has(m.taskId)) continue;
       if (isDup(m.text)) continue;
       items.push({
         kind: "message",
@@ -175,5 +180,5 @@ export function useSessionTimeline(
     }
 
     return items;
-  }, [sessionId, session, turns, sent, approvals, boot]);
+  }, [sessionId, session, turns, sent, approvals, boot, queueIds]);
 }
