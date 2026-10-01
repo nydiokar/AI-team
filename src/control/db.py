@@ -2733,6 +2733,7 @@ class MeshDB:
         turn_source: str = "system",
         turn_kind: str = "instruction",
         sender_session_id: Optional[str] = None,
+        sender_capability_hash: Optional[str] = None,
         idempotency_scope: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         admission_hash: Optional[str] = None,
@@ -2911,6 +2912,19 @@ class MeshDB:
                     if sender_session_id is not None:
                         if turn_source != "agent" or not flow_run_id:
                             raise ScopeForbiddenError("agent sender requires a canonical Case")
+                        # [A82 Stage 5 rework] Re-select the CAPABILITY row
+                        # (not revoked/rotated, carrier incarnation current)
+                        # in this txn: a revocation between the route's
+                        # validation and here is honoured. Sender-side staleness
+                        # ⇒ 401; target / role-pair ⇒ 403.
+                        cap = conn.execute(
+                            "SELECT c.role FROM mesh_sender_capabilities c "
+                            "JOIN nodes n ON n.node_id = c.node_id "
+                            "AND n.incarnation_id = c.incarnation_id "
+                            "WHERE c.token_hash = ? AND c.revoked_at IS NULL "
+                            "AND c.sender_session_id = ? AND c.case_id = ?",
+                            (sender_capability_hash or "", sender_session_id, flow_run_id),
+                        ).fetchone()
                         sender = conn.execute(
                             "SELECT status, current_case_id, case_role, turn_queue_enrolled "
                             "FROM sessions WHERE session_id = ?", (sender_session_id,),
@@ -2918,14 +2932,23 @@ class MeshDB:
                         case = conn.execute(
                             "SELECT status FROM flow_runs WHERE flow_run_id = ?", (flow_run_id,),
                         ).fetchone()
+                        manager = _case_latest_manager(conn, flow_run_id)
                         if (
-                            sender is None or sender_session_id == sid
+                            cap is None or sender is None
                             or sender["status"] in ("closed", "cancelled")
                             or not sender["turn_queue_enrolled"]
                             or sender["current_case_id"] != flow_run_id
-                            or srow is None or srow["current_case_id"] != flow_run_id
-                            or not _sender_pair_allowed(sender["case_role"], srow["case_role"])
+                            or sender["case_role"] != cap["role"]
+                            or (sender["case_role"] == "manager" and manager != sender_session_id)
                             or case is None or case["status"] in self._CLOSED_STATUSES
+                        ):
+                            raise InvalidCredentialError("sender capability revoked or stale")
+                        if (
+                            sender_session_id == sid or srow is None
+                            or srow["status"] in ("closed", "cancelled")
+                            or srow["current_case_id"] != flow_run_id
+                            or not _sender_pair_allowed(sender["case_role"], srow["case_role"])
+                            or (srow["case_role"] == "manager" and manager != sid)
                         ):
                             raise ScopeForbiddenError("sender and recipient no longer share an open Case")
                         recent = conn.execute(
@@ -4100,6 +4123,9 @@ class MeshDB:
             ).fetchone()
             if case is None or case["status"] in self._CLOSED_STATUSES:
                 raise InvalidCredentialError("sender Case is closed")
+            manager = _case_latest_manager(conn, row["case_id"])
+            if row["role"] == "manager" and manager != row["sender_session_id"]:
+                raise InvalidCredentialError("sender is no longer the Case's Manager")
             target = conn.execute(
                 "SELECT status, current_case_id, case_role FROM sessions WHERE session_id = ?",
                 (target_session_id,),
@@ -4109,10 +4135,12 @@ class MeshDB:
                 or target["status"] in ("closed", "cancelled")
                 or target["current_case_id"] != row["case_id"]
                 or not _sender_pair_allowed(row["role"], target["case_role"])
+                or (target["case_role"] == "manager" and manager != target_session_id)
             ):
                 raise ScopeForbiddenError("recipient is not a permitted session of the sender's open Case")
             return SenderIdentity(
                 session_id=row["sender_session_id"], case_id=row["case_id"], role=row["role"],
+                capability_hash=_sender_cap_hash(raw),
             )
         except TurnQueueError:
             raise
@@ -5572,6 +5600,10 @@ class MeshDB:
                 (flow_run_id, entity_type, entity_id, role,
                  _now(), created_by, payload),
             )
+            if entity_type == "session" and role == "manager":
+                # [A82 Stage 5 rework] A Manager-seat rebind revokes the
+                # superseded Manager's sender capability in the same txn.
+                _revoke_superseded_manager_caps(conn, _now(), flow_run_id)
             if cur.rowcount:
                 return int(cur.lastrowid)
             # Already existed (unique conflict ignored) — return the existing id.
@@ -7264,6 +7296,7 @@ class MeshDB:
                 """,
                 (case_id, sid, now),
             )
+            _revoke_superseded_manager_caps(conn, now, case_id)  # [A82 Stage 5 rework]
             seen = conn.execute(
                 "SELECT id FROM flow_events WHERE flow_run_id = ? AND event_type = "
                 "'case.manager_respawned' AND entity_type = 'session' AND entity_id = ? LIMIT 1",
@@ -10058,6 +10091,33 @@ def _sender_pair_allowed(sender_role: Optional[str], target_role: Optional[str])
     return (
         sender_role in _SENDER_ROLES and target_role in _SENDER_ROLES
         and not (sender_role == "manager" and target_role == "manager")
+    )
+
+
+def _case_latest_manager(conn: sqlite3.Connection, case_id: Optional[str]) -> Optional[str]:
+    """[A82 Stage 5 rework] The Case's CURRENT Manager: the newest
+    ``flow_links`` session link with role manager (``case_manager_session_id``
+    semantics), or None."""
+    if not case_id:
+        return None
+    row = conn.execute(
+        "SELECT entity_id FROM flow_links WHERE flow_run_id = ? "
+        "AND entity_type = 'session' AND role = 'manager' "
+        "ORDER BY id DESC LIMIT 1", (case_id,),
+    ).fetchone()
+    return str(row["entity_id"]) if row is not None else None
+
+
+def _revoke_superseded_manager_caps(conn: sqlite3.Connection, now: str, case_id: str) -> None:
+    """[A82 Stage 5 rework] Inside a Manager-link rebind txn: revoke every live
+    Manager-role sender capability of the Case not held by its CURRENT Manager
+    (the replaced/dead Manager loses Manager→worker authority with the seat)."""
+    latest = _case_latest_manager(conn, case_id)
+    conn.execute(
+        "UPDATE mesh_sender_capabilities SET revoked_at = ? "
+        "WHERE case_id = ? AND role = 'manager' AND revoked_at IS NULL "
+        "AND sender_session_id != ?",
+        (now, case_id, latest or ""),
     )
 
 
