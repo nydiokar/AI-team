@@ -426,8 +426,8 @@ def test_R02_cancel_before_the_turn_uuid_exists_is_caught_pre_invoke(db, tmp_pat
     _seed_session_turn(db, "t-q", "sess-q", "p")
     real_start = w._claim_and_start_managed
 
-    async def start_then_cancel(task_id):
-        out = await real_start(task_id)
+    async def start_then_cancel(task_id, **kw):
+        out = await real_start(task_id, **kw)
         assert not (w._managed_claims.get(task_id) or {}).get("turn_uuid")
         assert _gateway_cancel(task_id) is True
         rows = await w._fetch_pending()
