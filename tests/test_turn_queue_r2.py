@@ -103,16 +103,22 @@ def test_D2_batched_notifications_one_continuation_next_reply_served():
     sess = _start_fake_session(fake)
     proactive: List[str] = []
     sess._on_proactive = lambda k, o: proactive.append(o.output)
-    sess._turn_timeout_sec = lambda: 0.6
+    sess._turn_timeout_sec = lambda: 5.0
     try:
         _emit_autonomous(sess, fake, _task_updated("a", "running"), _task_updated("b", "running"),
                          _task_notification("a"), _task_notification("b"),
                          _init_frame(), _assistant("AUTO"), _result("AUTO"))
-        time.sleep(0.2)
+        # Condition waits, not fixed sleeps: the race was emitting REAL before
+        # the SDK loop had written (and echoed) "next" — under load REAL then
+        # looked autonomous and the managed turn hit its deadline.
+        end = time.monotonic() + 5.0
+        while proactive != ["AUTO"] and time.monotonic() < end:
+            time.sleep(0.01)
+        assert proactive == ["AUTO"], proactive
         out = _managed_in_thread(sess, "next")
-        time.sleep(0.1)
+        _wait_query(fake)
         _emit_autonomous(sess, fake, _init_frame(), _assistant("REAL"), _result("REAL"))
-        out["t"].join(2)
+        out["t"].join(10)
         assert "o" in out and out["o"].output == "REAL"
         assert proactive == ["AUTO"]
     finally:
