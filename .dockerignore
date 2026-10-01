@@ -1,18 +1,37 @@
-.git
-.ai
-.env
-.venv
-__pycache__
-*.pyc
-state
-logs
-tasks
-results
-summaries
-web/node_modules
-web/dist
-.pytest_cache
-.mypy_cache
-htmlcov
-.security
+# Allowlist: the build context holds ONLY what the Dockerfile reads. Everything
+# else (runtime state, logs, DBs, core dumps, worktrees, venvs, .git, .env, agent
+# and test artifacts) is excluded by default, so new repo junk cannot leak in or
+# invalidate cached layers. Add a path here when the Dockerfile starts using it.
+*
 
+!pyproject.toml
+!constraints.txt
+!__init__.py
+!main.py
+!server_main.py
+!worker_main.py
+!src/
+!config/
+!scripts/
+!deploy/docker-entrypoint.sh
+
+!web/package.json
+!web/pnpm-lock.yaml
+!web/pnpm-workspace.yaml
+!web/index.html
+!web/public/
+!web/src/
+!web/tsconfig.json
+!web/tsconfig.app.json
+!web/tsconfig.node.json
+!web/vite.config.ts
+!web/vitest.config.ts
+
+# Host-generated files inside allowlisted directories.
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/node_modules
+**/*.tsbuildinfo
