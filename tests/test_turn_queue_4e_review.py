@@ -136,6 +136,9 @@ def test_managed_recovery_mark_drains_with_case_continuation_flag_off(tmp_path, 
         def __init__(self):
             self.calls = 0
 
+        async def _reconcile_continuation_finalizers(self, _db):
+            return 0
+
         async def _reconcile_managed_recovery(self, _db):
             self.calls += 1
             return 0
@@ -143,6 +146,74 @@ def test_managed_recovery_mark_drains_with_case_continuation_flag_off(tmp_path, 
     tick = _Tick()
     assert asyncio.run(TaskOrchestrator._wake_dispatcher_tick_once(tick)) == 0
     assert tick.calls == 1
+
+
+def _wedge_setup(tmp_path, monkeypatch, *, record_quota: bool):
+    """A linked continuation wake W fails ``usage_limit`` while the Case
+    continuation flag is OFF; a human B is queued behind its pause mark."""
+    from src.control import db as db_module
+    from src.control.db import CONTINUATION_MACHINE_SENTINEL
+
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _session(db, "manager")
+    db.upsert_node(node_id="worker-a", tailscale_ip="100.64.0.10", api_port=9001,
+                   backends=["claude"], max_concurrent=2, incarnation_id="inc-a")
+    case_id = db.open_case("objective", "manager", role="manager")
+    token = f"cont:{case_id}:1"
+    db.enqueue_task(token, None, CONTINUATION_MACHINE_SENTINEL, "claude",
+                    "manager_continuation", {"case_id": case_id, "generation": 1})
+    db.enqueue_turn("wake-w", "manager", body="wake", turn_source="system",
+                    turn_kind="continuation",
+                    idempotency_scope="automation:manager:continuation",
+                    flow_run_id=case_id, producer_token=token,
+                    producer_meta={"case_id": case_id}, machine_id="worker-a")
+    assert db.activate_turn("wake-w")
+    claim = db.claim_turn("wake-w", node_id="worker-a", carrier_kind="gateway_local",
+                          incarnation_id="inc-a")
+    db.start_turn("wake-w", claim_token=str(claim), incarnation_id="inc-a")
+    db.complete_turn("wake-w", claim_token=str(claim), result={"output": ""},
+                     status="failed", error="429 usage limit", error_class="usage_limit")
+    assert db.get_task("wake-w")["retry_pause_state"] == "pending"
+    db.enqueue_turn("human-b", "manager", body="B", turn_source="human", flow_run_id=case_id)
+
+    monkeypatch.setattr(db_module, "get_db", lambda: db)
+    monkeypatch.setattr(db_module, "case_continuation_enabled", lambda: False)
+    monkeypatch.setattr(db_module, "cache_heartbeat_active_enabled", lambda: False)
+    monkeypatch.setattr(db_module, "case_quota_resume_enabled", lambda: record_quota)
+    monkeypatch.setattr(db_module, "transient_provider_resume_enabled", lambda: False)
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch.events = []
+    orch._emit_event = lambda name, task, data=None: orch.events.append(name)
+    orch._harness_flow_drive_enabled = lambda: True
+    orch.quota_window_state = lambda provider="claude": {
+        "exhausted": True, "reset_at": None, "provider": "claude", "evidence": "limit_reached"}
+    return db, orch, case_id, token
+
+
+def test_failed_continuation_wake_does_not_wedge_manager_with_flag_off(tmp_path, monkeypatch):
+    """[4e review F1] The real tick on a real MeshDB: the linked continuation
+    token is finalized with the Case continuation flag OFF, so the pause mark
+    drains (``done``) and human B is head-selected — no permanent wedge."""
+    db, orch, _case, token = _wedge_setup(tmp_path, monkeypatch, record_quota=False)
+    for _ in range(2):
+        asyncio.run(TaskOrchestrator._wake_dispatcher_tick_once(orch))
+    assert db.get_task(token)["status"] == "completed"
+    assert db.get_task("wake-w")["retry_pause_state"] == "done"
+    assert [r["id"] for r in db.select_eligible_turn_heads()] == ["human-b"]
+
+
+def test_failed_continuation_wake_records_pause_with_operator_exit_flag_off(tmp_path, monkeypatch):
+    """[4e review F1] With quota-pause recording ON the drained mark becomes a
+    recorded Case pause (B held by the pause, not by the mark); the existing
+    operator decline releases B."""
+    db, orch, case_id, token = _wedge_setup(tmp_path, monkeypatch, record_quota=True)
+    asyncio.run(TaskOrchestrator._wake_dispatcher_tick_once(orch))
+    assert db.get_task(token)["status"] == "completed"
+    assert db.get_task("wake-w")["retry_pause_state"] == "done"
+    assert db.case_quota_pause(case_id) is not None
+    assert db.select_eligible_turn_heads() == []
+    db.append_flow_event(case_id, "flow.quota_pause_declined", "operator")
+    assert [r["id"] for r in db.select_eligible_turn_heads()] == ["human-b"]
 
 
 def test_queued_old_manager_work_stays_held_after_case_rebind(tmp_path):
