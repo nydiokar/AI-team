@@ -3374,7 +3374,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         Returns ``{ok, reason, mode, case_id, session_id}``. ``reason`` codes:
         ``case_not_found`` / ``case_terminal`` / ``continuation_disabled`` /
         ``manager_busy`` / ``resume_in_flight`` / ``no_manager_link`` /
-        ``respawn_failed`` / ``deliver_failed`` / ``db_unavailable``.
+        ``respawn_failed`` / ``deliver_failed`` / ``db_unavailable`` /
+        ``pause_not_bound`` (an enrolled in-place resume naming a task other than
+        the open pause's).
         """
         from src.control.db import (
             CONTINUATION_MACHINE_SENTINEL, QUOTA_RESUME_ACTION,
@@ -3559,6 +3561,13 @@ class TaskOrchestrator(ITaskOrchestrator):
             out["reason"] = "resume_in_flight"
             return out
         bound = pause is not None and str(pause.get("paused_task_id") or "") == paused_task_id
+        if pause is not None and not bound:
+            # [A82 Stage 4e review F5] An unbound R would be held behind this
+            # very pause (the gate admits only R linked to it) while reporting
+            # success: refuse visibly instead — resume the CURRENT pause.
+            out["reason"] = "pause_not_bound"
+            out["session_id"] = sid
+            return out
         pause_event_id = pause.get("event_id") if bound else None
         token_payload = {
             "case_id": case_id, "paused_task_id": paused_task_id, "mode": "in_place",
