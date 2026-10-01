@@ -1364,13 +1364,22 @@ class WorkerAgent:
             )
         return prewarmer
 
+    async def _controller_state_loop(self) -> None:
+        """[A88] Keep the controller-state snapshot (flag registry) fresh."""
+        from src.control import controller_state
+        from src.worker.controller_state_client import RemoteControllerState
+
+        client = controller_state.active()
+        if isinstance(client, RemoteControllerState):
+            await client.run(self._shutdown)
+
     async def _quota_prewarm_supervisor_loop(self) -> None:
         """Start/stop window warming DYNAMICALLY from the runtime-flag registry.
 
         Warming can only fire where Claude executes (this worker), but WHETHER it
         runs stays an operator toggle: the QUOTA_PREWARM_ENABLED boolean in the
-        flag registry (mesh.db, read via runtime_flag_enabled — the SAME source
-        the controller uses, NOT an env var), re-read every cycle so it can be
+        flag registry (the controller's registry, read via runtime_flag_enabled
+        from the A88 controller-state snapshot — NOT an env var), re-read every cycle so it can be
         flipped on/off with no restart. That dynamic nature is the point of the
         registry. The only static gate is the precondition that this worker has a
         claude harness at all — without it warming can never work, so we never
@@ -2059,6 +2068,7 @@ class WorkerAgent:
         heartbeat = asyncio.create_task(self._heartbeat_loop())
         quota_observer = asyncio.create_task(self._quota_observe_loop())
         quota_prewarm = asyncio.create_task(self._quota_prewarm_supervisor_loop())
+        controller_state_refresh = asyncio.create_task(self._controller_state_loop())
         if self._canary:
             logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
             poller = asyncio.create_task(self._shutdown.wait())
@@ -2093,9 +2103,9 @@ class WorkerAgent:
             for t in pending:
                 t.cancel()
 
-        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm):
+        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh):
             t.cancel()
-        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, return_exceptions=True)
+        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, return_exceptions=True)
 
         # Terminate any backend subprocesses still alive (e.g. a hung
         # claude.exe that outlived its task). Without this, a worker restart
@@ -2120,6 +2130,26 @@ class WorkerAgent:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+def _install_controller_state(http: _HTTP, *, attempts: int = 3, retry_sleep_sec: float = 2.0) -> None:
+    """[A88] Controller-owned state (flag registry, Case ledger) is read from the
+    controller over HTTP; from here on this process never opens a mesh.db.
+
+    Installed before anything reads a flag. A bounded first fetch runs before work
+    is claimed; if the controller is unreachable the refresh loop keeps retrying and
+    flags resolve env → default meanwhile (docs/DATABASE_AUTHORITY.md §3.3)."""
+    from src.control import controller_state
+    from src.worker.controller_state_client import RemoteControllerState
+
+    client = RemoteControllerState(http)
+    controller_state.install(client)
+    for attempt in range(attempts):
+        if client.refresh():
+            return
+        if attempt + 1 < attempts:
+            time.sleep(retry_sleep_sec)
+    logger.warning("event=controller_state_initial_fetch_failed attempts=%d", attempts)
+
 
 def main() -> None:
     try:
@@ -2148,6 +2178,7 @@ def main() -> None:
     except (ValueError, RuntimeError):  # stderr not a real file (rare)
         pass
 
+    _install_controller_state(_HTTP(_cfg.controller_url, _cfg.worker_token))
     agent = WorkerAgent()
     try:
         asyncio.run(agent.run())

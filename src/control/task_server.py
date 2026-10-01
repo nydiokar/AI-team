@@ -11,8 +11,10 @@ The backing store is MeshDB (src/control/db.py). No SQL lives here.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import shutil
 import time
 import uuid
@@ -804,6 +806,70 @@ def _fire_nudge(node: NodeInfo) -> None:
             logger.debug("event=nudge_failed node_id=%s url=%s err=%s", node.node_id, url, e)
 
     threading.Thread(target=_do, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Controller-state endpoints (A88) — workers read controller-owned state here
+# instead of opening a mesh.db of their own (docs/DATABASE_AUTHORITY.md).
+# ---------------------------------------------------------------------------
+
+_CASE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+class RuntimeFlagRowOut(BaseModel):
+    flag_name: str
+    value: str
+    set_at: str
+
+
+class RuntimeFlagSnapshotOut(BaseModel):
+    revision: str
+    flags: List[RuntimeFlagRowOut]
+
+
+@app.get("/control/runtime-flags", dependencies=[Depends(_require_auth)])
+def control_runtime_flags() -> RuntimeFlagSnapshotOut:
+    """The controller's registry rows (registry-writable flags only) + a revision.
+
+    Workers resolve row → own env → default, exactly as the controller does.
+    """
+    from src.control.db import RUNTIME_FLAG_DEFINITIONS, runtime_flag_registry_writable
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    rows: List[RuntimeFlagRowOut] = [
+        RuntimeFlagRowOut(
+            flag_name=str(r["flag_name"]),
+            value=str(r.get("value") or ""),
+            set_at=str(r.get("set_at") or ""),
+        )
+        for r in db.list_runtime_flags()
+        if r.get("flag_name") in RUNTIME_FLAG_DEFINITIONS
+        and runtime_flag_registry_writable(str(r["flag_name"]))
+    ]
+    digest = hashlib.sha256(
+        json.dumps([[r.flag_name, r.value, r.set_at] for r in rows]).encode()
+    ).hexdigest()[:16]
+    return RuntimeFlagSnapshotOut(revision=digest, flags=rows)
+
+
+@app.post("/control/cases/{case_id}/boot-reconcile", dependencies=[Depends(_require_auth)])
+def control_boot_reconcile_case(case_id: str) -> Dict[str, Any]:
+    """Manager boot reconcile for a worker-hosted Manager session, against the
+    controller ledger. Same guards the driver applied locally; the db call is
+    idempotent and self-gated on DURABLE_RELAY_ENABLED."""
+    if not _CASE_ID_RE.match(case_id):
+        raise HTTPException(status_code=422, detail="invalid case id")
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    row = db.get_flow_run(case_id)
+    if row is None:
+        return {"ok": False, "reason": "unknown_case"}
+    if (row.get("status") or "") in db._CLOSED_STATUSES:
+        return {"ok": False, "reason": "case_closed"}
+    return db.boot_reconcile_case(case_id, actor="manager")
 
 
 # ---------------------------------------------------------------------------
