@@ -49,6 +49,9 @@ _MANAGED_ENV_KEYS = {
     "MESH_HEALTH_FAILURE_THRESHOLD",
     "MESH_HEALTH_WINDOW_SIZE",
     "MESH_ONEOFF_QUEUE_TIMEOUT_SEC",
+    "MESH_PENDING_MAX_AGE_SEC",
+    "MESH_PENDING_REAPER_ENABLED",
+    "MESH_PENDING_REAPER_GRACE_SEC",
     "MESH_ROUTING_FRESHNESS_WAIT_SEC",
     "MESH_ROUTING_LIVE_STATE_MAX_AGE_SEC",
     "MESH_SESSION_RECONCILE_INTERVAL_SEC",
@@ -260,6 +263,13 @@ class MeshConfig:
     affinity_offline_poll_interval_sec: float = 5.0  # MESH_AFFINITY_OFFLINE_POLL_INTERVAL_SEC
     claim_lease_sec: int = 300              # MESH_CLAIM_LEASE_SEC — stale-claim reaper threshold (T4)
     claim_max_runtime_sec: int = 36000      # MESH_CLAIM_MAX_RUNTIME_SEC — hard cap for active claimed tasks (10 hours)
+    # [#177] Pending-task reaper (sibling of the stale-CLAIM reaper). Cancels
+    # pending rows that can never be claimed: a closed session, an unknown/offline
+    # pinned node past the grace window, or an age-ceiling leak. 0 on a threshold
+    # disables that reason; enabled=False disables the whole sweep.
+    pending_reaper_enabled: bool = True     # MESH_PENDING_REAPER_ENABLED
+    pending_reaper_grace_sec: int = 1800    # MESH_PENDING_REAPER_GRACE_SEC — unknown/offline pin must persist this long
+    pending_max_age_sec: int = 604800       # MESH_PENDING_MAX_AGE_SEC — absolute ceiling for any pending row (7d)
     session_reconcile_interval_sec: int = 60  # MESH_SESSION_RECONCILE_INTERVAL_SEC — 0 disables M3 loop
     # A60 — §7 warm-worker idle-reaper. A65/A48 keep worker sessions warm (backend
     # slot held) after a Case closes, for re-dialogue. Idle beyond this TTL with no
@@ -848,6 +858,24 @@ class Config:
             v = os.getenv("MESH_CLAIM_MAX_RUNTIME_SEC")
             if v is not None:
                 self.mesh.claim_max_runtime_sec = max(60, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_PENDING_REAPER_ENABLED")
+            if v is not None:
+                self.mesh.pending_reaper_enabled = v.lower() in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_PENDING_REAPER_GRACE_SEC")
+            if v is not None:
+                self.mesh.pending_reaper_grace_sec = max(0, int(v))
+        except Exception:
+            pass
+        try:
+            v = os.getenv("MESH_PENDING_MAX_AGE_SEC")
+            if v is not None:
+                self.mesh.pending_max_age_sec = max(0, int(v))
         except Exception:
             pass
         try:

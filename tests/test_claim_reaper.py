@@ -182,6 +182,9 @@ def test_stale_claim_reaper_runs_sqlite_sweep_off_event_loop(monkeypatch):
     def sweep() -> None:
         calls.append("sweep")
 
+    def pending_sweep() -> None:
+        calls.append("pending_sweep")
+
     async def run_in_thread(func) -> None:
         calls.append("to_thread")
         func()
@@ -190,12 +193,14 @@ def test_stale_claim_reaper_runs_sqlite_sweep_off_event_loop(monkeypatch):
         raise asyncio.CancelledError
 
     monkeypatch.setattr(task_server, "_reap_stale_claims_once", sweep)
+    monkeypatch.setattr(task_server, "_reap_stale_pending_once", pending_sweep)
     monkeypatch.setattr(task_server.asyncio, "to_thread", run_in_thread)
     monkeypatch.setattr(task_server.asyncio, "sleep", stop_after_first_sweep)
 
     asyncio.run(task_server._stale_claim_reaper_loop(interval_sec=1))
 
-    assert calls == ["to_thread", "sweep"]
+    # Both the claim sweep and the pending sweep (#177) run off the event loop.
+    assert calls == ["to_thread", "sweep", "to_thread", "pending_sweep"]
 
 
 def test_stale_claims_when_node_offline(tmp_path):
