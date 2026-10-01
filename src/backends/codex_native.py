@@ -33,6 +33,37 @@ MAX_OUTPUT = 8 * 1024 * 1024
 MAX_TURN_SECONDS = 36000
 
 
+def _publish_codex_activity(context: TelemetryContext | None, method: object, item: object) -> None:
+    """Translate only known app-server item kinds into live activity categories."""
+    if context is None or not isinstance(item, dict):
+        return
+    event_method = method if method in ("item/started", "item/completed") else None
+    item_type = item.get("type")
+    if not isinstance(item_type, str):
+        return
+    tool_by_type = {
+        "commandExecution": "Bash",
+        "fileChange": "Edit",
+        "mcpToolCall": "MCP tool",
+        "webSearch": "WebSearch",
+    }
+    if item_type == "agentMessage" and event_method == "item/started":
+        category, tool = "writing", None
+    elif item_type in tool_by_type and event_method:
+        category = "tool_started" if event_method == "item/started" else "tool_completed"
+        tool = tool_by_type[item_type]
+    else:
+        return
+    from src.core.activity import publish_activity
+
+    publish_activity(
+        session_id=context.session_id,
+        task_id=context.turn_id,
+        category=category,
+        tool=tool,
+    )
+
+
 class ActiveTurn(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     session_id: str
@@ -300,6 +331,7 @@ class CodexBackend(CodingBackend):
                                 "model_context_window": native_usage.get("modelContextWindow")}}))
                 if method in ("item/started", "item/completed"):
                     item = params["item"]
+                    _publish_codex_activity(telemetry_context, method, item)
                     if method == "item/completed" and item["type"] == "agentMessage":
                         text = item["text"]
                         output_size += len(text.encode())

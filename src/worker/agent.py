@@ -693,6 +693,33 @@ async def _execute_task(
             "return_code": 0,
         }
 
+    if action == "cancel_turn":
+        # Interrupt the in-flight Claude SDK turn on this worker. Does NOT close the
+        # session — the backend process stays pooled so the next turn can reuse it.
+        # Mirrors cancel_codex but targets the SDK interrupt path instead of the
+        # Codex ownership table.
+        session = _make_session_from_payload(payload)
+        if session is not None:
+            backend = backends.get(session.backend or "claude")
+            canceller = getattr(backend, "cancel", None) if backend is not None else None
+            if callable(canceller):
+                try:
+                    await asyncio.to_thread(canceller, session)
+                except Exception as exc:
+                    logger.warning(
+                        "event=cancel_turn_backend_failed session_id=%s err=%s",
+                        getattr(session, "session_id", ""), exc,
+                    )
+        return {
+            "success": True,
+            "output": "cancel_turn requested",
+            "errors": [],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 0,
+        }
+
     if action == "cancel_codex":
         from src.backends.codex_ownership import CodexOwnership
         target = payload.get("target_task_id")
@@ -2091,6 +2118,105 @@ class WorkerAgent:
                 )
 
     # ------------------------------------------------------------------
+    # Window warming (harness-side)
+    # ------------------------------------------------------------------
+
+    def _emit_prewarm_event(self, name: str, payload: Dict[str, Any]) -> None:
+        """Surface prewarmer decisions in the worker log. A turn actually firing
+        is additionally logged by the prewarmer itself at INFO
+        (event=quota_prewarm_window_opened). The controller's events.ndjson is a
+        separate process/volume, so warming visibility lives in the worker log."""
+        logger.info("event=%s node_id=%s payload=%s", name, self.cfg.node_id, payload)
+
+    async def _build_quota_prewarmer(self) -> Optional[Any]:
+        """Construct (do NOT start) a prewarmer against a LOCAL activation-capable
+        coordinator (observe_locally=True). Opening a window costs one real
+        (haiku, max_turns=1) turn, which only a claude-capable worker can spend —
+        the controller container has no binary/credentials. Warming therefore
+        lives here, co-located with the harness that can actually fire it."""
+        try:
+            from src.services.quota_window_coordinator import (
+                build_quota_coordinator_from_config,
+            )
+            from src.services.quota_window_prewarmer import (
+                build_prewarmer_from_config,
+            )
+
+            coordinator = build_quota_coordinator_from_config(
+                enabled=True, observe_locally=True,
+            )
+            return build_prewarmer_from_config(
+                coordinator=coordinator,
+                enabled=True,
+                event_sink=self._emit_prewarm_event,
+            )
+        except Exception as e:
+            logger.warning(
+                "event=quota_prewarmer_worker_build_failed node_id=%s err_class=%s",
+                self.cfg.node_id, type(e).__name__,
+            )
+            return None
+
+    async def _prewarm_reconcile(self, want: bool, prewarmer: Optional[Any]) -> Optional[Any]:
+        """Bring the running prewarmer in line with the desired on/off state.
+        Idempotent: called every supervisor cycle. Returns the (possibly new or
+        cleared) prewarmer handle. This is the whole dynamic-toggle seam."""
+        if want and prewarmer is None:
+            prewarmer = await self._build_quota_prewarmer()
+            if prewarmer is not None:
+                await prewarmer.start()
+                logger.info(
+                    "event=quota_prewarmer_worker_started node_id=%s", self.cfg.node_id,
+                )
+        elif not want and prewarmer is not None:
+            await prewarmer.stop()
+            prewarmer = None
+            logger.info(
+                "event=quota_prewarmer_worker_stopped node_id=%s", self.cfg.node_id,
+            )
+        return prewarmer
+
+    async def _quota_prewarm_supervisor_loop(self) -> None:
+        """Start/stop window warming DYNAMICALLY from the runtime-flag registry.
+
+        Warming can only fire where Claude executes (this worker), but WHETHER it
+        runs stays an operator toggle: the QUOTA_PREWARM_ENABLED boolean in the
+        flag registry (mesh.db, read via runtime_flag_enabled — the SAME source
+        the controller uses, NOT an env var), re-read every cycle so it can be
+        flipped on/off with no restart. That dynamic nature is the point of the
+        registry. The only static gate is the precondition that this worker has a
+        claude harness at all — without it warming can never work, so we never
+        supervise."""
+        if "claude" not in self.cfg.backends:
+            return
+        from src.control.db import runtime_flag_enabled
+
+        interval = max(30, int(self.cfg.quota_observe_interval_sec))
+        logger.info(
+            "event=quota_prewarm_supervisor_started node_id=%s interval_sec=%d",
+            self.cfg.node_id, interval,
+        )
+        prewarmer: Optional[Any] = None
+        try:
+            while not self._shutdown.is_set():
+                try:
+                    want = runtime_flag_enabled("QUOTA_PREWARM_ENABLED")
+                except Exception as e:
+                    logger.warning(
+                        "event=quota_prewarm_flag_read_failed node_id=%s err_class=%s",
+                        self.cfg.node_id, type(e).__name__,
+                    )
+                    want = prewarmer is not None  # hold current state on a read error
+                prewarmer = await self._prewarm_reconcile(want, prewarmer)
+                try:
+                    await asyncio.wait_for(self._shutdown.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if prewarmer is not None:
+                await prewarmer.stop()
+
+    # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
 
@@ -2536,14 +2662,14 @@ class WorkerAgent:
                         # fetched id already scheduled / executing / awaiting
                         # result-delivery (WRK01) and bound scheduled handlers to
                         # 2x slots (WRK02). Control rows (close_session /
-                        # cancel_codex) bypass the slot semaphore by design and are
+                        # cancel_codex / cancel_turn) bypass the slot semaphore by design and are
                         # EXEMPT from the capacity bound (M1). Flag OFF: the
                         # scheduling loop is exactly main's.
                         if self._managed_enabled():
                             if self._is_already_scheduled(task_id):
                                 continue
                             if (
-                                row.get("action") not in ("close_session", "cancel_codex", CANCEL_MANAGED_ACTION)
+                                row.get("action") not in ("close_session", "cancel_codex", "cancel_turn", CANCEL_MANAGED_ACTION)
                                 and not self._scheduling_capacity_available()
                             ):
                                 # Leave it queued server-side; a later poll picks
@@ -2637,6 +2763,11 @@ class WorkerAgent:
         set_log_context(task_id=task_id, session_id=session_id)
         # Lightweight control action — must NOT consume a turn slot or it could
         # wait hours behind long-running turns before the process is freed.
+        if task_row.get("action") == "cancel_turn":
+            # Out-of-slot: interrupt the live Claude turn without consuming a work
+            # slot (which would queue behind the very turn we're trying to kill).
+            await self._handle_close_session(task_row)
+            return
         if task_row.get("action") == "cancel_codex":
             async with self._codex_control_semaphore:
                 await self._handle_close_session(task_row)
@@ -2990,6 +3121,7 @@ class WorkerAgent:
         )
         heartbeat = asyncio.create_task(self._heartbeat_loop())
         quota_observer = asyncio.create_task(self._quota_observe_loop())
+        quota_prewarm = asyncio.create_task(self._quota_prewarm_supervisor_loop())
         if self._canary:
             logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
             poller = asyncio.create_task(self._shutdown.wait())
@@ -3043,9 +3175,9 @@ class WorkerAgent:
             for t in pending:
                 t.cancel()
 
-        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer):
+        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm):
             t.cancel()
-        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, return_exceptions=True)
+        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, return_exceptions=True)
 
         # Terminate any backend subprocesses still alive (e.g. a hung
         # claude.exe that outlived its task). Without this, a worker restart

@@ -5,8 +5,8 @@ status: blocked
 owner: mgr-a2a819ff:worker
 depends_on: []
 results_ref: DISPATCH_LOG.md#A85
-evidence: []
-updated_at: "2026-09-25T10:41:43.925453+00:00"
+evidence: tests/test_container_acceptance.py
+updated_at: "2026-09-27T16:04:22.797137+00:00"
 ```
 
 # DISPATCH — A85 · Containerized worker acceptance baseline

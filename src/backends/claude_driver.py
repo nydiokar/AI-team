@@ -274,30 +274,34 @@ def _build_salvaged_reply(error_class: str, salvaged: str, error_text: str = "")
     return f"{banner}\n\n---\n\n{body}"
 
 
-def _make_activity_cb(session_id: Optional[str], task_id: Optional[str]):
-    """Return a thread-safe callback that emits task_activity events to the
-    observability spine. Called from inside the SDK async loop (background
-    thread) — intentionally avoids contextvars and passes IDs explicitly."""
-    if not session_id and not task_id:
+def _make_activity_cb(session_id: str | None, task_id: str | None):
+    """Return a thread-safe publisher bound to this SDK invocation's IDs."""
+    if not session_id or not task_id:
         return None
 
-    def cb(label: str) -> None:
-        try:
-            from src.core.observability import emit_event
-            # Pass turn_id explicitly (= task_id in this context) so the stale
-            # contextvar inherited by the reused SDK background thread doesn't
-            # overwrite the correct current-turn value inside emit_event.
-            emit_event(
-                "task_activity",
-                session_id=session_id,
-                task_id=task_id,
-                turn_id=task_id,
-                label=label,
-            )
-        except Exception:
-            pass
+    def cb(category: str, tool: str | None = None) -> None:
+        from src.core.activity import publish_activity
+
+        publish_activity(
+            session_id=session_id,
+            task_id=task_id,
+            category=category,
+            tool=tool,
+        )
 
     return cb
+
+
+def _claude_activity_tool(name: object) -> str | None:
+    """Allowlist SDK tool names before they can influence a live label."""
+    if not isinstance(name, str):
+        return None
+    return {
+        "bash": "Bash", "read": "Read", "edit": "Edit", "write": "Write",
+        "glob": "Glob", "grep": "Grep", "task": "Task",
+        "websearch": "WebSearch", "webfetch": "WebFetch",
+        "notebookedit": "NotebookEdit",
+    }.get(name.casefold())
 
 
 @dataclass
@@ -1052,11 +1056,13 @@ class _SDKSession:
                     if progress_cb is not None:
                         for block in msg.content:
                             if isinstance(block, ToolUseBlock):
-                                progress_cb(f"Using {block.name}")
+                                tool = _claude_activity_tool(block.name)
+                                if tool:
+                                    progress_cb("tool_started", tool)
                             elif isinstance(block, ThinkingBlock):
-                                progress_cb("Thinking…")
+                                progress_cb("thinking")
                             elif isinstance(block, TextBlock) and block.text:
-                                progress_cb("Writing response…")
+                                progress_cb("writing")
                     usage = _plain_usage_dict(getattr(msg, "usage", None))
                     if usage is not None:
                         acc.ndjson_lines.append(json.dumps({"type": "assistant", "message": {"usage": usage}}))

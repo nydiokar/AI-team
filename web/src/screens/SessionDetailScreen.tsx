@@ -900,7 +900,7 @@ export function SessionDetailScreen() {
                   >
                     <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
                   </button>
-                  <SessionStatusChip state={session.opState} closed={closed} reason={session.reason} />
+                  <SessionStatusChip state={session.opState} closed={closed} reason={session.reason} showReason={false} />
                   <div className="relative">
                     <button
                       onClick={() => setMenuOpen((v) => !v)}
@@ -1051,7 +1051,7 @@ export function SessionDetailScreen() {
                     >
                       <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
                     </button>
-                    <SessionStatusChip state={session.opState} closed={closed} reason={session.reason} />
+                    <SessionStatusChip state={session.opState} closed={closed} reason={session.reason} showReason={false} />
                     <div className="relative">
                       <button
                         onClick={() => setMenuOpen((v) => !v)}

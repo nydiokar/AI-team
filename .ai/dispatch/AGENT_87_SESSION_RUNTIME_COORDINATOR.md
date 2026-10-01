@@ -87,12 +87,10 @@ retires the premise of **BOTH** container-track jobs, not just A86 —
 
 ### Cross-job reconciliation gates (A87 owns these)
 
-### Execution environment facts (binding on every dispatched worker — packets predate the Docker migration)
-- **Python:** `/opt/venv/bin/python` (NOT `.venv/bin/python`, which no longer has a working interpreter). Editable install ⇒ `import src` resolves to THIS checkout — verify `src.__file__` before trusting any test.
-- **pytest:** absent from the read-only `/opt/venv`; run as `PYTHONPATH=/tmp/tvenv/lib/python3.11/site-packages /opt/venv/bin/python -m pytest <paths>`. Proven green: `tests/test_session_timeline.py` (5 passed).
-- **web:** node v22 + pnpm 10.30 present, `web/node_modules` installed.
-- **No live gateway** (`curl :9003/health` dead here) ⇒ acceptance = targeted tests + import smoke, NOT live-health probe.
-- **No `gh`, no docker/podman**; git remote `origin` (SSH) exists. ⇒ PR-via-CLI impossible; deliverable = reviewed local commit on `feat/*`; push/PR/merge-to-remote is operator-gated.
+### Execution environment facts (REPLACED 2026-09-25 — previous block described the retired worker container)
+- **Topology (operator decision 2026-09-25):** gateway + task-server run in Docker (`compose.yaml`, data under `DOCKER_DATA_ROOT`); the worker runs **natively under pm2 on the host** as the operator user (PR #165 activity/quota cross the boundary over HTTP; PR #167 publishes the control API on the tailnet IP for mesh nodes). Docker worker is non-canonical (PR #166).
+- **Python:** `/home/cifran/dev/AI-team/.venv/bin/python`. Develop ONLY in a git worktree (e.g. `/home/cifran/dev/AI-team-wt/<job>`); run pytest with cwd = the worktree so `import src` resolves there (verified). **Never switch branches in `/home/cifran/dev/AI-team`** — the live pm2 worker runs from that checkout.
+- **`gh` available**; push/PR/merge per repo branch policy. Live probe: `curl http://127.0.0.1:9003/health`.
 
 ### Coordination decision (this Case)
 1. **Track-1 src editors run SEQUENTIALLY** (A83 → A82 → A84) — because the shared editable install would make parallel worktrees mistest each other's `src` (A82 §1.5 trap). A83 is small; the serialization cost is low and it eliminates the collision the operator warned about.
@@ -138,6 +136,42 @@ retires the premise of **BOTH** container-track jobs, not just A86 —
   - Minors m1 (`/quiescence` accepts any non-null result as evidence), m2 (stale-receipt echoes unverified token).
   - **Holds up:** DB claim/start/complete/recovery fencing is real; SDK02 reader-gate is non-vacuous; flag-off/poll isolation + credential-strip on `get_pending_managed_turns`; `classify_completion_outcome` behavior-preserving.
 - **Disposition: REWORK sent back to the Stage-3 worker** (has context) with the full findings. Priority: M5/M6 (legacy regression + forbidden interrupt) and M4 (loop-thread reservation) are correctness-critical; B1/B2 + M1/M2/M3 must wire the managed path and add a fake-carrier integration test. Re-verify + re-review after remediation. Stage 3 NOT accepted; A84 stays blocked.
+
+### A82 — Session turn queue — Stage 3 gate 2026-09-25/26 — VERDICT: ACCEPT (branch `feat/session-turn-queue` @ `f4cebbb`, pushed; NOT merged — Stages 4/6/7 suites still red by design)
+- **Path:** 6 rework rounds, 5 fresh adversarial reviewers (REWORK ×4 → ACCEPT). Every reviewer probe adopted as a permanent test (tests/test_turn_queue_carrier_recovery.py, _r2.._r5.py); each new guard mutation-verified.
+- **Key design corrections forced by review:** managed-turn contract on `CodingBackend` (not a Claude side door); reply correlation by caller-chosen echo uuid (`--replay-user-messages`, verified by a 3-turn haiku spike) replacing a refuted continuation counter; write-ahead claim store + boot-relative /proc process proof (clock-step immune) before any auto-resolve; late replies bound by turn uuid, never session; every managed state has a live exit (own echo+result · stream end ⇒ dead session replaced · close · server-terminal ⇒ forget); legacy routes/helpers fenced to protocol 0.
+- **Manager verification:** 137 turn-queue + 212 legacy-regression tests passed on my rerun; flag-OFF byte-identity confirmed by 3 independent reviewers.
+- **Incidents:** worker used `git worktree remove --force` once on its own throwaway worktree (no loss, disclosed); one mutation run spawned the real CLI briefly (invalid resume id, exit 1, no model turn) — test now guards process start.
+- **Carried residuals (CONTEXT.md):** reparented `run_in_background` descendants undetectable (SDK has no process-group hook); oversize output not persisted to artifacts; psutil not yet installed in the live venv (declared + pinned on the branch).
+- **Disposition:** Stage 3 ACCEPTED. Stage 4 authorized, split into gated sub-stages (4a admission+scheduler+session instructions; 4b–4h one producer each).
+
+### A82 — Stage 4a (admission + fair scheduler + producer 1) gate 2026-09-26 — VERDICT: ACCEPT (branch @ `9acc32b`, pushed; unmerged)
+- **Path:** 4 fresh adversarial reviews (REWORK ×4; round 4 = one narrow major, fixed and verified by Manager with the reviewer's own probes: 6/6). Reviewer probes adopted as permanent tests (`tests/test_turn_queue_4a_*.py`, producer1, scheduler, admission); every new guard mutation-verified.
+- **Forced corrections:** blocked heads back off (no LIMIT-25 starvation); zero-enrollment ⇒ no marker read, legacy == main; claim verifies carrier assignment in the CAS; assignment to a registered, online, heartbeat-fresh managed carrier (never hostname) else typed 503; durable lineage-pending state + ONE convergent idempotent lineage procedure (get-or-create keyed on task_id) run by live writer and recovery, raising on DB error, lease-fenced, never re-affiliating to a closed Case; dead-carrier requeue with bounded idle wake; enrollment flag never lowered across an in-flight enroll.
+- **Manager verification:** 260 turn-queue passed (7 red = SYS03–07 Stage 4b+, api×2 Stage 6); 419 regression passed (incl. case_closure/case_interrupt/mcp_manager).
+- **Carried (CONTEXT.md):** enrollment only inside the gateway process (Stage-7 precondition); `MESH_LOCAL_CARRIER_NODE_ID` must equal the local daemon's `WORKER_NODE_ID` before enrolling; Stage-6 withdraw of a lineage-pending/partially-lineaged row must void the child flow_run + clear affiliation; compat `/api/instructions` cap derived ≈3.8 MiB (deviation from design 2 MiB, applies to all callers); cross-process completion wakes scheduler within ≤30 s; heartbeat timeout must be ≥2× worker heartbeat; Telegram retries not deduplicated.
+
+### A82 — Stage 4b (producer 2: compaction, fenced cancel, managed close, operator-stop hold) gate 2026-09-26 — VERDICT: ACCEPT (branch @ `0be7420`, pushed; unmerged)
+- **Path:** 3 fresh adversarial reviews (REWORK ×2 → ACCEPT with minors, closed and Manager-verified: reviewer probes 6/6).
+- **Forced corrections:** cancel during the CLI boot window armed by turn uuid / caught pre-invoke (never silently no-op'd); managed stop = durable `turn_queue_hold` (migration 37) honored by head selection, activation, wake/transient/quota/respawn automation — released only by an operator admission (incl. coalesced), never by automation (`dispatch_worker` sends `X-AI-Team-Principal: automation` — a trust-model label, not authentication); close withdraws + voids lineage (4a Stage-6 precondition implemented for close); compaction as a managed turn on a never-queried process (attribution verified against bundled CLI source).
+- **Manager verification:** 323 turn-queue passed (7 red = SYS03–07 Stage 4c+, api×2 Stage 6); 506 regression passed.
+- **Carried (CONTEXT.md):** stale whole-row session saves can undo a concurrent stop status (hold record itself is safe); stop with no active turn holds nothing (legacy parity); operator orphan sweep force-closes a held Manager's Case; automation close ends a hold; principal header is self-declared (authenticated principals = A71).
+
+### A82 — Stage 4c (producer 3: Case continuation token→turn linkage + durable finalization) gate 2026-09-26 — VERDICT: ACCEPT (branch @ `49bdb7c`, pushed; unmerged)
+- **Path:** 2 fresh adversarial reviews (narrow REWORK → ACCEPT; last test-gap follow-up Manager-verified). SYS03/SYS04 green.
+- **Delivered:** deterministic continuation turn id from token + durable attempt, linked inside the admission txn (exactly-once across crashes/replays); durable finalizer reconcile per wake tick (round counted once via fenced CAS; withdrawn/cancelled re-arms); activation-time obsolete withdrawal (closed/blocked Case, rebound Manager, reviewed, unlinked); rebound Manager withdraws a wake queued on the old (possibly held) Manager; continuation lineage pinned to the woken Case (Manager decision — fixed now rather than carried to A84); no events after `flow.closed`.
+- **Carried (CONTEXT.md):** `failed`/`failed_node_offline` consume the wake even if the Manager never ran (legacy parity); operator-stopped wake re-fires after release (accepted, desired); A84 must fold `wait_resolved` + outbox consumption + token CAS into one txn; wait groups on closed Cases stay pending in projections (cosmetic).
+
+### A82 — Stage 4d (producers 4 watched-job + 6 cache heartbeat) gate 2026-09-26 — VERDICT: ACCEPT (branch @ `9e25172`, pushed; unmerged)
+- **Path:** 2 fresh adversarial reviews (narrow REWORK → focused ACCEPT with minors, closed and Manager-verified). SYS06 green.
+- **Delivered:** automation-principal admission for both producers (never release/bypass a stop hold); watched-job turn keyed `watched:<job_id>` (one turn per completion), refused/errored admission ⇒ audit record (per-job containment, never escapes the poller batch), withdrawal audit written in the same txn as withdraw/close; heartbeat admitted idle-only (in-txn predicate incl. hold record, pause, any open managed/legacy row), 300 s deadline, withdrawn at claim when expired or no longer idle (a heartbeat never runs ahead of a human turn), beat counted once by fenced finalizer that runs before the flag gate; nothing-enrolled adds zero reads (all-thread trace).
+- **Carried (CONTEXT.md):** watched-job delivery at-most-once across restarts (in-memory watermark, legacy parity); heartbeat `failed_node_offline`/`cancelled` count no beat (intentional divergence: outage/operator stop must not disable heartbeats); linked heartbeat leases finalize only while either wake/heartbeat flag is on.
+
+### A87 architecture rulings 2026-09-25 (binding on A82 remaining stages and A84)
+1. **One pathway is the end state.** Protocol 0 (legacy poll/claim/result + legacy `send`) and protocol 1 (managed) coexist ONLY while A82 is being built, behind default-OFF flags. A82 gains a mandatory final **Stage 8 — cutover and legacy deletion**: enroll all sessions, drain in-flight protocol-0 work, then delete the protocol-0 routes, the legacy send branch, and the enrollment/`WORKER_MANAGED_TURNS` flags. A82 is not closed while two paths exist.
+2. **The managed-turn contract lives once on `CodingBackend`** (`supports_managed_turns` / `run_managed_turn` / `is_quiescent`). The carrier calls only the interface — no backend-name branching, no private side doors into a driver. Unsupported backends fail closed (claim refused at worker and server), never fall back to legacy.
+3. **Codex and OpenCode must implement the contract** before Stage 8 can delete protocol 0 (scope added to A82; each adapter implements against its own native protocol).
+4. **A84 is built only on the managed path** — no completion-delivery logic for protocol 0.
 
 ## Milestone (burndown)
 

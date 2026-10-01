@@ -597,9 +597,14 @@ export const api = {
     });
     const data = await res.json().catch(() => ({}) as Record<string, unknown>);
     if (!res.ok) {
-      const reason =
-        (data as { detail?: string }).detail ?? `${res.status} ${res.statusText}`;
-      throw new ApiError(res.status, String(reason));
+      // Structured envelope: detail = { ok: false, reason, detail? } (legacy: bare string).
+      const inner = (data as { detail?: unknown }).detail;
+      const message =
+        inner && typeof inner === "object"
+          ? ((inner as { detail?: string; reason?: string }).detail ??
+            (inner as { reason?: string }).reason)
+          : inner;
+      throw new ApiError(res.status, String(message ?? `${res.status} ${res.statusText}`));
     }
     return data as RawUploadResult;
   },
@@ -833,7 +838,12 @@ export const api = {
   /** GET /api/push/status — is push available + the public VAPID key to subscribe. */
   async pushStatus(
     token: string,
-  ): Promise<{ available: boolean; reason: string | null; vapid_public_key: string }> {
+  ): Promise<{
+    available: boolean;
+    reason: string | null;
+    vapid_public_key: string;
+    missing_env?: string[];
+  }> {
     return get(`/api/push/status`, token);
   },
 

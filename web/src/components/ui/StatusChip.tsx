@@ -93,11 +93,22 @@ function Pill({ role, label, sublabel }: { role: Role; label: string; sublabel?:
 }
 
 export function SessionStatusChip(
-  { state, closed, reason }: { state: SessionOpState; closed?: boolean; reason?: SessionReason | null },
+  {
+    state,
+    closed,
+    reason,
+    showReason = true,
+  }: {
+    state: SessionOpState;
+    closed?: boolean;
+    reason?: SessionReason | null;
+    /** Header chrome has one line of scarce space; keep diagnostics in Info. */
+    showReason?: boolean;
+  },
 ) {
   if (closed) return <Pill role="idle" label="Closed" />;
   const { role, label } = opMap(state);
-  return <Pill role={role} label={label} sublabel={reasonSublabel(reason)} />;
+  return <Pill role={role} label={label} sublabel={showReason ? reasonSublabel(reason) : null} />;
 }
 
 export function TaskStatusChip({ state }: { state: TaskState }) {

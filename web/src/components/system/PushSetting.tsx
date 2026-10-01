@@ -1,7 +1,8 @@
 /**
  * Quiet notifications control (#21). Renders in the System → Settings footnote.
- * Only shows an actionable button when push is genuinely available; otherwise it
- * states the honest reason (unsupported / unavailable / blocked) and does nothing.
+ * It is always visible: disappearing when gateway setup regresses leaves the user
+ * without an explanation or a way to distinguish browser permission from service
+ * configuration.
  */
 import { Bell, BellOff } from "lucide-react";
 import { Button } from "../ui/Button";
@@ -10,15 +11,16 @@ import { usePushNotifications } from "../../hooks/usePushNotifications";
 export function PushSetting() {
   const { state, error, subscribe, unsubscribe } = usePushNotifications();
 
-  // Nothing to offer — stay quiet rather than showing a dead control.
-  if (state === "unsupported" || state === "unavailable" || state === "loading") {
-    return null;
-  }
-
   let body: React.ReactNode;
   let action: React.ReactNode = null;
 
-  if (state === "denied") {
+  if (state === "loading") {
+    body = "Checking notification availability…";
+  } else if (state === "unsupported") {
+    body = "This browser does not support push notifications.";
+  } else if (state === "unavailable") {
+    body = "Push notifications are unavailable on this gateway.";
+  } else if (state === "denied") {
     body = "Notifications are blocked in your browser settings.";
   } else if (state === "subscribed") {
     body = "Push notifications on for task completions.";
