@@ -893,7 +893,12 @@ def claim_task(task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    ok = db.claim_task(task_id, payload.node_id)  # protocol-0 only (DB-fenced)
+    from .turn_queue import TurnQueueError
+
+    try:
+        ok = db.claim_task(task_id, payload.node_id)  # protocol-0 only (DB-fenced)
+    except TurnQueueError as e:  # [A82 Stage 4e review F4] enrolled-session refusal
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
     if not ok:
         raise HTTPException(status_code=409, detail="Task already claimed or not pending")
     task = db.get_task(task_id)

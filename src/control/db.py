@@ -1001,6 +1001,10 @@ def producer_turn_id(
 # terminal outcome (withdrawn = obsolete/closed, cancelled = operator stop)
 # re-arms the token for a fresh attempt without counting a round.
 PRODUCER_CONSUMING_STATUSES = ("completed", "failed", "failed_node_offline")
+# [A82 Stage 4e review F4] Protocol-0 actions that EXECUTE a turn in a session
+# (worker `_execute_task`). Refused at insert / claim for an ENROLLED session
+# (design §3 item 2); control rows (close_session, cancel_turn, ...) are not.
+LEGACY_EXECUTION_ACTIONS = ("create_session", "resume_session", "compact_session")
 
 
 def quota_resume_task_id(case_id: str, paused_task_id: str) -> str:
@@ -2190,19 +2194,41 @@ class MeshDB:
         payload: Dict[str, Any],
         artifact_path: Optional[str] = None,
         parent_task_id: Optional[str] = None,
+        status: str = "pending",
     ) -> None:
-        """Insert a new pending task into the dispatch queue."""
+        """Insert a new pending task into the dispatch queue.
+
+        [A82 Stage 4e review F4] ``status`` other than ``pending`` inserts a
+        NON-claimable record directly in that state (spool replay). A claimable
+        legacy EXECUTION row (``LEGACY_EXECUTION_ACTIONS``) for a session
+        enrolled in the managed turn queue raises
+        ``LegacyExecutionRefusedError`` (checked in the insert txn)."""
+        from .turn_queue import LegacyExecutionRefusedError, TurnQueueError
+
         now = _now()
         prompt: str | None = payload.get("prompt") if isinstance(payload.get("prompt"), str) else None
+        completed_at: Optional[str] = (
+            now if status in ("completed", "failed", "failed_node_offline", "cancelled") else None
+        )
         try:
             with self._write() as conn:
+                if status == "pending" and session_id and action in LEGACY_EXECUTION_ACTIONS:
+                    enrolled = conn.execute(
+                        "SELECT 1 FROM sessions WHERE session_id = ? AND turn_queue_enrolled = 1",
+                        (session_id,),
+                    ).fetchone()
+                    if enrolled is not None:
+                        raise LegacyExecutionRefusedError(
+                            "legacy execution refused: session is enrolled in the managed turn queue",
+                            task_id=task_id, session_id=session_id, action=action,
+                        )
                 conn.execute(
                     """
                     INSERT INTO mesh_tasks (
                         id, session_id, machine_id, backend, action,
                         payload, prompt, status, artifact_path, parent_task_id,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                        created_at, updated_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2212,12 +2238,16 @@ class MeshDB:
                         action,
                         json.dumps(payload),
                         prompt,
+                        status,
                         artifact_path,
                         parent_task_id,
                         now,
                         now,
+                        completed_at,
                     ),
                 )
+        except TurnQueueError:
+            raise
         except sqlite3.IntegrityError as e:
             if "UNIQUE constraint failed: mesh_tasks.id" in str(e):
                 # Idempotent — task already exists (e.g. duplicate dispatch on retry)
@@ -2319,25 +2349,56 @@ class MeshDB:
             logger.warning("event=db_record_audit_turn_failed task_id=%s err=%s", task_id, e)
 
     def claim_task(self, task_id: str, node_id: str) -> bool:
-        """Atomically claim a pending task. Returns True if claim succeeded."""
+        """Atomically claim a pending task. Returns True if claim succeeded.
+
+        [A82 Stage 4e review F4] A pending legacy EXECUTION row whose session is
+        now enrolled in the managed turn queue is never claimed: it is failed
+        (terminal, visible, never re-offered) in this txn and
+        ``LegacyExecutionRefusedError`` is raised after commit."""
+        from .turn_queue import LegacyExecutionRefusedError
+
         now = _now()
+        refused = False
         try:
             with self._write() as conn:
+                placeholders = ",".join("?" * len(LEGACY_EXECUTION_ACTIONS))
                 conn.execute(
-                    """
+                    f"""
                     UPDATE mesh_tasks
-                    SET status = 'claimed', claimed_by = ?, claimed_at = ?, updated_at = ?,
-                        claimer_incarnation = (SELECT incarnation_id FROM nodes WHERE node_id = ?)
+                    SET status = 'failed', completed_at = ?, updated_at = ?,
+                        error = 'legacy_execution_refused: session is enrolled in the managed turn queue'
                     WHERE id = ? AND status = 'pending' AND COALESCE(queue_protocol, 0) = 0
+                      AND action IN ({placeholders})
+                      AND session_id IN (
+                          SELECT session_id FROM sessions WHERE turn_queue_enrolled = 1
+                      )
                     """,
-                    (node_id, now, now, node_id, task_id),
+                    (now, now, task_id, *LEGACY_EXECUTION_ACTIONS),
                 )
-                return conn.execute(
-                    "SELECT changes()"
-                ).fetchone()[0] > 0
+                refused = conn.execute("SELECT changes()").fetchone()[0] > 0
+                claimed = False
+                if not refused:
+                    conn.execute(
+                        """
+                        UPDATE mesh_tasks
+                        SET status = 'claimed', claimed_by = ?, claimed_at = ?, updated_at = ?,
+                            claimer_incarnation = (SELECT incarnation_id FROM nodes WHERE node_id = ?)
+                        WHERE id = ? AND status = 'pending' AND COALESCE(queue_protocol, 0) = 0
+                        """,
+                        (node_id, now, now, node_id, task_id),
+                    )
+                    claimed = conn.execute(
+                        "SELECT changes()"
+                    ).fetchone()[0] > 0
         except Exception as e:
             logger.warning("event=db_claim_task_failed task_id=%s err=%s", task_id, e)
             return False
+        if refused:  # committed above (terminal); refused outside the txn
+            raise LegacyExecutionRefusedError(
+                "legacy execution refused: session is enrolled in the managed turn queue",
+                task_id=task_id, node_id=node_id,
+            )
+        return claimed
 
     def release_task(self, task_id: str, node_id: str) -> bool:
         """Release a claimed task back to pending. Only succeeds if claimed_by matches.

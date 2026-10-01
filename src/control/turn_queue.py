@@ -158,6 +158,15 @@ class CarrierUnavailableError(TurnQueueError):
     code = "carrier_unavailable"
 
 
+class LegacyExecutionRefusedError(TurnQueueError):
+    """409 — a protocol-0 (legacy) EXECUTION row for a session enrolled in the
+    managed turn queue, refused at the DB insert / claim boundary (design §3
+    item 2). Control rows (close / cancel) are never refused."""
+
+    status_code = 409
+    code = "legacy_execution_refused"
+
+
 class BackingStoreError(TurnQueueError):
     """503 — DB unavailable / deadline exceeded (design §6/§8). Fails closed."""
 

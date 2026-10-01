@@ -11900,6 +11900,9 @@ Generated from user description: {description}
                     machine_id = session.machine_id or None
             except Exception:
                 machine_id = None
+        # [A82 Stage 4e review F4] Inserted directly in its TERMINAL state: the
+        # replayed result is a record, never claimable work (a remote poll in
+        # the gap before `_mesh_complete_task` must not re-run the turn).
         db.enqueue_task(
             task_id=task.id,
             session_id=session_id,
@@ -11912,6 +11915,7 @@ Generated from user description: {description}
                 "action": action,
                 "metadata": metadata,
             },
+            status="completed" if result.success else "failed",
         )
 
     def reconcile_spooled_mesh_completions(self, limit: int = 100) -> Dict[str, int]:
