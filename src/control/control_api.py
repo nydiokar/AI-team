@@ -44,6 +44,8 @@ from pydantic import BaseModel, Field, field_validator
 from src.core import observability
 from src.control import app_metrics
 from src.control.app_metrics import RequestTimingMiddleware
+# [A82 Stage 5] Authorization scheme of the scoped agent sender capability.
+from src.control.agent_sender import SENDER_AUTH_SCHEME as _SENDER_AUTH_SCHEME
 
 if TYPE_CHECKING:
     from src.control.db import MeshDB
@@ -220,6 +222,47 @@ async def _submit_managed_instruction(
             join_case_id=body.case_id,
             extra_metadata=_instruction_extra_metadata(body),
             operation_id=idempotency_key,
+            turn_queue_enrolled=True,
+        )
+    except HarnessAdmissionBlocked as blocked:
+        raise _harness_blocked_http(blocked)
+    except TurnQueueError as err:
+        raise _turn_queue_http(err)
+
+
+async def _validate_agent_sender(raw: str, target_session_id: str) -> Any:
+    """[A82 Stage 5] Validate a scoped sender capability for ``target_session_id``
+    (bounded offload; read-only). 401 unknown/revoked, 403 wrong scope, 503 DB."""
+    from src.control.db import get_db
+    from src.control.turn_queue import TurnQueueError
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail={"ok": False, "reason": "mesh_db_unavailable"})
+    try:
+        return await asyncio.to_thread(db.validate_sender_capability, raw, target_session_id)
+    except TurnQueueError as err:
+        http = _turn_queue_http(err)
+        if http.status_code == 401:
+            http.headers = {"WWW-Authenticate": _SENDER_AUTH_SCHEME}
+        raise http
+
+
+async def _submit_agent_instruction(orchestrator: Any, body: Any, session: Any, sender: Any) -> Any:
+    """[A82 Stage 5] Agent sender → the SAME managed admission path. Source,
+    sender and Case come from the validated capability, never the request."""
+    from src.control.turn_queue import TurnQueueError
+    from src.orchestrator import HarnessAdmissionBlocked
+
+    try:
+        return await orchestrator.submit_instruction(
+            description=body.body,
+            session_id=session.session_id,
+            cwd=session.repo_path,
+            source="agent_session",
+            operation_id=body.operation_id,
+            sender_session_id=sender.session_id,
+            sender_case_id=sender.case_id,
             turn_queue_enrolled=True,
         )
     except HarnessAdmissionBlocked as blocked:
@@ -2031,31 +2074,61 @@ def build_control_api(orchestrator) -> FastAPI:
     # Write surface (U3) — thin adapters over the same services Telegram calls.
     # ----------------------------------------------------------------------
 
-    @app.post("/api/sessions/{session_id}/turn-requests", dependencies=[Depends(_require_auth)])
+    async def _turn_request_principal(
+        request: Request,
+        creds: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
+    ) -> Optional[Any]:
+        """[A82 Stage 5] The admission resource's two auth scopes (packet §3.13).
+        ``Authorization: AITeamSender <capability>`` ⇒ a scoped agent sender,
+        validated against THIS target before the body is parsed (returns the
+        canonical ``SenderIdentity``). Anything else ⇒ the unchanged operator
+        bearer check (returns None). A shared bearer is never an agent
+        identity and a capability never authenticates an operator."""
+        scheme, _, value = (request.headers.get("authorization") or "").partition(" ")
+        if scheme.strip().lower() == _SENDER_AUTH_SCHEME.lower():
+            return await _validate_agent_sender(value.strip(), str(request.path_params.get("session_id") or ""))
+        await _require_auth(creds)
+        return None
+
+    @app.post("/api/sessions/{session_id}/turn-requests")
     async def api_create_turn_request(
-        session_id: str, body: TurnRequestCreateBody,
+        session_id: str, body: TurnRequestCreateBody, request: Request,
+        sender: Optional[Any] = Depends(_turn_request_principal),
     ) -> JSONResponse:
         """Acknowledge a managed instruction only after canonical admission."""
         from src.control.turn_queue import TurnAdmission
 
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
+            if sender is not None:  # validated just now; vanished ⇒ out of scope
+                raise HTTPException(status_code=403, detail={"ok": False, "reason": "scope_forbidden"})
             raise HTTPException(status_code=404, detail={"ok": False, "reason": "session_not_found"})
+        if sender is not None:
+            idem = request.headers.get("idempotency-key")
+            if idem is not None and idem != body.operation_id:
+                raise HTTPException(status_code=422, detail={"ok": False, "reason": "operation_id_mismatch"})
         if not await _session_turn_queue_enrolled(session_id):
             raise HTTPException(status_code=409, detail={"ok": False, "reason": "session_not_enrolled"})
-        admitted = await _submit_managed_instruction(
-            orchestrator, InstructionBody(description=body.body), session,
-            body.operation_id,
-        )
+        if sender is not None:
+            admitted = await _submit_agent_instruction(orchestrator, body, session, sender)
+        else:
+            admitted = await _submit_managed_instruction(
+                orchestrator, InstructionBody(description=body.body), session,
+                body.operation_id,
+            )
         if not isinstance(admitted, TurnAdmission):
             raise HTTPException(status_code=503, detail={"ok": False, "reason": "admission_receipt_missing"})
-        return JSONResponse({
+        out: Dict[str, Any] = {
             "turn_id": admitted.id,
             "task_id": admitted.id,
             "status": admitted.status,
             "revision": admitted.revision,
             "queue_sequence": admitted.queue_sequence,
-        }, status_code=202)
+        }
+        if sender is not None:
+            out.update({"idempotent_replay": bool(admitted.idempotent_replay),
+                        "source": "agent", "sender_session_id": sender.session_id})
+        return JSONResponse(out, status_code=202)
 
     @app.get("/api/sessions/{session_id}/turn-requests", dependencies=[Depends(_require_auth)])
     def api_list_turn_requests(
