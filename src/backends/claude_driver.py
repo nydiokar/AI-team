@@ -1268,16 +1268,25 @@ class ClaudeSDKClientDriver(ClaudeDriver):
             case_id = (getattr(session, "current_case_id", None) or "").strip()
             if not case_id:
                 return
+            from src.control import controller_state
             from src.control.db import get_db, durable_relay_enabled
             if not durable_relay_enabled():
                 return  # nothing durable to reconcile ⇒ byte-identical no-op
-            db = get_db()
-            if db is None:
-                return
-            row = db.get_flow_run(case_id)
-            if row is None or (row.get("status") or "") in db._CLOSED_STATUSES:
-                return  # unknown or already-closed Case ⇒ not a resume
-            result = db.boot_reconcile_case(case_id, actor="manager")
+            remote = controller_state.active()
+            if remote is not None:
+                # [A88] Worker-hosted Manager: the Case ledger lives on the controller,
+                # which applies the same unknown/closed guards.
+                result = remote.boot_reconcile_case(case_id)
+                if result.get("reason") in ("unknown_case", "case_closed"):
+                    return
+            else:
+                db = get_db()
+                if db is None:
+                    return
+                row = db.get_flow_run(case_id)
+                if row is None or (row.get("status") or "") in db._CLOSED_STATUSES:
+                    return  # unknown or already-closed Case ⇒ not a resume
+                result = db.boot_reconcile_case(case_id, actor="manager")
             logger.info(
                 "event=manager_boot_reconcile session_id=%s case_id=%s reconciled=%s rearmed=%s",
                 getattr(session, "session_id", "?"), case_id,
