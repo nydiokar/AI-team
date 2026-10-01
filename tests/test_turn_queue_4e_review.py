@@ -187,7 +187,32 @@ def test_pending_or_claimed_old_manager_turn_cannot_start_after_rebind(
             db.start_turn("old-b", token, "inc-a")
         else:
             db.claim_turn("old-b", "worker-a", "gateway_local", "inc-a")
-    assert db.get_task("old-b")["status"] == ("claimed" if rebind_after_claim else "pending")
+    assert db.get_task("old-b")["status"] == ("claimed" if rebind_after_claim else "queued")
+
+
+def test_rebound_pending_turn_is_deactivated_with_an_operator_exit(tmp_path):
+    """An activated (pending) turn of the former Manager must not wedge the old
+    session's slot behind an unclaimable row: the refused claim returns it to
+    the queue, held by the binding gate, visible with a reason, withdrawable."""
+    db = MeshDB(str(tmp_path / "mesh.db"))
+    _session(db, "old-manager")
+    _session(db, "new-manager")
+    case_id = db.open_case("objective", "old-manager", role="manager")
+    db.upsert_node("worker-a", "100.64.0.10", 9001, ["claude"], 2, incarnation_id="inc-a")
+    db.enqueue_turn("old-b", "old-manager", body="B", turn_source="human",
+                    flow_run_id=case_id, machine_id="worker-a")
+    db.activate_turn("old-b")
+    db.create_flow_link(case_id, "session", "new-manager", "manager")
+    for _ in range(2):  # every carrier retry is refused the same way
+        with pytest.raises(OwnershipConflictError):
+            db.claim_turn("old-b", "worker-a", "gateway_local", "inc-a")
+    row = db.get_task("old-b")
+    assert row["status"] == "queued" and row["blocked_reason"] == "case_manager_rebound"
+    assert row["prompt"] == "B"
+    assert db.get_active_turn("old-manager") is None
+    assert db.select_eligible_turn_heads() == []
+    db.withdraw_turn("old-b", expected_revision=int(row["revision"]))
+    assert db.get_task("old-b")["status"] == "withdrawn"
 
 
 @pytest.mark.parametrize("intervening", ["rebind", "stop"])

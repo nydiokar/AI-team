@@ -4284,9 +4284,24 @@ class MeshDB:
                         task_id=task_id, status=status,
                     )
                 if not _turn_case_binding_current(conn, row["flow_run_id"], row["session_id"]):
-                    raise OwnershipConflictError(
-                        "Case Manager changed before claim", task_id=task_id,
-                    )
+                    if status == "pending":
+                        # [A82 Stage 4e review] Never leave an unclaimable row
+                        # holding the former Manager's slot: back to the queue
+                        # (held there by the binding gate; automation is
+                        # withdrawn by prepare), visible with a reason and
+                        # operator-withdrawable. Committed, then refused below.
+                        conn.execute(
+                            "UPDATE mesh_tasks SET status = 'queued', activated_at = NULL, "
+                            "updated_at = ? WHERE id = ? AND queue_protocol = 1 "
+                            "AND status = 'pending'",
+                            (now, task_id),
+                        )
+                        _apply_turn_block(conn, task_id, "case_manager_rebound")
+                        withdraw_reason = "case_manager_rebound"
+                    else:
+                        raise OwnershipConflictError(
+                            "Case Manager changed before claim", task_id=task_id,
+                        )
                 # [A82 Stage 4a rework] Claim independently verifies the carrier
                 # assignment (design §5 step 5) — the poll filter is not a
                 # guard. An unassigned managed row is claimable by nobody.
@@ -4295,12 +4310,14 @@ class MeshDB:
                         "turn is assigned to a different carrier",
                         task_id=task_id, assigned=row["machine_id"], claimant=node_id,
                     )
-                if status == "pending" and row["expires_at"] and row["turn_source"] != "human":
+                if withdraw_reason is not None:
+                    pass  # deactivated above (rebound); refused after commit
+                elif status == "pending" and row["expires_at"] and row["turn_source"] != "human":
                     if str(row["expires_at"]) <= now:
                         withdraw_reason = "expired"
                     elif not _session_idle_for_optional_turn(conn, row["session_id"], task_id):
                         withdraw_reason = "not_idle"
-                if withdraw_reason is not None:
+                if withdraw_reason is not None and withdraw_reason != "case_manager_rebound":
                     # [A82 Stage 4d] Optional automation (a deadline-carrying
                     # heartbeat) is never started late, nor ahead of real work
                     # admitted behind it after activation: withdrawn here,
@@ -4363,7 +4380,12 @@ class MeshDB:
             raise
         except Exception as e:
             raise _turn_backing_error("claim_turn", task_id=task_id, err=e)
-        # Committed withdrawal (outside the txn so it is not rolled back).
+        # Committed withdrawal / deactivation (outside the txn so it is not
+        # rolled back).
+        if withdraw_reason == "case_manager_rebound":
+            raise OwnershipConflictError(
+                "Case Manager changed before claim", task_id=task_id, reason=withdraw_reason,
+            )
         raise OwnershipConflictError(
             f"optional turn withdrawn at claim ({withdraw_reason})", task_id=task_id,
             reason=withdraw_reason,
