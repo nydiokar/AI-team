@@ -7314,6 +7314,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         turn_queue_enrolled: Optional[bool] = None,
         sender_session_id: Optional[str] = None,
         sender_case_id: Optional[str] = None,
+        sender_capability_hash: Optional[str] = None,
     ) -> str:
         """Direct runtime entrypoint for Telegram/CLI instructions.
 
@@ -7361,6 +7362,8 @@ class TaskOrchestrator(ITaskOrchestrator):
             # the turn ATTACHES to the sender's Case — it never re-affiliates
             # the recipient (a Manager stays Manager) and never births a Case.
             self._stash_task_meta(task, "__turn_sender_session_id", sender_session_id)
+            if sender_capability_hash:
+                self._stash_task_meta(task, "__turn_sender_capability_hash", sender_capability_hash)
             if sender_case_id:
                 self._stash_task_meta(task, self._ATTACH_CASE_META_KEY, sender_case_id)
         if turn_queue_enrolled is not None:
@@ -10694,6 +10697,7 @@ Generated from user description: {description}
         principal = self._MANAGED_SOURCE_PRINCIPAL.get(source, source)
         sender_session_id = str(meta.pop("__turn_sender_session_id", "") or "") if source == "agent_session" else ""
         sender_case_id = str(meta.get(self._ATTACH_CASE_META_KEY) or "") if sender_session_id else ""
+        sender_cap_hash = str(meta.pop("__turn_sender_capability_hash", "") or "") if sender_session_id else ""
         if source == "agent_session" and (not sender_session_id or not sender_case_id):
             raise ManagedUnsupportedError("agent send requires validated sender and Case")
         scope = f"{principal}:{sender_session_id}:{sid}:instruction" if sender_session_id else f"{principal}:{sid}:instruction"
@@ -10735,6 +10739,7 @@ Generated from user description: {description}
             idempotency_scope=scope,
             admission_hash=admission_hash,
             sender_session_id=sender_session_id or None,
+            sender_capability_hash=sender_cap_hash or None,
             flow_run_id=sender_case_id or None,
             lineage_token=token,
         )

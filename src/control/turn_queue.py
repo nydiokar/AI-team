@@ -249,6 +249,9 @@ class SenderIdentity(BaseModel):
     session_id: str
     case_id: str
     role: str
+    # [A82 Stage 5 rework] sha256 of the validated capability (never the raw
+    # secret) so the admission txn re-selects the SAME live capability row.
+    capability_hash: Optional[str] = Field(default=None, max_length=128, repr=False, exclude=True)
 
 
 class SenderCapabilityGrant(BaseModel):

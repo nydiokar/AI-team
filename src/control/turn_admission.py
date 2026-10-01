@@ -160,6 +160,9 @@ class AdmissionRequest(BaseModel):
     flow_run_id: Optional[str] = Field(default=None, max_length=128)
     coalesce_key: Optional[str] = Field(default=None, max_length=256)
     sender_session_id: Optional[str] = Field(default=None, max_length=256)
+    # [A82 Stage 5 rework] Hash of the validated sender capability (never the
+    # raw token): re-checked (revoked / rotated / carrier) in the admission txn.
+    sender_capability_hash: Optional[str] = Field(default=None, max_length=128, repr=False)
     machine_id: Optional[str] = Field(default=None, max_length=256)
     # Durable "lineage pending" writer token (Case lineage written after the
     # commit, then finalized under CAS); None ⇒ no post-admission lineage.
@@ -208,6 +211,7 @@ def admit_turn(
                 flow_run_id=request.flow_run_id,
                 coalesce_key=request.coalesce_key,
                 sender_session_id=request.sender_session_id,
+                sender_capability_hash=request.sender_capability_hash,
                 machine_id=request.machine_id,
                 lineage_token=request.lineage_token,
                 producer_token=request.producer_token,
