@@ -7313,6 +7313,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         operation_id: Optional[str] = None,
         turn_queue_enrolled: Optional[bool] = None,
         sender_session_id: Optional[str] = None,
+        sender_case_id: Optional[str] = None,
     ) -> str:
         """Direct runtime entrypoint for Telegram/CLI instructions.
 
@@ -7356,7 +7357,12 @@ class TaskOrchestrator(ITaskOrchestrator):
         if operation_id:
             self._stash_task_meta(task, self._TURN_OPERATION_META_KEY, operation_id)
         if sender_session_id:
+            # [A82 Stage 5] A validated agent sender (control API scoped auth):
+            # the turn ATTACHES to the sender's Case — it never re-affiliates
+            # the recipient (a Manager stays Manager) and never births a Case.
             self._stash_task_meta(task, "__turn_sender_session_id", sender_session_id)
+            if sender_case_id:
+                self._stash_task_meta(task, self._ATTACH_CASE_META_KEY, sender_case_id)
         if turn_queue_enrolled is not None:
             self._stash_task_meta(task, self._TURN_ENROLLED_META_KEY, bool(turn_queue_enrolled))
         return await self._enqueue_task(task)
@@ -10687,7 +10693,8 @@ Generated from user description: {description}
         db = get_db()
         principal = self._MANAGED_SOURCE_PRINCIPAL.get(source, source)
         sender_session_id = str(meta.pop("__turn_sender_session_id", "") or "") if source == "agent_session" else ""
-        if source == "agent_session" and (not sender_session_id or not meta.get(self._JOIN_CASE_META_KEY)):
+        sender_case_id = str(meta.get(self._ATTACH_CASE_META_KEY) or "") if sender_session_id else ""
+        if source == "agent_session" and (not sender_session_id or not sender_case_id):
             raise ManagedUnsupportedError("agent send requires validated sender and Case")
         scope = f"{principal}:{sender_session_id}:{sid}:instruction" if sender_session_id else f"{principal}:{sid}:instruction"
         # Original-request hash (design §4): target, body, attachments, options —
@@ -10728,7 +10735,7 @@ Generated from user description: {description}
             idempotency_scope=scope,
             admission_hash=admission_hash,
             sender_session_id=sender_session_id or None,
-            flow_run_id=str(meta.get(self._JOIN_CASE_META_KEY)) if sender_session_id else None,
+            flow_run_id=sender_case_id or None,
             lineage_token=token,
         )
         admission = await admit_turn_async(
