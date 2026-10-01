@@ -361,3 +361,41 @@ def test_authority_report_is_read_only_and_classifies(tmp_path: Path) -> None:
     push = next(t for t in report.tables if t.table == "push_subscriptions")
     assert push.worker_only == 1
     assert all(not k.startswith("https://") for k in push.sample_keys)  # capability URLs are hashed
+
+
+def test_worker_claims_no_work_before_flags_are_known() -> None:
+    import asyncio
+
+    from src.worker.agent import WorkerAgent
+
+    http = _FakeHTTP()
+    http.get_responses += [OSError("down"), _snapshot("r1")]
+    remote = RemoteControllerState(http)
+    controller_state.install(remote)
+    agent = WorkerAgent.__new__(WorkerAgent)
+
+    assert asyncio.run(agent._controller_state_ready()) is False  # outage: claim nothing
+    assert asyncio.run(agent._controller_state_ready()) is True   # first snapshot arrives
+    assert asyncio.run(agent._controller_state_ready()) is True   # no further fetch needed
+    assert http.get_responses == []
+
+
+def test_worker_degrades_instead_of_stalling_on_old_controller() -> None:
+    import asyncio
+
+    from src.worker.agent import WorkerAgent
+
+    http = _FakeHTTP()
+    http.get_responses.append(HTTPError("http://c/control/runtime-flags", 404, "Not Found", None, None))  # type: ignore[arg-type]
+    controller_state.install(RemoteControllerState(http))
+    agent = WorkerAgent.__new__(WorkerAgent)
+    assert asyncio.run(agent._controller_state_ready()) is True
+
+
+def test_controller_process_never_gates_claims() -> None:
+    import asyncio
+
+    from src.worker.agent import WorkerAgent
+
+    agent = WorkerAgent.__new__(WorkerAgent)
+    assert asyncio.run(agent._controller_state_ready()) is True

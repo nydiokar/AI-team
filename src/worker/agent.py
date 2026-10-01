@@ -1364,6 +1364,18 @@ class WorkerAgent:
             )
         return prewarmer
 
+    async def _controller_state_ready(self) -> bool:
+        """[A88] Claim no work until the controller's flag snapshot is known, so a
+        session never boots on env/default flags after a startup outage."""
+        from src.control import controller_state
+        from src.worker.controller_state_client import RemoteControllerState
+
+        client = controller_state.active()
+        if not isinstance(client, RemoteControllerState) or client.ready_for_work():
+            return True
+        await asyncio.to_thread(client.refresh)
+        return client.ready_for_work()
+
     async def _controller_state_loop(self) -> None:
         """[A88] Keep the controller-state snapshot (flag registry) fresh."""
         from src.control import controller_state
@@ -1864,6 +1876,8 @@ class WorkerAgent:
             pass
 
     async def _fetch_pending(self) -> List[Dict[str, Any]]:
+        if not await self._controller_state_ready():
+            return []
         params = {
             "node_id": self.cfg.node_id,
             "backends": ",".join(self.cfg.backends),
