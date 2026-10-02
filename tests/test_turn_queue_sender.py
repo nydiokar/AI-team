@@ -944,3 +944,36 @@ def test_AUTH11_sender_http_refuses_redirects():
         for srv in (sink, red):
             srv.shutdown()
             srv.server_close()
+
+
+def test_AUTH12_superseded_manager_is_not_minted_at_claim(tmp_path, monkeypatch):
+    """N1: the latest-Manager rule applies at MINT too. A session still
+    affiliated as manager but not the Case's latest flow_links Manager (raw
+    rebind with no revocation, or A→B→A) gets ``sender_capability: null`` from
+    its real ``/claim-managed`` and loses any live capability; the current
+    Manager is still minted."""
+    w = _mk_world(tmp_path, monkeypatch)
+    cap_m = _cap(w, "m-t1", MGR)
+    _new_manager_session(w)
+    # Still-affiliated after a rebind that forgot to revoke.
+    _raw_sql(w, "UPDATE sessions SET current_case_id = ?, case_role = 'manager' WHERE session_id = ?",
+             w.case_a, NEW_MGR)
+    _raw_sql(w, "INSERT INTO flow_links (flow_run_id, entity_type, entity_id, role, created_at) "
+                "VALUES (?, 'session', ?, 'manager', ?)", w.case_a, NEW_MGR, NOW)
+    assert not _revoked(w, cap_m)
+    r = _claim(w, "m-t1")  # the carrier's (re-)claim = the provisioning request
+    assert r.status_code == 200, r.text
+    assert r.json()["sender_capability"] is None
+    assert _revoked(w, cap_m)
+    cap_n = _cap(w, "n-t1", NEW_MGR)
+    assert _send(w, cap_n, WRK, op="new-mgr").status_code == 202
+    # A→B→A through the real link API: re-linking A is INSERT OR IGNORE, so B
+    # stays the Case's latest Manager; A, re-affiliated as manager, is still
+    # superseded and is not minted. B keeps its capability.
+    w.db.create_flow_link(w.case_a, "session", MGR, "manager", created_by="system")
+    w.db.set_session_case(MGR, w.case_a, "manager")
+    assert w.db.case_manager_session_id(w.case_a) == NEW_MGR
+    assert _claim(w, "m-t1").json()["sender_capability"] is None
+    assert not _revoked(w, cap_n)
+    assert _send(w, cap_n, WRK, op="b-still-current").status_code == 202
+
