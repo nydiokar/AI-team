@@ -52,6 +52,23 @@ def ctl():
     except Exception:
         return {}
 
+if sys.argv[2:3] == ["generate-json-schema"]:
+    # Offline capability probe (no model, no stdin): the real CLI writes the
+    # app-server protocol schema bundle; this fake writes the two facts read.
+    out = sys.argv[sys.argv.index("--out") + 1]
+    c = ctl()
+    os.makedirs(os.path.join(out, "v2"), exist_ok=True)
+    methods = ["initialize", "thread/start", "turn/start"] + (
+        [] if c.get("schema_no_thread_read") else ["thread/read"])
+    with open(os.path.join(out, "ClientRequest.json"), "w") as fh:
+        json.dump({"oneOf": [{"properties": {"method": {"enum": [m]}}} for m in methods]}, fh)
+    props = {"threadId": {"type": "string"}}
+    if not c.get("schema_no_client_id"):
+        props["clientUserMessageId"] = {"type": ["string", "null"]}
+    with open(os.path.join(out, "v2", "TurnStartParams.json"), "w") as fh:
+        json.dump({"properties": props}, fh)
+    sys.exit(0)
+
 def spy(record):
     if SPY:
         with lock, open(SPY, "a") as fh:
@@ -124,6 +141,8 @@ for line in sys.stdin:
             status = c.get("attach_status") or ("active" if th["active"] else "idle")
         emit({"id": rid, "result": {"thread": {"id": tid, "cwd": p["cwd"], "status": {"type": status}}}})
     elif method == "thread/read":
+        if c.get("read_delay"):
+            time.sleep(c["read_delay"])
         if c.get("read_error"):
             emit({"id": rid, "error": {"code": -32000, "message": "read refused"}})
             continue
@@ -157,6 +176,8 @@ for line in sys.stdin:
         if threads.get(tid, {}).get("active") != p["turnId"]:
             emit({"id": rid, "error": {"code": -32600, "message": "no such active turn"}})
             continue
+        if c.get("interrupt_delay"):
+            time.sleep(c["interrupt_delay"])
         emit({"id": rid, "result": {}})
         complete(tid, p["turnId"], "interrupted")
     elif method == "thread/compact/start":
@@ -252,6 +273,8 @@ def wait_for(predicate, timeout: float = 10.0) -> None:
 
 
 def managed_rows(home: Path) -> list[dict]:
+    if not (home / "gateway-ownership.sqlite3").exists():
+        return []
     conn = sqlite3.connect(home / "gateway-ownership.sqlite3")
     conn.row_factory = sqlite3.Row
     try:
@@ -627,4 +650,199 @@ def test_sender_capability_reaches_thread_config_and_never_disk(h):
     assert config["mcp_servers.ai_team_sender.env"]["AI_TEAM_SENDER_CAPABILITY"] == token
     for path in h.home.rglob("*"):
         if path.is_file():
+            assert token.encode() not in path.read_bytes(), f"capability persisted in {path}"
+
+
+# =========================================================================== #
+# [A82 step 4 rework, review round 1] One slow RPC never kills the shared
+# app-server (M1); refused-after-write-ahead is re-beginnable (m1); identity-
+# less owners have a cutover exit (m2); late delivery keeps the session busy
+# (m3); capability probe + systemError policy (m5); the sender token's only
+# path is the JSON-RPC thread config (token audit).
+# =========================================================================== #
+def _held_neighbour(h) -> tuple[threading.Thread, dict, int]:
+    """Session A holds a managed turn natively in flight on the shared app-server."""
+    h.ctl(hold=h.release_path)
+    th_a, box_a = run_bg(h.backend.run_managed_turn, h.session("sess-a"), "a",
+                         own("sess-a", "uuid-a", task="t-a"))
+    wait_for(lambda: any(r["turn_uuid"] == "uuid-a" and r["native_turn_id"] for r in managed_rows(h.home)))
+    return th_a, box_a, h.backend._client.process.pid
+
+
+def _neighbour_survives(h, th_a: threading.Thread, box_a: dict, pid: int) -> None:
+    time.sleep(0.3)
+    assert th_a.is_alive(), "A's in-flight turn was killed by a neighbour's slow RPC"
+    client = h.backend._client
+    assert client is not None and client.process.pid == pid and client.process.poll() is None
+    assert client.failure == "", client.failure
+    h.release()
+    th_a.join(10)
+    assert box_a["result"].success is True, box_a["result"].errors
+    native_a = {r["turn_uuid"]: r["native_turn_id"] for r in managed_rows(h.home)}["uuid-a"]
+    assert all(i["params"]["turnId"] != native_a for i in h.requests("turn/interrupt"))
+    assert h.backend._client is client and client.process.pid == pid, "app-server was restarted"
+
+
+def test_M1_slow_turn_start_of_one_session_never_kills_a_neighbour(h, monkeypatch):
+    th_a, box_a, pid = _held_neighbour(h)
+    monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
+    h.ctl(hold=h.release_path, start_delay=1.5)
+    res_b = h.backend.run_managed_turn(h.session("sess-b"), "b", own("sess-b", "uuid-b", task="t-b"))
+    assert res_b.error_class == "recovery_required"
+    assert h.backend.is_quiescent(h.session("sess-b")) is False, "B's prompt may still run: held"
+    _neighbour_survives(h, th_a, box_a, pid)
+    h.ctl()
+    # B's hold resolves through its LATE turn/start reply (the native id of the
+    # request that carried its clientUserMessageId) + thread/read status.
+    wait_for(lambda: h.backend.is_quiescent(h.session("sess-b")))
+    row_b = {r["turn_uuid"]: r for r in managed_rows(h.home)}["uuid-b"]
+    assert row_b["native_turn_id"].startswith("turn-") and row_b["state"] == "stopped"
+    assert owners(h.home) == []
+
+
+def test_M1_slow_thread_read_in_quiescence_probe_never_kills_a_neighbour(h, monkeypatch):
+    assert h.backend.run_managed_turn(h.session("sess-b"), "warm", own("sess-b", task="t-w")).success
+    th_a, box_a, pid = _held_neighbour(h)
+    monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
+    h.ctl(hold=h.release_path, read_delay=1.0)
+    assert h.backend.is_quiescent(h.session("sess-b")) is False, "unknown ⇒ busy, nothing else"
+    _neighbour_survives(h, th_a, box_a, pid)
+    h.ctl()
+    wait_for(lambda: h.backend.is_quiescent(h.session("sess-b")))
+
+
+def test_M1_slow_interrupt_never_kills_the_shared_app_server(h, monkeypatch):
+    th_a, box_a, pid = _held_neighbour(h)
+    th_b, box_b = run_bg(h.backend.run_managed_turn, h.session("sess-b"), "b",
+                         own("sess-b", "uuid-b", task="t-b"))
+    wait_for(lambda: len(managed_rows(h.home)) == 2 and all(r["native_turn_id"] for r in managed_rows(h.home)))
+    monkeypatch.setattr(app_server_mod, "INTERRUPT_TIMEOUT", 0.3, raising=False)
+    h.ctl(hold=h.release_path, interrupt_delay=5.5)  # beyond the legacy 5 s interrupt deadline
+    assert h.backend.cancel_managed_turn(h.session("sess-b"), "uuid-b") is True
+    th_b.join(15)
+    assert box_b["result"].errors == ["cancelled"], "the interrupt is confirmed natively, late"
+    _neighbour_survives(h, th_a, box_a, pid)
+
+
+def test_M1_legacy_turn_start_deadline_never_kills_a_managed_neighbour(h, monkeypatch):
+    th_a, box_a, pid = _held_neighbour(h)
+    monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
+    h.ctl(hold=h.release_path, start_delay=1.0)
+    legacy = h.backend.resume_session(h.session("sess-legacy"), "x")
+    assert legacy.success is False
+    assert h.backend.is_quiescent(h.session("sess-legacy")) is False, "held, never blindly released"
+    _neighbour_survives(h, th_a, box_a, pid)
+    h.ctl()
+    wait_for(lambda: h.backend.is_quiescent(h.session("sess-legacy")))
+    assert owners(h.home) == []
+
+
+def test_m1_turn_refused_after_write_ahead_is_rebeginnable(h):
+    session = h.session()
+    assert h.backend.cancel_managed_turn(session, "uuid-requeued") is True
+    first = h.backend.run_managed_turn(session, "x", own(turn_uuid="uuid-requeued"))
+    assert first.error_class == "managed_conflict"
+    assert {r["turn_uuid"]: r["state"] for r in managed_rows(h.home)} == {"uuid-requeued": "not_submitted"}
+    # The carrier requeues the provably-unsent attempt; the next claim runs it.
+    again = h.backend.run_managed_turn(session, "x", own(turn_uuid="uuid-requeued"))
+    assert again.success, again.errors
+    assert len(h.requests("turn/start")) == 1
+    assert {r["turn_uuid"]: r["state"] for r in managed_rows(h.home)} == {"uuid-requeued": "completed"}
+
+
+def test_m2_cutover_sweep_clears_identityless_owner_only_when_its_process_is_gone(h):
+    from src.backends.codex_ownership import sweep_legacy_owners
+
+    legacy = CodexOwnership()
+    legacy.acquire("sess-1", "thr-legacy", str(Path(h.repo).resolve()))
+    _crashed_owner_thread, _ = _crashed_owner(h, alive=False)  # a MANAGED owner (has identity)
+    assert sweep_legacy_owners() == [], "the owning process (this one) is alive"
+    assert h.make().is_quiescent(h.session(native="thr-legacy")) is False
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    conn = sqlite3.connect(h.home / "gateway-ownership.sqlite3")
+    with conn:
+        conn.execute("UPDATE owners SET pid = ? WHERE owner = ?", (gone.pid, legacy.owner))
+    conn.close()
+    assert sweep_legacy_owners() == [legacy.owner]
+    remaining = {owner for _key, owner in owners(h.home)}
+    assert legacy.owner not in remaining and remaining, "the managed owner is clear_dead_owners' job"
+    assert h.make().is_quiescent(h.session(native="thr-legacy")) is True
+
+
+def test_m3_session_stays_busy_until_late_reply_delivery_was_attempted(h, monkeypatch):
+    assert h.backend.run_managed_turn(h.session(), "warm", own()).success
+    monkeypatch.setattr(native_mod, "MANAGED_TURN_SECONDS", 0.5)
+    in_sink, release_sink = threading.Event(), threading.Event()
+    seen: list[bool] = []
+
+    def sink(_sid: str, _outcome: Any) -> None:
+        seen.append(h.backend.is_quiescent(h.session()))
+        in_sink.set()
+        release_sink.wait(5)
+
+    h.backend.set_proactive_sink(sink)
+    h.ctl(hold=h.release_path)
+    result = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-late"))
+    assert result.error_class == "recovery_required"
+    h.release()
+    assert in_sink.wait(10)
+    assert seen == [False], "reconcile could resolve the turn before its late reply was captured"
+    assert h.backend.is_quiescent(h.session()) is False
+    release_sink.set()
+    wait_for(lambda: h.backend.is_quiescent(h.session()))
+
+
+@pytest.mark.parametrize("missing", ["schema_no_thread_read", "schema_no_client_id"])
+def test_m5_capability_probe_refuses_an_app_server_without_the_managed_protocol(h, missing):
+    from src.control.turn_queue import ManagedUnsupportedError
+
+    h.ctl(**{missing: True})
+    assert h.backend.supports_managed_turns() is False
+    with pytest.raises(ManagedUnsupportedError):
+        h.backend.run_managed_turn(h.session(), "x", own())
+    assert h.requests() == [], "the probe is offline: no app-server protocol traffic"
+
+
+def test_m5_capability_probe_is_cached_per_binary(h):
+    assert h.backend.supports_managed_turns() is True
+    h.ctl(schema_no_thread_read=True)  # would fail if probed again
+    assert CodexBackend().supports_managed_turns() is True
+
+
+@pytest.mark.parametrize("where", ["attach", "loaded"])
+def test_m5_system_error_thread_is_submittable_on_attach_and_loaded_alike(h, where):
+    if where == "loaded":
+        warm = h.backend.run_managed_turn(h.session(), "warm", own())
+        assert warm.success
+        native = warm.backend_session_id
+        h.ctl(read_status="systemError")
+    else:
+        native = ""
+        h.ctl(attach_status="systemError")
+    result = h.backend.run_managed_turn(h.session(native=native), "hello", own())
+    assert result.success, result.errors
+
+
+def test_token_audit_sender_token_only_travels_in_the_mcp_env_thread_config(h, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    token = "cap-" + uuid.uuid4().hex
+    assert h.backend.provision_sender_capability("sess-1", token) is True
+    result = h.backend.run_managed_turn(h.session(), "hello", own())
+    assert result.success, result.errors
+    carrying = []
+    for request in h.requests():
+        for name, value in (request["params"].get("config") or {}).items():
+            if token in json.dumps(value):
+                carrying.append((request["method"], name))
+        stripped = {k: v for k, v in request["params"].items() if k != "config"}
+        assert token not in json.dumps(stripped), f"token leaked into {request['method']} params"
+    assert carrying == [("thread/start", "mcp_servers.ai_team_sender.env")]
+    assert token not in caplog.text, "token reached a log record"
+    assert token not in result.raw_stdout and token not in json.dumps(result.parsed_output)
+    spy = Path(h.spy_path).resolve()
+    for path in h.tmp_path.rglob("*"):
+        if path.is_file() and path.resolve() != spy:
             assert token.encode() not in path.read_bytes(), f"capability persisted in {path}"
