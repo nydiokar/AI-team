@@ -2587,6 +2587,7 @@ def build_control_api(orchestrator) -> FastAPI:
         deliver the objective as its first assignment. Refuses with 409 when the
         Manager-role path is disabled (MANAGER_ROLE_ENABLED OFF ⇒ new surface inert).
         Translates the Level-3 admission block to a clean 409, like /api/instructions."""
+        from src.control.turn_queue import TurnQueueError
         from src.orchestrator import HarnessAdmissionBlocked
 
         async with _idem_guard_async("manager", idempotency_key) as cached:
@@ -2609,6 +2610,10 @@ def build_control_api(orchestrator) -> FastAPI:
                 )
             except HarnessAdmissionBlocked as blocked:
                 raise _harness_blocked_http(blocked)
+            except TurnQueueError as refused:
+                # [A82 pre-cutover rework, F2] Typed managed refusal (503 when
+                # no carrier); invoke_manager already left nothing open.
+                raise _turn_queue_http(refused)
 
             if not result.get("ok"):
                 reason = result.get("reason") or "manager_invoke_failed"
