@@ -743,3 +743,22 @@ def test_R8_migration_42_is_cheap_on_a_large_table_and_reads_stay_indexed(tmp_pa
     t1 = time.monotonic()
     assert c.execute(q, (25,)).fetchall() == []
     assert time.monotonic() - t1 < 0.05
+
+
+# Telemetry reconcile cost ---------------------------------------------------- #
+def test_R9_turn_scoped_reconcile_never_aggregates_all_llm_events(tg: _Env) -> None:
+    """The consumer reconciles once per managed outcome (incl. never-ran
+    turns): a turn-scoped reconcile must not materialise MAX(received_at)
+    over the whole llm_events table."""
+    from src.control.telemetry_store import TelemetryStore
+
+    seen: List[str] = []
+    conn = tg.gw._conn()
+    conn.set_trace_callback(seen.append)
+    try:
+        TelemetryStore(tg.gw).reconcile(turn_id="t-x", since_hours=0)
+    finally:
+        conn.set_trace_callback(None)
+    [sql] = [q for q in seen if "FROM llm_turns t" in q]
+    plan = " ".join(str(r[-1]) for r in conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall())
+    assert "SCAN llm_events" not in plan, plan
