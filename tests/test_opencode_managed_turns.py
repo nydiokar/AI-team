@@ -696,7 +696,7 @@ def test_INT_opencode_ambiguous_outcome_holds_recovery(db, backend, fake, tmp_pa
 # =========================================================================== #
 @pytest.fixture(autouse=True)
 def _native_store(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_TEAM_OPENCODE_STATE_DIR", str(tmp_path / "oc-state"))
+    monkeypatch.setenv("WORKER_STATE_DIR", str(tmp_path / "carrier-state"))
 
 
 def test_m4_late_reply_is_captured_bound_to_the_turn_and_session_busy_until_delivered(backend, fake, tmp_path):
@@ -885,3 +885,53 @@ def test_m6_a_continuous_refusal_streak_still_terminates_a_live_non_serving_proc
     assert "will restart" in err
     assert key not in backend._base_urls
     stand_in_proc.wait(5)
+
+
+def _stored_rows(tmp_path) -> List[tuple]:
+    import sqlite3
+
+    path = tmp_path / "carrier-state" / "opencode-native-sessions.sqlite3"
+    if not path.exists():
+        return []
+    conn = sqlite3.connect(path)
+    try:
+        return list(conn.execute("SELECT session_id, native_id FROM native_sessions"))
+    finally:
+        conn.close()
+
+
+def test_m7_write_ahead_store_lives_under_the_carrier_state_dir(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from src.backends.opencode import _native_store_path
+
+    monkeypatch.setenv("AI_TEAM_OPENCODE_STATE_DIR", str(tmp_path / "ignored"))
+    assert _native_store_path() == tmp_path / "carrier-state" / "opencode-native-sessions.sqlite3"
+    monkeypatch.delenv("WORKER_STATE_DIR")
+    assert _native_store_path() == Path("logs") / "carrier_state" / "opencode-native-sessions.sqlite3"
+
+
+def test_m7_first_turn_resolved_by_late_capture_clears_its_write_ahead_row(backend, fake, tmp_path):
+    fake.release.clear()
+    backend._managed_deadline_sec = lambda: 0.5
+    got: List[Any] = []
+    backend.set_proactive_sink(lambda sid, outcome: got.append(outcome))
+    res = backend.run_managed_turn(_session(tmp_path, native=""), "x", _own(turn="u-wa"))
+    assert res.error_class == "recovery_required"
+    native = fake.created[0]
+    assert _stored_rows(tmp_path) == [("gw-1", native)]
+    fake.release.set()
+    _wait(lambda: got)
+    assert got[0].backend_session_id == native
+    _wait(lambda: _stored_rows(tmp_path) == [])
+
+
+def test_m7_a_session_whose_native_id_is_known_drops_a_stale_write_ahead_row(backend, fake, tmp_path):
+    from src.backends.opencode import _native_store
+
+    key = backend._server_key(str(tmp_path))
+    _native_store("INSERT OR REPLACE INTO native_sessions VALUES (?, ?, ?)", ("gw-1", key, "ses_stale"))
+    fake.add_session("ses_known")
+    res = backend.run_managed_turn(_session(tmp_path, native="ses_known"), "x", _own(turn="u-known"))
+    assert res.success is True, res.errors
+    assert _stored_rows(tmp_path) == []
