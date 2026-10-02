@@ -258,3 +258,104 @@ def test_F6_heartbeat_back_online_releases_holds_steady_heartbeat_does_not(tmp_p
     reg._nodes["worker-a"].status = "offline"  # expired by the registry, then back
     assert reg.heartbeat("worker-a") is True
     assert db.get_task(tid)["blocked_until"] is None and spy.hints > hints
+
+
+# --------------------------------------------------------------------------- #
+# Evidence gap — the file-only protocol-0 delivery row for an ENROLLED session
+# while its managed turn runs, end to end (real task server + carrier)
+# --------------------------------------------------------------------------- #
+def test_file_only_delivery_during_a_running_managed_turn_leaves_the_turn_and_session_truthful(
+        tmp_path, monkeypatch):
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    import src.control.db as db_mod
+    import src.control.node_registry as nr_mod
+    from src.control import task_server as tsrv
+    from src.core.interfaces import ExecutionResult
+    from tests.test_turn_queue_carrier_integration import NODE, TOKEN, _ClientHTTP, _worker
+    from tests.test_turn_queue_precutover import STAGED
+
+    mdb = db_mod.MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(tsrv, "get_db", lambda: mdb)
+    monkeypatch.setattr(db_mod, "get_db", lambda: mdb)
+    monkeypatch.setattr(nr_mod, "_registry", nr_mod.NodeRegistry())
+    monkeypatch.setattr(tsrv, "_worker_token", lambda: TOKEN)
+    monkeypatch.setattr(tsrv, "_STAGING_ROOT", tmp_path / "state" / "uploads")
+    stage = tmp_path / "state" / "uploads" / STAGED["file_id"]
+    stage.mkdir(parents=True)
+    (stage / STAGED["filename"]).write_bytes(b"# spec")
+
+    class _HTTP(_ClientHTTP):
+        def get_bytes(self, path, timeout=60):
+            resp = self.client.get(path, headers={"Authorization": f"Bearer {TOKEN}"})
+            assert resp.status_code == 200, resp.text
+            return resp.content
+
+        def delete(self, path, timeout=10):
+            return self.client.delete(path, headers={"Authorization": f"Bearer {TOKEN}"}).json()
+
+    started, release = threading.Event(), threading.Event()
+
+    class _Blocking:
+        def supports_managed_turns(self) -> bool:
+            return True
+
+        def is_quiescent(self, session) -> bool:
+            return True
+
+        def run_managed_turn(self, session, prompt, ownership, *, on_process=None, **_k):
+            started.set()
+            assert release.wait(10)
+            return ExecutionResult(success=True, output="managed reply", errors=[], backend_session_id="n")
+
+    w = _worker(tmp_path, _HTTP(TestClient(tsrv.app)))
+    w._backends = {"claude": _Blocking()}
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mdb.upsert_session(Session(session_id="sess-1", backend="claude", repo_path=str(repo),
+                               status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW,
+                               machine_id=NODE, backend_session_id="n"))
+    mdb.enroll_session("sess-1")
+    session_payload = {"session_id": "sess-1", "backend": "claude", "backend_session_id": "n",
+                       "repo_path": str(repo)}
+    mdb.enqueue_turn(task_id="t-1", session_id="sess-1", backend="claude", action="resume_session",
+                     payload={"task_id": "t-1", "prompt": "work", "session": session_payload},
+                     turn_source="human", turn_kind="instruction", machine_id=NODE)
+    mdb.activate_turn("t-1")
+    before = mdb.get_session("sess-1")
+
+    async def scenario():
+        rows = [r for r in await w._fetch_pending() if r["id"] == "t-1"]
+        turn = asyncio.create_task(w._handle_task(rows[0]))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        # The file-only delivery (the shape _deliver_staged_file_control enqueues).
+        fid = f"fetch-staged-{STAGED['file_id']}"
+        mdb.enqueue_task(task_id=fid, session_id="sess-1", machine_id=NODE, backend="claude",
+                         action="fetch_staged_file", payload={
+                             "prompt": "", "task_id": fid, "action": "fetch_staged_file",
+                             "metadata": {"session_id": "sess-1", "task_type": "fetch_staged_file",
+                                          "staged_file": dict(STAGED)},
+                             "session": session_payload})
+        rows = [r for r in await w._fetch_pending() if r["id"] == fid]
+        assert rows, "the control row is claimable while the managed turn runs"
+        await w._handle_task(rows[0])
+        assert mdb.get_task(fid)["status"] == "completed"
+        assert (repo / "uploads" / STAGED["filename"]).read_bytes() == b"# spec"
+        assert not stage.exists(), "file-only delivery spends the staged copy"
+        # The managed turn is undisturbed and the carrier still knows the session is busy.
+        assert mdb.get_task("t-1")["status"] == "running"
+        assert "sess-1" in w._inflight_sessions, "a control row must not clear the turn's in-flight mark"
+        release.set()
+        await turn
+
+    asyncio.run(scenario())
+    assert mdb.get_task("t-1")["status"] == "completed"
+    assert "sess-1" not in w._inflight_sessions
+    # Session truth: the delivery is not a turn — no BUSY / last_task_id / native id change from it.
+    after = mdb.get_session("sess-1")
+    for field in ("status", "backend_session_id"):
+        assert after.get(field) == before.get(field), field
+    assert not str(after.get("last_task_id") or "").startswith("fetch-staged-")

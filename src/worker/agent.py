@@ -582,6 +582,10 @@ def _make_session_from_payload(payload: Dict[str, Any]) -> Any:
 # Task executor
 # ---------------------------------------------------------------------------
 
+# Carrier actions that never invoke a backend (no session turn).
+_BACKENDLESS_ACTIONS = frozenset({"fetch_staged_file", "inspect"})
+
+
 class StagedFileMissing(Exception):
     """[A82 pre-cutover rework, F4] The controller answered 404 for a staged
     file: it is definitively gone (no retry can fetch it)."""
@@ -2974,6 +2978,10 @@ class WorkerAgent:
         if task_row.get("action") == "close_session":
             await self._handle_close_session(task_row)
             return
+        # [A82 pre-cutover rework] Only a backend turn marks the session in
+        # flight: a backend-less control row (file delivery, repo inspect)
+        # running beside a turn must not clear that turn's mark.
+        marks_turn = task_row.get("action") not in _BACKENDLESS_ACTIONS
         async with self._semaphore:
             self._slots_used += 1
             try:
@@ -3027,7 +3035,8 @@ class WorkerAgent:
                 })
                 emit_event("task_claimed", backend=task_row.get("backend", ""))
                 self._heartbeat_now.set()  # push slots_used immediately to the server
-                self._inflight_sessions.add(session_id)
+                if marks_turn:
+                    self._inflight_sessions.add(session_id)
 
                 # [A82 Stage 3 rework, B2] Write-ahead: durably record that the
                 # backend is ABOUT to be invoked. If this cannot be persisted the
@@ -3131,7 +3140,8 @@ class WorkerAgent:
                 if claim_token and self._result_spool is not None:
                     self._result_spool.release_reservation(task_id, claim_token)
                 self._slots_used -= 1
-                self._inflight_sessions.discard(session_id)
+                if marks_turn:
+                    self._inflight_sessions.discard(session_id)
                 self._heartbeat_now.set()  # push slots_used=0 immediately after task ends
 
     async def _handle_cancel_managed(self, task_row: Dict[str, Any]) -> None:
