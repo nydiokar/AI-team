@@ -41,6 +41,7 @@ from src.control import control_api
 from src.control.db import get_db
 from src.core.interfaces import ExecutionResult
 from src.orchestrator import TaskOrchestrator
+from tests.stage8a_legacy import unenrolled
 
 TOKEN = "test-tok"
 
@@ -95,6 +96,19 @@ def orch(tmp_path, monkeypatch):
     # Repo-path validation (must live inside the configured workspace root) is not what
     # A39 exercises — bypass it so the harness is hermetic (mirrors test_control_api).
     o.session_service._repo_path_validator = lambda _p: None
+    # [A82 Stage 8a] Sessions are born managed (their turns go to a managed
+    # carrier). This harness proves the Case loop on the IN-PROCESS executor, so
+    # each created session is modelled as operator-unenrolled (the legacy branch
+    # that remains until Stage 8b). The managed Manager loop: PC01 + producers.
+    real_create = o.session_service.create_session
+
+    def _legacy_born(**kw):
+        res = real_create(**kw)
+        if getattr(res, "ok", False):
+            unenrolled(get_db(), res.session.session_id)
+        return res
+
+    o.session_service.create_session = _legacy_born
     return o
 
 

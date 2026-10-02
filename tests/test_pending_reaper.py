@@ -22,6 +22,7 @@ from src.control.db import (
     continuation_task_id,
     quota_resume_task_id,
 )
+from tests.stage8a_legacy import enqueue_pre_cutover
 
 NOW = datetime(2026, 10, 2, 12, 0, 0, tzinfo=timezone.utc)
 GRACE = 1800          # 30 min
@@ -67,7 +68,7 @@ def _stale(db: MeshDB):
 def test_closed_session_pending_is_flagged_immediately(tmp_path):
     db = _db(tmp_path)
     _seed_session(db, "sess_closed", "closed")
-    db.enqueue_task("task_sc", "sess_closed", None, "claude", "resume_session", {"prompt": "x"})
+    enqueue_pre_cutover(db, "task_sc", "sess_closed", None, "claude", "resume_session", {"prompt": "x"})
     # Freshly created (no grace) — a closed session never reopens.
     _backdate(db, "task_sc", _iso(NOW - timedelta(seconds=5)))
     assert _stale(db) == {"task_sc": "session_closed"}
@@ -76,14 +77,14 @@ def test_closed_session_pending_is_flagged_immediately(tmp_path):
 def test_cancelled_session_pending_is_flagged(tmp_path):
     db = _db(tmp_path)
     _seed_session(db, "sess_x", "cancelled")
-    db.enqueue_task("task_cx", "sess_x", None, "claude", "resume_session", {"prompt": "x"})
+    enqueue_pre_cutover(db, "task_cx", "sess_x", None, "claude", "resume_session", {"prompt": "x"})
     assert _stale(db).get("task_cx") == "session_closed"
 
 
 def test_open_session_pending_is_not_flagged(tmp_path):
     db = _db(tmp_path)
     _seed_session(db, "sess_live", "awaiting_input")
-    db.enqueue_task("task_live", "sess_live", None, "claude", "resume_session", {"prompt": "x"})
+    enqueue_pre_cutover(db, "task_live", "sess_live", None, "claude", "resume_session", {"prompt": "x"})
     _backdate(db, "task_live", _iso(NOW - timedelta(seconds=10)))
     assert _stale(db) == {}
 
@@ -161,7 +162,7 @@ def test_thresholds_zero_disable_reasons(tmp_path):
 def test_cancel_task_flips_pending_and_writes_event(tmp_path):
     db = _db(tmp_path)
     _seed_session(db, "sess_c", "closed")
-    db.enqueue_task("task_c", "sess_c", None, "claude", "resume_session", {"prompt": "x"})
+    enqueue_pre_cutover(db, "task_c", "sess_c", None, "claude", "resume_session", {"prompt": "x"})
     assert db.cancel_task("task_c", "pending reaped: session_closed") is True
     row = db.get_task("task_c")
     assert row["status"] == "cancelled"
@@ -191,7 +192,7 @@ def test_reaper_cancels_closed_session_pending(tmp_path, monkeypatch):
 
     db = _db(tmp_path)
     _seed_session(db, "sess_r", "closed")
-    db.enqueue_task("task_r", "sess_r", None, "claude", "resume_session", {"prompt": "x"})
+    enqueue_pre_cutover(db, "task_r", "sess_r", None, "claude", "resume_session", {"prompt": "x"})
 
     monkeypatch.setattr(db_mod, "_db_instance", db, raising=False)
     monkeypatch.setattr(cfg.mesh, "pending_reaper_enabled", True, raising=False)
@@ -210,7 +211,7 @@ def test_reaper_is_a_noop_when_disabled(tmp_path, monkeypatch):
 
     db = _db(tmp_path)
     _seed_session(db, "sess_d", "closed")
-    db.enqueue_task("task_d", "sess_d", None, "claude", "resume_session", {"prompt": "x"})
+    enqueue_pre_cutover(db, "task_d", "sess_d", None, "claude", "resume_session", {"prompt": "x"})
 
     monkeypatch.setattr(db_mod, "_db_instance", db, raising=False)
     monkeypatch.setattr(cfg.mesh, "pending_reaper_enabled", False, raising=False)
@@ -260,9 +261,9 @@ def test_close_case_leaves_other_cases_tokens_alone(tmp_path):
 def test_stats_reports_stale_pending_separately(tmp_path):
     db = _db(tmp_path)
     _seed_session(db, "sess_s", "closed")
-    db.enqueue_task("task_orphan", "sess_s", None, "claude", "resume_session", {"prompt": "x"})
+    enqueue_pre_cutover(db, "task_orphan", "sess_s", None, "claude", "resume_session", {"prompt": "x"})
     _seed_session(db, "sess_ok", "awaiting_input")
-    db.enqueue_task("task_live", "sess_ok", None, "claude", "resume_session", {"prompt": "x"})
+    enqueue_pre_cutover(db, "task_live", "sess_ok", None, "claude", "resume_session", {"prompt": "x"})
 
     stats = db.stats()
     assert stats["tasks_pending"] == 2       # both still pending rows

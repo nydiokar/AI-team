@@ -11,6 +11,7 @@ import pytest
 from src.core.interfaces import Session, SessionStatus
 from src.control.db import MeshDB
 from src.control import transcript as transcript_mod
+from tests.stage8a_legacy import enqueue_pre_cutover
 
 
 def _session(session_id: str = "sess_pro") -> Session:
@@ -55,10 +56,10 @@ def test_transcript_orders_by_send_time_not_completion(tmp_path):
     dropped below a fast later one (and visibly reshuffled under the 3s poll)."""
     db = MeshDB(str(tmp_path / "mesh.db"))
     db.upsert_session(_session("sess_order"))
-    db.enqueue_task(task_id="task_A", session_id="sess_order", machine_id="Horse",
-                    backend="claude", action="resume_session", payload={"prompt": "first message"})
-    db.enqueue_task(task_id="task_B", session_id="sess_order", machine_id="Horse",
-                    backend="claude", action="resume_session", payload={"prompt": "second message"})
+    enqueue_pre_cutover(db, task_id="task_A", session_id="sess_order", machine_id="Horse",
+                        backend="claude", action="resume_session", payload={"prompt": "first message"})
+    enqueue_pre_cutover(db, task_id="task_B", session_id="sess_order", machine_id="Horse",
+                        backend="claude", action="resume_session", payload={"prompt": "second message"})
     # A sent first (10:00) finishes LATE (10:05); B sent second (10:01) finishes EARLY (10:02).
     with db._write() as conn:
         conn.execute(
@@ -116,7 +117,8 @@ def test_transcript_keeps_dispatched_prompt_visible_before_result(tmp_path):
     session.last_task_id = "task_pending"
     session.last_user_message = "Repair the session transcript view."
     db.upsert_session(session)
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         task_id="task_pending",
         session_id=session.session_id,
         machine_id="Horse",
@@ -146,7 +148,8 @@ def test_transcript_recovers_current_legacy_pending_prompt_from_session(tmp_path
     session.last_user_message = "Keep this prompt visible after opening the session."
     db.upsert_session(session)
     # Before prompt-at-enqueue, this column was NULL until task completion.
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         task_id=session.last_task_id,
         session_id=session.session_id,
         machine_id="Horse",

@@ -115,7 +115,8 @@ def test_set_model_unknown_nonadvisory_rejected(svc):
 
 
 def test_set_model_advisory_passes_through(svc):
-    s = _make(svc, backend="opencode")
+    # [A82 Stage 8a] the OpenCode CLI backend is retired; opencode-server is advisory too.
+    s = _make(svc, backend="opencode-server")
     res = svc.set_model(s.session_id, "some/custom-model")
     assert res.ok
     assert svc.store.get(s.session_id).model == "some/custom-model"

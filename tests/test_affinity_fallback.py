@@ -275,12 +275,14 @@ def test_local_pool_never_claims_pinned_task(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     session = _session("sess-pin", machine_id="node-a")
     db.upsert_session(session)
+    # [A82 Stage 8a] A pinned protocol-0 row is now a CONTROL row (session
+    # execution rows are refused at insert); the affinity scan is the same.
     db.enqueue_task(
         task_id="t-pinned",
         session_id=session.session_id,
         machine_id="node-a",
         backend="claude",
-        action="resume_session",
+        action="close_session",
         payload={"prompt": "hi", "task_id": "t-pinned"},
     )
 

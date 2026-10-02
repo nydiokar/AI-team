@@ -165,13 +165,15 @@ def test_OWN01b_legacy_claim_mints_no_token_boundary(tmp_path):
     db = _db(tmp_path)
     _session(db)
     _node(db)
-    # A legacy protocol-0 row (the untouched path).
+    # A legacy protocol-0 row (the untouched path). [A82 Stage 8a] protocol-0
+    # session EXECUTION rows are refused at insert now; the protocol-0 claim
+    # path itself (control rows) is the boundary under test.
     db.enqueue_task(
         task_id="t-legacy",
         session_id="sess-1",
         machine_id=None,
         backend="claude",
-        action="resume_session",
+        action="close_session",
         payload={"task_id": "t-legacy", "prompt": "hi"},
     )
     assert db.claim_task("t-legacy", "worker-a") is True
