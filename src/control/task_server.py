@@ -1105,6 +1105,7 @@ def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
     # the routing fields the executor needs (backend/action) from the committed
     # row — non-secret columns only.
     row = db.get_task(task_id) or {}
+    _emit_managed_change(row.get("session_id"), task_id, "claimed", row.get("status"))
     return {
         "status": "claimed",
         "claim_token": str(token),
@@ -1196,6 +1197,7 @@ def start_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, Any
         )
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    _emit_managed_change(_turn_session(db, task_id), task_id, "started", auth.status)
     return {"status": auth.status, "task_id": auth.task_id, "started_at": auth.started_at}
 
 
@@ -1224,6 +1226,7 @@ def release_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, A
             status_code=409,
             detail="managed turn not releasable (started, superseded or not claimed)",
         )
+    _emit_managed_change(_turn_session(db, task_id), task_id, "released", "pending")
     return {"status": "released", "task_id": task_id}
 
 
@@ -1259,6 +1262,7 @@ def enter_managed_recovery(task_id: str, payload: ManagedRecoveryPayload) -> Dic
         raise HTTPException(status_code=getattr(e, "status_code", 503), detail=str(e))
     if not moved:
         raise HTTPException(status_code=409, detail="turn not in a recoverable state")
+    _emit_managed_change(task.get("session_id"), task_id, "recovery_required", "recovery_required")
     return {"status": "recovery_required", "task_id": task_id}
 
 
@@ -1389,7 +1393,30 @@ def _commit_managed_result(
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
     _hint_turn_scheduler()  # [A82 Stage 4a] slot freed → next head may activate
+    _emit_managed_change(_turn_session(db, task_id), task_id, str(completion.status), str(completion.status))
     return completion
+
+
+def _turn_session(db: Any, task_id: str) -> Optional[str]:
+    """[A82 Stage 6] The owning session of a managed row (one PK read), for
+    the post-commit UI signal only; never raises."""
+    try:
+        return db.turn_session_id(task_id)
+    except Exception:  # noqa: BLE001 — the UI safety net still converges
+        return None
+
+
+def _emit_managed_change(
+    session_id: Any, task_id: str, change: str, status: Any = None,
+) -> None:
+    """[A82 Stage 6] Post-commit ``turn_queue_changed`` for a carrier
+    transition (claim / start / release / recovery / result / resolution)."""
+    from .turn_queue import emit_turn_queue_changed
+
+    emit_turn_queue_changed(
+        str(session_id or ""), change, turn_id=task_id,
+        status=str(status) if status else None,
+    )
 
 
 def _hint_turn_scheduler() -> None:
@@ -1546,6 +1573,7 @@ def record_quiescence_observation(
     except TurnQueueError as e:
         raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
     _hint_turn_scheduler()
+    _emit_managed_change(task.get("session_id"), task_id, "resolved", str(outcome.resolved_status))
     return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.resolved_status}
 
 

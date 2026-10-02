@@ -379,7 +379,7 @@ def _session_status_text(session_row: dict[str, object] | None) -> str | None:
 def _staleness_for_state(state: str) -> str:
     if state in {"stale_claim", "detached"}:
         return "stale"
-    if state == "worker_unknown":
+    if state in {"worker_unknown", "recovery_required"}:
         return "unknown"
     return "fresh"
 

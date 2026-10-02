@@ -25,6 +25,9 @@ TaskTruthState = Literal[
     "worker_unknown",
     "recovered",
     "driver_lost",
+    # [A82 Stage 6] managed (protocol-1) states
+    "withdrawn",
+    "recovery_required",
 ]
 
 TruthConfidence = Literal["high", "medium", "low"]
@@ -114,6 +117,30 @@ def derive_task_execution_state(
             observed_at=_first_text(task_row, "completed_at", "updated_at"),
             raw_refs=raw_refs,
         )
+    if status == "withdrawn":
+        return DerivedExecutionState(
+            state="withdrawn",
+            confidence="high",
+            reason="managed turn was withdrawn while waiting; it never ran",
+            authoritative_source="mesh_task_terminal",
+            observed_at=_first_text(task_row, "completed_at", "updated_at"),
+            raw_refs=raw_refs,
+        )
+    if status == "recovery_required":
+        # Not terminal: start was authorized but the outcome is unproven; the
+        # session slot stays held until evidence/operator resolution (design §6).
+        blocked: str = _text(task_row.get("blocked_reason"))
+        return DerivedExecutionState(
+            state="recovery_required",
+            confidence="high",
+            reason=(
+                f"managed turn outcome is uncertain and holds the session: {blocked[:200]}"
+                if blocked else "managed turn outcome is uncertain and holds the session"
+            ),
+            authoritative_source="mesh_task_status",
+            observed_at=_first_text(task_row, "updated_at", "started_at"),
+            raw_refs=raw_refs,
+        )
     if cancel_requested or status == "cancel_requested":
         return DerivedExecutionState(
             state="cancel_requested",
@@ -171,8 +198,21 @@ def derive_task_execution_state(
             observed_at=_first_text(task_row, "updated_at", "created_at"),
             raw_refs=raw_refs,
         )
+    if status == "queued":
+        return DerivedExecutionState(
+            state="queued",
+            confidence="high",
+            reason="managed turn is waiting in the session queue (not yet consumed)",
+            authoritative_source="mesh_task_status",
+            observed_at=_first_text(task_row, "updated_at", "created_at"),
+            raw_refs=raw_refs,
+        )
 
-    if status == "claimed":
+    # [A82 Stage 6] A managed `running` row is a claim whose start was
+    # authorized: the same node/incarnation/live-state proof applies, but it is
+    # never a stale (re-offerable) claim by lease age (design §6).
+    if status in ("claimed", "running"):
+        started: bool = status == "running"
         claimed_at: datetime | None = _parse_dt(task_row.get("claimed_at"))
         claim_stale_after: str | None = _add_seconds(claimed_at, claim_lease_sec)
 
@@ -256,6 +296,15 @@ def derive_task_execution_state(
                 raw_refs=raw_refs,
             )
 
+        if started:
+            return DerivedExecutionState(
+                state="worker_running",
+                confidence="medium",
+                reason="managed start was authorized on the current node incarnation (no fresh live proof)",
+                authoritative_source="mesh_task_claim",
+                observed_at=_first_text(task_row, "started_at", "claimed_at") or None,
+                raw_refs=raw_refs,
+            )
         if claimed_at is not None and (current_time - claimed_at).total_seconds() <= claim_lease_sec:
             return DerivedExecutionState(
                 state="claimed",

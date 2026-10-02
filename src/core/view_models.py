@@ -16,6 +16,19 @@ from src.core.session_reason import SessionReason
 
 
 @dataclass(frozen=True)
+class SessionTurnQueueState:
+    """[A82 Stage 6] Managed turn-queue overlay of an ENROLLED session, read
+    from the ledger (never from ``status``): waiting count, the active slot
+    holder and the operator pause/hold. Queued work is NOT busy — only an
+    ``active_status`` means a turn is in flight (or held for recovery)."""
+    queued: int
+    active_turn_id: Optional[str]
+    active_status: Optional[str]
+    paused: bool
+    hold: Optional[str]
+
+
+@dataclass(frozen=True)
 class SessionView:
     """Operator-facing read model for a session. Derived, never persisted.
 
@@ -53,6 +66,8 @@ class SessionView:
     # `with_reason` from the batched `derive_session_reasons`; the plain
     # `from_session` leaves it None so every existing caller is byte-identical.
     reason: Optional[SessionReason] = None
+    # [A82 Stage 6] Ledger-derived queue overlay; None ⇒ not enrolled (or no db).
+    turn_queue: Optional[SessionTurnQueueState] = None
 
     @classmethod
     def from_session(cls, s: Session) -> "SessionView":
@@ -114,6 +129,12 @@ class SessionView:
         field changes, so ``needs_input``/``is_active`` stay byte-identical."""
         from dataclasses import replace
         return replace(self, reason=reason)
+
+    def with_turn_queue(self, state: Optional[Dict[str, Any]]) -> "SessionView":
+        """[A82 Stage 6] Copy carrying the managed queue overlay (presentational;
+        ``status`` stays the persisted enum)."""
+        from dataclasses import replace
+        return replace(self, turn_queue=SessionTurnQueueState(**state) if state else None)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)   # JSON-ready for a future Web UI / WebSocket
