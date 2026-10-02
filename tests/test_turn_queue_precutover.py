@@ -531,6 +531,8 @@ def test_PC08c_fetch_failure_through_real_carrier_is_not_invoked_release(tmp_pat
     monkeypatch.setattr(tsrv, "_worker_token", lambda: TOKEN)
 
     class _HTTP(_ClientHTTP):
+        # Every HTTP error surfaces as a transport error (transient). A real
+        # urllib 404 is terminal (`staged_file_missing`, rework F4).
         def get_bytes(self, path, timeout=60):
             self.calls.append(("GET", path, None))
             resp = self.client.get(path, headers={"Authorization": f"Bearer {TOKEN}"})
