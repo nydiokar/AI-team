@@ -17,6 +17,29 @@ _FACTORIES: Dict[str, Callable[[], CodingBackend]] = {
 }
 
 
+# [A82 Stage 8a] Backends kept ONLY so existing sessions stay readable and
+# closable: no new session, turn or compaction is admitted for them (operator
+# decision 2026-10-02: the OpenCode CLI backend is retired; OpenCode sessions
+# use ``opencode-server``). Registry-level policy, never carrier/server logic.
+RETIRED_BACKENDS: Dict[str, str] = {
+    "opencode": "the OpenCode CLI backend is retired; use opencode-server",
+}
+
+
+def is_retired_backend(name: str) -> bool:
+    return (name or "").strip().lower() in RETIRED_BACKENDS
+
+
+def retired_backend_reason(name: str) -> str:
+    """Operator-facing reason for a retired backend ("" when not retired)."""
+    return RETIRED_BACKENDS.get((name or "").strip().lower(), "")
+
+
+def active_backend_names() -> Tuple[str, ...]:
+    """Backends a NEW session may use (registered and not retired)."""
+    return tuple(n for n in _FACTORIES if n not in RETIRED_BACKENDS)
+
+
 def build_backends() -> Dict[str, CodingBackend]:
     """Instantiate {name: CodingBackend} — replaces the duplicated dict literals."""
     return {name: factory() for name, factory in _FACTORIES.items()}

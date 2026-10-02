@@ -158,6 +158,26 @@ class CarrierUnavailableError(TurnQueueError):
     code = "carrier_unavailable"
 
 
+class CarrierRequiredError(CarrierUnavailableError):
+    """[A82 Stage 8a] 503 — a session turn in a deployment without a managed
+    carrier (``MESH_ENABLED=false`` single box): session turns run only on a
+    managed carrier, so they are refused before anything is admitted. One-off
+    (session-less) work is unaffected. Policy switch:
+    ``TaskOrchestrator._REFUSE_SESSION_TURNS_WITHOUT_MESH``."""
+
+    code = "carrier_required"
+
+
+class BackendRetiredError(TurnQueueError):
+    """[A82 Stage 8a] 410 — the session's backend is retired
+    (``src.backends.registry.RETIRED_BACKENDS``): no new turn or compaction is
+    admitted, refused BEFORE any carrier lookup. Reads, transcripts and close
+    keep working."""
+
+    status_code = 410
+    code = "backend_retired"
+
+
 class CarrierOfflineError(CarrierUnavailableError):
     """[A82 pre-cutover] The assigned carrier REGISTERED ``backend`` as managed
     but is offline / heart-beat stale right now. Under the offline-carrier
