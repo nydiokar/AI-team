@@ -264,3 +264,34 @@ def test_S7_M1_spool_boot_replay_keeps_one_envelope_in_memory(tmp_path):
         tracemalloc.stop()
     assert replayed == n and len(w._pending_result_delivery) == n
     assert peak < 6 * 1024 * 1024, f"replay peak {peak / 2**20:.1f} MiB holds every envelope"
+
+
+# --------------------------------------------------------------------------- #
+# Stage 7 pressure finding — per-pass scheduler reads walked HISTORY
+# --------------------------------------------------------------------------- #
+def _history_plans(tmp_path, fn) -> List[str]:
+    from tests.test_turn_queue_stage7_pressure import _seed_history, _traced
+
+    mdb = MeshDB(str(tmp_path / "hist.db"))
+    _seed_history(mdb, 3000, waiting_sessions=3, per_session=2)  # + ANALYZE
+    plans: List[str] = []
+    conn = mdb._conn()
+    for sql in _traced(mdb, lambda: fn(mdb)):
+        if "mesh_tasks" in sql and sql.lstrip().upper().startswith("SELECT"):
+            plans.extend(str(r[3]) for r in conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall())
+    return plans
+
+
+@pytest.mark.parametrize("call", ["count_slot_waiting_sessions", "requeue_turns_on_dead_carriers"])
+def test_S7_P1_scheduler_pass_reads_use_the_bounded_managed_indexes(tmp_path, call):
+    """Run on EVERY scheduler pass while work waits. With completed history and
+    real statistics (ANALYZE) SQLite chose a protocol-agnostic plan: a full
+    ``mesh_tasks`` scan (requeue probe) / each session's whole history via
+    ``idx_mesh_tasks_session`` (slot-waiting count) — ~109 ms per call at 100k
+    rows on the Pi. They must read only the bounded waiting/open subset."""
+    plans = _history_plans(tmp_path, lambda d: getattr(d, call)())
+    touching = [p for p in plans if p.startswith(("SCAN", "SEARCH")) and "nodes" not in p
+                and " s " not in f" {p} " and not p.startswith(("SCAN s", "SEARCH s ", "SCAN n", "SEARCH n "))]
+    assert touching, plans
+    bad = [p for p in touching if "idx_mesh_turns_" not in p]
+    assert not bad, plans
