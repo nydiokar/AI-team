@@ -621,9 +621,14 @@ def test_R4_poisoned_rows_fail_visibly_and_never_starve_good_rows(tg: _Env) -> N
         poisoned.append(r["id"])
     conn.commit()
     good = tg.run_turn("good", "op-g")
-    for _ in range(MANAGED_EFFECTS_MAX_ATTEMPTS + 2):
+    for _ in range(MANAGED_EFFECTS_MAX_ATTEMPTS + 1):
         tg.drain()
+    # The first batch of poisoned rows failed out of the index at the bound,
+    # so the good row (completed last) was reached.
     assert [c["task_id"] for c in tg.notifier.calls] == [seed, good]
+    for _ in range(MANAGED_EFFECTS_MAX_ATTEMPTS):
+        tg.drain()
+    assert tg.gw.pending_turn_effects(100) == []
     for pid in poisoned:
         row = tg.row(pid)
         assert row["effects_state"] == "failed", pid
