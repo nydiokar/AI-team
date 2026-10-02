@@ -1812,7 +1812,7 @@ Reviewer REWORK @ `496b681` (probes `/tmp/claude-1000/a82-review-s5/test_probe_s
 | `PATCH /api/turn-requests/{id}` (If-Match) | Edits a queued human instruction only (sequence kept). Stale revision or consumed ⇒ 409 with `detail.current` (safe summary). Not human ⇒ 403. |
 | `POST /api/turn-requests/{id}/withdraw` (If-Match) | Withdraws ONLY that queued item. Audited, never deleted. A written Case lineage is voided (`void_lineage=True`, the same rule as close; the sweep re-runs it). |
 | `POST /api/sessions/{id}/turn-requests/pause` / `resume` | Persistent `turn_queue_paused`. Resume also releases the operator-stop hold (record + `cancelled`→`idle` via `_release_stop_hold`). Recovery, Case, quota/`not_before` and approval gates stay (S6-06). |
-| `POST /api/sessions/{id}/stop` | Enrolled: persistent pause is committed FIRST, then only the active turn is cancelled (S6-05). Telegram `/session_cancel` keeps Stage-4b semantics: it has no resume command, so a send releases the hold. |
+| `POST /api/sessions/{id}/stop` | Enrolled: persistent pause is committed FIRST, then only the active turn is cancelled (S6-05). ~~Telegram `/session_cancel` keeps Stage-4b semantics: it has no resume command, so a send releases the hold.~~ **Superseded by the Stage 6 follow-up `4b3b8a0`:** Telegram `/session_cancel` and session-scoped `/cancel` commit the same persistent pause first; `/session_resume` is the explicit release (Stage 7: the reply says "Queue paused" only when the pause holds). |
 | `POST /api/turn-requests/{id}/resolve-recovery` | Unchanged contract. Reachable for an oversize-artifact hold through the API (S6-07: list shows `artifact=` pointer, no-ack 409, ack ⇒ `failed`, slot freed). |
 | `POST /api/instructions` | Status and envelope unchanged (`{ok, task_id, session}` 200). Enrolled: `task_id` is the canonical ledger id and `session.turn_queue` is the ledger overlay. Queued work is not busy, and a later refused admission changes nothing (S6-08). |
 
@@ -1920,7 +1920,7 @@ Replaced or fixed:
 Nothing is deferred.
 
 **Residuals / honest gaps.**
-1. Telegram stop has no persistent pause, because Telegram has no resume command (4b semantics retained).
+1. ~~Telegram stop has no persistent pause, because Telegram has no resume command (4b semantics retained).~~ Superseded by the Stage 6 follow-up (`4b3b8a0`): Telegram stop pauses persistently; `/session_resume` releases.
 2. The operator create route takes body text only; attachments and carry still go through `/api/instructions`, which is unchanged.
 3. The UI was verified with component tests on a mocked network; it was not rendered against a live gateway.
 4. A process note: removing my scratch baseline worktree (detached, under the scratchpad, holding only copies of these files) used `git worktree remove --force`. This breaks the no-`--force` rule. No repo data was affected.
