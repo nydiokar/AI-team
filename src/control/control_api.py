@@ -1578,16 +1578,29 @@ def build_control_api(orchestrator) -> FastAPI:
             governor["sdk_max_budget_usd"] = getattr(_cfg.claude, "sdk_max_budget_usd", None)
         except Exception:
             pass
-        # [A82 Stage 8a] Managed-carrier coverage from the gateway's periodic
-        # check (no DB read here): (carrier, backend) pairs of open sessions no
-        # live managed carrier covers. None ⇒ not checked yet / not a gateway.
+        # [A82 Stage 8a, review F4] Unauthenticated probe: only whether every
+        # open session's (carrier, backend) has a live managed carrier, from the
+        # gateway's periodic check (no DB read). None ⇒ not checked yet. The
+        # node ids / pins / counts live behind auth: /api/turn-queue/coverage.
+        missing = getattr(orchestrator, "_managed_carrier_missing", None)
+        coverage_ok = (not missing) if isinstance(missing, list) else None
+        return {"status": "ok", "governor": governor, "turn_queue": {"coverage_ok": coverage_ok}}
+
+    @app.get("/api/turn-queue/coverage", dependencies=[Depends(_require_auth)])
+    def api_turn_queue_coverage() -> Dict[str, Any]:
+        """[A82 Stage 8a, review F4] The latest managed-carrier coverage check:
+        (carrier, pin, backend, sessions) groups no live managed carrier covers
+        and the open retired-backend session count. Read from the gateway's
+        cached check (startup + periodic); ``checked`` False until it ran."""
         missing = getattr(orchestrator, "_managed_carrier_missing", None)
         retired = getattr(orchestrator, "_retired_backend_sessions", None)
-        turn_queue: Dict[str, Any] = {
-            "managed_carrier_missing": missing if isinstance(missing, list) else None,
+        checked = isinstance(missing, list)
+        return {
+            "checked": checked,
+            "coverage_ok": (not missing) if checked else None,
+            "managed_carrier_missing": missing if checked else [],
             "retired_backend_sessions": retired if isinstance(retired, int) else None,
         }
-        return {"status": "ok", "governor": governor, "turn_queue": turn_queue}
 
     @app.post("/api/turn-requests/{task_id}/resolve-recovery", dependencies=[Depends(_require_auth)])
     def api_resolve_turn_recovery(task_id: str, body: TurnRecoveryResolveBody) -> JSONResponse:
