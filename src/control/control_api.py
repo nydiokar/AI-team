@@ -402,6 +402,88 @@ class TurnRequestEditBody(BaseModel):
         return TurnRequestCreateBody._body_byte_limit(value)
 
 
+class TurnRequestSummaryOut(BaseModel):
+    """[A82 Stage 6] One queue card (design §9). A read model of the managed
+    ledger — NOT the telemetry turn DTO of ``/api/turns``. Never carries the
+    full prompt, payload, claim token or sender capability."""
+
+    model_config = {"extra": "ignore"}
+
+    id: str
+    turn_id: str
+    session_id: str
+    status: str
+    revision: int
+    queue_sequence: int
+    queue_position: Optional[int] = None
+    turn_source: Optional[str] = None
+    turn_kind: Optional[str] = None
+    sender_session_id: Optional[str] = None
+    blocked_reason: Optional[str] = None
+    created_at: Optional[str] = None
+    activated_at: Optional[str] = None
+    started_at: Optional[str] = None
+    preview: str = ""
+
+    @classmethod
+    def from_row(cls, row: Dict[str, Any]) -> "TurnRequestSummaryOut":
+        return cls.model_validate({**row, "turn_id": row["id"]})
+
+
+class TurnRequestPageOut(BaseModel):
+    """[A82 Stage 6] Cursor page of one session's open managed turns, in run
+    order, plus the queue-level state (counts, active slot, operator pause)."""
+
+    turns: List[TurnRequestSummaryOut]
+    count: int
+    queued: int
+    active_turn_id: Optional[str] = None
+    active_status: Optional[str] = None
+    next_cursor: Optional[int] = None
+    enrolled: bool
+    paused: bool
+    hold: Optional[str] = None
+
+
+class TurnRequestDetailOut(TurnRequestSummaryOut):
+    """[A82 Stage 6] The one-item read: the full editable intent (body)."""
+
+    body: str = ""
+    completed_at: Optional[str] = None
+    flow_run_id: Optional[str] = None
+
+    @classmethod
+    def from_row(cls, row: Dict[str, Any]) -> "TurnRequestDetailOut":
+        body: str = str(row.get("body") or "")
+        preview: str = body.encode("utf-8")[:2048].decode("utf-8", errors="ignore")
+        return cls.model_validate({**row, "turn_id": row["id"], "preview": preview})
+
+
+class TurnRequestReceiptOut(BaseModel):
+    """[A82 Stage 6] 202 acknowledgement of a durable admission: stable id,
+    current status/revision, acceptance time and a queue-position SNAPSHOT
+    (not a start-time promise)."""
+
+    turn_id: str
+    task_id: str
+    status: str
+    revision: int
+    queue_sequence: Optional[int] = None
+    queue_position: Optional[int] = None
+    accepted_at: Optional[str] = None
+    idempotent_replay: bool = False
+    source: Optional[str] = None
+    sender_session_id: Optional[str] = None
+
+
+class TurnQueueControlOut(BaseModel):
+    """[A82 Stage 6] Operator queue pause/resume outcome."""
+
+    session_id: str
+    paused: bool
+    hold: Optional[str] = None
+
+
 class CreateSessionBody(BaseModel):
     backend: str
     repo_path: str
@@ -683,12 +765,20 @@ class UploadResult(BaseModel):
     path: str
 
 
-def _session_payload(session) -> Optional[Dict[str, Any]]:
-    """Render a Session as the canonical SessionView dict (or None)."""
+def _session_payload(session, *, with_queue: bool = False) -> Optional[Dict[str, Any]]:
+    """Render a Session as the canonical SessionView dict (or None).
+    [A82 Stage 6] ``with_queue`` adds the ledger-derived turn-queue overlay
+    (enrolled admission responses: the truthful session state)."""
     if session is None:
         return None
     from src.core.view_models import SessionView
-    return SessionView.from_session(session).to_dict()
+    view = SessionView.from_session(session)
+    if with_queue:
+        from src.services.session_service import session_turn_queue_overlay
+        view = view.with_turn_queue(
+            session_turn_queue_overlay(_db(), [session.session_id]).get(session.session_id),
+        )
+    return view.to_dict()
 
 
 def _fork_carry_meta(continue_inline: Optional[str]) -> Optional[Dict[str, str]]:
@@ -1462,7 +1552,7 @@ def build_control_api(orchestrator) -> FastAPI:
           operator decision recorded as evidence. Never ``completed`` (no
           result) and never requeued after start (double-execution risk).
         No claim token is needed or returned."""
-        from src.control.turn_queue import TurnQueueError
+        from src.control.turn_queue import TurnQueueError, emit_turn_queue_changed
 
         db = _db()
         if db is None:
@@ -1478,6 +1568,7 @@ def build_control_api(orchestrator) -> FastAPI:
                     raise HTTPException(status_code=409, detail={"ok": False, "reason": "unstarted_turn_requeue_only"})
                 if not db.release_turn(task_id, token):
                     raise HTTPException(status_code=409, detail={"ok": False, "reason": "state_changed"})
+                emit_turn_queue_changed(row.get("session_id"), "released", turn_id=task_id, status="pending")
                 return JSONResponse({"ok": True, "task_id": task_id, "status": "pending"})
             if status in ("running", "recovery_required"):
                 if body.decision == "requeue":
@@ -1499,6 +1590,8 @@ def build_control_api(orchestrator) -> FastAPI:
                 from src.control.turn_scheduler import notify_turn_queue_changed
 
                 notify_turn_queue_changed()  # [A82 Stage 4a] slot freed
+                emit_turn_queue_changed(row.get("session_id"), "resolved", turn_id=task_id,
+                                        status=str(res.resolved_status))
                 return JSONResponse({"ok": True, "task_id": task_id, "status": res.resolved_status})
         except TurnQueueError as e:
             raise HTTPException(status_code=getattr(e, "status_code", 409), detail={"ok": False, "reason": e.code})
@@ -2160,131 +2253,176 @@ def build_control_api(orchestrator) -> FastAPI:
             )
         if not isinstance(admitted, TurnAdmission):
             raise HTTPException(status_code=503, detail={"ok": False, "reason": "admission_receipt_missing"})
-        out: Dict[str, Any] = {
-            "turn_id": admitted.id,
-            "task_id": admitted.id,
-            "status": admitted.status,
-            "revision": admitted.revision,
-            "queue_sequence": admitted.queue_sequence,
-        }
+        # [A82 Stage 6] The receipt reads the COMMITTED row (a replay reports the
+        # current status/revision, e.g. after an edit) — never the request.
+        db = _db()
+        row: Optional[Dict[str, Any]] = None
+        if db is not None:
+            try:
+                row = await asyncio.to_thread(db.get_turn_request, str(admitted))
+            except Exception:  # noqa: BLE001 — committed; the receipt falls back to the admission
+                row = None
+        receipt = TurnRequestReceiptOut(
+            turn_id=str(admitted), task_id=str(admitted),
+            status=str((row or {}).get("status") or admitted.status),
+            revision=int((row or {}).get("revision") or admitted.revision),
+            queue_sequence=(row or {}).get("queue_sequence", admitted.queue_sequence),
+            queue_position=(row or {}).get("queue_position"),
+            accepted_at=(row or {}).get("created_at"),
+            idempotent_replay=bool(admitted.idempotent_replay),
+        )
         if sender is not None:
-            out.update({"idempotent_replay": bool(admitted.idempotent_replay),
-                        "source": "agent", "sender_session_id": sender.session_id})
-        return JSONResponse(out, status_code=202)
+            receipt.source = "agent"
+            receipt.sender_session_id = sender.session_id
+        return JSONResponse(receipt.model_dump(), status_code=202)
 
-    @app.get("/api/sessions/{session_id}/turn-requests", dependencies=[Depends(_require_auth)])
+    def _require_queue_db() -> Any:
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        return db
+
+    async def _turn_mutation_http(db: Any, task_id: str, err: Exception) -> HTTPException:
+        """[A82 Stage 6] A refused queue mutation; a 409 (stale revision or
+        consumption race) carries a SAFE current summary so the client refetches
+        instead of overwriting (design §4)."""
+        http = _turn_queue_http(err)
+        if http.status_code == 409:
+            try:
+                row = await asyncio.to_thread(db.get_turn_request, task_id)
+            except Exception:  # noqa: BLE001 — the 409 itself stays truthful
+                row = None
+            if row is not None:
+                http.detail = {**http.detail, "current": TurnRequestSummaryOut.from_row(
+                    {**row, "preview": str(row.get("body") or "")[:2048].encode("utf-8")[:2048]
+                     .decode("utf-8", errors="ignore")},
+                ).model_dump()}
+        return http
+
+    async def _operator_human_turn(db: Any, task_id: str) -> Dict[str, Any]:
+        row = await asyncio.to_thread(db.get_turn_request, task_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "turn_not_found"})
+        if row["turn_source"] not in ("human", "operator") or row["turn_kind"] != "instruction":
+            raise HTTPException(status_code=403, detail={"ok": False, "reason": "not_human_turn"})
+        return row
+
+    @app.get("/api/sessions/{session_id}/turn-requests", dependencies=[Depends(_require_auth)],
+             response_model=TurnRequestPageOut)
     def api_list_turn_requests(
         session_id: str, cursor: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
-    ) -> JSONResponse:
+    ) -> TurnRequestPageOut:
+        """Cursor page (run order) of the session's open managed turns."""
         from src.control.turn_queue import TurnQueueError
 
-        db = _db()
-        if db is None:
-            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        db = _require_queue_db()
         try:
-            return JSONResponse(db.list_turn_requests(session_id, after_sequence=cursor, limit=limit))
+            page: Dict[str, Any] = db.list_turn_requests(session_id, after_sequence=cursor, limit=limit)
         except TurnQueueError as err:
             raise _turn_queue_http(err)
+        return TurnRequestPageOut.model_validate({
+            **page, "turns": [TurnRequestSummaryOut.from_row(t) for t in page["turns"]],
+        })
 
-    @app.get("/api/turn-requests/{task_id}", dependencies=[Depends(_require_auth)])
-    def api_get_turn_request(task_id: str) -> JSONResponse:
+    @app.get("/api/turn-requests/{task_id}", dependencies=[Depends(_require_auth)],
+             response_model=TurnRequestDetailOut)
+    def api_get_turn_request(task_id: str) -> TurnRequestDetailOut:
         from src.control.turn_queue import TurnQueueError
 
-        db = _db()
-        if db is None:
-            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        db = _require_queue_db()
         try:
             row = db.get_turn_request(task_id)
         except TurnQueueError as err:
             raise _turn_queue_http(err)
         if row is None:
             raise HTTPException(status_code=404, detail={"ok": False, "reason": "turn_not_found"})
-        return JSONResponse(row)
+        return TurnRequestDetailOut.from_row(row)
 
-    @app.patch("/api/turn-requests/{task_id}", dependencies=[Depends(_require_auth)])
+    @app.patch("/api/turn-requests/{task_id}", dependencies=[Depends(_require_auth)],
+               response_model=TurnRequestDetailOut)
     async def api_edit_turn_request(
         task_id: str, body: TurnRequestEditBody,
         revision: int = Header(alias="If-Match", ge=1),
-    ) -> JSONResponse:
-        from src.control.turn_queue import TurnQueueError
+    ) -> TurnRequestDetailOut:
+        """Conditional edit of a QUEUED human turn (expected revision in
+        If-Match). Sequence, recipient, source and Case never change."""
+        from src.control.turn_queue import TurnQueueError, emit_turn_queue_changed
         from src.control.turn_admission import run_turn_mutation_async
         from src.control.turn_scheduler import notify_turn_queue_changed
 
-        db = _db()
-        if db is None:
-            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
-        row = await asyncio.to_thread(db.get_turn_request, task_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail={"ok": False, "reason": "turn_not_found"})
-        if row["turn_source"] not in ("human", "operator") or row["turn_kind"] != "instruction":
-            raise HTTPException(status_code=403, detail={"ok": False, "reason": "not_human_turn"})
+        db = _require_queue_db()
+        row = await _operator_human_turn(db, task_id)
         try:
-            updated = await run_turn_mutation_async(
+            await run_turn_mutation_async(
                 lambda: db.revise_turn(task_id, revision, body=body.body, actor="operator"),
             )
         except TurnQueueError as err:
-            raise _turn_queue_http(err)
+            raise await _turn_mutation_http(db, task_id, err)
         notify_turn_queue_changed()
-        return JSONResponse(await asyncio.to_thread(db.get_turn_request, task_id) or updated)
+        emit_turn_queue_changed(row["session_id"], "edited", turn_id=task_id, status="queued")
+        current = await asyncio.to_thread(db.get_turn_request, task_id)
+        return TurnRequestDetailOut.from_row(current or row)
 
-    @app.post("/api/turn-requests/{task_id}/withdraw", dependencies=[Depends(_require_auth)])
+    @app.post("/api/turn-requests/{task_id}/withdraw", dependencies=[Depends(_require_auth)],
+              response_model=TurnRequestSummaryOut)
     async def api_withdraw_turn_request(
         task_id: str, revision: int = Header(alias="If-Match", ge=1),
-    ) -> JSONResponse:
-        from src.control.turn_queue import TurnQueueError
+    ) -> TurnRequestSummaryOut:
+        """Withdraw ONLY this queued human turn (auditable; never a deletion and
+        never an execution failure). Its written Case lineage is voided."""
+        from src.control.turn_queue import TurnQueueError, emit_turn_queue_changed
         from src.control.turn_admission import run_turn_mutation_async
         from src.control.turn_scheduler import notify_turn_queue_changed
 
-        db = _db()
-        if db is None:
-            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
-        row = await asyncio.to_thread(db.get_turn_request, task_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail={"ok": False, "reason": "turn_not_found"})
-        if row["turn_source"] not in ("human", "operator") or row["turn_kind"] != "instruction":
-            raise HTTPException(status_code=403, detail={"ok": False, "reason": "not_human_turn"})
+        db = _require_queue_db()
+        row = await _operator_human_turn(db, task_id)
         try:
             await run_turn_mutation_async(
-                lambda: db.withdraw_turn(task_id, revision, actor="operator"),
+                lambda: db.withdraw_turn(task_id, revision, actor="operator", void_lineage=True),
             )
         except TurnQueueError as err:
-            raise _turn_queue_http(err)
+            raise await _turn_mutation_http(db, task_id, err)
+        void = getattr(orchestrator, "_void_withdrawn_lineage", None)
+        if callable(void):
+            try:
+                await asyncio.to_thread(void, task_id)
+            except Exception as e:  # noqa: BLE001 — stays `void`; the scheduler sweep re-runs it
+                logger.warning("event=managed_void_lineage_deferred task_id=%s err=%s", task_id, e)
         notify_turn_queue_changed()
-        return JSONResponse({"turn_id": task_id, "status": "withdrawn", "revision": revision + 1})
+        emit_turn_queue_changed(row["session_id"], "withdrawn", turn_id=task_id, status="withdrawn")
+        current = await asyncio.to_thread(db.get_turn_request, task_id)
+        return TurnRequestSummaryOut.from_row({**(current or row), "preview": ""})
 
-    @app.post("/api/sessions/{session_id}/turn-requests/pause", dependencies=[Depends(_require_auth)])
-    async def api_pause_turn_requests(session_id: str) -> JSONResponse:
-        from src.control.turn_queue import TurnQueueError
-        from src.control.turn_admission import run_turn_mutation_async
-
-        db = _db()
-        if db is None:
-            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
-        try:
-            state = await run_turn_mutation_async(
-                lambda: db.set_turn_queue_paused(session_id, True),
-            )
-        except TurnQueueError as err:
-            raise _turn_queue_http(err)
-        return JSONResponse(state)
-
-    @app.post("/api/sessions/{session_id}/turn-requests/resume", dependencies=[Depends(_require_auth)])
-    async def api_resume_turn_requests(session_id: str) -> JSONResponse:
-        from src.control.turn_queue import TurnQueueError
+    async def _set_queue_paused(session_id: str, paused: bool) -> TurnQueueControlOut:
+        from src.control.turn_queue import TurnQueueError, emit_turn_queue_changed
         from src.control.turn_admission import run_turn_mutation_async
         from src.control.turn_scheduler import notify_turn_queue_changed
 
-        db = _db()
-        if db is None:
-            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        db = _require_queue_db()
         try:
             state = await run_turn_mutation_async(
-                lambda: db.set_turn_queue_paused(session_id, False),
+                lambda: db.set_turn_queue_paused(session_id, paused),
             )
         except TurnQueueError as err:
             raise _turn_queue_http(err)
-        notify_turn_queue_changed()
-        return JSONResponse(state)
+        if not paused:
+            notify_turn_queue_changed()
+        emit_turn_queue_changed(session_id, "paused" if paused else "resumed")
+        return TurnQueueControlOut.model_validate(state)
+
+    @app.post("/api/sessions/{session_id}/turn-requests/pause", dependencies=[Depends(_require_auth)],
+              response_model=TurnQueueControlOut)
+    async def api_pause_turn_requests(session_id: str) -> TurnQueueControlOut:
+        """Persist an operator queue pause (survives restart). Nothing queued
+        activates until an explicit resume; the active turn is not touched."""
+        return await _set_queue_paused(session_id, True)
+
+    @app.post("/api/sessions/{session_id}/turn-requests/resume", dependencies=[Depends(_require_auth)],
+              response_model=TurnQueueControlOut)
+    async def api_resume_turn_requests(session_id: str) -> TurnQueueControlOut:
+        """Clear ONLY the operator pause / operator-stop hold. Recovery, Case,
+        provider-deadline and approval gates keep holding."""
+        return await _set_queue_paused(session_id, False)
 
     @app.post("/api/instructions", dependencies=[Depends(_require_auth)])
     async def api_instructions(
@@ -2318,7 +2456,8 @@ def build_control_api(orchestrator) -> FastAPI:
                         orchestrator, body, session, idempotency_key, principal,
                     )
                     session = orchestrator.session_service.store.get(session.session_id)
-                    resp = {"ok": True, "task_id": task_id, "session": _session_payload(session)}
+                    resp = {"ok": True, "task_id": str(task_id),
+                            "session": await asyncio.to_thread(_session_payload, session, with_queue=True)}
                     _idem_put("instructions", idempotency_key, resp)
                     return JSONResponse(resp)
                 # Status write (BUSY + last_user_message) lives on the service.
@@ -2817,6 +2956,22 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
 
+    def _pause_enrolled_queue_for_stop(session_id: str) -> None:
+        """[A82 Stage 6] Sync (threadpool) half of the web stop: persist the
+        operator queue pause for an ENROLLED session. No read while nothing is
+        enrolled; a closed session is tolerated; other typed failures raise."""
+        from src.control.turn_admission import session_enrollment_sync
+        from src.control.turn_queue import OwnershipConflictError, emit_turn_queue_changed
+
+        db = _db()
+        if db is None or not session_enrollment_sync(db, session_id):
+            return
+        try:
+            db.set_turn_queue_paused(session_id, True)
+        except OwnershipConflictError:
+            return  # closed meanwhile: nothing can activate there anyway
+        emit_turn_queue_changed(session_id, "paused")
+
     @app.post("/api/sessions/{session_id}/stop", dependencies=[Depends(_require_auth)])
     def api_stop_session(session_id: str) -> JSONResponse:
         session = orchestrator.session_service.store.get(session_id)
@@ -2829,6 +2984,14 @@ def build_control_api(orchestrator) -> FastAPI:
 
         stop_managed = getattr(orchestrator, "stop_managed_session_turn", None)
         try:
+            # [A82 Stage 6] "Stop active" = a PERSISTENT operator queue pause,
+            # committed BEFORE the cancel (freeing the slot can never launch the
+            # next queued instruction), then cancel ONLY the active turn. Waiting
+            # work stays visible and paused until the explicit resume route (a
+            # new admission does not clear it — design §7). Telegram's stop has
+            # no resume command and keeps the Stage-4b release-on-send hold.
+            if callable(stop_managed):
+                _pause_enrolled_queue_for_stop(session_id)
             managed = stop_managed(session) if callable(stop_managed) else None
         except TurnQueueError as err:
             raise _turn_queue_http(err)

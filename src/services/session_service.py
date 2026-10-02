@@ -22,6 +22,21 @@ from src.backends.registry import is_valid_backend, DEFAULT_BACKEND
 logger = logging.getLogger(__name__)
 
 
+def session_turn_queue_overlay(db: Any, session_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """[A82 Stage 6] Batched ledger overlay ``{session_id: queue state}`` for
+    enrolled sessions. No read while nothing is enrolled; a failed read
+    degrades to no overlay (presentational — never a write, never BUSY)."""
+    if db is None or not session_ids:
+        return {}
+    try:
+        if db.any_session_enrolled() is False:
+            return {}
+        return db.session_turn_queue_states(session_ids)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("session_turn_queue_overlay_failed err=%s", e)
+        return {}
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """Accepted/rejected envelope for inbound session commands.
@@ -357,8 +372,11 @@ class SessionService:
             return [SessionView.from_session(s) for s in sessions]
         from src.core.session_reason import derive_session_reasons
         reasons = derive_session_reasons(db, sessions)
+        queues = session_turn_queue_overlay(db, [s.session_id for s in sessions])
         return [
-            SessionView.from_session(s).with_reason(reasons.get(s.session_id))
+            SessionView.from_session(s)
+            .with_reason(reasons.get(s.session_id))
+            .with_turn_queue(queues.get(s.session_id))
             for s in sessions
         ]
 

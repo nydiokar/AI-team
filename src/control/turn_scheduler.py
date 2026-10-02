@@ -31,6 +31,8 @@ from pydantic import BaseModel
 
 from .turn_admission import ALLOWANCE, SharedWaitingAllowance
 
+from .turn_queue import emit_turn_queue_changed
+
 logger = logging.getLogger(__name__)
 
 ACTIVATION_LIMIT_PER_PASS = 25
@@ -129,6 +131,9 @@ async def _activate_head(
             )
             if changed:  # log on state change only, not every retry
                 logger.warning("event=turn_prepare_failed task_id=%s err=%s", task_id, e)
+                emit_turn_queue_changed(
+                    str(head.get("session_id") or ""), "blocked", turn_id=task_id, status="queued",
+                )
             return "blocked"
         expected_config = int(current["config_revision"])
         outcome = await asyncio.to_thread(
@@ -212,6 +217,14 @@ async def run_scheduler_pass(
                 logger.debug("event=turn_scheduler_expire_race task_id=%s", task_id)
             continue
         outcome = await _activate_head(db, prepare, head, limit)
+        if outcome in ("activated", "withdrawn"):
+            # [A82 Stage 6] post-commit UI invalidation (queued → Starting /
+            # obsolete automation withdrawn). Blocked heads signal only on a
+            # reason CHANGE (in _activate_head), never every fallback tick.
+            emit_turn_queue_changed(
+                str(head.get("session_id") or ""), outcome, turn_id=str(head["id"]),
+                status="pending" if outcome == "activated" else "withdrawn",
+            )
         if outcome == "activated":
             result.activated += 1
         elif outcome == "stale":

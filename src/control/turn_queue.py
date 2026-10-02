@@ -483,3 +483,35 @@ def decide_retry(
             head=waiting[0], reason="superseded_by_real_instruction",
         )
     return RetryDecision(action="retry", admit_retry=True, head=None, reason="retry_head")
+
+
+# --------------------------------------------------------------------------- #
+# [A82 Stage 6] Post-commit UI invalidation signal
+# --------------------------------------------------------------------------- #
+TURN_QUEUE_CHANGED_EVENT = "turn_queue_changed"
+
+
+def emit_turn_queue_changed(
+    session_id: Optional[str],
+    change: str,
+    *,
+    turn_id: Optional[str] = None,
+    status: Optional[str] = None,
+) -> None:
+    """Append one ``turn_queue_changed`` event AFTER a queue commit so the
+    single SSE stream (A81) invalidates ``["session-turn-queue", id]`` and the
+    session list. Carries ``turn_id`` (not ``task_id``) so a queue-only change
+    never fans out to the task/job lists. A hint, never authority: it is
+    called only once the transaction committed and never raises."""
+    sid = (session_id or "").strip()
+    if not sid:
+        return
+    try:
+        from src.core.observability import emit_event
+
+        emit_event(
+            TURN_QUEUE_CHANGED_EVENT, session_id=sid, task_id=None,
+            turn_id=turn_id, change=change, status=status,
+        )
+    except Exception:  # noqa: BLE001 — the UI safety net still converges
+        pass

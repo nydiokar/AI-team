@@ -2155,7 +2155,8 @@ class MeshDB:
             return eligible
 
     def list_stale_busy_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Return BUSY sessions with no pending or claimed mesh task.
+        """Return BUSY sessions with no active mesh task (legacy pending/claimed or
+        a managed running/recovery_required slot holder — A82 Stage 6).
 
         This is the gateway-side M3 reconciliation query. A session is considered
         stale-busy when the gateway still marks it busy but the dispatch ledger has
@@ -2171,7 +2172,7 @@ class MeshDB:
                 SELECT 1
                 FROM mesh_tasks t
                 WHERE t.session_id = s.session_id
-                  AND t.status IN ('pending', 'claimed')
+                  AND t.status IN ('pending', 'claimed', 'running', 'recovery_required')
               )
             ORDER BY s.updated_at ASC
             LIMIT ?
@@ -3635,6 +3636,7 @@ class MeshDB:
         *,
         actor: str = "",
         audit_reason: Optional[str] = None,
+        void_lineage: bool = False,
     ) -> bool:
         """Conditional withdrawal of a QUEUED managed turn + audit, ONE
         transaction (design §4). A queued withdrawal is a terminal
@@ -3644,7 +3646,12 @@ class MeshDB:
 
         [A82 Stage 4d] ``audit_reason`` (scheduler obsolete withdrawal): a
         ``watched_job`` notification's audit record is written in the SAME
-        transaction — both or neither."""
+        transaction — both or neither.
+
+        [A82 Stage 6] ``void_lineage`` (operator withdrawal): a WRITTEN Case
+        lineage (``done``) is also marked ``void`` — same rule as session close —
+        so the caller / scheduler sweep voids the Case link of a turn that will
+        never run (the advancement gate must not wait on it)."""
         now = _now()
         try:
             with self._managed_write("withdraw_turn") as conn:
@@ -3673,11 +3680,12 @@ class MeshDB:
                     UPDATE mesh_tasks
                     SET status = 'withdrawn', revision = ?, completed_at = ?, updated_at = ?,
                         lineage_state = CASE WHEN lineage_state = 'pending'
+                                               OR (? AND lineage_state = 'done')
                                              THEN 'void' ELSE lineage_state END,
                         lineage_token = NULL, lineage_lease_until = NULL
                     WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
                     """,
-                    (new_rev, now, now, task_id),
+                    (new_rev, now, now, int(bool(void_lineage)), task_id),
                 )
                 if conn.execute("SELECT changes()").fetchone()[0] == 0:
                     raise OwnershipConflictError(
@@ -4316,9 +4324,15 @@ class MeshDB:
     def list_turn_requests(
         self, session_id: str, *, after_sequence: int = 0, limit: int = 50,
     ) -> Dict[str, Any]:
-        """Bounded queue cards for one session, without result/payload secrets."""
+        """Bounded queue cards for one session, without result/payload secrets.
+
+        [A82 Stage 6] Run order (``queue_sequence`` ASC — the active slot holder
+        first, then the waiting items in the order they will run); the cursor is
+        the last sequence of the previous page. Rows carry a ≤2 KiB preview, never
+        the full prompt, and a 1-based ``queue_position`` snapshot."""
         sid = (session_id or "").strip()
         page_size = min(100, max(1, int(limit)))
+        cursor = max(0, int(after_sequence))
         try:
             conn = self._conn()
             session = conn.execute(
@@ -4329,8 +4343,8 @@ class MeshDB:
                 raise TurnNotFoundError("unknown session", session_id=sid)
             rows = conn.execute(
                 f"""
-                SELECT t.id, t.status, t.revision, t.queue_sequence, t.turn_source,
-                       t.turn_kind,
+                SELECT t.id, t.session_id, t.status, t.revision, t.queue_sequence,
+                       t.turn_source, t.turn_kind, t.sender_session_id,
                        CASE WHEN {_MANAGED_CASE_BINDING_GATE_SQL}
                             THEN t.blocked_reason ELSE 'manager_rebound' END AS blocked_reason,
                        t.created_at, t.activated_at, t.started_at,
@@ -4341,22 +4355,31 @@ class MeshDB:
                   AND t.queue_sequence > ?
                 ORDER BY t.queue_sequence ASC LIMIT ?
                 """,
-                (sid, max(0, int(after_sequence)), page_size + 1),
+                (sid, cursor, page_size + 1),
             ).fetchall()
             has_more = len(rows) > page_size
             page = [dict(row) for row in rows[:page_size]]
-            for item in page:
+            counts = conn.execute(
+                "SELECT COUNT(*) AS open_count, "
+                "COALESCE(SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END), 0) AS queued, "
+                "COALESCE(SUM(CASE WHEN queue_sequence <= ? THEN 1 ELSE 0 END), 0) AS before_cursor, "
+                "MAX(CASE WHEN status != 'queued' THEN id END) AS active_id, "
+                "MAX(CASE WHEN status != 'queued' THEN status END) AS active_status "
+                "FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open "
+                "WHERE session_id = ? AND queue_protocol = 1 AND "
+                "status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')",
+                (cursor, sid),
+            ).fetchone()
+            for offset, item in enumerate(page):
                 item["preview"] = (item["preview"] or "").encode("utf-8")[:2048].decode(
                     "utf-8", errors="ignore",
                 )
-            count = conn.execute(
-                "SELECT COUNT(*) FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open "
-                "WHERE session_id = ? AND queue_protocol = 1 AND "
-                "status IN ('queued', 'pending', 'claimed', 'running', 'recovery_required')",
-                (sid,),
-            ).fetchone()[0]
+                item["queue_position"] = int(counts["before_cursor"]) + offset + 1
             return {
-                "turns": page, "count": int(count),
+                "turns": page, "count": int(counts["open_count"]),
+                "queued": int(counts["queued"]),
+                "active_turn_id": counts["active_id"],
+                "active_status": counts["active_status"],
                 "next_cursor": page[-1]["queue_sequence"] if has_more and page else None,
                 "enrolled": bool(session["turn_queue_enrolled"]),
                 "paused": bool(session["turn_queue_paused"]),
@@ -4368,20 +4391,82 @@ class MeshDB:
             raise _turn_backing_error("list_turn_requests", session_id=sid, err=exc)
 
     def get_turn_request(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """One managed editable intent; never expose claim or sender secrets."""
+        """One managed editable intent; never expose claim or sender secrets.
+        [A82 Stage 6] ``queue_position`` is the 1-based run-order snapshot among
+        the session's open rows (None once terminal)."""
         try:
             row = self._conn().execute(
-                """
-                SELECT id, session_id, status, revision, queue_sequence,
-                       turn_source, turn_kind, blocked_reason, prompt AS body,
-                       created_at, activated_at, started_at, flow_run_id
-                FROM mesh_tasks WHERE id = ? AND queue_protocol = 1
+                f"""
+                SELECT t.id, t.session_id, t.status, t.revision, t.queue_sequence,
+                       t.turn_source, t.turn_kind, t.sender_session_id,
+                       CASE WHEN {_MANAGED_CASE_BINDING_GATE_SQL}
+                            THEN t.blocked_reason ELSE 'manager_rebound' END AS blocked_reason,
+                       t.prompt AS body, t.created_at, t.activated_at, t.started_at,
+                       t.completed_at, t.flow_run_id,
+                       CASE WHEN t.status IN ('queued', 'pending', 'claimed', 'running',
+                                              'recovery_required')
+                            THEN (SELECT COUNT(*) FROM mesh_tasks o
+                                  INDEXED BY idx_mesh_turns_session_open
+                                  WHERE o.session_id = t.session_id AND o.queue_protocol = 1
+                                    AND o.status IN ('queued', 'pending', 'claimed', 'running',
+                                                     'recovery_required')
+                                    AND o.queue_sequence <= t.queue_sequence)
+                       END AS queue_position
+                FROM mesh_tasks t WHERE t.id = ? AND t.queue_protocol = 1
                 """,
                 (task_id,),
             ).fetchone()
             return dict(row) if row else None
         except Exception as exc:
             raise _turn_backing_error("get_turn_request", task_id=task_id, err=exc)
+
+    def turn_session_id(self, task_id: str) -> Optional[str]:
+        """[A82 Stage 6] The session that owns a managed row (one PK read)."""
+        row = self._conn().execute(
+            "SELECT session_id FROM mesh_tasks WHERE id = ? AND queue_protocol = 1", (task_id,),
+        ).fetchone()
+        return str(row[0]) if row and row[0] else None
+
+    def session_turn_queue_states(self, session_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """[A82 Stage 6] Batched queue overlay for a page of session views: for
+        each ENROLLED session in ``session_ids``, the waiting count and the
+        ledger's active slot holder (read from the ledger, never from
+        ``sessions.status``) plus the operator pause/hold. Unenrolled sessions are
+        absent. Chunked IN-lists, two indexed sub-reads per enrolled session;
+        no N+1 round trips."""
+        out: Dict[str, Dict[str, Any]] = {}
+        ids = [str(s) for s in dict.fromkeys(session_ids or []) if s]
+        conn = self._conn()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT s.session_id, s.turn_queue_paused, s.turn_queue_hold,
+                       (SELECT COUNT(*) FROM mesh_tasks q INDEXED BY idx_mesh_turns_session_open
+                        WHERE q.session_id = s.session_id AND q.queue_protocol = 1
+                          AND q.status IN ('queued', 'pending', 'claimed', 'running',
+                                           'recovery_required')
+                          AND q.status = 'queued') AS queued,
+                       (SELECT a.id || char(31) || a.status FROM mesh_tasks a
+                        WHERE a.session_id = s.session_id AND a.queue_protocol = 1
+                          AND a.status IN ('pending', 'claimed', 'running', 'recovery_required')
+                        LIMIT 1) AS active
+                FROM sessions s
+                WHERE s.turn_queue_enrolled = 1 AND s.session_id IN ({marks})
+                """,
+                chunk,
+            ).fetchall()
+            for r in rows:
+                active_id, _, active_status = (r["active"] or "").partition(chr(31))
+                out[r["session_id"]] = {
+                    "queued": int(r["queued"] or 0),
+                    "active_turn_id": active_id or None,
+                    "active_status": active_status or None,
+                    "paused": bool(r["turn_queue_paused"]),
+                    "hold": r["turn_queue_hold"],
+                }
+        return out
 
     def set_turn_queue_paused(self, session_id: str, paused: bool) -> Dict[str, Any]:
         """Operator pause/resume; resume clears only an operator-stop hold."""
@@ -4396,13 +4481,19 @@ class MeshDB:
                     raise TurnNotFoundError("unknown session", session_id=sid)
                 if not row["turn_queue_enrolled"] or row["status"] == "closed":
                     raise OwnershipConflictError("session cannot change queue pause", session_id=sid)
+                now = _now()
                 conn.execute(
                     "UPDATE sessions SET turn_queue_paused = ?, "
-                    "turn_queue_hold = CASE WHEN ? = 0 AND turn_queue_hold = 'operator_stop' "
-                    "THEN NULL ELSE turn_queue_hold END, config_revision = config_revision + 1, "
+                    "config_revision = config_revision + 1, "
                     "updated_at = ? WHERE session_id = ?",
-                    (int(paused), int(paused), _now(), sid),
+                    (int(paused), now, sid),
                 )
+                if not paused:
+                    # [A82 Stage 6] Resume is the explicit operator release of an
+                    # operator stop: the durable hold record AND its `cancelled`
+                    # status (activation refuses both). Recovery, Case, provider
+                    # deadline and approval gates live elsewhere and stay.
+                    _release_stop_hold(conn, sid, now)
                 state = conn.execute(
                     "SELECT turn_queue_paused, turn_queue_hold FROM sessions WHERE session_id = ?",
                     (sid,),

@@ -1164,6 +1164,12 @@ class TaskOrchestrator(ITaskOrchestrator):
             task_id = session.last_task_id
             if db is not None and task_id:
                 row = db.get_task(task_id)
+                if row and int(row.get("queue_protocol") or 0) == 1:
+                    # [A82 Stage 6] A managed turn's truth is the ledger (its
+                    # own startup reattach / recovery machinery owns it): never
+                    # ERROR the session or replay a legacy completion over it.
+                    self._repair_managed_stale_busy(session, row)
+                    continue
                 if row:
                     status = row.get("status")
                     if status == "completed":
@@ -4521,6 +4527,24 @@ class TaskOrchestrator(ITaskOrchestrator):
             logger.info("event=stale_busy_reconciler_stopped")
             raise
 
+    def _repair_managed_stale_busy(self, session: Any, row: Dict[str, Any]) -> bool:
+        """[A82 Stage 6] A BUSY session whose last turn is MANAGED: an open
+        ledger row (queued / slot holder incl. ``running`` and
+        ``recovery_required``) is never an orphan — leave it. A terminal one
+        means nothing is in flight: the stale BUSY becomes IDLE (the outcome
+        is already the ledger's truth; no ERROR, no legacy result replay)."""
+        from src.control.turn_queue import TERMINAL_STATUSES
+
+        if str(row.get("status") or "") not in TERMINAL_STATUSES:
+            return False
+        session.status = SessionStatus.IDLE
+        self.session_store.save(session)
+        logger.info(
+            "event=managed_stale_busy_repaired session_id=%s task_id=%s status=%s",
+            session.session_id, row.get("id"), row.get("status"),
+        )
+        return True
+
     async def _reconcile_stale_busy_sessions_once(self) -> int:
         """Mark BUSY sessions with no active task row as ERROR."""
         try:
@@ -4547,6 +4571,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             if task_id:
                 task_row = db.get_task(task_id)
                 status = task_row.get("status") if task_row else None
+                if task_row and int(task_row.get("queue_protocol") or 0) == 1:
+                    # [A82 Stage 6] managed: the ledger + recovery machinery own
+                    # it (never legacy fail_task / ERROR over a managed turn).
+                    reconciled += int(self._repair_managed_stale_busy(session, task_row))
+                    continue
                 if status == "completed":
                     await self._recover_completed_session(session, task_row)
                     reconciled += 1
@@ -11237,6 +11266,13 @@ Generated from user description: {description}
         out = db.request_turn_cancel(task_id, actor=actor, hold_session=hold_session)
         if out.outcome == "cancelled":
             notify_turn_queue_changed()  # the slot freed: next head may activate
+        if out.outcome in ("cancelled", "requested"):
+            from src.control.turn_queue import emit_turn_queue_changed
+
+            emit_turn_queue_changed(
+                str(row.get("session_id") or ""), out.outcome, turn_id=task_id,
+                status="cancelled" if out.outcome == "cancelled" else None,
+            )
         logger.info(
             "event=managed_turn_cancel task_id=%s outcome=%s node=%s control=%s",
             task_id, out.outcome, out.node_id, out.control_task_id,
@@ -11253,7 +11289,7 @@ Generated from user description: {description}
         (wake dispatcher, transient/quota resume, orphan sweep) does not restart
         it, and activation starts no queued turn until an operator action (a new
         human/operator admission) releases the hold. Explicit pause/resume
-        routes are Stage 6."""
+        routes are Stage 6 (the web stop route adds the persistent pause)."""
         from src.control.db import get_db
         from src.control.turn_admission import session_enrollment_sync
 
