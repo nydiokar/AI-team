@@ -2078,6 +2078,73 @@ Per A87 ruling 3, `CodexBackend` now implements the whole `CodingBackend` manage
 6. The derived id's 6 "time" bytes are hash bytes. That is harmless on 1.18.x ordering, but an OpenCode version that orders history by id alone would misplace managed turns. The pre-existing legacy path already used random ids.
 7. Validated against a fake server only. A live OpenCode proof is still owed (no binary or model was run, per the rules).
 
+### Step 4 rework (review round 1) — Codex + OpenCode managed contract (2026-10-02, branch `feat/session-turn-queue`, commits `f8fd681` (Codex tests, RED), `0cf0630` (Codex), `90590e1` (carrier/server tests, RED), `a19c955` (carrier/server), `bf0e52f` (OpenCode tests, RED), `256b67a` (OpenCode), `5c5f5db` (M1 follow-up) + this record) — SUBMITTED FOR RE-REVIEW, NOT ACCEPTED
+
+Independent reviewer returned REWORK (1 major, 7 minor plus the token-evidence note). Every fix was written test-first. RED was recorded at the test commit, GREEN at the fix commit.
+
+**M1 — one slow Codex RPC killed every in-flight Codex turn on the carrier.**
+- *Fix* (`0cf0630`, `5c5f5db`): an RPC deadline is now request-scoped. `CodexAppServerClient.request` raises `CodexRPCTimeout`, and the shared client is never `_fail`ed. The late reply is routed through `on_late`, or dropped; it no longer trips `codex_unmatched_response`. Pending late ids are bounded by refusing new requests at `MAX_LATE`, never by eviction: an evicted id's reply would fail the client. Per trigger:
+  - `turn/start` or compaction timeout: `recovery_required` with a hold whose `late_reply` slot alone decides. A `thread/read` "idle" cannot prove that a still-unprocessed request never runs. A late result binds the native turn id (the request carried our `clientUserMessageId`), then `thread/read` settles the hold. A late error settles it as `rejected`. Death of that app-server also settles it.
+  - `thread/read` timeout in `is_quiescent`: the status is unknown, so the session reads busy. Nothing else happens.
+  - `turn/interrupt` timeout (now `INTERRUPT_TIMEOUT`): caught. The arm is kept and the 10 s confirmation deadline holds. On expiry the result is recovery plus a hold, never a kill.
+  - The client is closed only when `client.failure` is set (EOF, write failure, process exit, protocol desync).
+  - The legacy `_run` path follows the same rule. When the app-server is healthy but the outcome is ambiguous, it now holds ownership, settled by native status. It used to kill the shared process. It calls `_settle_hold` before acquiring.
+- *Retired assertions:*
+  - `test_codex_app_server::test_deadline_poisons_connection_without_replay` is replaced by `…request_scoped_and_late_reply_is_routed_not_fatal`.
+  - `test_codex_native::test_wrong_turn_event_fails_closed` now asserts that the runtime is not killed and the turn is held.
+- *Tests:* `test_M1_*` ×4, covering slow `turn/start`, slow `thread/read` in the probe, slow `turn/interrupt` (5.5 s, beyond the old 5 s), and a slow legacy `turn/start`. Each asserts that A completes, the app-server pid is unchanged, `failure` is empty, and no `turn/interrupt` targets A. The reviewer probe `test_probe_codex_neighbour.py` passes. `test_late_ids_are_bounded_by_refusal_never_by_eviction` was RED on `256b67a` and is GREEN now.
+
+**m1 — a requeued-after-refusal Codex turn could never run.** `begin_managed` now re-begins a row in state `not_submitted`, which is provably unsent. Any other existing state is still `recovery_required`. Test: `test_m1_turn_refused_after_write_ahead_is_rebeginnable` (one `turn/start` in total, row `completed`).
+
+**m2 / m5-visibility — an identity-less legacy owner (or any "busy forever") wedged the session silently.**
+- (a) The carrier sends the `managed_conflict` reason with its not-invoked release (`blocked_reason`, ≤ 500 chars). The server (`_apply_backend_conflict`) records `blocked_reason = "backend_conflict: …"` and counts `blocked_attempts`. The 3rd consecutive refusal returns the row to `queued` under the existing blocked-head backoff (the `carrier_offline` pattern), and `turn_queue_changed(released, queued)` is emitted. A release without a reason is unchanged. Activation still resets `blocked_attempts`, so a permanently wedged session cycles through 2 fast refusals and then a backoff of about 12 s. That cycle is bounded and visible, and the turn can be withdrawn by the operator.
+- (b) Operator and cutover exit: `codex_ownership.sweep_legacy_owners()`. It clears owners that have no recorded identity and no managed rows, and only when every owning pid provably no longer exists (`os.kill(pid, 0)` → `ProcessLookupError`). A pid that exists, even a reused one, is never cleared. Run it with `python -m src.backends.codex_ownership --sweep-legacy-owners`; Stage 8's migration should call it.
+- Tests: `test_m2_cutover_sweep_…`, `test_m2_backend_conflict_is_visible_and_repeated_conflict_backs_off`, and the guard `test_m2_release_without_a_reason_keeps_the_unblocked_contract`.
+
+**m3 — the Codex late-reply race.**
+- `_calls` is popped only after the late-delivery attempt. `is_quiescent` returns False while an abandoned call of the session is still registered.
+- The proactive fallback posts the registering backend's name: `_setup_proactive_delivery` binds it per backend, so the post is no longer hard-coded `claude`.
+- Tests: `test_m3_session_stays_busy_until_late_reply_delivery_was_attempted` and `test_m3_uncaptured_late_reply_posts_proactive_turn_with_the_real_backend`.
+
+**m4 — OpenCode had no late capture.**
+- A held turn-kind attempt starts a watcher that runs `_managed_wait` for up to `_LATE_CAPTURE_SEC`, binding only the assistant reply parented to our derived messageID. It then hands a `_LateManagedOutcome` (`late_managed`, `managed_turn_uuid`) to the carrier's existing `_capture_late_managed_result` seam through `set_proactive_sink`.
+- The session stays non-quiescent, and a new turn is refused, while `late_pending`. `forget` sets `forgotten`, which stops the watcher and suppresses delivery.
+- Tests: backend capture plus busy-during-delivery, forgotten → no delivery, and a carrier test where the late reply is spooled and the row is `completed` with the real output.
+
+**m5 — Codex capability and systemError.**
+- `supports_managed_turns()` now also requires an offline protocol probe. It runs `codex app-server generate-json-schema --out <tmp>` (no app-server session, no model call) and checks that `ClientRequest.json` lists `thread/read` and that `v2/TurnStartParams.json` has `clientUserMessageId`. The result is cached per binary (path, mtime, size). A failed probe is retried after 300 s, failing closed meanwhile.
+- `systemError` is submittable on both attach and loaded, via `_SUBMITTABLE_STATES`. It means the last turn failed and nothing runs, so refusing it would wedge every session whose last turn failed. If native rejects the new turn, the result is a visible `rejected` failure.
+- *Probe evidence (real binary, offline):* `_managed_protocol_supported` returned **True** for `/home/cifran/.local/bin/codex`, **codex-cli 0.157.1**, run with an isolated empty `CODEX_HOME`. Nothing was written there.
+- Tests: missing `thread/read` and missing `clientUserMessageId` both lead to not advertised plus `ManagedUnsupportedError`, with no protocol traffic; a cache test; and `systemError` on attach and on loaded.
+
+**m6 — OpenCode transport errors killed the shared serve.**
+- `_http` treats `URLError(timeout)` as a timeout.
+- A reset or refusal on a live process is transient: the server is kept and the caller sees unknown, which reads as busy.
+- The reference is cleared and the process terminated only in two cases: proven death (`proc.poll()` is not None), or a live process that has refused connections for 60 s and is therefore not serving.
+- Tests: connect-timeout and reset during a held neighbour's turn (the serve survives and the turn completes), and dead process → cleaned up.
+
+**m7 — OpenCode created the native session before the conflict checks.**
+- `POST /session` now happens only after reserve, lock and the idle gate (`_managed_create_native`).
+- The new id is recorded write-ahead before the prompt is submitted, in `$AI_TEAM_OPENCODE_STATE_DIR` (default `~/.local/state/ai-team`) `/opencode-native-sessions.sqlite3`. It is also kept in memory. A first turn with no gateway id reuses it. The record is cleared once a terminal result carries the id to the carrier.
+- Tests: refused first turn → `created == []`; first-turn recovery followed by a successor backend → the same native id, with both prompts in that session.
+
+**Token audit (Codex, offline).** `test_token_audit_sender_token_only_travels_in_the_mcp_env_thread_config` checks four things:
+- Of all JSON-RPC requests, the token appears only in `thread/start` → `config["mcp_servers.ai_team_sender.env"]`.
+- It appears in no other param.
+- It appears in no log record and in neither the result nor its projection.
+- It appears in no file under the test tmp tree (fake `CODEX_HOME`, repo, ctl), other than the test's own spy log.
+
+That test passed on HEAD too, so it adds coverage rather than fixing anything. The earlier "never lands on disk" claim rests on the step-4a probe: codex-cli 0.157.1, an isolated unauthenticated `CODEX_HOME`, a canary token in the thread config, and `grep -r --binary-files=text` over `CODEX_HOME` after `thread/start` plus a turn (which returned 401) found nothing. That probe was not re-run here, because the rules forbid running the binary against a model.
+
+**Verification.** `timeout 1800 pytest tests/test_codex_*.py tests/test_opencode*.py tests/test_backend_activity.py tests/test_turn_queue*.py` → **670 passed, 12 skipped** (opt-in e2e), run before `5c5f5db`. After `5c5f5db`: `pytest tests/test_codex_*.py tests/test_turn_queue_backend_conflict.py` → 81 passed. The new M1/m3 tests were run 6× more for flakiness (7/7 each time). One test-helper race (polling the ownership DB before its schema existed) was fixed in the test.
+
+**Open / uncertain.**
+1. The m2 backoff does not grow past about 12 s, because activation resets `blocked_attempts`. I did not change the reset (it is shared with every blocked-head path). The reason stays visible on the queued row.
+2. `sweep_legacy_owners` uses carrier-pid absence as its proof. It does not prove the old app-server is gone (open risk (c) from step 4a still applies). It is an explicit operator/migration action, never automatic.
+3. A legacy one-off (`oneoff-*` key) held after an ambiguity never has `is_quiescent` called on it. Its in-memory hold and owner rows remain until carrier restart. They are harmless, because the thread is unique, but they are leaked.
+4. The m7 fallback assumes a gateway session with an empty `backend_session_id` wants its pending first-turn native session. If a future "reset native session" feature clears the id while a write-ahead record still exists (that is, the last turn was not terminal), the old session would be reused.
+5. Both fixes were validated against fakes only. No live Codex or OpenCode turn was run.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
