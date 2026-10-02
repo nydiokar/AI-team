@@ -1625,7 +1625,8 @@ class WorkerAgent:
             logger.warning("event=managed_backend_identity_persist_failed task_id=%s", task_id)
 
     async def _release_managed_claim(
-        self, task_id: str, claim_token: str, *, not_invoked: bool = False
+        self, task_id: str, claim_token: str, *, not_invoked: bool = False,
+        blocked_reason: str = "",
     ) -> str:
         """Release a managed attempt back to pending (current token only).
         ``not_invoked`` adds the carrier's write-ahead attestation that the
@@ -1640,7 +1641,8 @@ class WorkerAgent:
                 f"/tasks/{task_id}/release-managed",
                 {"node_id": self.cfg.node_id, "claim_token": claim_token,
                  "incarnation_id": self._incarnation_id,
-                 "backend_not_invoked": bool(not_invoked)},
+                 "backend_not_invoked": bool(not_invoked),
+                 **({"blocked_reason": blocked_reason[:500]} if blocked_reason else {})},
             )
         except Exception as e:
             if self._is_definitive_refusal(e):
@@ -2043,12 +2045,15 @@ class WorkerAgent:
             setter = getattr(backend, "set_proactive_sink", None)
             if callable(setter):
                 try:
-                    setter(self._deliver_proactive_turn)
+                    # [A82 step 4 rework, m3] Bind the registering backend's name:
+                    # an uncaptured late reply is posted with ITS backend.
+                    setter(lambda sid, outcome, _name=name: self._deliver_proactive_turn(
+                        sid, outcome, backend=_name))
                     logger.info("event=proactive_sink_registered backend=%s", name)
                 except Exception:
                     logger.warning("event=proactive_sink_register_failed backend=%s", name, exc_info=True)
 
-    def _deliver_proactive_turn(self, session_id: str, outcome: Any) -> None:
+    def _deliver_proactive_turn(self, session_id: str, outcome: Any, backend: str = "claude") -> None:
         """Sink called by the driver (off the SDK loop) for an autonomous turn.
 
         Blocking HTTP is fine here — the driver runs this in a worker thread, not
@@ -2077,7 +2082,7 @@ class WorkerAgent:
                 {
                     "node_id": self.cfg.node_id,
                     "session_id": session_id,
-                    "backend": "claude",
+                    "backend": backend,
                     "output": text,
                     "backend_session_id": getattr(outcome, "backend_session_id", "") or "",
                     "usage": usage,
@@ -3004,7 +3009,12 @@ class WorkerAgent:
                         self._claim_record(task_id, invoked=False, status="start_unknown")
                     except Exception:
                         logger.warning("event=managed_conflict_persist_failed task_id=%s", task_id)
-                    await self._release_managed_claim(task_id, claim_token, not_invoked=True)
+                    # [A82 step 4 rework, m2] The refusal reason is made visible
+                    # on the row (a repeated one backs off) — never a silent loop.
+                    await self._release_managed_claim(
+                        task_id, claim_token, not_invoked=True,
+                        blocked_reason="; ".join(result.get("errors") or []) or "managed_conflict",
+                    )
                     return
 
                 # Post result. [A82 Stage 3] A managed (protocol-1) turn spools its

@@ -4778,6 +4778,7 @@ class MeshDB:
         *,
         backend_not_invoked: bool = False,
         node_id: Optional[str] = None,
+        blocked_reason: Optional[str] = None,
     ) -> bool:
         """Release a CLAIMED-but-not-started managed turn back to `pending` for
         the current token only (design §6: release before start is safe only for
@@ -4792,7 +4793,12 @@ class MeshDB:
         — so a ``running``/``recovery_required`` row of the claiming node + token
         may also return to pending (start response lost, or conflict detected
         before submit). The prompt is preserved; token/carrier/incarnation/start
-        are cleared so the old attempt can do nothing further."""
+        are cleared so the old attempt can do nothing further.
+
+        [A82 step 4 rework, m2] ``blocked_reason`` (with ``backend_not_invoked``)
+        is the backend's pre-submit refusal (``managed_conflict``): recorded on
+        the row and counted; a repeated refusal returns it to `queued` under the
+        blocked-head backoff (``_apply_backend_conflict``)."""
         now = _now()
         try:
             with self._write() as conn:
@@ -4832,7 +4838,10 @@ class MeshDB:
                         """,
                         (now, task_id, claim_token, node_id or ""),
                     )
-                    return conn.execute("SELECT changes()").fetchone()[0] > 0
+                    released = conn.execute("SELECT changes()").fetchone()[0] > 0
+                    if released and blocked_reason:
+                        _apply_backend_conflict(conn, task_id, blocked_reason)
+                    return released
                 conn.execute(
                     """
                     UPDATE mesh_tasks
@@ -10344,6 +10353,37 @@ def _apply_turn_block(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
         (bounded, attempts, until, _now(), task_id),
     )
     return row["blocked_reason"] != bounded
+
+
+# [A82 step 4 rework, m2] Consecutive pre-submit backend refusals of one row
+# retried at once before it backs off in `queued`.
+_BACKEND_CONFLICT_BACKOFF_AFTER = 3
+
+
+def _apply_backend_conflict(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
+    """[A82 step 4 rework, m2] Inside the not-invoked release txn (row already
+    back to `pending`): a backend that refused BEFORE submit (native busy, an
+    identity-less legacy owner, a held turn) must never be requeued silently
+    forever. The refusal is an operator-visible ``blocked_reason`` and is
+    counted; the N-th consecutive refusal returns the row to `queued` under the
+    blocked-head backoff — the ``carrier_offline`` pattern: visible, bounded,
+    operator-withdrawable; activation re-offers it after ``blocked_until``."""
+    bounded = f"backend_conflict: {reason}"[:500]
+    row = conn.execute("SELECT blocked_attempts FROM mesh_tasks WHERE id = ?", (task_id,)).fetchone()
+    attempts = int((row["blocked_attempts"] if row else 0) or 0) + 1
+    if attempts < _BACKEND_CONFLICT_BACKOFF_AFTER:
+        conn.execute(
+            "UPDATE mesh_tasks SET blocked_reason = ?, blocked_attempts = ? "
+            "WHERE id = ? AND queue_protocol = 1 AND status = 'pending'",
+            (bounded, attempts, task_id),
+        )
+        return
+    conn.execute(
+        "UPDATE mesh_tasks SET status = 'queued', activated_at = NULL, blocked_attempts = ?, "
+        "updated_at = ? WHERE id = ? AND queue_protocol = 1 AND status = 'pending'",
+        (attempts - 1, _now(), task_id),
+    )
+    _apply_turn_block(conn, task_id, bounded)
 
 
 def _carrier_fresh_cutoff() -> str:
