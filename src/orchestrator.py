@@ -195,6 +195,23 @@ MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC = 4.0
 MANAGED_EFFECTS_FENCE_SLACK_SEC = 30.0
 
 
+def _transient_db_error(err: BaseException) -> bool:
+    """[A84 review N2] A DB backing failure (write-lock / busy deadline,
+    ``database is locked``) is transient contention, not a defect of the row:
+    it is retried on the next pass and never counts toward the attempt limit."""
+    import sqlite3
+
+    from src.control.turn_queue import BackingStoreError
+
+    return isinstance(err, (BackingStoreError, sqlite3.OperationalError))
+
+
+def _effect_error(label: str, err: BaseException) -> str:
+    """An effect failure line; transient DB failures are tagged so they do not
+    count toward ``MANAGED_EFFECTS_MAX_ATTEMPTS``."""
+    return f"{'transient ' if _transient_db_error(err) else ''}{label}: {err}"
+
+
 def _managed_fence_abandoned(fence: str) -> bool:
     """[A84 review F3] True when the notify fence ``"<epoch>:<nonce>"`` has
     outlived any live holder's bounded send + mark (an unreadable fence is
@@ -12099,6 +12116,8 @@ Generated from user description: {description}
                     finalized += 1
             except Exception as e:  # noqa: BLE001 — counted; failed at the bound
                 logger.warning("event=managed_effects_row_failed task_id=%s err=%s", tid, e)
+                if _transient_db_error(e):
+                    continue  # N2: contention — retried next pass, never counted
                 try:
                     state = await asyncio.to_thread(
                         db.record_turn_effects_failure, tid, f"effects_error: {e}",
@@ -12181,6 +12200,13 @@ Generated from user description: {description}
             if outcome in ("raced", "retry"):
                 return False
             notify_failed = notify_failed or outcome == "failed"
+        if errors and all(e.startswith("transient ") for e in errors):
+            # N2: only DB contention — retried next pass, not counted.
+            await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "notified", "notified",
+                error="; ".join(errors),
+            )
+            return False
         if errors:
             if not bumped:
                 attempts += 1
@@ -12340,11 +12366,11 @@ Generated from user description: {description}
                     self._write_session_summary(session, result)
                 self._append_session_event(sid, tid, result)
             except Exception as e:  # noqa: BLE001 — retried
-                errors.append(f"session: {e}")
+                errors.append(_effect_error("session", e))
         try:
             TelemetryStore(db).reconcile(turn_id=tid, since_hours=0)
         except Exception as e:  # noqa: BLE001 — retried
-            errors.append(f"telemetry: {e}")
+            errors.append(_effect_error("telemetry", e))
         if conversational and case_id and self._harness_flow_drive_enabled():
             try:
                 self._record_flow_event(
@@ -12356,7 +12382,7 @@ Generated from user description: {description}
                     strict=True, once=True,
                 )
             except Exception as e:  # noqa: BLE001 — retried
-                errors.append(f"case: {e}")
+                errors.append(_effect_error("case", e))
         return errors
 
     def _mesh_dispatch_payload(
