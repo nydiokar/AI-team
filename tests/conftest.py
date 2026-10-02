@@ -124,6 +124,22 @@ def _disable_file_watcher(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_turn_allowance(monkeypatch):
+    """Fresh process-global waiting allowance per test.
+
+    ``ALLOWANCE`` counts waiting turns in memory while every test uses its own
+    temp DB, so admissions from earlier tests would otherwise exhaust the fleet
+    cap for later ones. ``turn_scheduler`` binds the name at import, so patch both.
+    """
+    from src.control import turn_admission, turn_scheduler
+
+    fresh = turn_admission.SharedWaitingAllowance()
+    monkeypatch.setattr(turn_admission, "ALLOWANCE", fresh)
+    monkeypatch.setattr(turn_scheduler, "ALLOWANCE", fresh)
+    yield
+
+
 # --- 4. e2e marker + opt-in gate --------------------------------------------
 
 def pytest_addoption(parser):
