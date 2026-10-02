@@ -188,7 +188,7 @@ def test_codex_app_server_turn_forwards_model_and_effort():
     calls = []
 
     class RecordingClient(CodexAppServerClient):
-        def request(self, method, params, timeout=30):
+        def request(self, method, params, timeout=30, on_late=None):
             calls.append((method, params, timeout))
             return {}
 
