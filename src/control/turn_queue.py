@@ -181,6 +181,22 @@ class LegacyExecutionRefusedError(TurnQueueError):
     code = "legacy_execution_refused"
 
 
+class EnrollmentRefusedError(TurnQueueError):
+    """[A82 Stage 7] 409 — the enrollment service (design §10 steps 6/8) refused
+    to enroll / unenroll a session. ``code`` is the stable reason:
+    ``enrollment_disabled``, ``session_closed``, ``session_not_quiescent``,
+    ``legacy_work_in_flight``, ``capability_missing``, ``carrier_offline``,
+    ``managed_obligation_remaining``; a legacy arrival refused during an
+    enrollment is ``enrollment_in_progress``."""
+
+    status_code = 409
+    code = "enrollment_refused"
+
+    def __init__(self, detail: str = "", *, reason: str, **context: Any) -> None:
+        super().__init__(detail, reason=reason, **context)
+        self.code = reason
+
+
 class BackingStoreError(TurnQueueError):
     """503 — DB unavailable / deadline exceeded (design §6/§8). Fails closed."""
 
