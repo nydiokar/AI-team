@@ -71,6 +71,8 @@ def _scrub_surrogates(obj: Any) -> Any:
 # always still carries {ok, reason} so the client owns the wording (no prose here).
 _REASON_STATUS = {
     "unknown_backend": 400,
+    # [A82 Stage 8a] retired backend (e.g. the OpenCode CLI): use opencode-server
+    "backend_retired": 410,
     "unknown_model": 400,
     "unknown_effort": 400,
     "invalid_repo_path": 400,
@@ -443,6 +445,10 @@ class TurnRequestPageOut(BaseModel):
     enrolled: bool
     paused: bool
     hold: Optional[str] = None
+    # [A82 Stage 8a] Finished turns of this session whose post-commit effects
+    # (notification / history / telemetry) ended ``failed`` + the latest one.
+    effects_failed: int = 0
+    effects_failed_turn_id: Optional[str] = None
 
 
 class TurnRequestDetailOut(TurnRequestSummaryOut):
@@ -451,6 +457,10 @@ class TurnRequestDetailOut(TurnRequestSummaryOut):
     body: str = ""
     completed_at: Optional[str] = None
     flow_run_id: Optional[str] = None
+    # [A82 Stage 8a] A84 post-commit effects outcome of a finished turn
+    # (``failed`` = the reply/notification may never have reached the user).
+    effects_state: Optional[str] = None
+    effects_error: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: Dict[str, Any]) -> "TurnRequestDetailOut":
@@ -1568,7 +1578,16 @@ def build_control_api(orchestrator) -> FastAPI:
             governor["sdk_max_budget_usd"] = getattr(_cfg.claude, "sdk_max_budget_usd", None)
         except Exception:
             pass
-        return {"status": "ok", "governor": governor}
+        # [A82 Stage 8a] Managed-carrier coverage from the gateway's periodic
+        # check (no DB read here): (carrier, backend) pairs of open sessions no
+        # live managed carrier covers. None ⇒ not checked yet / not a gateway.
+        missing = getattr(orchestrator, "_managed_carrier_missing", None)
+        retired = getattr(orchestrator, "_retired_backend_sessions", None)
+        turn_queue: Dict[str, Any] = {
+            "managed_carrier_missing": missing if isinstance(missing, list) else None,
+            "retired_backend_sessions": retired if isinstance(retired, int) else None,
+        }
+        return {"status": "ok", "governor": governor, "turn_queue": turn_queue}
 
     @app.post("/api/turn-requests/{task_id}/resolve-recovery", dependencies=[Depends(_require_auth)])
     def api_resolve_turn_recovery(task_id: str, body: TurnRecoveryResolveBody) -> JSONResponse:
