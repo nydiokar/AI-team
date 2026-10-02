@@ -96,11 +96,16 @@ def _seed_claimed(db: MeshDB, client: TestClient, n: int, incarnation_id: str) -
     return tokens
 
 
-def _sync_allowance(db: MeshDB) -> None:
-    """The scheduler pass's refresh: cache == DB waiting count (0: all claimed)."""
-    allowance = turn_scheduler.ALLOWANCE
-    gen = allowance.snapshot_generation()
-    assert allowance.refresh_managed(db.managed_waiting_totals()["count"], gen)
+def _sync_allowance(db: MeshDB) -> turn_scheduler.SchedulerPassResult:
+    """A REAL scheduler pass (no queued heads → ``prepare`` never runs): its
+    allowance refresh is the production one."""
+
+    async def _prepare(*_a: Any) -> Any:  # pragma: no cover — nothing queued
+        raise AssertionError("no head expected")
+
+    res = asyncio.run(turn_scheduler.run_scheduler_pass(db, _prepare))
+    assert not res.refresh_deferred
+    return res
 
 
 def _legacy_put_admitted(cap: int, legacy_waiting: int) -> bool:
@@ -128,7 +133,6 @@ def test_S7_C1_release_managed_keeps_fleet_cap(db, hints):
     cap = 3
     tokens = _seed_claimed(db, client, 2, "inc-1")
     _sync_allowance(db)
-    assert turn_scheduler.ALLOWANCE.managed_cached() == 0
     hints.hints = 0
     for i, tok in enumerate(tokens):
         r = client.post(f"/tasks/t-{i}/release-managed",
@@ -188,4 +192,42 @@ def test_S7_C1d_pass_refresh_corrects_over_count(db, hints):
                     json={"node_id": NODE, "incarnation_id": "inc-1"}, headers=H)
     assert r.status_code == 200
     _sync_allowance(db)
+    assert turn_scheduler.ALLOWANCE.managed_cached() == 1  # still claimed: counted
+    with db._write() as conn:  # it starts (out of process): no longer waiting
+        conn.execute("UPDATE mesh_tasks SET status = 'running' WHERE id = 't-0'")
+    _sync_allowance(db)
     assert turn_scheduler.ALLOWANCE.managed_cached() == 0
+
+
+def test_S7_C1e_out_of_process_release_keeps_fleet_cap(db, hints):
+    """Live topology: ``MESH_EMBEDDED_SERVER=false`` (config default; compose /
+    ecosystem split) runs the task server in ANOTHER process — its release
+    cannot touch this process's allowance or hint this scheduler. The legacy
+    gate must hold anyway: unstarted (claimed) grants are counted, so a
+    claimed → pending hand-back never lowers the true figure below the cache."""
+    client = TestClient(ts.app)
+    _register(client, "inc-1")
+    cap = 3
+    tokens = _seed_claimed(db, client, 2, "inc-1")
+    _sync_allowance(db)
+    hints.hints = 0
+    for i, tok in enumerate(tokens):  # the other process's commit: DB only
+        assert db.release_turn(f"t-{i}", tok)
+    assert hints.hints == 0
+    assert db.managed_waiting_totals()["count"] == 2
+    assert not _legacy_put_admitted(cap, legacy_waiting=1)
+
+
+def test_S7_C1f_claimed_rows_keep_a_bounded_refresh_clock(db, hints):
+    """Claimed grants start (or are handed back) in the task-server process
+    with no hint here: while any exist the scheduler re-reads the DB on the
+    3 s fallback clock, so the conservative count is corrected promptly and
+    never strands legacy capacity on the long safety net / indefinite sleep."""
+    client = TestClient(ts.app)
+    _register(client, "inc-1")
+    _seed_claimed(db, client, 1, "inc-1")
+    res = _sync_allowance(db)
+    assert res.claimed == 1 and res.waiting == 0 and res.pending == 0
+    timeout = turn_scheduler._next_timeout(res, turn_scheduler.ACTIVATION_LIMIT_PER_PASS,
+                                           turn_scheduler.SAFETY_NET_SEC)
+    assert timeout is not None and timeout <= turn_scheduler.FALLBACK_INTERVAL_SEC
