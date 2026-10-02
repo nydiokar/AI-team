@@ -275,10 +275,32 @@ async def _submit_agent_instruction(orchestrator: Any, body: Any, session: Any, 
         raise http
 
 
-def _parse_turn_request_body(raw: bytes) -> "TurnRequestCreateBody":
+def _is_json_content_type(value: Optional[str]) -> bool:
+    """FastAPI's strict declared-body rule: ``application/json`` or any
+    ``+json`` subtype (parameters such as charset allowed); missing ⇒ False."""
+    if not value:
+        return False
+    import email.message
+
+    msg = email.message.Message()
+    msg["content-type"] = value
+    if msg.get_content_maintype() != "application":
+        return False
+    subtype: str = msg.get_content_subtype()
+    return subtype == "json" or subtype.endswith("+json")
+
+
+def _parse_turn_request_body(raw: bytes, content_type: Optional[str] = None) -> "TurnRequestCreateBody":
     """[A82 Stage 5 rework] Validate the create-route body AFTER the auth
     dependency ran (FastAPI decodes a declared body before dependencies, so
-    unauthenticated garbage would be 422 instead of 401). Same 422 shape."""
+    unauthenticated garbage would be 422 instead of 401). Same 422 shape —
+    including FastAPI's strict content-type rule: a non-JSON (or missing)
+    media type is never decoded as JSON ⇒ 422, as on every declared body."""
+    if not _is_json_content_type(content_type):
+        raise RequestValidationError([{
+            "type": "content_type", "loc": ("body",),
+            "msg": "Content-Type must be application/json", "input": content_type,
+        }])
     try:
         return TurnRequestCreateBody.model_validate_json(raw)
     except ValidationError as e:
@@ -2116,7 +2138,7 @@ def build_control_api(orchestrator) -> FastAPI:
         only after authentication: unauthenticated input is 401, never 422."""
         from src.control.turn_queue import TurnAdmission
 
-        body = _parse_turn_request_body(await request.body())
+        body = _parse_turn_request_body(await request.body(), request.headers.get("content-type"))
 
         session = orchestrator.session_service.store.get(session_id)
         if session is None:

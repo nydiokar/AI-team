@@ -977,3 +977,29 @@ def test_AUTH12_superseded_manager_is_not_minted_at_claim(tmp_path, monkeypatch)
     assert not _revoked(w, cap_n)
     assert _send(w, cap_n, WRK, op="b-still-current").status_code == 202
 
+
+def test_AUTH13_create_route_requires_json_content_type(tmp_path, monkeypatch):
+    """N2: the manual body read accepts only a JSON media type (charset params
+    and ``+json`` allowed); anything else is rejected after auth with the same
+    422 FastAPI gives every declared body for a non-JSON media type."""
+    w = _mk_world(tmp_path, monkeypatch)
+    url = f"/api/sessions/{MGR}/turn-requests"
+    body = json.dumps({"body": "x", "operation_id": "ct"}).encode()
+    cap = _cap(w, "w-t1", WRK)
+    auth = {"Authorization": f"AITeamSender {cap}", "Idempotency-Key": "ct"}
+    # Unauthenticated: still 401 regardless of content type.
+    assert w.api.post(url, content=body, headers={"Content-Type": "text/plain"}).status_code == 401
+    for ct in ("text/plain", "application/x-www-form-urlencoded", None):
+        h = dict(auth)
+        if ct is not None:
+            h["Content-Type"] = ct
+        r = w.api.post(url, content=body, headers=h)
+        assert r.status_code == 422, (ct, r.status_code, r.text)
+    assert _agent_rows(w.db, MGR) == []
+    ok = w.api.post(url, content=body,
+                    headers={**auth, "Content-Type": "application/json; charset=utf-8"})
+    assert ok.status_code == 202, ok.text
+    ok2 = w.api.post(url, content=json.dumps({"body": "y", "operation_id": "ct2"}).encode(),
+                     headers={**auth, "Idempotency-Key": "ct2",
+                              "Content-Type": "application/vnd.aiteam+json"})
+    assert ok2.status_code == 202, ok2.text
