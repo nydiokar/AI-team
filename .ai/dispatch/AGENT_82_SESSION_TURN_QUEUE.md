@@ -2292,6 +2292,104 @@ Every fix was written test-first. RED was observed on the unchanged code and GRE
 2. *F2 leftover rows.* The session close of a never-run Manager session still enqueues the carrier `close_session` teardown row pinned to the (unknown) node. That is existing managed-close behavior, one row per refused invoke. Each retry also creates and then closes a new session. A refusal is not cached by idempotency, because the carrier may come back.
 3. *F2 scope.* Only `TurnQueueError` is rolled back. The `HarnessAdmissionBlocked` deferral in the docstring is unchanged.
 4. *F3 probe.* The reviewer probe `test_probe_m2_flap.py` now errors at its 4th `claim_turn`: the row is `queued` (backed off), and `claim_turn` raises 409 instead of returning None. The regression test asserts the backoff directly.
+### Stage 7 — regression, pressure, rollout rehearsal (2026-10-02, branch `feat/session-turn-queue`, commits `732f632`..`cb2f768` + this record) — SUBMITTED FOR REVIEW, NOT ACCEPTED
+
+**Ground truth found while starting.** (1) The Stage-6 carry assumed the task server is embedded in the gateway. It is NOT in the live/default shape: `config.mesh.embedded_server` defaults `False`, `compose.yaml` and the ecosystem split run `MESH_EMBEDDED_SERVER=false` (`ai-team-server` via `server_main.py`). A scheduler hint from the task server is then a no-op. (Commit `841d75f`'s message repeats the wrong "embedded" claim; `9c988f5` is the cross-process fix. The F6 docstring in `node_registry._carrier_back_online` has the same assumption; its ≤60 s safety-net fallback is honest.) (2) The enrollment SERVICE (design §10 steps 6/8; packet Stage-4a deviation 5 "Stage 7 rollout") did not exist: there was no flag, no route, no eligibility checks and no unenroll. `MeshDB.enroll_session` was only the marker. Stage 7 built it, because the rollout rehearsal cannot run without it.
+
+**Stage-6 carries closed**
+| Item | Change | Evidence |
+|---|---|---|
+| MINOR under-count (release claimed→pending) | **In-process:** `SharedWaitingAllowance.note_managed_released` raises the cache and bumps the generation, so a refresh that read before the release cannot lower it. `turn_scheduler.notify_managed_released` is called after `task_server.release_managed`, after `NodeRegistry.register` superseded-grant release, and after the operator requeue (`841d75f`). **Cross-process (live shape):** the legacy gate also counts claimed-not-started grants (`managed_waiting_totals()["claimed"]`; the admission caps are unchanged), so a hand-back never makes the true figure exceed the cache. While grants are claimed, the scheduler refreshes on the 3 s fallback clock, so starts correct the over-count promptly (`9c988f5`). | `test_turn_queue_stage7.py` S7_C1 (route; real legacy `SessionTaskQueue` refuses the put at cap), C1b (re-registration), C1c (stale refresh refused), C1d (over-count corrected by a real pass), C1e (out-of-process: DB-only release, no hint, cap holds), C1f (claimed ⇒ timeout ≤ 3 s). RED→GREEN. |
+| NIT Telegram sync read | `_session_queue_paused_async` uses `asyncio.to_thread`; all 3 reply sites use it. | TG_R8 (spy asserts the read is not on the loop thread) |
+| NIT stop reply always "Queue paused" | `_stop_pause_hint` appends the hint only when the pause holds. Stop skips the pause on a closed session (`OwnershipConflictError`). Applies to `/session_cancel` and session-scoped `/cancel`. | TG_R7 |
+| NIT `/session_resume` owner refusal untested | Test added (an allowed but non-owner user is refused; the pause stays). | TG_R6 |
+| NIT stale route-table row | The Stage 6 row and deviation 1 are struck through and marked superseded by `4b3b8a0` (`537e2b1`). | — |
+
+**Enrollment service (new, `25534d7` RED → `cf7276e`)**
+- **Flag.** `TURN_QUEUE_ENROLLMENT_ENABLED` is a runtime flag: registry over env, default `0`, live effect.
+- **Enroll entry point.** `TaskOrchestrator.enroll_session_turn_queue(sid)` runs in the gateway process (this enforces Stage-4a precondition (c)). It refuses with a typed `EnrollmentRefusedError` (409, `code` = reason) or 404/503:
+  - `enrollment_disabled` when the flag is off.
+  - 503 without the canonical DB.
+  - `legacy_work_in_flight` when the session has `active_tasks` (queued or running) or a legacy put is parked.
+  - `capability_missing` when the carrier lacks managed capability (old worker), and `carrier_offline` when it is offline.
+- **Durable half.** `MeshDB.enroll_session_checked` runs one `_managed_write` transaction (5 s deadline). It refuses with `session_closed`, with `session_not_quiescent` (status not idle/awaiting_input/error), and with `legacy_work_in_flight` for open protocol-0 execution rows. It is idempotent: already enrolled returns False.
+- **Admission exclusion (gateway loop).** The legacy put refuses (`enrollment_in_progress`, 409) when the session is being enrolled or was enrolled by this process. That window is a stale marker read. A legacy put parked in the throttled `put` is counted, so enrollment refuses while it is parked. There is no await between the guard and the put. The web legacy branch now maps a `TurnQueueError` to its HTTP code and calls `mark_idle`, so the session is not stranded BUSY.
+- **Unenroll.** `unenroll_session_turn_queue` / `MeshDB.unenroll_session_drained` refuse with `managed_obligation_remaining` while any queued/pending/claimed/running/recovery_required row exists. Unenroll is NOT gated by the flag (rollback must work with the flag OFF).
+- **Routes.** `POST /api/sessions/{id}/turn-requests/enroll|unenroll`: admin auth, 16 KiB stream cap.
+- **Not observable.** Native unsolicited work on a remote carrier cannot be seen at enrollment. The carrier's pre-start `is_quiescent` gate, which requeues with `managed_conflict`, stays the per-turn backstop.
+- **Unchanged.** `_respawn_manager_managed` still marks a respawned Manager enrolled through the raw marker. It is a continuation of an already enrolled Case and is not a new enrollment.
+
+**Pressure findings fixed (TDD)**
+1. **Worker boot spool replay loaded every envelope** (`list_spooled()` built the whole list, up to the 128 MiB retained budget as parsed objects). The fix is the lazy `ManagedResultSpool.iter_spooled`. Traced peak for 12×1 MiB envelopes went from 13.0 MiB to under 6 MiB (`6a9dd1c` RED, `829ac71`).
+2. **Per-pass scheduler reads walked history.** With history plus real ANALYZE statistics, `count_slot_waiting_sessions` read each session's whole history through `idx_mesh_tasks_session` (~109 ms/call at 100k completed rows on the Pi). `requeue_turns_on_dead_carriers` did a full `mesh_tasks` scan on every pass. Both are now pinned `INDEXED BY` the bounded managed partial indexes (`63e18f0` RED, `6e4c1cf`). Scheduler-pass reads now take a median 0.29–0.41 ms at 1k vs 0.30 ms at 100k.
+
+**Regression (explicit paths, guards inspected).** The conftest forces `AI_TEAM_TEST_MODE=1` and `MESH_ENABLED=false`, uses a temp DB per test, and neutralises the file watcher. `test_guard` blocks claude/codex/opencode spawns. Codex/OpenCode suites use fake executables. `test_opencode_server_integration.py` is e2e and was not run. `test_database_authority_process.py` spawns `server_main.py` on a free loopback port with a temp root and terminates it. As extra belts, every group ran with `AI_TEAM_BLOCK_LIVE_CLI=1` and with tripwire `claude`/`codex`/`opencode` stubs first on PATH; the tripwire log stayed empty.
+| Group | Paths | Result |
+|---|---|---|
+| G1 A82 suites (new first) | all `tests/test_turn_queue_*.py` (incl. stage7, rollout, pressure skipped by default) + `test_telegram_turn_queue_resume.py`, `test_codex_managed_*.py`, `test_opencode_managed_turns.py` | **679 passed, 8 skipped** (the opt-in pressure module) |
+| G2 mesh/claims/authority | mesh_enqueue_affinity, claim_reaper, task_state_truth, mesh_dispatch_timeout, mesh_reconcile_spool, pending_reaper, task_server_upload_safety, task_server_client, database_authority(+_process), embedded_server_watchdog | **110 passed** |
+| G3 sessions | session_cancellation, session_close_propagation, session_service(+_lifecycle), session_payload_roundtrip, session_case_persist, session_cache_heartbeat, session_timeline, transcript_read_a81 | **70 passed** |
+| G4 Case producers | case_admission, case_continuation, case_interrupt, case_closure, case_quota_resume, case_transient_resume, case_respawn, watched_jobs | **191 passed** |
+| G5 backends | sdk_driver_proactive, proactive_turn_delivery, codex_ownership, codex_native, codex_app_server, codex_telemetry_adapter, opencode_backend | **97 passed** |
+| G6 surfaces | control_api_write, control_api_fork, control_api, telegram_session_flow, mcp_manager, mcp_jobs, worker_role | **212 passed** |
+Total: 1359 passed, 0 failed, so no origin/main comparison was needed. One mid-run red (`test_WRK03`, a source-inspection test) was an artifact of editing `agent.py` while G1 ran; it is green on rerun and in the final G1.
+**Web** (worktree; `dist/` stays in the worktree): `pnpm --dir web --config.verify-deps-before-run=false test` gave 20 files / **182 passed**; `tsc -b` was clean; `build` succeeded.
+
+**Pressure rehearsal: `tests/test_turn_queue_stage7_pressure.py`** (opt-in `A82_PRESSURE=1`, offline). It runs real uvicorn control-API and task-server instances on 127.0.0.1 ephemeral ports, a raw-socket client, the real bound producer path, the real admission service and a temp DB. 8/8 pass, 54 s on the Pi.
+| Bound (implemented) | Measured |
+|---|---|
+| 100 simultaneous max-size requests (16 KiB `\u0001` text ≈ 96 KiB on the wire) | 14×202 / 86×429 (all `capacity` + `Retry-After`), wall 0.99 s; request p50 0.27 s / p95 0.91 s / max 0.91 s |
+| ≤ 4 concurrent queue mutations | peak **4** (instrumented `enqueue_turn`, 50 ms simulated storage) |
+| per-session 20 / fleet 50 | sequential top-up: sess-0 = **20**, total **50**, then 429 `capacity` |
+| 100 MiB stored intent (count cap lifted for the call) | 51 rows ×2 MiB intent accepted (99.61 MiB); the next is refused 429 `capacity` "byte budget"; per-row >2 MiB is 413 |
+| < 256 MiB incremental RSS, admission only | **+49.5 MiB** peak VmRSS (ru_maxrss +54.2). Byte-bound run: +106 MiB, which is mostly the 256 MiB SQLite mmap of the 100 MB file |
+| threads / SQLite connections / handlers | threads peak 11 (default executor 8); 9 connections opened (per-thread); server-loop tasks peak 115 (100 requests in flight) |
+| event-loop lag | burst: one 360 ms sample (FastAPI parses 100×96 KiB JSON on the loop); held lock: ≤ 4.5 ms |
+| new route 256 KiB / 16 KiB text; compat ≈3.8 MiB (`_INSTRUCTIONS_MAX_REQUEST_BYTES` = 3 983 872) | declared oversize: 413 before any body byte sent (0.001 s). Chunked oversize: 413 after 264 KiB sent (new) / 3.81 MiB (compat), while the client was still sending. 16 KiB UTF-8 text gives 202; one more byte gives 422 |
+| body-read deadline 5 s (total, not idle) | stalled body **408 at 5.002 s**; trickle past 5 s gives 408 at 5.002 s; a 2.5 s trickle is accepted |
+| mutation lock/DB deadline 5 s, held SQLite write lock (2nd connection `BEGIN IMMEDIATE`) | 4×503 `backing_store` at **5.010–5.019 s**, 6×429 immediately. Permits free mid-hold = **0** (held until the threads exit), back to 4 after. Reads (`/health`, turn list) ≤ 4 ms. **No phantom accept** (0 rows) |
+| body + DB measured separately | 2.5 s trickle + held lock: total 7.59 s, DB part 5.01 s (no 15 s legacy retry) |
+| orphan threads | thread count after round 1 = after round 2 (8). Executor threads are bounded |
+| progress after release | 3 admissions 202 and one scheduler pass **activates 3** |
+| 1000 vs 100000 completed rows, same 50 waiting | no `mesh_tasks` full scan or history-index walk in any traced lifecycle statement (heads, totals, slot-waiting, wake, lineage, void, dead-carrier requeue, queue states, list, admission, unenroll). The only temp b-tree is `count(DISTINCT)` over `idx_mesh_turns_waiting` (≤ 50 rows). Reads 0.29 ms vs 0.30 ms |
+| Case eligibility batched | head selection is **1 statement** for both 10 and 50 waiting heads |
+| result/heartbeat not starved | 4 mutations saturated (1 s each, 60-request storm). Heartbeat 7 ms, claim 10 ms, start 8 ms, result 5 ms, gateway read 4 ms |
+| worker spool not all in memory | finding 1 above (fixed). Delivery is bounded by `MAX_CONCURRENT_DELIVERIES` = 2 per carrier |
+
+**Rollout rehearsal: `tests/test_turn_queue_rollout.py` (19 tests, in default runs)**
+- **ROLL01.** Flag OFF refuses enrollment, and the legacy path is unchanged. ROLL01b: flag OFF with accepted rows across a simulated restart (new `MeshDB` + orchestrator on the same file). Presence is reloaded, the scheduler activates, carrier completion activates the next head, the enrolled session still admits, and recovery enter/resolve works.
+- **ROLL02.** No canonical DB gives 503, and the legacy path is unchanged.
+- **ROLL03.** Covers idempotent enroll, the old worker (`capability_missing`), an offline carrier, BUSY / pinned-offline sessions, a closed session, legacy in-memory work, and durable legacy pending/claimed rows. A completed legacy row does not block.
+- **ROLL04.** Both cutover interleavings: a legacy arrival during the enroll commit, a stale marker read resumed after the commit, and a parked throttled put. Exactly one side wins. Mutants were killed: removing the put guard fails 04/04b; removing the parked counter fails 04c.
+- **ROLL05.** Unenroll is refused while the session is queued, pending, running or in recovery_required. After drain it is allowed (flag OFF) and the legacy path resumes.
+- **ROLL05b (mixed version / rollback).** An OLD worker re-registers without managed capability. `/tasks/pending` never offers the protocol-1 row, `/pending-managed` returns `[]`, and the legacy `/claim` refuses. The row stays `pending` with protocol 1: durable, not run, not lost. A new managed admission gets 503 `carrier_unavailable`, and the old worker still polls and claims legacy work.
+- **ROLL06.** Routes: 401/404/409/200 and the 413 cap. The web legacy refusal during an enroll returns 409 with no BUSY strand.
+- **Producers honor the marker** (existing suites, green above): web/Telegram/runtime P1 (P1_01/05/06/11*, P1_09, TG_R*), compaction/stop/close 4b, continuation 4c, watched-job + heartbeat 4d, quota/transient/respawn 4e, sender AUTH, manager_invoke/uploads pre-cutover P1/P2.
+- **MESH_ENABLED=false.** `get_db()` returns None, so there is no marker read and the legacy path is used (P1_02b, ROLL02).
+- **Rollback rule (documented).** Never roll back to pre-A82 `main` while protocol-1 rows exist: main's `get_pending_tasks` is `WHERE status = 'pending'`, with no protocol filter (verified with `git show origin/main:src/control/db.py`), so it would hand managed rows to legacy pollers and run them twice. Drain or unenroll first; this branch's legacy poller never receives them (ROLL05b).
+
+**§7 service-boundary walk**
+| Seam | Concurrency | Memory | Payload | Timeout | Malformed | Backing failure |
+|---|---|---|---|---|---|---|
+| Admission (web/turn-requests/Telegram/producers) | 4 process-wide permits, excess 429 + Retry-After (PR01) | ≤ 50 rows / 100 MiB intent; +49.5 MiB at 100 max-size requests | streamed cap 256 KiB / 16 KiB text / compat ≈3.8 MiB (PR02) | body 5 s (408), mutation 5 s (503), separate (PR02/03) | extra=forbid → 422 | DB lock/None → 503, no phantom (PR03) |
+| Start/result (task server) | token-fenced CAS; sync routes in the anyio pool; unaffected by admission saturation (PR05) | result ≤ 8 MiB envelope, spool ≤ 128 MiB, boot replay now lazy | 16 KiB control / 8 MiB+64 KiB result (streamed) | carrier HTTP 10 s; redelivery bounded batches, 2 concurrent | extra=forbid; foreign token 409 | spool-before-POST, receipt-matched prune |
+| Credential provisioning / send | minted in the claim txn; send = turn-requests route (same 4 permits) + sender rate index | as admission | as admission | as admission | 401 / 403 typed | 503 |
+| Recovery resolution | operator / `/quiescence`, evidence-gated CAS | small | 16 KiB / 8 MiB caps | single txn | typed 409 (`acknowledgement_required`…) | 503 |
+| Staged-file fetch | per managed turn (worker semaphore) | **whole file in worker memory** (`_HTTP.get_bytes`) | **bounded only by `GATEWAY_UPLOAD_MAX_MB` (default 0 = unbounded on web; the Telegram bot API caps at 20 MB)**: DEFERRED, see CONTEXT (s) | 60 s GET | 404 → `staged_file_missing` (F4) | transient error → release + retry |
+| Codex / OpenCode managed calls | codex capacity 8, control semaphore 4, app-server `MAX_PENDING` 32; OpenCode repo/server slots 8 | bounded queues | codex message ≤ 1 MiB | `RPC_TIMEOUT` 30 s per request (neighbour-safe, step-4 M1); turn ≤ 36 000 s | typed refusals | not-submitted → requeue (`managed_conflict`, N2); uncertain → recovery |
+| Enrollment (new) | operator-only; in-process exclusion + one 5 s txn | O(1) | 16 KiB cap, no body | 5 s DB deadline | unknown → 404 | no DB / lock → 503 |
+
+**Deferrals (also under A82 in CONTEXT, with evidence).**
+- (s) An out-of-process `running→pending` `backend_not_invoked` hand-back is seen by the gateway's legacy gate only at the next scheduler pass. The window is bounded by the carrier's re-claim (claimed rows are counted). Managed admission stays exact.
+- (t) Staged-file size: set `GATEWAY_UPLOAD_MAX_MB` before enrolling sessions that take web uploads. This is a pre-existing legacy path that the managed delivery inherits.
+- (u) Native unsolicited work on a remote carrier is not observable at enrollment. The per-turn `is_quiescent` gate is the backstop.
+- (v) The burst caused one 360 ms event-loop lag sample from on-loop JSON parsing of 96 KiB bodies. It is within bounds; no change.
+
+**Uncertain / not verified.**
+- No live gateway, worker, Codex or OpenCode was touched.
+- `is_quiescent` on a real remote carrier is unproven live, as recorded at step 4.
+- The pressure numbers are from this Pi (4 cores) with a temp DB on the local filesystem.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
