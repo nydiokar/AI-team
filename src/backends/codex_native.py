@@ -55,6 +55,11 @@ _SUBMITTABLE_STATES = frozenset({"idle", "systemError"})
 _PROTOCOL_PROBES: dict[tuple[str, int, int], tuple[bool, bool, float]] = {}
 _PROBE_RETRY_SEC = 300.0
 _PRE_SUBMIT_CONFLICTS = frozenset({"codex_thread_busy", "codex_capacity_exceeded"})
+# [A82 pre-cutover, N1] An app-server that leaves a request unanswered this long
+# while alive is hung: it is recycled once no live turn runs on it (held turns
+# on it then resolve by process-death proof) — never a session wedged until a
+# worker restart.
+UNRESPONSIVE_AFTER_SEC = 300.0
 
 
 def _managed_protocol_supported(executable: str, env: dict[str, str]) -> bool:
@@ -169,6 +174,7 @@ class _Hold(BaseModel):
     # [A82 step 4 rework, M1] Set when the submitting request (turn/start or
     # compaction) timed out: its late reply lands here and alone decides.
     late_reply: Any = None  # queue.Queue[dict] | None
+    late_id: int = 0  # [A82 pre-cutover, N1] that request's JSON-RPC id
 
 
 class LateManagedOutcome(BaseModel):
@@ -223,6 +229,10 @@ class CodexBackend(CodingBackend):
         self._held: dict[str, _Hold] = {}
         self._armed: dict[str, None] = {}
         self._proactive_sink: Callable[[str, LateManagedOutcome], Any] | None = None
+        # [A82 pre-cutover, N1] session key → (app-server, request id) of a
+        # forgotten hold's still-unanswered submission: busy until it is
+        # answered or that app-server is gone (recycled when unresponsive).
+        self._unanswered: dict[str, tuple[CodexAppServerClient, int]] = {}
 
     def provision_sender_capability(self, session_id: str, token: str | None) -> bool:
         """[A82 Stage 5] Per-thread sender tool: the next attach of this
@@ -464,10 +474,50 @@ class CodexBackend(CodingBackend):
                 with call.lock:
                     call.forgotten = True
                 removed = True
-            removed = removed or any(h.turn_uuid == turn_uuid for h in self._held.values())
+            key = next((k for k, h in self._held.items() if turn_uuid and h.turn_uuid == turn_uuid), None)
+            hold = self._held.pop(key) if key is not None else None
         if turn_uuid and CodexOwnership().finish_managed(turn_uuid, "forgotten"):
             removed = True
+        if hold is not None:
+            # [A82 pre-cutover, N1] Drop the hold and its late route; a still-
+            # unanswered submission keeps the session busy (it may yet be
+            # accepted) until answered or its app-server is gone/recycled.
+            removed = True
+            if hold.late_reply is not None and hold.client is not None and hold.late_id \
+                    and hold.client.forget_late(hold.late_id):
+                with self._lock:
+                    self._unanswered[key] = (hold.client, hold.late_id)
+            hold.ownership.release()
         return removed
+
+    def _recycle_unresponsive(self) -> None:
+        """[A82 pre-cutover, N1] Close every app-server this backend still
+        depends on that left a request unanswered past ``UNRESPONSIVE_AFTER_SEC``
+        — but never one with a live run (``_active``) on it. Its process-group
+        death is then the proof that settles every turn it held."""
+        with self._lock:
+            candidates = [self._client, *(h.client for h in self._held.values()),
+                          *(c for c, _ in self._unanswered.values())]
+        seen: set[int] = set()
+        for client in candidates:
+            if client is None or id(client) in seen or not client.unresponsive(UNRESPONSIVE_AFTER_SEC):
+                continue
+            seen.add(id(client))
+            with self._runtime_lock, self._lock:
+                if client is self._client:
+                    if self._active:
+                        logger.warning("event=codex_app_server_unresponsive_not_recycled reason=live_turn")
+                        continue
+                    self._client = None
+                    self._loaded.clear()
+                    self._sender_attached.clear()
+            process = client.process
+            logger.warning("event=codex_app_server_unresponsive_recycled pid=%s",
+                           process.pid if process is not None else None)
+            try:
+                client.close()
+            except CodexProtocolError:
+                logger.warning("event=codex_app_server_recycle_incomplete")
 
     def is_quiescent(self, session: Session) -> bool:
         """No native work for ``session``: no live run here, no held turn still
@@ -482,6 +532,17 @@ class CodexBackend(CodingBackend):
                 return False
             if any(call.abandoned and call.session_key == key for call in self._calls.values()):
                 return False  # a late reply is still being delivered
+        self._recycle_unresponsive()
+        with self._lock:
+            unanswered = self._unanswered.get(key)
+        if unanswered is not None:
+            client, request_id = unanswered
+            process = client.process
+            if process is not None and process.poll() is None and client.outstanding(request_id):
+                return False  # [N1] a forgotten submission may still be accepted
+            with self._lock:
+                if self._unanswered.get(key) == unanswered:
+                    self._unanswered.pop(key, None)
         if not self._settle_hold(key):
             return False
         ownership = CodexOwnership()
@@ -654,6 +715,7 @@ class CodexBackend(CodingBackend):
         file_changes: dict[str, dict] = {}
         identity: dict = {}
         awaiting_reply: queue.Queue[dict] | None = None
+        awaiting_id = 0
         try:
             with self._lock:
                 if key in self._active:
@@ -752,8 +814,9 @@ class CodexBackend(CodingBackend):
                     response = client.start_turn(native_id, message, workspace, model, effort,
                                                  managed.turn_uuid if managed else None,
                                                  on_late=start_reply.put_nowait)
-            except CodexRPCTimeout:
+            except CodexRPCTimeout as exc:
                 awaiting_reply = start_reply  # [M1] the prompt may still be accepted, late
+                awaiting_id = exc.request_id
                 raise
             if not compact:
                 active.turn_id = response["turn"]["id"]
@@ -871,7 +934,7 @@ class CodexBackend(CodingBackend):
                     with self._lock:
                         self._held[key] = _Hold(ownership=ownership, client=client, thread_id=native_id,
                                                 turn_uuid=managed.turn_uuid, native_turn_id=active.turn_id,
-                                                late_reply=awaiting_reply)
+                                                late_reply=awaiting_reply, late_id=awaiting_id)
                     return outcome
                 if outcome is not None:
                     release_safe = True  # nothing of ours runs (never submitted / provably stopped)
@@ -889,7 +952,7 @@ class CodexBackend(CodingBackend):
                 with self._lock:
                     self._held[key] = _Hold(ownership=ownership, client=client, thread_id=native_id,
                                             turn_uuid="", native_turn_id=active.turn_id,
-                                            late_reply=awaiting_reply)
+                                            late_reply=awaiting_reply, late_id=awaiting_id)
             elif isinstance(exc, CodexRPCError):
                 release_safe = True
             return ExecutionResult(False, "\n".join(output.values()), native_id,

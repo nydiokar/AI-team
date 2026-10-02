@@ -872,3 +872,55 @@ def test_N2_pre_submit_thread_start_timeout_is_not_submitted_and_requeues(h, mon
     again = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-n2"))
     assert again.success, again.errors
     assert len(h.requests("turn/start")) == 1
+
+
+def test_N1_hung_app_server_forget_drops_hold_and_late_id_and_recycle_unwedges(h, monkeypatch):
+    """Inverts the reviewer probe ``test_probe_codex_hung.py``: ``turn/start``
+    is never answered while the app-server stays alive."""
+    monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
+    monkeypatch.setattr(native_mod, "UNRESPONSIVE_AFTER_SEC", 1.0)
+    h.ctl(start_delay=30)  # the fake's request loop is wedged: nothing is answered
+    result = h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-h"))
+    assert result.error_class == "recovery_required"
+    client = h.backend._client
+    ident = process_identity(client.process.pid)
+    assert h.backend.forget_managed_turn(h.session(), "uuid-h") is True
+    assert h.backend._held == {}, "operator forget must drop the hold"
+    assert client.late == {}, "operator forget must drop the late id's route"
+    assert h.backend.is_quiescent(h.session()) is False, "the unanswered prompt may still be accepted"
+    time.sleep(1.1)  # past the late-reply window: the app-server is unresponsive
+    assert h.backend.is_quiescent(h.session()) is True, "hung app-server recycled; session not wedged"
+    assert process_gone_proof(ident) is not None, "recycle = provable process death"
+    assert owners(h.home) == []
+    h.ctl()
+    after = h.backend.run_managed_turn(h.session(), "y", own(turn_uuid="uuid-next"))
+    assert after.success, after.errors
+    assert h.backend._client is not client
+
+
+def test_N1_held_turn_on_a_hung_app_server_resolves_by_recycle_without_forget(h, monkeypatch):
+    monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
+    monkeypatch.setattr(native_mod, "UNRESPONSIVE_AFTER_SEC", 1.0)
+    h.ctl(start_delay=30)
+    assert h.backend.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-h2")).error_class \
+        == "recovery_required"
+    assert h.backend.is_quiescent(h.session()) is False
+    time.sleep(1.1)
+    assert h.backend.is_quiescent(h.session()) is True
+    assert h.backend._held == {}
+    assert {r["turn_uuid"]: r["state"] for r in managed_rows(h.home)}["uuid-h2"] == "stopped"
+
+
+def test_N1_unresponsive_app_server_is_never_recycled_under_a_live_neighbour_turn(h, monkeypatch):
+    th_a, box_a, pid = _held_neighbour(h)
+    monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
+    monkeypatch.setattr(native_mod, "UNRESPONSIVE_AFTER_SEC", 0.5)
+    h.ctl(hold=h.release_path, start_delay=2.0)
+    res_b = h.backend.run_managed_turn(h.session("sess-b"), "b", own("sess-b", "uuid-b", task="t-b"))
+    assert res_b.error_class == "recovery_required"
+    time.sleep(0.6)
+    assert h.backend._client.unresponsive(0.5)
+    assert h.backend.is_quiescent(h.session("sess-b")) is False
+    _neighbour_survives(h, th_a, box_a, pid)
+    h.ctl()
+    wait_for(lambda: h.backend.is_quiescent(h.session("sess-b")))
