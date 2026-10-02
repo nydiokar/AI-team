@@ -31,7 +31,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 logger = logging.getLogger("worker.managed_result_spool")
 
@@ -458,11 +458,21 @@ class ManagedResultSpool:
         and delivers). A malformed/foreign file is skipped, not fatal.
         """
         out: List[Tuple[str, str, Dict[str, Any]]] = []
-        if not self.dir.exists():
-            return out
-        for p in _rotate(sorted(self.dir.glob("*.json")), after):
+        for item in self.iter_spooled(after):
             if limit is not None and len(out) >= limit:
                 break
+            out.append(item)
+        return out
+
+    def iter_spooled(
+        self, after: Optional[str] = None
+    ) -> Iterator[Tuple[str, str, Dict[str, Any]]]:
+        """[A82 Stage 7] Lazily yield ``(task_id, claim_token, envelope)``, one
+        file read per step — a full pass (boot replay) holds one envelope at a
+        time, never the whole retained budget."""
+        if not self.dir.exists():
+            return
+        for p in _rotate(sorted(self.dir.glob("*.json")), after):
             try:
                 body = json.loads(p.read_text(encoding="utf-8"))
                 tid = str(body["task_id"])
@@ -471,8 +481,7 @@ class ManagedResultSpool:
             except Exception:
                 logger.warning("event=managed_spool_unreadable path=%s (skipped)", p.name)
                 continue
-            out.append((tid, tok, env))
-        return out
+            yield (tid, tok, env)
 
 
 class ManagedClaimStore:

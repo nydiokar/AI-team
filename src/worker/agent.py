@@ -1379,7 +1379,8 @@ class WorkerAgent:
         if orphans:
             logger.warning("event=managed_spool_orphan_tmps_removed count=%d", orphans)
         replayed = 0
-        for task_id, _claim_token, _envelope in self._result_spool.list_spooled():
+        # [A82 Stage 7] Lazy pass: one envelope in memory at a time (design §8).
+        for task_id, _claim_token, _envelope in self._result_spool.iter_spooled():
             self._pending_result_delivery.add(task_id)
             replayed += 1
         if replayed:
