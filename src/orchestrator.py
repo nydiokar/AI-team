@@ -1275,6 +1275,36 @@ class TaskOrchestrator(ITaskOrchestrator):
                 task_id=task_id or session.session_id,
                 chat_id=session.telegram_chat_id,
             )
+            # [recovery-wait-resolution] A wait member we could only mark ERROR
+            # (failed / unknown after restart) must still resolve its Manager's
+            # wait-group — otherwise the Manager hangs on a worker that will never
+            # report. Emit the terminal fact as a failure (idempotent) so the
+            # Manager is woken to react rather than waiting forever.
+            if task_id:
+                self._emit_task_finished(
+                    task_id, success=False,
+                    error_class="restart_interrupted", once=True,
+                )
+
+        # [recovery-wait-resolution] Final safety net: the recovery/reaper paths
+        # that terminalise a task without emitting `task.finished` are the only way
+        # an armed wait can be stranded, and they all run around a restart. Reconcile
+        # EVERY open Case's waits against task truth once here, so the durable task
+        # state alone is sufficient to wake a Manager — independent of which path
+        # finalised the worker. Bounded (open Cases only) and idempotent.
+        if db is not None:
+            try:
+                for case in db.list_open_cases():
+                    cid = case.get("flow_run_id")
+                    if cid:
+                        backfilled = db.backfill_missing_task_finished(cid)
+                        if backfilled:
+                            self._emit_event(
+                                "recovery_wait_backfill", None,
+                                {"case_id": cid, "task_ids": backfilled},
+                            )
+            except Exception as e:
+                logger.warning("event=recovery_wait_backfill_failed err=%s", e)
 
     async def _recover_completed_session(self, session: Any, task_row: Dict[str, Any]) -> None:
         """Restore a session whose task completed in DB while the gateway was down."""
@@ -1339,6 +1369,14 @@ class TaskOrchestrator(ITaskOrchestrator):
             None,
             {"session_id": session.session_id, "task_id": task_row["id"], "backend": session.backend},
         )
+        # [recovery-wait-resolution] This path finalises a task that completed
+        # across a gateway restart, but a Manager's wait-group resolves ONLY from
+        # the durable `task.finished` ledger fact — which the live result path
+        # emits and this path historically did NOT. Emit it (idempotent) so a
+        # Manager waiting on this worker is actually woken; without it the wait
+        # dangles forever while the UI (session row, updated above) correctly
+        # shows the worker done — the exact divergence that strands the Manager.
+        self._emit_task_finished(task_row.get("id"), success=True, once=True)
 
         await self.notifier.notify_task_outcome(
             task_row["id"],
@@ -7412,27 +7450,63 @@ class TaskOrchestrator(ITaskOrchestrator):
         (no-op when OFF ⇒ byte-identical) and best-effort/isolated — a write
         failure logs and returns; it can NEVER raise into task execution.
         """
+        meta = getattr(task, "metadata", None) or {}
+        # Birth case (owns a flow_run) OR the shared Case an ordinary turn
+        # attached to — either way the task ran under this Case.
+        flow_run_id = meta.get(self._FLOW_RUN_META_KEY) or meta.get(self._CASE_ID_META_KEY)
+        self._emit_task_finished(
+            getattr(task, "id", None),
+            success=success,
+            error_class=error_class,
+            flow_run_id=flow_run_id,
+        )
+
+    def _emit_task_finished(
+        self,
+        task_id: Optional[str],
+        *,
+        success: bool,
+        error_class: str = "",
+        flow_run_id: Optional[str] = None,
+        once: bool = False,
+    ) -> None:
+        """Emit the SINGLE durable terminal fact (``task.finished``) for a task.
+
+        This is the one signal the wake-dispatcher reads to resolve a Manager's
+        wait-group (``compute_continuation_tick``). EVERY path that terminalises a
+        task must funnel through here so the ledger fact can never diverge from the
+        task's real outcome: the live result path (``_flow_terminal_outcome``),
+        restart recovery (``_recover_completed_session``) and the reattach path all
+        call it. The Case is resolved from an explicit ``flow_run_id`` hint (the
+        live path carries it in task metadata) or, failing that, from the durable
+        task→Case lineage (``existing_task_lineage``) — so a caller that holds only
+        a task id (recovery) still writes to the correct Case instead of silently
+        dropping the fact. Flag-guarded, best-effort/isolated — a write failure
+        logs and returns; it can NEVER raise into task handling. ``once=True`` makes
+        the write idempotent (used by the reconciliation callers)."""
         try:
-            if not self._harness_flow_drive_enabled():
+            if not task_id or not self._harness_flow_drive_enabled():
                 return
-            meta = getattr(task, "metadata", None) or {}
-            # Birth case (owns a flow_run) OR the shared Case an ordinary turn
-            # attached to — either way the task ran under this Case.
-            flow_run_id = meta.get(self._FLOW_RUN_META_KEY) or meta.get(self._CASE_ID_META_KEY)
-            if not flow_run_id:
+            case = flow_run_id
+            if not case:
+                from src.control.db import get_db
+                db = get_db()
+                lineage = db.existing_task_lineage(task_id) if db is not None else None
+                case = lineage.get("flow_run_id") if lineage else None
+            if not case:
                 return
             self._record_flow_event(
-                flow_run_id, "task.finished", "system",
-                entity_type="task", entity_id=getattr(task, "id", None),
+                case, "task.finished", "system",
+                entity_type="task", entity_id=task_id,
                 payload={
                     "outcome": "success" if success else "failed",
                     "error_class": (error_class or None) if not success else None,
                 },
+                once=once,
             )
         except Exception as e:
             logger.warning(
-                "event=flow_terminal_outcome_failed task_id=%s err=%s",
-                getattr(task, "id", "?"), e,
+                "event=emit_task_finished_failed task_id=%s err=%s", task_id, e,
             )
 
     # ===========================================================================
