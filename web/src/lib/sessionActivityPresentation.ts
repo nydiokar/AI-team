@@ -27,6 +27,9 @@ const STATE_VIEW: Record<string, ActivityStatusView> = {
   done: { label: "Done", tone: "ok" },
   lost: { label: "Lost", tone: "warn" },
   pending: { label: "Pending", tone: "idle" },
+  // [A82 Stage 6] managed turn truth states
+  withdrawn: { label: "Withdrawn", tone: "idle" },
+  recovery_required: { label: "Recovery required", tone: "bad" },
 };
 
 export function activityStatusView(item: SessionActivityItem): ActivityStatusView {

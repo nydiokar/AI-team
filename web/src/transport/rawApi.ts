@@ -48,6 +48,20 @@ export interface RawSessionView {
    *  reason (BUSY, terminal, or db unavailable). Optional so older cached
    *  payloads without the field still parse. */
   reason?: RawSessionReason | null;
+  /** [A82 Stage 6] Ledger-derived managed turn-queue overlay of an ENROLLED
+   *  session (core.view_models.SessionTurnQueueState). null/absent ⇒ not
+   *  enrolled (legacy status semantics apply). */
+  turn_queue?: RawSessionTurnQueue | null;
+}
+
+// [A82 Stage 6] Queue overlay: waiting count + the ledger's active slot holder.
+// Queued work is NOT busy — only `active_status` means a turn is in flight.
+export interface RawSessionTurnQueue {
+  queued: number;
+  active_turn_id: string | null;
+  active_status: string | null;
+  paused: boolean;
+  hold: string | null;
 }
 
 // [A83] Shape of SessionReason.to_dict(): {kind, confidence, detail}.
@@ -275,6 +289,9 @@ export interface RawTranscriptTurn {
   /** When the reply landed (start + time spent working). Falls back to `timestamp`. */
   completed_at?: string;
   success: boolean;
+  /** [A82 Stage 6] Ledger status (pending/running/completed/…). Waiting
+   *  (`queued`) and `withdrawn` managed turns are never in the transcript. */
+  status?: string;
   instruction: string;
   result: string;
   file_count: number;
