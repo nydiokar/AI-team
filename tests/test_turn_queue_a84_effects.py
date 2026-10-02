@@ -407,8 +407,10 @@ def test_E09_case_child_gets_exactly_one_task_finished(tg: _Env, monkeypatch: py
 def test_E10_pending_effects_read_uses_the_partial_index(tg: _Env) -> None:
     plan = " ".join(str(r[-1]) for r in tg.gw._conn().execute(
         "EXPLAIN QUERY PLAN " + tg.gw._PENDING_EFFECTS_SQL, (25,)).fetchall())
-    assert "idx_mesh_tasks_turn_effects" in plan
-    assert "SCAN mesh_tasks" not in plan.replace("USING INDEX", "")
+    # A walk of the PARTIAL index only (it holds just the outstanding rows;
+    # legacy/finished rows are never visited) and no sort step.
+    assert "USING INDEX idx_mesh_tasks_turn_effects" in plan
+    assert plan.count(" mesh_tasks ") == plan.count("USING INDEX idx_mesh_tasks_turn_effects")
     assert "TEMP B-TREE" not in plan
 
 
