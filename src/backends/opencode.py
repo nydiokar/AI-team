@@ -1202,6 +1202,13 @@ class OpenCodeServerBackend(CodingBackend):
     def close(self, session: Session) -> None:
         # OpenCode DELETE removes the session and all its data. Ordinary close
         # only releases gateway-side ownership; persisted history remains resumable.
+        # [A82 pre-cutover] A closed session gets no late delivery: stop its held
+        # attempts' late watchers (their entries stay, so quiescence still
+        # follows native truth until resolved / forgotten).
+        with self._lock:
+            for entry in self._managed.values():
+                if entry.phase == "held" and entry.session_id == (session.session_id or ""):
+                    entry.forgotten = True
         return None
 
     def compact_session(self, session: Session) -> ExecutionResult:
