@@ -242,7 +242,10 @@ def test_2b_idle_fleet_pending_on_dead_carrier_is_requeued(tmp_path, monkeypatch
         s = ts.TurnScheduler(db, o._prepare_managed_turn, fallback_sec=0.05,
                              safety_net_sec=0.2, recover_lineage=o._recover_managed_lineage)
         task = asyncio.create_task(s.run())
-        await asyncio.sleep(0.3)
+        for _ in range(100):  # poll: a fixed 0.3 s flaked under full-suite load
+            if db.get_task(tid)["status"] == "pending":
+                break
+            await asyncio.sleep(0.05)
         assert db.get_task(tid)["status"] == "pending"  # activated to worker-a
         old = (datetime.now(tz=timezone.utc) - timedelta(seconds=1000)).isoformat()
         db._conn().execute("UPDATE nodes SET last_heartbeat=?, status='offline' WHERE node_id='worker-a'", (old,))
