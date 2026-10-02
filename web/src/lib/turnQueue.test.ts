@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { QueryClient } from "@tanstack/react-query";
 import {
   blockedReasonLabel,
+  effectsFailedLabel,
   isEditableTurn,
   queueOpState,
   queueOwnedIds,
@@ -220,5 +221,20 @@ describe("UI06 pending/terminal dedup by durable id", () => {
   it("terminal set matches the backend (withdrawn is terminal)", () => {
     expect(TURN_TERMINAL_STATUSES.has("withdrawn")).toBe(true);
     expect(TURN_TERMINAL_STATUSES.has("recovery_required")).toBe(false);
+  });
+});
+
+describe("[A82 Stage 8a] cutover labels", () => {
+  it("a head waiting on a pre-cutover legacy turn says so", () => {
+    expect(blockedReasonLabel("legacy_work_draining: task_1234")).toBe(
+      "Finishing a pre-cutover turn — starts right after it",
+    );
+  });
+
+  it("failed post-commit effects get a queue-level label; none ⇒ null", () => {
+    expect(effectsFailedLabel(0)).toBeNull();
+    expect(effectsFailedLabel(undefined)).toBeNull();
+    expect(effectsFailedLabel(1)).toMatch(/^1 finished turn: reply delivery failed/);
+    expect(effectsFailedLabel(3)).toMatch(/^3 finished turns/);
   });
 });
