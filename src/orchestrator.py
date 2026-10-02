@@ -183,6 +183,9 @@ MANAGED_HEARTBEAT_TTL_SEC = 300
 MANAGED_EFFECTS_MAX_ATTEMPTS = 5
 MANAGED_EFFECTS_BATCH = 25
 MANAGED_EFFECTS_IDLE_SWEEP_EVERY = 20
+#: [A84] A notification that has not returned by then has an UNKNOWN delivery
+#: outcome: it is closed (never re-sent) instead of stalling the consumer.
+MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC = 60.0
 
 
 async def _reconcile_heartbeat_leases(db: Any) -> None:
@@ -12119,10 +12122,17 @@ Generated from user description: {description}
             sid = str(row.get("session_id") or "")
             session = self.session_store.get(sid) if sid else None
             try:
-                await self.notifier.notify_task_outcome(
+                await asyncio.wait_for(self.notifier.notify_task_outcome(
                     task_id, result, session=session,
                     chat_id=getattr(session, "telegram_chat_id", None) if session else None,
+                ), timeout=MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC)
+            except asyncio.TimeoutError:
+                # The send may have gone out: unknown ⇒ never retried.
+                await asyncio.to_thread(
+                    db.transition_turn_effects, task_id, "notifying", "notified",
+                    error="notify_timeout (outcome unknown)",
                 )
+                logger.warning("event=managed_notify_timeout task_id=%s", task_id)
             except Exception as e:  # noqa: BLE001 — bounded retry below
                 attempts += 1
                 bumped = True

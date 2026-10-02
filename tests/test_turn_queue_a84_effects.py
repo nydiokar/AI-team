@@ -330,6 +330,28 @@ def test_E05b_transient_notifier_failure_retries_then_delivers(tg: _Env) -> None
     assert tg.drain() == 0 and len(tg.notifier.calls) == 2
 
 
+def test_E05c_hung_notifier_times_out_and_is_never_resent(
+    tg: _Env, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC", 0.05)
+    tid = tg.run_turn("hang", "op-h")
+    real = tg.notifier.notify_task_outcome
+
+    async def _hang(*a: Any, **k: Any) -> None:
+        await real(*a, **k)
+        await asyncio.sleep(30)
+
+    tg.notifier.notify_task_outcome = _hang  # type: ignore[method-assign]
+    assert tg.drain() == 1
+    assert tg.drain() == 0
+    assert len(tg.notifier.calls) == 1  # outcome unknown ⇒ never re-sent
+    row = tg.row(tid)
+    assert row["effects_state"] == "done"
+    assert "notify_timeout" in (row["effects_error"] or "")
+
+
 # E06 ----------------------------------------------------------------------- #
 def test_E06_failing_idempotent_effect_retries_without_renotifying(
     tg: _Env, monkeypatch: pytest.MonkeyPatch,
