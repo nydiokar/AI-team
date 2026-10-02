@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
 import time
 import uuid
@@ -98,6 +99,12 @@ async def _session_turn_queue_enrolled(session_id: str) -> bool:
 def _turn_queue_refusal(err: TurnQueueError) -> str:
     """[A82 Stage 4a] Honest refusal: nothing was queued."""
     return f"❌ Not queued ({getattr(err, 'code', 'error')}): {str(err)[:200]}"
+
+
+def _upload_staging_root() -> Path:
+    """Gateway staging directory for files pulled by the session's worker
+    (same root the control API and task server ``/files`` use)."""
+    return Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
 _DANGEROUS_EXTENSIONS: set[str] = {
     ".exe", ".bat", ".cmd", ".com", ".msi", ".msp", ".scr", ".pif", ".cpl",
@@ -2026,13 +2033,10 @@ class TelegramInterface:
         if not self._user_can_access_session(user_id, active_session):
             await update.message.reply_text("❌ You do not own the active session.")
             return
-        if await _session_turn_queue_enrolled(active_session.session_id):
-            # [A82 Stage 4a] File ingestion into an enrolled session is producer 8
-            # (not converted yet): refuse before any download / BUSY mark.
-            await update.message.reply_text(
-                "❌ File upload into a queue-enrolled session is not supported yet."
-            )
-            return
+        # [A82 pre-cutover P2] Producer 8: an ENROLLED session's file is staged
+        # for its managed carrier (fetched before the turn runs); a caption is a
+        # managed turn (queued, never BUSY), no caption a file-only delivery.
+        enrolled = await _session_turn_queue_enrolled(active_session.session_id)
 
         # Determine file source
         doc = update.message.document
@@ -2081,14 +2085,14 @@ class TelegramInterface:
         # (same rule NodeInspector uses), so uploads and inspection agree on
         # where a session lives — including after the gateway moves to the VPS.
         from src.control.node_inspector import session_node
-        is_remote = session_node(active_session) is not None
+        is_remote = session_node(active_session) is not None or enrolled
 
         file_size_kb = file_size / 1024
         size_str = f"{file_size_kb:.1f} KB" if file_size_kb < 1024 else f"{file_size_kb / 1024:.1f} MB"
 
         if is_remote:
             # Stage the file on the server; the remote worker will pull it via GET /files/{file_id}
-            _staging_root = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
+            _staging_root = _upload_staging_root()
             stage_id = uuid.uuid4().hex[:16]
             stage_dir = _staging_root / stage_id
             try:
@@ -2102,9 +2106,36 @@ class TelegramInterface:
                 return
 
             staged_file_meta = {"file_id": stage_id, "filename": safe_name}
-            save_msg = f"📎 Staged `uploads/{safe_name}` ({size_str}) → sending to {active_session.machine_id}"
+            target = active_session.machine_id or "the session's carrier"
+            save_msg = f"📎 Staged `uploads/{safe_name}` ({size_str}) → sending to {target}"
 
-            if caption:
+            if caption and enrolled:
+                try:
+                    admitted = await self.orchestrator.submit_instruction(
+                        description=f"{caption}\n\n📎 File: `uploads/{safe_name}`",
+                        session_id=active_session.session_id,
+                        cwd=active_session.repo_path,
+                        source="telegram_session",
+                        extra_metadata={"staged_file": staged_file_meta},
+                    )
+                except TurnQueueError as err:
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                    await update.message.reply_text(_turn_queue_refusal(err))
+                    return
+                except Exception as e:
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                    await update.message.reply_text(f"❌ Failed to create task: {e}")
+                    logger.error("instruction submission failed: user=%s chat=%s error=%s", user_id, chat_id, e)
+                    return
+                await update.message.reply_text(
+                    f"{save_msg}\n"
+                    + _turn_queued_text(admitted, _session_queue_paused(active_session.session_id)),
+                )
+                logger.info(
+                    "file+instruction queued user=%s chat=%s file=%s task=%s session=%s",
+                    user_id, chat_id, safe_name, admitted, active_session.session_id,
+                )
+            elif caption:
                 full_instruction = f"{caption}\n\n📎 File: `uploads/{safe_name}`"
                 active_session.last_user_message = full_instruction
                 active_session.status = SessionStatus.BUSY
@@ -2144,11 +2175,13 @@ class TelegramInterface:
                         },
                     )
                 except Exception as e:
+                    if enrolled:  # nothing was queued: drop the orphaned stage
+                        shutil.rmtree(stage_dir, ignore_errors=True)
                     await update.message.reply_text(f"❌ Failed to deliver file: {e}")
                     logger.error("file delivery task failed: user=%s chat=%s error=%s", user_id, chat_id, e)
                     return
                 await update.message.reply_text(
-                    f"{save_msg}\nFile is being delivered to {active_session.machine_id} — type an instruction once it arrives.",
+                    f"{save_msg}\nFile is being delivered to {target} — type an instruction once it arrives.",
                     parse_mode="Markdown",
                 )
                 logger.info(
