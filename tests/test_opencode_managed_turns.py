@@ -935,3 +935,24 @@ def test_m7_a_session_whose_native_id_is_known_drops_a_stale_write_ahead_row(bac
     res = backend.run_managed_turn(_session(tmp_path, native="ses_known"), "x", _own(turn="u-known"))
     assert res.success is True, res.errors
     assert _stored_rows(tmp_path) == []
+
+
+def test_close_stops_that_sessions_late_watcher_and_no_late_delivery(backend, fake, tmp_path):
+    fake.add_session("ses_cl")
+    fake.add_session("ses_other")
+    fake.release.clear()
+    backend._managed_deadline_sec = lambda: 0.5
+    got: List[Any] = []
+    backend.set_proactive_sink(lambda sid, outcome: got.append(sid))
+    s = _session(tmp_path, native="ses_cl")
+    assert backend.run_managed_turn(s, "x", _own(turn="u-close")).error_class == "recovery_required"
+
+    def watching(turn: str) -> bool:
+        return any(t.name == f"opencode-late-{turn[:12]}" and t.is_alive() for t in threading.enumerate())
+
+    assert watching("u-close")
+    backend.close(s)
+    _wait(lambda: not watching("u-close"), timeout=3)
+    fake.release.set()
+    time.sleep(0.3)
+    assert got == [], "a closed session's late reply was still delivered"
