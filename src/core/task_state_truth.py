@@ -242,6 +242,18 @@ def derive_task_execution_state(
         claimer_incarnation: str = _text(task_row.get("claimer_incarnation"))
         node_incarnation: str = _text(node_row.get("incarnation_id"))
         if claimer_incarnation and node_incarnation and claimer_incarnation != node_incarnation:
+            if started:
+                # [A82 Stage 6 F5d] A STARTED managed turn whose carrier restarted
+                # is never re-offered: its outcome is uncertain and it is fenced
+                # into recovery (design §6), not a stale (re-offerable) claim.
+                return DerivedExecutionState(
+                    state="recovery_required",
+                    confidence="medium",
+                    reason="managed turn started on a previous carrier incarnation; outcome uncertain",
+                    authoritative_source="stale_claim_evidence",
+                    observed_at=_first_text(node_row, "updated_at", "last_heartbeat"),
+                    raw_refs=raw_refs,
+                )
             return DerivedExecutionState(
                 state="stale_claim",
                 confidence="high",

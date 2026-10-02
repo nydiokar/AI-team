@@ -341,7 +341,9 @@ def test_S6_08b_unenrolled_sessions_carry_no_queue_block(env: _Env) -> None:
         status=SessionStatus.BUSY, created_at=NOW, updated_at=NOW, machine_id="worker-a",
     ))
     listed = {s["session_id"]: s for s in env.client.get("/api/sessions", headers=AUTH).json()["sessions"]}
-    assert listed["legacy"]["turn_queue"] is None and listed["legacy"]["status"] == "busy"
+    # [F5a] byte-identical legacy payload: the key is absent, not null.
+    assert "turn_queue" not in listed["legacy"] and listed["legacy"]["status"] == "busy"
+    assert listed[SID]["turn_queue"] is not None
 
 
 # S6-09 --------------------------------------------------------------------- #
@@ -556,3 +558,60 @@ def test_S6_F3b_managed_compaction_admission_emits_post_commit(env: _Env) -> Non
     env.events.clear()
     asyncio.run(env.orch.compact_session(SID, operation_id="k1"))  # replay: no new queue state
     assert env.queue_events() == []
+
+
+# F5 nits ------------------------------------------------------------------- #
+def test_S6_F5b_operator_receipt_carries_the_server_derived_source(env: _Env) -> None:
+    r = env.create("first", "op-1")
+    assert r.status_code == 202 and r.json()["source"] == "operator"
+    assert env.create("first", "op-1").json()["source"] == "operator"  # replay too
+
+
+def test_S6_F5c_if_match_accepts_a_quoted_etag_and_refuses_weak_or_garbage(env: _Env) -> None:
+    env.create("a", "op-a")
+    b: str = env.create("b", "op-b").json()["turn_id"]
+    url: str = f"/api/turn-requests/{b}"
+    weak = env.client.patch(url, headers={**AUTH, "If-Match": 'W/"1"'}, json={"body": "weak"})
+    assert weak.status_code == 412 and weak.json()["detail"]["reason"] == "weak_etag_never_matches"
+    assert env.client.patch(url, headers={**AUTH, "If-Match": "abc"}, json={"body": "x"}).status_code == 422
+    assert env.client.patch(url, headers={**AUTH, "If-Match": '"0"'}, json={"body": "x"}).status_code == 422
+    assert env.client.patch(url, json={"body": "x"}, headers=AUTH).status_code == 422  # still required
+    ok = env.client.patch(url, headers={**AUTH, "If-Match": '"1"'}, json={"body": "b2"})
+    assert ok.status_code == 200 and ok.json()["revision"] == 2
+    assert env.client.post(f"{url}/withdraw", headers={**AUTH, "If-Match": ' "2" '}).status_code == 200
+    assert env.db.get_task(b)["status"] == "withdrawn"
+
+
+def test_S6_F5d_running_with_a_changed_incarnation_is_recovery_not_a_stale_claim() -> None:
+    from src.core.task_state_truth import derive_task_execution_state
+
+    node: Dict[str, Any] = {"node_id": "n", "status": "online", "incarnation_id": "inc-2",
+                            "last_heartbeat": NOW}
+    out = derive_task_execution_state(
+        {"id": "t", "status": "running", "queue_protocol": 1, "claimed_at": NOW,
+         "claimer_incarnation": "inc-1"}, node_row=node,
+    )
+    assert out.state == "recovery_required" and out.state != "stale_claim"
+    # An UNSTARTED claim on a dead incarnation is still a stale (re-offerable) claim.
+    claimed = derive_task_execution_state(
+        {"id": "t", "status": "claimed", "queue_protocol": 1, "claimed_at": NOW,
+         "claimer_incarnation": "inc-1"}, node_row=node,
+    )
+    assert claimed.state == "stale_claim"
+
+
+def test_S6_F5e_sequences_never_reuse_or_go_below_an_existing_cursor(env: _Env) -> None:
+    # Sequences are per-session max+1 over ALL protocol-1 rows (terminal rows are
+    # kept), assigned once at insert and never rewritten (requeue keeps it), so
+    # no open row can appear below a cursor a client already paged past.
+    a: str = env.create("a", "op-a").json()["turn_id"]
+    b: str = env.create("b", "op-b").json()["turn_id"]
+    seq_b: int = int(env.db.get_task(b)["queue_sequence"])
+    env.client.post(f"/api/turn-requests/{b}/withdraw", headers={**AUTH, "If-Match": "1"})
+    page1 = env.client.get(f"/api/sessions/{SID}/turn-requests?limit=1", headers=AUTH).json()
+    assert [t["turn_id"] for t in page1["turns"]] == [a]
+    c: str = env.create("c", "op-c").json()["turn_id"]
+    assert int(env.db.get_task(c)["queue_sequence"]) > seq_b  # the withdrawn tail is not reused
+    cursor: int = int(page1["turns"][-1]["queue_sequence"])
+    page2 = env.client.get(f"/api/sessions/{SID}/turn-requests?cursor={cursor}", headers=AUTH).json()
+    assert [t["turn_id"] for t in page2["turns"]] == [c]

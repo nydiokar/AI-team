@@ -2277,6 +2277,8 @@ def build_control_api(orchestrator) -> FastAPI:
         if sender is not None:
             receipt.source = "agent"
             receipt.sender_session_id = sender.session_id
+        else:
+            receipt.source = "operator"  # [A82 Stage 6 F5b] server-derived, never the request
         return JSONResponse(receipt.model_dump(), status_code=202)
 
     def _require_queue_db() -> Any:
@@ -2301,6 +2303,20 @@ def build_control_api(orchestrator) -> FastAPI:
                      .decode("utf-8", errors="ignore")},
                 ).model_dump()}
         return http
+
+    def _if_match_revision(raw: str) -> int:
+        """[A82 Stage 6 F5c] The expected revision from ``If-Match``: a bare
+        ``3`` or a strong entity-tag ``"3"``. A weak tag (``W/"3"``) never
+        matches under the strong comparison If-Match requires (RFC 9110
+        §13.1.1) ⇒ 412; anything else ⇒ 422."""
+        tag: str = raw.strip()
+        if tag.startswith("W/"):
+            raise HTTPException(status_code=412, detail={"ok": False, "reason": "weak_etag_never_matches"})
+        if len(tag) >= 2 and tag[0] == tag[-1] == '"':
+            tag = tag[1:-1]
+        if not (tag.isascii() and tag.isdigit()) or int(tag) < 1:
+            raise HTTPException(status_code=422, detail={"ok": False, "reason": "invalid_if_match"})
+        return int(tag)
 
     async def _operator_human_turn(db: Any, task_id: str) -> Dict[str, Any]:
         row = await asyncio.to_thread(db.get_turn_request, task_id)
@@ -2345,7 +2361,7 @@ def build_control_api(orchestrator) -> FastAPI:
                response_model=TurnRequestDetailOut)
     async def api_edit_turn_request(
         task_id: str, body: TurnRequestEditBody,
-        revision: int = Header(alias="If-Match", ge=1),
+        if_match: str = Header(alias="If-Match", max_length=64),
     ) -> TurnRequestDetailOut:
         """Conditional edit of a QUEUED human turn (expected revision in
         If-Match). Sequence, recipient, source and Case never change."""
@@ -2353,6 +2369,7 @@ def build_control_api(orchestrator) -> FastAPI:
         from src.control.turn_admission import run_turn_mutation_async
         from src.control.turn_scheduler import notify_turn_queue_changed
 
+        revision: int = _if_match_revision(if_match)
         db = _require_queue_db()
         row = await _operator_human_turn(db, task_id)
         try:
@@ -2369,7 +2386,7 @@ def build_control_api(orchestrator) -> FastAPI:
     @app.post("/api/turn-requests/{task_id}/withdraw", dependencies=[Depends(_require_auth)],
               response_model=TurnRequestSummaryOut)
     async def api_withdraw_turn_request(
-        task_id: str, revision: int = Header(alias="If-Match", ge=1),
+        task_id: str, if_match: str = Header(alias="If-Match", max_length=64),
     ) -> TurnRequestSummaryOut:
         """Withdraw ONLY this queued human turn (auditable; never a deletion and
         never an execution failure). Its written Case lineage is voided."""
@@ -2377,6 +2394,7 @@ def build_control_api(orchestrator) -> FastAPI:
         from src.control.turn_admission import run_turn_mutation_async
         from src.control.turn_scheduler import notify_turn_queue_changed
 
+        revision: int = _if_match_revision(if_match)
         db = _require_queue_db()
         row = await _operator_human_turn(db, task_id)
         try:

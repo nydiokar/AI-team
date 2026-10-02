@@ -137,4 +137,8 @@ class SessionView:
         return replace(self, turn_queue=SessionTurnQueueState(**state) if state else None)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)   # JSON-ready for a future Web UI / WebSocket
+        out: Dict[str, Any] = asdict(self)   # JSON-ready for a future Web UI / WebSocket
+        if self.turn_queue is None:
+            # [A82 Stage 6 F5a] unenrolled ⇒ the legacy payload stays byte-identical.
+            del out["turn_queue"]
+        return out
