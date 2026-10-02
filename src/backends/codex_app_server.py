@@ -235,7 +235,9 @@ class CodexAppServerClient:
             self.check()
             if method not in REQUEST_METHODS or not isinstance(params, dict):
                 raise CodexProtocolError("codex_invalid_client_request")
-            if len(self.pending) >= MAX_PENDING:
+            if len(self.pending) >= MAX_PENDING or len(self.late) >= MAX_LATE:
+                # Request-scoped refusal; never evict a late id (its reply would
+                # then read as unmatched and fail the shared client).
                 raise CodexProtocolError("codex_rpc_capacity_exceeded")
             self.sequence += 1
             request_id = self.sequence
@@ -262,8 +264,6 @@ class CodexAppServerClient:
                         # fail the SHARED client (that would kill every other
                         # thread's turn). Its late reply is routed, not fatal.
                         self.late[request_id] = on_late
-                        while len(self.late) > MAX_LATE:
-                            self.late.pop(next(iter(self.late)))
                         raise CodexRPCTimeout(f"codex_rpc_deadline_exceeded:{method}") from None
             self.check()
             if "error" in response:

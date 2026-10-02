@@ -2,6 +2,7 @@
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -141,3 +142,24 @@ def test_thread_channels_reject_competing_subscription(server):
     client.subscribe("different")
     client.unsubscribe("exact")
     client.subscribe("exact")
+
+
+def test_late_ids_are_bounded_by_refusal_never_by_eviction(server, monkeypatch):
+    """[A82 step 4 rework, M1] An evicted late id would make its reply read as
+    unmatched and fail the shared client: the bound refuses new requests
+    (request-scoped) until late replies drain."""
+    import src.backends.codex_app_server as mod
+
+    monkeypatch.setattr(mod, "MAX_LATE", 1)
+    client = server()
+    client.start()
+    with pytest.raises(CodexRPCTimeout):
+        client.request("turn/interrupt", {"threadId": "slow", "turnId": "turn"}, timeout=0.05)
+    with pytest.raises(CodexProtocolError, match="capacity"):
+        client.request("turn/interrupt", {"threadId": "x", "turnId": "turn"})
+    assert not client.failure
+    deadline = time.monotonic() + 5
+    while client.late and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert client.request("turn/interrupt", {"threadId": "after", "turnId": "turn"}) == {}
+    assert not client.failure
