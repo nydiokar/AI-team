@@ -4004,7 +4004,8 @@ class MeshDB:
         incarnation) and says which generation it already holds.
 
         * Not the current owner ⇒ ``InvalidCredentialError`` (nothing minted).
-        * Session not an active member of an open Case (or closed/unenrolled)
+        * Session not an active member of an open Case (or closed/unenrolled,
+          or a Manager that is not the Case's latest flow_links Manager)
           ⇒ its live capabilities are revoked and ``None`` is returned.
         * A live capability with the SAME binding, carrier incarnation and the
           presented generation ⇒ the binding without a secret (no re-mint).
@@ -4047,6 +4048,10 @@ class MeshDB:
                         "SELECT status FROM flow_runs WHERE flow_run_id = ?", (case_id,),
                     ).fetchone()
                     eligible = case is not None and case["status"] not in self._CLOSED_STATUSES
+                if eligible and role == "manager":
+                    # Same latest-Manager rule as validation: a superseded
+                    # (still-affiliated / A->B->A) Manager is never minted.
+                    eligible = _case_latest_manager(conn, case_id) == sid
                 if not eligible:
                     _revoke_sender_caps(conn, now, sid)
                     return None
