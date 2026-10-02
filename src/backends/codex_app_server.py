@@ -23,6 +23,7 @@ RPC_TIMEOUT = 30.0
 REQUEST_METHODS = frozenset({
     "initialize", "thread/start", "thread/resume", "thread/unsubscribe",
     "thread/compact/start", "turn/start", "turn/interrupt", "model/list",
+    "thread/read",
 })
 CONSUMED_NOTIFICATIONS = frozenset({
     "turn/started", "turn/completed", "thread/tokenUsage/updated",
@@ -165,10 +166,20 @@ class CodexAppServerClient:
         return self.request("thread/resume" if thread_id else "thread/start", params)
 
     def start_turn(self, thread_id: str, message: str, cwd: str,
-                   model: str | None, effort: str | None) -> dict[str, JsonValue]:
-        return self.request("turn/start", {"threadId": thread_id,
+                   model: str | None, effort: str | None,
+                   client_message_id: str | None = None) -> dict[str, JsonValue]:
+        params: dict[str, JsonValue] = {"threadId": thread_id,
             "input": [{"type": "text", "text": message}], "cwd": cwd,
-            "model": model, "effort": effort})
+            "model": model, "effort": effort}
+        if client_message_id:
+            # Native correlation: echoed as the userMessage item's ``clientId``
+            # and persisted in the thread's turn history.
+            params["clientUserMessageId"] = client_message_id
+        return self.request("turn/start", params, timeout=RPC_TIMEOUT)
+
+    def read_thread(self, thread_id: str) -> dict[str, JsonValue]:
+        """Native thread metadata incl. ``status`` (no turn history)."""
+        return self.request("thread/read", {"threadId": thread_id}, timeout=RPC_TIMEOUT)
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
         self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=5)

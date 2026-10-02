@@ -100,6 +100,7 @@ def run_turn(tid, turn_id, c, text):
                 return
             time.sleep(0.02)
     if c.get("die_mid_turn"):
+        time.sleep(0.3)  # the turn/start response is consumed first
         os._exit(3)
     if c.get("foreign_event"):
         note(tid, "item/completed", turnId="turn-foreign",
@@ -429,6 +430,7 @@ def test_app_server_death_mid_turn_is_attributable_failure_with_process_proof(h)
 # Deadline: no interrupt; late reply binds to the turn uuid only
 # --------------------------------------------------------------------------- #
 def test_deadline_holds_without_interrupt_and_late_result_binds_to_turn_uuid(h, monkeypatch):
+    assert h.backend.run_managed_turn(h.session(), "warm", own()).success  # app-server up
     monkeypatch.setattr(native_mod, "MANAGED_TURN_SECONDS", 0.5)
     late: list[tuple[str, Any]] = []
     h.backend.set_proactive_sink(lambda sid, outcome: late.append((sid, outcome)))
@@ -447,6 +449,7 @@ def test_deadline_holds_without_interrupt_and_late_result_binds_to_turn_uuid(h, 
 
 
 def test_forget_drops_late_delivery_but_quiescence_follows_native_truth(h, monkeypatch):
+    assert h.backend.run_managed_turn(h.session(), "warm", own()).success  # app-server up
     monkeypatch.setattr(native_mod, "MANAGED_TURN_SECONDS", 0.5)
     late: list = []
     h.backend.set_proactive_sink(lambda sid, outcome: late.append(outcome))
