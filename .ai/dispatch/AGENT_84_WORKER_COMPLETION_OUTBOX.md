@@ -162,6 +162,11 @@ Not done: the gateway `turn.started` / `turn.result_recorded` events. The reconc
 - Mutation run on the rework fixes: 11/11 killed. The first pass had the F1 action-gate mutant surviving; it is now killed by R1c.
 - Full set: `tests/test_turn_queue*.py`, `test_push_notifications.py`, `test_telegram_*.py`, `test_telemetry_*.py`, codex managed carrier, flow runs/schema/links, task-server client, wake-dispatcher, wait-group, cache-heartbeat: **804 collected, 796 passed, 8 skipped, 0 failures / errors** (junit).
 
+### A84 slice 1 merge nits (re-review ACCEPTED) — 2026-10-02, commits `cb3d761` (tests N1–N3, RED), `22da1f8` (N1), N2, N3 (see git log)
+- **N1:** the shutdown grace for an in-flight notify is now 4 s (was 10 s), and compose sets `stop_grace_period: 30s` on the gateway (`test_N1`). Residual: a fence CAS still running past the 4 s grace at stop is cancelled. If its write commits afterwards, the row is closed as outcome-unknown after notify timeout + slack, with 0 sends.
+- **N2:** `BackingStoreError` and `sqlite3.OperationalError` hit during the fence, a read, or an effect are retried on the next pass and never count toward the 5 attempts (`test_N2`: 7 fence errors + 2 read errors, then 1 send, `done`).
+- **N3:** a `notifying` row with a NULL fence is closed on its state alone (no live holder can own it) instead of staying stuck (`test_N3`). Tests: a84 effects + telemetry + docker suites: 100 passed, 0 failures.
+
 ## Closure (fill on completion)
 
 Record changed files, exact tests/results, the legacy cutover disposition, any deferred reaper bound, and confirmation that no flag was activated or worker restarted.
