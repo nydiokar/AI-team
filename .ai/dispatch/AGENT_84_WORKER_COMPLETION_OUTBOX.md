@@ -101,7 +101,7 @@ Per row:
 
 **§7 service boundary (consumer + changed route).**
 - *Concurrency:* there is one consumer loop per gateway (instance lock), and it is sequential. Two consumers cannot double-notify, because of the CAS fence.
-- *Memory:* the batch holds ids only, and one row is loaded at a time (≤ ~17 MiB worst case: output + reply). Raw stdout/stderr are not persisted.
+- *Memory:* the batch holds ids only, and one row is loaded at a time (≤ ~17 MiB worst case: output + reply). Raw stdout/stderr are not persisted. *(Corrected in rework round 1 — see below: the per-row bound also includes the session's task_history.)*
 - *Request size:* the route is unchanged (`_guard_managed_body` cap + Pydantic bounds). The consumer takes no external input.
 - *Timeout:* every DB write goes through `_managed_write` (5 s deadline ⇒ typed error ⇒ row contained, retried next pass). The notifier has a 60 s timeout ⇒ unknown, not retried.
 - *Malformed input:* a garbled result or history JSON is treated as empty, and a missing session is skipped.
@@ -123,6 +123,44 @@ Per row:
 3. `sessions.status` is not set from the result: enrolled-session status stays owned by the queue. The legacy `turn.*` gateway telemetry events and the `results/<id>.json` artifact are not emitted for managed turns (not in F1). The task-server `task_failed` ndjson event is not emitted either.
 4. Latency: ≤3 s plus drain time. With nothing enrolled, ≤60 s.
 5. The CONTEXT.md note for these deferrals is left to the Manager at close.
+
+### A84 slice 1 rework (review round 1) — 2026-10-02, commits `494cf44` (tests, RED), `4c611bc` (F1), `10c3668` (DB/telemetry), `68c2c38` (consumer), `d971a0b` (R9, RED), `9f896d5` (R9 perf), `83a8b78` (R1c kill test) — SUBMITTED FOR RE-REVIEW, NOT ACCEPTED
+
+The reviewer probes `/tmp/claude-1000/a84-review/test_probe_a84.py` P1–P3 and `mig_probe.py` were inverted into regression tests R1, R2, R3 and R8. Every RED was recorded on the pre-fix tree at `494cf44` and was behavioural: driver tuple wiped, 0 sends, `(False, True)`, good row starved, `''` output, compaction notified, `running` telemetry. R2b, R7c and R8 were green from the start and act as guards.
+
+| Finding | Fix | Test |
+|---|---|---|
+| **F1** default/compaction envelope wiped driver state | `_reported_driver_state`: apply driver state only for `create_session` / `resume_session` rows with a non-empty `driver_type` | R1 (default envelope), R1b (compaction envelope), R1c (non-empty report on a compaction row; kills the action-gate mutant) |
+| **F2** stop after the fence lost the notification | `_notify_managed_turn` (fence + send + mark) runs as one task under `asyncio.shield`. On cancel it gets `MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC`=10 s (> the 5 s fence-write deadline) to finish and mark; a row not yet fenced stays `pending` | R2 (send completes, `notified`, 1 send), R2b (stop before the fence → `pending`, sent once later) |
+| **F3** a second consumer stole an in-flight fence | `effects_fence = "<epoch>:<nonce>"` is stamped on `pending→notifying`. Every move out of `notifying` is fence-matched. A `notifying` row is closed as outcome-unknown only once the fence is older than notify timeout + 30 s | R3 (A True, B False, 1 send, no error); E03 now ages the fence before the restart takes it over |
+| **F4** raises outside effect containment were retried forever and starved the batch | `record_turn_effects_failure` counts the pass, sets `failed` at the bound, leaves the index, and never touches a fenced row | R4 (26 garbled rows + 1 good: the good row is reached after the first batch fails out; all poisoned rows end `failed` with 5 attempts). Test bound note: the 26th row needs passes after the first 25 fail out; the oracle is unchanged |
+| **F5** empty output notified "no final reply text" | A success with empty `output` uses the stored `reply_text`. Otherwise the legacy remote shape: `raw_stdout` mirrors output, `error_detail` and `telemetry_invocation_id` attached | R5 |
+| **F6** compaction parity (Manager decision) | compaction: no notify (`pending→notified`, no fence), and no history / preview / summary file / session log / Case event; reconcile + reply enrichment only. Heartbeat and continuation keep notifying | R6 |
+| **F7** memory claim | Documented honestly, no cap. Legacy `task_history.result_summary` is the uncapped full reply (orchestrator `_task_worker`), and this slice matches it. Per-row worst case: `get_task` (`SELECT *`) holds output ≤8 MiB + reply_text ≤8 MiB + prompt, i.e. ~16 MiB+. `project_turn_session` and `session_store.get` load `task_history`: 20 entries, each up to the full reply, so up to ~160 MiB in theory. That is the same bound every legacy `session_store.get` already carries. Follow-up candidate: cap `result_summary` for both paths | — |
+| **Telemetry gap** | See below | R7, R7b, R7c (legacy unchanged), R9 |
+
+**Telemetry trace (code-read).**
+- Gateway managed admission emits `turn.accepted` (`_admit_managed_session_turn` / `_admit_managed_producer_turn`). The `llm_turns` row is projected with `final_status='running'` (projection default).
+- The carrier `_execute_task` emits `invocation.*` events with `turn_id` = task id (payload `telemetry` block from `_mesh_dispatch_payload`). They are ingested via `/telemetry/batches`.
+- **Nothing emits `turn.completed` for a managed turn.** The legacy gateway `_task_worker` did. So `TelemetryStore.reconcile` is the only closer.
+
+Fixes:
+1. reconcile now closes a **protocol-1** `cancelled` / `withdrawn` row as `cancelled`. Legacy rows keep skipping (R7c).
+2. Never-ran managed terminal writers mark `effects_state='telemetry'`, and the consumer runs only reconcile for them. The writers are: `withdraw_turn`, `close_session_turns` withdrawal, the heartbeat-deadline withdrawal in `claim_turn`, `request_turn_cancel` before start ×2, and `release_turn` of an operator-cancelled attempt. Without this, a withdrawn turn's `llm_turns` row stayed `running` forever (E08 updated accordingly: telemetry only, never a notification).
+3. R9 perf: the turn-scoped reconcile used to `MATERIALIZE` `MAX(received_at)` over the whole `llm_events` table on every call. The subquery is now filtered by turn. Same result; this also helps the legacy result route.
+
+Not done: the gateway `turn.started` / `turn.result_recorded` events. The reconciler's `turn.result_recorded` / `turn.completed` close the turn. Token metrics come from the carrier's invocation events.
+
+**sessions.status for enrolled sessions (code-read; not changed).**
+- Wake-Dispatcher: the enrolled branch (`_continue_case_once` → `_continue_case_managed`) runs before the `AWAITING_INPUT` gate and reads status only for CLOSED / CANCELLED (dead-Manager respawn). The consumer never writes either, so it does not depend on ERROR or AWAITING_INPUT.
+- UI: `SessionView.with_turn_queue` keeps the persisted enum and adds the queue overlay (active / queued).
+- Telegram: the enrolled path restores the prior status and never sets BUSY. `/session_status` shows the persisted enum.
+- Effect: after a managed turn the badge keeps its pre-enrollment value (never "needs attention" after a failure). This is cosmetic and nothing misbehaves (no stuck BUSY, no gate). Left to Stage 8a.
+
+**Counts.**
+- `tests/test_turn_queue_a84_effects.py`: 28 tests, all green.
+- Mutation run on the rework fixes: 11/11 killed. The first pass had the F1 action-gate mutant surviving; it is now killed by R1c.
+- Full set: `tests/test_turn_queue*.py`, `test_push_notifications.py`, `test_telegram_*.py`, `test_telemetry_*.py`, codex managed carrier, flow runs/schema/links, task-server client, wake-dispatcher, wait-group, cache-heartbeat: **804 collected, 796 passed, 8 skipped, 0 failures / errors** (junit).
 
 ## Closure (fill on completion)
 
