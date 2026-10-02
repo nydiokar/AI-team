@@ -14,6 +14,16 @@ a write-ahead ``managed_turns`` map from the carrier's turn uuid to the native
 thread/turn ids. A no-TTL owner row is cleared ONLY with proof that its
 app-server is gone (all of that process's turns are then provably stopped);
 an owner without a recorded identity stays unknown ⇒ busy.
+
+[A82 pre-cutover, m2] ``sweep_legacy_owners`` (the operator / Stage 8 cutover
+exit for identity-less legacy owners) also refuses while ANY ``codex
+app-server`` using the same ``CODEX_HOME`` is alive, found via
+``/proc/<pid>/cmdline`` + ``/proc/<pid>/environ``; an app-server whose environ
+is unreadable, or a host without ``/proc``, fails closed (refused).
+Container caveat: ``/proc`` shows only the caller's pid namespace. An
+app-server in ANOTHER container/namespace sharing the same ``CODEX_HOME``
+volume is invisible here — run the sweep in the namespace of every carrier
+that mounts that ``CODEX_HOME`` (or with all of them stopped).
 """
 import json
 import os
@@ -221,7 +231,50 @@ def _owner_process_gone(pid: int) -> bool:
     return False
 
 
-def sweep_legacy_owners(gone: Callable[[int], bool] = _owner_process_gone) -> list[str]:
+class LegacySweepRefused(RuntimeError):
+    """[A82 pre-cutover, m2] The cutover sweep cannot prove no app-server
+    still uses this ``CODEX_HOME``; nothing was cleared."""
+
+
+def _live_app_servers(codex_home: Path, proc_root: Path) -> list[str]:
+    """Pids (as text) of live ``codex app-server`` processes whose effective
+    ``CODEX_HOME`` (env, else ``$HOME/.codex``) is ``codex_home``; a codex
+    app-server whose environ cannot be read counts (fail closed). Raises
+    ``LegacySweepRefused`` when the process table itself is unreadable."""
+    target = codex_home.resolve()
+    try:
+        entries = [e for e in proc_root.iterdir() if e.name.isdigit() and int(e.name) != os.getpid()]
+    except OSError as exc:
+        raise LegacySweepRefused(f"process table unreadable at {proc_root}: {exc}") from exc
+    found: list[str] = []
+    for entry in entries:
+        try:
+            argv = [a.decode(errors="replace") for a in (entry / "cmdline").read_bytes().split(b"\0") if a]
+        except FileNotFoundError:
+            continue  # exited meanwhile
+        except OSError:
+            found.append(f"{entry.name}(cmdline unreadable)")
+            continue
+        if "app-server" not in argv or not any(Path(a).name.startswith("codex") for a in argv):
+            continue
+        try:
+            raw = (entry / "environ").read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            found.append(f"{entry.name}(environ unreadable)")
+            continue
+        env = dict(item.decode(errors="replace").partition("=")[::2] for item in raw.split(b"\0") if item)
+        home = env.get("CODEX_HOME") or (str(Path(env["HOME"]) / ".codex") if env.get("HOME") else "")
+        if not home:
+            found.append(f"{entry.name}(CODEX_HOME unknown)")
+        elif Path(home).resolve() == target:
+            found.append(entry.name)
+    return found
+
+
+def sweep_legacy_owners(gone: Callable[[int], bool] = _owner_process_gone,
+                        proc_root: str | Path = "/proc") -> list[str]:
     """[A82 step 4 rework, m2] Cutover sweep for Stage 8's migration (and the
     operator exit): clear owner rows left by the LEGACY ``_run`` path — owners
     with NO recorded app-server identity (no ``owner_processes`` row, no
@@ -232,9 +285,16 @@ def sweep_legacy_owners(gone: Callable[[int], bool] = _owner_process_gone) -> li
     is never cleared (fail closed). Returns the cleared owner ids.
 
     Run it with: ``python -m src.backends.codex_ownership --sweep-legacy-owners``
-    (uses ``CODEX_HOME`` like the carrier)."""
+    (uses ``CODEX_HOME`` like the carrier).
+
+    [A82 pre-cutover, m2] Refused (``LegacySweepRefused``, nothing cleared)
+    while any ``codex app-server`` for the same ``CODEX_HOME`` is alive — see
+    the module docstring for the container pid-namespace caveat."""
     cleared: list[str] = []
     store = CodexOwnership()
+    live = _live_app_servers(store.path.parent, Path(proc_root))
+    if live:
+        raise LegacySweepRefused("codex app-server still alive for this CODEX_HOME: pids " + ", ".join(live))
     with store._connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
@@ -262,4 +322,8 @@ if __name__ == "__main__":
 
     if sys.argv[1:] != ["--sweep-legacy-owners"]:
         sys.exit("usage: python -m src.backends.codex_ownership --sweep-legacy-owners")
-    print(json.dumps({"cleared_owners": sweep_legacy_owners()}))
+    try:
+        print(json.dumps({"cleared_owners": sweep_legacy_owners()}))
+    except LegacySweepRefused as refused:
+        print(json.dumps({"refused": str(refused)}))
+        sys.exit(2)

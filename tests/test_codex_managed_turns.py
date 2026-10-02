@@ -761,7 +761,9 @@ def test_m2_cutover_sweep_clears_identityless_owner_only_when_its_process_is_gon
     legacy.acquire("sess-1", "thr-legacy", str(Path(h.repo).resolve()))
     managed = CodexOwnership()  # a MANAGED owner (recorded identity): never swept here
     managed.acquire("sess-2", "thr-managed", str(Path(h.repo).resolve()), process={"pid": 1 << 30})
-    assert sweep_legacy_owners() == [], "the owning process (this one) is alive"
+    no_app_server = h.tmp_path / "proc"  # a fake, empty process table (no live app-server)
+    no_app_server.mkdir()
+    assert sweep_legacy_owners(proc_root=no_app_server) == [], "the owning process (this one) is alive"
     assert h.make().is_quiescent(h.session(native="thr-legacy")) is False
     gone = subprocess.Popen([sys.executable, "-c", "pass"])
     gone.wait()
@@ -769,7 +771,7 @@ def test_m2_cutover_sweep_clears_identityless_owner_only_when_its_process_is_gon
     with conn:
         conn.execute("UPDATE owners SET pid = ? WHERE owner = ?", (gone.pid, legacy.owner))
     conn.close()
-    assert sweep_legacy_owners() == [legacy.owner]
+    assert sweep_legacy_owners(proc_root=no_app_server) == [legacy.owner]
     remaining = {owner for _key, owner in owners(h.home)}
     assert legacy.owner not in remaining and remaining, "the managed owner is clear_dead_owners' job"
     assert h.make().is_quiescent(h.session(native="thr-legacy")) is True
