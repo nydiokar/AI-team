@@ -58,7 +58,11 @@ class _GatewayInstanceLock:
         if existing:
             pid = int(existing.get("pid") or 0)
             started = float(existing.get("create_time") or 0)
-            if pid and process_matches_entrypoint(
+            if pid in (os.getpid(), os.getppid()):
+                # A recycled pid namespace (container restart) can hand us the
+                # stale lock's pid: it is us or our parent, never a rival.
+                logger.warning(f"Stale gateway lock names our own process tree (pid={pid}); replacing it")
+            elif pid and process_matches_entrypoint(
                 pid,
                 started=started,
                 app_root=self.app_root,
