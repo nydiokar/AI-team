@@ -322,6 +322,12 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "registry_writable": "1",
         "description": "A65 cost-alert enforcement: when ON, alerting surfaces the existing SDK governor ceiling (sdk_max_budget_usd) as the lever. Never a new kill mechanism.",
     },
+    "TURN_QUEUE_ENROLLMENT_ENABLED": {
+        "default": "0",
+        "effect_scope": "live",
+        "registry_writable": "1",
+        "description": "A82: allow NEW sessions to be enrolled on the managed per-session turn queue. OFF never abandons accepted managed work (consumption, recovery, drain/unenroll stay available).",
+    },
     "HARNESS_LEVEL3_GUARD": {
         "default": "0",
         "effect_scope": "live",
@@ -4024,6 +4030,112 @@ class MeshDB:
                 self._enroll_generation += 1
                 self._enrolls_in_flight -= 1
                 self._any_enrolled = True
+
+    def enroll_session_checked(self, session_id: str) -> bool:
+        """[A82 Stage 7] The enrollment service's durable half (design §10 step
+        6): ONE bounded write transaction (5 s deadline, typed 503) that checks
+        the canonical session row and its durable legacy work, then sets the
+        marker. Refuses (``EnrollmentRefusedError``, 409) a closed/cancelled
+        session, a session that is not quiescent (status other than idle /
+        awaiting_input / error) and any protocol-0 EXECUTION row of the session
+        still ``pending``/``claimed``/``running``; unknown session ⇒ 404. Returns
+        True when newly enrolled, False when already enrolled (idempotent).
+
+        The caller (``TaskOrchestrator.enroll_session_turn_queue``, in the
+        gateway process) owns the flag, carrier-capability and in-memory legacy
+        checks plus the admission exclusion. A legacy row inserted after this
+        commits is refused by ``enqueue_task``/``claim_task`` (same marker)."""
+        from .turn_queue import EnrollmentRefusedError, TurnNotFoundError
+
+        sid = (session_id or "").strip()
+        if not sid:
+            raise TurnNotFoundError("enrollment requires a session_id")
+        with self._presence_lock:
+            self._enroll_generation += 1
+            self._enrolls_in_flight += 1
+            self._any_enrolled = True
+        placeholders = ",".join("?" for _ in LEGACY_EXECUTION_ACTIONS)
+        enrolled_now = False
+        try:
+            with self._managed_write("enroll_session") as conn:
+                row = conn.execute(
+                    "SELECT status, turn_queue_enrolled FROM sessions WHERE session_id = ?",
+                    (sid,),
+                ).fetchone()
+                if row is None:
+                    raise TurnNotFoundError("session not found", session_id=sid)
+                if int(row["turn_queue_enrolled"] or 0):
+                    return False
+                status = str(row["status"] or "")
+                if status in ("closed", "cancelled"):
+                    raise EnrollmentRefusedError(
+                        f"session is {status}", reason="session_closed", session_id=sid)
+                if status not in ("idle", "awaiting_input", "error"):
+                    raise EnrollmentRefusedError(
+                        f"session is not quiescent ({status})",
+                        reason="session_not_quiescent", session_id=sid, status=status)
+                legacy = conn.execute(
+                    "SELECT COUNT(*) FROM mesh_tasks WHERE session_id = ? "
+                    "AND COALESCE(queue_protocol, 0) = 0 "
+                    f"AND action IN ({placeholders}) "
+                    "AND status IN ('pending', 'claimed', 'running')",
+                    (sid, *LEGACY_EXECUTION_ACTIONS),
+                ).fetchone()[0]
+                if legacy:
+                    raise EnrollmentRefusedError(
+                        f"{legacy} legacy execution row(s) still open",
+                        reason="legacy_work_in_flight", session_id=sid, legacy_rows=int(legacy))
+                conn.execute(
+                    "UPDATE sessions SET turn_queue_enrolled = 1, updated_at = ? "
+                    "WHERE session_id = ?",
+                    (_now(), sid),
+                )
+                enrolled_now = True
+            return True
+        finally:
+            with self._presence_lock:
+                self._enroll_generation += 1
+                self._enrolls_in_flight -= 1
+                if enrolled_now:
+                    self._any_enrolled = True
+
+    def unenroll_session_drained(self, session_id: str) -> bool:
+        """[A82 Stage 7] Rollback exit (design §10 step 8): remove the marker
+        only when the session holds NO managed obligation — no protocol-1 row
+        ``queued``/``pending``/``claimed``/``running``/``recovery_required``
+        (index-served). Otherwise ``EnrollmentRefusedError``
+        (``managed_obligation_remaining``): drain, withdraw or resolve first.
+        Not flag-gated (disabling enrollment must never block the exit).
+        True when removed, False when not enrolled; unknown session ⇒ 404. The
+        process presence flag is lowered by the next scheduler refresh."""
+        from .turn_queue import EnrollmentRefusedError, TurnNotFoundError
+
+        sid = (session_id or "").strip()
+        if not sid:
+            raise TurnNotFoundError("unenrollment requires a session_id")
+        with self._managed_write("unenroll_session") as conn:
+            row = conn.execute(
+                "SELECT turn_queue_enrolled FROM sessions WHERE session_id = ?", (sid,),
+            ).fetchone()
+            if row is None:
+                raise TurnNotFoundError("session not found", session_id=sid)
+            if not int(row["turn_queue_enrolled"] or 0):
+                return False
+            open_rows = conn.execute(
+                "SELECT COUNT(*) FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open "
+                f"WHERE session_id = ? AND {_MANAGED_OPEN_PREDICATE}",
+                (sid,),
+            ).fetchone()[0]
+            if open_rows:
+                raise EnrollmentRefusedError(
+                    f"{open_rows} managed turn(s) still waiting/active/in recovery",
+                    reason="managed_obligation_remaining", session_id=sid,
+                    open_rows=int(open_rows))
+            conn.execute(
+                "UPDATE sessions SET turn_queue_enrolled = 0, updated_at = ? WHERE session_id = ?",
+                (_now(), sid),
+            )
+        return True
 
     def issue_sender_capability(
         self,

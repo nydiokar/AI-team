@@ -235,11 +235,11 @@ def test_ROLL04_legacy_arrival_during_enrollment_is_refused(
     assert o.task_queue.qsize() == 0 and not o.active_tasks
 
 
-def test_ROLL04b_enrollment_during_legacy_admission_is_refused(
+def test_ROLL04b_legacy_marker_read_before_enrollment_cannot_land(
         tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
-    """A legacy admission is between its marker decision and the legacy put
-    (suspended in the offloaded marker read); enrollment must refuse rather
-    than commit underneath it."""
+    """A legacy admission read the marker (False) BEFORE the enrollment
+    committed, then resumes: its legacy put must be refused — never a legacy
+    turn queued for a session that is now enrolled (exactly one side wins)."""
     db, o = _setup(tmp_path, monkeypatch, enroll=False)
     release = asyncio.Event()
     reading = asyncio.Event()
@@ -247,7 +247,7 @@ def test_ROLL04b_enrollment_during_legacy_admission_is_refused(
     async def _slow_marker(_sid: str) -> bool:
         reading.set()
         await release.wait()
-        return False
+        return False  # the stale pre-enrollment read
 
     monkeypatch.setattr(o, "_session_turn_queue_enrolled", _slow_marker)
 
@@ -255,19 +255,50 @@ def test_ROLL04b_enrollment_during_legacy_admission_is_refused(
         legacy = asyncio.create_task(o.submit_instruction(
             description="legacy first", session_id="sess-1", cwd="/tmp/repo", source="web_session"))
         await reading.wait()
+        out: Dict[str, Any] = {"enrolled": await o.enroll_session_turn_queue("sess-1")}
+        release.set()
+        try:
+            out["legacy"] = await legacy
+        except tq.TurnQueueError as err:
+            out["legacy_err"] = err
+        return out
+
+    out = asyncio.run(scenario())
+    assert out["enrolled"] is True and _enrolled(db)
+    assert "legacy" not in out and out["legacy_err"].code == "enrollment_in_progress"
+    assert o.task_queue.qsize() == 0 and not o.active_tasks
+
+
+def test_ROLL04c_enrollment_refused_while_a_legacy_put_is_parked(
+        tmp_path: Any, monkeypatch: Any, flag_on: None) -> None:
+    """A legacy admission parked in the throttled (queue-full) put is visible
+    to enrollment, which refuses instead of committing underneath it."""
+    db, o = _setup(tmp_path, monkeypatch, enroll=False)
+    o.task_queue = SessionTaskQueue(1, lambda _t: "")
+    from types import SimpleNamespace
+
+    o.task_queue.put_nowait(SimpleNamespace(id="filler", metadata={}))  # full
+
+    async def scenario() -> Dict[str, Any]:
+        legacy = asyncio.create_task(o.submit_instruction(
+            description="parked", session_id="sess-1", cwd="/tmp/repo", source="web_session"))
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if o._enrollment_exclusion()[2].get("sess-1"):
+                break
         out: Dict[str, Any] = {}
         try:
             out["enrolled"] = await o.enroll_session_turn_queue("sess-1")
         except tq.TurnQueueError as err:
             out["enroll_err"] = err
-        release.set()
+        o.task_queue.get_nowait()  # room frees: the parked put lands
         out["legacy"] = await legacy
         return out
 
     out = asyncio.run(scenario())
     assert "enrolled" not in out and out["enroll_err"].code == "legacy_work_in_flight"
-    assert type(out["legacy"]) is str and o.task_queue.qsize() == 1
-    assert not _enrolled(db)
+    assert type(out["legacy"]) is str and not _enrolled(db)
+    assert o._enrollment_exclusion()[2] == {}
 
 
 # --------------------------------------------------------------------------- #
@@ -333,3 +364,47 @@ def test_ROLL05b_legacy_poller_never_receives_managed_rows(tmp_path: Any, monkey
     assert row["status"] == "pending" and row["queue_protocol"] == 1  # durable, not run
     err = _refused(_submit, o)
     assert err.status_code == 503 and err.code == "carrier_unavailable"
+
+
+# --------------------------------------------------------------------------- #
+# Operator HTTP surface (control API, gateway process)
+# --------------------------------------------------------------------------- #
+def _api(o: Any, monkeypatch: Any) -> TestClient:
+    from src.control import control_api
+
+    monkeypatch.setattr(control_api, "_dashboard_token", lambda: "tok")
+    return TestClient(control_api.build_control_api(o))
+
+
+def test_ROLL06_enroll_unenroll_routes(tmp_path: Any, monkeypatch: Any) -> None:
+    db, o = _setup(tmp_path, monkeypatch, enroll=False)
+    _wire(o)
+    c = _api(o, monkeypatch)
+    h = {"Authorization": "Bearer tok"}
+    monkeypatch.delenv(FLAG, raising=False)
+    r = c.post("/api/sessions/sess-1/turn-requests/enroll", headers=h)
+    assert r.status_code == 409 and r.json()["detail"]["reason"] == "enrollment_disabled"
+    assert c.post("/api/sessions/sess-1/turn-requests/enroll").status_code == 401
+    monkeypatch.setenv(FLAG, "1")
+    r = c.post("/api/sessions/nope/turn-requests/enroll", headers=h)
+    assert r.status_code == 404
+    r = c.post("/api/sessions/sess-1/turn-requests/enroll", headers=h)
+    assert r.status_code == 200 and r.json()["changed"] is True and _enrolled(db)
+    _submit(o, operation_id="q")
+    r = c.post("/api/sessions/sess-1/turn-requests/unenroll", headers=h)
+    assert r.status_code == 409 and r.json()["detail"]["reason"] == "managed_obligation_remaining"
+    r = c.post("/api/sessions/sess-1/turn-requests/enroll", headers=h,
+               content=b"x" * (17 * 1024), )
+    assert r.status_code == 413  # capped before any read/parse
+
+
+def test_ROLL06b_web_legacy_refusal_during_enrollment_is_not_stranded_busy(
+        tmp_path: Any, monkeypatch: Any) -> None:
+    db, o = _setup(tmp_path, monkeypatch, enroll=False)
+    _wire(o)
+    c = _api(o, monkeypatch)
+    o._enrollment_exclusion()[0].add("sess-1")  # an enrollment is committing
+    r = c.post("/api/instructions", headers={"Authorization": "Bearer tok"},
+               json={"description": "hi", "session_id": "sess-1"})
+    assert r.status_code == 409 and r.json()["detail"]["reason"] == "enrollment_in_progress"
+    assert _sess().status != SessionStatus.BUSY and o.task_queue.qsize() == 0

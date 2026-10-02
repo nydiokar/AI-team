@@ -325,7 +325,7 @@ def _preparse_byte_guard(app: Any) -> None:
             (r"/api/turn-requests/[^/]+", _TURN_REQUESTS_MAX_REQUEST_BYTES),
             (r"/api/instructions", _INSTRUCTIONS_MAX_REQUEST_BYTES),
             (r"/api/sessions/[^/]+/turn-requests", _TURN_REQUESTS_MAX_REQUEST_BYTES),
-            (r"/api/sessions/[^/]+/turn-requests/(pause|resume)", 16 * 1024),
+            (r"/api/sessions/[^/]+/turn-requests/(pause|resume|enroll|unenroll)", 16 * 1024),
         ],
         read_deadline_sec=_BODY_READ_DEADLINE_SEC,
     )
@@ -2469,6 +2469,41 @@ def build_control_api(orchestrator) -> FastAPI:
         provider-deadline and approval gates keep holding."""
         return await _set_queue_paused(session_id, False)
 
+    @app.post("/api/sessions/{session_id}/turn-requests/enroll", dependencies=[Depends(_require_auth)])
+    async def api_enroll_turn_queue(session_id: str) -> JSONResponse:
+        """[A82 Stage 7] Operator enrollment onto the managed turn queue (design
+        §10 step 6). Default-OFF flag ``TURN_QUEUE_ENROLLMENT_ENABLED``; typed
+        refusal (409 + reason) for a busy / closed session, legacy work, or a
+        carrier without managed capability; 503 without the canonical DB."""
+        from src.control.turn_queue import TurnQueueError
+
+        enroll = getattr(orchestrator, "enroll_session_turn_queue", None)
+        if not callable(enroll):
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "enrollment_unavailable"})
+        try:
+            changed = await enroll(session_id)
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        return JSONResponse({"ok": True, "session_id": session_id, "enrolled": True,
+                             "changed": bool(changed)})
+
+    @app.post("/api/sessions/{session_id}/turn-requests/unenroll", dependencies=[Depends(_require_auth)])
+    async def api_unenroll_turn_queue(session_id: str) -> JSONResponse:
+        """[A82 Stage 7] Rollback exit (design §10 step 8): remove enrollment only
+        when no waiting/active/recovery managed obligation remains (409
+        ``managed_obligation_remaining`` otherwise). Not flag-gated."""
+        from src.control.turn_queue import TurnQueueError
+
+        unenroll = getattr(orchestrator, "unenroll_session_turn_queue", None)
+        if not callable(unenroll):
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "enrollment_unavailable"})
+        try:
+            changed = await unenroll(session_id)
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        return JSONResponse({"ok": True, "session_id": session_id, "enrolled": False,
+                             "changed": bool(changed)})
+
     @app.post("/api/instructions", dependencies=[Depends(_require_auth)])
     async def api_instructions(
         body: InstructionBody,
@@ -2482,6 +2517,7 @@ def build_control_api(orchestrator) -> FastAPI:
         # blocked task can never be mistaken for an accepted one. Translate it to a
         # clean 409 here (not an opaque 500) and, crucially, undo the optimistic
         # BUSY write on the session so it is not stranded with no in-flight task.
+        from src.control.turn_queue import TurnQueueError
         from src.orchestrator import HarnessAdmissionBlocked
 
         async with _idem_guard_async("instructions", idempotency_key) as cached:
@@ -2525,6 +2561,10 @@ def build_control_api(orchestrator) -> FastAPI:
                     # No task ran — return the session to IDLE so it stays usable.
                     orchestrator.session_service.mark_idle(session.session_id)
                     raise _harness_blocked_http(blocked)
+                except TurnQueueError as err:
+                    # [A82 Stage 7] e.g. enrollment_in_progress: nothing queued.
+                    orchestrator.session_service.mark_idle(session.session_id)
+                    raise _turn_queue_http(err)
                 session.last_task_id = task_id
                 orchestrator.session_service.store.save(session)
             else:

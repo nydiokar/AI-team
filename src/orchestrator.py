@@ -72,7 +72,7 @@ import re
 import socket
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Any, Optional, Tuple
+from typing import Callable, Dict, List, Any, Optional, Set, Tuple
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from src.core.timeutil import now_iso, parse_iso
@@ -6027,6 +6027,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             if getattr(self, "running", False):
                 self._start_wake_dispatcher()
             return admitted
+        # [A82 Stage 7] Admission exclusion (design §10 step 6): a legacy arrival
+        # for a session being / just enrolled in THIS gateway is refused before
+        # any side effect (no await between here and the legacy put).
+        self._legacy_put_guard(_sid)
         if task.metadata:
             task.metadata.pop(self._TURN_OPERATION_META_KEY, None)
 
@@ -6072,6 +6076,9 @@ class TaskOrchestrator(ITaskOrchestrator):
                 raise RuntimeError("Task queue is full")
             logger.warning(f"event=throttled task_id={task.id} reason=queue_full priority={priority_val}")
             self._emit_event("throttled", task, {"reason": "queue_full", "priority": priority_val})
+            admitting = self._enrollment_exclusion()[2] if _sid else None
+            if admitting is not None:  # [A82 Stage 7] visible to a racing enrollment
+                admitting[_sid] = admitting.get(_sid, 0) + 1
             try:
                 await asyncio.wait_for(self.task_queue.put(task), timeout=5.0)
                 self.active_tasks[task.id] = task
@@ -6085,6 +6092,13 @@ class TaskOrchestrator(ITaskOrchestrator):
                 logger.error(f"event=dropped_after_throttle task_id={task.id}")
                 self._emit_event("dropped_after_throttle", task, {"timeout": 5.0})
                 raise RuntimeError("Task queue is full") from exc
+            finally:
+                if admitting is not None:
+                    left = admitting.get(_sid, 1) - 1
+                    if left > 0:
+                        admitting[_sid] = left
+                    else:
+                        admitting.pop(_sid, None)
         return task.id
 
     def _task_requires_local_execution(self, task: Task) -> bool:
@@ -10728,6 +10742,126 @@ Generated from user description: {description}
         # (non-human; never releases an operator stop hold), keyed on its Case.
         "manager_invoke": "automation",
     }
+
+    def _enrollment_exclusion(self) -> Tuple[Set[str], Set[str], Dict[str, int]]:
+        """[A82 Stage 7] Gateway-loop admission exclusion state: sessions being
+        enrolled, sessions enrolled by THIS process (enrollment happens only in
+        the gateway — Stage 4a M3), legacy admissions parked in a throttled put.
+        Lazily created (bounded by the enrolled-session count)."""
+        state = self.__dict__
+        return (
+            state.setdefault("_enrolling_sessions", set()),
+            state.setdefault("_enrolled_here", set()),
+            state.setdefault("_legacy_admitting", {}),
+        )
+
+    def _legacy_put_guard(self, session_id: str) -> None:
+        """[A82 Stage 7] Refuse a legacy put for a session that is being, or was
+        just, enrolled here: its marker read may predate the commit. Typed 409
+        (``enrollment_in_progress``); a retry reads the marker and goes managed."""
+        if not session_id:
+            return
+        enrolling, enrolled_here, _admitting = self._enrollment_exclusion()
+        if session_id in enrolling or session_id in enrolled_here:
+            from src.control.turn_queue import EnrollmentRefusedError
+
+            raise EnrollmentRefusedError(
+                "the session is being enrolled on the managed turn queue; retry",
+                reason="enrollment_in_progress", session_id=session_id, retry_after=1,
+            )
+
+    async def enroll_session_turn_queue(self, session_id: str) -> bool:
+        """[A82 Stage 7] The enrollment service (design §10 step 6) — an operator
+        action that must run in the gateway process. Behind the default-OFF
+        ``TURN_QUEUE_ENROLLMENT_ENABLED`` flag; needs the canonical DB. Refuses
+        (typed, nothing written) a session with legacy work queued / running /
+        mid-admission in this gateway, a carrier without the backend's managed
+        capability (``capability_missing``) or offline (``carrier_offline``), and
+        — in one bounded DB txn — a closed / non-quiescent session or open
+        durable legacy execution rows. The exclusion: while enrolling (and
+        after, for this process) the legacy put refuses the session. True when
+        newly enrolled, False when already enrolled.
+
+        Native unsolicited work on a REMOTE carrier is not observable here; the
+        carrier's pre-start quiescence gate (``is_quiescent`` → requeue with
+        ``managed_conflict``) remains the backstop for each managed turn."""
+        from src.control.db import get_db, runtime_flag_enabled
+        from src.control.turn_queue import (
+            BackingStoreError,
+            CarrierOfflineError,
+            CarrierUnavailableError,
+            EnrollmentRefusedError,
+            TurnNotFoundError,
+        )
+
+        sid = (session_id or "").strip()
+        if not runtime_flag_enabled("TURN_QUEUE_ENROLLMENT_ENABLED"):
+            raise EnrollmentRefusedError(
+                "new enrollment is disabled (TURN_QUEUE_ENROLLMENT_ENABLED)",
+                reason="enrollment_disabled", session_id=sid,
+            )
+        db = get_db()
+        if db is None:
+            raise BackingStoreError(
+                "enrollment needs the canonical mesh DB (MESH_ENABLED)", session_id=sid,
+            )
+        session = self.session_store.get(sid) if sid else None
+        if session is None:
+            raise TurnNotFoundError("session not found", session_id=sid)
+        enrolling, enrolled_here, admitting = self._enrollment_exclusion()
+        if sid in enrolling:
+            raise EnrollmentRefusedError(
+                "an enrollment of this session is already in progress",
+                reason="enrollment_in_progress", session_id=sid,
+            )
+        enrolling.add(sid)
+        try:
+            in_memory = sum(
+                1 for t in list((getattr(self, "active_tasks", None) or {}).values())
+                if str((getattr(t, "metadata", None) or {}).get("session_id") or "") == sid
+            )
+            if admitting.get(sid) or in_memory:
+                raise EnrollmentRefusedError(
+                    "legacy work for the session is queued, running or being admitted",
+                    reason="legacy_work_in_flight", session_id=sid,
+                )
+            backend: str = str(getattr(session, "backend", "") or "")
+            try:
+                await asyncio.to_thread(self._managed_carrier_assignment, session, backend)
+            except CarrierOfflineError as e:
+                raise EnrollmentRefusedError(
+                    str(e.detail), reason="carrier_offline", session_id=sid,
+                    node_id=e.context.get("node_id"),
+                )
+            except CarrierUnavailableError as e:
+                raise EnrollmentRefusedError(
+                    str(e.detail), reason="capability_missing", session_id=sid,
+                    node_id=e.context.get("node_id"),
+                )
+            enrolled: bool = bool(await asyncio.to_thread(db.enroll_session_checked, sid))
+            enrolled_here.add(sid)
+            logger.info("event=turn_queue_session_enrolled session_id=%s new=%s", sid, enrolled)
+            return enrolled
+        finally:
+            enrolling.discard(sid)
+
+    async def unenroll_session_turn_queue(self, session_id: str) -> bool:
+        """[A82 Stage 7] Rollback exit (design §10 step 8): remove enrollment only
+        when the session holds no waiting/active/recovery managed obligation
+        (typed ``managed_obligation_remaining`` otherwise). NOT flag-gated —
+        disabling enrollment must never trap accepted work or block the exit."""
+        from src.control.db import get_db
+        from src.control.turn_queue import BackingStoreError
+
+        sid = (session_id or "").strip()
+        db = get_db()
+        if db is None:
+            raise BackingStoreError("unenrollment needs the canonical mesh DB", session_id=sid)
+        removed: bool = bool(await asyncio.to_thread(db.unenroll_session_drained, sid))
+        self._enrollment_exclusion()[1].discard(sid)
+        if removed:
+            logger.info("event=turn_queue_session_unenrolled session_id=%s", sid)
+        return removed
 
     async def _session_turn_queue_enrolled(self, session_id: str) -> bool:
         """Durable enrollment marker from the canonical DB (never a flag). No
