@@ -7000,6 +7000,10 @@ class TaskOrchestrator(ITaskOrchestrator):
             cwd=session.repo_path,
             source="manager_invoke",
             extra_metadata=fork_meta,
+            # [A82 pre-cutover P1] Durable trigger identity of this invoke: its
+            # Case ⇒ at most one first turn per Case (managed path only; the
+            # legacy path strips it).
+            operation_id=f"manager_invoke:{case_id}",
         )
         return {
             "ok": True,
@@ -10651,7 +10655,8 @@ Generated from user description: {description}
     # admitted by its own branch; anything else FAILS CLOSED for an enrolled
     # session instead of bypassing the managed queue.
     _MANAGED_PRODUCER1_SOURCES = frozenset(
-        {"web_session", "telegram_session", "runtime", "telegram", "automation_session", "agent_session"}
+        {"web_session", "telegram_session", "runtime", "telegram", "automation_session", "agent_session",
+         "manager_invoke"}
     )
     # [A82 Stage 4d] Automation producers admitted with a durable trigger
     # identity (source → turn_kind). The producer facts ride the server-set
@@ -10676,6 +10681,9 @@ Generated from user description: {description}
         # operator stop hold.
         "automation_session": "automation",
         "agent_session": "agent",
+        # [A82 pre-cutover P1] /api/manager's first assignment turn: automation
+        # (non-human; never releases an operator stop hold), keyed on its Case.
+        "manager_invoke": "automation",
     }
 
     async def _session_turn_queue_enrolled(self, session_id: str) -> bool:
