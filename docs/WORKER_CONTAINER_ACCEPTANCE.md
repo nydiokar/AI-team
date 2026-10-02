@@ -31,8 +31,9 @@ The `Dockerfile` is multi-stage:
 |---|---|---|
 | `node-runtime` | `node:22-bookworm-slim` | Node toolchain source |
 | `web-build` | `node-runtime` | Builds the web UI with pnpm |
-| `runtime` | `python:3.11-slim-bookworm` | Controller/gateway image; installs git+tini+curl, a venv at `/opt/venv`, the Python package via `pip install -c constraints.txt .`, and the built web dist. Creates the non-root `ai-team` user (uid/gid **10001**), `chown -R ai-team /app`. `ENTRYPOINT` is `tini -- docker-entrypoint`; default `CMD` `python main.py`. |
-| `worker-agents` | `runtime` | Adds the Node toolchain (`COPY --from=node-runtime /usr/local`) and the coding-agent runtimes (`pnpm`, `@anthropic-ai/claude-code`, `@openai/codex`) via one global `npm install`. `CMD` `python worker_main.py`. |
+| `python-requirements` | `python:3.11-slim-bookworm` | Reduces `pyproject.toml` to its runtime requirement list (`[project].dependencies` + `push`), so non-dependency pyproject edits and `src/` edits keep the pip layer cached |
+| `runtime` | `python:3.11-slim-bookworm` | Controller/gateway image; installs git+tini, a venv at `/opt/venv`, third-party deps via `pip install -c constraints.txt -r requirements.txt` (keyed on dependency metadata only), then the project via `pip install --no-deps .`, and the built web dist. Creates the non-root `ai-team` user (uid/gid **10001**); app files are copied `--chown=ai-team`. `ENTRYPOINT` is `tini -- docker-entrypoint`; default `CMD` `python main.py`. |
+| `worker-agents` | `runtime` | Adds the Node toolchain (`COPY --from=node-runtime /usr/local`) and the coding-agent runtimes (`pnpm`, `@anthropic-ai/claude-code`, `@openai/codex`) via one global `npm install`, plus `curl` (agent-facing tooling; the controller image does not ship it). `CMD` `python worker_main.py`. |
 
 The worker is the **`worker-agents` target**. `deploy/compose.worker.yaml`
 builds `target: worker-agents` and runs `python worker_main.py`.

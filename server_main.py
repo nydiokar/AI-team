@@ -10,8 +10,9 @@ observability spine, then runs uvicorn on src.control.task_server:app.
 Run directly (no PM2 required):
     python server_main.py
 
-Binds {MESH_TAILSCALE_IP or 127.0.0.1}:{MESH_TASK_SERVER_PORT}. Reads the same
-.env and the same state/mesh.db as the gateway and worker.
+Binds {MESH_TAILSCALE_IP or 127.0.0.1}:{MESH_TASK_SERVER_PORT}. Shares the
+gateway's mesh.db (the controller authority); workers never open it — they read
+controller state over this server's API (docs/DATABASE_AUTHORITY.md).
 """
 import sys
 from pathlib import Path

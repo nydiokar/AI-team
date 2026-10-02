@@ -168,10 +168,16 @@ def _worker_startup_preflight() -> None:
     code = """
 from src.worker.config import WorkerConfig
 from src.core.observability import init_logging
-from src.worker.agent import WorkerAgent
+from src.control import controller_state
+from src.worker.agent import WorkerAgent, _HTTP, _install_controller_state
 
-WorkerConfig.from_env()
+cfg = WorkerConfig.from_env()
 init_logging(node_id="worker-preflight")
+# A88: as in worker main() — never opens/creates a local mesh.db; refuses to
+# deploy a worker that is newer than its controller (route missing).
+_install_controller_state(_HTTP(cfg.controller_url, cfg.worker_token))
+if controller_state.active().route_missing:
+    raise SystemExit("controller lacks /control/runtime-flags: deploy the controller first (A88)")
 agent = WorkerAgent()
 agent._live_state()
 print("worker_startup_preflight_ok")
