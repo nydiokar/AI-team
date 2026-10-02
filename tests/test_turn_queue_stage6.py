@@ -484,3 +484,47 @@ def test_S6_12e_stale_busy_repair_never_errors_a_managed_turn(env: _Env) -> None
     # terminal managed ⇒ stale BUSY repaired to IDLE (never ERROR, no legacy replay).
     assert asyncio.run(env.orch._reconcile_stale_busy_sessions_once()) == 1
     assert env.orch.session_store.get(SID).status == SessionStatus.IDLE
+
+
+# Stage 6 follow-ups ---------------------------------------------------------- #
+# F1: an admission holding a reservation while the pass refreshes the shared
+# allowance (idempotent replay / DB-side refusal) must not leave the managed
+# cache stale-high while the scheduler sleeps until a hint that never comes.
+def test_S6_F1_deferred_allowance_refresh_keeps_a_bounded_wake() -> None:
+    a: ta.SharedWaitingAllowance = ta.SharedWaitingAllowance()
+    a.register_legacy_probe(lambda: 0)
+    assert a.refresh_managed(35, a.snapshot_generation())
+    held: List[Any] = []
+
+    class _FakeDB:
+        def __init__(self) -> None:
+            self.mid_flight: bool = True
+
+        def select_eligible_turn_heads(self, limit: int) -> List[Dict[str, Any]]:
+            return []
+
+        def managed_waiting_totals(self) -> Dict[str, int]:
+            if self.mid_flight:  # an admission reserves inside this pass's read
+                cm = a.reserve(50)
+                cm.__enter__()
+                held.append(cm)
+            return {"count": 0, "bytes": 0, "queued": 0}
+
+    async def _prep(_h: Dict[str, Any], _r: Dict[str, Any]) -> Any:
+        return None
+
+    fake: _FakeDB = _FakeDB()
+    res: sched.SchedulerPassResult = asyncio.run(sched.run_scheduler_pass(fake, _prep, allowance=a))
+    # The in-flight admission then fails inside its DB txn (no row, no hint).
+    try:
+        held[0].__exit__(RuntimeError, RuntimeError("per-session cap"), None)
+    except RuntimeError:
+        pass
+    assert res.refresh_deferred is True
+    timeout = sched._next_timeout(res, 25, sched.SAFETY_NET_SEC, 3.0)
+    assert timeout is not None and timeout <= sched.FALLBACK_INTERVAL_SEC
+    fake.mid_flight = False
+    res2: sched.SchedulerPassResult = asyncio.run(sched.run_scheduler_pass(fake, _prep, allowance=a))
+    assert res2.refresh_deferred is False and a.managed_cached() == 0
+    assert a.legacy_blocked(15, 50) is False
+    assert sched._next_timeout(res2, 25, sched.SAFETY_NET_SEC, 3.0) is None  # idle again
