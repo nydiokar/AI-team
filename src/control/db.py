@@ -6913,6 +6913,13 @@ class MeshDB:
         if not durable_relay_enabled():
             return {"ok": False, "reason": "durable_relay_disabled"}
 
+        # [recovery-wait-resolution] Reconcile the ledger from TASK TRUTH first: if a
+        # member task reached a terminal state via a path that never emitted
+        # ``task.finished`` (restart recovery, reapers), backfill the missing fact so
+        # the scan below can resolve the wait. Idempotent; a no-op when every member
+        # already has its event.
+        self.backfill_missing_task_finished(flow_run_id, actor=actor)
+
         pending_markers: Dict[str, Dict[str, Any]] = {}
         resolved_tasks: set = set()
         finished: Dict[str, str] = {}
@@ -6947,6 +6954,107 @@ class MeshDB:
                     "timeout": pl.get("timeout") if isinstance(pl, dict) else None,
                 })
         return {"ok": True, "resolved": resolved_out, "pending": pending_out}
+
+    def backfill_missing_task_finished(
+        self,
+        flow_run_id: str,
+        *,
+        actor: str = "system",
+    ) -> List[str]:
+        """Reconcile the Case ledger from TASK TRUTH: emit any ``task.finished``
+        event that a terminalising path failed to write.
+
+        The wake-dispatcher resolves a wait-group PURELY from ``task.finished``
+        events (``compute_continuation_tick``). But a task can reach a terminal
+        state through a path that updates only the task row / session and never
+        emits that event — restart recovery (``_recover_completed_session``) and
+        the stale-claim / stale-pending reapers all do. When such a task is a
+        member of an unresolved ``worker.wait_pending`` group, the group dangles
+        forever and the Manager waits on a worker that is already done, while the
+        UI (session row) correctly shows it finished. This is the exact divergence
+        that strands a Manager across a gateway restart.
+
+        For every member of an unresolved pending group that has NO
+        ``task.finished`` event yet but whose ``mesh_tasks.status`` IS terminal,
+        append the missing ``task.finished`` (``once`` ⇒ idempotent) with the
+        outcome derived from the task row. Returns the task_ids backfilled.
+
+        Flag-neutral by design: this is a truth-reconciliation of the audit
+        ledger (the single durable fact the wake loop reads), NOT the
+        durable-relay re-arm — so a restart can always re-derive a stranded wait
+        regardless of ``durable_relay_enabled``. Best-effort per task; a bad row
+        is skipped, never raised."""
+        # Covers BOTH wait subsystems that share this ledger: M3.4 wait-GROUPS
+        # (``entity_type='wait_group'`` carrying ``member_task_ids``, read by
+        # ``compute_continuation_tick``) and A46 per-TASK waits
+        # (``entity_type='task'``, read by ``reconcile_worker_waits``).
+        groups: Dict[str, List[str]] = {}
+        resolved_groups: set = set()
+        task_pending: set = set()
+        task_resolved: set = set()
+        already_finished: set = set()
+        for e in self.list_flow_events(flow_run_id):
+            et = e.get("event_type")
+            etype = e.get("entity_type")
+            eid = e.get("entity_id")
+            if etype == "wait_group":
+                if not eid:
+                    continue
+                if et == "worker.wait_pending":
+                    pl = _event_payload(e) or {}
+                    groups[eid] = list(pl.get("member_task_ids") or [])
+                elif et == "worker.wait_resolved":
+                    resolved_groups.add(eid)
+            elif etype == "task":
+                if not eid:
+                    continue
+                if et == "worker.wait_pending":
+                    task_pending.add(eid)
+                elif et == "worker.wait_resolved":
+                    task_resolved.add(eid)
+                elif et == "task.finished":
+                    already_finished.add(eid)
+
+        candidates: set = set()
+        for gid, members in groups.items():
+            if gid in resolved_groups:
+                continue
+            for tid in members:
+                if tid and tid not in already_finished:
+                    candidates.add(tid)
+        for tid in task_pending:
+            if tid not in task_resolved and tid not in already_finished:
+                candidates.add(tid)
+        if not candidates:
+            return []
+
+        backfilled: List[str] = []
+        for tid in candidates:
+            try:
+                row = self.get_task(tid)
+                if not row:
+                    continue
+                status = str(row.get("status") or "").strip().lower()
+                if status == "completed":
+                    outcome = "success"
+                elif status in ("failed", "failed_node_offline", "cancelled"):
+                    outcome = "failed"
+                else:
+                    continue  # genuinely still running — leave the wait pending
+                self.append_flow_event_once(
+                    flow_run_id, "task.finished", actor,
+                    entity_type="task", entity_id=tid,
+                    payload={
+                        "outcome": outcome,
+                        "error_class": (str(row.get("error_class") or "") or None)
+                        if outcome == "failed" else None,
+                        "source": "backfill_from_task_truth",
+                    },
+                )
+                backfilled.append(tid)
+            except Exception:
+                continue
+        return backfilled
 
     # ------------------------------------------------------------------
     # [M3.4] Autonomous Case continuation. A Manager arms a wait-GROUP over a
