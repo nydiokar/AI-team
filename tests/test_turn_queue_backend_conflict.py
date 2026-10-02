@@ -268,3 +268,25 @@ def test_capability_probe_in_the_task_gate_never_blocks_the_event_loop(tmp_path)
     row = {"id": "t-p", "session_id": "s-p", "backend": "claude", "queue_protocol": 1}
     assert _max_loop_stall(lambda: w._handle_task(row)) < 0.2
     assert probe.calls == 1
+
+
+# =========================================================================== #
+# [A82 pre-cutover rework, F3] Alternating details of the SAME refusal class
+# (native status flapping active/unknown) still back off; the visible reason
+# stays the latest one.
+# =========================================================================== #
+def test_F3_flapping_refusal_details_of_one_class_still_back_off(db, tmp_path):
+    """Inverts the reviewer probe ``test_probe_m2_flap.py``."""
+    w = _worker(tmp_path, _ClientHTTP(TestClient(ts.app)))
+    _seed_turn(db, "t-f", "sess-f")
+    seen = []
+    for i in range(3):
+        tok = db.claim_turn("t-f", w.cfg.node_id, "worker", w._incarnation_id)
+        assert tok is not None
+        reason = "session_not_quiescent: native_status:" + ("active" if i % 2 else "unknown")
+        db.release_turn("t-f", tok, backend_not_invoked=True, node_id=w.cfg.node_id, blocked_reason=reason)
+        row = _row(db, "t-f")
+        seen.append((row["status"], row["blocked_attempts"], row["blocked_reason"]))
+    assert seen[0][:2] == ("pending", 1) and seen[1][:2] == ("pending", 2)
+    assert seen[2][0] == "queued", f"3 consecutive pre-submit refusals never backed off: {seen}"
+    assert seen[2][2] == "backend_conflict: session_not_quiescent: native_status:unknown"

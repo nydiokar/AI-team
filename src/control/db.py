@@ -10388,9 +10388,14 @@ def _apply_backend_conflict(conn: sqlite3.Connection, task_id: str, reason: str,
     blocked_attempts) before this release. The count continues only for the
     SAME refusal reason (claim and activation keep a ``backend_conflict:``
     record, so the backoff grows across re-activation cycles); a different
-    reason restarts it, and a completed turn clears it."""
+    reason restarts it, and a completed turn clears it.
+
+    [A82 pre-cutover rework, F3] "Same" compares the reason CLASS (the token
+    before the backend detail, e.g. ``session_not_quiescent``), so a detail
+    that flaps (``native_status:active``/``unknown``) still backs off; the
+    visible ``blocked_reason`` is always the latest full reason."""
     bounded = f"backend_conflict: {reason}"[:500]
-    same = previous is not None and previous["blocked_reason"] == bounded
+    same = previous is not None and _conflict_class(previous["blocked_reason"]) == _conflict_class(bounded)
     attempts = (int(previous["blocked_attempts"] or 0) if same else 0) + 1
     if attempts < _BACKEND_CONFLICT_BACKOFF_AFTER:
         conn.execute(
@@ -10405,6 +10410,11 @@ def _apply_backend_conflict(conn: sqlite3.Connection, task_id: str, reason: str,
         (attempts - 1, _now(), task_id),
     )
     _apply_turn_block(conn, task_id, bounded)
+
+
+def _conflict_class(blocked_reason: Optional[str]) -> str:
+    """``backend_conflict: <class>[: detail]`` → ``backend_conflict: <class>``."""
+    return ":".join((blocked_reason or "").split(":", 2)[:2])
 
 
 def _carrier_fresh_cutoff() -> str:
