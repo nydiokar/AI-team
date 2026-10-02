@@ -122,6 +122,7 @@ class NodeRegistry:
         # Sweep claims only when the worker process identity changed. A controller
         # restart also forces workers to re-register, but the worker process is
         # still alive and may still be executing its claimed task.
+        self._carrier_back_online(info.node_id)
         if old_incarnation and new_incarnation and old_incarnation != new_incarnation:
             released = self._db_release_node_claims(info.node_id)
             if released:
@@ -159,7 +160,11 @@ class NodeRegistry:
         node = self._nodes.get(node_id)
         if node is None:
             return False
-        node.last_heartbeat = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=timezone.utc)
+        # [A82 pre-cutover rework, F6] offline / heartbeat-stale → online.
+        returned = node.status != "online" or node.last_heartbeat is None \
+            or (now - node.last_heartbeat).total_seconds() > self._timeout_sec
+        node.last_heartbeat = now
         node.status = "online"
         if live_state is not None:
             node.live_state = live_state
@@ -167,6 +172,8 @@ class NodeRegistry:
         if models is not None:
             node.capabilities.models = dict(models)
         self._db_heartbeat(node_id, live_state, models)
+        if returned:
+            self._carrier_back_online(node_id)
         return True
 
     # ------------------------------------------------------------------
@@ -355,6 +362,23 @@ class NodeRegistry:
                 )
         except Exception as e:
             logger.debug("event=db_heartbeat_err node_id=%s err=%s", node_id, e)
+
+    def _carrier_back_online(self, node_id: str) -> None:
+        """[A82 pre-cutover rework, F6] Release the node's ``carrier_offline``
+        holds and wake the turn scheduler (an in-process hint: the task server
+        is embedded in the gateway; out of process the cleared ``blocked_until``
+        is picked up by the scheduler's ≤60 s safety-net pass). Best-effort:
+        the backoff still bounds activation if this fails."""
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None or not db.release_carrier_offline_holds(node_id):
+                return
+            from src.control.turn_scheduler import notify_turn_queue_changed
+            notify_turn_queue_changed()
+            logger.info("event=carrier_offline_holds_released node_id=%s", node_id)
+        except Exception as e:
+            logger.warning("event=carrier_offline_release_failed node_id=%s err=%s", node_id, e)
 
     def _db_mark_offline(self, node_id: str) -> None:
         try:
