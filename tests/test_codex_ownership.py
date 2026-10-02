@@ -111,3 +111,83 @@ def test_live_cross_process_thread_alias_is_excluded(tmp_path, monkeypatch) -> N
     finally:
         owner.release()
     assert CodexOwnership().acquire("session", "") == "exact-thread"
+
+
+# --------------------------------------------------------------------------- #
+# [A82 pre-cutover, m2 sweep safety] the cutover sweep refuses while ANY
+# `codex app-server` using the same CODEX_HOME is alive (fake /proc root).
+# --------------------------------------------------------------------------- #
+def _fake_proc(root, pid: int, argv: list[str], env: dict[str, str] | None) -> None:
+    d = root / str(pid)
+    d.mkdir(parents=True)
+    (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+    if env is None:
+        (d / "environ").write_bytes(b"")
+        (d / "environ").chmod(0)
+    else:
+        (d / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in env.items()) + b"\0")
+
+
+def _swept_legacy_owner(tmp_path, monkeypatch):
+    from src.backends.codex_ownership import CodexOwnership
+
+    home = tmp_path / "codexhome"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    legacy = CodexOwnership()
+    legacy.acquire("sess-1", "thr-legacy", str(tmp_path))
+    return home, legacy
+
+
+def test_sweep_refuses_while_an_app_server_for_the_same_codex_home_is_alive(tmp_path, monkeypatch):
+    from src.backends.codex_ownership import LegacySweepRefused, sweep_legacy_owners
+
+    home, legacy = _swept_legacy_owner(tmp_path, monkeypatch)
+    proc = tmp_path / "proc"
+    _fake_proc(proc, 4242, ["/usr/bin/node", "/opt/codex/bin/codex", "app-server", "--stdio"],
+               {"CODEX_HOME": str(home), "HOME": "/home/x"})
+    with pytest.raises(LegacySweepRefused, match="4242"):
+        sweep_legacy_owners(gone=lambda pid: True, proc_root=proc)
+    assert legacy.thread_for("sess-1") == "thr-legacy"
+    # Same CODEX_HOME through the default (HOME/.codex) also refuses.
+    proc2 = tmp_path / "proc2"
+    _fake_proc(proc2, 77, ["codex", "app-server"], {"HOME": str(home.parent)})
+    monkeypatch.setenv("CODEX_HOME", str(home.parent / ".codex"))
+    from src.backends.codex_ownership import CodexOwnership
+
+    CodexOwnership().acquire("sess-2", "thr-2", str(tmp_path))
+    with pytest.raises(LegacySweepRefused):
+        sweep_legacy_owners(gone=lambda pid: True, proc_root=proc2)
+
+
+def test_sweep_fails_closed_when_an_app_server_environ_is_unreadable(tmp_path, monkeypatch):
+    import os as _os
+
+    from src.backends.codex_ownership import LegacySweepRefused, sweep_legacy_owners
+
+    if _os.geteuid() == 0:
+        pytest.skip("root reads a 0-mode file")
+    _home, _legacy = _swept_legacy_owner(tmp_path, monkeypatch)
+    proc = tmp_path / "proc"
+    _fake_proc(proc, 9001, ["/x/codex", "app-server", "--stdio"], None)
+    with pytest.raises(LegacySweepRefused, match="unreadable"):
+        sweep_legacy_owners(gone=lambda pid: True, proc_root=proc)
+
+
+def test_sweep_ignores_other_codex_homes_and_other_processes(tmp_path, monkeypatch):
+    from src.backends.codex_ownership import sweep_legacy_owners
+
+    home, legacy = _swept_legacy_owner(tmp_path, monkeypatch)
+    proc = tmp_path / "proc"
+    _fake_proc(proc, 10, ["/x/codex", "app-server", "--stdio"], {"CODEX_HOME": str(tmp_path / "other")})
+    _fake_proc(proc, 11, ["/usr/bin/python3", "worker.py", "app-server"], None)  # not codex
+    _fake_proc(proc, 12, ["/x/codex", "exec", "hi"], {"CODEX_HOME": str(home)})  # not app-server
+    (proc / "self").mkdir()
+    assert sweep_legacy_owners(gone=lambda pid: True, proc_root=proc) == [legacy.owner]
+
+
+def test_sweep_fails_closed_without_a_proc_root(tmp_path, monkeypatch):
+    from src.backends.codex_ownership import LegacySweepRefused, sweep_legacy_owners
+
+    _swept_legacy_owner(tmp_path, monkeypatch)
+    with pytest.raises(LegacySweepRefused):
+        sweep_legacy_owners(gone=lambda pid: True, proc_root=tmp_path / "no-proc")

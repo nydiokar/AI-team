@@ -164,6 +164,26 @@ def _looks_like_backend_error(output: Optional[str]) -> str:
     return ""
 
 
+def classify_completion_outcome(
+    success: bool, output: Optional[str], errors: Optional[List[str]]
+) -> "tuple[bool, str]":
+    """[A82 Stage 3] Shared completion classification (design §6: "Extract shared
+    completion classification rather than duplicating salvage/quota/cache-health/
+    native-id rules").
+
+    Returns ``(effective_success, downgraded_error_class)``. The single source of
+    truth for the success-downgrade trust boundary: a worker running pre-fix
+    driver code can report ``success=True`` while ``output`` is actually a bare
+    backend error string. Both the legacy protocol-0 ``submit_result`` and the
+    managed protocol-1 result path classify through here, so the two never drift.
+    """
+    if success and not errors:
+        err_class = _looks_like_backend_error(output)
+        if err_class:
+            return False, err_class
+    return success, ""
+
+
 
 def _register_local_node() -> None:
     """Register the gateway's OWN host as an online node so its in-process
@@ -316,6 +336,18 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="AI-Team Mesh Task Server", version="1.0", lifespan=_lifespan)
 app.add_middleware(RequestTimingMiddleware, component="task_server")
+# [A82 Stage 3 rework 4, m2] Streamed byte cap on every managed carrier route
+# (chunked bodies included), enforced before the body is parsed.
+from src.control.body_cap import BodyCapMiddleware  # noqa: E402
+
+_MANAGED_ROUTE_BODY_CAP = 8 * 1024 * 1024 + 64 * 1024
+app.add_middleware(
+    BodyCapMiddleware,
+    rules=[
+        (r"/tasks/[^/]+/(result-managed|quiescence)", _MANAGED_ROUTE_BODY_CAP),
+        (r"/tasks/[^/]+/(claim-managed|start-managed|release-managed|enter-recovery)", 16 * 1024),
+    ],
+)
 
 
 @app.middleware("http")
@@ -377,6 +409,15 @@ class _Capabilities(BaseModel):
     projects_root: str = ""
     repos: List[Dict[str, str]] = Field(default_factory=list)
     models: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
+    # [A82 Stage 3] Managed turn-queue protocol versions this carrier supports.
+    # Empty/[0] = legacy-only carrier: it MUST NOT be offered protocol-1 (managed)
+    # rows (design §7: "Legacy workers must not receive managed rows"; capability
+    # negotiation happens BEFORE managed pending rows are visible). A carrier
+    # advertises 1 here once it runs the managed claim/result/spool path.
+    queue_protocols: List[int] = Field(default_factory=lambda: [0])
+    # [A82 Stage 3 rework] Backends on this carrier with a real managed
+    # execution path; protocol-1 rows for any other backend are never offered.
+    managed_backends: List[str] = Field(default_factory=list)
 
 
 class NodeRegisterPayload(BaseModel):
@@ -741,6 +782,8 @@ def register_node(payload: NodeRegisterPayload) -> Dict[str, str]:
             projects_root=payload.capabilities.projects_root,
             repos=list(payload.capabilities.repos),
             models=dict(payload.capabilities.models),
+            queue_protocols=list(payload.capabilities.queue_protocols),
+            managed_backends=list(payload.capabilities.managed_backends),
         ),
         incarnation_id=payload.incarnation_id or None,
     )
@@ -916,7 +959,12 @@ def claim_task(task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    ok = db.claim_task(task_id, payload.node_id)
+    from .turn_queue import TurnQueueError
+
+    try:
+        ok = db.claim_task(task_id, payload.node_id)  # protocol-0 only (DB-fenced)
+    except TurnQueueError as e:  # [A82 Stage 4e review F4] enrolled-session refusal
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
     if not ok:
         raise HTTPException(status_code=409, detail="Task already claimed or not pending")
     task = db.get_task(task_id)
@@ -925,7 +973,631 @@ def claim_task(task_id: str, payload: ClaimPayload) -> Dict[str, Any]:
             task["payload"] = json.loads(task["payload"])
         except Exception:
             pass
+    if task:
+        _strip_managed_secrets(task)
     return {"status": "claimed", "task": task}
+
+
+def _strip_managed_secrets(row: Dict[str, Any]) -> Dict[str, Any]:
+    """[A82 Stage 3 rework] Never return the managed execution credential or
+    admission material through a legacy response."""
+    for key in ("claim_token", "idempotency_key", "admission_hash"):
+        row.pop(key, None)
+    return row
+
+
+def _refuse_if_managed(db: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    """[A82 Stage 3 rework, M5] Legacy protocol-0 routes must never mutate a
+    protocol-1 row (that would bypass token fencing). Returns the row."""
+    task = db.get_task(task_id)
+    if task and int(task.get("queue_protocol") or 0) == 1:
+        raise HTTPException(
+            status_code=409,
+            detail="managed (protocol-1) turn: use the managed carrier routes",
+        )
+    return task
+
+
+# --------------------------------------------------------------------------- #
+# [A82 Stage 3] Managed (protocol-1) carrier protocol — capability-negotiated.
+# These extend the EXISTING poll/claim/result infrastructure; they do NOT form a
+# parallel worker protocol. Legacy protocol-0 handlers above are unchanged.
+# --------------------------------------------------------------------------- #
+class ManagedClaimPayload(BaseModel):
+    node_id: str
+    carrier_kind: str = "gateway_local"
+    # [A82 Stage 4e review F3] Required: the claim is fenced to the node's
+    # current registered incarnation (a zombie process cannot claim).
+    incarnation_id: str = Field(min_length=1, max_length=128)
+    # A carrier MUST advertise it supports the managed protocol to receive a
+    # managed claim; a legacy poll/claim never reaches this route.
+    queue_protocols: List[int] = Field(default_factory=lambda: [1])
+    # [A82 Stage 5] The sender-capability generation this carrier already
+    # holds for the row's session (None ⇒ it holds none ⇒ mint). It can only
+    # avoid a re-mint; it can never choose the capability's binding.
+    sender_capability_generation: Optional[int] = Field(default=None, ge=0, le=2**31)
+
+
+@app.get("/tasks/pending-managed", dependencies=[Depends(_require_auth)])
+def get_pending_managed(
+    node_id: Optional[str] = None,
+    backends: Optional[str] = None,
+    accept_unpinned: bool = True,
+    limit: int = 10,
+    queue_protocols: str = "1",
+) -> List[Dict[str, Any]]:
+    """Return protocol-1 pending turns to a carrier that negotiated managed
+    support (design §6/§7). Capability negotiation happens BEFORE managed rows
+    are visible: a caller that does not declare protocol 1 gets an empty list, so
+    a legacy carrier can never see or claim a managed turn. The execution
+    credential is stripped from this view — the claim response carries it.
+    """
+    # [A82 Stage 3 rework] Gate on the node's REGISTERED capability, not on a
+    # query parameter the caller controls: an unregistered node, a node that
+    # did not register protocol 1, or a backend it did not register as managed
+    # sees no managed rows. (`queue_protocols` is accepted for compatibility
+    # and ignored.)
+    managed_backends = _registered_managed_backends(node_id)
+    if not managed_backends:
+        return []
+    db = get_db()
+    if db is None:
+        return []
+    requested = [b.strip() for b in backends.split(",") if b.strip()] if backends else list(managed_backends)
+    backend_list = [b for b in requested if b in managed_backends]
+    if not backend_list:
+        return []
+    return db.get_pending_managed_turns(
+        node_id=node_id,
+        backends=backend_list,
+        accept_unpinned=accept_unpinned,
+        limit=limit,
+    )
+
+
+def _registered_managed_backends(node_id: Optional[str]) -> List[str]:
+    """Backends the node REGISTERED as managed-capable (protocol 1), else []."""
+    if not node_id:
+        return []
+    node = get_registry().get(node_id)
+    if node is None or 1 not in set(node.capabilities.queue_protocols or []):
+        return []
+    return list(node.capabilities.managed_backends or [])
+
+
+@app.post("/tasks/{task_id}/claim-managed", dependencies=[Depends(_require_auth)])
+def claim_managed(task_id: str, payload: ManagedClaimPayload) -> Dict[str, Any]:
+    """Claim a managed turn, minting a fresh per-attempt token and returning the
+    FROZEN execution payload in the response (design §6). The carrier executes
+    THIS response, not the poll snapshot. A lost claim response is resolved by
+    re-claiming with the same task + carrier process (the same live claimed
+    attempt returns its existing ownership via ``claim_turn`` CAS). The token is
+    an execution credential and appears ONLY here — never in poll/list/telemetry.
+    """
+    from .turn_queue import TurnQueueError
+
+    if 1 not in set(payload.queue_protocols or []):
+        raise HTTPException(status_code=409, detail="carrier did not negotiate managed protocol")
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    # [A82 Stage 3 rework] Fail closed on the REGISTERED capability: the node
+    # must have registered protocol 1 for this row's backend.
+    pre = db.get_task(task_id)
+    if pre is not None and (pre.get("backend") or "") not in _registered_managed_backends(payload.node_id):
+        raise HTTPException(
+            status_code=409,
+            detail="node has not registered a managed execution path for this backend",
+        )
+    try:
+        token = db.claim_turn(
+            task_id=task_id,
+            node_id=payload.node_id,
+            carrier_kind=payload.carrier_kind,
+            incarnation_id=payload.incarnation_id,
+        )
+    except TurnQueueError as e:
+        if (getattr(e, "context", None) or {}).get("reason") in ("expired", "not_idle", "case_manager_rebound"):
+            _hint_turn_scheduler()  # [A82 Stage 4d] expired optional turn freed the slot
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    _hint_turn_scheduler()  # [A82 Stage 4a] waiting count dropped
+    # [A82 Stage 3 rework] The carrier executes THIS response, so it must carry
+    # the routing fields the executor needs (backend/action) from the committed
+    # row — non-secret columns only.
+    row = db.get_task(task_id) or {}
+    _emit_managed_change(row.get("session_id"), task_id, "claimed", row.get("status"))
+    return {
+        "status": "claimed",
+        "claim_token": str(token),
+        # [A82 Stage 5] PRIVATE provisioning: the session's scoped sender
+        # capability (raw secret only when minted for this claim). Top-level,
+        # never inside the frozen task payload the carrier may persist.
+        "sender_capability": _sender_capability_for_claim(db, task_id, str(token), payload),
+        # The frozen execution payload the carrier must run (design §5).
+        "task": {
+            "id": token.task_id,
+            "session_id": token.session_id,
+            "backend": row.get("backend", ""),
+            "action": row.get("action", ""),
+            "queue_protocol": 1,
+            "claim_token": str(token),
+            "status": token.status,
+            "payload": token.payload,
+        },
+    }
+
+
+def _sender_capability_for_claim(
+    db: Any, task_id: str, claim_token: str, payload: "ManagedClaimPayload",
+) -> Optional[Dict[str, Any]]:
+    """[A82 Stage 5] Mint/confirm the claimed session's sender capability for
+    the CURRENT owner (design §9). A minting failure never fails the claim:
+    the turn runs without the sender tool (fail closed for sending only)."""
+    from .turn_queue import TurnQueueError
+
+    try:
+        grant = db.issue_sender_capability(
+            task_id, claim_token, payload.node_id, payload.incarnation_id,
+            presented_generation=payload.sender_capability_generation,
+        )
+    except TurnQueueError as e:
+        logger.warning("event=sender_capability_not_issued task_id=%s reason=%s",
+                       task_id, getattr(e, "code", type(e).__name__))
+        return None
+    return grant.model_dump() if grant is not None else None
+
+
+class ManagedAttemptPayload(BaseModel):
+    """Identifies one managed execution attempt (design §6): the carrier node,
+    its process incarnation and the per-attempt claim token."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str = Field(min_length=1, max_length=128)
+    claim_token: str = Field(min_length=1, max_length=128)
+    incarnation_id: Optional[str] = Field(default=None, max_length=128)
+    # Release only: the carrier's write-ahead attestation that the backend was
+    # never invoked for this attempt (allows release of a started row).
+    backend_not_invoked: bool = False
+    # [A82 step 4 rework, m2] Release only: the backend's pre-submit refusal
+    # reason (``managed_conflict``), made operator-visible on the row.
+    blocked_reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+# [A82 Stage 3 rework, m2] Server-side byte cap for managed carrier bodies: one
+# result envelope (8 MiB, design §7) plus bounded framing.
+_MANAGED_BODY_MAX_BYTES = 8 * 1024 * 1024 + 64 * 1024
+
+
+def _guard_managed_body(request: Request) -> None:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            too_big = int(content_length) > _MANAGED_BODY_MAX_BYTES
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"ok": False, "reason": "invalid_content_length"})
+        if too_big:
+            raise HTTPException(status_code=413, detail={"ok": False, "reason": "payload_too_large"})
+
+
+@app.post("/tasks/{task_id}/start-managed", dependencies=[Depends(_require_auth)])
+def start_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, Any]:
+    """[A82 Stage 3 rework, B2] Conditional managed start (``claimed -> running``)
+    for the CURRENT token and carrier incarnation (design §7: "Managed start is a
+    new conditional operation"). A repeated start with the same live attempt
+    returns the same authorization; a superseded token or a restarted carrier
+    incarnation is refused (409) so an old authorization can start nothing."""
+    from .turn_queue import TurnQueueError
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        auth = db.start_turn(
+            task_id=task_id,
+            claim_token=payload.claim_token,
+            incarnation_id=payload.incarnation_id,
+        )
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    _emit_managed_change(_turn_session(db, task_id), task_id, "started", auth.status)
+    return {"status": auth.status, "task_id": auth.task_id, "started_at": auth.started_at}
+
+
+@app.post("/tasks/{task_id}/release-managed", dependencies=[Depends(_require_auth)])
+def release_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, Any]:
+    """[A82 Stage 3 rework] Release a claimed-but-NOT-started managed turn back
+    to pending for the current token only (design §7: release before start is
+    safe only for the current token). A started/foreign-token row is refused
+    (409) — release after start is forbidden without quiescence evidence."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    from .turn_queue import TurnQueueError
+
+    try:
+        released = db.release_turn(
+            task_id=task_id,
+            claim_token=payload.claim_token,
+            backend_not_invoked=payload.backend_not_invoked,
+            node_id=payload.node_id,
+            blocked_reason=payload.blocked_reason if payload.backend_not_invoked else None,
+        )
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 503), detail=str(e))
+    if not released:
+        raise HTTPException(
+            status_code=409,
+            detail="managed turn not releasable (started, superseded or not claimed)",
+        )
+    _note_managed_released(1)  # [A82 Stage 7] waiting count rose: keep the fleet cap
+    status = "pending"
+    if payload.blocked_reason and payload.backend_not_invoked:
+        try:
+            status = (db.get_task(task_id) or {}).get("status") or status
+        except Exception:  # noqa: BLE001 — the UI signal only
+            pass
+    _emit_managed_change(_turn_session(db, task_id), task_id, "released", status)
+    return {"status": "released", "task_id": task_id}
+
+
+class ManagedRecoveryPayload(ManagedAttemptPayload):
+    reason: str = Field(default="", max_length=500)
+
+
+@app.post("/tasks/{task_id}/enter-recovery", dependencies=[Depends(_require_auth)])
+def enter_managed_recovery(task_id: str, payload: ManagedRecoveryPayload) -> Dict[str, Any]:
+    """[A82 Stage 3 rework] Carrier reports an UNCERTAIN managed outcome
+    (uncorrelated result / managed deadline): move its claimed/running attempt
+    to ``recovery_required`` via the Stage-2 ``enter_recovery`` helper. Fenced by
+    the current claim token AND the claiming node. The slot stays held until
+    resolved with recorded evidence (``/quiescence`` / operator) — this route
+    never releases or completes anything."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    from .turn_queue import TurnQueueError
+
+    task = db.get_task(task_id)
+    if not task or int(task.get("queue_protocol") or 0) != 1:
+        raise HTTPException(status_code=404, detail="no managed turn")
+    if not _token_matches(task.get("claim_token"), payload.claim_token) or str(
+        task.get("claimed_by") or ""
+    ) != payload.node_id:
+        raise HTTPException(status_code=409, detail="recovery request from a superseded or foreign attempt")
+    if str(task.get("status")) == "recovery_required":
+        return {"status": "recovery_required", "task_id": task_id}  # idempotent
+    try:
+        moved = db.enter_recovery(task_id=task_id, claim_token=payload.claim_token, reason=payload.reason)
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 503), detail=str(e))
+    if not moved:
+        raise HTTPException(status_code=409, detail="turn not in a recoverable state")
+    _emit_managed_change(task.get("session_id"), task_id, "recovery_required", "recovery_required")
+    return {"status": "recovery_required", "task_id": task_id}
+
+
+class _ManagedResultFields(BaseModel):
+    """[A82 Stage 3 rework, m2] The exact result-envelope fields a carrier may
+    send (the worker's ``_execute_task`` result dict); anything else is
+    rejected (extra="forbid"). Text fields are length-bounded."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool = True
+    output: str = Field(default="", max_length=8 * 1024 * 1024)
+    errors: List[str] = Field(default_factory=list, max_length=200)
+    files_modified: List[str] = Field(default_factory=list, max_length=10000)
+    execution_time: float = 0.0
+    timestamp: str = Field(default="", max_length=64)
+    return_code: int = 0
+    error_detail: str = Field(default="", max_length=64 * 1024)
+    raw_stdout: str = Field(default="", max_length=8 * 1024 * 1024)
+    raw_stderr: str = Field(default="", max_length=1024 * 1024)
+    error_class: str = Field(default="", max_length=128)
+    backend_session_id: Optional[str] = Field(default=None, max_length=256)
+    driver_type: str = Field(default="", max_length=64)
+    driver_status: str = Field(default="", max_length=64)
+    cache_health: str = Field(default="unknown", max_length=64)
+    cache_unhealthy_count: int = 0
+    previous_backend_session_ids: List[str] = Field(default_factory=list, max_length=1000)
+    usage: Optional[Dict[str, Any]] = None
+    telemetry_invocation_id: str = Field(default="", max_length=128)
+    artifact_path: Optional[str] = Field(default=None, max_length=4096)
+
+
+class ManagedResultPayload(_ManagedResultFields):
+    node_id: str = Field(min_length=1, max_length=128)
+    claim_token: str = Field(min_length=1, max_length=128)
+
+
+@app.post("/tasks/{task_id}/result-managed", dependencies=[Depends(_require_auth), Depends(_guard_managed_body)])
+def submit_managed_result(task_id: str, payload: ManagedResultPayload) -> Dict[str, Any]:
+    """Atomic managed (protocol-1) result commit (design §6). Verifies the claim
+    token + state and commits the terminal outcome, native session id and active
+    identity in ONE transaction via ``complete_turn``; classification goes through
+    the SHARED helper so it never drifts from the legacy path. Returns a durable
+    receipt that echoes ``task_id`` AND ``claim_token`` so the carrier's result
+    spool can prune ONLY on a task/token-matched receipt (never on a bare 2xx or
+    timeout — design §6). An identical repeated commit for the current token is
+    idempotent; a superseded/foreign token is rejected (409). Body size is
+    capped BEFORE validation by the ``_guard_managed_body`` dependency (m2)."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    # Late arrival for a row that is already terminal: return a durable STALE
+    # receipt so the carrier can retire its spool obligation (design §6) — but
+    # ONLY when the presented token is the row's recorded token. A superseded or
+    # foreign token is refused and never echoed back (m2: no unverified echo).
+    task = db.get_task(task_id)
+    if task and str(task.get("status")) in ("completed", "failed", "failed_node_offline", "cancelled", "withdrawn"):
+        if not _token_matches(task.get("claim_token"), payload.claim_token):
+            raise HTTPException(status_code=409, detail="stale result presented a superseded or foreign claim token")
+        return {"status": "accepted (stale)", "task_id": task_id, "claim_token": payload.claim_token}
+    outcome = _commit_managed_result(
+        db, task_id, payload.claim_token,
+        success=payload.success, output=payload.output, errors=payload.errors,
+        backend_session_id=payload.backend_session_id,
+        artifact_path=payload.artifact_path,
+        error_class=payload.error_class,
+    )
+    return {
+        "status": "accepted",
+        "task_id": outcome.task_id,
+        "claim_token": payload.claim_token,
+        "resolved_status": outcome.status,
+    }
+
+
+def _token_matches(recorded: Any, presented: str) -> bool:
+    import hmac
+
+    return bool(recorded) and hmac.compare_digest(str(recorded), str(presented or ""))
+
+
+def _commit_managed_result(
+    db: Any,
+    task_id: str,
+    claim_token: str,
+    *,
+    success: bool,
+    output: str,
+    errors: List[str],
+    backend_session_id: Optional[str],
+    artifact_path: Optional[str] = None,
+    error_class: Optional[str] = None,
+) -> Any:
+    """Classify through the SHARED helper and commit atomically via
+    ``complete_turn`` (terminal status + result + native id + active identity in
+    one transaction). Used by the managed result route and by quiescence
+    reconciliation of a spooled terminal result, so the two never diverge."""
+    from .turn_queue import TurnQueueError
+
+    effective_success, downgraded = classify_completion_outcome(success, output, errors)
+    result_dict = {
+        "success": effective_success,
+        "output": output,
+        "errors": errors,
+        "backend_session_id": backend_session_id,
+        "error_detail": downgraded,
+    }
+    if effective_success:
+        status, error = "completed", None
+    else:
+        status = "failed"
+        error = "; ".join(errors) if errors else (
+            f"backend error result ({downgraded})" if downgraded else "worker reported failure"
+        )
+    try:
+        completion = db.complete_turn(
+            task_id=task_id,
+            claim_token=claim_token,
+            result=result_dict,
+            status=status,
+            native_session_id=backend_session_id,
+            error=error,
+            artifact_path=artifact_path,
+            # [A82 Stage 4e] the carrier's class (a downgraded success keeps its
+            # own class); persisted and used to mark a Case pause candidate.
+            error_class=(error_class or downgraded or None) if not effective_success else None,
+        )
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    _hint_turn_scheduler()  # [A82 Stage 4a] slot freed → next head may activate
+    _emit_managed_change(_turn_session(db, task_id), task_id, str(completion.status), str(completion.status))
+    return completion
+
+
+def _turn_session(db: Any, task_id: str) -> Optional[str]:
+    """[A82 Stage 6] The owning session of a managed row (one PK read), for
+    the post-commit UI signal only; never raises."""
+    try:
+        return db.turn_session_id(task_id)
+    except Exception:  # noqa: BLE001 — the UI safety net still converges
+        return None
+
+
+def _emit_managed_change(
+    session_id: Any, task_id: str, change: str, status: Any = None,
+) -> None:
+    """[A82 Stage 6] Post-commit ``turn_queue_changed`` for a carrier
+    transition (claim / start / release / recovery / result / resolution)."""
+    from .turn_queue import emit_turn_queue_changed
+
+    emit_turn_queue_changed(
+        str(session_id or ""), change, turn_id=task_id,
+        status=str(status) if status else None,
+    )
+
+
+def _hint_turn_scheduler() -> None:
+    """[A82 Stage 4a] Post-commit hint to the gateway turn scheduler (a no-op
+    when none runs in this process). Hints never carry authority."""
+    try:
+        from .turn_scheduler import notify_turn_queue_changed
+
+        notify_turn_queue_changed()
+    except Exception:  # noqa: BLE001 — the 3 s fallback still covers it
+        logger.debug("event=turn_scheduler_hint_failed", exc_info=True)
+
+
+def _note_managed_released(count: int) -> None:
+    """[A82 Stage 7] Post-commit: released managed rows re-entered the waiting
+    count — raise the shared allowance and hint the scheduler (the task server
+    is embedded in the gateway process). The scheduler refresh is the backstop."""
+    try:
+        from .turn_scheduler import notify_managed_released
+
+        notify_managed_released(count)
+    except Exception:  # noqa: BLE001 — the scheduler refresh still covers it
+        logger.debug("event=turn_allowance_release_note_failed", exc_info=True)
+
+
+class ManagedTerminalResult(_ManagedResultFields):
+    """A durable terminal result presented as recovery evidence (m1): it must be
+    a real result envelope — an explicit boolean ``success`` plus its output —
+    not merely any non-null value."""
+
+    success: bool
+
+
+class QuiescenceObservationPayload(BaseModel):
+    """An authenticated carrier observation of backend quiescence for a held
+    (recovery_required) managed turn (design §6). Bound to the execution attempt:
+    node/process/native identity + a terminal/stop signal, or a durable terminal
+    result. Node registration/offline status is NOT quiescence — the validator
+    rejects a bare boolean/offline label."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str = Field(min_length=1, max_length=128)
+    claim_token: str = Field(min_length=1, max_length=128)
+    quiescent: bool = False
+    terminal: bool = False
+    terminal_status: Optional[str] = Field(default=None, max_length=32)
+    native_session_id: Optional[str] = Field(default=None, max_length=256)
+    # [A82 Stage 3 rework] How the carrier knows the backend is stopped:
+    #   backend_terminal  — native execution identity + terminal observation;
+    #   backend_quiescent — the SAME live carrier process (observer incarnation ==
+    #                       claim incarnation) observed its backend quiescent;
+    #   carrier_restarted — a NEW carrier process (registered incarnation) that
+    #                       reaped the old incarnation's backend children at boot.
+    stop_evidence: Optional[str] = Field(default=None, max_length=32)
+    observer_incarnation: Optional[str] = Field(default=None, max_length=128)
+    # carrier_restarted only: {"pid": int, "observed": "absent"|"pid_reused"|"rebooted"}
+    # — the carrier's proof that the attempt's recorded backend process is gone.
+    process_proof: Optional[Dict[str, Any]] = None
+    result: Optional[Dict[str, Any]] = None
+
+
+def _registered_incarnation(db: Any, node_id: str) -> Optional[str]:
+    node = get_registry().get(node_id)
+    if node is not None and node.incarnation_id:
+        return node.incarnation_id
+    row = db.get_node(node_id) if hasattr(db, "get_node") else None
+    return (row or {}).get("incarnation_id")
+
+
+@app.post("/tasks/{task_id}/quiescence", dependencies=[Depends(_require_auth), Depends(_guard_managed_body)])
+def record_quiescence_observation(
+    task_id: str, payload: QuiescenceObservationPayload
+) -> Dict[str, Any]:
+    """Record a carrier quiescence observation for a held managed turn and
+    auto-reconcile it (design §6). If the observation carries a durable terminal
+    ``result``, the turn is reconciled to that outcome; otherwise a valid
+    quiescent+terminal observation resolves the recovery hold to the observed
+    terminal status. An insufficient observation (bare boolean / offline) is
+    refused (409) — the hold is retained with missing evidence. This is the
+    RECORDED evidence the operator resolve-recovery endpoint (Stage 6) consumes;
+    the carrier cannot supply a bare boolean."""
+    from .turn_queue import TurnQueueError
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    task = db.get_task(task_id)
+    if not task or int(task.get("queue_protocol") or 0) != 1:
+        raise HTTPException(status_code=404, detail="no managed turn")
+    # [A82 Stage 3 rework, m1] Evidence must be bound to THIS attempt: the
+    # recorded token and the carrier node that holds the claim.
+    if not _token_matches(task.get("claim_token"), payload.claim_token):
+        raise HTTPException(status_code=409, detail="quiescence observation for a superseded or foreign attempt")
+    if str(task.get("claimed_by") or "") != payload.node_id:
+        raise HTTPException(status_code=409, detail="quiescence observation from a carrier that does not hold the claim")
+    if payload.result is not None:
+        # A durable spooled terminal result: validate it is a real result
+        # envelope, then reconcile it through the SAME atomic completion as the
+        # managed result route (result + native id + active identity).
+        try:
+            res = ManagedTerminalResult.model_validate(payload.result)
+        except ValidationError:
+            raise HTTPException(status_code=422, detail="result evidence is not a terminal result envelope")
+        outcome = _commit_managed_result(
+            db, task_id, payload.claim_token,
+            success=res.success, output=res.output, errors=res.errors,
+            backend_session_id=res.backend_session_id or payload.native_session_id,
+            artifact_path=res.artifact_path,
+            error_class=res.error_class,
+        )
+        return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.status}
+    # No result: a quiescence observation must carry an explicit terminal/stop
+    # observation bound to a verifiable carrier identity. Without a result the
+    # outcome is not success — only failed/cancelled may be recorded.
+    if not (payload.quiescent and payload.terminal):
+        raise HTTPException(status_code=409, detail="insufficient quiescence evidence (requires quiescent + terminal)")
+    kind = payload.stop_evidence or "backend_terminal"
+    registered = _registered_incarnation(db, payload.node_id)
+    claim_inc = task.get("claim_incarnation")
+    if kind == "backend_terminal":
+        ok = bool((payload.native_session_id or "").strip())
+    elif kind == "backend_quiescent":
+        ok = bool(payload.observer_incarnation) and payload.observer_incarnation == claim_inc == registered
+    elif kind == "carrier_restarted":
+        proof = payload.process_proof or {}
+        ok = (
+            bool(payload.observer_incarnation)
+            and payload.observer_incarnation == registered
+            and payload.observer_incarnation != claim_inc
+            and isinstance(proof.get("pid"), int)
+            and proof.get("observed") in ("absent", "pid_reused", "rebooted")
+        )
+    else:
+        ok = False
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail="insufficient quiescence evidence (unverifiable stop evidence / carrier identity)",
+        )
+    if payload.terminal_status not in ("failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail="terminal_status must be failed or cancelled without a durable result",
+        )
+    evidence: Dict[str, Any] = {
+        "task_id": task_id,
+        "claim_token": payload.claim_token,
+        "node_id": payload.node_id,
+        "quiescent": True,
+        "terminal": True,
+        "terminal_status": payload.terminal_status,
+        "native_session_id": payload.native_session_id,
+        "stop_evidence": kind,
+        "observer_incarnation": payload.observer_incarnation,
+        "process_proof": payload.process_proof,
+        "source": "carrier",
+    }
+    try:
+        outcome = db.resolve_recovery(
+            task_id=task_id,
+            claim_token=payload.claim_token,
+            quiescence_evidence=evidence,
+            resolved_status=payload.terminal_status,
+        )
+    except TurnQueueError as e:
+        raise HTTPException(status_code=getattr(e, "status_code", 409), detail=str(e))
+    _hint_turn_scheduler()
+    _emit_managed_change(task.get("session_id"), task_id, "resolved", str(outcome.resolved_status))
+    return {"status": "reconciled", "task_id": outcome.task_id, "resolved_status": outcome.resolved_status}
 
 
 @app.post("/tasks/{task_id}/release", dependencies=[Depends(_require_auth)])
@@ -938,6 +1610,7 @@ def release_task(task_id: str, payload: ClaimPayload) -> Dict[str, str]:
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
+    _refuse_if_managed(db, task_id)
     ok = db.release_task(task_id, payload.node_id)
     if not ok:
         raise HTTPException(status_code=409, detail="Task not claimed by this node or not in claimed state")
@@ -964,7 +1637,7 @@ def submit_result(
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    task = db.get_task(task_id)
+    task = _refuse_if_managed(db, task_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
 
@@ -991,19 +1664,18 @@ def submit_result(
     # "Prompt is too long" bug — an is_error ResultMessage stored as a reply).
     # Independently re-validate here so the gateway never persists such a turn as
     # completed even before the worker is redeployed.
-    effective_success = payload.success
-    downgraded_error_class = ""
-    if payload.success and not payload.errors:
-        err_class = _looks_like_backend_error(payload.output)
-        if err_class:
-            effective_success = False
-            downgraded_error_class = err_class
-            logger.warning(
-                "event=submit_result_downgraded task_id=%s node=%s error_class=%s "
-                "— worker reported success but output is a backend error string "
-                "(likely pre-fix driver); recording as failure",
-                task_id, payload.node_id, err_class,
-            )
+    # [A82 Stage 3] Classify through the shared helper so legacy and managed
+    # paths apply the identical success-downgrade rule.
+    effective_success, downgraded_error_class = classify_completion_outcome(
+        payload.success, payload.output, payload.errors
+    )
+    if downgraded_error_class:
+        logger.warning(
+            "event=submit_result_downgraded task_id=%s node=%s error_class=%s "
+            "— worker reported success but output is a backend error string "
+            "(likely pre-fix driver); recording as failure",
+            task_id, payload.node_id, downgraded_error_class,
+        )
 
     result_dict = {
         "success": effective_success,
@@ -1028,7 +1700,7 @@ def submit_result(
     # A close_session control task carries a session_id for pinning, but it is
     # not a conversational turn — the session is already CLOSED. Skip the turn
     # event so it doesn't render a phantom "turn" against a closed session.
-    is_control_action = task.get("action") in ("close_session", "cancel_codex")
+    is_control_action = task.get("action") in ("close_session", "cancel_codex", "cancel_managed")
     if effective_success:
         db.complete_task(task_id, result_dict, payload.artifact_path)
         # Append event for the session if present

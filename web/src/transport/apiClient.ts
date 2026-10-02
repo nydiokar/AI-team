@@ -150,7 +150,134 @@ export interface InstructionResponse {
   session: RawSessionView | null;
 }
 
+// [A82 Stage 6] Managed turn-request resources (design §9) — a read model of
+// the session queue, distinct from the telemetry `/api/turns` DTOs.
+export interface TurnRequestSummary {
+  id: string;
+  turn_id: string;
+  session_id: string;
+  status: string;
+  revision: number;
+  queue_sequence: number;
+  /** 1-based run-order snapshot (not a start-time promise). */
+  queue_position: number | null;
+  turn_source: string | null;
+  turn_kind: string | null;
+  sender_session_id: string | null;
+  blocked_reason: string | null;
+  created_at: string | null;
+  activated_at: string | null;
+  started_at: string | null;
+  /** ≤ 2 KiB preview — never the full prompt. */
+  preview: string;
+}
+
+export interface TurnRequestPage {
+  turns: TurnRequestSummary[];
+  count: number;
+  queued: number;
+  active_turn_id: string | null;
+  active_status: string | null;
+  next_cursor: number | null;
+  enrolled: boolean;
+  paused: boolean;
+  hold: string | null;
+}
+
+export interface TurnRequestDetail extends TurnRequestSummary {
+  /** Full editable intent (one-item read only). */
+  body: string;
+  completed_at: string | null;
+  flow_run_id: string | null;
+}
+
+export interface TurnQueueControl {
+  session_id: string;
+  paused: boolean;
+  hold: string | null;
+}
+
+export interface TurnRecoveryResolution {
+  ok: boolean;
+  task_id: string;
+  status: string;
+}
+
+async function turnMutation<T>(
+  path: string,
+  token: string,
+  method: "PATCH" | "POST",
+  body: unknown,
+  revision?: number,
+): Promise<T> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+  if (revision !== undefined) headers["If-Match"] = String(revision);
+  const res = await fetch(path, { method, headers, body: JSON.stringify(body ?? {}) });
+  const data = await res.json().catch(() => ({}) as Record<string, unknown>);
+  if (!res.ok) {
+    const detail = (data as { detail?: unknown }).detail;
+    const reason =
+      detail && typeof detail === "object" && "reason" in detail
+        ? String((detail as { reason: unknown }).reason)
+        : typeof detail === "string"
+          ? detail
+          : `${res.status} ${res.statusText}`;
+    throw new ApiError(res.status, reason);
+  }
+  return data as T;
+}
+
 export const api = {
+  turnRequests(token: string, sessionId: string, cursor = 0, limit = 50): Promise<TurnRequestPage> {
+    const qs = new URLSearchParams({ cursor: String(cursor), limit: String(limit) });
+    return get<TurnRequestPage>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/turn-requests?${qs}`, token,
+    );
+  },
+
+  turnRequest(token: string, turnId: string): Promise<TurnRequestDetail> {
+    return get<TurnRequestDetail>(`/api/turn-requests/${encodeURIComponent(turnId)}`, token);
+  },
+
+  /** Edit a WAITING request; `revision` is the expected one (If-Match) — 409 on a race. */
+  editTurnRequest(token: string, turnId: string, revision: number, body: string): Promise<TurnRequestDetail> {
+    return turnMutation<TurnRequestDetail>(
+      `/api/turn-requests/${encodeURIComponent(turnId)}`, token, "PATCH", { body }, revision,
+    );
+  },
+
+  /** Withdraw ONLY this waiting request (auditable; never deletes). */
+  withdrawTurnRequest(token: string, turnId: string, revision: number): Promise<TurnRequestSummary> {
+    return turnMutation<TurnRequestSummary>(
+      `/api/turn-requests/${encodeURIComponent(turnId)}/withdraw`, token, "POST", {}, revision,
+    );
+  },
+
+  pauseTurnRequests(token: string, sessionId: string): Promise<TurnQueueControl> {
+    return turnMutation<TurnQueueControl>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/turn-requests/pause`, token, "POST", {},
+    );
+  },
+
+  resumeTurnRequests(token: string, sessionId: string): Promise<TurnQueueControl> {
+    return turnMutation<TurnQueueControl>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/turn-requests/resume`, token, "POST", {},
+    );
+  },
+
+  /** Operator resolution of a held (recovery_required) turn; never replays it. */
+  resolveTurnRecovery(
+    token: string, turnId: string, decision: "failed" | "cancelled", note = "",
+  ): Promise<TurnRecoveryResolution> {
+    return turnMutation<TurnRecoveryResolution>(
+      `/api/turn-requests/${encodeURIComponent(turnId)}/resolve-recovery`, token, "POST",
+      { decision, acknowledge_uncertain: true, note },
+    );
+  },
+
   async sessions(token: string, limit = 200, keepPinned?: boolean): Promise<RawSessionView[]> {
     const qs = new URLSearchParams({ limit: String(limit) });
     if (keepPinned !== undefined) qs.set("keep_pinned", String(keepPinned));

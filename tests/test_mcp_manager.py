@@ -84,10 +84,11 @@ def test_clamp_float():
 def test_dispatch_worker_posts_and_reports(monkeypatch):
     calls = {}
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls["method"] = method
         calls["path"] = path
         calls["payload"] = payload
+        calls["headers"] = headers
         return {"ok": True, "task_id": "task_abc", "session": {"session_id": "sess_1"}}
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
@@ -98,6 +99,8 @@ def test_dispatch_worker_posts_and_reports(monkeypatch):
         "files": ["a.py", "b.py"],
     })
     assert calls["method"] == "POST"
+    # [A82 Stage 4b rework 2] dispatch_worker declares itself automation.
+    assert calls["headers"] == {"X-AI-Team-Principal": "automation"}
     assert calls["path"] == "/api/instructions"
     assert calls["payload"] == {
         "description": "Fix the widget",
@@ -115,7 +118,7 @@ def test_dispatch_worker_sends_parent_lineage(monkeypatch):
     HARNESS_FLOW_DRIVE is ON)."""
     seen = {}
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         seen["payload"] = payload
         return {"task_id": "t1", "session": None}
 
@@ -136,7 +139,7 @@ def test_dispatch_worker_omits_parent_lineage_when_absent(monkeypatch):
     plain dispatch; no null/empty field leaks)."""
     seen = {}
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         seen["payload"] = payload
         return {"task_id": "t1", "session": None}
 
@@ -198,7 +201,7 @@ def test_dispatch_worker_refuses_unknown_claude_model_before_api_call(monkeypatc
 def test_dispatch_worker_refuses_malformed_session_create_response(monkeypatch):
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         return {"ok": True, "session": {}}
 
@@ -216,7 +219,7 @@ def test_dispatch_worker_opens_observable_session_when_cwd_and_no_session(monkey
     Proves the worker is observable (a session row), not a sessionless one-off."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         if path == "/api/sessions":
             return {"ok": True, "session": {"session_id": "worker_sess_9"}}
@@ -254,7 +257,7 @@ def test_dispatch_worker_reuses_given_session_without_creating(monkeypatch):
     (byte-identical to the reuse path)."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         return {"ok": True, "task_id": "t", "session": {"session_id": "sess_existing"}}
 
@@ -272,7 +275,7 @@ def test_dispatch_worker_tiers_model_on_new_session(monkeypatch):
     that replaces `claude -p --model` via watch_job."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         if path == "/api/sessions":
             return {"ok": True, "session": {"session_id": "w_opus"}}
@@ -295,7 +298,7 @@ def test_dispatch_worker_model_ignored_on_reused_session(monkeypatch):
     says so honestly (no silent no-op)."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         return {"ok": True, "task_id": "t", "session": {"session_id": "sess_existing"}}
 
@@ -325,7 +328,7 @@ def test_dispatch_worker_refuses_oneoff_without_cwd(monkeypatch):
     its prompt cache. The refusal fires before any API call is made."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         return {"ok": True, "task_id": "t", "session": None}
 
@@ -342,7 +345,7 @@ def test_dispatch_worker_warm_reuse_after_case_close(monkeypatch):
     still available after Case close."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         return {"ok": True, "task_id": "t2", "session": {"session_id": "warm_worker"}}
 
@@ -371,7 +374,7 @@ def _affil(session_id="w1", role="worker", case_id="case_1"):
 def test_release_worker_closes_verified_worker_of_own_case(monkeypatch):
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         if path == "/api/work/affiliations/sessions":
             return _affil(session_id="w1", role="worker", case_id="case_1")
@@ -406,7 +409,7 @@ def test_release_worker_refuses_unknown_session(monkeypatch):
     """No affiliation row for the target ⇒ structured refusal, NO close attempted."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append(path)
         if path == "/api/work/affiliations/sessions":
             return _affil(session_id="other", role="worker", case_id="case_1")
@@ -423,7 +426,7 @@ def test_release_worker_refuses_non_worker_role(monkeypatch):
     """The target is affiliated but not a worker (e.g. a manager) ⇒ refusal, no close."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append(path)
         if path == "/api/work/affiliations/sessions":
             return _affil(session_id="m1", role="manager", case_id="case_1")
@@ -441,7 +444,7 @@ def test_release_worker_refuses_worker_of_other_case(monkeypatch):
     """The target is a worker but joined to a DIFFERENT Case ⇒ refusal, no close."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append(path)
         if path == "/api/work/affiliations/sessions":
             return _affil(session_id="w1", role="worker", case_id="case_OTHER")
@@ -458,7 +461,7 @@ def test_release_worker_reports_refusal_on_close_404(monkeypatch):
     """[Defect 3] The backend /close raises HTTPError 404 → _api_request raises
     RuntimeError for an already-closed/unknown session. That must return the SAME
     structured-refusal shape, not leak an exception (the old else-branch was dead)."""
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         if path == "/api/work/affiliations/sessions":
             return _affil(session_id="w1", role="worker", case_id="case_1")
         raise RuntimeError("HTTP 404 on POST /api/sessions/w1/close: session_not_found")
@@ -481,7 +484,7 @@ def test_wait_requires_an_id():
 def test_wait_resolves_task_to_flow_then_returns_on_done(monkeypatch):
     seq = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         seq.append(path)
         if path.startswith("/api/flows?task_id="):
             return {"flows": [{"flow_run_id": "flow_1"}]}
@@ -497,7 +500,7 @@ def test_wait_resolves_task_to_flow_then_returns_on_done(monkeypatch):
 
 
 def test_wait_returns_on_attention(monkeypatch):
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         return {"flow": {"status": "blocked", "current_stage": "impl"}}
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
@@ -509,7 +512,7 @@ def test_wait_returns_on_attention(monkeypatch):
 def test_wait_returns_on_task_finished_event(monkeypatch):
     """[A37] Honest closure: the worker flow's status never flips on task-end, so
     wait_for_worker must terminate on the authoritative `task.finished` event."""
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         if path.startswith("/api/flows/"):
             return {"flow": {"status": None, "current_stage": "execution"}}
         if path.startswith("/api/work/") and path.endswith("/timeline"):
@@ -528,7 +531,7 @@ def test_wait_returns_on_task_finished_event(monkeypatch):
 
 
 def test_wait_task_finished_failure_is_attention(monkeypatch):
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         if path.startswith("/api/flows/"):
             return {"flow": {"status": None, "current_stage": "execution"}}
         if path.endswith("/timeline"):
@@ -550,7 +553,7 @@ def test_wait_times_out_without_busy_loop(monkeypatch):
     sleeps = []
     monkeypatch.setattr(mcp_manager.time, "sleep", lambda s: sleeps.append(s))
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         return {"flow": {"status": "running"}}
 
     monkeypatch.setattr(mcp_manager, "_api_request", fake_request)
@@ -565,7 +568,7 @@ def test_wait_tolerates_transient_poll_errors(monkeypatch):
     monkeypatch.setattr(mcp_manager.time, "sleep", lambda s: None)
     calls = {"n": 0}
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls["n"] += 1
         if calls["n"] <= 2:
             raise RuntimeError("Could not reach control API: transient blip")
@@ -794,7 +797,7 @@ def test_dispatch_worker_records_durable_wait_when_case(monkeypatch):
     (POST /api/cases/{case}/waits) so a restart can reconcile it."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         if path == "/api/sessions":
             return {"session": {"session_id": "ws1"}}
@@ -815,7 +818,7 @@ def test_dispatch_worker_records_durable_wait_when_case(monkeypatch):
 def test_dispatch_worker_wait_relay_failure_is_nonfatal(monkeypatch):
     """A relay failure (e.g. the 404 when DURABLE_RELAY_ENABLED is OFF) must NOT
     break the dispatch — the worker is still dispatched, just without the note."""
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         if path.endswith("/waits"):
             raise RuntimeError("HTTP 404 on POST /api/cases/case_1/waits: not_found")
         if path == "/api/sessions":
@@ -835,7 +838,7 @@ def test_dispatch_worker_no_wait_relay_without_case(monkeypatch):
     Case ledger to record the wait on)."""
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append(path)
         return {"task_id": "t", "session": {"session_id": "s1"}}
 
@@ -847,7 +850,7 @@ def test_dispatch_worker_no_wait_relay_without_case(monkeypatch):
 def test_reconcile_waits_formats_resolved_and_pending(monkeypatch):
     """reconcile_waits summarizes resolved + still-open waits and tells the Manager
     to re-arm wait_for_worker for the open ones."""
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         assert method == "POST" and path == "/api/cases/case_1/waits/reconcile"
         return {
             "ok": True,
@@ -959,7 +962,7 @@ def test_api_request_raises_when_all_tokens_401(monkeypatch):
 def test_open_case_threads_round_cap_into_body(monkeypatch):
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append((method, path, payload))
         return {"ok": True, "case_id": "case_9"}
 
@@ -989,7 +992,7 @@ def test_open_case_rejects_non_positive_round_cap(monkeypatch):
 def test_open_case_omits_round_cap_when_absent(monkeypatch):
     calls = []
 
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         calls.append(payload)
         return {"ok": True, "case_id": "case_9"}
 
@@ -1001,7 +1004,7 @@ def test_open_case_omits_round_cap_when_absent(monkeypatch):
 def test_get_case_unpacks_dual_shape_criteria(monkeypatch):
     """A Case opened with round_cap stores the object shape; get_case must show the
     human criteria (not a JSON blob) and the cap on its own line."""
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         return {"flow": {
             "status": None,
             "completion_criteria": '{"round_cap": 5, "criteria": "tests green"}',
@@ -1017,7 +1020,7 @@ def test_get_case_unpacks_dual_shape_criteria(monkeypatch):
 
 
 def test_get_case_plain_criteria_unchanged(monkeypatch):
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         return {"flow": {
             "status": None,
             "completion_criteria": "just plain text",
@@ -1066,7 +1069,7 @@ def test_bootstrap_inserts_repo_root_on_sys_path():
 # --------------------------------------------------------------------------
 
 def _fake_ok_request(seen):
-    def fake_request(method, path, payload=None, timeout=20.0):
+    def fake_request(method, path, payload=None, timeout=20.0, headers=None):
         seen.setdefault("calls", []).append((method, path, payload))
         return {"ok": True, "task_id": "task_o1", "session": {"session_id": "sess_1"}}
     return fake_request

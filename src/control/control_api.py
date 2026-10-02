@@ -39,11 +39,13 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from src.core import observability
 from src.control import app_metrics
 from src.control.app_metrics import RequestTimingMiddleware
+# [A82 Stage 5] Authorization scheme of the scoped agent sender capability.
+from src.control.agent_sender import SENDER_AUTH_SCHEME as _SENDER_AUTH_SCHEME
 
 if TYPE_CHECKING:
     from src.control.db import MeshDB
@@ -74,6 +76,8 @@ _REASON_STATUS = {
     "invalid_repo_path": 400,
     "session_not_found": 404,
     "not_closed": 409,
+    # [A82 Stage 4b] managed close could not reach the turn ledger (fail closed)
+    "turn_queue_unavailable": 503,
     # Move H — approvals
     "not_found": 404,
     "already_resolved": 409,
@@ -125,6 +129,206 @@ _CONTINUE_INLINE_MAX = 48000
 # that, so no realistic caller (web composer, MCP Manager, Manager-internal
 # dispatch) can hit it; it only blunts runaway/accidental oversized posts.
 _MAX_INSTRUCTION_CHARS = 262144
+# [A82 Stage 4a] Compatibility-route serialized request ceiling (design §8),
+# DERIVED from the existing character limits so no previously valid request is
+# refused: the worst JSON encoding of one character is 12 bytes (a non-BMP char
+# ASCII-escaped as a surrogate pair, e.g. \ud83d\ude00), applied to the prompt and
+# carry limits, plus a 256 KiB allowance for the envelope/other fields. ≈3.8 MiB
+# — a documented deviation from design §8's 2 MiB (which would refuse valid
+# 262144-char prompts of escaped non-BMP text).
+_JSON_MAX_BYTES_PER_CHAR = 12
+_INSTRUCTIONS_ENVELOPE_ALLOWANCE = 256 * 1024
+_INSTRUCTIONS_MAX_REQUEST_BYTES = (
+    _JSON_MAX_BYTES_PER_CHAR * (_MAX_INSTRUCTION_CHARS + _CONTINUE_INLINE_MAX)
+    + _INSTRUCTIONS_ENVELOPE_ALLOWANCE
+)
+# New turn-request route (Stage 6) whole-request cap (design §8: 256 KiB).
+_TURN_REQUESTS_MAX_REQUEST_BYTES = 256 * 1024
+# Body-read deadline for the capped routes (design §8 "Time").
+_BODY_READ_DEADLINE_SEC = 5.0
+
+
+async def _session_turn_queue_enrolled(session_id: str) -> bool:
+    """[A82 Stage 4a] Durable enrollment marker. No read while no session is
+    enrolled; else one offloaded read; unreadable ⇒ typed 503 (fail closed)."""
+    from src.control.db import get_db
+    from src.control.turn_admission import session_enrollment
+    from src.control.turn_queue import TurnQueueError
+
+    try:
+        return await session_enrollment(get_db(), session_id)
+    except TurnQueueError as err:
+        raise _turn_queue_http(err)
+
+
+def _enrollment_kw(orchestrator: Any, enrolled: bool) -> Dict[str, Any]:
+    """[A82 Stage 4a rework] Pass the route's single enrollment decision on
+    (one marker read per request) — only when enrollment can exist, so the
+    no-enrollment legacy call is byte-identical to before."""
+    from src.control.db import get_db
+
+    db = get_db()
+    if db is None or db.any_session_enrolled() is False:
+        return {}
+    return {"turn_queue_enrolled": enrolled}
+
+
+def _turn_queue_http(err: Exception) -> HTTPException:
+    """[A82 Stage 4a] Map a typed managed-queue outcome to a structured HTTP
+    error (design §6 table); 429 carries Retry-After."""
+    status = int(getattr(err, "status_code", 503) or 503)
+    code = str(getattr(err, "code", "turn_queue_error"))
+    ctx = getattr(err, "context", {}) or {}
+    headers = None
+    if status == 429:
+        headers = {"Retry-After": str(int(ctx.get("retry_after", 1) or 1))}
+    return HTTPException(
+        status_code=status,
+        detail={"ok": False, "reason": code, "message": str(getattr(err, "detail", err))[:300]},
+        headers=headers,
+    )
+
+
+# [A82 Stage 4b rework 2] Caller self-declaration on /api/instructions. An
+# in-repo automation caller (Manager MCP dispatch_worker) sends
+# `X-AI-Team-Principal: automation`; its enrolled turn is then non-human and
+# never releases an operator stop hold. Absent ⇒ operator (web UI). This is a
+# trust-model LABEL, not authentication: both callers hold the same bearer token.
+PRINCIPAL_HEADER = "X-AI-Team-Principal"
+AUTOMATION_PRINCIPAL = "automation"
+
+
+async def _submit_managed_instruction(
+    orchestrator: Any, body: Any, session: Any, idempotency_key: Optional[str],
+    principal: Optional[str] = None,
+) -> str:
+    """[A82 Stage 4a] Producer 1 (web) → managed admission. The web
+    Idempotency-Key is the durable operation id (replay-safe across restarts)."""
+    from src.control.turn_queue import TurnQueueError
+    from src.orchestrator import HarnessAdmissionBlocked
+
+    try:
+        return await orchestrator.submit_instruction(
+            description=body.description,
+            session_id=session.session_id,
+            cwd=session.repo_path or body.cwd,
+            target_files=body.target_files,
+            source=(
+                "automation_session"
+                if (principal or "").strip().lower() == AUTOMATION_PRINCIPAL
+                else "web_session"
+            ),
+            parent_flow_run_id=body.parent_flow_run_id,
+            join_case_id=body.case_id,
+            extra_metadata=_instruction_extra_metadata(body),
+            operation_id=idempotency_key,
+            turn_queue_enrolled=True,
+        )
+    except HarnessAdmissionBlocked as blocked:
+        raise _harness_blocked_http(blocked)
+    except TurnQueueError as err:
+        raise _turn_queue_http(err)
+
+
+async def _validate_agent_sender(raw: str, target_session_id: str) -> Any:
+    """[A82 Stage 5] Validate a scoped sender capability for ``target_session_id``
+    (bounded offload; read-only). 401 unknown/revoked, 403 wrong scope, 503 DB."""
+    from src.control.db import get_db
+    from src.control.turn_queue import TurnQueueError
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail={"ok": False, "reason": "mesh_db_unavailable"})
+    try:
+        return await asyncio.to_thread(db.validate_sender_capability, raw, target_session_id)
+    except TurnQueueError as err:
+        http = _turn_queue_http(err)
+        if http.status_code == 401:
+            http.headers = {"WWW-Authenticate": _SENDER_AUTH_SCHEME}
+        raise http
+
+
+async def _submit_agent_instruction(orchestrator: Any, body: Any, session: Any, sender: Any) -> Any:
+    """[A82 Stage 5] Agent sender → the SAME managed admission path. Source,
+    sender and Case come from the validated capability, never the request."""
+    from src.control.turn_queue import TurnQueueError
+    from src.orchestrator import HarnessAdmissionBlocked
+
+    try:
+        return await orchestrator.submit_instruction(
+            description=body.body,
+            session_id=session.session_id,
+            cwd=session.repo_path,
+            source="agent_session",
+            operation_id=body.operation_id,
+            sender_session_id=sender.session_id,
+            sender_case_id=sender.case_id,
+            sender_capability_hash=sender.capability_hash,
+            turn_queue_enrolled=True,
+        )
+    except HarnessAdmissionBlocked as blocked:
+        raise _harness_blocked_http(blocked)
+    except TurnQueueError as err:
+        http = _turn_queue_http(err)
+        if http.status_code == 401:  # stale capability at admission (rework F3)
+            http.headers = {"WWW-Authenticate": _SENDER_AUTH_SCHEME}
+        raise http
+
+
+def _is_json_content_type(value: Optional[str]) -> bool:
+    """FastAPI's strict declared-body rule: ``application/json`` or any
+    ``+json`` subtype (parameters such as charset allowed); missing ⇒ False."""
+    if not value:
+        return False
+    import email.message
+
+    msg = email.message.Message()
+    msg["content-type"] = value
+    if msg.get_content_maintype() != "application":
+        return False
+    subtype: str = msg.get_content_subtype()
+    return subtype == "json" or subtype.endswith("+json")
+
+
+def _parse_turn_request_body(raw: bytes, content_type: Optional[str] = None) -> "TurnRequestCreateBody":
+    """[A82 Stage 5 rework] Validate the create-route body AFTER the auth
+    dependency ran (FastAPI decodes a declared body before dependencies, so
+    unauthenticated garbage would be 422 instead of 401). Same 422 shape —
+    including FastAPI's strict content-type rule: a non-JSON (or missing)
+    media type is never decoded as JSON ⇒ 422, as on every declared body."""
+    if not _is_json_content_type(content_type):
+        raise RequestValidationError([{
+            "type": "content_type", "loc": ("body",),
+            "msg": "Content-Type must be application/json", "input": content_type,
+        }])
+    try:
+        return TurnRequestCreateBody.model_validate_json(raw)
+    except ValidationError as e:
+        raise RequestValidationError(
+            [{**err, "loc": ("body", *err.get("loc", ()))} for err in e.errors(include_url=False)]
+        )
+
+
+def _preparse_byte_guard(app: Any) -> None:
+    """[A82 Stage 4a] Install the streamed pre-parse byte gate (design §8):
+    bytes are counted as RECEIVED (chunked included) and a structured 413 is
+    returned before JSON parsing for the operator recovery route and the
+    ``/api/instructions`` admission route; a stalled body read fails at the
+    deadline instead of holding the request open."""
+    from src.control.body_cap import BodyCapMiddleware
+
+    app.add_middleware(
+        BodyCapMiddleware,
+        rules=[
+            (r"/api/turn-requests/[^/]+/resolve-recovery", 16 * 1024),
+            (r"/api/turn-requests/[^/]+/withdraw", 16 * 1024),
+            (r"/api/turn-requests/[^/]+", _TURN_REQUESTS_MAX_REQUEST_BYTES),
+            (r"/api/instructions", _INSTRUCTIONS_MAX_REQUEST_BYTES),
+            (r"/api/sessions/[^/]+/turn-requests", _TURN_REQUESTS_MAX_REQUEST_BYTES),
+            (r"/api/sessions/[^/]+/turn-requests/(pause|resume|enroll|unenroll)", 16 * 1024),
+        ],
+        read_deadline_sec=_BODY_READ_DEADLINE_SEC,
+    )
 # [A72 review] Smaller semantic fields on the case write surface. The MCP client
 # already bounds spec body ≤ 8k / title ≤ 512 / uri ≤ 1000 / reviewer ≤ 64, so the
 # server bounds below sit at-or-above every legit caller and only reject bulk that
@@ -165,6 +369,119 @@ class InstructionBody(BaseModel):
     # here (§7) so an oversized payload cannot be a DoS vector — but generously, so a
     # real fork carries in full. Absent on every normal turn ⇒ byte-identical.
     continue_inline: Optional[str] = Field(default=None, max_length=_CONTINUE_INLINE_MAX)
+
+
+class TurnRequestCreateBody(BaseModel):
+    """Small human instruction accepted by the managed queue resource."""
+
+    model_config = {"extra": "forbid"}
+
+    body: str = Field(min_length=1)
+    operation_id: str = Field(min_length=1, max_length=256)
+
+    @field_validator("body")
+    @classmethod
+    def _body_byte_limit(cls, value: str) -> str:
+        try:
+            byte_count = len(value.encode("utf-8"))
+        except UnicodeError as exc:
+            raise ValueError("body is not valid UTF-8") from exc
+        if byte_count > 16 * 1024:
+            raise ValueError("body exceeds 16 KiB UTF-8")
+        return value
+
+
+class TurnRequestEditBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    body: str = Field(min_length=1)
+
+    @field_validator("body")
+    @classmethod
+    def _body_byte_limit(cls, value: str) -> str:
+        return TurnRequestCreateBody._body_byte_limit(value)
+
+
+class TurnRequestSummaryOut(BaseModel):
+    """[A82 Stage 6] One queue card (design §9). A read model of the managed
+    ledger — NOT the telemetry turn DTO of ``/api/turns``. Never carries the
+    full prompt, payload, claim token or sender capability."""
+
+    model_config = {"extra": "ignore"}
+
+    id: str
+    turn_id: str
+    session_id: str
+    status: str
+    revision: int
+    queue_sequence: int
+    queue_position: Optional[int] = None
+    turn_source: Optional[str] = None
+    turn_kind: Optional[str] = None
+    sender_session_id: Optional[str] = None
+    blocked_reason: Optional[str] = None
+    created_at: Optional[str] = None
+    activated_at: Optional[str] = None
+    started_at: Optional[str] = None
+    preview: str = ""
+
+    @classmethod
+    def from_row(cls, row: Dict[str, Any]) -> "TurnRequestSummaryOut":
+        return cls.model_validate({**row, "turn_id": row["id"]})
+
+
+class TurnRequestPageOut(BaseModel):
+    """[A82 Stage 6] Cursor page of one session's open managed turns, in run
+    order, plus the queue-level state (counts, active slot, operator pause)."""
+
+    turns: List[TurnRequestSummaryOut]
+    count: int
+    queued: int
+    active_turn_id: Optional[str] = None
+    active_status: Optional[str] = None
+    next_cursor: Optional[int] = None
+    enrolled: bool
+    paused: bool
+    hold: Optional[str] = None
+
+
+class TurnRequestDetailOut(TurnRequestSummaryOut):
+    """[A82 Stage 6] The one-item read: the full editable intent (body)."""
+
+    body: str = ""
+    completed_at: Optional[str] = None
+    flow_run_id: Optional[str] = None
+
+    @classmethod
+    def from_row(cls, row: Dict[str, Any]) -> "TurnRequestDetailOut":
+        body: str = str(row.get("body") or "")
+        preview: str = body.encode("utf-8")[:2048].decode("utf-8", errors="ignore")
+        return cls.model_validate({**row, "turn_id": row["id"], "preview": preview})
+
+
+class TurnRequestReceiptOut(BaseModel):
+    """[A82 Stage 6] 202 acknowledgement of a durable admission: stable id,
+    current status/revision, acceptance time and a queue-position SNAPSHOT
+    (not a start-time promise)."""
+
+    turn_id: str
+    task_id: str
+    status: str
+    revision: int
+    queue_sequence: Optional[int] = None
+    queue_position: Optional[int] = None
+    accepted_at: Optional[str] = None
+    idempotent_replay: bool = False
+    source: Optional[str] = None
+    sender_session_id: Optional[str] = None
+
+
+class TurnQueueControlOut(BaseModel):
+    """[A82 Stage 6] Operator queue pause/resume outcome."""
+
+    session_id: str
+    paused: bool
+    hold: Optional[str] = None
 
 
 class CreateSessionBody(BaseModel):
@@ -366,6 +683,19 @@ class BindBody(BaseModel):
     chat_id: Optional[int] = None
 
 
+class TurnRecoveryResolveBody(BaseModel):
+    """[A82 Stage 3 rework] Operator unwedge for a held managed turn. Minimal
+    (full UI is Stage 6): the decision + note are recorded on the row."""
+
+    model_config = {"extra": "forbid"}
+
+    decision: str = Field(pattern="^(failed|cancelled|requeue)$")
+    note: str = Field(default="", max_length=500)
+    # The operator explicitly accepts that the backend outcome is unproven
+    # (required for a started/held turn; not needed to requeue an unstarted one).
+    acknowledge_uncertain: bool = False
+
+
 class RuntimeFlagBody(BaseModel):
     value: bool
     set_by: Optional[str] = Field(default=None, max_length=128)
@@ -435,12 +765,20 @@ class UploadResult(BaseModel):
     path: str
 
 
-def _session_payload(session) -> Optional[Dict[str, Any]]:
-    """Render a Session as the canonical SessionView dict (or None)."""
+def _session_payload(session, *, with_queue: bool = False) -> Optional[Dict[str, Any]]:
+    """Render a Session as the canonical SessionView dict (or None).
+    [A82 Stage 6] ``with_queue`` adds the ledger-derived turn-queue overlay
+    (enrolled admission responses: the truthful session state)."""
     if session is None:
         return None
     from src.core.view_models import SessionView
-    return SessionView.from_session(session).to_dict()
+    view = SessionView.from_session(session)
+    if with_queue:
+        from src.services.session_service import session_turn_queue_overlay
+        view = view.with_turn_queue(
+            session_turn_queue_overlay(_db(), [session.session_id]).get(session.session_id),
+        )
+    return view.to_dict()
 
 
 def _fork_carry_meta(continue_inline: Optional[str]) -> Optional[Dict[str, str]]:
@@ -776,6 +1114,12 @@ async def _store_session_upload(
     from pathlib import Path as _Path
     from src.control.node_inspector import session_node
 
+    # [A82 pre-cutover P2] Producer 8: an ENROLLED session's file is always
+    # staged for its managed carrier (which fetches it before invoking — the
+    # gateway never writes the repo), and an attached instruction is a managed
+    # turn: durable before ack, never BUSY / last_task_id.
+    enrolled: bool = await _session_turn_queue_enrolled(session.session_id)
+
     ext = _os.path.splitext(raw_name)[1].lower()
     blocked_exts: set[str] = {
         ".exe", ".bat", ".cmd", ".com", ".msi", ".msp", ".scr", ".pif",
@@ -800,7 +1144,7 @@ async def _store_session_upload(
     attached_instruction: str = _upload_attached_instruction(instruction or "", file_path)
 
     remote_node = session_node(session)
-    if remote_node is not None:
+    if remote_node is not None or enrolled:
         stage_id: str = _uuid.uuid4().hex[:16]
         stage_dir = _upload_staging_root() / stage_id
         dest = (stage_dir / safe_name).resolve()
@@ -835,6 +1179,41 @@ async def _store_session_upload(
                 "size": len(content),
                 "path": file_path,
                 "delivery": "pending_instruction",
+                "staged_file": staged_file_meta,
+            }
+
+        if enrolled:
+            from src.control.turn_queue import TurnQueueError
+            from src.orchestrator import HarnessAdmissionBlocked
+
+            try:
+                admitted = await orchestrator.submit_instruction(
+                    description=attached_instruction,
+                    session_id=session.session_id,
+                    cwd=session.repo_path,
+                    source="web_session",
+                    extra_metadata={"staged_file": staged_file_meta},
+                    turn_queue_enrolled=True,
+                )
+            except Exception as exc:
+                _shutil.rmtree(stage_dir, ignore_errors=True)
+                if isinstance(exc, TurnQueueError):
+                    raise _turn_queue_http(exc) from exc
+                if isinstance(exc, HarnessAdmissionBlocked):
+                    raise _harness_blocked_http(exc) from exc
+                logger.error(
+                    "event=web_upload_attached_enqueue_failed session=%s file=%s error=%s",
+                    session.session_id, safe_name, exc,
+                )
+                raise _upload_error(500, "delivery_enqueue_failed") from exc
+            return {
+                "ok": True,
+                "filename": safe_name,
+                "size": len(content),
+                "path": file_path,
+                "delivery": "attached",
+                "task_id": str(admitted),
+                "instruction": attached_instruction,
                 "staged_file": staged_file_meta,
             }
 
@@ -1044,6 +1423,8 @@ def build_control_api(orchestrator) -> FastAPI:
         openapi_url="/openapi.json" if _docs_on else None,
     )
     app.add_middleware(RequestTimingMiddleware, component="gateway")
+    # [A82 Stage 3 rework 4, m2 / Stage 4a] Streamed pre-parse byte caps.
+    _preparse_byte_guard(app)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_exception_handler(
@@ -1188,6 +1569,66 @@ def build_control_api(orchestrator) -> FastAPI:
         except Exception:
             pass
         return {"status": "ok", "governor": governor}
+
+    @app.post("/api/turn-requests/{task_id}/resolve-recovery", dependencies=[Depends(_require_auth)])
+    def api_resolve_turn_recovery(task_id: str, body: TurnRecoveryResolveBody) -> JSONResponse:
+        """[A82 Stage 3 rework] Operator exit for every held managed state.
+
+        * ``claimed`` (never started) → ``requeue`` only: token-fenced release
+          to pending (prompt preserved, token cleared).
+        * ``running`` / ``recovery_required`` → ``failed``/``cancelled`` only,
+          with ``acknowledge_uncertain``: the row enters recovery (if running)
+          and is resolved through the Stage-2 ``resolve_recovery`` with the
+          operator decision recorded as evidence. Never ``completed`` (no
+          result) and never requeued after start (double-execution risk).
+        No claim token is needed or returned."""
+        from src.control.turn_queue import TurnQueueError, emit_turn_queue_changed
+
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        row = db.get_task(task_id)
+        if not row or int(row.get("queue_protocol") or 0) != 1:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "no_managed_turn"})
+        status = str(row.get("status") or "")
+        token = row.get("claim_token") or ""
+        try:
+            if status == "claimed":
+                if body.decision != "requeue":
+                    raise HTTPException(status_code=409, detail={"ok": False, "reason": "unstarted_turn_requeue_only"})
+                if not db.release_turn(task_id, token):
+                    raise HTTPException(status_code=409, detail={"ok": False, "reason": "state_changed"})
+                from src.control.turn_scheduler import notify_managed_released
+
+                notify_managed_released(1)  # [A82 Stage 6 F1 / Stage 7] waiting count rose: count it + refresh
+                emit_turn_queue_changed(row.get("session_id"), "released", turn_id=task_id, status="pending")
+                return JSONResponse({"ok": True, "task_id": task_id, "status": "pending"})
+            if status in ("running", "recovery_required"):
+                if body.decision == "requeue":
+                    raise HTTPException(status_code=409, detail={"ok": False, "reason": "started_turn_cannot_requeue"})
+                if not body.acknowledge_uncertain:
+                    raise HTTPException(status_code=409, detail={"ok": False, "reason": "acknowledgement_required"})
+                if status == "running":
+                    db.enter_recovery(task_id, token, reason=f"operator: {body.note}"[:500])
+                evidence = {
+                    "source": "operator",
+                    "task_id": task_id,
+                    "quiescent": True,
+                    "terminal": True,
+                    "terminal_status": body.decision,
+                    "acknowledged_uncertain": True,
+                    "note": body.note,
+                }
+                res = db.resolve_recovery(task_id, token, evidence, resolved_status=body.decision)
+                from src.control.turn_scheduler import notify_turn_queue_changed
+
+                notify_turn_queue_changed()  # [A82 Stage 4a] slot freed
+                emit_turn_queue_changed(row.get("session_id"), "resolved", turn_id=task_id,
+                                        status=str(res.resolved_status))
+                return JSONResponse({"ok": True, "task_id": task_id, "status": res.resolved_status})
+        except TurnQueueError as e:
+            raise HTTPException(status_code=getattr(e, "status_code", 409), detail={"ok": False, "reason": e.code})
+        raise HTTPException(status_code=409, detail={"ok": False, "reason": "not_resolvable", "status": status})
 
     @app.get("/api/flags", dependencies=[Depends(_require_auth)])
     def api_list_flags() -> JSONResponse:
@@ -1797,10 +2238,277 @@ def build_control_api(orchestrator) -> FastAPI:
     # Write surface (U3) — thin adapters over the same services Telegram calls.
     # ----------------------------------------------------------------------
 
+    async def _turn_request_principal(
+        request: Request,
+        creds: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
+    ) -> Optional[Any]:
+        """[A82 Stage 5] The admission resource's two auth scopes (packet §3.13).
+        ``Authorization: AITeamSender <capability>`` ⇒ a scoped agent sender,
+        validated against THIS target before the body is parsed (returns the
+        canonical ``SenderIdentity``). Anything else ⇒ the unchanged operator
+        bearer check (returns None). A shared bearer is never an agent
+        identity and a capability never authenticates an operator."""
+        scheme, _, value = (request.headers.get("authorization") or "").partition(" ")
+        if scheme.strip().lower() == _SENDER_AUTH_SCHEME.lower():
+            return await _validate_agent_sender(value.strip(), str(request.path_params.get("session_id") or ""))
+        await _require_auth(creds)
+        return None
+
+    @app.post("/api/sessions/{session_id}/turn-requests")
+    async def api_create_turn_request(
+        session_id: str, request: Request,
+        sender: Optional[Any] = Depends(_turn_request_principal),
+    ) -> JSONResponse:
+        """Acknowledge a managed instruction only after canonical admission.
+        The body (byte-capped by ``BodyCapMiddleware``) is read and validated
+        only after authentication: unauthenticated input is 401, never 422."""
+        from src.control.turn_queue import TurnAdmission
+
+        body = _parse_turn_request_body(await request.body(), request.headers.get("content-type"))
+
+        session = orchestrator.session_service.store.get(session_id)
+        if session is None:
+            if sender is not None:  # validated just now; vanished ⇒ out of scope
+                raise HTTPException(status_code=403, detail={"ok": False, "reason": "scope_forbidden"})
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "session_not_found"})
+        if sender is not None:
+            idem = request.headers.get("idempotency-key")
+            if idem is not None and idem != body.operation_id:
+                raise HTTPException(status_code=422, detail={"ok": False, "reason": "operation_id_mismatch"})
+        if not await _session_turn_queue_enrolled(session_id):
+            raise HTTPException(status_code=409, detail={"ok": False, "reason": "session_not_enrolled"})
+        if sender is not None:
+            admitted = await _submit_agent_instruction(orchestrator, body, session, sender)
+        else:
+            admitted = await _submit_managed_instruction(
+                orchestrator, InstructionBody(description=body.body), session,
+                body.operation_id,
+            )
+        if not isinstance(admitted, TurnAdmission):
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "admission_receipt_missing"})
+        # [A82 Stage 6] The receipt reads the COMMITTED row (a replay reports the
+        # current status/revision, e.g. after an edit) — never the request.
+        db = _db()
+        row: Optional[Dict[str, Any]] = None
+        if db is not None:
+            try:
+                row = await asyncio.to_thread(db.get_turn_request, str(admitted))
+            except Exception:  # noqa: BLE001 — committed; the receipt falls back to the admission
+                row = None
+        receipt = TurnRequestReceiptOut(
+            turn_id=str(admitted), task_id=str(admitted),
+            status=str((row or {}).get("status") or admitted.status),
+            revision=int((row or {}).get("revision") or admitted.revision),
+            queue_sequence=(row or {}).get("queue_sequence", admitted.queue_sequence),
+            queue_position=(row or {}).get("queue_position"),
+            accepted_at=(row or {}).get("created_at"),
+            idempotent_replay=bool(admitted.idempotent_replay),
+        )
+        if sender is not None:
+            receipt.source = "agent"
+            receipt.sender_session_id = sender.session_id
+        else:
+            receipt.source = "operator"  # [A82 Stage 6 F5b] server-derived, never the request
+        return JSONResponse(receipt.model_dump(), status_code=202)
+
+    def _require_queue_db() -> Any:
+        db = _db()
+        if db is None:
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "db_unavailable"})
+        return db
+
+    async def _turn_mutation_http(db: Any, task_id: str, err: Exception) -> HTTPException:
+        """[A82 Stage 6] A refused queue mutation; a 409 (stale revision or
+        consumption race) carries a SAFE current summary so the client refetches
+        instead of overwriting (design §4)."""
+        http = _turn_queue_http(err)
+        if http.status_code == 409:
+            try:
+                row = await asyncio.to_thread(db.get_turn_request, task_id)
+            except Exception:  # noqa: BLE001 — the 409 itself stays truthful
+                row = None
+            if row is not None:
+                http.detail = {**http.detail, "current": TurnRequestSummaryOut.from_row(
+                    {**row, "preview": str(row.get("body") or "")[:2048].encode("utf-8")[:2048]
+                     .decode("utf-8", errors="ignore")},
+                ).model_dump()}
+        return http
+
+    def _if_match_revision(raw: str) -> int:
+        """[A82 Stage 6 F5c] The expected revision from ``If-Match``: a bare
+        ``3`` or a strong entity-tag ``"3"``. A weak tag (``W/"3"``) never
+        matches under the strong comparison If-Match requires (RFC 9110
+        §13.1.1) ⇒ 412; anything else ⇒ 422."""
+        tag: str = raw.strip()
+        if tag.startswith("W/"):
+            raise HTTPException(status_code=412, detail={"ok": False, "reason": "weak_etag_never_matches"})
+        if len(tag) >= 2 and tag[0] == tag[-1] == '"':
+            tag = tag[1:-1]
+        if not (tag.isascii() and tag.isdigit()) or int(tag) < 1:
+            raise HTTPException(status_code=422, detail={"ok": False, "reason": "invalid_if_match"})
+        return int(tag)
+
+    async def _operator_human_turn(db: Any, task_id: str) -> Dict[str, Any]:
+        row = await asyncio.to_thread(db.get_turn_request, task_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "turn_not_found"})
+        if row["turn_source"] not in ("human", "operator") or row["turn_kind"] != "instruction":
+            raise HTTPException(status_code=403, detail={"ok": False, "reason": "not_human_turn"})
+        return row
+
+    @app.get("/api/sessions/{session_id}/turn-requests", dependencies=[Depends(_require_auth)],
+             response_model=TurnRequestPageOut)
+    def api_list_turn_requests(
+        session_id: str, cursor: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
+    ) -> TurnRequestPageOut:
+        """Cursor page (run order) of the session's open managed turns."""
+        from src.control.turn_queue import TurnQueueError
+
+        db = _require_queue_db()
+        try:
+            page: Dict[str, Any] = db.list_turn_requests(session_id, after_sequence=cursor, limit=limit)
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        return TurnRequestPageOut.model_validate({
+            **page, "turns": [TurnRequestSummaryOut.from_row(t) for t in page["turns"]],
+        })
+
+    @app.get("/api/turn-requests/{task_id}", dependencies=[Depends(_require_auth)],
+             response_model=TurnRequestDetailOut)
+    def api_get_turn_request(task_id: str) -> TurnRequestDetailOut:
+        from src.control.turn_queue import TurnQueueError
+
+        db = _require_queue_db()
+        try:
+            row = db.get_turn_request(task_id)
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        if row is None:
+            raise HTTPException(status_code=404, detail={"ok": False, "reason": "turn_not_found"})
+        return TurnRequestDetailOut.from_row(row)
+
+    @app.patch("/api/turn-requests/{task_id}", dependencies=[Depends(_require_auth)],
+               response_model=TurnRequestDetailOut)
+    async def api_edit_turn_request(
+        task_id: str, body: TurnRequestEditBody,
+        if_match: str = Header(alias="If-Match", max_length=64),
+    ) -> TurnRequestDetailOut:
+        """Conditional edit of a QUEUED human turn (expected revision in
+        If-Match). Sequence, recipient, source and Case never change."""
+        from src.control.turn_queue import TurnQueueError, emit_turn_queue_changed
+        from src.control.turn_admission import run_turn_mutation_async
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        revision: int = _if_match_revision(if_match)
+        db = _require_queue_db()
+        row = await _operator_human_turn(db, task_id)
+        try:
+            await run_turn_mutation_async(
+                lambda: db.revise_turn(task_id, revision, body=body.body, actor="operator"),
+            )
+        except TurnQueueError as err:
+            raise await _turn_mutation_http(db, task_id, err)
+        notify_turn_queue_changed()
+        emit_turn_queue_changed(row["session_id"], "edited", turn_id=task_id, status="queued")
+        current = await asyncio.to_thread(db.get_turn_request, task_id)
+        return TurnRequestDetailOut.from_row(current or row)
+
+    @app.post("/api/turn-requests/{task_id}/withdraw", dependencies=[Depends(_require_auth)],
+              response_model=TurnRequestSummaryOut)
+    async def api_withdraw_turn_request(
+        task_id: str, if_match: str = Header(alias="If-Match", max_length=64),
+    ) -> TurnRequestSummaryOut:
+        """Withdraw ONLY this queued human turn (auditable; never a deletion and
+        never an execution failure). Its written Case lineage is voided."""
+        from src.control.turn_queue import TurnQueueError, emit_turn_queue_changed
+        from src.control.turn_admission import run_turn_mutation_async
+        from src.control.turn_scheduler import notify_turn_queue_changed
+
+        revision: int = _if_match_revision(if_match)
+        db = _require_queue_db()
+        row = await _operator_human_turn(db, task_id)
+        try:
+            await run_turn_mutation_async(
+                lambda: db.withdraw_turn(task_id, revision, actor="operator", void_lineage=True),
+            )
+        except TurnQueueError as err:
+            raise await _turn_mutation_http(db, task_id, err)
+        void = getattr(orchestrator, "_void_withdrawn_lineage", None)
+        if callable(void):
+            try:
+                await asyncio.to_thread(void, task_id)
+            except Exception as e:  # noqa: BLE001 — stays `void`; the scheduler sweep re-runs it
+                logger.warning("event=managed_void_lineage_deferred task_id=%s err=%s", task_id, e)
+        notify_turn_queue_changed()
+        emit_turn_queue_changed(row["session_id"], "withdrawn", turn_id=task_id, status="withdrawn")
+        current = await asyncio.to_thread(db.get_turn_request, task_id)
+        return TurnRequestSummaryOut.from_row({**(current or row), "preview": ""})
+
+    async def _set_queue_paused(session_id: str, paused: bool) -> TurnQueueControlOut:
+        from src.control.turn_queue import TurnQueueError
+        from src.control.turn_admission import set_queue_paused_async
+
+        db = _require_queue_db()
+        try:
+            state = await set_queue_paused_async(db, session_id, paused)
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        return TurnQueueControlOut.model_validate(state)
+
+    @app.post("/api/sessions/{session_id}/turn-requests/pause", dependencies=[Depends(_require_auth)],
+              response_model=TurnQueueControlOut)
+    async def api_pause_turn_requests(session_id: str) -> TurnQueueControlOut:
+        """Persist an operator queue pause (survives restart). Nothing queued
+        activates until an explicit resume; the active turn is not touched."""
+        return await _set_queue_paused(session_id, True)
+
+    @app.post("/api/sessions/{session_id}/turn-requests/resume", dependencies=[Depends(_require_auth)],
+              response_model=TurnQueueControlOut)
+    async def api_resume_turn_requests(session_id: str) -> TurnQueueControlOut:
+        """Clear ONLY the operator pause / operator-stop hold. Recovery, Case,
+        provider-deadline and approval gates keep holding."""
+        return await _set_queue_paused(session_id, False)
+
+    @app.post("/api/sessions/{session_id}/turn-requests/enroll", dependencies=[Depends(_require_auth)])
+    async def api_enroll_turn_queue(session_id: str) -> JSONResponse:
+        """[A82 Stage 7] Operator enrollment onto the managed turn queue (design
+        §10 step 6). Default-OFF flag ``TURN_QUEUE_ENROLLMENT_ENABLED``; typed
+        refusal (409 + reason) for a busy / closed session, legacy work, or a
+        carrier without managed capability; 503 without the canonical DB."""
+        from src.control.turn_queue import TurnQueueError
+
+        enroll = getattr(orchestrator, "enroll_session_turn_queue", None)
+        if not callable(enroll):
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "enrollment_unavailable"})
+        try:
+            changed = await enroll(session_id)
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        return JSONResponse({"ok": True, "session_id": session_id, "enrolled": True,
+                             "changed": bool(changed)})
+
+    @app.post("/api/sessions/{session_id}/turn-requests/unenroll", dependencies=[Depends(_require_auth)])
+    async def api_unenroll_turn_queue(session_id: str) -> JSONResponse:
+        """[A82 Stage 7] Rollback exit (design §10 step 8): remove enrollment only
+        when no waiting/active/recovery managed obligation remains (409
+        ``managed_obligation_remaining`` otherwise). Not flag-gated."""
+        from src.control.turn_queue import TurnQueueError
+
+        unenroll = getattr(orchestrator, "unenroll_session_turn_queue", None)
+        if not callable(unenroll):
+            raise HTTPException(status_code=503, detail={"ok": False, "reason": "enrollment_unavailable"})
+        try:
+            changed = await unenroll(session_id)
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        return JSONResponse({"ok": True, "session_id": session_id, "enrolled": False,
+                             "changed": bool(changed)})
+
     @app.post("/api/instructions", dependencies=[Depends(_require_auth)])
     async def api_instructions(
         body: InstructionBody,
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+        principal: Optional[str] = Header(default=None, alias=PRINCIPAL_HEADER),
     ) -> JSONResponse:
         """Submit an instruction. With session_id it mirrors the Telegram session
         path (session → BUSY, source=web_session); otherwise a one-off."""
@@ -1809,6 +2517,7 @@ def build_control_api(orchestrator) -> FastAPI:
         # blocked task can never be mistaken for an accepted one. Translate it to a
         # clean 409 here (not an opaque 500) and, crucially, undo the optimistic
         # BUSY write on the session so it is not stranded with no in-flight task.
+        from src.control.turn_queue import TurnQueueError
         from src.orchestrator import HarnessAdmissionBlocked
 
         async with _idem_guard_async("instructions", idempotency_key) as cached:
@@ -1820,6 +2529,18 @@ def build_control_api(orchestrator) -> FastAPI:
                 session = orchestrator.session_service.store.get(body.session_id)
                 if session is None:
                     raise HTTPException(status_code=404, detail="session_not_found")
+                if await _session_turn_queue_enrolled(session.session_id):
+                    # [A82 Stage 4a] Enrolled ⇒ managed admission. Acceptance is
+                    # durable before this returns and does NOT write BUSY /
+                    # last_user_message / last_task_id (queued is not busy).
+                    task_id = await _submit_managed_instruction(
+                        orchestrator, body, session, idempotency_key, principal,
+                    )
+                    session = orchestrator.session_service.store.get(session.session_id)
+                    resp = {"ok": True, "task_id": str(task_id),
+                            "session": await asyncio.to_thread(_session_payload, session, with_queue=True)}
+                    _idem_put("instructions", idempotency_key, resp)
+                    return JSONResponse(resp)
                 # Status write (BUSY + last_user_message) lives on the service.
                 orchestrator.session_service.mark_busy(
                     session.session_id, last_user_message=body.description)
@@ -1834,11 +2555,16 @@ def build_control_api(orchestrator) -> FastAPI:
                         parent_flow_run_id=body.parent_flow_run_id,
                         join_case_id=body.case_id,
                         extra_metadata=_instruction_extra_metadata(body),
+                        **_enrollment_kw(orchestrator, False),
                     )
                 except HarnessAdmissionBlocked as blocked:
                     # No task ran — return the session to IDLE so it stays usable.
                     orchestrator.session_service.mark_idle(session.session_id)
                     raise _harness_blocked_http(blocked)
+                except TurnQueueError as err:
+                    # [A82 Stage 7] e.g. enrollment_in_progress: nothing queued.
+                    orchestrator.session_service.mark_idle(session.session_id)
+                    raise _turn_queue_http(err)
                 session.last_task_id = task_id
                 orchestrator.session_service.store.save(session)
             else:
@@ -1901,6 +2627,7 @@ def build_control_api(orchestrator) -> FastAPI:
         deliver the objective as its first assignment. Refuses with 409 when the
         Manager-role path is disabled (MANAGER_ROLE_ENABLED OFF ⇒ new surface inert).
         Translates the Level-3 admission block to a clean 409, like /api/instructions."""
+        from src.control.turn_queue import TurnQueueError
         from src.orchestrator import HarnessAdmissionBlocked
 
         async with _idem_guard_async("manager", idempotency_key) as cached:
@@ -1923,6 +2650,10 @@ def build_control_api(orchestrator) -> FastAPI:
                 )
             except HarnessAdmissionBlocked as blocked:
                 raise _harness_blocked_http(blocked)
+            except TurnQueueError as refused:
+                # [A82 pre-cutover rework, F2] Typed managed refusal (503 when
+                # no carrier); invoke_manager already left nothing open.
+                raise _turn_queue_http(refused)
 
             if not result.get("ok"):
                 reason = result.get("reason") or "manager_invoke_failed"
@@ -2320,6 +3051,24 @@ def build_control_api(orchestrator) -> FastAPI:
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session_not_found")
+        # [A82 Stage 4b] Enrolled: stop = cancel the turn owning the ACTIVE slot
+        # (ledger truth, never last_task_id); the turn row, not a whole-session
+        # CANCELLED save, is the truth. None ⇒ legacy (unchanged below).
+        from src.control.turn_queue import TurnQueueError
+
+        stop_managed = getattr(orchestrator, "stop_managed_session_turn", None)
+        try:
+            # [A82 Stage 6] "Stop active" = a PERSISTENT operator queue pause,
+            # committed BEFORE the cancel (freeing the slot can never launch the
+            # next queued instruction), then cancel ONLY the active turn. Waiting
+            # work stays visible and paused until the explicit resume route (a
+            # new admission does not clear it — design §7). Same service as
+            # Telegram's stop (``pause_queue=True``).
+            managed = stop_managed(session, pause_queue=True) if callable(stop_managed) else None
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        if managed is not None:
+            return JSONResponse({"ok": True, "cancelled": managed[0], "task_id": managed[1]})
         cancelled = False
         if session.last_task_id:
             cancelled = bool(orchestrator.cancel_task(session.last_task_id))
@@ -2329,16 +3078,32 @@ def build_control_api(orchestrator) -> FastAPI:
         return JSONResponse({"ok": True, "cancelled": cancelled, "task_id": session.last_task_id})
 
     @app.post("/api/sessions/{session_id}/compact", dependencies=[Depends(_require_auth)])
-    async def api_compact_session(session_id: str) -> JSONResponse:
+    async def api_compact_session(session_id: str, request: Request) -> JSONResponse:
         session = orchestrator.session_service.store.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session_not_found")
-        result = await orchestrator.compact_session(session_id)
-        return JSONResponse({
+        from src.control.turn_queue import TurnQueueError
+
+        # [A82 Stage 4b] Idempotency-Key = the managed compaction's durable
+        # operation id (only consulted for an enrolled session).
+        idem = (request.headers.get("Idempotency-Key") or "").strip()[:256] or None
+        try:
+            result = await (
+                orchestrator.compact_session(session_id, operation_id=idem)
+                if idem else orchestrator.compact_session(session_id)
+            )
+        except TurnQueueError as err:
+            raise _turn_queue_http(err)
+        body: Dict[str, Any] = {
             "ok": bool(getattr(result, "success", False)),
             "output": getattr(result, "output", ""),
             "errors": list(getattr(result, "errors", []) or []),
-        })
+        }
+        managed = getattr(result, "parsed_output", None)
+        if isinstance(managed, dict) and managed.get("managed"):
+            body.update({"queued": True, "task_id": managed.get("task_id"),
+                         "status": managed.get("status")})
+        return JSONResponse(body)
 
     @app.post("/api/sessions/{session_id}/close", dependencies=[Depends(_require_auth)])
     async def api_close_session(session_id: str) -> JSONResponse:

@@ -17,6 +17,7 @@ Server mode (OpenCodeServerBackend):
 
 Both are synchronous — called via asyncio.to_thread() by the orchestrator.
 """
+import hashlib
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ import queue
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -32,9 +34,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel, ConfigDict, Field
+
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
-from src.core.process_utils import ensure_node_on_path, terminate_many_popen
+from src.core.process_utils import (
+    ensure_node_on_path, process_gone_proof, process_identity, terminate_many_popen,
+)
 from src.core.interfaces import CodingBackend, ExecutionResult, Session
 from src.core.telemetry import TelemetryContext, telemetry_subprocess_env
 
@@ -916,6 +922,121 @@ def _find_free_port(preferred: int) -> int:
         return s.getsockname()[1]
 
 
+_MSG_ID_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def managed_message_id(turn_uuid: str) -> str:
+    """[A82 Step 4b] Deterministic OpenCode ``messageID`` for a managed turn.
+
+    Derived from the carrier's write-ahead ``turn_uuid`` so the native user
+    message (and every assistant reply whose ``parentID`` is it) is attributable
+    to exactly that attempt even after a carrier crash. Format verified against
+    the installed opencode 1.18.32 ``Identifier`` module: the server only
+    requires the ``msg`` prefix (``ID ... does not start with msg`` otherwise);
+    native ids are ``msg_`` + 12 hex (6 bytes) + 14 base62 chars, mirrored here.
+    History order is ``time_created`` then ``id`` (``MessageV2.page`` /
+    ``latest``), so the hash-derived "time" bytes cannot reorder the turn."""
+    digest = hashlib.sha256(f"ai-team.managed-turn:{turn_uuid}".encode()).digest()
+    tail = "".join(_MSG_ID_BASE62[b % 62] for b in digest[6:20])
+    return f"msg_{digest[:6].hex()}{tail}"
+
+
+class _ManagedTurn(BaseModel):
+    """[A82 Step 4b] In-memory record of one managed attempt on this backend
+    instance (never persisted; the carrier's claim record is the durable one)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_uuid: str
+    session_id: str
+    key: str = ""
+    oc_session_id: str = ""
+    kind: str = "turn"                      # "turn" | "compaction"
+    message_id: str = ""                    # our user message id ("" for compaction)
+    known_ids: List[str] = Field(default_factory=list)  # compaction: pre-submit ids
+    phase: str = "reserved"                 # reserved | submitted | held
+    cancel_armed: bool = False
+    cancel_delivered: bool = False
+    submitted_at: float = 0.0               # time.monotonic()
+    server_identity: Optional[Dict[str, Any]] = None
+    forgotten: bool = False                 # [m4] terminal server-side: no late delivery
+    late_pending: bool = False              # [m4] late capture not yet attempted
+
+
+class _LateManagedOutcome(BaseModel):
+    """[A82 step 4 rework, m4] The real reply of a held managed turn, handed to
+    the carrier's proactive sink — the same duck-typed shape its
+    ``_capture_late_managed_result`` binds by ``managed_turn_uuid`` only."""
+
+    late_managed: bool = True
+    managed_turn_uuid: str
+    output: str
+    is_error: bool
+    error_text: str = ""
+    error_class: str = ""
+    backend_session_id: str = ""
+    raw_ndjson: str = ""
+
+
+# [A82 step 4 rework, m7] Write-ahead record of a FIRST turn's native session
+# (gateway session id → native id), written before the prompt is submitted so a
+# recovery on that turn (the gateway never learns the id from a result) keeps
+# the session's history instead of creating a second native session. Cleared
+# once a terminal result carries the id to the carrier.
+# [A82 pre-cutover, m7] It lives in the carrier's own state dir — the same
+# ``WORKER_STATE_DIR`` (default ``logs/carrier_state``) base the carrier's result
+# spool and claim store use (``WorkerAgent._carrier_state_dir``), so it shares
+# their persistence (e.g. the container's state volume). Cleared also when a
+# recovery resolves (late capture delivered the id) or the gateway knows the id.
+def _native_store_path() -> Path:
+    root = os.getenv("WORKER_STATE_DIR") or os.path.join("logs", "carrier_state")
+    return Path(root) / "opencode-native-sessions.sqlite3"
+
+
+def _native_store(sql: str, args: tuple) -> List[tuple]:
+    path = _native_store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=5)
+    try:
+        with conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS native_sessions (session_id TEXT PRIMARY KEY, "
+                         "server_key TEXT NOT NULL, native_id TEXT NOT NULL)")
+            return conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+
+
+def _clear_native(session_id: str, native_id: str = "") -> None:
+    """[A82 pre-cutover, m7] Drop ``session_id``'s write-ahead row (only the one
+    naming ``native_id`` when given). Never creates the store."""
+    if not _native_store_path().exists():
+        return
+    try:
+        if native_id:
+            _native_store("DELETE FROM native_sessions WHERE session_id = ? AND native_id = ?",
+                          (session_id, native_id))
+        else:
+            _native_store("DELETE FROM native_sessions WHERE session_id = ?", (session_id,))
+    except (OSError, sqlite3.Error):
+        logger.warning("event=opencode_native_store_clear_failed session=%s", session_id)
+
+
+def _stored_native(session_id: str, key: str) -> str:
+    try:
+        rows = _native_store("SELECT native_id FROM native_sessions WHERE session_id = ? AND server_key = ?",
+                             (session_id, key))
+    except (OSError, sqlite3.Error):
+        logger.warning("event=opencode_native_store_read_failed session=%s", session_id)
+        return ""
+    return str(rows[0][0]) if rows else ""
+
+
+def _http_status(err: Optional[str]) -> Optional[int]:
+    """HTTP status code embedded in an ``OpenCodeServerBackend._http`` error."""
+    m = re.match(r"HTTP (\d{3}) ", err or "")
+    return int(m.group(1)) if m else None
+
+
 class OpenCodeServerBackend(CodingBackend):
     """OpenCode HTTP server backend.
 
@@ -935,6 +1056,13 @@ class OpenCodeServerBackend(CodingBackend):
         self._server_slots = threading.BoundedSemaphore(8)
         self._server_slot_keys: set[str] = set()
         self._active_cancel: Dict[str, threading.Event] = {}
+        # [A82 Step 4b] managed-turn bookkeeping (memory only).
+        self._managed: Dict[str, _ManagedTurn] = {}          # turn_uuid -> attempt
+        self._armed_cancels: set[str] = set()                # cancels for not-yet-seen turns
+        self._native: Dict[str, tuple[str, str]] = {}        # gateway sid -> (server key, native id)
+        self._proactive_sink: Any = None                     # [m4] carrier late-reply sink
+        self._refused_since: Dict[str, float] = {}           # [m6] server key -> first refusal (monotonic)
+        self._refused_last: Dict[str, float] = {}            # [m6] server key -> latest refusal (monotonic)
 
     @staticmethod
     def _server_key(repo_path: str) -> str:
@@ -1074,6 +1202,13 @@ class OpenCodeServerBackend(CodingBackend):
     def close(self, session: Session) -> None:
         # OpenCode DELETE removes the session and all its data. Ordinary close
         # only releases gateway-side ownership; persisted history remains resumable.
+        # [A82 pre-cutover] A closed session gets no late delivery: stop its held
+        # attempts' late watchers (their entries stay, so quiescence still
+        # follows native truth until resolved / forgotten).
+        with self._lock:
+            for entry in self._managed.values():
+                if entry.phase == "held" and entry.session_id == (session.session_id or ""):
+                    entry.forgotten = True
         return None
 
     def compact_session(self, session: Session) -> ExecutionResult:
@@ -1129,6 +1264,604 @@ class OpenCodeServerBackend(CodingBackend):
                 terminate_many_popen(procs)
             for _ in range(slot_count):
                 self._server_slots.release()
+
+    # ------------------------------------------------------------------
+    # [A82 Step 4b] Managed (protocol-1) turn contract — OpenCode native.
+    #
+    # Attribution: the user message is submitted under
+    # ``managed_message_id(turn_uuid)``; the result is ONLY the assistant reply
+    # whose ``parentID`` is that id. Never interrupts: a busy/unknown session is
+    # a pre-submit conflict; ambiguity (lost ack, deadline, server death) is
+    # ``recovery_required`` and the native turn is left running. Abort is
+    # session-wide in OpenCode, so a cancel is delivered only while the running
+    # (latest) user message is provably ours.
+    # ------------------------------------------------------------------
+    _MANAGED_POLL_SEC: float = 1.0
+    _MANAGED_ACK_TIMEOUT_SEC: int = 30
+    _MANAGED_RECONCILE_TRIES: int = 5
+    _MANAGED_IDLE_GRACE_POLLS: int = 3
+    _MANAGED_ABSENT_GRACE_SEC: float = 60.0
+    _LATE_CAPTURE_SEC: float = 36000.0      # [m4] how long a held turn's reply is awaited
+    _UNREACHABLE_TERMINATE_SEC: float = 60.0  # [m6] a LIVE serve refusing connections this long
+
+    def set_proactive_sink(self, sink: Any) -> None:
+        """[A82 step 4 rework, m4] Carrier sink for late managed replies."""
+        self._proactive_sink = sink
+
+    def supports_managed_turns(self) -> bool:
+        """The opencode-server protocol supports every managed invariant
+        (client-chosen messageID, status + history reconciliation, abort gated
+        on the provably-running message). The CLI backend does not (default)."""
+        return True
+
+    def provision_sender_capability(self, session_id: str, token: Optional[str]) -> bool:
+        """Fail closed. OpenCode's only MCP seams are per server PROCESS
+        (``opencode.json`` / ``OPENCODE_CONFIG_CONTENT`` at launch) or per
+        directory INSTANCE (``POST /mcp``, "add MCP server to the system"); there
+        is no per-session MCP config. One ``opencode serve`` is shared by every
+        session in the repo, so provisioning one session's scoped sender token
+        would hand it to its neighbours (and a launch-time config would put the
+        raw token in the child env / on disk). Agent send is therefore not
+        available on OpenCode."""
+        return False
+
+    def _managed_deadline_sec(self) -> float:
+        try:
+            from config import config as _cfg
+            return float(max(1, int(getattr(_cfg.opencode, "timeout_seconds", 1800))))
+        except Exception:
+            return 1800.0
+
+    def run_managed_turn(self, session: Session, message: str, ownership: Any, *,
+                         telemetry_context: Any = None, telemetry_sink: Any = None,
+                         on_process: Any = None) -> ExecutionResult:
+        return self._run_managed("turn", session, message, ownership, telemetry_context,
+                                 telemetry_sink, on_process)
+
+    def run_managed_compaction(self, session: Session, ownership: Any, *,
+                               telemetry_context: Any = None, telemetry_sink: Any = None,
+                               on_process: Any = None) -> ExecutionResult:
+        """Native ``POST /session/{id}/summarize`` (synchronous; server-chosen
+        ids, so the compaction message is identified as the new user message
+        carrying a ``compaction`` part that did not exist before submit)."""
+        return self._run_managed("compaction", session, "", ownership, telemetry_context,
+                                 telemetry_sink, on_process)
+
+    def _run_managed(self, kind: str, session: Session, message: str, ownership: Any,
+                     telemetry_context: Any, telemetry_sink: Any, on_process: Any) -> ExecutionResult:
+        from src.control.turn_queue import (
+            OwnershipConflictError, RecoveryRequiredError, TurnQueueError,
+        )
+
+        if (getattr(ownership, "session_id", "") or "") != (session.session_id or ""):
+            raise OwnershipConflictError("managed ownership does not match the session",
+                                         task_id=getattr(ownership, "task_id", None))
+        turn_uuid = str(getattr(ownership, "turn_uuid", "") or "")
+        if not turn_uuid:
+            raise OwnershipConflictError("managed OpenCode turn requires a turn_uuid (attribution key)",
+                                         task_id=getattr(ownership, "task_id", None))
+        start = time.time()
+        entry = _ManagedTurn(turn_uuid=turn_uuid, session_id=session.session_id or "", kind=kind,
+                             message_id=managed_message_id(turn_uuid) if kind == "turn" else "")
+        keep = False
+        try:
+            if kind == "turn":
+                return self._managed_turn_body(entry, session, message, start, telemetry_context,
+                                               telemetry_sink, on_process)
+            return self._managed_compaction_body(entry, session, start, on_process)
+        except TurnQueueError as e:
+            recovery = isinstance(e, RecoveryRequiredError)
+            keep = recovery and entry.phase != "reserved"
+            if keep:
+                with self._lock:
+                    entry.phase = "held"
+                    late = kind == "turn" and bool(entry.message_id) and self._proactive_sink is not None
+                    entry.late_pending = late
+                if late:
+                    threading.Thread(target=self._capture_late, args=(entry, session, start),
+                                     name=f"opencode-late-{turn_uuid[:12]}", daemon=True).start()
+            logger.warning("event=opencode_managed_%s kind=%s turn=%s err=%s",
+                           "recovery" if recovery else "conflict", kind, turn_uuid, e)
+            return ExecutionResult(
+                False, "", backend_session_id=entry.oc_session_id or session.backend_session_id or "",
+                errors=[str(e)], error_class="recovery_required" if recovery else "managed_conflict",
+                execution_time=time.time() - start)
+        finally:
+            if not keep:
+                with self._lock:
+                    if self._managed.get(turn_uuid) is entry:
+                        self._managed.pop(turn_uuid, None)
+
+    def _capture_late(self, entry: _ManagedTurn, session: Session, start: float) -> None:
+        """[A82 step 4 rework, m4] A held turn's real reply (parented to OUR
+        derived message id) is still captured after the deadline and handed to
+        the carrier's proactive sink as ``late_managed`` bound to the turn uuid
+        (mirrors the Claude/Codex late-delivery contract). The session stays
+        non-quiescent until this attempt was made. Never aborts."""
+        response: Dict[str, Any] = {}
+        try:
+            response = self._managed_wait(entry, self._LATE_CAPTURE_SEC)
+        except Exception as e:  # noqa: BLE001 — server lost / never recorded / window over
+            logger.info("event=opencode_managed_late_capture_ended turn=%s why=%s", entry.turn_uuid, e)
+        try:
+            with self._lock:
+                live = self._managed.get(entry.turn_uuid) is entry and not entry.forgotten
+            sink = self._proactive_sink
+            if response and live and sink is not None:
+                result = self._managed_outcome(response, session, entry.oc_session_id,
+                                               time.time() - start, None, None)
+                sink(entry.session_id, _LateManagedOutcome(
+                    managed_turn_uuid=entry.turn_uuid, output=result.output or "",
+                    is_error=not result.success, error_text="; ".join(result.errors or []),
+                    error_class=result.error_class or "", backend_session_id=entry.oc_session_id,
+                    raw_ndjson=result.raw_stdout or ""))
+                _clear_native(entry.session_id, entry.oc_session_id)  # [m7] recovery resolved: id delivered
+        except Exception:  # noqa: BLE001 — the sink must never kill this thread silently
+            logger.warning("event=opencode_managed_late_delivery_failed turn=%s", entry.turn_uuid,
+                           exc_info=True)
+        finally:
+            with self._lock:
+                entry.late_pending = False
+
+    def _managed_reserve(self, entry: _ManagedTurn) -> None:
+        """Register ``entry`` as THE active attempt of its session, or raise a
+        typed conflict. A held (recovery) attempt blocks until it is natively
+        resolved (or forgotten); the native probe runs outside the lock."""
+        from src.control.turn_queue import OwnershipConflictError
+
+        with self._lock:
+            if entry.turn_uuid in self._managed:
+                raise OwnershipConflictError("managed turn already active on this backend")
+            others = [e for e in self._managed.values()
+                      if e.session_id == entry.session_id
+                      or (entry.oc_session_id and e.oc_session_id == entry.oc_session_id)]
+        for other in others:
+            if other.phase != "held" or other.late_pending or self._entry_in_flight(other) is not False:
+                raise OwnershipConflictError("another managed turn of this session is in flight")
+        with self._lock:
+            for other in others:
+                if self._managed.get(other.turn_uuid) is other:
+                    self._managed.pop(other.turn_uuid, None)   # natively resolved hold
+            if any(e.session_id == entry.session_id for e in self._managed.values()):
+                raise OwnershipConflictError("another managed turn of this session is in flight")
+            if entry.turn_uuid in self._armed_cancels:
+                self._armed_cancels.discard(entry.turn_uuid)
+                entry.cancel_armed = True
+            self._managed[entry.turn_uuid] = entry
+
+    def _managed_native_session(self, entry: _ManagedTurn, session: Session, start: float) -> Optional[ExecutionResult]:
+        """Resolve the native session. A saved native id the server no longer
+        knows is recovery — never re-created. [A82 step 4 rework, m7] A first
+        turn's session is NOT created here: ``_managed_create_native`` does it
+        only after the reserve / lock / idle gates passed; a first turn whose
+        earlier attempt created one (write-ahead record) reuses it."""
+        from src.control.turn_queue import RecoveryRequiredError
+
+        key = self._server_key(session.repo_path)
+        entry.key = key
+        err = self._ensure_server(key, session.repo_path)
+        if err:
+            return ExecutionResult(False, "", backend_session_id=session.backend_session_id or "",
+                                   errors=[err], error_class="server_unavailable",
+                                   execution_time=time.time() - start)
+        oc_id = session.backend_session_id or ""
+        if oc_id:
+            _clear_native(entry.session_id)  # [m7] the gateway knows its id: the record is stale
+        if not oc_id and entry.kind == "turn":
+            with self._lock:
+                known = self._native.get(entry.session_id)
+            oc_id = known[1] if known and known[0] == key else _stored_native(entry.session_id, key)
+            if oc_id:
+                session.backend_session_id = oc_id
+        if oc_id:
+            info, ierr = self._http(key, "GET", f"/session/{oc_id}", timeout=10)
+            if ierr and _http_status(ierr) == 404:
+                raise RecoveryRequiredError(
+                    "saved OpenCode native session no longer exists; refusing to re-create it")
+            if ierr or not isinstance(info, dict) or not info.get("id"):
+                return ExecutionResult(False, "", backend_session_id=oc_id,
+                                       errors=[ierr or "OpenCode session lookup returned no id"],
+                                       error_class="server_unavailable", execution_time=time.time() - start)
+        elif entry.kind != "turn":
+            return ExecutionResult(False, "", errors=["OpenCode native session ID is missing."],
+                                   error_class="session_identity_missing", execution_time=time.time() - start)
+        if oc_id:
+            entry.oc_session_id = oc_id
+            with self._lock:
+                self._native[entry.session_id] = (key, oc_id)
+        return None
+
+    def _managed_create_native(self, entry: _ManagedTurn, session: Session, start: float) -> Optional[ExecutionResult]:
+        """[A82 step 4 rework, m7] Create a first turn's native session — only
+        after every gate passed — and record it write-ahead (before the prompt
+        is submitted) so a recovery on this turn keeps it."""
+        agent = self._session_agent(session) or "build"
+        created, cerr = self._http(entry.key, "POST", "/session", {"title": session.session_id, "agent": agent})
+        oc_id = created.get("id", "") if isinstance(created, dict) else ""
+        if cerr or not oc_id:
+            return ExecutionResult(False, "", errors=[cerr or "Server returned session without ID"],
+                                   error_class="server_unavailable", execution_time=time.time() - start)
+        try:
+            _native_store("INSERT OR REPLACE INTO native_sessions VALUES (?, ?, ?)",
+                          (entry.session_id, entry.key, oc_id))
+        except (OSError, sqlite3.Error):
+            logger.warning("event=opencode_native_store_write_failed session=%s — memory only", entry.session_id)
+        session.backend_session_id = oc_id
+        entry.oc_session_id = oc_id
+        with self._lock:
+            self._native[entry.session_id] = (entry.key, oc_id)
+        return None
+
+    def _managed_acquire(self, session: Session) -> threading.Lock:
+        """Non-blocking repo lock + capacity; busy ⇒ typed pre-submit conflict."""
+        from src.control.turn_queue import OwnershipConflictError
+
+        lock = _get_repo_lock(session.repo_path)
+        if not self._repo_capacity.acquire(blocking=False):
+            raise OwnershipConflictError("OpenCode server capacity is full")
+        if not lock.acquire(blocking=False):
+            self._repo_capacity.release()
+            raise OwnershipConflictError("another OpenCode turn is running against this repo")
+        return lock
+
+    def _managed_release(self, lock: threading.Lock) -> None:
+        lock.release()
+        self._repo_capacity.release()
+
+    def _managed_presubmit(self, entry: _ManagedTurn, on_process: Any, require_idle: bool = True) -> None:
+        """Idle gate + process identity. Raises a typed conflict unless the
+        native session is provably idle (unknown ⇒ refuse; never abort)."""
+        from src.control.turn_queue import OwnershipConflictError
+
+        status = self._native_status(entry.key, entry.oc_session_id) if require_idle else "idle"
+        if status != "idle":
+            raise OwnershipConflictError(
+                f"OpenCode session is {status or 'in an unknown state'}; managed turn not submitted")
+        proc = self._procs.get(entry.key)
+        if proc is not None and proc.poll() is None:
+            ident = process_identity(proc.pid)
+            entry.server_identity = dict(ident)
+            if callable(on_process):
+                on_process(dict(ident))
+
+    def _managed_turn_body(self, entry: _ManagedTurn, session: Session, message: str, start: float,
+                           telemetry_context: Any, telemetry_sink: Any, on_process: Any) -> ExecutionResult:
+        from src.control.turn_queue import OwnershipConflictError, RecoveryRequiredError
+
+        early = self._managed_native_session(entry, session, start)
+        if early is not None:
+            return early
+        self._managed_reserve(entry)
+        lock = self._managed_acquire(session)
+        try:
+            if not entry.oc_session_id:
+                early = self._managed_create_native(entry, session, start)
+                if early is not None:
+                    return early
+            key, oc_id, mid = entry.key, entry.oc_session_id, entry.message_id
+            existing = self._message_exists(key, oc_id, mid)
+            if existing is None:
+                raise OwnershipConflictError("could not verify the managed message id before submit")
+            # Re-bind (our id already recorded ⇒ an earlier invocation of THIS
+            # attempt submitted it): no idle gate, never resubmitted.
+            self._managed_presubmit(entry, on_process, require_idle=not existing)
+            if not existing:
+                if entry.cancel_armed:
+                    return ExecutionResult(False, "", backend_session_id=oc_id,
+                                           errors=["Managed turn cancelled before submission."],
+                                           error_class="cancelled", execution_time=time.time() - start)
+            stop_reader = threading.Event()
+            reader_ready = threading.Event()
+            activity = threading.Thread(
+                target=self._read_activity_events,
+                args=(key, oc_id, telemetry_context, telemetry_sink, stop_reader, reader_ready,
+                      {"at": time.monotonic()}),
+                name=f"opencode-events-{oc_id[:12]}", daemon=True)
+            activity.start()
+            reader_ready.wait(timeout=2)
+            try:
+                if not reader_ready.is_set():
+                    if existing:
+                        raise RecoveryRequiredError("OpenCode event stream unavailable while re-binding the attempt")
+                    return ExecutionResult(False, "", backend_session_id=oc_id,
+                        errors=["OpenCode event stream did not connect; turn was not submitted."],
+                        error_class="event_stream_unavailable", execution_time=time.time() - start)
+                with self._lock:
+                    entry.phase = "submitted"
+                    entry.submitted_at = time.monotonic()
+                if not existing:
+                    refused = self._managed_submit(entry, session, message)
+                    if refused:
+                        return ExecutionResult(False, "", backend_session_id=oc_id, errors=[refused],
+                                               error_class="provider_error", execution_time=time.time() - start)
+                response = self._managed_wait(entry, start + self._managed_deadline_sec() - time.time())
+            finally:
+                stop_reader.set()
+                activity.join(timeout=2)
+            elapsed = time.time() - start
+            if entry.cancel_delivered:
+                return ExecutionResult(False, "", backend_session_id=oc_id,
+                                       errors=["OpenCode managed turn cancelled."], error_class="cancelled",
+                                       execution_time=elapsed)
+            result = self._managed_outcome(response, session, oc_id, elapsed, telemetry_context, telemetry_sink)
+            _clear_native(entry.session_id, oc_id)  # [m7] the terminal result carries the id now
+            return result
+        finally:
+            self._managed_release(lock)
+
+    def _managed_outcome(self, response: Dict[str, Any], session: Session, oc_id: str, elapsed: float,
+                         telemetry_context: Any, telemetry_sink: Any) -> ExecutionResult:
+        """The managed result for OUR correlated reply (``{}`` ⇒ ended without one)."""
+        result = self._turn_result(response, session.repo_path, oc_id, elapsed,
+                                   telemetry_context, telemetry_sink)
+        native_error = ((response.get("info") or {}).get("error") or {}) if response else {}
+        if native_error:
+            detail = (native_error.get("data") or {}).get("message") or native_error.get("name") or "error"
+            result.success = False
+            result.errors = [f"OpenCode turn ended with an error: {detail}"] + list(result.errors or [])
+            result.error_class = result.error_class or "provider_error"
+        elif not response:
+            result.errors = ["OpenCode finished this turn without a reply."] + list(result.errors or [])
+        return result
+
+    def _managed_submit(self, entry: _ManagedTurn, session: Session, message: str) -> Optional[str]:
+        """POST prompt_async under our deterministic id. A lost/failed ack is
+        reconciled by that id; never resubmitted, never aborted. Returns a
+        refusal message iff OpenCode definitively rejected the request (4xx and
+        our id is provably not recorded) — nothing ran, so it is a plain
+        failure, not recovery."""
+        from src.control.turn_queue import RecoveryRequiredError
+
+        body: Dict[str, Any] = {"parts": [{"type": "text", "text": message}], "messageID": entry.message_id}
+        model_id, provider_id = self._parse_model(self._session_model(session))
+        if model_id:
+            body["model"] = {"providerID": provider_id or "opencode", "modelID": model_id}
+        _, err = self._http(entry.key, "POST", f"/session/{entry.oc_session_id}/prompt_async", body,
+                            timeout=self._MANAGED_ACK_TIMEOUT_SEC)
+        if not err:
+            return None
+        code = _http_status(err)
+        if code is not None and 400 <= code < 500 and code not in (408, 429):
+            # Definitive refusal of the request itself (nothing recorded).
+            if self._message_exists(entry.key, entry.oc_session_id, entry.message_id) is False:
+                return f"OpenCode refused the managed prompt: {err}"
+        for attempt in range(max(1, self._MANAGED_RECONCILE_TRIES)):
+            if self._message_exists(entry.key, entry.oc_session_id, entry.message_id):
+                return None
+            if attempt + 1 < self._MANAGED_RECONCILE_TRIES:
+                time.sleep(self._MANAGED_POLL_SEC)
+        raise RecoveryRequiredError(f"OpenCode prompt acceptance is ambiguous ({err}); "
+                                    "message id not found in native history")
+
+    def _managed_wait(self, entry: _ManagedTurn, budget_sec: float) -> Dict[str, Any]:
+        """Wait for OUR terminal reply. Returns the correlated assistant message
+        (``{}`` ⇒ our turn ended without one). Deadline / lost server ⇒ typed
+        recovery; the native turn is never interrupted for it."""
+        from src.control.turn_queue import RecoveryRequiredError
+
+        key, oc_id, mid = entry.key, entry.oc_session_id, entry.message_id
+        deadline = time.monotonic() + max(0.0, budget_sec)
+        idle_polls = 0
+        while True:
+            if entry.forgotten:
+                return {}  # [m4] terminal server-side: nothing to deliver
+            if entry.cancel_armed and not entry.cancel_delivered:
+                self._abort_if_ours(entry)
+            if time.monotonic() >= deadline:
+                raise RecoveryRequiredError("OpenCode managed turn deadline expired without a terminal reply")
+            status = self._native_status(key, oc_id)
+            if status is None:
+                if not self._base_urls.get(key):
+                    raise RecoveryRequiredError("OpenCode server was lost mid-turn; outcome unknown")
+            elif status == "busy":
+                idle_polls = 0
+            else:
+                history, herr = self._http(key, "GET", f"/session/{oc_id}/message?limit=100", timeout=10)
+                if not herr:
+                    response = self._find_correlated_response(history, mid)
+                    if response:
+                        return response
+                    exists = self._message_exists(key, oc_id, mid)
+                    if exists:
+                        idle_polls += 1
+                        if idle_polls >= self._MANAGED_IDLE_GRACE_POLLS:
+                            return {}
+                    elif exists is False and time.monotonic() - entry.submitted_at > self._MANAGED_ABSENT_GRACE_SEC:
+                        raise RecoveryRequiredError("OpenCode never recorded the managed prompt")
+            time.sleep(self._MANAGED_POLL_SEC)
+
+    def _managed_compaction_body(self, entry: _ManagedTurn, session: Session, start: float,
+                                 on_process: Any) -> ExecutionResult:
+        from src.control.turn_queue import RecoveryRequiredError
+
+        early = self._managed_native_session(entry, session, start)
+        if early is not None:
+            return early
+        key, oc_id = entry.key, entry.oc_session_id
+        model_id, provider_id = self._parse_model(self._session_model(session))
+        if not provider_id or not model_id:
+            providers, perr = self._http(key, "GET", "/config/providers", timeout=10)
+            defaults = providers.get("default") if isinstance(providers, dict) else None
+            if not perr and isinstance(defaults, dict) and defaults:
+                provider_id, model_id = next(iter(defaults.items()))
+        if not provider_id or not model_id:
+            return ExecutionResult(False, "", backend_session_id=oc_id,
+                errors=["OpenCode has no selected or configured default model for native compaction."],
+                error_class="model_unavailable", execution_time=time.time() - start)
+        self._managed_reserve(entry)
+        lock = self._managed_acquire(session)
+        try:
+            history, herr = self._http(key, "GET", f"/session/{oc_id}/message?limit=100", timeout=10)
+            if herr or not isinstance(history, list):
+                from src.control.turn_queue import OwnershipConflictError
+                raise OwnershipConflictError("could not snapshot native history before compaction")
+            entry.known_ids = [str((m.get("info") or {}).get("id")) for m in history if isinstance(m, dict)]
+            self._managed_presubmit(entry, on_process)
+            if entry.cancel_armed:
+                return ExecutionResult(False, "", backend_session_id=oc_id,
+                                       errors=["Managed compaction cancelled before submission."],
+                                       error_class="cancelled", execution_time=time.time() - start)
+            with self._lock:
+                entry.phase = "submitted"
+                entry.submitted_at = time.monotonic()
+            summarized, err = self._http(key, "POST", f"/session/{oc_id}/summarize",
+                                         {"providerID": provider_id, "modelID": model_id},
+                                         timeout=int(self._managed_deadline_sec()))
+            if entry.cancel_delivered:
+                return ExecutionResult(False, "", backend_session_id=oc_id,
+                                       errors=["OpenCode managed compaction cancelled."],
+                                       error_class="cancelled", execution_time=time.time() - start)
+            if err or summarized is False:
+                # Synchronous call with server-chosen ids: a failed/lost
+                # response is not attributable (it may have compacted).
+                raise RecoveryRequiredError(f"OpenCode compaction outcome is ambiguous: "
+                                            f"{err or 'summarize returned false'}")
+            return ExecutionResult(True, "", backend_session_id=oc_id, execution_time=time.time() - start)
+        finally:
+            self._managed_release(lock)
+
+    # -- native probes --------------------------------------------------- #
+    def _native_status(self, key: str, oc_id: str) -> Optional[str]:
+        """``idle`` / ``busy`` from ``GET /session/status`` (an absent entry is
+        idle on opencode 1.18.x); ``None`` when unknown/unreachable."""
+        if not key or not oc_id or not self._base_urls.get(key):
+            return None
+        states, err = self._http(key, "GET", "/session/status", timeout=5)
+        if err or not isinstance(states, dict):
+            return None
+        status = states.get(oc_id)
+        if status is None:
+            return "idle"
+        state = status.get("type") if isinstance(status, dict) else status
+        return "idle" if state == "idle" else "busy"
+
+    def _message_exists(self, key: str, oc_id: str, message_id: str) -> Optional[bool]:
+        info, err = self._http(key, "GET", f"/session/{oc_id}/message/{message_id}", timeout=10)
+        if not err:
+            got = (info.get("info") or {}).get("id") if isinstance(info, dict) else None
+            return got == message_id
+        return False if _http_status(err) == 404 else None
+
+    def _latest_user(self, history: Any) -> Optional[Dict[str, Any]]:
+        """OpenCode's own "latest user message" order: time.created, then id."""
+        users = [m for m in history if isinstance(m, dict) and isinstance(m.get("info"), dict)
+                 and m["info"].get("role") == "user"] if isinstance(history, list) else []
+        if not users:
+            return None
+        return max(users, key=lambda m: ((m["info"].get("time") or {}).get("created") or 0,
+                                         str(m["info"].get("id") or "")))
+
+    def _running_is_ours(self, entry: _ManagedTurn) -> Optional[bool]:
+        """True iff the session is busy AND its latest user message is ours;
+        False when busy with someone else's message; None when not running/unknown."""
+        if self._native_status(entry.key, entry.oc_session_id) != "busy":
+            return None
+        history, err = self._http(entry.key, "GET", f"/session/{entry.oc_session_id}/message?limit=20", timeout=10)
+        latest = None if err else self._latest_user(history)
+        if latest is None:
+            return None
+        latest_id = str(latest["info"].get("id") or "")
+        if entry.message_id:
+            return latest_id == entry.message_id
+        is_compaction = any(isinstance(p, dict) and p.get("type") == "compaction" for p in latest.get("parts") or [])
+        return is_compaction and latest_id not in entry.known_ids
+
+    def _abort_if_ours(self, entry: _ManagedTurn) -> Optional[bool]:
+        """Deliver the session-wide abort ONLY while our message is the running
+        one. Returns True (delivered), False (another message runs), None (ours
+        is not running yet / unknown — stays armed)."""
+        ours = self._running_is_ours(entry)
+        if not ours:
+            return ours
+        _, err = self._http(entry.key, "POST", f"/session/{entry.oc_session_id}/abort", timeout=5)
+        if err:
+            return None
+        with self._lock:
+            entry.cancel_delivered = True
+        return True
+
+    def _entry_in_flight(self, entry: _ManagedTurn) -> Optional[bool]:
+        """Is a HELD attempt's native work still running? A gone server process
+        proves it stopped (OpenCode runs turns in-process); otherwise status +
+        history decide; unknown ⇒ None."""
+        if entry.server_identity and process_gone_proof(entry.server_identity):
+            return False
+        status = self._native_status(entry.key, entry.oc_session_id)
+        if status is None:
+            return None
+        if status == "busy":
+            return True
+        if entry.kind == "compaction" or not entry.message_id:
+            return False
+        exists = self._message_exists(entry.key, entry.oc_session_id, entry.message_id)
+        if exists is None:
+            return None
+        if exists:
+            return False
+        return time.monotonic() - entry.submitted_at < self._MANAGED_ABSENT_GRACE_SEC
+
+    def is_quiescent(self, session: Session) -> bool:
+        """No native work for ``session`` is in flight: no running local attempt,
+        every held attempt natively resolved, and ``/session/status`` idle.
+        Unknown / unreachable ⇒ False. No native session at all ⇒ True."""
+        sid = session.session_id or ""
+        with self._lock:
+            entries = [e for e in self._managed.values() if e.session_id == sid]
+            known = self._native.get(sid)
+        for e in entries:
+            if e.phase != "held" or e.late_pending or self._entry_in_flight(e) is not False:
+                return False
+        oc_id = session.backend_session_id or (known[1] if known else "")
+        if not oc_id:
+            return True
+        key = self._server_key(session.repo_path) if session.repo_path else (known[0] if known else "")
+        if not key:
+            return False
+        if not self._base_urls.get(key):
+            try:
+                if not session.repo_path or self._ensure_server(key, session.repo_path):
+                    return False
+            except Exception:
+                return False  # e.g. live-call guard / spawn failure ⇒ unknown
+        return self._native_status(key, oc_id) == "idle"
+
+    def cancel_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+        """Cancel exactly ``turn_uuid``: arm it when it has not begun here; abort
+        only while its message is the running one; refuse (False, disarmed)
+        when another message is running — never abort someone else's turn."""
+        if not turn_uuid:
+            return False
+        with self._lock:
+            entry = self._managed.get(turn_uuid)
+            if entry is None:
+                self._armed_cancels.add(turn_uuid)
+                return True
+            entry.cancel_armed = True
+            phase = entry.phase
+        if phase == "reserved":
+            return True        # the pre-submit check refuses to submit it
+        delivered = self._abort_if_ours(entry)
+        if delivered is False:
+            with self._lock:
+                entry.cancel_armed = False
+            return False
+        if phase == "held":
+            return bool(delivered)  # no live waiter to deliver it later
+        return True            # delivered, or armed for when ours is running
+
+    def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
+        """Drop a HELD attempt (or an armed cancel) the carrier learned is
+        terminal server-side. An attempt whose call is still running here is
+        not dropped — its own waiter ends it (reply / deadline)."""
+        with self._lock:
+            entry = self._managed.get(turn_uuid)
+            dropped = entry is not None and entry.phase == "held"
+            if dropped:
+                entry.forgotten = True
+                self._managed.pop(turn_uuid, None)
+            armed = turn_uuid in self._armed_cancels
+            self._armed_cancels.discard(turn_uuid)
+        return dropped or armed
 
     # ------------------------------------------------------------------
     # Core message send
@@ -1300,6 +2033,14 @@ class OpenCodeServerBackend(CodingBackend):
                 execution_time=elapsed,
                 error_class="cancelled" if "cancelled" in err.lower() else "timeout" if "timeout" in err.lower() else "transport_error" if "unreachable" in err.lower() else "malformed_event" if "event stream malformed" in err.lower() else "provider_error")
 
+        return self._turn_result(response, cwd, oc_session_id, elapsed, telemetry_context, telemetry_sink)
+
+    def _turn_result(
+        self, response: Dict[str, Any], cwd: str, oc_session_id: str, elapsed: float,
+        telemetry_context: Any, telemetry_sink: Any,
+    ) -> ExecutionResult:
+        """Build the ExecutionResult for a terminal correlated OpenCode reply
+        (shared by the legacy and the managed send paths)."""
         output, errors, finish = self._parse_message_response(response)
 
         if finish in ("stop", "tool-calls"):
@@ -1779,12 +2520,14 @@ class OpenCodeServerBackend(CodingBackend):
                 if declared_size and int(declared_size) > 8 * 1024 * 1024:
                     return {}, f"OpenCode response exceeded 8 MiB ({method} {path})"
                 raw = resp.read(8 * 1024 * 1024 + 1)
+                self._refused_since.pop(key, None)
                 if len(raw) > 8 * 1024 * 1024:
                     return {}, f"OpenCode response exceeded 8 MiB ({method} {path})"
                 if not raw:
                     return {}, None
                 return json.loads(raw), None
         except urllib.error.HTTPError as e:
+            self._refused_since.pop(key, None)  # the server answered
             raw = e.read(8 * 1024 * 1024 + 1)
             try:
                 err_body = json.loads(raw)
@@ -1803,14 +2546,40 @@ class OpenCodeServerBackend(CodingBackend):
                 f"opencode request timed out ({method} {path}) after {timeout}s"
             )
         except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
-            # Server is gone or unhealthy — clear and terminate our reference so
-            # _ensure_server restarts it, and avoid leaving an orphaned process.
+            # [A82 step 4 rework, m6] A transport error is not proof the SHARED
+            # serve is gone — terminating it kills every turn it hosts. A
+            # connect-phase timeout (URLError(timeout)) is a timeout; a reset or
+            # refusal on a LIVE process is transient (unknown to the caller).
+            # Only proven death (the process exited), or a live process that
+            # has refused connections for _UNREACHABLE_TERMINATE_SEC (it is not
+            # serving: unrecoverable), clears the reference for a restart.
+            reason = getattr(e, "reason", e)
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                return {}, f"opencode request timed out ({method} {path}) after {timeout}s"
+            now = time.monotonic()
             with self._lock:
-                proc = self._procs.pop(key, None)
-                self._base_urls.pop(key, None)
-                self._release_server_slot_locked(key)
+                proc = self._procs.get(key)
+                dead = proc is None or proc.poll() is not None
+                refusing = isinstance(reason, ConnectionRefusedError)
+                if refusing:
+                    # [A82 pre-cutover, m6] Only a CONTINUOUS refusal streak
+                    # counts: an earlier refusal older than the window (no
+                    # refusal since) is isolated — the streak restarts.
+                    last = self._refused_last.get(key)
+                    if last is not None and now - last >= self._UNREACHABLE_TERMINATE_SEC:
+                        self._refused_since.pop(key, None)
+                    self._refused_last[key] = now
+                first = self._refused_since.setdefault(key, now) if refusing else None
+                wedged = first is not None and now - first >= self._UNREACHABLE_TERMINATE_SEC
+                if dead or wedged:
+                    self._procs.pop(key, None)
+                    self._base_urls.pop(key, None)
+                    self._refused_since.pop(key, None)
+                    self._release_server_slot_locked(key)
+            if not (dead or wedged):
+                return {}, f"opencode server unreachable ({method} {path}): {e} — server kept (transient)"
             if proc is not None:
-                terminate_many_popen([proc])
+                terminate_many_popen([proc])  # reap an exited group / stop a wedged one
             return {}, f"opencode server unreachable ({method} {path}): {e} — will restart on next call"
         except Exception as e:
             return {}, f"Request failed ({method} {path}): {e}"

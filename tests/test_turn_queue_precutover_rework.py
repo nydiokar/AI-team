@@ -1,0 +1,361 @@
+"""A82 pre-cutover rework (review round 1) — F2/F3/F4/F6 + the file-only
+control-row evidence gap. Real pieces as in ``test_turn_queue_precutover``:
+file-backed ``MeshDB`` as ``get_db()``, REAL bound orchestrator methods on a
+bare instance, the REAL control API app, the REAL task server + carrier. No
+CLI / network (autouse spawn guard).
+"""
+import asyncio
+import itertools
+import types
+
+import pytest
+
+from src.control import turn_admission as ta
+from src.control import turn_queue as tq
+from src.core.interfaces import Session, SessionStatus
+from src.services.session_service import SessionService
+from tests.test_turn_queue_producer1 import (  # noqa: F401
+    NOW, _client, _flags, _managed_rows, _no_cli_spawn, _setup,
+)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_allowance(monkeypatch):
+    monkeypatch.setattr(ta, "ALLOWANCE", ta.SharedWaitingAllowance())
+
+
+# --------------------------------------------------------------------------- #
+# F2 — a refused Manager invoke leaves nothing open; retries never multiply
+# --------------------------------------------------------------------------- #
+def _manager_orch(tmp_path, monkeypatch, machine):
+    """Born-managed Manager sessions (``mgr-1``, ``mgr-2`` …) created by a REAL
+    SessionService whose close path is the orchestrator's managed close."""
+    monkeypatch.setenv("HARNESS_FLOW_DRIVE", "1")
+    db, o = _setup(tmp_path, monkeypatch, enroll=False)
+    o._manager_role_enabled = lambda: True
+    svc = SessionService(o.session_store, remote_close_dispatcher=o._dispatch_remote_close,
+                         managed_close=o._close_managed_session)
+    ids = itertools.count(1)
+
+    def create_session(**kw):
+        sid = f"mgr-{next(ids)}"
+        s = Session(session_id=sid, backend=kw.get("backend") or "claude", repo_path=kw["repo_path"],
+                    status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id=machine)
+        db.upsert_session(s)
+        db.enroll_session(sid)
+        return types.SimpleNamespace(ok=True, session=o.session_store.get(sid))
+
+    svc.create_session = create_session
+    o.session_service = svc
+    return db, o
+
+
+def _cases(db):
+    return [dict(r) for r in db._conn().execute("SELECT flow_run_id, status FROM flow_runs").fetchall()]
+
+
+def _open_sessions(db):
+    return [r["session_id"] for r in db._conn().execute(
+        "SELECT session_id, status FROM sessions WHERE session_id LIKE 'mgr-%'").fetchall()
+        if r["status"] != SessionStatus.CLOSED.value]
+
+
+def test_F2_unregistered_carrier_refuses_before_any_case_and_leaves_no_open_session(tmp_path, monkeypatch):
+    db, o = _manager_orch(tmp_path, monkeypatch, machine="ghost")
+    with pytest.raises(tq.CarrierUnavailableError):
+        asyncio.run(o.invoke_manager("ship X", repo_path="/tmp/repo", node_id="ghost"))
+    assert _cases(db) == [], "the refusal happens before open_case"
+    assert _open_sessions(db) == [], "the created Manager session is closed, never orphaned"
+    assert _managed_rows(db) == []
+
+
+def test_F2_turn_queue_refusal_after_case_opened_cancels_the_case_and_closes_the_session(tmp_path, monkeypatch):
+    db, o = _manager_orch(tmp_path, monkeypatch, machine="worker-a")
+
+    async def refused(**_kw):
+        raise tq.CapacityError("fleet waiting cap reached", retry_after=5)
+
+    o.submit_instruction = refused
+    with pytest.raises(tq.CapacityError):
+        asyncio.run(o.invoke_manager("ship X", repo_path="/tmp/repo", node_id="worker-a"))
+    cases = _cases(db)
+    assert len(cases) == 1 and cases[0]["status"] == "cancelled"
+    assert _open_sessions(db) == []
+
+
+def test_F2_api_manager_maps_refusal_to_structured_503_and_retries_never_multiply(tmp_path, monkeypatch):
+    db, o = _manager_orch(tmp_path, monkeypatch, machine="ghost")
+    client = _client(monkeypatch, o)
+    headers = {"Authorization": "Bearer tok", "Idempotency-Key": "inv-1"}
+    body = {"objective": "ship X", "repo_path": "/tmp/repo", "node_id": "ghost"}
+    for _ in range(3):
+        r = client.post("/api/manager", headers=headers, json=body)
+        assert r.status_code == 503, r.text
+        assert r.json()["detail"]["reason"] == "carrier_unavailable"
+    assert _cases(db) == []
+    assert _open_sessions(db) == []
+
+
+# --------------------------------------------------------------------------- #
+# F4 — a definitively missing staged file is a terminal failure, not a loop
+# --------------------------------------------------------------------------- #
+def _http_error(path, code):
+    import urllib.error
+
+    return urllib.error.HTTPError(f"http://gw{path}", code, "err", {}, None)
+
+
+class _CodeHTTP:
+    def __init__(self, code):
+        self.code, self.calls = code, []
+
+    def get_bytes(self, path, timeout=60):
+        self.calls.append(("GET", path))
+        raise _http_error(path, self.code)
+
+    def delete(self, path, timeout=10):
+        self.calls.append(("DELETE", path))
+        return {"status": "deleted"}
+
+
+@pytest.mark.parametrize("code, error_class", [(404, "staged_file_missing"), (503, "managed_conflict")])
+def test_F4_missing_staged_file_is_terminal_transient_error_still_requeues(tmp_path, code, error_class):
+    from src.worker import agent as agent_mod
+    from tests.test_turn_queue_precutover import STAGED, _staged_row, _StagedBackend
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    b = _StagedBackend(repo)
+    http = _CodeHTTP(code)
+    own = tq.ManagedTurnOwnership(task_id="t-1", session_id="s", node_id="n", claim_token="tok")
+    out = asyncio.run(agent_mod._execute_task(_staged_row(repo), {"claude": b}, http, ownership=own))
+    assert b.seen == [] and out["success"] is False
+    assert out["error_class"] == error_class
+    assert STAGED["file_id"] in out["errors"][0]
+    assert ("DELETE", f"/files/{STAGED['file_id']}") not in http.calls
+
+
+def test_F4_missing_staged_file_through_real_carrier_fails_the_turn_visibly(tmp_path, monkeypatch):
+    """Real task server + carrier ``_handle_task`` with urllib-shaped errors:
+    the staged file was never there (``GET /files/{id}`` → 404) ⇒ the turn is
+    ``failed`` with a visible ``staged_file_missing`` error — never re-offered."""
+    from fastapi.testclient import TestClient
+
+    import src.control.db as db_mod
+    import src.control.node_registry as nr_mod
+    from src.control import task_server as tsrv
+    from tests.test_turn_queue_carrier_integration import NODE, TOKEN, _ClientHTTP, _worker
+    from tests.test_turn_queue_precutover import _staged_row, _StagedBackend
+
+    mdb = db_mod.MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(tsrv, "get_db", lambda: mdb)
+    monkeypatch.setattr(db_mod, "get_db", lambda: mdb)
+    monkeypatch.setattr(nr_mod, "_registry", nr_mod.NodeRegistry())
+    monkeypatch.setattr(tsrv, "_worker_token", lambda: TOKEN)
+    monkeypatch.setattr(tsrv, "_STAGING_ROOT", tmp_path / "state" / "uploads")
+
+    class _HTTP(_ClientHTTP):
+        def get_bytes(self, path, timeout=60):
+            self.calls.append(("GET", path, None))
+            resp = self.client.get(path, headers={"Authorization": f"Bearer {TOKEN}"})
+            if resp.status_code >= 400:
+                raise _http_error(path, resp.status_code)
+            return resp.content
+
+    http = _HTTP(TestClient(tsrv.app))
+    w = _worker(tmp_path, http)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    b = _StagedBackend(repo)
+    w._backends = {"claude": b}
+    mdb.upsert_session(Session(session_id="sess-1", backend="claude", repo_path=str(repo),
+                               status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW,
+                               machine_id=NODE, backend_session_id="n"))
+    mdb.enroll_session("sess-1")
+    payload = _staged_row(repo)["payload"]
+    payload["task_id"] = "t-1"
+    mdb.enqueue_turn(task_id="t-1", session_id="sess-1", backend="claude",
+                     action="resume_session", payload=payload, turn_source="human",
+                     turn_kind="instruction", machine_id=NODE)
+    mdb.activate_turn("t-1")
+
+    async def scenario():
+        rows = [r for r in await w._fetch_pending() if r["id"] == "t-1"]
+        assert rows
+        await w._handle_task(rows[0])
+
+    asyncio.run(scenario())
+    row = mdb.get_task("t-1")
+    assert b.seen == []
+    assert row["status"] == "failed", row["status"]
+    assert "staged_file_missing" in (row.get("error") or "") + str(row.get("result") or "")
+
+
+# --------------------------------------------------------------------------- #
+# F6 — a returning carrier releases its carrier_offline holds and wakes the
+# scheduler (no wait for the up-to-300 s blocked-head backoff)
+# --------------------------------------------------------------------------- #
+class _HintSpy:
+    def __init__(self):
+        self.hints = 0
+
+    def hint(self):
+        self.hints += 1
+
+
+def _offline_admitted(tmp_path, monkeypatch):
+    import src.control.node_registry as nr_mod
+    from src.control import turn_scheduler as tsch
+    from tests.test_turn_queue_precutover import _offline, _submit
+
+    db, o = _setup(tmp_path, monkeypatch)
+    _offline(db)
+    tid = _submit(o, operation_id="op-off")
+    row = db.get_task(tid)
+    assert row["status"] == "queued" and row["blocked_reason"] == "carrier_offline: worker-a"
+    assert row["blocked_until"], "admitted under the blocked-head backoff"
+    spy = _HintSpy()
+    monkeypatch.setattr(tsch, "_ACTIVE", spy)
+    reg = nr_mod.NodeRegistry()
+    monkeypatch.setattr(nr_mod, "_registry", reg)
+    return db, o, tid, spy, reg
+
+
+def _carrier_info(node="worker-a"):
+    from src.control.node_registry import NodeCapabilities, NodeInfo
+
+    return NodeInfo(node_id=node, tailscale_ip="", api_port=9001,
+                    capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2,
+                                                  queue_protocols=[1], managed_backends=["claude"]),
+                    incarnation_id="inc-1")
+
+
+def test_F6_carrier_registration_releases_offline_holds_and_hints_the_scheduler(tmp_path, monkeypatch):
+    from tests.test_turn_queue_precutover import _pass
+
+    db, o, tid, spy, reg = _offline_admitted(tmp_path, monkeypatch)
+    reg.register(_carrier_info())
+    row = db.get_task(tid)
+    assert row["blocked_until"] is None and row["status"] == "queued"
+    assert row["blocked_reason"] == "carrier_offline: worker-a", "visible until activation"
+    assert spy.hints >= 1
+    assert _pass(db, o).activated == 1, "eligible at once — no backoff wait"
+    assert db.get_task(tid)["status"] == "pending"
+
+
+def test_F6_heartbeat_back_online_releases_holds_steady_heartbeat_does_not(tmp_path, monkeypatch):
+    db, o, tid, spy, reg = _offline_admitted(tmp_path, monkeypatch)
+    reg.register(_carrier_info("worker-b"))  # an unrelated carrier: nothing of worker-a released
+    assert db.get_task(tid)["blocked_until"] is not None
+    reg._nodes["worker-a"] = _carrier_info()
+    reg._nodes["worker-a"].status = "online"
+    from datetime import datetime, timezone
+
+    reg._nodes["worker-a"].last_heartbeat = datetime.now(tz=timezone.utc)
+    hints = spy.hints
+    assert reg.heartbeat("worker-a") is True  # steady online heartbeat: no release
+    assert db.get_task(tid)["blocked_until"] is not None and spy.hints == hints
+    reg._nodes["worker-a"].status = "offline"  # expired by the registry, then back
+    assert reg.heartbeat("worker-a") is True
+    assert db.get_task(tid)["blocked_until"] is None and spy.hints > hints
+
+
+# --------------------------------------------------------------------------- #
+# Evidence gap — the file-only protocol-0 delivery row for an ENROLLED session
+# while its managed turn runs, end to end (real task server + carrier)
+# --------------------------------------------------------------------------- #
+def test_file_only_delivery_during_a_running_managed_turn_leaves_the_turn_and_session_truthful(
+        tmp_path, monkeypatch):
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    import src.control.db as db_mod
+    import src.control.node_registry as nr_mod
+    from src.control import task_server as tsrv
+    from src.core.interfaces import ExecutionResult
+    from tests.test_turn_queue_carrier_integration import NODE, TOKEN, _ClientHTTP, _worker
+    from tests.test_turn_queue_precutover import STAGED
+
+    mdb = db_mod.MeshDB(str(tmp_path / "mesh.db"))
+    monkeypatch.setattr(tsrv, "get_db", lambda: mdb)
+    monkeypatch.setattr(db_mod, "get_db", lambda: mdb)
+    monkeypatch.setattr(nr_mod, "_registry", nr_mod.NodeRegistry())
+    monkeypatch.setattr(tsrv, "_worker_token", lambda: TOKEN)
+    monkeypatch.setattr(tsrv, "_STAGING_ROOT", tmp_path / "state" / "uploads")
+    stage = tmp_path / "state" / "uploads" / STAGED["file_id"]
+    stage.mkdir(parents=True)
+    (stage / STAGED["filename"]).write_bytes(b"# spec")
+
+    class _HTTP(_ClientHTTP):
+        def get_bytes(self, path, timeout=60):
+            resp = self.client.get(path, headers={"Authorization": f"Bearer {TOKEN}"})
+            assert resp.status_code == 200, resp.text
+            return resp.content
+
+        def delete(self, path, timeout=10):
+            return self.client.delete(path, headers={"Authorization": f"Bearer {TOKEN}"}).json()
+
+    started, release = threading.Event(), threading.Event()
+
+    class _Blocking:
+        def supports_managed_turns(self) -> bool:
+            return True
+
+        def is_quiescent(self, session) -> bool:
+            return True
+
+        def run_managed_turn(self, session, prompt, ownership, *, on_process=None, **_k):
+            started.set()
+            assert release.wait(10)
+            return ExecutionResult(success=True, output="managed reply", errors=[], backend_session_id="n")
+
+    w = _worker(tmp_path, _HTTP(TestClient(tsrv.app)))
+    w._backends = {"claude": _Blocking()}
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mdb.upsert_session(Session(session_id="sess-1", backend="claude", repo_path=str(repo),
+                               status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW,
+                               machine_id=NODE, backend_session_id="n"))
+    mdb.enroll_session("sess-1")
+    session_payload = {"session_id": "sess-1", "backend": "claude", "backend_session_id": "n",
+                       "repo_path": str(repo)}
+    mdb.enqueue_turn(task_id="t-1", session_id="sess-1", backend="claude", action="resume_session",
+                     payload={"task_id": "t-1", "prompt": "work", "session": session_payload},
+                     turn_source="human", turn_kind="instruction", machine_id=NODE)
+    mdb.activate_turn("t-1")
+    before = mdb.get_session("sess-1")
+
+    async def scenario():
+        rows = [r for r in await w._fetch_pending() if r["id"] == "t-1"]
+        turn = asyncio.create_task(w._handle_task(rows[0]))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        # The file-only delivery (the shape _deliver_staged_file_control enqueues).
+        fid = f"fetch-staged-{STAGED['file_id']}"
+        mdb.enqueue_task(task_id=fid, session_id="sess-1", machine_id=NODE, backend="claude",
+                         action="fetch_staged_file", payload={
+                             "prompt": "", "task_id": fid, "action": "fetch_staged_file",
+                             "metadata": {"session_id": "sess-1", "task_type": "fetch_staged_file",
+                                          "staged_file": dict(STAGED)},
+                             "session": session_payload})
+        rows = [r for r in await w._fetch_pending() if r["id"] == fid]
+        assert rows, "the control row is claimable while the managed turn runs"
+        await w._handle_task(rows[0])
+        assert mdb.get_task(fid)["status"] == "completed"
+        assert (repo / "uploads" / STAGED["filename"]).read_bytes() == b"# spec"
+        assert not stage.exists(), "file-only delivery spends the staged copy"
+        # The managed turn is undisturbed and the carrier still knows the session is busy.
+        assert mdb.get_task("t-1")["status"] == "running"
+        assert "sess-1" in w._inflight_sessions, "a control row must not clear the turn's in-flight mark"
+        release.set()
+        await turn
+
+    asyncio.run(scenario())
+    assert mdb.get_task("t-1")["status"] == "completed"
+    assert "sess-1" not in w._inflight_sessions
+    # Session truth: the delivery is not a turn — no BUSY / last_task_id / native id change from it.
+    after = mdb.get_session("sess-1")
+    for field in ("status", "backend_session_id"):
+        assert after.get(field) == before.get(field), field
+    assert not str(after.get("last_task_id") or "").startswith("fetch-staged-")

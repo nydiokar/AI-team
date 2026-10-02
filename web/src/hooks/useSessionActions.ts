@@ -63,6 +63,7 @@ export function useSubmitInstruction() {
       qc.invalidateQueries({ queryKey: ["tasks"] });
       if (vars.sessionId) {
         qc.invalidateQueries({ queryKey: ["session", vars.sessionId] });
+        qc.invalidateQueries({ queryKey: ["session-turn-queue", vars.sessionId] });
       }
     },
   });
@@ -96,9 +97,12 @@ export function useStopSession() {
   return useMutation({
     mutationFn: (sessionId: string) => api.stopSession(token, sessionId),
     retry: false, // a stop is not safe to blindly auto-retry; user re-presses.
-    onSettled: () => {
+    onSettled: (_data, _err, sessionId) => {
       qc.invalidateQueries({ queryKey: ["sessions"] });
       qc.invalidateQueries({ queryKey: ["tasks"] });
+      // [A82 Stage 6] Enrolled stop = persistent queue pause + cancel the active
+      // turn only: the queue cards (now "paused") must reflect it at once.
+      qc.invalidateQueries({ queryKey: ["session-turn-queue", sessionId] });
     },
   });
 }

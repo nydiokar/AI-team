@@ -25,6 +25,8 @@ interface SentState {
   add: (msg: SentMessage) => void;
   update: (id: string, patch: Partial<SentMessage>) => void;
   forSession: (sessionId: string) => SentMessage[];
+  /** [A82 Stage 6] Drop the optimistic bubble of a withdrawn managed request. */
+  dropTask: (taskId: string) => void;
 }
 
 export const useSentStore = create<SentState>((set, get) => ({
@@ -45,4 +47,12 @@ export const useSentStore = create<SentState>((set, get) => ({
       return { bySession: next };
     }),
   forSession: (sessionId) => get().bySession[sessionId] ?? [],
+  dropTask: (taskId) =>
+    set((s) => {
+      const next: Record<string, SentMessage[]> = {};
+      for (const [sid, list] of Object.entries(s.bySession)) {
+        next[sid] = list.filter((m) => m.taskId !== taskId);
+      }
+      return { bySession: next };
+    }),
 }));

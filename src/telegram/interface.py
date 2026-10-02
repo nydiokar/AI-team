@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
 import time
 import uuid
@@ -23,6 +24,7 @@ from src.services.session_store import SessionStore
 from src.core.interfaces import Session, SessionStatus
 from src.services.path_resolver import PathResolver, PathResolution
 from src.backends.registry import valid_backend_names
+from src.control.turn_queue import TurnAdmission, TurnQueueError
 
 try:
     from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -48,6 +50,73 @@ except ImportError:
         DEFAULT_TYPE = Context
 
 logger = logging.getLogger(__name__)
+
+
+_QUEUE_PAUSED_HINT = "⏸ Queue paused — nothing starts until you send /session_resume."
+
+
+def _turn_queued_text(admission: TurnAdmission, paused: bool = False) -> str:
+    """[A82 Stage 4a] Reply for a durably queued managed turn (not 'Working').
+    [A82 Stage 6] While the operator pause holds the queue, say so (and how to
+    resume) instead of looking like a silent stall."""
+    if admission.status == "withdrawn":
+        return f"↩️ Withdrawn before it ran `{admission}`"
+    seq = f" #{admission.queue_sequence}" if admission.queue_sequence else ""
+    tail = f"\n{_QUEUE_PAUSED_HINT}" if paused else ""
+    return f"📥 Queued{seq} `{admission}`{tail}"
+
+
+def _session_queue_paused(session_id: str) -> bool:
+    """[A82 Stage 6] Is the ENROLLED session's queue operator-paused? Reply
+    wording only (never authority): an unreadable state reads as not paused."""
+    from src.control.db import get_db
+
+    db = get_db()
+    if db is None:
+        return False
+    try:
+        state = db.session_turn_queue_states([session_id]).get(session_id) or {}
+    except Exception:  # noqa: BLE001 — the admission itself already committed
+        logger.debug("event=turn_queue_pause_read_failed session_id=%s", session_id, exc_info=True)
+        return False
+    return bool(state.get("paused"))
+
+
+async def _session_queue_paused_async(session_id: str) -> bool:
+    """[A82 Stage 7] ``_session_queue_paused`` in a worker thread: the sync
+    SQLite read never runs on the bot's event loop."""
+    return await asyncio.to_thread(_session_queue_paused, session_id)
+
+
+async def _stop_pause_hint(session_id: str) -> str:
+    """[A82 Stage 7] The stop reply's pause line, only when the pause actually
+    holds (stop skips it when the session closed meanwhile)."""
+    return f"\n{_QUEUE_PAUSED_HINT}" if await _session_queue_paused_async(session_id) else ""
+
+
+async def _session_turn_queue_enrolled(session_id: str) -> bool:
+    """[A82 Stage 4a] Durable enrollment marker: no read while no session is
+    enrolled; unreadable while enrollment exists ⇒ treated as enrolled (fail
+    closed: refuse rather than bypass the managed queue)."""
+    from src.control.db import get_db
+    from src.control.turn_admission import session_enrollment
+
+    try:
+        return await session_enrollment(get_db(), session_id)
+    except TurnQueueError:
+        logger.warning("event=turn_queue_enrollment_unreadable session_id=%s", session_id)
+        return True
+
+
+def _turn_queue_refusal(err: TurnQueueError) -> str:
+    """[A82 Stage 4a] Honest refusal: nothing was queued."""
+    return f"❌ Not queued ({getattr(err, 'code', 'error')}): {str(err)[:200]}"
+
+
+def _upload_staging_root() -> Path:
+    """Gateway staging directory for files pulled by the session's worker
+    (same root the control API and task server ``/files`` use)."""
+    return Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
 
 _DANGEROUS_EXTENSIONS: set[str] = {
     ".exe", ".bat", ".cmd", ".com", ".msi", ".msp", ".scr", ".pif", ".cpl",
@@ -110,6 +179,7 @@ class TelegramInterface:
         self.app.add_handler(CommandHandler("session_dirs", self._handle_session_dirs))
         self.app.add_handler(CommandHandler("session_status", self._handle_session_status))
         self.app.add_handler(CommandHandler("session_cancel", self._handle_session_cancel))
+        self.app.add_handler(CommandHandler("session_resume", self._handle_session_resume))
         self.app.add_handler(CommandHandler("session_close", self._handle_session_close))
         self.app.add_handler(CommandHandler("session_restore", self._handle_session_restore))
         self.app.add_handler(CommandHandler("compact", self._handle_compact))
@@ -171,6 +241,7 @@ class TelegramInterface:
             ("session_dirs", "📂 List project folders"),
             ("session_status", "🔎 Active session details"),
             ("session_cancel", "🛑 Cancel the running task"),
+            ("session_resume", "▶️ Resume a paused session queue"),
             ("session_restore", "↩️ Restore a closed session"),
             ("session_closed", "💤 Browse & restore closed sessions"),
             ("compact", "🗜 Compact the session context"),
@@ -320,14 +391,28 @@ class TelegramInterface:
             if not self._user_can_access_session(user_id, active_session):
                 await self.app.bot.send_message(chat_id=chat_id, text="❌ You do not own the active session.")
                 return
+            prior = (active_session.last_user_message, active_session.status)
             active_session.last_user_message = message_text
             active_session.status = SessionStatus.BUSY
-            task_id = await self.orchestrator.submit_instruction(
-                description=message_text,
-                session_id=active_session.session_id,
-                cwd=active_session.repo_path,
-                source="telegram_session",
-            )
+            try:
+                task_id = await self.orchestrator.submit_instruction(
+                    description=message_text,
+                    session_id=active_session.session_id,
+                    cwd=active_session.repo_path,
+                    source="telegram_session",
+                )
+            except TurnQueueError as err:
+                active_session.last_user_message, active_session.status = prior
+                await self.app.bot.send_message(chat_id=chat_id, text=_turn_queue_refusal(err))
+                return
+            if isinstance(task_id, TurnAdmission):
+                # [A82 Stage 4a] Enrolled session: durably queued, not BUSY.
+                active_session.last_user_message, active_session.status = prior
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=_turn_queued_text(task_id, await _session_queue_paused_async(active_session.session_id)),
+                )
+                return
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
             await self.app.bot.send_message(
@@ -1180,6 +1265,40 @@ class TelegramInterface:
             "If omitted, `session_id` defaults to the active session."
         )
 
+    async def _managed_session_cancel_reply(self, update: Update, args: list[str]) -> Optional[str]:
+        """[A82 Stage 4b] Reply text when a session-scoped /cancel targets an
+        enrolled session (stop = cancel the active managed turn); None for an
+        explicit task id, an unenrolled session, or when nothing is enrolled
+        anywhere (then nothing extra is read)."""
+        from src.control.db import get_db
+
+        db = get_db()
+        if db is None or db.any_session_enrolled() is False:
+            return None
+        stop_managed = getattr(self.orchestrator, "stop_managed_session_turn", None)
+        if not callable(stop_managed):
+            return None
+        if args and not re.fullmatch(r"[0-9a-f]{12}", str(args[0]).strip()):
+            return None  # an explicit task id goes through cancel_task (fenced there)
+        session, error = self._get_accessible_session(
+            update, **({"session_id": str(args[0]).strip()} if args else {"require_active": False}),
+        )
+        if error or session is None:
+            return None
+        try:
+            # [A82 Stage 6] Same "Stop active" as the web: persistent pause first.
+            managed = stop_managed(session, pause_queue=True)
+        except Exception as e:
+            return f"❌ Cancellation not recorded: {e}"
+        if managed is None:
+            return None
+        cancelled, active_id = managed
+        hint = await _stop_pause_hint(session.session_id)
+        if cancelled:
+            return (f"🔄 Cancellation requested for session {self._session_tag(session.session_id)} "
+                    f"task `{active_id}`.{hint}")
+        return f"No active turn to cancel in session {self._session_tag(session.session_id)}.{hint}"
+
     def _resolve_task_scope(
         self,
         update: Update,
@@ -1228,14 +1347,27 @@ class TelegramInterface:
             if not self._user_can_access_session(update.effective_user.id, active_session):
                 await update.message.reply_text("❌ You do not own the active session.")
                 return
+            prior = (active_session.last_user_message, active_session.status)
             active_session.last_user_message = message_text
             active_session.status = SessionStatus.BUSY
-            task_id = await self.orchestrator.submit_instruction(
-                description=message_text,
-                session_id=active_session.session_id,
-                cwd=active_session.repo_path,
-                source="telegram_session",
-            )
+            try:
+                task_id = await self.orchestrator.submit_instruction(
+                    description=message_text,
+                    session_id=active_session.session_id,
+                    cwd=active_session.repo_path,
+                    source="telegram_session",
+                )
+            except TurnQueueError as err:
+                active_session.last_user_message, active_session.status = prior
+                await update.message.reply_text(_turn_queue_refusal(err))
+                return
+            if isinstance(task_id, TurnAdmission):
+                # [A82 Stage 4a] Enrolled session: durably queued, not BUSY.
+                active_session.last_user_message, active_session.status = prior
+                await update.message.reply_text(
+                    _turn_queued_text(task_id, await _session_queue_paused_async(active_session.session_id)),
+                )
+                return
             active_session.last_task_id = task_id
             self.session_store.save(active_session)
             await update.message.reply_text(f"⏳ Working... {self._session_message_ref(active_session, task_id)}")
@@ -1302,7 +1434,8 @@ class TelegramInterface:
             "• `/session_status [id]` — full detail on a session\n"
             "• `/session_use [id]` — switch active session\n"
             "• `/session_close [id]` — close · `/session_restore [id]` — reopen\n"
-            "• `/session_cancel [id]` — stop the running task\n"
+            "• `/session_cancel [id]` — stop the running task (pauses its queue)\n"
+            "• `/session_resume [id]` — resume a paused/stopped session queue\n"
             "• `/compact [id]` — shrink the agent's context window\n\n"
             "⚡ *Work*\n"
             "• plain text → continues the active session\n"
@@ -1813,6 +1946,14 @@ class TelegramInterface:
             await update.message.reply_text("❌ Access denied.")
             return
 
+        # [A82 Stage 4b] Session-scoped /cancel on an ENROLLED session cancels
+        # the turn owning the ACTIVE slot (ledger truth, never last_task_id).
+        # None ⇒ legacy resolution below, unchanged.
+        managed_reply = await self._managed_session_cancel_reply(update, context.args or [])
+        if managed_reply is not None:
+            await update.message.reply_text(managed_reply)
+            return
+
         task_id, session, error = self._resolve_task_scope(update, context.args or [])
         if error:
             await update.message.reply_text(error)
@@ -1904,6 +2045,10 @@ class TelegramInterface:
         if not self._user_can_access_session(user_id, active_session):
             await update.message.reply_text("❌ You do not own the active session.")
             return
+        # [A82 pre-cutover P2] Producer 8: an ENROLLED session's file is staged
+        # for its managed carrier (fetched before the turn runs); a caption is a
+        # managed turn (queued, never BUSY), no caption a file-only delivery.
+        enrolled = await _session_turn_queue_enrolled(active_session.session_id)
 
         # Determine file source
         doc = update.message.document
@@ -1952,14 +2097,14 @@ class TelegramInterface:
         # (same rule NodeInspector uses), so uploads and inspection agree on
         # where a session lives — including after the gateway moves to the VPS.
         from src.control.node_inspector import session_node
-        is_remote = session_node(active_session) is not None
+        is_remote = session_node(active_session) is not None or enrolled
 
         file_size_kb = file_size / 1024
         size_str = f"{file_size_kb:.1f} KB" if file_size_kb < 1024 else f"{file_size_kb / 1024:.1f} MB"
 
         if is_remote:
             # Stage the file on the server; the remote worker will pull it via GET /files/{file_id}
-            _staging_root = Path(__file__).resolve().parent.parent.parent / "state" / "uploads"
+            _staging_root = _upload_staging_root()
             stage_id = uuid.uuid4().hex[:16]
             stage_dir = _staging_root / stage_id
             try:
@@ -1973,9 +2118,36 @@ class TelegramInterface:
                 return
 
             staged_file_meta = {"file_id": stage_id, "filename": safe_name}
-            save_msg = f"📎 Staged `uploads/{safe_name}` ({size_str}) → sending to {active_session.machine_id}"
+            target = active_session.machine_id or "the session's carrier"
+            save_msg = f"📎 Staged `uploads/{safe_name}` ({size_str}) → sending to {target}"
 
-            if caption:
+            if caption and enrolled:
+                try:
+                    admitted = await self.orchestrator.submit_instruction(
+                        description=f"{caption}\n\n📎 File: `uploads/{safe_name}`",
+                        session_id=active_session.session_id,
+                        cwd=active_session.repo_path,
+                        source="telegram_session",
+                        extra_metadata={"staged_file": staged_file_meta},
+                    )
+                except TurnQueueError as err:
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                    await update.message.reply_text(_turn_queue_refusal(err))
+                    return
+                except Exception as e:
+                    shutil.rmtree(stage_dir, ignore_errors=True)
+                    await update.message.reply_text(f"❌ Failed to create task: {e}")
+                    logger.error("instruction submission failed: user=%s chat=%s error=%s", user_id, chat_id, e)
+                    return
+                await update.message.reply_text(
+                    f"{save_msg}\n"
+                    + _turn_queued_text(admitted, await _session_queue_paused_async(active_session.session_id)),
+                )
+                logger.info(
+                    "file+instruction queued user=%s chat=%s file=%s task=%s session=%s",
+                    user_id, chat_id, safe_name, admitted, active_session.session_id,
+                )
+            elif caption:
                 full_instruction = f"{caption}\n\n📎 File: `uploads/{safe_name}`"
                 active_session.last_user_message = full_instruction
                 active_session.status = SessionStatus.BUSY
@@ -2015,11 +2187,13 @@ class TelegramInterface:
                         },
                     )
                 except Exception as e:
+                    if enrolled:  # nothing was queued: drop the orphaned stage
+                        shutil.rmtree(stage_dir, ignore_errors=True)
                     await update.message.reply_text(f"❌ Failed to deliver file: {e}")
                     logger.error("file delivery task failed: user=%s chat=%s error=%s", user_id, chat_id, e)
                     return
                 await update.message.reply_text(
-                    f"{save_msg}\nFile is being delivered to {active_session.machine_id} — type an instruction once it arrives.",
+                    f"{save_msg}\nFile is being delivered to {target} — type an instruction once it arrives.",
                     parse_mode="Markdown",
                 )
                 logger.info(
@@ -2625,6 +2799,27 @@ class TelegramInterface:
         if not self._user_can_access_session(update.effective_user.id, session):
             await update.message.reply_text("❌ You do not own that session.")
             return
+        # [A82 Stage 4b] Enrolled session: cancel the turn owning the ACTIVE
+        # slot (ledger truth, never last_task_id). None ⇒ legacy below.
+        # [A82 Stage 6] Same "Stop active" as the web: the persistent queue
+        # pause commits first; /session_resume is the explicit release.
+        stop_managed = getattr(self.orchestrator, "stop_managed_session_turn", None)
+        try:
+            managed = stop_managed(session, pause_queue=True) if callable(stop_managed) else None
+        except Exception as e:
+            await update.message.reply_text(f"Cancellation not recorded: {e}")
+            return
+        if managed is not None:
+            cancelled, active_id = managed
+            hint = await _stop_pause_hint(session.session_id)
+            if cancelled:
+                await update.message.reply_text(
+                    f"Cancellation requested for `{active_id}` in session {self._session_tag(session.session_id)}."
+                    f"{hint}"
+                )
+            else:
+                await update.message.reply_text(f"No active turn to cancel in that session.{hint}")
+            return
         if not session.last_task_id:
             await update.message.reply_text("No task is associated with that session yet.")
             return
@@ -2637,6 +2832,35 @@ class TelegramInterface:
             )
         else:
             await update.message.reply_text(f"Task `{session.last_task_id}` is not cancellable.")
+
+    async def _handle_session_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/session_resume [session_id] — [A82 Stage 6] release the operator queue
+        pause / stop hold of an ENROLLED session (the web resume route's service).
+        Recovery, Case, provider-deadline and approval gates keep holding."""
+        if not self._check_user_permission(update.effective_user.id):
+            await update.message.reply_text("❌ Access denied.")
+            return
+        args = context.args or []
+        session = self.session_store.get(args[0]) if args else self.session_store.get_active(update.effective_chat.id)
+        if not session:
+            await update.message.reply_text("No session found.")
+            return
+        if not self._user_can_access_session(update.effective_user.id, session):
+            await update.message.reply_text("❌ You do not own that session.")
+            return
+        from src.control.db import get_db
+        from src.control.turn_admission import set_queue_paused_async
+
+        tag = self._session_tag(session.session_id)
+        if not await _session_turn_queue_enrolled(session.session_id):
+            await update.message.reply_text(f"Session {tag} is not on the managed turn queue — nothing to resume.")
+            return
+        try:
+            await set_queue_paused_async(get_db(), session.session_id, False)
+        except TurnQueueError as err:
+            await update.message.reply_text(_turn_queue_refusal(err))
+            return
+        await update.message.reply_text(f"▶️ Queue resumed for session {tag}. Waiting turns run in order.")
 
     async def _handle_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """/compact [session_id] — collapse the Claude context window for the active (or specified) session."""
@@ -2657,7 +2881,11 @@ class TelegramInterface:
         await update.message.reply_text("Compacting context...")
         try:
             result = await self.orchestrator.compact_session(session.session_id)
-            if result.success:
+            managed = getattr(result, "parsed_output", None)
+            if result.success and isinstance(managed, dict) and managed.get("managed"):
+                # [A82 Stage 4b] Enrolled: compaction is a queued managed turn.
+                await update.message.reply_text(f"📥 {result.output}. It runs after the turns ahead of it.")
+            elif result.success:
                 await update.message.reply_text("Context compacted. The session will continue with a condensed summary.")
             else:
                 err = (result.errors or ["unknown error"])[0]
@@ -2787,11 +3015,15 @@ class TelegramInterface:
         # Lifecycle (backend close + status + backend_session_id) lives on the
         # transport-neutral service (U3.5/P1). backend.close may block, so run the
         # service call off-thread. Chat unbinding below stays Telegram's concern.
-        await asyncio.to_thread(
+        closed = await asyncio.to_thread(
             self.orchestrator.session_service.close_session,
             session.session_id,
             backends=getattr(self.orchestrator, "_backends", {}),
         )
+        if getattr(closed, "reason", "") == "turn_queue_unavailable":
+            # [A82 Stage 4b] Managed close could not reach the turn ledger.
+            await update.message.reply_text("Close not recorded (turn queue unavailable) — retry.")
+            return
         session = self.session_store.get(session.session_id) or session
         active = self.session_store.get_active(update.effective_chat.id)
         if active and active.session_id == session.session_id:
