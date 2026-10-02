@@ -11284,7 +11284,9 @@ Generated from user description: {description}
         )
         return out.outcome in ("cancelled", "requested")
 
-    def stop_managed_session_turn(self, session: Any) -> Optional[Tuple[bool, Optional[str]]]:
+    def stop_managed_session_turn(
+        self, session: Any, *, pause_queue: bool = False,
+    ) -> Optional[Tuple[bool, Optional[str]]]:
         """[A82 Stage 4b] "Stop" for an ENROLLED session: cancel the turn that
         OWNS the active slot, read from the ledger (never ``last_task_id``,
         never a queued id). Returns (cancelled, task_id), or None for an
@@ -11293,15 +11295,25 @@ Generated from user description: {description}
         (session ``cancelled``, set in the cancel transaction): Case automation
         (wake dispatcher, transient/quota resume, orphan sweep) does not restart
         it, and activation starts no queued turn until an operator action (a new
-        human/operator admission) releases the hold. Explicit pause/resume
-        routes are Stage 6 (the web stop route adds the persistent pause)."""
+        human/operator admission) releases the hold.
+
+        [A82 Stage 6] ``pause_queue=True`` is the operator "Stop active" of every
+        surface (web stop, Telegram stop): the PERSISTENT queue pause commits
+        BEFORE the cancel (freeing the slot can never launch the next queued
+        instruction) and only an explicit resume releases it (design §7)."""
         from src.control.db import get_db
-        from src.control.turn_admission import session_enrollment_sync
+        from src.control.turn_admission import session_enrollment_sync, set_queue_paused_sync
+        from src.control.turn_queue import OwnershipConflictError
 
         db = get_db()
         sid = str(getattr(session, "session_id", "") or "")
         if not sid or not session_enrollment_sync(db, sid):
             return None
+        if pause_queue:
+            try:
+                set_queue_paused_sync(db, sid, True)
+            except OwnershipConflictError:
+                pass  # closed meanwhile: nothing can activate there anyway
         active = db.get_active_turn(sid)
         if not active:
             return (False, None)

@@ -277,3 +277,34 @@ def session_enrollment_sync(db: Any, session_id: str) -> bool:
     if db.any_session_enrolled() is False:
         return False
     return _read_marker(db, session_id)
+
+
+def _queue_pause_committed(session_id: str, paused: bool) -> None:
+    """Post-commit signals of an operator pause/resume (hint only on resume:
+    a pause can never make anything eligible)."""
+    from .turn_queue import emit_turn_queue_changed
+
+    if not paused:
+        from .turn_scheduler import notify_turn_queue_changed
+
+        notify_turn_queue_changed()
+    emit_turn_queue_changed(session_id, "paused" if paused else "resumed")
+
+
+def set_queue_paused_sync(db: Any, session_id: str, paused: bool) -> Dict[str, Any]:
+    """[A82 Stage 6] THE operator queue pause/resume of an enrolled session,
+    shared by every surface (web routes, web stop, Telegram stop/resume).
+    Resume also releases an operator-stop hold; recovery, Case, provider and
+    approval gates stay. Typed ``TurnQueueError`` on refusal."""
+    state: Dict[str, Any] = db.set_turn_queue_paused(session_id, paused)
+    _queue_pause_committed(session_id, paused)
+    return state
+
+
+async def set_queue_paused_async(db: Any, session_id: str, paused: bool) -> Dict[str, Any]:
+    """Bounded (admission permit) async twin of :func:`set_queue_paused_sync`."""
+    state: Dict[str, Any] = await run_turn_mutation_async(
+        lambda: db.set_turn_queue_paused(session_id, paused),
+    )
+    _queue_pause_committed(session_id, paused)
+    return state
