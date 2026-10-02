@@ -11,8 +11,10 @@ The backing store is MeshDB (src/control/db.py). No SQL lives here.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import shutil
 import time
 import uuid
@@ -847,6 +849,70 @@ def _fire_nudge(node: NodeInfo) -> None:
             logger.debug("event=nudge_failed node_id=%s url=%s err=%s", node.node_id, url, e)
 
     threading.Thread(target=_do, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Controller-state endpoints (A88) — workers read controller-owned state here
+# instead of opening a mesh.db of their own (docs/DATABASE_AUTHORITY.md).
+# ---------------------------------------------------------------------------
+
+_CASE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+class RuntimeFlagRowOut(BaseModel):
+    flag_name: str
+    value: str
+    set_at: str
+
+
+class RuntimeFlagSnapshotOut(BaseModel):
+    revision: str
+    flags: list[RuntimeFlagRowOut]
+
+
+@app.get("/control/runtime-flags", dependencies=[Depends(_require_auth)])
+def control_runtime_flags() -> RuntimeFlagSnapshotOut:
+    """The controller's registry rows (registry-writable flags only) + a revision.
+
+    Workers resolve row → own env → default, exactly as the controller does.
+    """
+    from src.control.db import RUNTIME_FLAG_DEFINITIONS, runtime_flag_registry_writable
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    rows: list[RuntimeFlagRowOut] = [
+        RuntimeFlagRowOut(
+            flag_name=str(r["flag_name"]),
+            value=str(r.get("value") or ""),
+            set_at=str(r.get("set_at") or ""),
+        )
+        for r in db.list_runtime_flags()
+        if r.get("flag_name") in RUNTIME_FLAG_DEFINITIONS
+        and runtime_flag_registry_writable(str(r["flag_name"]))
+    ]
+    digest = hashlib.sha256(
+        json.dumps([[r.flag_name, r.value, r.set_at] for r in rows]).encode()
+    ).hexdigest()[:16]
+    return RuntimeFlagSnapshotOut(revision=digest, flags=rows)
+
+
+@app.post("/control/cases/{case_id}/boot-reconcile", dependencies=[Depends(_require_auth)])
+def control_boot_reconcile_case(case_id: str) -> dict[str, Any]:
+    """Manager boot reconcile for a worker-hosted Manager session, against the
+    controller ledger. Same guards the driver applied locally; the db call is
+    idempotent and self-gated on DURABLE_RELAY_ENABLED."""
+    if not _CASE_ID_RE.match(case_id):
+        raise HTTPException(status_code=422, detail="invalid case id")
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    row = db.get_flow_run(case_id)
+    if row is None:
+        return {"ok": False, "reason": "unknown_case"}
+    if (row.get("status") or "") in db._CLOSED_STATUSES:
+        return {"ok": False, "reason": "case_closed"}
+    return db.boot_reconcile_case(case_id, actor="manager")
 
 
 # ---------------------------------------------------------------------------
@@ -1695,8 +1761,49 @@ def _reap_stale_claims_once() -> None:
             )
 
 
+def _reap_stale_pending_once() -> None:
+    """[#177] Synchronously cancel pending tasks that can never be claimed.
+
+    Sibling of ``_reap_stale_claims_once`` for the ``pending`` state, which had
+    no TTL before this change (orphans accumulated for up to 58 days live). A row
+    is cancelled — not released — because none of these are claimable: a closed
+    session, an unknown/offline pinned node past the grace window, or an
+    age-ceiling leak (the only reason that retires a stuck continuation lease).
+    Each cancellation writes a ``task_events`` row (via ``cancel_task``) and one
+    bounded log line. Off the event loop: callers wrap this in ``to_thread``.
+    """
+    db = get_db()
+    if db is None:
+        return
+    from config import config as _cfg
+    if not getattr(_cfg.mesh, "pending_reaper_enabled", True):
+        return
+    grace_sec = int(getattr(_cfg.mesh, "pending_reaper_grace_sec", 1800) or 0)
+    max_age_sec = int(getattr(_cfg.mesh, "pending_max_age_sec", 604800) or 0)
+    stale = db.list_stale_pending_tasks(grace_sec=grace_sec, max_age_sec=max_age_sec)
+    for row in stale:
+        task_id = row.get("id", "?")
+        reason = row.get("_stale_reason", "unknown")
+        machine_id = row.get("machine_id")
+        age_sec = int(row.get("_age_sec") or 0)
+        if db.cancel_task(
+            task_id,
+            f"pending reaped: {reason} (machine_id={machine_id!r}, age={age_sec}s)",
+            event_session_id=row.get("session_id"),
+        ):
+            logger.info(
+                "event=stale_pending_cancelled task_id=%s reason=%s machine_id=%s age_sec=%d",
+                task_id, reason, machine_id, age_sec,
+            )
+
+
 async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
-    """Periodically sweep stale claims without blocking gateway request handling."""
+    """Periodically sweep stale claims without blocking gateway request handling.
+
+    The same cadence also sweeps stale PENDING rows (#177) — one loop, two
+    bounded synchronous sweeps, each guarded so a failure in one never starves
+    the other.
+    """
     logger.info("event=stale_claim_reaper_started interval=%ds", interval_sec)
     try:
         while True:
@@ -1704,6 +1811,10 @@ async def _stale_claim_reaper_loop(interval_sec: int = 30) -> None:
                 await asyncio.to_thread(_reap_stale_claims_once)
             except Exception as e:
                 logger.debug("event=stale_claim_reaper_error err=%s", e)
+            try:
+                await asyncio.to_thread(_reap_stale_pending_once)
+            except Exception as e:
+                logger.debug("event=stale_pending_reaper_error err=%s", e)
             await asyncio.sleep(interval_sec)
     except asyncio.CancelledError:
         logger.info("event=stale_claim_reaper_stopped")

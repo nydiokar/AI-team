@@ -2263,13 +2263,32 @@ class WorkerAgent:
             )
         return prewarmer
 
+    async def _controller_state_ready(self) -> bool:
+        """[A88] Claim no work until the controller's flag snapshot is known, so a
+        session never boots on env/default flags after a startup outage."""
+        from src.control import controller_state
+        from src.worker.controller_state_client import RemoteControllerState
+
+        client = controller_state.active()
+        # Read-only: the refresh loop is the single refresher (no concurrent fetches).
+        return not isinstance(client, RemoteControllerState) or client.ready_for_work()
+
+    async def _controller_state_loop(self) -> None:
+        """[A88] Keep the controller-state snapshot (flag registry) fresh."""
+        from src.control import controller_state
+        from src.worker.controller_state_client import RemoteControllerState
+
+        client = controller_state.active()
+        if isinstance(client, RemoteControllerState):
+            await client.run(self._shutdown)
+
     async def _quota_prewarm_supervisor_loop(self) -> None:
         """Start/stop window warming DYNAMICALLY from the runtime-flag registry.
 
         Warming can only fire where Claude executes (this worker), but WHETHER it
         runs stays an operator toggle: the QUOTA_PREWARM_ENABLED boolean in the
-        flag registry (mesh.db, read via runtime_flag_enabled — the SAME source
-        the controller uses, NOT an env var), re-read every cycle so it can be
+        flag registry (the controller's registry, read via runtime_flag_enabled
+        from the A88 controller-state snapshot — NOT an env var), re-read every cycle so it can be
         flipped on/off with no restart. That dynamic nature is the point of the
         registry. The only static gate is the precondition that this worker has a
         claude harness at all — without it warming can never work, so we never
@@ -2794,6 +2813,8 @@ class WorkerAgent:
             pass
 
     async def _fetch_pending(self) -> List[Dict[str, Any]]:
+        if not await self._controller_state_ready():
+            return []
         params = {
             "node_id": self.cfg.node_id,
             "backends": ",".join(self.cfg.backends),
@@ -3213,6 +3234,7 @@ class WorkerAgent:
         heartbeat = asyncio.create_task(self._heartbeat_loop())
         quota_observer = asyncio.create_task(self._quota_observe_loop())
         quota_prewarm = asyncio.create_task(self._quota_prewarm_supervisor_loop())
+        controller_state_refresh = asyncio.create_task(self._controller_state_loop())
         if self._canary:
             logger.info("event=worker_canary_mode node_id=%s polling_disabled=true", self.cfg.node_id)
             poller = asyncio.create_task(self._shutdown.wait())
@@ -3266,9 +3288,9 @@ class WorkerAgent:
             for t in pending:
                 t.cancel()
 
-        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm):
+        for t in (poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh):
             t.cancel()
-        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, return_exceptions=True)
+        await asyncio.gather(poller, heartbeat, nudge_listener, job_watcher, quota_observer, quota_prewarm, controller_state_refresh, return_exceptions=True)
 
         # Terminate any backend subprocesses still alive (e.g. a hung
         # claude.exe that outlived its task). Without this, a worker restart
@@ -3293,6 +3315,22 @@ class WorkerAgent:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+def _install_controller_state(http: _HTTP) -> None:
+    """[A88] Controller-owned state (flag registry, Case ledger) is read from the
+    controller over HTTP; from here on this process never opens a mesh.db.
+
+    Installed before anything reads a flag, with one bounded first fetch. Until a
+    snapshot exists the poll loop claims no work (``_controller_state_ready``) and
+    the refresh loop retries (docs/DATABASE_AUTHORITY.md §3.3)."""
+    from src.control import controller_state
+    from src.worker.controller_state_client import RemoteControllerState
+
+    client = RemoteControllerState(http)
+    controller_state.install(client)
+    if not client.refresh():
+        logger.warning("event=controller_state_initial_fetch_failed route_missing=%s", client.route_missing)
+
 
 def main() -> None:
     try:
@@ -3321,6 +3359,7 @@ def main() -> None:
     except (ValueError, RuntimeError):  # stderr not a real file (rare)
         pass
 
+    _install_controller_state(_HTTP(_cfg.controller_url, _cfg.worker_token))
     agent = WorkerAgent()
     try:
         asyncio.run(agent.run())

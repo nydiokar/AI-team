@@ -362,7 +362,7 @@ RUNTIME_FLAG_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "default": "0",
         "effect_scope": "live",
         "registry_writable": "1",
-        "description": "Keep the Claude 5-hour window ticking: when telemetry shows NO open window, spend one minimal haiku turn to start one, then verify against the provider that a window actually opened. Runs around the clock on purpose — an already-running window is only worth anything before work starts. Warming runs where Claude executes: a claude-capable WORKER re-reads this registry row every cycle and starts/stops warming LIVE — flip it on/off with no restart. The ingest-only Docker controller has no local Claude and does not warm (a single-process local-execution gateway still warms in-process, at startup). NOTE: the worker reads the mesh.db it is pointed at (MESH_DB_PATH, relative to its cwd); toggle the flag in that DB (e.g. scripts/ops_flag.sh at the worker's repo). Bounded by QUOTA_PREWARM_MAX_PER_DAY / QUOTA_PREWARM_MIN_INTERVAL_SEC and a consecutive-failure circuit breaker.",
+        "description": "Keep the Claude 5-hour window ticking: when telemetry shows NO open window, spend one minimal haiku turn to start one, then verify against the provider that a window actually opened. Runs around the clock on purpose — an already-running window is only worth anything before work starts. Warming runs where Claude executes: a claude-capable WORKER re-reads this registry row every cycle and starts/stops warming LIVE — flip it on/off with no restart. The ingest-only Docker controller has no local Claude and does not warm (a single-process local-execution gateway still warms in-process, at startup). The worker reads this row from the controller's registry over the task-server API (refreshed ~every 30 s), so the normal /api/flags or scripts/ops_flag.sh toggle reaches it. Bounded by QUOTA_PREWARM_MAX_PER_DAY / QUOTA_PREWARM_MIN_INTERVAL_SEC and a consecutive-failure circuit breaker.",
     },
     "QUOTA_DIGEST_TELEGRAM_ENABLED": {
         "default": "0",
@@ -458,6 +458,12 @@ def _runtime_flag_row(flag_name: str, db: Optional[Any] = None) -> Optional[Dict
     if not runtime_flag_registry_writable(flag_name):
         return None
     try:
+        if db is None:
+            # [A88] A non-controller process resolves rows from the controller.
+            from src.control import controller_state
+            remote = controller_state.active()
+            if remote is not None:
+                return remote.runtime_flag_row(flag_name)
         flag_db = db if db is not None else get_db()
         if flag_db is None:
             return None
@@ -945,6 +951,20 @@ RETRY_PAUSE_EVENTS = {
         "flow.transient_pause_exhausted", "case.manager_respawned",
     )),
 }
+# [#177] Every ``machine_id`` value that is a reserved internal sentinel rather
+# than a real ``node_id``. A pending row pinned to one of these is NOT orphaned
+# merely because no node by that name exists — it is a gateway-claimed
+# single-flight lease. The pending reaper therefore never flags a sentinel row
+# under the node-liveness reasons; only the absolute age ceiling (and an explicit
+# close_case cancellation) may retire one.
+_RESERVED_MACHINE_SENTINELS = frozenset(
+    {CONTINUATION_MACHINE_SENTINEL, CACHE_HEARTBEAT_MACHINE_SENTINEL}
+)
+# [#177] Pending-task reaper defaults (also the fallbacks used by ``stats()`` for
+# the ``tasks_stale_pending`` figure). Overridable per-deploy via MeshConfig env
+# (MESH_PENDING_REAPER_GRACE_SEC / MESH_PENDING_MAX_AGE_SEC).
+_DEFAULT_PENDING_GRACE_SEC = 1800       # unknown/offline pinned node must persist this long
+_DEFAULT_PENDING_MAX_AGE_SEC = 604800   # 7d absolute ceiling for ANY pending row
 # Default round cap when a Case's completion_criteria does not carry an explicit
 # ``round_cap`` — a backstop against a runaway continuation loop, not a tuning knob.
 DEFAULT_CONTINUATION_ROUND_CAP = 50
@@ -5037,6 +5057,125 @@ class MeshDB:
         except Exception as e:
             raise _turn_backing_error("resolve_recovery", task_id=task_id, err=e)
 
+    def cancel_task(
+        self,
+        task_id: str,
+        reason: str,
+        *,
+        event_session_id: Optional[str] = None,
+    ) -> bool:
+        """[#177] Terminally cancel a task that can never resolve.
+
+        Distinct from ``fail_task`` (execution outcome) — cancellation is a
+        reaper/close-triggered retirement of a row that no worker can ever claim
+        (closed session, unknown/offline pinned node, age ceiling). The UPDATE is
+        guarded to the live states ``pending``/``claimed`` so a racing completion
+        is never clobbered. Returns True iff this call flipped the row to
+        ``cancelled``. When ``event_session_id`` resolves to a session, an
+        append-only ``task_events`` row records the cancellation for audit.
+        """
+        now = _now()
+        changed = False
+        try:
+            with self._write() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE mesh_tasks
+                    SET status = 'cancelled', error = ?, completed_at = ?, updated_at = ?
+                    WHERE id = ? AND status IN ('pending', 'claimed')
+                    """,
+                    (reason, now, now, task_id),
+                )
+                changed = bool(cur.rowcount or 0)
+        except Exception as e:
+            logger.warning("event=db_cancel_task_failed task_id=%s err=%s", task_id, e)
+            return False
+        if changed:
+            sid = event_session_id
+            if not sid:
+                row = self.get_task(task_id)
+                sid = (row or {}).get("session_id")
+            if sid:
+                self.append_event(sid, task_id, success=False, error=reason)
+        return changed
+
+    def list_stale_pending_tasks(
+        self,
+        *,
+        grace_sec: int = _DEFAULT_PENDING_GRACE_SEC,
+        max_age_sec: int = _DEFAULT_PENDING_MAX_AGE_SEC,
+        now: Optional[datetime] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """[#177] Pending tasks that can never be claimed, each tagged ``_stale_reason``.
+
+        A ``pending`` row is stale when ONE holds:
+          * ``session_closed`` — it is bound to a session whose status is terminal
+            (``closed``/``cancelled``); flagged immediately (no grace) because a
+            closed session never reopens.
+          * ``node_unknown`` — pinned to a REAL node id (not NULL, not a reserved
+            sentinel) that has no ``nodes`` row, and the row is older than
+            ``grace_sec`` (lets a just-registering node settle).
+          * ``node_offline`` — pinned to a node whose status is ``offline`` and
+            older than ``grace_sec`` (a transient worker blip is shorter than the
+            grace window; an affinity-held dispatch already has its own grace).
+          * ``age_exceeded`` — older than ``max_age_sec`` AND NOT pinned to a
+            currently-online node (claimable work is never age-reaped, however
+            long it has queued). This is the reason that retires reserved-sentinel
+            single-flight rows (``cont:``/``respawn:``/``qresume:``/``tresume:``) —
+            their primary retirement is ``close_case``; this is the leak backstop.
+
+        A row pinned to an ONLINE node is legitimate queued work and is NEVER
+        returned (no reason applies — the pin is live, so even a very old row can
+        still be claimed). ``grace_sec``/``max_age_sec`` <= 0 disables that reason.
+        ``session_closed`` is always on. Only the lean columns the classifier and
+        the reaper consume are selected (not ``payload``/``result``), so counting
+        a large orphan backlog stays cheap.
+        """
+        clock = now or datetime.now(tz=timezone.utc)
+        if clock.tzinfo is None:
+            clock = clock.replace(tzinfo=timezone.utc)
+        rows = self._conn().execute(
+            """
+            SELECT t.id        AS id,
+                   t.session_id AS session_id,
+                   t.machine_id AS machine_id,
+                   t.created_at AS created_at,
+                   s.status AS _session_status,
+                   n.node_id AS _node_row_id,
+                   n.status  AS _node_status
+            FROM mesh_tasks t
+            LEFT JOIN sessions s ON s.session_id = t.session_id
+            LEFT JOIN nodes n ON n.node_id = t.machine_id
+            WHERE t.status = 'pending'
+            ORDER BY t.created_at ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for raw in rows:
+            row = dict(raw)
+            created = _parse_datetime_utc(row.get("created_at"))
+            age_sec = (clock - created).total_seconds() if created else 0.0
+            machine_id = row.get("machine_id")
+            is_real_pin = bool(machine_id) and machine_id not in _RESERVED_MACHINE_SENTINELS
+            pinned_online = is_real_pin and row.get("_node_status") == "online"
+            reason: Optional[str] = None
+            if row.get("session_id") and (row.get("_session_status") in ("closed", "cancelled")):
+                reason = "session_closed"
+            elif is_real_pin and grace_sec > 0 and age_sec >= grace_sec and row.get("_node_row_id") is None:
+                reason = "node_unknown"
+            elif is_real_pin and grace_sec > 0 and age_sec >= grace_sec and row.get("_node_status") == "offline":
+                reason = "node_offline"
+            elif max_age_sec > 0 and age_sec >= max_age_sec and not pinned_online:
+                reason = "age_exceeded"
+            if reason:
+                row["_stale_reason"] = reason
+                row["_age_sec"] = age_sec
+                out.append(row)
+        return out
+
     def get_pending_tasks(
         self,
         node_id: Optional[str] = None,
@@ -5981,7 +6120,49 @@ class MeshDB:
                 "reconciliation": criteria_reconciliation or None,
             },
         )
+        # [#177] Retire this Case's pending single-flight dispatch tokens
+        # (cont:/respawn:/qresume:/tresume:, all riding CONTINUATION_MACHINE_SENTINEL).
+        # Once the Case is terminal these wakes are moot; left pending they linger
+        # forever (the Manager session is gone, no worker can claim the sentinel).
+        # Claimed rows are mid-delivery and finalize/release on their own; only
+        # pending tokens are swept here. The age ceiling is the backstop for any
+        # stuck claimed token.
+        self._cancel_case_pending_dispatch_tokens(flow_run_id)
         return True
+
+    def _cancel_case_pending_dispatch_tokens(self, flow_run_id: str) -> int:
+        """[#177] Cancel this Case's pending continuation/respawn/resume lease rows.
+
+        Scoped to rows that (a) are still ``pending``, (b) ride the reserved
+        ``CONTINUATION_MACHINE_SENTINEL`` (every case-scoped single-flight token
+        does), and (c) carry ``:<case_id>:`` in their deterministic id. Case ids
+        are hex ⇒ no LIKE wildcard escaping needed. Returns the rowcount."""
+        now = _now()
+        try:
+            with self._write() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE mesh_tasks
+                    SET status = 'cancelled', error = 'case closed', completed_at = ?, updated_at = ?
+                    WHERE status = 'pending'
+                      AND machine_id = ?
+                      AND id LIKE '%' || ? || '%'
+                    """,
+                    (now, now, CONTINUATION_MACHINE_SENTINEL, f":{flow_run_id}:"),
+                )
+                n = int(cur.rowcount or 0)
+            if n:
+                logger.info(
+                    "event=case_close_cancelled_dispatch_tokens case=%s count=%d",
+                    flow_run_id, n,
+                )
+            return n
+        except Exception as e:
+            logger.warning(
+                "event=db_cancel_case_dispatch_tokens_failed case=%s err=%s",
+                flow_run_id, e,
+            )
+            return 0
 
     def append_flow_event(
         self,
@@ -9482,6 +9663,11 @@ class MeshDB:
             "sessions_total":   conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
             "sessions_busy":    conn.execute("SELECT COUNT(*) FROM sessions WHERE status='busy'").fetchone()[0],
             "tasks_pending":    conn.execute("SELECT COUNT(*) FROM mesh_tasks WHERE status='pending'").fetchone()[0],
+            # [#177] Of the pending rows above, how many can never be claimed
+            # (closed session / unknown-or-offline pinned node / past the age
+            # ceiling). Surfaces orphans that would otherwise silently inflate
+            # ``tasks_pending`` — mirrors the "stale busy" honesty figure.
+            "tasks_stale_pending": len(self.list_stale_pending_tasks(limit=10000)),
             "tasks_claimed":    conn.execute("SELECT COUNT(*) FROM mesh_tasks WHERE status='claimed'").fetchone()[0],
             "tasks_completed":  conn.execute("SELECT COUNT(*) FROM mesh_tasks WHERE status='completed'").fetchone()[0],
             "tasks_failed":     conn.execute("SELECT COUNT(*) FROM mesh_tasks WHERE status IN ('failed','failed_node_offline')").fetchone()[0],
@@ -10615,6 +10801,11 @@ def get_db() -> Optional[MeshDB]:
     guard with a simple `if db:` check.
     """
     global _db_instance
+    from src.control import controller_state
+    if controller_state.active() is not None:
+        # [A88] Controller state lives only in the controller's database; a
+        # process with an installed controller-state client never opens one.
+        return None
     if _db_instance is not None:
         return _db_instance
     with _db_lock:

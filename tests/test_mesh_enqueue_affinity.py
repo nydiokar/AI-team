@@ -100,6 +100,9 @@ def test_unpinned_is_self_claimed(_patch):
 
 def test_pinned_to_other_host_stays_pending_for_that_worker(_patch):
     db = _patch
+    # A genuinely remote node must be REGISTERED for its pinned work to stay
+    # claimable (#177 rejects a pin to an unknown node).
+    db.upsert_node("Horse", "100.0.0.2", 9001, ["claude"], 2)
     orch = _orch(db, _session(machine_id="Horse"))  # a genuinely remote node
 
     orch._mesh_enqueue_task(_task(), "claude")
@@ -112,3 +115,19 @@ def test_pinned_to_other_host_stays_pending_for_that_worker(_patch):
     # …but the pinned remote worker sees it.
     seen = db.get_pending_tasks(node_id="Horse")
     assert [r["id"] for r in seen] == ["t-1"]
+
+
+def test_pinned_to_unknown_node_is_rejected_not_left_pending(_patch):
+    """[#177] A pin to a node that was never registered (e.g. 'kanebra' when the
+    real node is 'kanebra-worker') is rejected at enqueue — marked failed so it
+    never becomes a pending orphan and the dispatch poller fails fast."""
+    db = _patch
+    orch = _orch(db, _session(machine_id="kanebra"))  # no such node
+
+    orch._mesh_enqueue_task(_task(), "claude")
+
+    row = db.get_task("t-1")
+    assert row["status"] == "failed", "unknown-node pin must fail fast, never linger pending"
+    assert "not a registered mesh node" in (row["error"] or "")
+    # No worker — real or phantom — ever sees it as claimable work.
+    assert db.get_pending_tasks(node_id="kanebra") == []
