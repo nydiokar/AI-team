@@ -976,10 +976,21 @@ def test_server_async_no_progress_timeout_aborts(tmp_path):
         stop.wait(2)
 
     backend._base_urls["/repo"] = "http://localhost"
+    # `opencode.time` is the global time module: script the clock for this
+    # thread only, so stray threads from other tests can't consume the values.
+    real_monotonic = time.monotonic
+    caller = threading.get_ident()
+    scripted = iter([0.0, 0.0, 31.0])
+
+    def fake_monotonic() -> float:
+        if threading.get_ident() != caller:
+            return real_monotonic()
+        return next(scripted)
+
     with (
         patch.object(backend, "_http", side_effect=fake_http),
         patch.object(backend, "_read_activity_events", side_effect=fake_reader),
-        patch("src.backends.opencode.time.monotonic", side_effect=[0.0, 0.0, 31.0]),
+        patch("src.backends.opencode.time.monotonic", side_effect=fake_monotonic),
         patch("config.config") as config,
     ):
         config.opencode.timeout_seconds = 60

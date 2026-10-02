@@ -215,6 +215,11 @@ def _load_artifact_index(results_dir: Path, session_id: str) -> Dict[str, Dict[s
 # ── Primary source: mesh.db task ledger ───────────────────────────────────────
 
 
+# [A82 Stage 6] Managed (protocol-1-only) statuses whose prompt the model never
+# saw: still waiting in the queue, or withdrawn while waiting.
+_UNCONSUMED_TURN_STATUSES = frozenset({"queued", "withdrawn"})
+
+
 def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]]:
     """Project the session's task ledger into conversation turns.
 
@@ -262,7 +267,13 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
 
     turns: List[Dict[str, Any]] = []
     for r in rows:
-        success = (r.get("status") or "") not in ("failed", "failed_node_offline")
+        status = str(r.get("status") or "")
+        # [A82 Stage 6] A managed turn still WAITING in the session queue (or
+        # withdrawn before it ever ran) was never consumed by the model: it
+        # belongs to the queue card read model, never to the conversation.
+        if status in _UNCONSUMED_TURN_STATUSES:
+            continue
+        success = status not in ("failed", "failed_node_offline")
         instruction = (r.get("prompt") or "").strip()
         result = (r.get("reply_text") or "").strip()
         # Back-compat: a row enriched only via the legacy `result` JSON.
@@ -312,6 +323,9 @@ def _turns_from_db(session_id: str, limit: int) -> Optional[List[Dict[str, Any]]
             "started_at": created or completed or "",
             "completed_at": completed or created or "",
             "success": success,
+            # [A82 Stage 6] ledger status, so the UI can tell an in-flight
+            # exchange from a finished one and dedupe it against queue cards.
+            "status": status,
             "instruction": instruction,
             "result": result,
             "file_count": len(files) if isinstance(files, (list, tuple)) else 0,

@@ -525,6 +525,18 @@ capability, not an A71 per-node credential rewrite or a sandbox against agents
 that can already steal host admin secrets. The packet fixes issuance,
 provisioning, storage and validation details.
 
+As built (A82 Stage 5): the capability is minted in the carrier's managed
+claim response (`/claim-managed`, worker credential + registered incarnation +
+claim token prove current ownership; binding read from the canonical row),
+stored as `sha256` with session generation in `mesh_sender_capabilities`, and
+presented as `Authorization: AITeamSender <capability>` on
+`POST /api/sessions/{id}/turn-requests`. Claude sessions get the tool as an
+in-process SDK MCP server in their own `ClaudeAgentOptions.mcp_servers` entry
+rather than a stdio server, because the installed SDK serializes a stdio
+server's `env` into the CLI argv (`--mcp-config`), readable by any same-user
+process; Codex threads get the stdio `scripts/mcp_sender.py` server through
+`_thread_config` with the capability in that server's own environment.
+
 Attachment references must survive queue wait, restart and revision.
 Current staged files need explicit reference retention/ownership validation;
 path syntax alone is not authorization. Fetch remotely before start, with

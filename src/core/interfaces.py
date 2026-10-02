@@ -328,6 +328,83 @@ class CodingBackend(ABC):
         """
         return self.resume_session(session, "/compact")
 
+    # ------------------------------------------------------------------ #
+    # [A82 Stage 3] Managed (protocol-1) turn contract — the ONE seam a carrier
+    # uses for a claimed managed row. Default: unsupported (fail closed). A
+    # backend opts in by overriding all three; it is then advertised for queue
+    # protocol 1. Legacy create/resume/run_oneoff are untouched.
+    # ------------------------------------------------------------------ #
+    def supports_managed_turns(self) -> bool:
+        """True iff this backend implements :meth:`run_managed_turn`."""
+        return False
+
+    def run_managed_turn(
+        self, session: "Session", message: str, ownership: Any, *,
+        telemetry_context: Any = None, telemetry_sink: Any = None,
+        on_process: Any = None,
+    ) -> ExecutionResult:
+        """Execute one managed turn for ``ownership`` (a
+        ``turn_queue.ManagedTurnOwnership``). Must NEVER interrupt an in-flight
+        turn on conflict (typed ``OwnershipConflictError`` instead) and must
+        raise/report a typed ``RecoveryRequiredError`` when the outcome cannot
+        be attributed (uncorrelated result / deadline). ``on_process`` (optional
+        callable) receives the backend process identity ({pid, create_time})
+        BEFORE the prompt is submitted, so a successor carrier can prove that
+        process is gone. Default: unsupported."""
+        from src.control.turn_queue import ManagedUnsupportedError
+
+        raise ManagedUnsupportedError(
+            "backend has no managed execution path", backend=type(self).__name__,
+        )
+
+    def is_quiescent(self, session: "Session") -> bool:
+        """True iff no native work for ``session`` is in flight. Default False
+        (unknown ⇒ not quiescent, fail closed)."""
+        return False
+
+    def quiescence_reason(self, session: "Session") -> Optional[str]:
+        """[A82 pre-cutover, m2] Why the last :meth:`is_quiescent` for
+        ``session`` was False (short, operator-visible), or None if unknown.
+        Default: None (the carrier then reports a generic reason)."""
+        return None
+
+    def provision_sender_capability(self, session_id: str, token: Optional[str]) -> bool:
+        """[A82 Stage 5] Give (or, with ``None``, withdraw) the session's scoped
+        ``send_instruction`` capability to THIS backend instance — memory only,
+        per session, never global env/config. Returns True iff the backend
+        supports a per-session sender tool. Default: unsupported."""
+        return False
+
+    def forget_managed_turn(self, session: "Session", turn_uuid: str) -> bool:
+        """The carrier learned the managed turn ``turn_uuid`` is terminal on the
+        server (operator-resolved / definitively refused): drop any in-memory
+        wait for it so the session can become quiescent again. Default: no-op."""
+        return False
+
+    # [A82 Stage 4b] Producer 2 — managed compaction + operator cancel.
+    def run_managed_compaction(
+        self, session: "Session", ownership: Any, *,
+        telemetry_context: Any = None, telemetry_sink: Any = None,
+        on_process: Any = None,
+    ) -> ExecutionResult:
+        """Compact ``session``'s native context as ONE managed turn owned by
+        ``ownership``. Same contract as :meth:`run_managed_turn`: never
+        interrupts native work (not quiescent ⇒ typed ``OwnershipConflictError``
+        before anything is submitted), and an unattributable outcome is a typed
+        ``RecoveryRequiredError``. Default: unsupported (fail closed)."""
+        from src.control.turn_queue import ManagedUnsupportedError
+
+        raise ManagedUnsupportedError(
+            "backend has no managed compaction path", backend=type(self).__name__,
+        )
+
+    def cancel_managed_turn(self, session: "Session", turn_uuid: str) -> bool:
+        """Operator cancel of the managed turn ``turn_uuid`` ONLY (never another
+        turn): interrupt it if it is the turn the backend is running, or arm the
+        interrupt for when it begins. True iff a cancel was delivered/armed.
+        Default: False (nothing to cancel on this backend)."""
+        return False
+
 
 class ITaskOrchestrator(ABC):
     """Main orchestrator interface"""

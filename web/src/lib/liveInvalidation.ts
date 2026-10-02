@@ -24,11 +24,30 @@ function textField(value: unknown): string | null {
  */
 const PROGRESS_ONLY_EVENTS: ReadonlySet<string> = new Set(["task_activity"]);
 
+/**
+ * [A82 Stage 6] Post-commit managed queue signal (`turn_queue_changed`). A
+ * queue-only change (admit/edit/withdraw/pause/activate/claim/start) refreshes
+ * ONLY the queue card read-model + the session list (opState comes from the
+ * ledger overlay) — never the transcript. A TERMINAL outcome is a real
+ * conversation fact: full session refresh, so the finished exchange replaces
+ * the card in the same batch.
+ */
+const TURN_QUEUE_EVENT = "turn_queue_changed";
+const TURN_TERMINAL_CHANGES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "failed_node_offline",
+  "resolved",
+]);
+
 export interface LiveInvalidationTarget {
   /** sessions needing a FULL read-model refresh (messages/turns/usage/activity) */
   sessions: Set<string>;
   /** sessions needing ONLY the live activity-ticker refresh (progress pings) */
   activitySessions: Set<string>;
+  /** [A82 Stage 6] sessions needing ONLY the queue cards + session list refresh */
+  queueSessions?: Set<string>;
   cases: Set<string>;
   tasks: boolean;
   approvals: boolean;
@@ -40,6 +59,7 @@ export function collectLiveInvalidationTargets(
   const target: LiveInvalidationTarget = {
     sessions: new Set<string>(),
     activitySessions: new Set<string>(),
+    queueSessions: new Set<string>(),
     cases: new Set<string>(),
     tasks: false,
     approvals: false,
@@ -54,6 +74,19 @@ export function collectLiveInvalidationTargets(
       // A progress ping churns nothing but the ticker — never the transcript,
       // task/job lists, cases, or approvals. Record the session and move on.
       if (sessionId) target.activitySessions.add(sessionId);
+      continue;
+    }
+
+    if (eventName === TURN_QUEUE_EVENT) {
+      if (!sessionId) continue;
+      if (TURN_TERMINAL_CHANGES.has(String(raw.change ?? ""))) {
+        target.sessions.add(sessionId);
+        target.tasks = true;
+      } else {
+        target.queueSessions?.add(sessionId);
+        // A withdrawal is terminal for the task lists, never a transcript fact.
+        if (raw.change === "withdrawn") target.tasks = true;
+      }
       continue;
     }
 
@@ -76,8 +109,13 @@ export function invalidateLiveTargets(
   queryClient: QueryClient,
   target: LiveInvalidationTarget,
 ): void {
-  if (target.sessions.size > 0 || target.tasks) {
+  const queueOnly = target.queueSessions ?? new Set<string>();
+  if (target.sessions.size > 0 || target.tasks || queueOnly.size > 0) {
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  }
+  for (const sessionId of queueOnly) {
+    if (target.sessions.has(sessionId)) continue; // full refresh below covers it
+    queryClient.invalidateQueries({ queryKey: ["session-turn-queue", sessionId] });
   }
   if (target.tasks) {
     queryClient.invalidateQueries({ queryKey: ["tasks"] });
@@ -97,6 +135,7 @@ export function invalidateLiveTargets(
   for (const sessionId of target.sessions) {
     queryClient.invalidateQueries({ queryKey: ["session-messages", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["session-turns", sessionId] });
+    queryClient.invalidateQueries({ queryKey: ["session-turn-queue", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["session-usage", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["session-activity", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["work-affiliations"] });
@@ -143,6 +182,7 @@ const LIVE_QUERY_KEYS: readonly (readonly [string])[] = [
   ["artifacts"],
   ["session-messages"],
   ["session-turns"],
+  ["session-turn-queue"],
   ["session-usage"],
   ["session-activity"],
   ["work-list"],

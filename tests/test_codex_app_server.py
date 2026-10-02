@@ -2,11 +2,14 @@
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from src.backends.codex_app_server import CodexAppServerClient, CodexProtocolError, CodexRPCError
+from src.backends.codex_app_server import (
+    CodexAppServerClient, CodexProtocolError, CodexRPCError, CodexRPCTimeout,
+)
 
 
 @pytest.fixture
@@ -28,6 +31,7 @@ for line in sys.stdin:
     mode=request["params"].get("threadId", "")
     if mode=="die": sys.exit(1)
     if mode=="hang": time.sleep(10); continue
+    if mode=="slow": time.sleep(0.5)
     if mode=="malformed": print("not json",flush=True); continue
     if mode=="wrong-id": emit({"id":99999,"result":{}}); continue
     if mode=="unknown":
@@ -96,13 +100,25 @@ def test_unknown_notification_does_not_poison_runtime(server):
     assert not client.failure
 
 
-def test_deadline_poisons_connection_without_replay(server):
+def test_deadline_is_request_scoped_and_late_reply_is_routed_not_fatal(server):
+    """[A82 step 4 rework, M1] Replaces "deadline poisons the connection": one
+    slow reply must never fail the SHARED client (that killed every other
+    thread's turn). The late reply goes to ``on_late`` or is dropped; never
+    replayed, never an unmatched-response failure."""
     client = server()
     client.start()
-    with pytest.raises(CodexProtocolError, match="deadline"):
-        client.request("turn/interrupt", {"threadId": "hang", "turnId": "turn"}, timeout=0.05)
-    with pytest.raises(CodexProtocolError):
-        client.request("turn/interrupt", {"threadId": "later", "turnId": "turn"})
+    late: list[dict] = []
+    with pytest.raises(CodexRPCTimeout, match="deadline"):
+        client.request("turn/interrupt", {"threadId": "slow", "turnId": "turn"}, timeout=0.05,
+                       on_late=late.append)
+    assert not client.failure
+    assert client.request("turn/interrupt", {"threadId": "later", "turnId": "turn"}) == {}
+    assert len(late) == 1 and late[0]["result"] == {}
+    with pytest.raises(CodexRPCTimeout):
+        client.request("turn/interrupt", {"threadId": "slow", "turnId": "turn"}, timeout=0.05)
+    assert client.request("turn/interrupt", {"threadId": "after", "turnId": "turn"}) == {}
+    assert not client.failure and client.process.poll() is None
+    assert client.pending == {} and client.late == {}
 
 
 def test_concurrent_rpc_ids_are_correlated(server):
@@ -126,3 +142,43 @@ def test_thread_channels_reject_competing_subscription(server):
     client.subscribe("different")
     client.unsubscribe("exact")
     client.subscribe("exact")
+
+
+def test_late_ids_are_bounded_by_refusal_never_by_eviction(server, monkeypatch):
+    """[A82 step 4 rework, M1] An evicted late id would make its reply read as
+    unmatched and fail the shared client: the bound refuses new requests
+    (request-scoped) until late replies drain."""
+    import src.backends.codex_app_server as mod
+
+    monkeypatch.setattr(mod, "MAX_LATE", 1)
+    client = server()
+    client.start()
+    with pytest.raises(CodexRPCTimeout):
+        client.request("turn/interrupt", {"threadId": "slow", "turnId": "turn"}, timeout=0.05)
+    with pytest.raises(CodexProtocolError, match="capacity"):
+        client.request("turn/interrupt", {"threadId": "x", "turnId": "turn"})
+    assert not client.failure
+    deadline = time.monotonic() + 5
+    while client.late and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert client.request("turn/interrupt", {"threadId": "after", "turnId": "turn"}) == {}
+    assert not client.failure
+
+
+def test_hung_request_goes_late_then_unresponsive_and_its_route_can_be_forgotten(server):
+    """[A82 pre-cutover, N1] Restores the ``hang``-mode coverage: a request the
+    app-server never answers is request-scoped (the client stays healthy), is
+    tracked as outstanding, flags the app-server unresponsive past a window,
+    and its late route can be dropped without un-matching a future reply."""
+    client = server()
+    client.start()
+    with pytest.raises(CodexRPCTimeout) as info:
+        client.request("turn/interrupt", {"threadId": "hang", "turnId": "turn"}, timeout=0.05)
+    request_id = info.value.request_id
+    assert request_id > 0 and client.outstanding(request_id)
+    assert client.unresponsive(5.0) is False
+    time.sleep(0.2)
+    assert client.unresponsive(0.1) is True
+    assert client.forget_late(request_id) is True
+    assert client.late == {} and client.outstanding(request_id)
+    assert not client.failure and client.process.poll() is None

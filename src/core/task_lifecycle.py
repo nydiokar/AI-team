@@ -52,6 +52,13 @@ _MESH_STATE = {
     "failed": FAILED,
     "failed_node_offline": FAILED,
     "cancelled": CANCELLED,
+    # [A82 Stage 6] managed (protocol-1) turn states. `queued` waits in the
+    # session queue; `running` = start authorized; `withdrawn` never ran;
+    # `recovery_required` = outcome unproven (attention, not a failure).
+    "queued": QUEUED,
+    "running": RUNNING,
+    "withdrawn": CANCELLED,
+    "recovery_required": CONNECTION_UNKNOWN,
 }
 
 # Terminal states never get overlaid by a (stale) session status — a completed

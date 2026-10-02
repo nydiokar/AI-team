@@ -29,6 +29,7 @@ export function useSessionTimeline(
   session: Session | undefined,
   turns: RawTranscriptTurn[] = [],
   approvals: ApprovalRequest[] = [],
+  queueIds: ReadonlySet<string> = new Set(),
 ): TimelineItem[] {
   const sent = useSentStore((s) =>
     sessionId ? s.bySession[sessionId] : undefined,
@@ -70,6 +71,11 @@ export function useSessionTimeline(
     // 1 — real conversation turns. Each task is one exchange.
     const seenInstructions = new Set<string>();
     for (const t of turns) {
+      // [A82 Stage 6] The queue card owns a managed request (by durable id)
+      // until there is a finished exchange; a starting/working prompt is shown
+      // on its card, never twice. (Waiting/withdrawn prompts never reach the
+      // transcript at all — the backend filters them.)
+      if (queueIds.has(t.task_id) && !t.result) continue;
       // Distinct anchors: the USER bubble is stamped when the turn STARTED (when
       // the message was sent); the ASSISTANT bubble when the reply LANDED (start +
       // time spent working). Older turns without the split fall back to the single
@@ -128,6 +134,9 @@ export function useSessionTimeline(
       return seen.some((s) => s.startsWith(t) || t.startsWith(s));
     };
     for (const m of sent ?? []) {
+      // [A82 Stage 6] An acknowledged managed send is reconciled by durable id
+      // into its queue card ("Next up") — never a second optimistic bubble.
+      if (m.taskId && queueIds.has(m.taskId)) continue;
       if (isDup(m.text)) continue;
       items.push({
         kind: "message",
@@ -168,12 +177,12 @@ export function useSessionTimeline(
       items.push({
         kind: "task_state",
         at: session.updatedAt,
-        taskId: session.lastTaskId ?? "current",
+        taskId: session.turnQueue?.activeTurnId ?? session.lastTaskId ?? "current",
         state: "running",
         objective: "Working…",
       });
     }
 
     return items;
-  }, [sessionId, session, turns, sent, approvals, boot]);
+  }, [sessionId, session, turns, sent, approvals, boot, queueIds]);
 }

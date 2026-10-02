@@ -24,6 +24,10 @@ class NodeCapabilities:
     repos: List[dict] = field(default_factory=list)  # [{name, path}] snapshot from worker
     # Backend-owned model descriptors: {backend: [{name, is_default, efforts}]}
     models: Dict[str, List[dict]] = field(default_factory=dict)
+    # [A82 Stage 3] Managed turn-queue capability as REGISTERED by the carrier.
+    # Default legacy-only; protocol-1 rows are offered only for managed_backends.
+    queue_protocols: List[int] = field(default_factory=lambda: [0])
+    managed_backends: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -118,12 +122,20 @@ class NodeRegistry:
         # Sweep claims only when the worker process identity changed. A controller
         # restart also forces workers to re-register, but the worker process is
         # still alive and may still be executing its claimed task.
+        self._carrier_back_online(info.node_id)
         if old_incarnation and new_incarnation and old_incarnation != new_incarnation:
             released = self._db_release_node_claims(info.node_id)
             if released:
                 logger.warning(
                     "event=orphaned_claims_released node_id=%s old_incarnation=%s new_incarnation=%s count=%d task_ids=%s",
                     info.node_id, old_incarnation, new_incarnation, len(released), released,
+                )
+            dead_grants = self._db_release_superseded_managed_grants(info.node_id, new_incarnation)
+            if dead_grants:
+                self._note_managed_released(len(dead_grants))
+                logger.warning(
+                    "event=superseded_managed_grants_released node_id=%s new_incarnation=%s count=%d task_ids=%s",
+                    info.node_id, new_incarnation, len(dead_grants), dead_grants,
                 )
             lost_count = self._db_mark_driver_sessions_lost(info.node_id)
             if lost_count:
@@ -149,7 +161,11 @@ class NodeRegistry:
         node = self._nodes.get(node_id)
         if node is None:
             return False
-        node.last_heartbeat = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=timezone.utc)
+        # [A82 pre-cutover rework, F6] offline / heartbeat-stale → online.
+        returned = node.status != "online" or node.last_heartbeat is None \
+            or (now - node.last_heartbeat).total_seconds() > self._timeout_sec
+        node.last_heartbeat = now
         node.status = "online"
         if live_state is not None:
             node.live_state = live_state
@@ -157,6 +173,8 @@ class NodeRegistry:
         if models is not None:
             node.capabilities.models = dict(models)
         self._db_heartbeat(node_id, live_state, models)
+        if returned:
+            self._carrier_back_online(node_id)
         return True
 
     # ------------------------------------------------------------------
@@ -283,7 +301,10 @@ class NodeRegistry:
             rows = db.list_tasks(status="claimed")
             failed = []
             for row in rows:
-                if row.get("claimed_by") == node_id:
+                # [A82 Stage 3 rework 4, m4] fail_task is fenced to protocol-0
+                # rows; a managed row it cannot change must not be reported
+                # (or notified) as failed. Offline is not quiescence.
+                if row.get("claimed_by") == node_id and int(row.get("queue_protocol") or 0) == 0:
                     db.fail_task(row["id"], f"node {node_id} went offline", status="failed_node_offline")
                     failed.append(row["id"])
             return failed
@@ -313,6 +334,11 @@ class NodeRegistry:
                     repos=node.capabilities.repos,
                     models=node.capabilities.models,
                     incarnation_id=node.incarnation_id,
+                    # [A82 Stage 4a rework] persisted managed capability.
+                    managed_backends=(
+                        list(node.capabilities.managed_backends or [])
+                        if 1 in set(node.capabilities.queue_protocols or []) else []
+                    ),
                 )
                 node.incarnation_id = incarnation_id
                 return old_incarnation, incarnation_id
@@ -337,6 +363,33 @@ class NodeRegistry:
                 )
         except Exception as e:
             logger.debug("event=db_heartbeat_err node_id=%s err=%s", node_id, e)
+
+    def _carrier_back_online(self, node_id: str) -> None:
+        """[A82 pre-cutover rework, F6] Release the node's ``carrier_offline``
+        holds and wake the turn scheduler (an in-process hint: the task server
+        is embedded in the gateway; out of process the cleared ``blocked_until``
+        is picked up by the scheduler's ≤60 s safety-net pass). Best-effort:
+        the backoff still bounds activation if this fails."""
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db is None or not db.release_carrier_offline_holds(node_id):
+                return
+            from src.control.turn_scheduler import notify_turn_queue_changed
+            notify_turn_queue_changed()
+            logger.info("event=carrier_offline_holds_released node_id=%s", node_id)
+        except Exception as e:
+            logger.warning("event=carrier_offline_release_failed node_id=%s err=%s", node_id, e)
+
+    def _note_managed_released(self, count: int) -> None:
+        """[A82 Stage 7] Released superseded grants re-entered the waiting count:
+        raise the shared allowance + hint the scheduler (in-process: the task
+        server is embedded in the gateway). The scheduler refresh is the backstop."""
+        try:
+            from src.control.turn_scheduler import notify_managed_released
+            notify_managed_released(count)
+        except Exception as e:
+            logger.warning("event=managed_release_note_failed count=%d err=%s", count, e)
 
     def _db_mark_offline(self, node_id: str) -> None:
         try:
@@ -365,6 +418,17 @@ class NodeRegistry:
                 return db.release_node_claims(node_id)
         except Exception as e:
             logger.debug("event=db_release_node_claims_err node_id=%s err=%s", node_id, e)
+        return []
+
+
+    def _db_release_superseded_managed_grants(self, node_id: str, incarnation_id: str) -> list:
+        try:
+            from src.control.db import get_db
+            db = get_db()
+            if db:
+                return db.release_superseded_managed_grants(node_id, incarnation_id)
+        except Exception as e:
+            logger.warning("event=db_release_superseded_grants_err node_id=%s err=%s", node_id, e)
         return []
 
 

@@ -39,7 +39,8 @@ class SessionStore:
     def create(self, backend: str, repo_path: str,
                 telegram_chat_id: Optional[int] = None,
                 owner_user_id: Optional[int] = None,
-                machine_id: Optional[str] = None) -> Session:
+                machine_id: Optional[str] = None,
+                session_id: Optional[str] = None) -> Session:
         # A11: stamp the pinned node atomically at create time. Previously this
         # always wrote `socket.gethostname()` (the local host) and callers that
         # wanted a remote pin had to set `machine_id` and `save()` afterwards —
@@ -50,7 +51,8 @@ class SessionStore:
         # here closes that window: the row never transiently names the wrong node.
         pinned = (machine_id or "").strip() or socket.gethostname()
         session = Session(
-            session_id=uuid.uuid4().hex[:12],
+            # [A82 Stage 4e] an explicit id makes a respawn's create convergent.
+            session_id=session_id or uuid.uuid4().hex[:12],
             backend=backend,
             repo_path=repo_path,
             status=SessionStatus.IDLE,

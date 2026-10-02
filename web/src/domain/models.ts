@@ -98,6 +98,17 @@ export interface Session {
   /** [A83] Derived, non-authoritative secondary reason refining `opState`
    *  (spec docs/TBD/SESSION_WAIT_STATE_GRANULARITY.md). null ⇒ no reason. */
   reason: SessionReason | null;
+  /** [A82 Stage 6] Managed turn-queue overlay (enrolled sessions only). */
+  turnQueue: SessionTurnQueue | null;
+}
+
+/** [A82 Stage 6] Ledger truth for an enrolled session's queue. */
+export interface SessionTurnQueue {
+  queued: number;
+  activeTurnId: string | null;
+  activeStatus: string | null;
+  paused: boolean;
+  hold: string | null;
 }
 
 // [A83] Canonical secondary reason. Presentational; the enum stays authoritative.

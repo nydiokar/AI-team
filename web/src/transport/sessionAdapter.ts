@@ -6,6 +6,7 @@
 import type { Session, SessionReason, SessionReasonKind } from "../domain/models";
 import type { SessionLifecycle, SessionOpState } from "../domain/status";
 import type { RawSessionReason, RawSessionView } from "./rawApi";
+import { queueOpState, toSessionTurnQueue } from "../lib/turnQueue";
 
 const REASON_KINDS: ReadonlySet<string> = new Set<SessionReasonKind>([
   "paused_quota",
@@ -42,8 +43,15 @@ export function deriveLifecycle(raw: RawSessionView): SessionLifecycle {
   return raw.status === "closed" ? "closed" : "open";
 }
 
-/** Backend SessionStatus → operational state (gap-doc §3 table). */
+/** Backend SessionStatus → operational state (gap-doc §3 table).
+ *  [A82 Stage 6] An ENROLLED session (`turn_queue` present) is running only
+ *  while the LEDGER has an in-flight slot holder; a held (recovery) turn needs
+ *  attention; queued work (or a stale persisted BUSY) is never "running". */
 export function deriveOpState(raw: RawSessionView): SessionOpState {
+  const queue = toSessionTurnQueue(raw.turn_queue);
+  const fromQueue = queueOpState(queue);
+  if (fromQueue) return fromQueue;
+  if (queue && raw.status === "busy") return "idle";
   switch (raw.status) {
     case "busy":
     // A18: pinned node briefly offline, gateway is holding + polling for it to
@@ -104,6 +112,7 @@ export function toSession(raw: RawSessionView): Session {
     keepPinned: Boolean(raw.keep_pinned),
     keepNote: raw.keep_note ?? "",
     reason: deriveReason(raw),
+    turnQueue: toSessionTurnQueue(raw.turn_queue),
   };
 }
 

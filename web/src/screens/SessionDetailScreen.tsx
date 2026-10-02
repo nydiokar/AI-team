@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ChevronLeft,
@@ -45,7 +45,9 @@ import { ModelPickerSheet } from "../components/sessions/ModelPickerSheet";
 import { EffortPickerSheet } from "../components/sessions/EffortPickerSheet";
 import { GitPanelSheet } from "../components/sessions/GitPanelSheet";
 import { SessionKeepSheet } from "../components/sessions/SessionKeepSheet";
-import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionUsage, useSessionActivity, useJobs, useCacheHeartbeats } from "../hooks/useLiveData";
+import { useSessions, useApprovals, useSessionMessages, useArtifacts, useArtifact, useSessionTurns, useSessionTurnQueue, useSessionUsage, useSessionActivity, useJobs, useCacheHeartbeats } from "../hooks/useLiveData";
+import { TurnQueuePanel } from "../components/timeline/TurnQueuePanel";
+import { queueOwnedIds, transcriptFinishedIds } from "../lib/turnQueue";
 import { compactTokens } from "../components/timeline/SessionTurns";
 import { useSessionAffiliations } from "../hooks/useWork";
 import { useSessionTimeline } from "../hooks/useSessionTimeline";
@@ -602,10 +604,21 @@ export function SessionDetailScreen() {
     isError: messagesError,
     fetchStatus: messagesFetchStatus,
   } = useSessionMessages(id);
+  // [A82 Stage 6] Queue cards: a read model separate from historical exchanges,
+  // loaded only for an enrolled session (the session overlay says so).
+  const { data: turnQueue } = useSessionTurnQueue(id, Boolean(session?.turnQueue));
   const { data: approvals } = useApprovals();
   const { data: activity } = useSessionActivity(id, 30);
-  const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? []);
-  const liveActivity = useTaskActivity(id, session?.lastTaskId ?? undefined);
+  // Pending/terminal dedup by durable id: a finished exchange wins over a card.
+  const finishedIds = useMemo(() => transcriptFinishedIds(turns ?? []), [turns]);
+  const queueIds = useMemo(
+    () => queueOwnedIds((turnQueue?.turns ?? []).map((turn) => turn.id), finishedIds),
+    [turnQueue, finishedIds],
+  );
+  const timeline = useSessionTimeline(id, session, turns ?? [], approvals ?? [], queueIds);
+  const liveActivity = useTaskActivity(
+    id, session?.turnQueue?.activeTurnId ?? session?.lastTaskId ?? undefined,
+  );
   const running = session?.opState === "running";
   const closed = session?.lifecycle === "closed";
   // Only treat as "loading" on the very first fetch — subsequent polls use
@@ -1311,6 +1324,10 @@ export function SessionDetailScreen() {
               Fork → new session
             </button>
           </div>
+        )}
+
+        {id && !closed && turnQueue?.enrolled && (
+          <TurnQueuePanel sessionId={id} page={turnQueue} ownedIds={queueIds} />
         )}
 
         {/* Composer pinned outside the scroll container so it always sits at the true bottom */}

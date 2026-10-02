@@ -17,6 +17,7 @@ Run locally (no Tailscale required):
 """
 
 import asyncio
+import functools
 import faulthandler
 import json
 import logging
@@ -35,7 +36,9 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from src.control.turn_queue import CANCEL_MANAGED_ACTION, ManagedTurnOwnership
 
 from src.core.process_utils import (
     WORKER_INCARNATION_ENV,
@@ -579,14 +582,30 @@ def _make_session_from_payload(payload: Dict[str, Any]) -> Any:
 # Task executor
 # ---------------------------------------------------------------------------
 
+# Carrier actions that never invoke a backend (no session turn).
+_BACKENDLESS_ACTIONS = frozenset({"fetch_staged_file", "inspect"})
+
+
+class StagedFileMissing(Exception):
+    """[A82 pre-cutover rework, F4] The controller answered 404 for a staged
+    file: it is definitively gone (no retry can fetch it)."""
+
+
 async def _fetch_staged_file(
     staged: Dict[str, Any],
     payload: Dict[str, Any],
     http: "_HTTP",
+    delete: bool = True,
+    strict: bool = False,
 ) -> Optional[str]:
     """Fetch a staged file from the controller and save it into the session's uploads dir.
 
     Returns the local path string on success, None on failure.
+    [A82 pre-cutover P2] ``delete=False`` keeps the controller copy (a managed
+    turn deletes it only after its prompt was submitted, so a not-invoked
+    release can re-fetch it on the next attempt).
+    [A82 pre-cutover rework, F4] ``strict=True`` raises ``StagedFileMissing``
+    on a definitive 404 instead of returning None (transient errors still None).
     """
     file_id = staged.get("file_id", "")
     filename = staged.get("filename", "upload")
@@ -607,12 +626,21 @@ async def _fetch_staged_file(
         logger.info("event=staged_file_fetched file_id=%s dest=%s size=%d", file_id, dest, len(file_bytes))
     except Exception as e:
         logger.error("event=staged_file_fetch_failed file_id=%s err=%s", file_id, e)
+        if strict and isinstance(e, urllib.error.HTTPError) and e.code == 404:
+            raise StagedFileMissing(file_id) from e
         return None
+    if delete:
+        await _delete_staged_file(staged, http)
+    return str(dest)
+
+
+async def _delete_staged_file(staged: Dict[str, Any], http: "_HTTP") -> None:
+    """Best-effort removal of the controller's staged copy."""
+    file_id = staged.get("file_id", "")
     try:
         await asyncio.to_thread(http.delete, f"/files/{file_id}")
     except Exception as e:
         logger.warning("event=staged_file_cleanup_failed file_id=%s err=%s", file_id, e)
-    return str(dest)
 
 
 async def _execute_task(
@@ -621,8 +649,17 @@ async def _execute_task(
     http: Optional["_HTTP"] = None,
     telemetry_sink: Any = None,
     node_id: str = "",
+    ownership: Any = None,
+    on_process: Any = None,
 ) -> Dict[str, Any]:
-    """Execute one task row from mesh_tasks. Returns an ExecutionResultPayload-compatible dict."""
+    """Execute one task row from mesh_tasks. Returns an ExecutionResultPayload-compatible dict.
+
+    [A82 Stage 3] ``ownership`` (a ``turn_queue.ManagedTurnOwnership``) marks a
+    claimed protocol-1 row: its session turn goes ONLY through the backend
+    interface ``CodingBackend.run_managed_turn`` — no backend-specific branching
+    and no legacy fallback (an unsupported backend raises a typed refusal before
+    anything runs). ``ownership=None`` is the unchanged legacy path."""
+    managed = ownership is not None
     payload = task_row.get("payload") or {}
     if isinstance(payload, str):
         try:
@@ -631,11 +668,53 @@ async def _execute_task(
             payload = {}
 
     action = task_row.get("action", "run_oneoff")
+    if managed and action not in ("create_session", "resume_session", "compact_session"):
+        return {
+            "success": False,
+            "output": "",
+            "errors": [f"managed turn refused: action {action!r} has no managed execution path"],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 1,
+            "error_class": "managed_unsupported",
+        }
 
     # Fetch any file staged on the controller before backend execution
     staged = (payload.get("metadata") or {}).get("staged_file")
+    fetched: Optional[str] = None
     if staged and http is not None:
-        await _fetch_staged_file(staged, payload, http)
+        try:
+            fetched = await _fetch_staged_file(staged, payload, http, delete=not managed, strict=managed)
+        except StagedFileMissing:
+            # [A82 pre-cutover rework, F4] Definitively gone (404): a terminal,
+            # visible failure — a requeue could never fetch it (it would block
+            # the session's queue head forever). Nothing was invoked.
+            return {
+                "success": False,
+                "output": "",
+                "errors": [f"staged_file_missing: {str(staged.get('file_id', ''))[:64]} "
+                           "(the gateway no longer holds the attachment; re-send it)"],
+                "files_modified": [],
+                "execution_time": 0.0,
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "return_code": 1,
+                "error_class": "staged_file_missing",
+            }
+    if managed and staged and fetched is None:
+        # [A82 pre-cutover P2] Never run a managed turn without its file: a
+        # pre-submit refusal ⇒ the carrier releases the attempt NOT invoked
+        # with this visible reason (prompt kept; repeated refusals back off).
+        return {
+            "success": False,
+            "output": "",
+            "errors": [f"staged_file_unavailable: {str(staged.get('file_id', ''))[:64]}"],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 1,
+            "error_class": "managed_conflict",
+        }
 
     # Repo inspection tasks: read-only (or commit) ops against the session's
     # repo, which lives on THIS worker. No backend needed — the gateway routes
@@ -826,11 +905,40 @@ async def _execute_task(
         from src.core.interfaces import ExecutionResult as _ER
         from src.core.backend_call import call_backend
 
-        if action in ("create_session", "resume_session"):
+        if managed and action == "compact_session":
+            # [A82 Stage 4b] Managed compaction: ONLY through the interface
+            # (no backend-name branching, no legacy fallback).
             session = _make_session_from_payload(payload)
             if session is None:
                 raise ValueError("Session payload missing for session action")
-            if action == "create_session" or not session.backend_session_id:
+            raw = await asyncio.to_thread(
+                call_backend,
+                functools.partial(backend.run_managed_compaction, on_process=on_process),
+                session,
+                ownership,
+                telemetry_context=context,
+                telemetry_sink=sink,
+            )
+        elif action in ("create_session", "resume_session"):
+            session = _make_session_from_payload(payload)
+            if session is None:
+                raise ValueError("Session payload missing for session action")
+            if managed:
+                raw = await asyncio.to_thread(
+                    call_backend,
+                    functools.partial(backend.run_managed_turn, on_process=on_process),
+                    session,
+                    prompt or session.last_user_message or "",
+                    ownership,
+                    telemetry_context=context,
+                    telemetry_sink=sink,
+                )
+                if staged and http is not None and getattr(raw, "error_class", "") not in (
+                    "managed_conflict", "recovery_required",
+                ):
+                    # [A82 pre-cutover P2] submitted ⇒ the staged copy is spent.
+                    await _delete_staged_file(staged, http)
+            elif action == "create_session" or not session.backend_session_id:
                 raw = await asyncio.to_thread(
                     call_backend,
                     backend.create_session,
@@ -979,6 +1087,7 @@ async def _execute_task(
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "return_code": 1,
             "telemetry_invocation_id": context.invocation_id if context else "",
+            **({"error_class": getattr(e, "code", "") or error_class} if managed else {}),
         }
 
 
@@ -1138,8 +1247,874 @@ class WorkerAgent:
         os.environ[WORKER_NODE_ENV] = self.cfg.node_id
         os.environ[WORKER_INCARNATION_ENV] = self._incarnation_id
         self._activity_forwarder: Optional[_ActivityForwarder] = None
+        # [A82 Stage 3] Managed (protocol-1) result spool + bookkeeping. Stored
+        # under the carrier state dir (outside repo source); replayed on boot so a
+        # delivered-but-unacked result survives restart (design §6, WRK04).
+        # [A82 Stage 3 rework, m5] Lazy: with the managed flag OFF nothing is
+        # constructed or created on disk — unless a previous managed run left
+        # carrier state behind, which must still drain (design §3.16).
+        self._init_managed_state()
+        # task_ids currently spooled and awaiting a receipt-matched ack — these
+        # retain session ownership even after the backend slot is returned (WRK06).
+        self._pending_result_delivery: set = set()
+        # [A82 Stage 3 rework] Managed attempt bookkeeping kept OUT of
+        # `_active_meta` (which is published in heartbeat `active_task_details`):
+        # the claim token is an execution credential and must never reach a
+        # telemetry/status view. task_id -> {"claim_token", "status"}.
+        self._managed_claims: Dict[str, Dict[str, Any]] = {}
+        # Bounded result delivery (design §7: 2 concurrent deliveries) and the
+        # set currently being delivered, so replay never double-posts.
+        from src.worker.managed_result_spool import MAX_CONCURRENT_DELIVERIES
+        self._result_delivery_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DELIVERIES)
+        self._delivering: set = set()
+        # Envelopes the server refused whose dead-letter move failed: skipped by
+        # replay (never re-POSTed forever).
+        self._delivery_parked: set = set()
+        # Rate limit for re-probing held (no-proof) attempts against the server.
+        self._held_probe_at: Dict[str, float] = {}
+        self._held_probe_interval_sec: float = 60.0
+        # Set when a managed result cannot be reconciled (oversize / disk
+        # failure): stop claiming NEW managed turns (design §7).
+        self._managed_claims_blocked: Optional[str] = None
+        self._restore_managed_claims_block()
+        # Separate small bounded capacity for control cancellation (design §7);
+        # already provided by `_codex_control_semaphore` — referenced by the
+        # shutdown-release guard below.
         self._setup_activity_forwarding()
         self._setup_proactive_delivery()
+        try:
+            self._replay_result_spool()
+        except Exception:
+            logger.warning("event=managed_result_spool_replay_failed", exc_info=True)
+
+    def _init_managed_state(self) -> None:
+        """[A82 Stage 3 rework, m5] Construct the managed result spool + claim
+        store only when the managed flag is ON, or when a previous managed run
+        left carrier state that must still drain. Nothing is created on disk
+        here (dirs are created lazily on first write)."""
+        from src.worker.managed_result_spool import ManagedClaimStore, ManagedResultSpool
+
+        state_dir = self._carrier_state_dir()
+        if self._managed_enabled() or os.path.isdir(state_dir):
+            self._result_spool = ManagedResultSpool(state_dir)
+            self._claim_store = ManagedClaimStore(state_dir)
+        else:
+            self._result_spool = None
+            self._claim_store = None
+
+    def _restore_managed_claims_block(self) -> None:
+        """[A82 Stage 4e] An unresolved oversize artifact (durable; survives a
+        restart) bars new managed claims; once none remains, an OVERSIZE block
+        lifts. Other blocks (spool write failure) are left untouched."""
+        if self._result_spool is not None and self._result_spool.has_oversize_artifacts():
+            self._managed_claims_blocked = "oversize_artifact_requires_recovery"
+        elif str(self._managed_claims_blocked or "").startswith(("oversize_result:", "oversize_artifact")):
+            self._managed_claims_blocked = None
+
+    def _carrier_state_dir(self) -> str:
+        """Absolute path to this carrier's private state dir for the managed
+        result spool. Prefers an explicit env override, else a per-node dir under
+        the worker's logs root — never inside the repo source tree (design §6)."""
+        base = os.getenv("WORKER_STATE_DIR") or os.path.join("logs", "carrier_state")
+        node = getattr(self.cfg, "node_id", "") or "node"
+        # Created lazily by the spool/claim store on first write (m5).
+        return os.path.join(base, node)
+
+    # ------------------------------------------------------------------
+    # [A82 Stage 3] Worker scheduling + result bookkeeping (design §§5-6, §7)
+    # ------------------------------------------------------------------
+    def _is_already_scheduled(self, task_id: str) -> bool:
+        """True if a fetched id is ALREADY scheduled / executing / awaiting
+        result-delivery — so the poll loop must NOT create a second handler for
+        it (WRK01; design §5). Consulted before ``create_task``. The current
+        `_poll_loop` bug overwrote ``_active[task_id]`` unconditionally.
+        """
+        tid = task_id.get("id") if isinstance(task_id, dict) else task_id
+        pending_delivery = getattr(self, "_pending_result_delivery", set())
+        return (
+            tid in self._active
+            or tid in self._active_meta
+            or tid in pending_delivery
+        )
+
+    def _should_schedule(self, task_id: str) -> bool:
+        """True iff a fetched id is NOT already tracked and should get a handler
+        (WRK01). The negation of :meth:`_is_already_scheduled`; consulted before
+        ``create_task`` in the poll loop so an already-scheduled id is skipped."""
+        return not self._is_already_scheduled(task_id)
+
+    def _scheduling_capacity_available(self) -> bool:
+        """True while scheduled+executing work is below 2x configured execution
+        slots (WRK02; design §6). Acquire this bounded scheduling capacity BEFORE
+        ``create_task`` — the backend semaphore alone only bounds concurrent
+        backend calls, not the number of scheduled handlers.
+        """
+        try:
+            slots = int(getattr(self.cfg, "max_concurrent", 0) or 0)
+        except (TypeError, ValueError):
+            slots = 0
+        return len(self._active) < max(1, slots) * 2
+
+    def _reserve_result_envelope(
+        self, task_id: str, claim_token: str, nbytes: int
+    ) -> Optional[Any]:
+        """Reserve a single managed result-envelope allowance BEFORE start
+        (WRK05; design §6). Returns a reservation, or ``None`` when the spool is
+        full / the estimate is oversize — in which case the turn is left PENDING
+        rather than run-and-discarded. Never truncates to claim success.
+        """
+        if self._result_spool is None:
+            return None
+        return self._result_spool.reserve(task_id, claim_token, nbytes)
+
+    def _replay_result_spool(self) -> int:
+        """Re-mark every durably-spooled managed result as pending delivery on
+        boot (WRK04; design §6); ``run()`` then re-delivers them. Also drops
+        crash-orphaned temp files (m4). Returns the count replayed."""
+        if self._result_spool is None:
+            return 0
+        orphans = self._result_spool.clean_orphan_tmps()
+        if self._claim_store is not None:
+            orphans += self._claim_store.clean_orphan_tmps()
+        if orphans:
+            logger.warning("event=managed_spool_orphan_tmps_removed count=%d", orphans)
+        replayed = 0
+        # [A82 Stage 7] Lazy pass: one envelope in memory at a time (design §8).
+        for task_id, _claim_token, _envelope in self._result_spool.iter_spooled():
+            self._pending_result_delivery.add(task_id)
+            replayed += 1
+        if replayed:
+            logger.info("event=managed_result_spool_replayed count=%d", replayed)
+        return replayed
+
+    def _prune_result_spool_on_receipt(
+        self, task_id: str, claim_token: str, receipt: Any
+    ) -> bool:
+        """Remove a spooled managed result ONLY on a durable accepted/stale
+        receipt that matches task AND token (WRK04b; design §6). A bare HTTP
+        timeout or a 2xx with no matching receipt does NOT prune — the envelope
+        survives for replay. On a match the attempt's obligation is complete:
+        the delivery marker AND the durable claim record are cleared.
+        """
+        if self._result_spool is None:
+            return False
+        pruned = self._result_spool.prune_on_receipt(task_id, claim_token, receipt)
+        if pruned:
+            self._pending_result_delivery.discard(task_id)
+            self._claim_forget(task_id)
+        return pruned
+
+    def _managed_shutdown_release_ok(self, task_row: Dict[str, Any]) -> bool:
+        """Guard for graceful shutdown (WRK06; design §6/§7): may this task's
+        ownership be released on shutdown?
+
+        Only a CLAIMED, never-started managed attempt is releasable. A running
+        or recovery-held turn, an attempt whose start outcome is unknown, and a
+        result pending delivery all keep ownership (the durable claim record
+        lets the next boot move them). Legacy protocol-0 rows keep their
+        existing drain behavior.
+        """
+        tid = task_row.get("id")
+        if tid in getattr(self, "_pending_result_delivery", set()):
+            return False
+        proto = task_row.get("queue_protocol", 0)
+        status = str(task_row.get("status", "")).lower()
+        if int(proto or 0) == 1:
+            return status == "claimed"
+        return True
+
+    def _managed_enabled(self) -> bool:
+        """[A82 Stage 3] Managed carrier flag (``WORKER_MANAGED_TURNS``, default
+        OFF). OFF ⇒ legacy protocol-0 poll/claim only, byte-identical."""
+        return bool(getattr(getattr(self, "cfg", None), "managed_turns", False))
+
+    def _managed_backends(self) -> List[str]:
+        """[A82 Stage 3 rework] Backends on this worker with a REAL managed
+        execution path (``supports_managed_turns()``; today Claude on the SDK
+        driver only). Codex/opencode have none, so they are never advertised and
+        their managed rows are never polled/claimed here (fail closed)."""
+        if not self._managed_enabled():
+            return []
+        out: List[str] = []
+        for name in self.cfg.backends:
+            probe = getattr((self._backends or {}).get(name), "supports_managed_turns", None)
+            try:
+                if callable(probe) and probe():
+                    out.append(name)
+            except Exception:
+                logger.warning("event=managed_capability_probe_failed backend=%s", name, exc_info=True)
+        return out
+
+    # --- durable claim records (B2) ------------------------------------- #
+    def _claim_record(self, task_id: str, **fields: Any) -> Dict[str, Any]:
+        """Write-through update of the attempt record (memory + durable store).
+        Raises ``ResultSpoolError`` if it cannot be persisted."""
+        rec = dict(self._managed_claims.get(task_id) or {})
+        rec.update(fields)
+        if self._claim_store is not None:
+            self._claim_store.put(task_id, rec)
+        self._managed_claims[task_id] = rec
+        return rec
+
+    async def _drop_attempt(self, task_id: str) -> None:
+        """[A82 Stage 3 rework 6] The server says this attempt is terminal / not
+        ours (definitive refusal): drop the durable record AND any in-memory
+        backend wait for its turn (abandon-and-forget), so the session can
+        become quiescent again without a close/restart."""
+        rec = dict(self._managed_claims.get(task_id) or {})
+        if not rec and self._claim_store is not None:
+            rec = self._claim_store.get(task_id) or {}
+        self._claim_forget(task_id)
+        if rec.get("oversize_artifact") and self._result_spool is not None:
+            # [A82 Stage 4e] Resolved elsewhere (operator / server-terminal):
+            # the artifact is retained but no longer bars new managed claims.
+            try:
+                self._result_spool.resolve_oversize(Path(str(rec["oversize_artifact"])))
+            except Exception:
+                logger.error("event=managed_oversize_resolve_failed task_id=%s", task_id, exc_info=True)
+            self._restore_managed_claims_block()
+        turn_uuid = rec.get("turn_uuid")
+        backend = (self._backends or {}).get(str(rec.get("backend") or ""))
+        forget = getattr(backend, "forget_managed_turn", None)
+        if turn_uuid and callable(forget):
+            session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
+            try:
+                await asyncio.to_thread(forget, session, turn_uuid)
+            except Exception:
+                logger.warning("event=managed_forget_turn_failed task_id=%s", task_id, exc_info=True)
+
+    def _claim_forget(self, task_id: str) -> None:
+        self._managed_claims.pop(task_id, None)
+        if self._claim_store is not None:
+            self._claim_store.remove(task_id)
+
+    def _session_for(self, session_id: str, backend: str, payload: Optional[Dict[str, Any]] = None) -> Any:
+        session_dict = dict((payload or {}).get("session") or {})
+        session_dict.setdefault("session_id", session_id)
+        session_dict.setdefault("backend", backend)
+        return _make_session_from_payload({"session": session_dict})
+
+    async def _backend_quiescent(self, backend_name: str, session: Any) -> bool:
+        backend = (self._backends or {}).get(backend_name)
+        probe = getattr(backend, "is_quiescent", None)
+        if not callable(probe) or session is None:
+            return False
+        try:
+            return bool(await asyncio.to_thread(probe, session))
+        except Exception:
+            logger.warning("event=managed_quiescence_probe_failed backend=%s", backend_name, exc_info=True)
+            return False
+
+    def _backend_quiescence_reason(self, backend_name: str, session: Any) -> str:
+        """[A82 pre-cutover, m2] The backend's own reason for its last
+        not-quiescent answer (optional interface hook), or ""."""
+        probe = getattr((self._backends or {}).get(backend_name), "quiescence_reason", None)
+        if not callable(probe) or session is None:
+            return ""
+        try:
+            return str(probe(session) or "")[:300]
+        except Exception:
+            logger.warning("event=managed_quiescence_reason_failed backend=%s", backend_name, exc_info=True)
+            return ""
+
+    def _is_definitive_refusal(self, exc: BaseException) -> bool:
+        return (
+            isinstance(exc, urllib.error.HTTPError)
+            and 400 <= exc.code < 500
+            and exc.code not in (408, 429)
+        )
+
+    def _sender_caps(self) -> Dict[str, Tuple[int, str]]:
+        """[A82 Stage 5] session_id → (generation, raw capability) held by THIS
+        carrier process. Memory only: never persisted, logged or published."""
+        caps = self.__dict__.get("_sender_cap_cache")
+        if caps is None:
+            caps = {}
+            self.__dict__["_sender_cap_cache"] = caps
+        return caps
+
+    def _held_sender_generation(self, session_id: str) -> Optional[int]:
+        held = self._sender_caps().get(session_id) if session_id else None
+        return held[0] if held else None
+
+    def _provision_sender_capability(
+        self, session_id: str, backend_name: str, grant: Any,
+    ) -> None:
+        """[A82 Stage 5] Apply the claim response's sender grant: a fresh secret
+        replaces the held one; a confirmation (no secret, same generation)
+        keeps it; no grant (not a Case member / revoked / not issued) drops it.
+        The backend instance for that session is provisioned accordingly."""
+        if not session_id:
+            return
+        caps = self._sender_caps()
+        token: Optional[str] = None
+        if isinstance(grant, dict) and grant.get("session_id") == session_id:
+            gen = grant.get("generation")
+            raw = grant.get("token")
+            if isinstance(raw, str) and raw and isinstance(gen, int):
+                caps[session_id] = (gen, raw)
+                token = raw
+            elif caps.get(session_id) and caps[session_id][0] == gen:
+                token = caps[session_id][1]
+        if token is None:
+            caps.pop(session_id, None)
+        backend = (getattr(self, "_backends", None) or {}).get(backend_name or "claude")
+        provision = getattr(backend, "provision_sender_capability", None)
+        if callable(provision):
+            try:
+                provision(session_id, token)
+            except Exception as e:  # noqa: BLE001 — never fails the claim
+                logger.warning("event=sender_provision_failed session_id=%s err=%s",
+                               session_id, type(e).__name__)
+
+    async def _claim_and_start_managed(
+        self, task_id: str, session_hint: str = "",
+    ) -> Optional[Tuple[Dict[str, Any], str]]:
+        """[A82 Stage 3 rework] Managed claim → persist → reserve → quiescence →
+        fenced start.
+
+        1. Claim via ``/claim-managed`` (fresh token; the frozen payload in the
+           RESPONSE is what executes).
+        2. Persist the attempt record durably BEFORE anything else (B2) — a
+           crash from here on can always be reconciled at boot.
+        3. Reserve one result envelope (M2 budget); none ⇒ release, stay pending.
+        4. Session not quiescent ⇒ release BEFORE start (M2): the prompt stays
+           pending and is retried; nothing terminal happens to it.
+        5. ``/start-managed`` with bounded retries on transport errors (B1): the
+           server returns the same authorization for a repeated start, so a lost
+           response is recovered by retrying. Only a DEFINITIVE refusal permits
+           release. If the outcome stays unknown the token is NEVER discarded:
+           the attempt is released with the write-ahead "not invoked" attestation
+           (running→pending allowed), or left durably for the reconciler.
+        """
+        try:
+            claim_response = await asyncio.to_thread(
+                self._http.post,
+                f"/tasks/{task_id}/claim-managed",
+                {
+                    "node_id": self.cfg.node_id,
+                    "carrier_kind": "worker_daemon",
+                    "incarnation_id": self._incarnation_id,
+                    "queue_protocols": [1],
+                    # [A82 Stage 5] The sender-capability generation held for
+                    # this session (None ⇒ none held ⇒ the gateway mints).
+                    "sender_capability_generation": self._held_sender_generation(session_hint),
+                },
+            )
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                logger.debug("managed_claim_race task_id=%s", task_id)
+            else:
+                logger.warning("managed_claim_failed task_id=%s err=%s", task_id, e)
+            return None
+        except Exception as e:
+            logger.warning("managed_claim_failed task_id=%s err=%s", task_id, e)
+            return None
+        task_row = claim_response.get("task") if isinstance(claim_response, dict) else None
+        claim_token = claim_response.get("claim_token") if isinstance(claim_response, dict) else None
+        if not isinstance(task_row, dict) or not claim_token:
+            logger.warning("managed_claim_malformed_response task_id=%s", task_id)
+            return None
+        from src.worker.managed_result_spool import ResultSpoolError
+
+        # [A82 Stage 5] Provision the session's scoped sender capability into
+        # its backend instance (carrier memory only — never the claim record).
+        self._provision_sender_capability(
+            str(task_row.get("session_id") or ""), str(task_row.get("backend") or ""),
+            claim_response.get("sender_capability"),
+        )
+        try:
+            self._claim_record(
+                task_id, claim_token=claim_token, status="claimed", invoked=False,
+                recovery_acked=False, session_id=str(task_row.get("session_id") or ""),
+                backend=str(task_row.get("backend") or ""), incarnation_id=self._incarnation_id,
+            )
+        except ResultSpoolError:
+            logger.error("event=managed_claim_persist_failed task_id=%s — not starting", task_id)
+            self._managed_claims[task_id] = {"claim_token": claim_token, "status": "claimed", "invoked": False}
+            await self._release_managed_claim(task_id, claim_token)
+            return None
+        if self._reserve_result_envelope(
+            task_id, claim_token, self._result_spool.max_envelope_bytes
+        ) is None:
+            logger.warning(
+                "event=managed_result_budget_exhausted task_id=%s — releasing the "
+                "unstarted claim; turn stays pending", task_id,
+            )
+            await self._release_managed_claim(task_id, claim_token)
+            return None
+        session = self._session_for(
+            str(task_row.get("session_id") or ""), str(task_row.get("backend") or ""),
+            task_row.get("payload") if isinstance(task_row.get("payload"), dict) else None,
+        )
+        if not await self._backend_quiescent(str(task_row.get("backend") or ""), session):
+            logger.info(
+                "event=managed_session_not_quiescent task_id=%s — releasing before "
+                "start; prompt stays pending", task_id,
+            )
+            # [A82 pre-cutover, m2] Never a silent loop: the backend was not
+            # invoked, so release with that attestation and a visible reason
+            # (backend-supplied when it has one) — the server counts it and
+            # backs a repeated refusal off, exactly like a run-time conflict.
+            reason = self._backend_quiescence_reason(str(task_row.get("backend") or ""), session)
+            await self._release_managed_claim(
+                task_id, claim_token, not_invoked=True,
+                blocked_reason="session_not_quiescent" + (f": {reason}" if reason else ""),
+            )
+            return None
+        body = {
+            "node_id": self.cfg.node_id,
+            "claim_token": claim_token,
+            "incarnation_id": self._incarnation_id,
+        }
+        delays = tuple(getattr(self, "_start_retry_delays", (0.5, 1.0, 2.0)))
+        for attempt in range(len(delays) + 1):
+            try:
+                await asyncio.to_thread(self._http.post, f"/tasks/{task_id}/start-managed", body)
+                break
+            except Exception as e:
+                if self._is_definitive_refusal(e):
+                    logger.warning("managed_start_refused task_id=%s err=%s", task_id, e)
+                    await self._release_managed_claim(task_id, claim_token)
+                    return None
+                logger.warning(
+                    "managed_start_unconfirmed task_id=%s attempt=%d err=%s",
+                    task_id, attempt + 1, e,
+                )
+                if attempt < len(delays):
+                    await asyncio.sleep(delays[attempt])
+        else:
+            # Start outcome unknown after bounded retries. The backend was never
+            # invoked (write-ahead flag still False): release with that
+            # attestation; if even that is unreachable the durable record stays
+            # for the reconciler. The token is never dropped here.
+            self._claim_record(task_id, status="start_unknown")
+            await self._release_managed_claim(task_id, claim_token, not_invoked=True)
+            return None
+        self._claim_record(task_id, status="running")
+        return task_row, claim_token
+
+    def _record_backend_process(self, task_id: str, ident: Dict[str, Any]) -> None:
+        """[A82 Stage 3 rework 4, B2] Persist the backend process identity for
+        this attempt (called by the backend right before the prompt is
+        submitted) — the only basis on which a successor carrier may claim the
+        backend is gone."""
+        if not isinstance(ident, dict) or not isinstance(ident.get("pid"), int):
+            return
+        try:
+            self._claim_record(task_id, backend_pid=ident["pid"], backend_identity=dict(ident))
+        except Exception:
+            logger.warning("event=managed_backend_identity_persist_failed task_id=%s", task_id)
+
+    async def _release_managed_claim(
+        self, task_id: str, claim_token: str, *, not_invoked: bool = False,
+        blocked_reason: str = "",
+    ) -> str:
+        """Release a managed attempt back to pending (current token only).
+        ``not_invoked`` adds the carrier's write-ahead attestation that the
+        backend never ran (lets a started row return to pending, prompt kept).
+        Returns ``released`` / ``refused`` (definitive — the attempt is not ours
+        to hold; record dropped) / ``unknown`` (transport — record KEPT)."""
+        if self._result_spool is not None:
+            self._result_spool.release_reservation(task_id, claim_token)
+        try:
+            await asyncio.to_thread(
+                self._http.post,
+                f"/tasks/{task_id}/release-managed",
+                {"node_id": self.cfg.node_id, "claim_token": claim_token,
+                 "incarnation_id": self._incarnation_id,
+                 "backend_not_invoked": bool(not_invoked),
+                 **({"blocked_reason": blocked_reason[:500]} if blocked_reason else {})},
+            )
+        except Exception as e:
+            if self._is_definitive_refusal(e):
+                logger.warning("managed_release_refused task_id=%s err=%s", task_id, e)
+                self._claim_forget(task_id)
+                return "refused"
+            logger.warning("managed_release_unconfirmed task_id=%s err=%s", task_id, e)
+            return "unknown"
+        self._claim_forget(task_id)
+        return "released"
+
+    async def _enter_managed_recovery(self, task_id: str, claim_token: str, reason: str) -> bool:
+        """[A82 Stage 3 rework] Move a STARTED managed turn to
+        ``recovery_required`` via ``/enter-recovery`` (token-fenced; Stage-2
+        ``enter_recovery``). Ownership stays held (durable record + drain guard)
+        until the reconciler posts evidence or an operator resolves it. The
+        unused result-envelope reservation is returned. A transport failure keeps
+        ``recovery_acked=False`` so the poll-pass reconciler retries until acked;
+        a definitive refusal (row already terminal / not ours) drops the record.
+        Returns True iff the server acknowledged the recovery hold."""
+        if self._result_spool is not None:
+            self._result_spool.release_reservation(task_id, claim_token)
+        try:
+            self._claim_record(task_id, claim_token=claim_token, status="recovery_required",
+                               reason=(reason or "")[:500], recovery_acked=False)
+        except Exception:
+            logger.error("event=managed_recovery_persist_failed task_id=%s", task_id, exc_info=True)
+        try:
+            await asyncio.to_thread(
+                self._http.post,
+                f"/tasks/{task_id}/enter-recovery",
+                {"node_id": self.cfg.node_id, "claim_token": claim_token,
+                 "incarnation_id": self._incarnation_id, "reason": (reason or "")[:500]},
+            )
+        except Exception as e:
+            # MINOR-2: only a fenced 409 or a 404 ("no managed turn") is a
+            # definitive answer here; 401/403/other 4xx are transient (auth /
+            # proxy trouble) — keep the record and retry (rate-limited).
+            if isinstance(e, urllib.error.HTTPError) and e.code in (404, 409):
+                logger.warning("event=managed_enter_recovery_refused task_id=%s err=%s", task_id, e)
+                if task_id not in self._pending_result_delivery:
+                    await self._drop_attempt(task_id)
+                return False
+            logger.error(
+                "event=managed_enter_recovery_failed task_id=%s err=%s — retried by "
+                "the reconciler (ownership held)", task_id, e,
+            )
+            return False
+        try:
+            self._claim_record(task_id, recovery_acked=True)
+        except Exception:
+            logger.warning("event=managed_recovery_ack_persist_failed task_id=%s", task_id)
+        # MINOR-2: a refused envelope (dead letter / parked) leaves the budget on
+        # ANY acknowledged recovery — including a later reconciler pass.
+        if self._result_spool is not None:
+            self._result_spool.retire_dead_letter(task_id, claim_token)
+            if task_id in self._delivery_parked:
+                self._result_spool.discard(task_id, claim_token)
+                self._delivery_parked.discard(task_id)
+        logger.warning("event=managed_turn_recovery_required task_id=%s", task_id)
+        return True
+
+    async def _post_managed_result_once(
+        self, task_id: str, claim_token: str, envelope: Dict[str, Any]
+    ) -> bool:
+        """POST one spooled envelope to ``/result-managed`` (atomic
+        ``complete_turn`` on the server) and prune ONLY on a task+token-matched
+        durable receipt. Transport error / 5xx / unmatched body ⇒ keep the spool
+        and the ownership hold (retried next pass). A DEFINITIVE 4xx ⇒ the
+        envelope moves to the bounded dead-letter dir and the attempt goes to
+        recovery (m3) — never retried forever, never blocking replay order."""
+        async with self._result_delivery_semaphore:
+            try:
+                receipt = await asyncio.to_thread(
+                    self._http.post,
+                    f"/tasks/{task_id}/result-managed",
+                    envelope,
+                    timeout=10,
+                )
+            except Exception as e:
+                if self._is_definitive_refusal(e):
+                    await self._retire_refused_result(task_id, claim_token, e)
+                    return False
+                logger.warning(
+                    "event=managed_result_post_failed task_id=%s err=%s (spooled, "
+                    "retained for replay)", task_id, e,
+                )
+                return False
+        if self._prune_result_spool_on_receipt(task_id, claim_token, receipt):
+            logger.info("event=managed_result_acked task_id=%s", task_id)
+            return True
+        logger.warning(
+            "event=managed_result_unacked task_id=%s — receipt did not match "
+            "task+token; spool retained for replay", task_id,
+        )
+        return False
+
+    async def _retire_refused_result(self, task_id: str, claim_token: str, err: BaseException) -> None:
+        """[m3/M2] The server DEFINITIVELY refused this envelope. It must never
+        be re-POSTed forever: move it to the bounded dead-letter dir (or, if
+        that is full/unwritable, park it in memory), stop delivering it, and put
+        the attempt in recovery. Once the recovery hold is acknowledged — or the
+        attempt is definitively not ours — the envelope leaves the budget."""
+        logger.error(
+            "event=managed_result_refused task_id=%s err=%s — dead-letter + recovery",
+            task_id, err,
+        )
+        dead = self._result_spool.dead_letter(task_id, claim_token, str(err))
+        if not dead:
+            self._delivery_parked.add(task_id)
+        self._pending_result_delivery.discard(task_id)
+        acked = await self._enter_managed_recovery(
+            task_id, claim_token, f"managed_result_refused: {err}"[:500],
+        )
+        if acked or task_id not in self._managed_claims:
+            if dead:
+                self._result_spool.retire_dead_letter(task_id, claim_token)
+            else:
+                self._result_spool.discard(task_id, claim_token)
+                self._delivery_parked.discard(task_id)
+
+    async def _deliver_managed_result(
+        self, task_id: str, claim_token: str, result: Dict[str, Any]
+    ) -> bool:
+        """Spool a managed result BEFORE POST, deliver it to ``/result-managed``,
+        and prune ONLY on a durable receipt matching task+token (design §6).
+        Retains session ownership (``_pending_result_delivery``) until the receipt
+        matches — a failed delivery is re-sent by :meth:`_redeliver_spooled_results`
+        (next poll pass / boot replay). Oversize/disk failure raises, leaving a
+        visible recovery obligation and blocking new managed claims (never a
+        truncated false success). Returns True iff acknowledged."""
+        from src.worker.managed_result_spool import OversizeResultError, ResultSpoolError
+
+        envelope = {"node_id": self.cfg.node_id, "claim_token": claim_token, **result}
+        # Mark ownership held for delivery even if the backend slot returns.
+        self._pending_result_delivery.add(task_id)
+        try:
+            self._result_spool.commit(task_id, claim_token, envelope)
+        except OversizeResultError:
+            artifact_path = ""
+            try:
+                # [A82 Stage 4e] Record the deterministic artifact path BEFORE
+                # the write: a crash mid-write still leaves a held obligation
+                # that the reconciler routes to the operator (never auto-failed).
+                intended = str(self._result_spool.oversize_artifact_path(task_id, claim_token))
+                self._claim_record(task_id, oversize_artifact=intended)
+                artifact_path = str(self._result_spool.preserve_oversize(task_id, claim_token, envelope))
+            except ResultSpoolError:
+                logger.error("event=managed_oversize_artifact_failed task_id=%s", task_id)
+                try:
+                    self._claim_record(task_id, oversize_artifact=None)
+                except Exception:
+                    logger.warning("event=managed_oversize_record_failed task_id=%s", task_id)
+            # Keep the ownership hold; an artifact write failure is itself a
+            # recovery obligation, never a reason to report a truncated success.
+            self._managed_claims_blocked = f"oversize_result:{task_id}"
+            logger.error(
+                "event=managed_result_oversize task_id=%s — holding recovery "
+                "obligation, NOT claiming success; new managed claims stopped", task_id,
+            )
+            # [A82 Stage 3 rework] Bounded server-side diagnostic: the attempt
+            # moves to recovery_required with a short reason (<=500 chars) —
+            # never a truncated "success". Slot stays held.
+            self._pending_result_delivery.discard(task_id)
+            # The artifact pointer goes first so the 500-char bound can only
+            # cut the diagnostic tail, never the recovery reference.
+            await self._enter_managed_recovery(
+                task_id, claim_token,
+                f"managed_result_oversize: artifact={artifact_path or 'write_failed'}; "
+                f"node={self.cfg.node_id}; serialized envelope exceeds "
+                f"{self._result_spool.max_envelope_bytes} bytes; output_chars="
+                f"{len(str(result.get('output') or ''))}",
+            )
+            raise
+        except ResultSpoolError as e:
+            self._managed_claims_blocked = f"spool_write_failed:{task_id}"
+            logger.error(
+                "event=managed_result_spool_write_failed task_id=%s — visible "
+                "recovery obligation, no ack; new managed claims stopped", task_id,
+            )
+            self._pending_result_delivery.discard(task_id)
+            await self._enter_managed_recovery(
+                task_id, claim_token, f"managed_result_spool_write_failed: {e}"[:500],
+            )
+            raise
+        self._delivering.add(task_id)
+        try:
+            return await self._post_managed_result_once(task_id, claim_token, envelope)
+        finally:
+            self._delivering.discard(task_id)
+
+    async def _redeliver_spooled_results(self, batch: int = 8) -> int:
+        """[A82 Stage 3 rework, M3] Re-deliver durably spooled, unacknowledged
+        managed results (boot replay + retry of earlier failed deliveries).
+
+        Bounded: at most ``batch`` envelopes per pass, at most
+        ``MAX_CONCURRENT_DELIVERIES`` concurrent POSTs, and never one already in
+        flight. Runs regardless of the managed flag — disabling new managed work
+        must not abandon an accepted result (design §3.16). Returns acks."""
+        if self._result_spool is None:
+            return 0
+        acked = 0
+        items = self._result_spool.list_spooled(
+            limit=batch, after=getattr(self, "_redeliver_cursor", None),
+        )
+        # M2: rotating cursor — a stuck head cannot starve later envelopes.
+        self._redeliver_cursor = items[-1][0] if len(items) >= batch else None
+        for task_id, claim_token, envelope in items:
+            if task_id in self._delivering or task_id in self._delivery_parked:
+                continue
+            self._pending_result_delivery.add(task_id)
+            self._delivering.add(task_id)
+            try:
+                if await self._post_managed_result_once(task_id, claim_token, envelope):
+                    acked += 1
+            finally:
+                self._delivering.discard(task_id)
+        return acked
+
+    def _capture_late_managed_result(self, session_id: str, outcome: Any) -> bool:
+        """[A82 Stage 3 rework, M3] The late real reply of a managed turn that
+        hit its deadline (driver flags ``late_managed``). Spool it as that held
+        attempt's result so the normal delivery path commits it atomically
+        (``/result-managed`` → ``complete_turn`` accepts a recovery-held row).
+        Runs on the driver's sink thread; returns True iff captured."""
+        if self._result_spool is None or self._claim_store is None:
+            return False
+        # MAJOR-1: bind by the managed TURN identity, never by session — a stale
+        # record for an earlier turn on the same session must not steal it.
+        turn_uuid = getattr(outcome, "managed_turn_uuid", "") or ""
+        if not turn_uuid:
+            return False
+        for rec in self._claim_store.list():
+            if rec.get("turn_uuid") != turn_uuid or not rec.get("invoked"):
+                continue
+            if rec.get("session_id") and rec.get("session_id") != session_id:
+                logger.error("event=managed_late_result_session_mismatch task_id=%s", rec.get("task_id"))
+                return False
+            tid, tok = str(rec.get("task_id")), str(rec.get("claim_token"))
+            is_error = bool(getattr(outcome, "is_error", False))
+            envelope = {
+                "node_id": self.cfg.node_id,
+                "claim_token": tok,
+                "success": not is_error,
+                "output": _bound_output(getattr(outcome, "output", "") or ""),
+                "errors": [getattr(outcome, "error_text", "") or "backend error result"] if is_error else [],
+                "error_class": getattr(outcome, "error_class", "") or "",
+                "backend_session_id": getattr(outcome, "backend_session_id", "") or None,
+                "raw_stdout": _bound_output(getattr(outcome, "raw_ndjson", "") or ""),
+            }
+            try:
+                self._result_spool.commit(tid, tok, envelope)
+            except Exception:
+                logger.error("event=managed_late_result_spool_failed task_id=%s", tid, exc_info=True)
+                return False
+            self._pending_result_delivery.add(tid)
+            logger.warning("event=managed_late_result_captured task_id=%s", tid)
+            return True
+        return False
+
+    def _backend_process_gone(self, rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """[A82 Stage 3 rework 5, B2/MINOR-3] Proof the recorded backend
+        process is gone (``process_utils.process_gone_proof``: boot-relative
+        /proc identity on Linux, psutil create_time+cmdline elsewhere), or None
+        when there is no unambiguous proof (fail closed → operator route)."""
+        from src.core.process_utils import process_gone_proof
+
+        ident = rec.get("backend_identity")
+        if not isinstance(ident, dict):
+            return None
+        return process_gone_proof(ident)
+
+    async def _probe_held_attempt(self, tid: str, tok: str, rec: Dict[str, Any], why: str) -> bool:
+        """Rate-limited server consultation for an attempt the carrier cannot
+        resolve itself. Re-asserting the recovery hold is idempotent; a
+        definitive 404/409 (row terminal / operator-resolved / not ours) drops
+        the record and forgets the backend wait. Returns True iff dropped."""
+        now = time.monotonic()
+        last = self._held_probe_at.get(tid)
+        if last is not None and now - last < self._held_probe_interval_sec:
+            return False
+        self._held_probe_at[tid] = now
+        logger.warning("event=managed_recovery_held task_id=%s reason=%s", tid, why)
+        await self._enter_managed_recovery(
+            tid, tok, rec.get("reason") or f"carrier: held ({why})",
+        )
+        if tid not in self._managed_claims:
+            self._held_probe_at.pop(tid, None)
+            return True
+        return False
+
+    async def _reconcile_managed_claims(self, batch: int = 8) -> int:
+        """[A82 Stage 3 rework, B2] Give every durably held managed attempt a
+        live exit (boot + every poll pass, bounded batch, no background tasks).
+
+        Skips attempts still being handled in this process or owned by the
+        result-delivery path (a spooled result). For the rest:
+          * never invoked (write-ahead flag) ⇒ release with the not-invoked
+            attestation: back to pending, prompt preserved;
+          * invoked, no result ⇒ ensure the recovery hold is acknowledged, then
+            post carrier-provable stop evidence to ``/quiescence``:
+            ``carrier_restarted`` for a previous incarnation's attempt (this
+            process reaped its backend children at boot), or
+            ``backend_quiescent`` once the backend's own oracle reports the
+            session quiescent. Resolved ``failed``; the session's native id is
+            left untouched. A definitive refusal (row resolved elsewhere, e.g.
+            by an operator) drops the record.
+        Transport failures leave the record for the next pass. Returns the
+        number of attempts that reached a final state this pass."""
+        if self._claim_store is None:
+            return 0
+        done = 0
+        recs = self._claim_store.list(limit=batch, after=getattr(self, "_reconcile_cursor", None))
+        # M2: rotating cursor — a stuck record can never starve later ones.
+        self._reconcile_cursor = recs[-1].get("task_id") if len(recs) >= batch else None
+        for rec in recs:
+            tid = str(rec.get("task_id") or "")
+            tok = str(rec.get("claim_token") or "")
+            if not tid or not tok or tid in self._active or tid in self._delivering:
+                continue
+            if tid in self._pending_result_delivery:
+                continue  # the result path owns it
+            self._managed_claims.setdefault(tid, rec)
+            if not rec.get("invoked"):
+                if await self._release_managed_claim(tid, tok, not_invoked=True) != "unknown":
+                    done += 1
+                continue
+            if not rec.get("recovery_acked"):
+                ok = await self._enter_managed_recovery(
+                    tid, tok, rec.get("reason") or "carrier: invoked attempt without a delivered result",
+                )
+                if not ok:
+                    if tid not in self._managed_claims:
+                        done += 1  # definitively refused ⇒ record dropped
+                    continue
+                # The server was just consulted; the held-record probe below
+                # starts its rate-limit window now.
+                self._held_probe_at[tid] = time.monotonic()
+            if rec.get("oversize_artifact"):
+                # [A82 Stage 4e] The complete result sits in carrier artifact
+                # storage: never auto-resolve it to `failed` (that erases the
+                # row's artifact pointer). Hold for the operator; an operator
+                # resolution (definitive refusal) is the exit.
+                if await self._probe_held_attempt(tid, tok, rec, "oversize result artifact"):
+                    done += 1
+                continue
+            proof: Optional[Dict[str, Any]] = None
+            if rec.get("incarnation_id") != self._incarnation_id:
+                # B2: a previous process's attempt resolves ONLY with proof that
+                # the recorded backend process is gone; otherwise it is held for
+                # the operator route (no auto-resolve on a guess).
+                proof = self._backend_process_gone(rec)
+                if proof is None:
+                    if await self._probe_held_attempt(tid, tok, rec, "no process proof"):
+                        done += 1
+                    continue
+                kind = "carrier_restarted"
+            else:
+                session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
+                if not await self._backend_quiescent(str(rec.get("backend") or ""), session):
+                    # Still owed by a live backend: keep holding, but consult
+                    # the server (rate-limited) so an operator resolution is a
+                    # real exit (the backend wait is then forgotten).
+                    if await self._probe_held_attempt(tid, tok, rec, "backend not quiescent"):
+                        done += 1
+                    continue
+                kind = "backend_quiescent"
+            if tid in self._pending_result_delivery:
+                continue  # m1: a late result was captured during the probe
+            try:
+                await asyncio.to_thread(
+                    self._http.post,
+                    f"/tasks/{tid}/quiescence",
+                    {"node_id": self.cfg.node_id, "claim_token": tok, "quiescent": True,
+                     "terminal": True, "terminal_status": "failed", "stop_evidence": kind,
+                     "observer_incarnation": self._incarnation_id,
+                     **({"process_proof": proof} if proof else {})},
+                )
+            except Exception as e:
+                if isinstance(e, urllib.error.HTTPError) and e.code in (404, 409):
+                    logger.warning("event=managed_quiescence_refused task_id=%s err=%s", tid, e)
+                    await self._drop_attempt(tid)
+                    done += 1
+                else:
+                    logger.warning("event=managed_quiescence_post_failed task_id=%s err=%s", tid, e)
+                continue
+            self._claim_forget(tid)
+            done += 1
+            logger.warning("event=managed_recovery_resolved task_id=%s evidence=%s", tid, kind)
+        return done
 
     def _setup_proactive_delivery(self) -> None:
         """Wire autonomous (background-job continuation) turns back to the gateway.
@@ -1152,17 +2127,28 @@ class WorkerAgent:
             setter = getattr(backend, "set_proactive_sink", None)
             if callable(setter):
                 try:
-                    setter(self._deliver_proactive_turn)
+                    # [A82 step 4 rework, m3] Bind the registering backend's name:
+                    # an uncaptured late reply is posted with ITS backend.
+                    setter(lambda sid, outcome, _name=name: self._deliver_proactive_turn(
+                        sid, outcome, backend=_name))
                     logger.info("event=proactive_sink_registered backend=%s", name)
                 except Exception:
                     logger.warning("event=proactive_sink_register_failed backend=%s", name, exc_info=True)
 
-    def _deliver_proactive_turn(self, session_id: str, outcome: Any) -> None:
+    def _deliver_proactive_turn(self, session_id: str, outcome: Any, backend: str = "claude") -> None:
         """Sink called by the driver (off the SDK loop) for an autonomous turn.
 
         Blocking HTTP is fine here — the driver runs this in a worker thread, not
         on its event loop. Best-effort: a delivery failure must never crash the
         session that produced the turn."""
+        if getattr(outcome, "late_managed", False):
+            # [A82 Stage 3 rework, M3] late reply of a deadline-held managed
+            # turn: commit it to that turn, not the proactive transcript.
+            try:
+                if self._capture_late_managed_result(session_id, outcome):
+                    return
+            except Exception:
+                logger.warning("event=managed_late_capture_failed session_id=%s", session_id, exc_info=True)
         try:
             text = (getattr(outcome, "output", "") or "").strip()
             if not text:
@@ -1178,7 +2164,7 @@ class WorkerAgent:
                 {
                     "node_id": self.cfg.node_id,
                     "session_id": session_id,
-                    "backend": "claude",
+                    "backend": backend,
                     "output": text,
                     "backend_session_id": getattr(outcome, "backend_session_id", "") or "",
                     "usage": usage,
@@ -1428,6 +2414,8 @@ class WorkerAgent:
     # ------------------------------------------------------------------
 
     def _register(self) -> None:
+        # [A82 Stage 3] Advertise protocol 1 only for backends with a managed path.
+        managed_backends = self._managed_backends()
         self._http.post("/nodes/register", {
             "node_id": self.cfg.node_id,
             "tailscale_ip": self.cfg.tailscale_ip,
@@ -1442,6 +2430,12 @@ class WorkerAgent:
                 # overwrite a good startup result with an intermittent empty
                 # app-server read before the first heartbeat.
                 "models": self._model_capabilities,
+                # [A82 Stage 3] Advertise managed protocol 1 only when enabled;
+                # flag OFF sends the byte-identical legacy capability set.
+                **(
+                    {"queue_protocols": [0, 1], "managed_backends": managed_backends}
+                    if managed_backends else {}
+                ),
             },
         }, timeout=_REGISTRATION_TIMEOUT_SECONDS)
         logger.info("event=registered node_id=%s controller=%s projects_root=%s",
@@ -1836,6 +2830,20 @@ class WorkerAgent:
         empty_count = 0
         try:
             while not self._shutdown.is_set():
+                # [A82 Stage 3 rework, M3/B2] Re-send unacknowledged managed
+                # results and move durably held attempts (bounded batches; no
+                # background retry tasks). No-op when no carrier state exists.
+                # M1: managed-path failures (disk full, bad state) are logged
+                # and never kill legacy polling.
+                try:
+                    if self._pending_result_delivery - self._delivering:
+                        await self._redeliver_spooled_results()
+                    if self._claim_store is not None:
+                        await self._reconcile_managed_claims()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.error("event=managed_poll_pass_failed", exc_info=True)
                 tasks = await self._fetch_pending()
                 if tasks:
                     empty_count = 0
@@ -1843,6 +2851,24 @@ class WorkerAgent:
                         if self._shutdown.is_set():
                             break
                         task_id = row.get("id", "unknown")
+                        # [A82 Stage 3] With the managed carrier ON: dedup a
+                        # fetched id already scheduled / executing / awaiting
+                        # result-delivery (WRK01) and bound scheduled handlers to
+                        # 2x slots (WRK02). Control rows (close_session /
+                        # cancel_codex / cancel_turn) bypass the slot semaphore by design and are
+                        # EXEMPT from the capacity bound (M1). Flag OFF: the
+                        # scheduling loop is exactly main's.
+                        if self._managed_enabled():
+                            if self._is_already_scheduled(task_id):
+                                continue
+                            if (
+                                row.get("action") not in ("close_session", "cancel_codex", "cancel_turn", CANCEL_MANAGED_ACTION)
+                                and not self._scheduling_capacity_available()
+                            ):
+                                # Leave it queued server-side; a later poll picks
+                                # it up once a slot frees. Keep scanning so
+                                # control rows further down are still scheduled.
+                                continue
                         self._active_meta[task_id] = {
                             "task_id": task_id,
                             "backend": row.get("backend", ""),
@@ -1882,15 +2908,45 @@ class WorkerAgent:
             "limit": str(self.cfg.max_concurrent * 2),
             "accept_unpinned": "true" if self.cfg.accept_unpinned else "false",
         }
+        legacy: List[Dict[str, Any]] = []
         for attempt in range(1, 3):
             try:
-                return await asyncio.to_thread(self._http.get, "/tasks/pending", params)
+                legacy = await asyncio.to_thread(self._http.get, "/tasks/pending", params)
+                break
             except Exception as exc:
                 if attempt == 2:
                     logger.warning("event=fetch_pending_failed attempts=%d err=%s", attempt, exc)
                 else:
                     await asyncio.sleep(1)
-        return []
+        if not self._managed_enabled():
+            return legacy
+        return list(legacy or []) + await self._fetch_pending_managed(params)
+
+    async def _fetch_pending_managed(self, params: Dict[str, str]) -> List[Dict[str, Any]]:
+        """[A82 Stage 3 rework, B2] Poll protocol-1 pending turns (capability
+        negotiated: this carrier declares queue protocol 1). Skipped while new
+        managed claims are blocked by an unreconciled result (design §7)."""
+        if self._managed_claims_blocked:
+            logger.warning(
+                "event=managed_claims_blocked reason=%s — not polling managed turns",
+                self._managed_claims_blocked,
+            )
+            return []
+        # [A82 pre-cutover] The capability probe may spawn a subprocess (Codex
+        # offline schema probe, cached per binary): never on the event loop.
+        managed_backends = await asyncio.to_thread(self._managed_backends)
+        if not managed_backends:
+            return []
+        try:
+            rows = await asyncio.to_thread(
+                self._http.get,
+                "/tasks/pending-managed",
+                {**params, "backends": ",".join(managed_backends)},
+            )
+        except Exception as exc:
+            logger.warning("event=fetch_pending_managed_failed err=%s", exc)
+            return []
+        return [r for r in (rows or []) if int(r.get("queue_protocol", 0) or 0) == 1]
 
     # ------------------------------------------------------------------
     # Task handling
@@ -1913,28 +2969,62 @@ class WorkerAgent:
             async with self._codex_control_semaphore:
                 await self._handle_close_session(task_row)
             return
+        if task_row.get("action") == CANCEL_MANAGED_ACTION:
+            # [A82 Stage 4b] Operator cancel of a managed attempt this carrier
+            # holds — outside the turn slot (it must never queue behind the
+            # very turn it stops).
+            async with self._codex_control_semaphore:
+                await self._handle_cancel_managed(task_row)
+            return
         if task_row.get("action") == "close_session":
             await self._handle_close_session(task_row)
             return
+        # [A82 pre-cutover rework] Only a backend turn marks the session in
+        # flight: a backend-less control row (file delivery, repo inspect)
+        # running beside a turn must not clear that turn's mark.
+        marks_turn = task_row.get("action") not in _BACKENDLESS_ACTIONS
         async with self._semaphore:
             self._slots_used += 1
             try:
-                # Claim — optimistic lock
-                try:
-                    await asyncio.to_thread(
-                        self._http.post,
-                        f"/tasks/{task_id}/claim",
-                        {"node_id": self.cfg.node_id},
+                # Claim — optimistic lock. [A82 Stage 3 rework] A managed
+                # (protocol-1) row — only ever fetched when the managed flag is ON —
+                # claims via /claim-managed and executes the claim RESPONSE's
+                # frozen task + token (design §5, WRK03), after reserving a result
+                # envelope and a fenced start. Legacy protocol-0 rows keep the
+                # byte-identical /claim path and execute the poll row.
+                managed = self._managed_enabled() and int(task_row.get("queue_protocol", 0) or 0) == 1
+                claim_token: Optional[str] = None
+                if managed and task_row.get("backend", "") not in await asyncio.to_thread(self._managed_backends):
+                    # Fail closed: never claim a managed row for a backend without
+                    # a managed execution path (no legacy fallback).
+                    logger.warning(
+                        "event=managed_row_backend_unsupported task_id=%s backend=%s",
+                        task_id, task_row.get("backend", ""),
                     )
-                except urllib.error.HTTPError as e:
-                    if e.code == 409:
-                        logger.debug("claim_race (already claimed)")
-                    else:
+                    return
+                if managed:
+                    claim_response = await self._claim_and_start_managed(
+                        task_id, session_hint=str(task_row.get("session_id") or ""),
+                    )
+                    if claim_response is None:
+                        return
+                    task_row, claim_token = claim_response
+                else:
+                    try:
+                        await asyncio.to_thread(
+                            self._http.post,
+                            f"/tasks/{task_id}/claim",
+                            {"node_id": self.cfg.node_id},
+                        )
+                    except urllib.error.HTTPError as e:
+                        if e.code == 409:
+                            logger.debug("claim_race (already claimed)")
+                        else:
+                            logger.warning("claim_failed err=%s", e)
+                        return
+                    except Exception as e:
                         logger.warning("claim_failed err=%s", e)
-                    return
-                except Exception as e:
-                    logger.warning("claim_failed err=%s", e)
-                    return
+                        return
 
                 logger.info("task_claimed")
                 meta = self._active_meta.setdefault(task_id, {"task_id": task_id})
@@ -1946,7 +3036,30 @@ class WorkerAgent:
                 })
                 emit_event("task_claimed", backend=task_row.get("backend", ""))
                 self._heartbeat_now.set()  # push slots_used immediately to the server
-                self._inflight_sessions.add(session_id)
+                if marks_turn:
+                    self._inflight_sessions.add(session_id)
+
+                # [A82 Stage 3 rework, B2] Write-ahead: durably record that the
+                # backend is ABOUT to be invoked. If this cannot be persisted the
+                # backend is not invoked and the attempt is released (prompt kept).
+                turn_uuid: Optional[str] = None
+                if managed and claim_token:
+                    turn_uuid = str(uuid.uuid4())
+                    # [A82 Stage 4b rework] Pre-invoke cancel check: an operator
+                    # cancel handled before this point (no turn uuid to arm yet)
+                    # is recorded on the attempt. No await between this check
+                    # and recording the uuid below, so a later cancel always
+                    # finds the uuid and arms the backend instead.
+                    if (self._managed_claims.get(task_id) or {}).get("cancel_requested"):
+                        logger.info("event=managed_cancelled_before_invoke task_id=%s", task_id)
+                        await self._release_managed_claim(task_id, claim_token, not_invoked=True)
+                        return
+                    try:
+                        self._claim_record(task_id, invoked=True, turn_uuid=turn_uuid)
+                    except Exception:
+                        logger.error("event=managed_invoke_persist_failed task_id=%s", task_id)
+                        await self._release_managed_claim(task_id, claim_token, not_invoked=True)
+                        return
 
                 # Execute
                 result = await _execute_task(
@@ -1955,18 +3068,62 @@ class WorkerAgent:
                     self._http,
                     telemetry_sink=self._telemetry_sink,
                     node_id=self.cfg.node_id,
+                    **({"ownership": ManagedTurnOwnership(
+                        task_id=task_id,
+                        session_id=str(task_row.get("session_id") or session_id or ""),
+                        node_id=self.cfg.node_id,
+                        claim_token=claim_token,
+                        incarnation_id=self._incarnation_id,
+                        turn_uuid=turn_uuid,
+                    ), "on_process": functools.partial(self._record_backend_process, task_id),
+                    } if managed and claim_token else {}),
                 )
 
-                # Post result
-                try:
-                    delivered = await _post_result_until_accepted(
-                        self._http,
-                        f"/tasks/{task_id}/result",
-                        {"node_id": self.cfg.node_id, **result},
-                        label="result_post",
+                # [A82 Stage 3 rework] Uncertain managed outcome (uncorrelated
+                # result / deadline): move the started turn to recovery_required
+                # through the token-fenced carrier route and KEEP ownership — no
+                # result is reported, nothing is auto-released.
+                if managed and claim_token and result.get("error_class") == "recovery_required":
+                    await self._enter_managed_recovery(
+                        task_id, claim_token, "; ".join(result.get("errors") or [])
                     )
-                    if not delivered:
-                        raise RuntimeError("controller_unreachable_until_delivery_deadline")
+                    return
+                # [A82 Stage 3 rework, M2] A managed conflict is raised by the
+                # backend BEFORE the prompt is submitted (lock busy / session not
+                # quiescent at the loop-thread reservation): nothing ran, so the
+                # turn returns to pending with the not-invoked attestation — never
+                # a terminal failure for a prompt that was never sent.
+                if managed and claim_token and result.get("error_class") == "managed_conflict":
+                    try:
+                        self._claim_record(task_id, invoked=False, status="start_unknown")
+                    except Exception:
+                        logger.warning("event=managed_conflict_persist_failed task_id=%s", task_id)
+                    # [A82 step 4 rework, m2] The refusal reason is made visible
+                    # on the row (a repeated one backs off) — never a silent loop.
+                    await self._release_managed_claim(
+                        task_id, claim_token, not_invoked=True,
+                        blocked_reason="; ".join(result.get("errors") or []) or "managed_conflict",
+                    )
+                    return
+
+                # Post result. [A82 Stage 3] A managed (protocol-1) turn spools its
+                # result BEFORE the POST to /result-managed and keeps ownership
+                # until a receipt-matched ack (design §6); a legacy protocol-0 turn
+                # keeps the exact byte-identical in-memory post path.
+                try:
+                    if managed and claim_token:
+                        await self._deliver_managed_result(
+                            task_id, claim_token, result
+                        )
+                    else:
+                        delivered = await _post_result_until_accepted(
+                            self._http,
+                            f"/tasks/{task_id}/result",
+                            {"node_id": self.cfg.node_id, **result},
+                            label="result_post",
+                        )
+                        if not delivered:
+                            raise RuntimeError("controller_unreachable_until_delivery_deadline")
                     logger.info(
                         "task_result_posted success=%s elapsed=%.1fs",
                         result["success"], result["execution_time"],
@@ -1979,9 +3136,88 @@ class WorkerAgent:
                 except Exception as e:
                     logger.error("result_post_failed err=%s", e)
             finally:
+                # [A82 Stage 3 rework, m6] Never leak an envelope reservation
+                # (cancellation included); a committed envelope already consumed it.
+                if claim_token and self._result_spool is not None:
+                    self._result_spool.release_reservation(task_id, claim_token)
                 self._slots_used -= 1
-                self._inflight_sessions.discard(session_id)
+                if marks_turn:
+                    self._inflight_sessions.discard(session_id)
                 self._heartbeat_now.set()  # push slots_used=0 immediately after task ends
+
+    async def _handle_cancel_managed(self, task_row: Dict[str, Any]) -> None:
+        """[A82 Stage 4b] Deliver an operator cancel to the managed attempt this
+        carrier holds for ``payload.target_task_id``. Claims the control row
+        (legacy protocol-0 claim), looks the attempt up in the durable claim
+        record (its per-attempt ``turn_uuid``), and asks the backend to cancel
+        EXACTLY that turn (``CodingBackend.cancel_managed_turn``). The attempt's
+        own result / recovery then commits ``cancelled`` server-side (the cancel
+        is recorded against its token). No live attempt ⇒ nothing to interrupt
+        (it already finished, or the Stage-3 recovery exits own it)."""
+        task_id = task_row.get("id", "unknown")
+        try:
+            await asyncio.to_thread(
+                self._http.post, f"/tasks/{task_id}/claim", {"node_id": self.cfg.node_id}
+            )
+        except urllib.error.HTTPError as e:
+            if e.code != 409:
+                logger.warning("cancel_managed_claim_failed err=%s", e)
+            return
+        except Exception as e:
+            logger.warning("cancel_managed_claim_failed err=%s", e)
+            return
+        payload = task_row.get("payload") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        target = payload.get("target_task_id") if isinstance(payload, dict) else None
+        delivered = False
+        detail = "no live managed attempt on this carrier"
+        if not isinstance(target, str) or not target or len(target) > 256:
+            detail = "invalid cancellation target"
+        else:
+            live = target in self._managed_claims
+            if live:
+                # [A82 Stage 4b rework] This process holds the attempt: record
+                # the cancel on it durably BEFORE any await, so the pre-invoke
+                # check refuses to invoke it even if no turn uuid exists yet.
+                try:
+                    self._claim_record(target, cancel_requested=True)
+                except Exception:
+                    self._managed_claims.setdefault(target, {})["cancel_requested"] = True
+                    logger.warning("event=cancel_managed_persist_failed target=%s", target)
+                detail = "cancel held for the attempt (not invoked yet)"
+            rec = dict(self._managed_claims.get(target) or {})
+            if not rec and self._claim_store is not None:
+                rec = dict(self._claim_store.get(target) or {})
+            turn_uuid = str(rec.get("turn_uuid") or "")
+            backend = (self._backends or {}).get(str(rec.get("backend") or ""))
+            cancel = getattr(backend, "cancel_managed_turn", None)
+            if rec and turn_uuid and callable(cancel):
+                session = self._session_for(str(rec.get("session_id") or ""), str(rec.get("backend") or ""))
+                try:
+                    delivered = bool(await asyncio.to_thread(cancel, session, turn_uuid))
+                    detail = "interrupt delivered or armed" if delivered else "turn not in flight"
+                except Exception as e:
+                    detail = f"cancel failed: {type(e).__name__}"
+                    logger.warning("event=cancel_managed_failed target=%s", target, exc_info=True)
+        logger.info("event=cancel_managed_handled target=%s delivered=%s", target, delivered)
+        result = {
+            "success": True, "output": detail, "errors": [], "files_modified": [],
+            "execution_time": 0.0, "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 0,
+        }
+        try:
+            delivered_post = await _post_result_until_accepted(
+                self._http, f"/tasks/{task_id}/result", {"node_id": self.cfg.node_id, **result},
+                label="cancel_managed_result_post",
+            )
+            if not delivered_post:
+                raise RuntimeError("controller_unreachable_until_delivery_deadline")
+        except Exception as e:
+            logger.error("cancel_managed_result_post_failed err=%s", e)
 
     async def _wait_for_inflight_turn(self, session_id: str) -> None:
         """Hold a close_session control task until the session's turn finishes.
@@ -2035,6 +3271,8 @@ class WorkerAgent:
             telemetry_sink=self._telemetry_sink,
             node_id=self.cfg.node_id,
         )
+        if session_id and task_row.get("action") == "close_session":
+            self._sender_caps().pop(session_id, None)  # [A82 Stage 5] (server revoked it)
         try:
             delivered = await _post_result_until_accepted(
                 self._http,
@@ -2069,6 +3307,22 @@ class WorkerAgent:
         if self._shutdown.is_set():
             return
 
+        # [A82 Stage 3 rework, M3] Boot replay: re-deliver managed results that
+        # were spooled but never acknowledged before the previous process exited.
+        if self._pending_result_delivery:
+            try:
+                await self._redeliver_spooled_results()
+            except Exception:
+                logger.warning("event=managed_result_boot_replay_failed", exc_info=True)
+        # [A82 Stage 3 rework, B2] Every attempt a previous process held (token
+        # persisted at claim time) gets an exit now: release if never invoked,
+        # else recovery + carrier_restarted evidence (children reaped above).
+        if self._claim_store is not None:
+            try:
+                await self._reconcile_managed_claims()
+            except Exception:
+                logger.warning("event=managed_claim_boot_reconcile_failed", exc_info=True)
+
         nudge_listener = asyncio.create_task(
             _run_nudge_listener(
                 self.cfg.tailscale_ip,
@@ -2099,6 +3353,25 @@ class WorkerAgent:
         logger.info("event=draining active=%d", len(self._active))
         release_tasks = list(self._active.keys())
         for task_id in release_tasks:
+            # [A82 Stage 3 rework, M1] A managed attempt is released ONLY when the
+            # shutdown guard allows it (claimed, not started, no result pending
+            # delivery) and only through the token-fenced managed release; a
+            # running managed backend / undelivered result keeps its ownership.
+            managed_claim = self._managed_claims.get(task_id)
+            if managed_claim is not None:
+                if self._managed_shutdown_release_ok({
+                    "id": task_id,
+                    "queue_protocol": 1,
+                    "status": managed_claim.get("status", ""),
+                }):
+                    await self._release_managed_claim(task_id, managed_claim["claim_token"])
+                # Anything else stays durably recorded for the next boot.
+                else:
+                    logger.info(
+                        "event=managed_ownership_retained_on_drain task_id=%s status=%s",
+                        task_id, managed_claim.get("status", ""),
+                    )
+                continue
             try:
                 await asyncio.to_thread(
                     self._http.post,
