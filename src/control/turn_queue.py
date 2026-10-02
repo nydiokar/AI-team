@@ -158,6 +158,20 @@ class CarrierUnavailableError(TurnQueueError):
     code = "carrier_unavailable"
 
 
+class CarrierOfflineError(CarrierUnavailableError):
+    """[A82 pre-cutover] The assigned carrier REGISTERED ``backend`` as managed
+    but is offline / heart-beat stale right now. Under the offline-carrier
+    admission policy the turn is admitted queued and this is its operator-
+    visible ``blocked_reason`` until the carrier returns (host affinity:
+    never relocated); otherwise it is a plain 503 refusal."""
+
+    code = "carrier_offline"
+
+    @property
+    def blocked_reason(self) -> str:
+        return f"carrier_offline: {self.context.get('node_id') or ''}"
+
+
 class LegacyExecutionRefusedError(TurnQueueError):
     """409 — a protocol-0 (legacy) EXECUTION row for a session enrolled in the
     managed turn queue, refused at the DB insert / claim boundary (design §3

@@ -128,9 +128,13 @@ async def _activate_head(
             logger.info("event=turn_withdrawn_obsolete task_id=%s reason=%s", task_id, ob.reason)
             return "withdrawn"
         except Exception as e:  # noqa: BLE001 — leave queued with a reason + backoff
+            # [A82 pre-cutover] a typed refusal may name its own operator-
+            # visible reason (``carrier_offline: <node>``).
+            reason = getattr(e, "blocked_reason", None)
             changed = await asyncio.to_thread(
                 db.mark_turn_blocked, task_id,
-                f"prepare_failed: {type(e).__name__}: {str(e)[:200]}",
+                reason if isinstance(reason, str) and reason
+                else f"prepare_failed: {type(e).__name__}: {str(e)[:200]}",
             )
             if changed:  # log on state change only, not every retry
                 logger.warning("event=turn_prepare_failed task_id=%s err=%s", task_id, e)

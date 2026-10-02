@@ -5980,21 +5980,30 @@ class TaskOrchestrator(ITaskOrchestrator):
         is flag-gated OFF by default (`HARNESS_LEVEL3_GUARD`), so default behavior
         is byte-identical: absent flag / absent field / level ≤ 2 ⇒ pass-through.
         """
+        _sid = str((task.metadata or {}).get("session_id") or "").strip()
+        _known = (task.metadata or {}).pop(self._TURN_ENROLLED_META_KEY, None)
         # A controller-only deployment still needs this gateway queue to dispatch
         # remote-pinned tasks. Reject local work *before* queueing it, otherwise a
         # controller image without agent CLIs would leave an unpinned turn stuck.
+        # [A82 pre-cutover] An ENROLLED session's turn never executes in this
+        # gateway: it is routed to its managed carrier (pin, else
+        # MESH_LOCAL_CARRIER_NODE_ID) below — the refusal stays for one-offs and
+        # legacy sessions. The marker is read only here, and only when needed.
         if not config.system.local_execution_enabled and self._task_requires_local_execution(task):
-            logger.warning(
-                "event=task_blocked reason=local_execution_disabled task_id=%s source=%s",
-                task.id,
-                (task.metadata or {}).get("source", "runtime"),
-            )
-            self._emit_event(
-                "task_blocked",
-                task,
-                {"task_id": task.id, "reason": "local_execution_disabled"},
-            )
-            raise HarnessAdmissionBlocked(task.id, "local_execution_disabled")
+            if _sid and _known is None:
+                _known = await self._session_turn_queue_enrolled(_sid)
+            if not (_sid and _known):
+                logger.warning(
+                    "event=task_blocked reason=local_execution_disabled task_id=%s source=%s",
+                    task.id,
+                    (task.metadata or {}).get("source", "runtime"),
+                )
+                self._emit_event(
+                    "task_blocked",
+                    task,
+                    {"task_id": task.id, "reason": "local_execution_disabled"},
+                )
+                raise HarnessAdmissionBlocked(task.id, "local_execution_disabled")
 
         # [Harness] Admission control (spec docs/Task_harness_workflow.md §14).
         if not self._harness_level3_allows_autopickup(task):
@@ -6013,8 +6022,6 @@ class TaskOrchestrator(ITaskOrchestrator):
         # managed admission path (commit-before-ack; no BUSY/last_task_id write,
         # no in-memory queue). Unenrolled / mesh-off ⇒ the legacy path below,
         # unchanged. The marker is read from the canonical DB, never a flag.
-        _sid = str((task.metadata or {}).get("session_id") or "").strip()
-        _known = (task.metadata or {}).pop(self._TURN_ENROLLED_META_KEY, None)
         if _sid and (_known if _known is not None else await self._session_turn_queue_enrolled(_sid)):
             admitted = await self._admit_managed_session_turn(task)
             if getattr(self, "running", False):
@@ -10744,7 +10751,7 @@ Generated from user description: {description}
             # path without an Idempotency-Key); the key is still non-NULL.
             operation_id = f"task:{task.id}"
         backend = self._resolve_task_backend(task)
-        carrier = self._managed_carrier_assignment(self.session_store.get(sid), backend)
+        carrier, offline = self._managed_admission_carrier(self.session_store.get(sid), backend)
         # Admit FIRST (no side effect before the durable decision): a refused
         # admission leaves no Case lineage. The row is inserted in the DURABLE
         # "lineage pending" state (never activatable) under this request's
@@ -10775,6 +10782,7 @@ Generated from user description: {description}
         admission = await admit_turn_async(
             db, request, fleet_cap=int(config.system.max_queue_size),
         )
+        await self._mark_admitted_carrier_offline(admission, offline)
         if admission.idempotent_replay:
             if admission.lineage_pending:
                 # Never ack a replay without lineage: wait (bounded) for the live
@@ -10828,7 +10836,7 @@ Generated from user description: {description}
         kind = str(producer.get("turn_kind") or "continuation")
         task.id = str(producer["turn_id"])
         backend = self._resolve_task_backend(task)
-        carrier = self._managed_carrier_assignment(self.session_store.get(sid), backend)
+        carrier, offline = self._managed_admission_carrier(self.session_store.get(sid), backend)
         lineage_token = uuid.uuid4().hex
         if kind == "continuation":
             token_id = str(producer["token_id"])
@@ -10885,6 +10893,7 @@ Generated from user description: {description}
         admission = await admit_turn_async(
             db, request, fleet_cap=int(config.system.max_queue_size),
         )
+        await self._mark_admitted_carrier_offline(admission, offline)
         if admission.idempotent_replay:
             if admission.lineage_pending:
                 await self._await_or_recover_lineage(str(admission))
@@ -11194,7 +11203,7 @@ Generated from user description: {description}
 
         sid = str(session.session_id)
         backend = str(session.backend or "claude")
-        carrier = self._managed_carrier_assignment(session, backend)
+        carrier, offline = self._managed_admission_carrier(session, backend)
         turn_id = f"compact-{sid[:8]}-{uuid.uuid4().hex[:12]}"
         op = (operation_id or "").strip() or f"compact:{turn_id}"
         request = AdmissionRequest(
@@ -11228,6 +11237,8 @@ Generated from user description: {description}
         admission = await admit_turn_async(
             get_db(), request, fleet_cap=int(config.system.max_queue_size),
         )
+        if not admission.coalesced:
+            await self._mark_admitted_carrier_offline(admission, offline)
         notify_turn_queue_changed()
         if not admission.idempotent_replay and not admission.coalesced:
             from src.control.turn_queue import emit_turn_queue_changed
@@ -11669,7 +11680,7 @@ Generated from user description: {description}
         ``backend`` as managed-capable, else a typed 503 refusal: a turn nobody
         can claim is never accepted."""
         from src.control.db import get_db
-        from src.control.turn_queue import CarrierUnavailableError
+        from src.control.turn_queue import CarrierOfflineError, CarrierUnavailableError
 
         target = self._managed_carrier_node(session)
         if not target:
@@ -11679,11 +11690,57 @@ Generated from user description: {description}
             )
         db = get_db()
         if db is None or backend not in db.node_managed_backends(target):
+            if db is not None and self._queue_turns_for_offline_carrier(db, target, backend):
+                raise CarrierOfflineError(
+                    f"managed carrier '{target}' is offline (registered for '{backend}')",
+                    session_id=getattr(session, "session_id", None), node_id=target,
+                )
             raise CarrierUnavailableError(
                 f"no registered managed-capable carrier '{target}' for backend '{backend}'",
                 session_id=getattr(session, "session_id", None), node_id=target,
             )
         return target
+
+    # [A82 pre-cutover] Offline-carrier admission policy — the ONE switch
+    # (operator decision pending). True: a new managed turn whose carrier
+    # REGISTERED the backend as managed but is offline / heartbeat-stale is
+    # admitted queued (``carrier_offline: <node>``) and activates when that
+    # carrier returns — host affinity "pinned = host-or-nothing; fallback =
+    # wait/requeue". False: refused 503 like an unknown carrier. A node that
+    # never registered managed support, or does not exist, is 503 either way.
+    _QUEUE_TURNS_FOR_OFFLINE_CARRIER = True
+
+    def _queue_turns_for_offline_carrier(self, db: Any, node_id: str, backend: str) -> bool:
+        """Whether admission may queue a turn for the registered-but-offline
+        carrier ``node_id`` (see ``_QUEUE_TURNS_FOR_OFFLINE_CARRIER``)."""
+        return bool(self._QUEUE_TURNS_FOR_OFFLINE_CARRIER) and backend in db.node_managed_backends(
+            node_id, live=False,
+        )
+
+    def _managed_admission_carrier(self, session: Any, backend: str) -> Tuple[str, Optional[str]]:
+        """Admission-time carrier: ``(node_id, None)`` for a live carrier, or
+        ``(node_id, blocked_reason)`` when the offline-carrier policy admits
+        the turn queued for a registered-but-offline carrier. Any other
+        unavailability raises the typed 503 (nothing admitted)."""
+        from src.control.turn_queue import CarrierOfflineError
+
+        try:
+            return self._managed_carrier_assignment(session, backend), None
+        except CarrierOfflineError as offline:
+            return str(offline.context.get("node_id") or ""), offline.blocked_reason
+
+    async def _mark_admitted_carrier_offline(self, admission: Any, reason: Optional[str]) -> None:
+        """Make a freshly admitted turn's ``carrier_offline`` reason visible at
+        once (bounded backoff). Best-effort: the scheduler sets the same reason
+        on its next activation attempt, so a failed write loses nothing."""
+        if not reason or getattr(admission, "idempotent_replay", False):
+            return
+        from src.control.db import get_db
+
+        try:
+            await asyncio.to_thread(get_db().mark_turn_blocked, str(admission), reason)
+        except Exception:  # noqa: BLE001 — visibility only; see docstring
+            logger.warning("event=carrier_offline_mark_failed task_id=%s", admission, exc_info=True)
 
     def _managed_carrier_node(self, session: Any) -> str:
         """The carrier node id an enrolled session's managed turns are assigned
