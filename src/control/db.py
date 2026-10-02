@@ -4604,12 +4604,32 @@ class MeshDB:
                 )
                 item["queue_position"] = int(counts["before_cursor"]) + offset + 1
             # [A82 Stage 8a] Operator surface: finished turns whose post-commit
-            # effects (notification / history / telemetry) ended `failed`.
+            # effects (notification / history / telemetry) ended `failed` —
+            # [review F5] only those AFTER the session's latest delivered turn
+            # (a later conversational turn that ran and reached `done`), so the
+            # label clears once a reply gets through. Failed rows come from
+            # their partial index; each probes only later sequences of its
+            # session (idx_mesh_turns_session_sequence).
             effects = conn.execute(
-                "SELECT COUNT(*), MAX(id) FROM mesh_tasks INDEXED BY idx_mesh_tasks_effects_failed "
-                "WHERE session_id = ? AND effects_state = 'failed'",
-                (sid,),
+                """
+                SELECT COUNT(*),
+                       (SELECT f2.id FROM mesh_tasks f2 INDEXED BY idx_mesh_tasks_effects_failed
+                        WHERE f2.session_id = ? AND f2.effects_state = 'failed'
+                        ORDER BY f2.queue_sequence DESC LIMIT 1)
+                FROM mesh_tasks f INDEXED BY idx_mesh_tasks_effects_failed
+                WHERE f.session_id = ? AND f.effects_state = 'failed'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM mesh_tasks d INDEXED BY idx_mesh_turns_session_sequence
+                      WHERE d.session_id = f.session_id AND d.queue_protocol = 1
+                        AND d.queue_sequence > f.queue_sequence
+                        AND d.effects_state = 'done' AND d.started_at IS NOT NULL
+                        AND COALESCE(d.turn_kind, '') != 'compaction'
+                  )
+                """,
+                (sid, sid),
             ).fetchone()
+            if not int(effects[0] or 0):
+                effects = (0, None)
             return {
                 "effects_failed": int(effects[0] or 0),
                 "effects_failed_turn_id": effects[1],
