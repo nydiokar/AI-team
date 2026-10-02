@@ -60,7 +60,7 @@ class Runtime(CodexAppServerClient):
         self.emit(thread_id, "turn/completed", turn={"id": turn, "items": [],
                   "status": status or self.status, "error": {"message": "failed"} if self.status == "failed" else None})
 
-    def request(self, method, params, timeout=30):
+    def request(self, method, params, timeout=30, on_late=None):
         self.check()
         self.calls.append((method, params))
         if method == self.reject:
@@ -217,7 +217,7 @@ def test_cancel_interrupts_exact_turn_and_does_not_poison_followup(native):
 def test_completion_wins_late_interrupt(native):
     backend, runtime, cwd = native
     original = runtime.request
-    def request(method, params, timeout=30):
+    def request(method, params, timeout=30, on_late=None):
         reply = original(method, params, timeout)
         if method == "turn/start":
             backend.cancel_execution("task")
@@ -274,7 +274,10 @@ def test_wrong_turn_event_fails_closed(native):
     runtime.complete = complete
     result = run(backend, cwd)
     assert not result.success and "identity_mismatch" in result.errors[0]
-    assert runtime.dead
+    # [A82 step 4 rework, M1] One thread's ambiguity never kills the SHARED
+    # app-server (every other thread's turn with it): ownership is held instead.
+    assert not runtime.dead
+    assert "gateway" in backend._held
 
 
 def test_workspace_change_rejected_before_turn(native):
