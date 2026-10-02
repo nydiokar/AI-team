@@ -775,3 +775,67 @@ def test_R9_turn_scoped_reconcile_never_aggregates_all_llm_events(tg: _Env) -> N
     [sql] = [q for q in seen if "FROM llm_turns t" in q]
     plan = " ".join(str(r[-1]) for r in conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall())
     assert "SCAN llm_events" not in plan, plan
+
+
+# Merge nits (re-review) ------------------------------------------------------ #
+def test_N1_shutdown_grace_fits_inside_the_container_stop_budget() -> None:
+    """The shielded send+mark grace must leave room for the rest of stop()
+    inside docker's stop budget (compose sets it for the gateway)."""
+    from pathlib import Path
+
+    import yaml
+
+    from src.orchestrator import MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC
+
+    compose = yaml.safe_load((Path(__file__).resolve().parents[1] / "compose.yaml").read_text())
+    budget = str(compose["services"]["gateway"].get("stop_grace_period") or "10s")
+    assert budget.endswith("s")
+    assert MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC <= 5.0
+    assert float(budget[:-1]) >= 30.0
+
+
+def test_N2_transient_db_errors_never_exhaust_the_attempt_limit(
+    tg: _Env, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlite3
+
+    from src.control.turn_queue import BackingStoreError
+    from src.orchestrator import MANAGED_EFFECTS_MAX_ATTEMPTS
+
+    tid = tg.run_turn("contended", "op-n2")
+    real_t, real_g = tg.gw.transition_turn_effects, tg.gw.get_task
+    left: List[int] = [MANAGED_EFFECTS_MAX_ATTEMPTS + 2]
+
+    def _fence(task_id: str, from_state: str, to_state: str, **kw: Any) -> bool:
+        if to_state == "notifying" and left[0] > 0:
+            left[0] -= 1
+            raise BackingStoreError("managed transition_turn_effects deadline exceeded")
+        return real_t(task_id, from_state, to_state, **kw)
+
+    flaky_reads: List[int] = [2]
+
+    def _get(task_id: str) -> Any:
+        if flaky_reads[0] > 0:
+            flaky_reads[0] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real_g(task_id)
+
+    monkeypatch.setattr(tg.gw, "transition_turn_effects", _fence)
+    monkeypatch.setattr(tg.gw, "get_task", _get)
+    for _ in range(MANAGED_EFFECTS_MAX_ATTEMPTS + 6):
+        tg.drain()
+    row = tg.row(tid)
+    assert row["effects_state"] == "done", row["effects_error"]
+    assert len(tg.notifier.calls) == 1
+
+
+def test_N3_notifying_row_without_a_fence_is_closed_not_stuck(tg: _Env) -> None:
+    tid = tg.run_turn("legacy fence", "op-n3")
+    tg.gw._conn().execute(
+        "UPDATE mesh_tasks SET effects_state = 'notifying', effects_fence = NULL WHERE id = ?", (tid,))
+    tg.gw._conn().commit()
+    assert tg.drain() == 1 and tg.drain() == 0
+    row = tg.row(tid)
+    assert row["effects_state"] == "done"
+    assert "notify_outcome_unknown" in (row["effects_error"] or "")
+    assert tg.notifier.calls == []  # outcome unknown ⇒ never sent again
