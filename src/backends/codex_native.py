@@ -177,6 +177,18 @@ class _Hold(BaseModel):
     late_id: int = 0  # [A82 pre-cutover, N1] that request's JSON-RPC id
 
 
+class _Forgotten(BaseModel):
+    """[A82 pre-cutover rework, F1] A forgotten hold whose native effect may
+    still be live: its ownership rows stay the cross-process fence until its
+    submission is answered AND the thread is natively quiet on that
+    app-server, or that app-server is provably gone."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    client: CodexAppServerClient
+    request_id: int = 0  # the still-unanswered submission's JSON-RPC id (0: none)
+    ownership: CodexOwnership
+    thread_id: str
+
+
 class LateManagedOutcome(BaseModel):
     """The real reply of a managed turn that outlived its deadline, delivered to
     the carrier's proactive sink and bound by ``managed_turn_uuid`` only."""
@@ -229,10 +241,11 @@ class CodexBackend(CodingBackend):
         self._held: dict[str, _Hold] = {}
         self._armed: dict[str, None] = {}
         self._proactive_sink: Callable[[str, LateManagedOutcome], Any] | None = None
-        # [A82 pre-cutover, N1] session key → (app-server, request id) of a
-        # forgotten hold's still-unanswered submission: busy until it is
-        # answered or that app-server is gone (recycled when unresponsive).
-        self._unanswered: dict[str, tuple[CodexAppServerClient, int]] = {}
+        # [A82 pre-cutover, N1 + rework F1] session key → a forgotten hold whose
+        # submission is unanswered or whose native turn may still run on a live
+        # app-server: busy, its ownership kept, until answered and natively
+        # quiet or that app-server is gone (recycled when unresponsive).
+        self._unanswered: dict[str, _Forgotten] = {}
         self._busy_reasons: dict[str, str] = {}  # [A82 pre-cutover, m2] last not-quiescent reason
 
     def provision_sender_capability(self, session_id: str, token: str | None) -> bool:
@@ -483,15 +496,22 @@ class CodexBackend(CodingBackend):
         if turn_uuid and CodexOwnership().finish_managed(turn_uuid, "forgotten"):
             removed = True
         if hold is not None:
-            # [A82 pre-cutover, N1] Drop the hold and its late route; a still-
-            # unanswered submission keeps the session busy (it may yet be
-            # accepted) until answered or its app-server is gone/recycled.
+            # [A82 pre-cutover, N1] Drop the hold and its late route (no late
+            # delivery). [rework F1] Its ownership rows are the only fence for a
+            # successor / another carrier on this CODEX_HOME: while its app-server
+            # lives they are kept until the submission is answered and the thread
+            # is natively quiet (or that app-server is gone/recycled).
             removed = True
-            if hold.late_reply is not None and hold.client is not None and hold.late_id \
-                    and hold.client.forget_late(hold.late_id):
+            request_id = hold.late_id if hold.late_reply is not None and hold.client is not None \
+                and hold.late_id and hold.client.forget_late(hold.late_id) else 0
+            process = hold.client.process if hold.client is not None else None
+            if hold.client is not None and process is not None and process.poll() is None \
+                    and (request_id or hold.native_turn_id or hold.late_reply is not None):
                 with self._lock:
-                    self._unanswered[key] = (hold.client, hold.late_id)
-            hold.ownership.release()
+                    self._unanswered[key] = _Forgotten(client=hold.client, request_id=request_id,
+                                                       ownership=hold.ownership, thread_id=hold.thread_id)
+            else:
+                hold.ownership.release()
         return removed
 
     def _recycle_unresponsive(self) -> None:
@@ -501,7 +521,7 @@ class CodexBackend(CodingBackend):
         death is then the proof that settles every turn it held."""
         with self._lock:
             candidates = [self._client, *(h.client for h in self._held.values()),
-                          *(c for c, _ in self._unanswered.values())]
+                          *(f.client for f in self._unanswered.values())]
         seen: set[int] = set()
         for client in candidates:
             if client is None or id(client) in seen or not client.unresponsive(UNRESPONSIVE_AFTER_SEC):
@@ -557,13 +577,16 @@ class CodexBackend(CodingBackend):
         with self._lock:
             unanswered = self._unanswered.get(key)
         if unanswered is not None:
-            client, request_id = unanswered
-            process = client.process
-            if process is not None and process.poll() is None and client.outstanding(request_id):
+            process = unanswered.client.process
+            alive = process is not None and process.poll() is None
+            if alive and unanswered.request_id and unanswered.client.outstanding(unanswered.request_id):
                 return "forgotten_submission_unanswered"  # [N1] it may still be accepted
+            if alive and self._native_status(unanswered.client, unanswered.thread_id) not in _QUIET_STATES:
+                return "forgotten_turn_running"  # [rework F1] the fence stays until it ends
             with self._lock:
-                if self._unanswered.get(key) == unanswered:
+                if self._unanswered.get(key) is unanswered:
                     self._unanswered.pop(key, None)
+            unanswered.ownership.release()  # answered and quiet, or its app-server is gone
         if not self._settle_hold(key):
             return "held_turn_unresolved"
         ownership = CodexOwnership()

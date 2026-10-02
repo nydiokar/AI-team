@@ -939,3 +939,75 @@ def test_m2_quiescence_reason_names_an_identityless_legacy_owner(h):
     legacy.release()
     assert successor.is_quiescent(session) is True
     assert successor.quiescence_reason(session) is None
+
+
+# --------------------------------------------------------------------------- #
+# [A82 pre-cutover rework, F1] forget never drops the cross-process fence
+# --------------------------------------------------------------------------- #
+def _forgotten_unanswered(h, monkeypatch, start_delay: float) -> tuple[CodexBackend, CodexBackend, str]:
+    monkeypatch.setattr(app_server_mod, "RPC_TIMEOUT", 0.3)
+    h.ctl(start_delay=start_delay)  # A's app-server answers turn/start late (or never)
+    a = h.backend
+    result = a.run_managed_turn(h.session(), "x", own(turn_uuid="uuid-a"))
+    assert result.error_class == "recovery_required"
+    tid = CodexOwnership().thread_for("sess-1") or result.backend_session_id
+    b = h.make()  # successor incarnation / another carrier on the same CODEX_HOME
+    assert b.is_quiescent(h.session(native=tid)) is False
+    assert a.forget_managed_turn(h.session(), "uuid-a") is True
+    return a, b, tid
+
+
+def test_F1_forget_keeps_the_fence_while_the_submission_is_unanswered_on_a_live_app_server(h, monkeypatch):
+    """Inverts the reviewer probe ``test_probe_n1_forget_fence.py``."""
+    a, b, tid = _forgotten_unanswered(h, monkeypatch, start_delay=3)
+    assert a._client.process.poll() is None
+    assert owners(h.home) != [], "forget must not drop the owner rows of a still-unanswered submission"
+    assert b.is_quiescent(h.session(native=tid)) is False
+    assert b.quiescence_reason(h.session(native=tid)) == "other_owner_not_provably_gone"
+    assert a.is_quiescent(h.session(native=tid)) is False
+    # A's app-server answers and its turn completes natively: only then is the fence released.
+    wait_for(lambda: a.is_quiescent(h.session(native=tid)), timeout=15)
+    assert owners(h.home) == []
+    assert b.is_quiescent(h.session(native=tid)) is True
+    h.ctl()
+    assert b.run_managed_turn(h.session(native=tid), "y", own(turn_uuid="uuid-b", task="t-2")).success
+    starts = [(x["pid"], x["params"].get("threadId")) for x in h.requests("turn/start")]
+    assert [s for s in starts if s[1] == tid and s[0] == a._client.process.pid] == [(a._client.process.pid, tid)]
+    assert len([s for s in starts if s[1] == tid]) == 2, "B ran only after A's turn ended — never concurrently"
+
+
+def test_F1_forget_keeps_the_fence_while_the_native_turn_runs(h, monkeypatch):
+    assert h.backend.run_managed_turn(h.session(), "warm", own()).success
+    monkeypatch.setattr(native_mod, "MANAGED_TURN_SECONDS", 0.5)
+    h.ctl(hold=h.release_path)
+    result = h.backend.run_managed_turn(h.session(), "hello", own(turn_uuid="uuid-run"))
+    assert result.error_class == "recovery_required"
+    tid = result.backend_session_id
+    assert h.backend.forget_managed_turn(h.session(), "uuid-run") is True
+    b = h.make()
+    assert owners(h.home) != []
+    assert b.is_quiescent(h.session(native=tid)) is False, "A's native turn still runs"
+    h.release()
+    wait_for(lambda: h.backend.is_quiescent(h.session(native=tid)))
+    assert owners(h.home) == []
+    assert b.is_quiescent(h.session(native=tid)) is True
+
+
+def test_F1_successor_quiescent_once_the_forgotten_holders_app_server_is_recycled(h, monkeypatch):
+    monkeypatch.setattr(native_mod, "UNRESPONSIVE_AFTER_SEC", 1.0)
+    a, b, tid = _forgotten_unanswered(h, monkeypatch, start_delay=30)
+    assert b.is_quiescent(h.session(native=tid)) is False
+    time.sleep(1.1)
+    assert a.is_quiescent(h.session(native=tid)) is True  # recycle = provable death
+    assert owners(h.home) == []
+    assert b.is_quiescent(h.session(native=tid)) is True
+
+
+def test_F1_successor_quiescent_once_the_forgotten_holders_app_server_dies(h, monkeypatch):
+    a, b, tid = _forgotten_unanswered(h, monkeypatch, start_delay=30)
+    process = a._client.process
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait(timeout=10)
+    assert b.is_quiescent(h.session(native=tid)) is True, "process proof clears the dead owner"
+    h.ctl()
+    assert b.run_managed_turn(h.session(native=tid), "y", own(turn_uuid="uuid-b", task="t-2")).success
