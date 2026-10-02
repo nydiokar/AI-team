@@ -186,6 +186,23 @@ MANAGED_EFFECTS_IDLE_SWEEP_EVERY = 20
 #: [A84] A notification that has not returned by then has an UNKNOWN delivery
 #: outcome: it is closed (never re-sent) instead of stalling the consumer.
 MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC = 60.0
+#: [A84 review F2] On a gateway stop, a fenced send in flight gets this long to
+#: finish and be marked (> the 5 s managed-write deadline of the fence CAS).
+MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC = 10.0
+#: [A84 review F3] A ``notifying`` fence older than the notify timeout plus
+#: this slack is abandoned (its holder died); a younger one may be in flight.
+MANAGED_EFFECTS_FENCE_SLACK_SEC = 30.0
+
+
+def _managed_fence_abandoned(fence: str) -> bool:
+    """[A84 review F3] True when the notify fence ``"<epoch>:<nonce>"`` has
+    outlived any live holder's bounded send + mark (an unreadable fence is
+    treated as abandoned)."""
+    try:
+        taken = float(str(fence).split(":", 1)[0])
+    except (TypeError, ValueError):
+        return True
+    return time.time() - taken > MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC + MANAGED_EFFECTS_FENCE_SLACK_SEC
 
 
 async def _reconcile_heartbeat_leases(db: Any) -> None:
@@ -12069,16 +12086,28 @@ Generated from user description: {description}
     async def _drain_managed_turn_effects_once(self, db: Any) -> int:
         """[A84] Drain up to ``MANAGED_EFFECTS_BATCH`` terminal managed turns
         with effects outstanding, one row at a time (bounded memory). Per-row
-        containment: one bad row never starves the others. Returns the rows
-        finalized (``done`` / ``failed``) this pass."""
+        containment WITH accounting (review F4): a row whose processing raises
+        outside the per-effect containment counts a failed attempt and ends
+        ``failed`` at the bound, leaving the index — poisoned rows can never
+        starve newer ones. Returns the rows finalized this pass."""
         ids = await asyncio.to_thread(db.pending_turn_effects, MANAGED_EFFECTS_BATCH)
         finalized = 0
         for tid in ids:
             try:
                 if await self._run_managed_turn_effects(db, tid):
                     finalized += 1
-            except Exception as e:  # noqa: BLE001 — the row stays; next pass
+            except Exception as e:  # noqa: BLE001 — counted; failed at the bound
                 logger.warning("event=managed_effects_row_failed task_id=%s err=%s", tid, e)
+                try:
+                    state = await asyncio.to_thread(
+                        db.record_turn_effects_failure, tid, f"effects_error: {e}",
+                        MANAGED_EFFECTS_MAX_ATTEMPTS,
+                    )
+                    if state == "failed":
+                        finalized += 1
+                        logger.warning("event=managed_effects_failed task_id=%s err=%s", tid, e)
+                except Exception as e2:  # noqa: BLE001 — DB down: next pass
+                    logger.warning("event=managed_effects_account_failed task_id=%s err=%s", tid, e2)
         return finalized
 
     async def _run_managed_turn_effects(self, db: Any, task_id: str) -> bool:
@@ -12088,69 +12117,69 @@ Generated from user description: {description}
           1. idempotent effects (re-run safely on retry/crash): session
              summary + ``task_history`` (field-scoped, once per task id), the
              reply enrichment of a result-less outcome, telemetry reconcile,
-             the Case ``task.finished`` event (written at most once);
-          2. the notification, fenced by the CAS ``pending``→``notifying``
-             BEFORE the send: a crash after the fence is never re-sent (the row
-             is closed ``notify_outcome_unknown``); a raising notifier is
-             retried up to ``MANAGED_EFFECTS_MAX_ATTEMPTS`` failed passes, then
-             the row ends ``failed`` with the error recorded;
+             the Case ``task.finished`` event (written at most once). A
+             compaction turn gets only the telemetry/enrichment (legacy
+             compaction never notified nor touched the history); a turn that
+             never ran (``telemetry``) gets only the telemetry close;
+          2. the notification inside the fenced critical section
+             (``_notify_managed_turn``), shielded from a gateway stop;
           3. ``notified``→``done`` (or ``failed``) once every effect succeeded.
         Returns True iff the row was finalized by this call."""
         row = await asyncio.to_thread(db.get_task, task_id)
         state = str((row or {}).get("effects_state") or "")
-        if state not in ("pending", "notifying", "notified"):
+        if state not in ("pending", "notifying", "notified", "telemetry"):
             return False
-        if state == "notifying":
-            # A previous incarnation died between the fence and its mark: the
-            # notification may have been delivered — never send it twice.
+        if state == "telemetry":
+            from src.control.telemetry_store import TelemetryStore
+
             await asyncio.to_thread(
-                db.transition_turn_effects, task_id, "notifying", "notified",
-                error="notify_outcome_unknown",
+                lambda: TelemetryStore(db).reconcile(turn_id=task_id, since_hours=0),
             )
+            return bool(await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "telemetry", "done",
+            ))
+        if state == "notifying":
+            fence = str(row.get("effects_fence") or "")
+            if not _managed_fence_abandoned(fence):
+                return False  # another consumer's send may be in flight (F3)
+            # Its holder died between the fence and its mark: the notification
+            # may have been delivered — never send it twice.
+            if not await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "notifying", "notified",
+                error="notify_outcome_unknown", fence=fence,
+            ):
+                return False
             logger.warning("event=managed_notify_outcome_unknown task_id=%s", task_id)
             state = "notified"
         task, result, case_id = self._managed_turn_effect_inputs(row)
+        compaction = str(row.get("turn_kind") or "") == "compaction"
         errors = await asyncio.to_thread(
             self._apply_managed_turn_projections, db, row, task, result, case_id,
         )
         attempts = int(row.get("effects_attempts") or 0)
         notify_failed = str(row.get("effects_error") or "").startswith("notify_failed")
         bumped = False
-        if state == "pending":
-            if not await asyncio.to_thread(db.transition_turn_effects, task_id, "pending", "notifying"):
-                return False  # another consumer owns it
-            sid = str(row.get("session_id") or "")
-            session = self.session_store.get(sid) if sid else None
+        if state == "pending" and compaction:
+            # [A84 review F6] Legacy compaction never notified.
+            if not await asyncio.to_thread(db.transition_turn_effects, task_id, "pending", "notified"):
+                return False
+        elif state == "pending":
+            crit = asyncio.ensure_future(self._notify_managed_turn(db, row, result, attempts))
             try:
-                await asyncio.wait_for(self.notifier.notify_task_outcome(
-                    task_id, result, session=session,
-                    chat_id=getattr(session, "telegram_chat_id", None) if session else None,
-                ), timeout=MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC)
-            except asyncio.TimeoutError:
-                # The send may have gone out: unknown ⇒ never retried.
-                await asyncio.to_thread(
-                    db.transition_turn_effects, task_id, "notifying", "notified",
-                    error="notify_timeout (outcome unknown)",
-                )
-                logger.warning("event=managed_notify_timeout task_id=%s", task_id)
-            except Exception as e:  # noqa: BLE001 — bounded retry below
-                attempts += 1
-                bumped = True
-                if attempts < MANAGED_EFFECTS_MAX_ATTEMPTS:
-                    await asyncio.to_thread(
-                        db.transition_turn_effects, task_id, "notifying", "pending",
-                        error=f"notify_error: {e}", bump_attempts=True,
-                    )
-                    return False
-                notify_failed = True
-                await asyncio.to_thread(
-                    db.transition_turn_effects, task_id, "notifying", "notified",
-                    error=f"notify_failed: {e}", bump_attempts=True,
-                )
-                logger.warning("event=managed_notify_failed task_id=%s attempts=%d err=%s",
-                               task_id, attempts, e)
-            else:
-                await asyncio.to_thread(db.transition_turn_effects, task_id, "notifying", "notified")
+                outcome, attempts, bumped = await asyncio.shield(crit)
+            except asyncio.CancelledError:
+                # [A84 review F2] Gateway stop: the fence + send + mark run as
+                # one shielded unit — give it a bounded grace so a send in
+                # flight is marked (or a row not yet fenced stays pending).
+                done, _ = await asyncio.wait({crit}, timeout=MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC)
+                if not done:
+                    crit.cancel()
+                    with contextlib.suppress(BaseException):
+                        await crit
+                raise
+            if outcome in ("raced", "retry"):
+                return False
+            notify_failed = notify_failed or outcome == "failed"
         if errors:
             if not bumped:
                 attempts += 1
@@ -12169,6 +12198,62 @@ Generated from user description: {description}
         final = "failed" if notify_failed else "done"
         return bool(await asyncio.to_thread(db.transition_turn_effects, task_id, "notified", final))
 
+    async def _notify_managed_turn(
+        self, db: Any, row: Dict[str, Any], result: TaskResult, attempts: int,
+    ) -> Tuple[str, int, bool]:
+        """[A84] The notify critical section: take the fence (CAS
+        ``pending``→``notifying`` stamping ``"<epoch>:<nonce>"``), send with a
+        timeout, and move the row out of ``notifying`` — every move out is
+        fenced, so only the holder can. Returns ``(outcome, attempts,
+        bumped)``; outcome ∈ raced | sent | unknown | retry | failed.
+        A raising notifier ⇒ back to ``pending`` (bounded retries, then
+        ``failed``); a timeout or a cancellation mid-send ⇒ outcome unknown,
+        never re-sent (a cancelled send leaves the fence, which a later pass
+        closes once abandoned)."""
+        task_id = str(row["id"])
+        fence = f"{time.time():.3f}:{uuid.uuid4().hex[:12]}"
+        if not await asyncio.to_thread(
+            db.transition_turn_effects, task_id, "pending", "notifying", new_fence=fence,
+        ):
+            return "raced", attempts, False
+        sid = str(row.get("session_id") or "")
+        session = self.session_store.get(sid) if sid else None
+        try:
+            await asyncio.wait_for(self.notifier.notify_task_outcome(
+                task_id, result, session=session,
+                chat_id=getattr(session, "telegram_chat_id", None) if session else None,
+            ), timeout=MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC)
+        except asyncio.CancelledError:
+            logger.warning("event=managed_notify_cancelled_in_flight task_id=%s", task_id)
+            raise
+        except asyncio.TimeoutError:
+            # The send may have gone out: unknown ⇒ never retried.
+            await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "notifying", "notified",
+                error="notify_timeout (outcome unknown)", fence=fence,
+            )
+            logger.warning("event=managed_notify_timeout task_id=%s", task_id)
+            return "unknown", attempts, False
+        except Exception as e:  # noqa: BLE001 — bounded retry
+            attempts += 1
+            if attempts < MANAGED_EFFECTS_MAX_ATTEMPTS:
+                await asyncio.to_thread(
+                    db.transition_turn_effects, task_id, "notifying", "pending",
+                    error=f"notify_error: {e}", bump_attempts=True, fence=fence,
+                )
+                return "retry", attempts, True
+            await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "notifying", "notified",
+                error=f"notify_failed: {e}", bump_attempts=True, fence=fence,
+            )
+            logger.warning("event=managed_notify_failed task_id=%s attempts=%d err=%s",
+                           task_id, attempts, e)
+            return "failed", attempts, True
+        await asyncio.to_thread(
+            db.transition_turn_effects, task_id, "notifying", "notified", fence=fence,
+        )
+        return "sent", attempts, False
+
     def _managed_turn_effect_inputs(
         self, row: Dict[str, Any],
     ) -> Tuple[Task, TaskResult, str]:
@@ -12183,16 +12268,27 @@ Generated from user description: {description}
             errors = [str(row.get("error"))]
         if status == "cancelled" and not any("cancelled" in e.lower() for e in errors):
             errors.append("cancelled")
+        # [A84 review F5] The carrier's raw transcript is not persisted; the
+        # reply extracted from it at commit (``reply_text``) stands in for an
+        # empty ``output`` of a success. Legacy remote shape otherwise:
+        # raw_stdout mirrors output, error_detail / invocation id attached.
+        output = str(res.get("output") or "")
+        if success and not output.strip():
+            output = str(row.get("reply_text") or "")
         result = TaskResult(
             task_id=str(row["id"]), success=success,
-            output=str(res.get("output") or ""), errors=errors,
+            output=output, errors=errors,
             files_modified=[str(f) for f in (res.get("files_modified") or [])],
             execution_time=float(res.get("execution_time") or 0.0),
             timestamp=str(res.get("timestamp") or row.get("completed_at") or ""),
+            raw_stdout=output,
             return_code=int(res.get("return_code") or 0),
             usage=res.get("usage") if isinstance(res.get("usage"), dict) else None,
             error_class=str(row.get("error_class") or ""),
         )
+        if res.get("error_detail"):
+            setattr(result, "error_detail", res.get("error_detail"))
+        setattr(result, "telemetry_invocation_id", res.get("telemetry_invocation_id") or None)
         meta = task.metadata or {}
         case_id = str(
             row.get("flow_run_id") or meta.get(self._FLOW_RUN_META_KEY)
@@ -12220,7 +12316,10 @@ Generated from user description: {description}
             # A result-less outcome (recovery resolution) still gets its
             # transcript reply (``_mesh_complete_task`` parity).
             db.enrich_task(tid, reply_text=full_out)
-        if sid:
+        # [A84 review F6] Legacy compaction never touched the session history
+        # / preview, the summary, the session log or the Case.
+        conversational = str(row.get("turn_kind") or "") != "compaction"
+        if sid and conversational:
             try:
                 summary = full_out[-400:] if len(full_out) > 400 else full_out
                 db.project_turn_session(
@@ -12245,7 +12344,7 @@ Generated from user description: {description}
             TelemetryStore(db).reconcile(turn_id=tid, since_hours=0)
         except Exception as e:  # noqa: BLE001 — retried
             errors.append(f"telemetry: {e}")
-        if case_id and self._harness_flow_drive_enabled():
+        if conversational and case_id and self._harness_flow_drive_enabled():
             try:
                 self._record_flow_event(
                     case_id, "task.finished", "system", entity_type="task", entity_id=tid,
