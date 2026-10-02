@@ -983,8 +983,13 @@ class _LateManagedOutcome(BaseModel):
 # recovery on that turn (the gateway never learns the id from a result) keeps
 # the session's history instead of creating a second native session. Cleared
 # once a terminal result carries the id to the carrier.
+# [A82 pre-cutover, m7] It lives in the carrier's own state dir — the same
+# ``WORKER_STATE_DIR`` (default ``logs/carrier_state``) base the carrier's result
+# spool and claim store use (``WorkerAgent._carrier_state_dir``), so it shares
+# their persistence (e.g. the container's state volume). Cleared also when a
+# recovery resolves (late capture delivered the id) or the gateway knows the id.
 def _native_store_path() -> Path:
-    root = os.environ.get("AI_TEAM_OPENCODE_STATE_DIR") or str(Path.home() / ".local" / "state" / "ai-team")
+    root = os.getenv("WORKER_STATE_DIR") or os.path.join("logs", "carrier_state")
     return Path(root) / "opencode-native-sessions.sqlite3"
 
 
@@ -999,6 +1004,21 @@ def _native_store(sql: str, args: tuple) -> List[tuple]:
             return conn.execute(sql, args).fetchall()
     finally:
         conn.close()
+
+
+def _clear_native(session_id: str, native_id: str = "") -> None:
+    """[A82 pre-cutover, m7] Drop ``session_id``'s write-ahead row (only the one
+    naming ``native_id`` when given). Never creates the store."""
+    if not _native_store_path().exists():
+        return
+    try:
+        if native_id:
+            _native_store("DELETE FROM native_sessions WHERE session_id = ? AND native_id = ?",
+                          (session_id, native_id))
+        else:
+            _native_store("DELETE FROM native_sessions WHERE session_id = ?", (session_id,))
+    except (OSError, sqlite3.Error):
+        logger.warning("event=opencode_native_store_clear_failed session=%s", session_id)
 
 
 def _stored_native(session_id: str, key: str) -> str:
@@ -1368,6 +1388,7 @@ class OpenCodeServerBackend(CodingBackend):
                     is_error=not result.success, error_text="; ".join(result.errors or []),
                     error_class=result.error_class or "", backend_session_id=entry.oc_session_id,
                     raw_ndjson=result.raw_stdout or ""))
+                _clear_native(entry.session_id, entry.oc_session_id)  # [m7] recovery resolved: id delivered
         except Exception:  # noqa: BLE001 — the sink must never kill this thread silently
             logger.warning("event=opencode_managed_late_delivery_failed turn=%s", entry.turn_uuid,
                            exc_info=True)
@@ -1417,6 +1438,8 @@ class OpenCodeServerBackend(CodingBackend):
                                    errors=[err], error_class="server_unavailable",
                                    execution_time=time.time() - start)
         oc_id = session.backend_session_id or ""
+        if oc_id:
+            _clear_native(entry.session_id)  # [m7] the gateway knows its id: the record is stale
         if not oc_id and entry.kind == "turn":
             with self._lock:
                 known = self._native.get(entry.session_id)
@@ -1554,11 +1577,7 @@ class OpenCodeServerBackend(CodingBackend):
                                        errors=["OpenCode managed turn cancelled."], error_class="cancelled",
                                        execution_time=elapsed)
             result = self._managed_outcome(response, session, oc_id, elapsed, telemetry_context, telemetry_sink)
-            try:  # [m7] the terminal result carries the id to the carrier now
-                _native_store("DELETE FROM native_sessions WHERE session_id = ? AND native_id = ?",
-                              (entry.session_id, oc_id))
-            except (OSError, sqlite3.Error):
-                logger.warning("event=opencode_native_store_clear_failed session=%s", entry.session_id)
+            _clear_native(entry.session_id, oc_id)  # [m7] the terminal result carries the id now
             return result
         finally:
             self._managed_release(lock)
