@@ -687,3 +687,160 @@ def test_INT_opencode_ambiguous_outcome_holds_recovery(db, backend, fake, tmp_pa
     time.sleep(0.6)
     asyncio.run(w._reconcile_managed_claims())
     assert _row(db, "t-oc3")["status"] in ("failed",), _row(db, "t-oc3")
+
+
+# =========================================================================== #
+# [A82 step 4 rework, review round 1] m4 late capture, m6 transport errors never
+# kill the shared serve, m7 native session created only after the gates and
+# persisted write-ahead.
+# =========================================================================== #
+@pytest.fixture(autouse=True)
+def _native_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_TEAM_OPENCODE_STATE_DIR", str(tmp_path / "oc-state"))
+
+
+def test_m4_late_reply_is_captured_bound_to_the_turn_and_session_busy_until_delivered(backend, fake, tmp_path):
+    fake.add_session("ses_late")
+    fake.release.clear()
+    backend._managed_deadline_sec = lambda: 0.5
+    in_sink, release_sink = threading.Event(), threading.Event()
+    got: List[Any] = []
+    s = _session(tmp_path, native="ses_late")
+
+    def sink(sid: str, outcome: Any) -> None:
+        got.append((sid, outcome, backend.is_quiescent(s)))
+        in_sink.set()
+        release_sink.wait(5)
+
+    backend.set_proactive_sink(sink)
+    res = backend.run_managed_turn(s, "x", _own(turn="u-late"))
+    assert res.error_class == "recovery_required"
+    assert backend.is_quiescent(s) is False
+    fake.release.set()
+    assert in_sink.wait(10), "the late reply was dropped"
+    sid, outcome, quiescent_during_delivery = got[0]
+    assert sid == "gw-1" and outcome.late_managed is True
+    assert outcome.managed_turn_uuid == "u-late" and outcome.output == "managed reply"
+    assert outcome.is_error is False and outcome.backend_session_id == "ses_late"
+    assert quiescent_during_delivery is False, "reconcile could resolve before the late reply was captured"
+    release_sink.set()
+    _wait(lambda: backend.is_quiescent(s))
+    assert fake.aborts == []
+
+
+def test_m4_forgotten_turn_gets_no_late_delivery(backend, fake, tmp_path):
+    fake.add_session("ses_fg")
+    fake.release.clear()
+    backend._managed_deadline_sec = lambda: 0.5
+    got: List[Any] = []
+    backend.set_proactive_sink(lambda sid, outcome: got.append(outcome))
+    s = _session(tmp_path, native="ses_fg")
+    assert backend.run_managed_turn(s, "x", _own(turn="u-fg")).error_class == "recovery_required"
+    assert backend.forget_managed_turn(s, "u-fg") is True
+    fake.release.set()
+    _wait(lambda: backend.is_quiescent(s))
+    time.sleep(0.3)
+    assert got == []
+
+
+def test_m4_late_reply_completes_the_held_turn_through_the_carrier(db, backend, fake, tmp_path):
+    fake.add_session("ses_lc")
+    fake.release.clear()
+    backend._managed_deadline_sec = lambda: 0.5
+    w = _oc_worker(tmp_path, backend)
+    w._setup_proactive_delivery()
+    _seed_oc_turn(db, "t-oc-late", "sess-oc-late", "slow", str(tmp_path), "ses_lc")
+    _run_one(w, "t-oc-late")
+    assert _row(db, "t-oc-late")["status"] == "recovery_required"
+    assert asyncio.run(w._reconcile_managed_claims()) == 0, "must not resolve while the reply is owed"
+    fake.release.set()
+    _wait(lambda: [tid for tid, _t, _e in w._result_spool.list_spooled()] == ["t-oc-late"])
+    asyncio.run(w._redeliver_spooled_results())
+    row = _row(db, "t-oc-late")
+    assert row["status"] == "completed", row
+    assert json.loads(row["result"])["output"] == "managed reply"
+
+
+def _fail_status_once(monkeypatch, exc: BaseException) -> List[str]:
+    import urllib.request
+
+    import src.backends.opencode as oc_mod
+
+    real = urllib.request.urlopen
+    hits: List[str] = []
+
+    def urlopen(req, *a, **k):
+        if not hits and "/session/status" in req.full_url:
+            hits.append(req.full_url)
+            raise exc
+        return real(req, *a, **k)
+
+    monkeypatch.setattr(oc_mod.urllib.request, "urlopen", urlopen)
+    return hits
+
+
+@pytest.mark.parametrize("kind", ["connect_timeout", "reset"])
+def test_m6_probe_transport_error_never_terminates_the_shared_server(backend, fake, tmp_path,
+                                                                     stand_in_proc, monkeypatch, kind):
+    import socket
+    import urllib.error
+
+    fake.add_session("ses_a")
+    fake.add_session("ses_b")
+    fake.release.clear()
+    th, out = _bg(backend.run_managed_turn, _session(tmp_path, native="ses_a"), "a", _own(turn="u-a"))
+    _wait(lambda: len(fake.prompts) == 1)
+    exc = urllib.error.URLError(socket.timeout("timed out")) if kind == "connect_timeout" \
+        else ConnectionResetError("reset by peer")
+    hits = _fail_status_once(monkeypatch, exc)
+    assert backend.is_quiescent(_session(tmp_path, sid="gw-b", native="ses_b")) is False, "unknown ⇒ busy"
+    assert hits, "the probe hit the injected transport error"
+    key = backend._server_key(str(tmp_path))
+    assert stand_in_proc.poll() is None, "the shared serve was terminated"
+    assert backend._procs.get(key) is stand_in_proc and backend._base_urls.get(key) == fake.url
+    fake.release.set()
+    th.join(10)
+    assert out["result"].success is True, out["result"].errors
+
+
+def test_m6_dead_server_process_is_still_cleaned_up(backend, fake, tmp_path, stand_in_proc):
+    fake.add_session("ses_d6")
+    stand_in_proc.kill()
+    stand_in_proc.wait(5)
+    fake.die()
+    assert backend.is_quiescent(_session(tmp_path, native="ses_d6")) is False
+    assert backend._server_key(str(tmp_path)) not in backend._base_urls, "proven death clears the reference"
+
+
+def test_m7_first_turn_conflict_creates_no_native_session(backend, fake, tmp_path):
+    from src.backends.opencode import _get_repo_lock
+
+    lock = _get_repo_lock(str(tmp_path))
+    assert lock.acquire(blocking=False)
+    try:
+        res = backend.run_managed_turn(_session(tmp_path, native=""), "x", _own(turn="u-first"))
+    finally:
+        lock.release()
+    assert res.error_class == "managed_conflict"
+    assert fake.created == [], "a refused first turn leaked an orphan native session"
+
+
+def test_m7_first_turn_recovery_keeps_its_native_session_across_a_restart(backend, fake, tmp_path, stand_in_proc):
+    fake.record_prompt = False  # the first prompt's acceptance is ambiguous ⇒ recovery
+    first = backend.run_managed_turn(_session(tmp_path, native=""), "x", _own(turn="u-r1"))
+    assert first.error_class == "recovery_required"
+    assert len(fake.created) == 1
+    native = fake.created[0]
+    assert first.backend_session_id == native
+    # A successor backend (carrier restart): the gateway never learned the id.
+    fake.record_prompt = True
+    successor = OpenCodeServerBackend()
+    successor._exe = str(tmp_path / "no-such-opencode-binary")
+    key = successor._server_key(str(tmp_path))
+    successor._procs[key] = stand_in_proc
+    successor._base_urls[key] = fake.url
+    successor._MANAGED_POLL_SEC = 0.05
+    nxt = successor.run_managed_turn(_session(tmp_path, native=""), "y", _own(turn="u-r2"))
+    assert nxt.success is True, nxt.errors
+    assert nxt.backend_session_id == native and fake.created == [native], "history lost: a second session"
+    assert [p["session"] for p in fake.prompts] == [native, native]
