@@ -2870,7 +2870,9 @@ class WorkerAgent:
                 self._managed_claims_blocked,
             )
             return []
-        managed_backends = self._managed_backends()
+        # [A82 pre-cutover] The capability probe may spawn a subprocess (Codex
+        # offline schema probe, cached per binary): never on the event loop.
+        managed_backends = await asyncio.to_thread(self._managed_backends)
         if not managed_backends:
             return []
         try:
@@ -2926,7 +2928,7 @@ class WorkerAgent:
                 # byte-identical /claim path and execute the poll row.
                 managed = self._managed_enabled() and int(task_row.get("queue_protocol", 0) or 0) == 1
                 claim_token: Optional[str] = None
-                if managed and task_row.get("backend", "") not in self._managed_backends():
+                if managed and task_row.get("backend", "") not in await asyncio.to_thread(self._managed_backends):
                     # Fail closed: never claim a managed row for a backend without
                     # a managed execution path (no legacy fallback).
                     logger.warning(
