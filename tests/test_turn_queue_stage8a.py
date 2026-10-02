@@ -444,8 +444,9 @@ def test_S8_07b_carrier_coverage_check_and_health(tmp_path, monkeypatch, caplog)
     assert pairs == {("worker-a", "codex"): 1, ("local-daemon", "claude"): 1}
     assert o._retired_backend_sessions == 1
     assert "event=managed_carrier_missing" in caplog.text
-    body = _api(monkeypatch, o).get("/health").json()
-    assert sorted((m["carrier"], m["backend"]) for m in body["turn_queue"]["managed_carrier_missing"]) == \
+    body = _api(monkeypatch, o).get("/api/turn-queue/coverage",
+                                    headers={"Authorization": "Bearer tok"}).json()
+    assert sorted((m["carrier"], m["backend"]) for m in body["managed_carrier_missing"]) == \
         sorted(pairs)
     _register_carrier(db, "local-daemon")
     _register_carrier(db, "worker-a", managed=("claude", "codex"))
@@ -771,3 +772,29 @@ def test_S8_12_draining_backoff_is_capped_F3(tmp_path, monkeypatch):
     assert row["blocked_reason"] == "legacy_work_draining: legacy-live"
     wait = (datetime.fromisoformat(row["blocked_until"]) - datetime.now(tz=timezone.utc)).total_seconds()
     assert 0 < wait <= 15.0, wait  # resumes within ~15 s of the legacy row finishing
+
+
+def test_S8_13_health_shows_only_a_coverage_boolean_details_need_auth_F4(tmp_path, monkeypatch):
+    from config import config
+
+    db, o = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(config.mesh, "local_carrier_node_id", "local-daemon")
+    db.upsert_session(Session(session_id="cx-1", backend="codex", repo_path="/r",
+                              status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW,
+                              machine_id="worker-a"))
+    c = _api(monkeypatch, o)
+    assert c.get("/health").json()["turn_queue"] == {"coverage_ok": None}  # not checked yet
+    o.check_managed_carrier_coverage()
+    health = c.get("/health")
+    assert health.json()["turn_queue"] == {"coverage_ok": False}
+    for secret in ("worker-a", "local-daemon", "codex", "sessions"):
+        assert secret not in health.text
+    assert c.get("/api/turn-queue/coverage").status_code == 401
+    detail = c.get("/api/turn-queue/coverage", headers={"Authorization": "Bearer tok"}).json()
+    assert detail["checked"] is True and detail["coverage_ok"] is False
+    assert {"carrier": "worker-a", "pin": "worker-a", "backend": "codex", "sessions": 1} in \
+        detail["managed_carrier_missing"]
+    _register_carrier(db, "worker-a", managed=("claude", "codex"))
+    _register_carrier(db, "local-daemon")
+    o.check_managed_carrier_coverage()
+    assert c.get("/health").json()["turn_queue"] == {"coverage_ok": True}
