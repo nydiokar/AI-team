@@ -6052,6 +6052,11 @@ class TaskOrchestrator(ITaskOrchestrator):
             # [A82 Stage 8a] No managed carrier in this deployment ⇒ a session
             # turn is refused (typed) before any side effect, enrolled or not.
             self._require_session_carrier_mode(_sid)
+            if _known is None:
+                _known = await self._session_turn_queue_enrolled(_sid)
+            # [review F2] Defence in depth: a non-enrolled session turn has no
+            # pathway after the cutover — refused before any side effect.
+            self.refuse_unenrolled_session_turn(_sid, enrolled=bool(_known))
         # A controller-only deployment still needs this gateway queue to dispatch
         # remote-pinned tasks. Reject local work *before* queueing it, otherwise a
         # controller image without agent CLIs would leave an unpinned turn stuck.
@@ -10922,6 +10927,14 @@ Generated from user description: {description}
         from src.control.turn_queue import BackingStoreError
 
         sid = (session_id or "").strip()
+        if self._LEGACY_SESSION_EXECUTION_RETIRED:
+            # [A82 Stage 8a, review F2] An unenrolled session would have no
+            # pathway left (its turns could only fail): enrollment is the only mode.
+            from src.control.turn_queue import LegacyExecutionRetiredError
+
+            raise LegacyExecutionRetiredError(
+                "unenroll is retired: legacy session execution no longer exists", session_id=sid,
+            )
         db = get_db()
         if db is None:
             raise BackingStoreError("unenrollment needs the canonical mesh DB", session_id=sid)
@@ -12027,6 +12040,25 @@ Generated from user description: {description}
     # keep running locally. False: session turns follow the normal routing
     # (an enrolled session is admitted to its managed carrier).
     _REFUSE_SESSION_TURNS_WITHOUT_MESH = True
+
+    # [A82 Stage 8a, review F2] The cutover invariant (not an operator switch;
+    # Stage 8b deletes the legacy session path it guards): session turns run
+    # only on the managed queue, so a NON-enrolled session turn is refused and
+    # the operator unenroll exit is refused. The offline test harness flips it
+    # (with MESH_ENABLED forced off) to keep exercising the legacy branches
+    # that remain until 8b — never a production shape.
+    _LEGACY_SESSION_EXECUTION_RETIRED = True
+
+    def refuse_unenrolled_session_turn(self, session_id: str, *, enrolled: bool) -> None:
+        """Raise ``LegacyExecutionRetiredError`` (409) for a session turn whose
+        session is not enrolled (see ``_LEGACY_SESSION_EXECUTION_RETIRED``)."""
+        if self._LEGACY_SESSION_EXECUTION_RETIRED and not enrolled:
+            from src.control.turn_queue import LegacyExecutionRetiredError
+
+            raise LegacyExecutionRetiredError(
+                "this session is not on the managed turn queue and legacy session "
+                "execution is retired; start a new session", session_id=session_id,
+            )
 
     def _require_session_carrier_mode(self, session_id: Optional[str]) -> None:
         """Raise ``CarrierRequiredError`` for a session turn in a deployment
