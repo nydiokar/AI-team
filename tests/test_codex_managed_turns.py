@@ -279,6 +279,8 @@ def managed_rows(home: Path) -> list[dict]:
     conn.row_factory = sqlite3.Row
     try:
         return [dict(r) for r in conn.execute("SELECT * FROM managed_turns")]
+    except sqlite3.OperationalError:
+        return []  # polled while the backend is still creating its schema
     finally:
         conn.close()
 
@@ -755,7 +757,8 @@ def test_m2_cutover_sweep_clears_identityless_owner_only_when_its_process_is_gon
 
     legacy = CodexOwnership()
     legacy.acquire("sess-1", "thr-legacy", str(Path(h.repo).resolve()))
-    _crashed_owner_thread, _ = _crashed_owner(h, alive=False)  # a MANAGED owner (has identity)
+    managed = CodexOwnership()  # a MANAGED owner (recorded identity): never swept here
+    managed.acquire("sess-2", "thr-managed", str(Path(h.repo).resolve()), process={"pid": 1 << 30})
     assert sweep_legacy_owners() == [], "the owning process (this one) is alive"
     assert h.make().is_quiescent(h.session(native="thr-legacy")) is False
     gone = subprocess.Popen([sys.executable, "-c", "pass"])

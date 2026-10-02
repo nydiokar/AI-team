@@ -13,6 +13,7 @@ import queue
 import signal
 import subprocess
 import threading
+from collections.abc import Callable
 
 from pydantic import JsonValue
 
@@ -20,6 +21,10 @@ MAX_FRAME = 4 * 1024 * 1024
 MAX_BUFFER = 16 * 1024 * 1024
 MAX_PENDING = 32
 RPC_TIMEOUT = 30.0
+INTERRUPT_TIMEOUT = 5.0
+# [A82 step 4 rework, M1] Ids of requests whose caller stopped waiting: their
+# late reply is routed (or dropped) instead of failing the shared client.
+MAX_LATE = 256
 REQUEST_METHODS = frozenset({
     "initialize", "thread/start", "thread/resume", "thread/unsubscribe",
     "thread/compact/start", "turn/start", "turn/interrupt", "model/list",
@@ -84,6 +89,12 @@ class CodexProtocolError(RuntimeError):
     """Protocol/transport failure; possibly executed calls must not be replayed."""
 
 
+class CodexRPCTimeout(CodexProtocolError):
+    """[A82 step 4 rework, M1] One request's reply deadline expired. Request-
+    scoped: the shared app-server and every other thread on it stay healthy;
+    the late reply is routed to the request's ``on_late`` (or dropped)."""
+
+
 class CodexRPCError(CodexProtocolError):
     def __init__(self, error: dict[str, JsonValue]) -> None:
         super().__init__("codex_rpc_rejected")
@@ -115,6 +126,7 @@ class CodexAppServerClient:
         self.process: subprocess.Popen[bytes] | None = None
         self.failure: str = ""
         self.pending: dict[int, queue.Queue[dict[str, JsonValue]]] = {}
+        self.late: dict[int, Callable[[dict[str, JsonValue]], None] | None] = {}
         self.channels: dict[str, EventChannel] = {}
         self.buffered: int = 0
         self.sequence: int = 0
@@ -167,7 +179,8 @@ class CodexAppServerClient:
 
     def start_turn(self, thread_id: str, message: str, cwd: str,
                    model: str | None, effort: str | None,
-                   client_message_id: str | None = None) -> dict[str, JsonValue]:
+                   client_message_id: str | None = None,
+                   on_late: Callable[[dict[str, JsonValue]], None] | None = None) -> dict[str, JsonValue]:
         params: dict[str, JsonValue] = {"threadId": thread_id,
             "input": [{"type": "text", "text": message}], "cwd": cwd,
             "model": model, "effort": effort}
@@ -175,17 +188,18 @@ class CodexAppServerClient:
             # Native correlation: echoed as the userMessage item's ``clientId``
             # and persisted in the thread's turn history.
             params["clientUserMessageId"] = client_message_id
-        return self.request("turn/start", params, timeout=RPC_TIMEOUT)
+        return self.request("turn/start", params, timeout=RPC_TIMEOUT, on_late=on_late)
 
     def read_thread(self, thread_id: str) -> dict[str, JsonValue]:
         """Native thread metadata incl. ``status`` (no turn history)."""
         return self.request("thread/read", {"threadId": thread_id}, timeout=RPC_TIMEOUT)
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
-        self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=5)
+        self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=INTERRUPT_TIMEOUT)
 
-    def compact(self, thread_id: str) -> None:
-        self.request("thread/compact/start", {"threadId": thread_id})
+    def compact(self, thread_id: str,
+                on_late: Callable[[dict[str, JsonValue]], None] | None = None) -> None:
+        self.request("thread/compact/start", {"threadId": thread_id}, on_late=on_late)
 
     def unload(self, thread_id: str) -> None:
         self.request("thread/unsubscribe", {"threadId": thread_id})
@@ -215,8 +229,8 @@ class CodexAppServerClient:
                     except queue.Empty:
                         break
 
-    def request(self, method: str, params: dict[str, JsonValue],
-                timeout: float = RPC_TIMEOUT) -> dict[str, JsonValue]:
+    def request(self, method: str, params: dict[str, JsonValue], timeout: float = RPC_TIMEOUT,
+                on_late: Callable[[dict[str, JsonValue]], None] | None = None) -> dict[str, JsonValue]:
         with self.lock:
             self.check()
             if method not in REQUEST_METHODS or not isinstance(params, dict):
@@ -237,7 +251,20 @@ class CodexAppServerClient:
                 self.pending.pop(request_id)
                 raise CodexProtocolError("codex_rpc_capacity_exceeded") from exc
         try:
-            response = reply.get(timeout=timeout)
+            try:
+                response = reply.get(timeout=timeout)
+            except queue.Empty:
+                with self.lock:
+                    try:
+                        response = reply.get_nowait()  # raced in under the lock
+                    except queue.Empty:
+                        # [A82 step 4 rework, M1] Request-scoped deadline: never
+                        # fail the SHARED client (that would kill every other
+                        # thread's turn). Its late reply is routed, not fatal.
+                        self.late[request_id] = on_late
+                        while len(self.late) > MAX_LATE:
+                            self.late.pop(next(iter(self.late)))
+                        raise CodexRPCTimeout(f"codex_rpc_deadline_exceeded:{method}") from None
             self.check()
             if "error" in response:
                 error = response["error"]
@@ -248,9 +275,6 @@ class CodexAppServerClient:
             if not isinstance(result, dict):
                 raise CodexProtocolError("codex_invalid_rpc_result")
             return result
-        except queue.Empty as exc:
-            self._fail("codex_rpc_deadline_exceeded")
-            raise CodexProtocolError(self.failure) from exc
         finally:
             with self.lock:
                 self.pending.pop(request_id, None)
@@ -283,6 +307,11 @@ class CodexAppServerClient:
                             # No adapter authority to grant approval or answer user input.
                             raise CodexProtocolError("codex_unsupported_server_request")
                         request_id = event["id"]
+                        if type(request_id) is int and request_id in self.late:
+                            route = self.late.pop(request_id)
+                            if route is not None:
+                                route(event)  # must not block: the reader holds the lock
+                            continue
                         if type(request_id) is not int or request_id not in self.pending:
                             raise CodexProtocolError("codex_unmatched_response")
                         self.pending[request_id].put_nowait(event)

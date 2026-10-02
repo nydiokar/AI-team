@@ -137,13 +137,21 @@ class CodexOwnership:
     def begin_managed(self, turn_uuid: str, thread_id: str, kind: str, process: dict) -> None:
         """Write-ahead BEFORE the prompt is submitted. A row that already exists
         for this uuid means an earlier life may have submitted it: raise (the
-        caller reports recovery; never a blind re-submit)."""
+        caller reports recovery; never a blind re-submit) — unless that row is
+        ``not_submitted``: refused before submission, provably unsent, so the
+        requeued attempt begins again ([A82 step 4 rework, m1])."""
         with self._connect() as conn:
             try:
                 conn.execute("INSERT INTO managed_turns VALUES (?, ?, ?, '', ?, 'submitting', ?, ?)",
                              (turn_uuid, self.session_key, thread_id, kind, self.owner, json.dumps(process)))
             except sqlite3.IntegrityError as exc:
-                raise RuntimeError("codex_managed_turn_already_begun") from exc
+                if conn.execute(
+                        "UPDATE managed_turns SET session_key = ?, thread_id = ?, native_turn_id = '', "
+                        "kind = ?, state = 'submitting', owner = ?, process = ? "
+                        "WHERE turn_uuid = ? AND state = 'not_submitted'",
+                        (self.session_key, thread_id, kind, self.owner, json.dumps(process),
+                         turn_uuid)).rowcount != 1:
+                    raise RuntimeError("codex_managed_turn_already_begun") from exc
 
     def bind_native_turn(self, turn_uuid: str, native_turn_id: str) -> None:
         with self._connect() as conn:
@@ -194,8 +202,64 @@ class CodexOwnership:
         return True
 
 
+def _owner_process_gone(pid: int) -> bool:
+    """True only with proof the pid no longer exists (fail closed)."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import psutil
+            return not psutil.pid_exists(pid)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def sweep_legacy_owners(gone: Callable[[int], bool] = _owner_process_gone) -> list[str]:
+    """[A82 step 4 rework, m2] Cutover sweep for Stage 8's migration (and the
+    operator exit): clear owner rows left by the LEGACY ``_run`` path — owners
+    with NO recorded app-server identity (no ``owner_processes`` row, no
+    managed rows) — whose owning carrier process is provably gone (its pid no
+    longer exists). Such an owner otherwise reads ``codex_thread_busy`` forever.
+    Owners with a recorded identity are never touched here (``clear_dead_owners``
+    decides them by app-server proof); a pid that exists — even a reused one —
+    is never cleared (fail closed). Returns the cleared owner ids.
+
+    Run it with: ``python -m src.backends.codex_ownership --sweep-legacy-owners``
+    (uses ``CODEX_HOME`` like the carrier)."""
+    cleared: list[str] = []
+    store = CodexOwnership()
+    with store._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT DISTINCT owner, pid FROM owners WHERE owner NOT IN (SELECT owner FROM owner_processes) "
+            "AND owner NOT IN (SELECT owner FROM managed_turns)").fetchall()
+        pids: dict[str, set[int]] = {}
+        for owner, pid in rows:
+            pids.setdefault(owner, set()).add(int(pid))
+        for owner, owner_pids in pids.items():
+            if all(gone(pid) for pid in owner_pids):
+                conn.execute("DELETE FROM owners WHERE owner = ?", (owner,))
+                cleared.append(owner)
+    return cleared
+
+
 def _record(row: tuple) -> ManagedTurnRecord:
     turn_uuid, session_key, thread_id, native_turn_id, kind, state, owner, process = row
     return ManagedTurnRecord(turn_uuid=turn_uuid, session_key=session_key, thread_id=thread_id,
                              native_turn_id=native_turn_id, kind=kind, state=state, owner=owner,
                              process=json.loads(process or "{}"))
+
+
+if __name__ == "__main__":
+    import sys
+
+    if sys.argv[1:] != ["--sweep-legacy-owners"]:
+        sys.exit("usage: python -m src.backends.codex_ownership --sweep-legacy-owners")
+    print(json.dumps({"cleared_owners": sweep_legacy_owners()}))
