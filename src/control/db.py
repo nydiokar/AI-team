@@ -4270,6 +4270,29 @@ class MeshDB:
         except Exception as e:
             raise _turn_backing_error("requeue_turns_on_dead_carriers", err=e)
 
+    def release_carrier_offline_holds(self, node_id: str) -> int:
+        """[A82 pre-cutover rework, F6] The carrier ``node_id`` is back online:
+        its queued managed rows held ``carrier_offline: <node_id>`` become
+        eligible at once (``blocked_until`` cleared) instead of waiting out the
+        blocked-head backoff (up to 300 s). The reason stays visible until the
+        scheduler activates (or re-blocks) the row. Read first: the common case
+        (nothing held for the node) takes no write lock. Returns rows released."""
+        reason = f"carrier_offline: {node_id}"
+        query = ("FROM mesh_tasks WHERE queue_protocol = 1 AND status = 'queued' "
+                 "AND blocked_reason = ? AND blocked_until IS NOT NULL")
+        if not node_id or self._conn().execute(f"SELECT 1 {query} LIMIT 1", (reason,)).fetchone() is None:
+            return 0
+        try:
+            with self._managed_write("release_carrier_offline_holds") as conn:
+                return conn.execute(
+                    f"UPDATE mesh_tasks SET blocked_until = NULL, updated_at = ? WHERE id IN (SELECT id {query})",
+                    (_now(), reason),
+                ).rowcount
+        except TurnQueueError:
+            raise
+        except Exception as e:
+            raise _turn_backing_error("release_carrier_offline_holds", err=e)
+
     def refresh_enrollment_presence(self) -> Optional[bool]:
         """[A82 Stage 4a rework] Reload the process-level presence flag with one
         bounded query. On failure the previous value is kept (None = unknown ⇒

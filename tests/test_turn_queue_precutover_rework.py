@@ -189,3 +189,72 @@ def test_F4_missing_staged_file_through_real_carrier_fails_the_turn_visibly(tmp_
     assert b.seen == []
     assert row["status"] == "failed", row["status"]
     assert "staged_file_missing" in (row.get("error") or "") + str(row.get("result") or "")
+
+
+# --------------------------------------------------------------------------- #
+# F6 — a returning carrier releases its carrier_offline holds and wakes the
+# scheduler (no wait for the up-to-300 s blocked-head backoff)
+# --------------------------------------------------------------------------- #
+class _HintSpy:
+    def __init__(self):
+        self.hints = 0
+
+    def hint(self):
+        self.hints += 1
+
+
+def _offline_admitted(tmp_path, monkeypatch):
+    import src.control.node_registry as nr_mod
+    from src.control import turn_scheduler as tsch
+    from tests.test_turn_queue_precutover import _offline, _submit
+
+    db, o = _setup(tmp_path, monkeypatch)
+    _offline(db)
+    tid = _submit(o, operation_id="op-off")
+    row = db.get_task(tid)
+    assert row["status"] == "queued" and row["blocked_reason"] == "carrier_offline: worker-a"
+    assert row["blocked_until"], "admitted under the blocked-head backoff"
+    spy = _HintSpy()
+    monkeypatch.setattr(tsch, "_ACTIVE", spy)
+    reg = nr_mod.NodeRegistry()
+    monkeypatch.setattr(nr_mod, "_registry", reg)
+    return db, o, tid, spy, reg
+
+
+def _carrier_info(node="worker-a"):
+    from src.control.node_registry import NodeCapabilities, NodeInfo
+
+    return NodeInfo(node_id=node, tailscale_ip="", api_port=9001,
+                    capabilities=NodeCapabilities(backends=["claude"], max_concurrent=2,
+                                                  queue_protocols=[1], managed_backends=["claude"]),
+                    incarnation_id="inc-1")
+
+
+def test_F6_carrier_registration_releases_offline_holds_and_hints_the_scheduler(tmp_path, monkeypatch):
+    from tests.test_turn_queue_precutover import _pass
+
+    db, o, tid, spy, reg = _offline_admitted(tmp_path, monkeypatch)
+    reg.register(_carrier_info())
+    row = db.get_task(tid)
+    assert row["blocked_until"] is None and row["status"] == "queued"
+    assert row["blocked_reason"] == "carrier_offline: worker-a", "visible until activation"
+    assert spy.hints >= 1
+    assert _pass(db, o).activated == 1, "eligible at once — no backoff wait"
+    assert db.get_task(tid)["status"] == "pending"
+
+
+def test_F6_heartbeat_back_online_releases_holds_steady_heartbeat_does_not(tmp_path, monkeypatch):
+    db, o, tid, spy, reg = _offline_admitted(tmp_path, monkeypatch)
+    reg.register(_carrier_info("worker-b"))  # an unrelated carrier: nothing of worker-a released
+    assert db.get_task(tid)["blocked_until"] is not None
+    reg._nodes["worker-a"] = _carrier_info()
+    reg._nodes["worker-a"].status = "online"
+    from datetime import datetime, timezone
+
+    reg._nodes["worker-a"].last_heartbeat = datetime.now(tz=timezone.utc)
+    hints = spy.hints
+    assert reg.heartbeat("worker-a") is True  # steady online heartbeat: no release
+    assert db.get_task(tid)["blocked_until"] is not None and spy.hints == hints
+    reg._nodes["worker-a"].status = "offline"  # expired by the registry, then back
+    assert reg.heartbeat("worker-a") is True
+    assert db.get_task(tid)["blocked_until"] is None and spy.hints > hints
