@@ -798,3 +798,31 @@ def test_S8_13_health_shows_only_a_coverage_boolean_details_need_auth_F4(tmp_pat
     _register_carrier(db, "local-daemon")
     o.check_managed_carrier_coverage()
     assert c.get("/health").json()["turn_queue"] == {"coverage_ok": True}
+
+
+def test_S8_14_effects_failed_banner_clears_after_a_delivered_turn_F5(tmp_path, monkeypatch):
+    from src.orchestrator import MANAGED_EFFECTS_MAX_ATTEMPTS
+    from tests.test_turn_queue_a84_effects import AUTH, _make_env
+
+    env = _make_env(tmp_path, monkeypatch, chat_id=None)
+
+    def page() -> Dict[str, Any]:
+        return env.api.get("/api/sessions/sess-a84/turn-requests", headers=AUTH).json()
+
+    def failing_turn(op: str) -> str:
+        tid = env.run_turn("notifier down", op)
+        env.notifier.fail = 10_000
+        for _ in range(MANAGED_EFFECTS_MAX_ATTEMPTS + 2):
+            env.drain()
+        env.notifier.fail = 0
+        assert env.row(tid)["effects_state"] == "failed"
+        return tid
+
+    first = failing_turn("op-f1")
+    assert (page()["effects_failed"], page()["effects_failed_turn_id"]) == (1, first)
+    ok = env.run_turn("fine", "op-ok")
+    env.drain()
+    assert env.row(ok)["effects_state"] == "done"
+    assert (page()["effects_failed"], page()["effects_failed_turn_id"]) == (0, None)
+    again = failing_turn("op-f2")
+    assert (page()["effects_failed"], page()["effects_failed_turn_id"]) == (1, again)
