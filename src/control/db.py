@@ -5070,7 +5070,9 @@ class MeshDB:
         reaper/close-triggered retirement of a row that no worker can ever claim
         (closed session, unknown/offline pinned node, age ceiling). The UPDATE is
         guarded to the live states ``pending``/``claimed`` so a racing completion
-        is never clobbered. Returns True iff this call flipped the row to
+        is never clobbered, and to LEGACY (protocol-0) rows: a managed A82 turn
+        has its own lifecycle (cancel_managed / close_session_turns / recovery)
+        and is never retired here. Returns True iff this call flipped the row to
         ``cancelled``. When ``event_session_id`` resolves to a session, an
         append-only ``task_events`` row records the cancellation for audit.
         """
@@ -5083,6 +5085,7 @@ class MeshDB:
                     UPDATE mesh_tasks
                     SET status = 'cancelled', error = ?, completed_at = ?, updated_at = ?
                     WHERE id = ? AND status IN ('pending', 'claimed')
+                      AND COALESCE(queue_protocol, 0) = 0
                     """,
                     (reason, now, now, task_id),
                 )
@@ -5125,6 +5128,11 @@ class MeshDB:
             single-flight rows (``cont:``/``respawn:``/``qresume:``/``tresume:``) —
             their primary retirement is ``close_case``; this is the leak backstop.
 
+        Only LEGACY (protocol-0) rows are considered: a managed A82 turn
+        (queue_protocol 1) legitimately waits behind a busy or offline-pinned
+        session (host affinity) and a closed session's managed rows belong to
+        ``close_session_turns``.
+
         A row pinned to an ONLINE node is legitimate queued work and is NEVER
         returned (no reason applies — the pin is live, so even a very old row can
         still be claimed). ``grace_sec``/``max_age_sec`` <= 0 disables that reason.
@@ -5147,7 +5155,7 @@ class MeshDB:
             FROM mesh_tasks t
             LEFT JOIN sessions s ON s.session_id = t.session_id
             LEFT JOIN nodes n ON n.node_id = t.machine_id
-            WHERE t.status = 'pending'
+            WHERE t.status = 'pending' AND COALESCE(t.queue_protocol, 0) = 0
             ORDER BY t.created_at ASC
             LIMIT ?
             """,
@@ -6145,6 +6153,7 @@ class MeshDB:
                     UPDATE mesh_tasks
                     SET status = 'cancelled', error = 'case closed', completed_at = ?, updated_at = ?
                     WHERE status = 'pending'
+                      AND COALESCE(queue_protocol, 0) = 0
                       AND machine_id = ?
                       AND id LIKE '%' || ? || '%'
                     """,
