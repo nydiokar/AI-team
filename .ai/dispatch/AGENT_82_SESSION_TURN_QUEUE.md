@@ -1925,6 +1925,34 @@ Nothing is deferred.
 3. The UI was verified with component tests on a mocked network; it was not rendered against a live gateway.
 4. A process note: removing my scratch baseline worktree (detached, under the scratchpad, holding only copies of these files) used `git worktree remove --force`. This breaks the no-`--force` rule. No repo data was affected.
 
+### Stage 6 follow-ups (review minors + Telegram parity) (2026-10-02, branch `feat/session-turn-queue`, commits `fae95fa` F1, `78cd8b4` F3, `ba47746` F5, `8425294` F2/F4, `4b3b8a0` Telegram parity + this record) — SUBMITTED, NOT ACCEPTED
+
+The Stage 6 reviewer accepted with minors. Each item below was fixed test-first: the tests were RED on `c977a97` and GREEN after the fix.
+
+| Item | Fix | Test (RED → GREEN) |
+|---|---|---|
+| **F1** stale-high allowance while the scheduler sleeps | `SchedulerPassResult.refresh_deferred` is set when `refresh_managed` refuses the pass's DB count. When it is set, `_next_timeout` returns at most `FALLBACK_INTERVAL_SEC` (3 s), so the next pass restores the cache to the DB count. The operator requeue of an unstarted claim (resolve-recovery `requeue`) now also hints the scheduler, because the waiting count rose. | `test_S6_F1_deferred_allowance_refresh_keeps_a_bounded_wake` (the reviewer probe as a unit test). The reviewer probe now prints `next timeout: 3.0` (was `None`). |
+| **F2** a `pending` head showed the session "running" forever | `queueOpState`: `pending` is no longer in flight. It shows Starting on its card, and the session falls back to the persisted status. Only `claimed`/`running` mean running. Added the `carrier_offline` label "Carrier offline — waits for it to return". | `turnQueue.test.ts` UI02 "pending head is Starting, never running". |
+| **F3** queue changes that emitted no event | The scheduler expiry-withdrawal branch now emits `withdrawn` after commit, and only if the withdraw succeeded. A managed compaction admission emits `admitted`, but not on a replay or when coalesced. | `test_S6_F3a`, `test_S6_F3b`. |
+| **F4** the operator-stop hold was invisible in the panel | `TurnQueuePanel` uses `held = paused \|\| hold != null`. It shows the hold notice ("Stopped by operator — nothing new starts until you resume.") and the Resume action (never Pause). The panel stays visible with zero cards while the queue is paused or held. | `TurnQueuePanel.test.tsx`: two new cases. |
+| **F5a** | `SessionView.to_dict` omits `turn_queue` when the session is unenrolled. | S6-08b tightened: key absent. |
+| **F5b** | An operator create receipt has `source: "operator"` (server-derived), including on replay. | `test_S6_F5b`. |
+| **F5c** | `If-Match` accepts `3` or `"3"`. A weak `W/"3"` returns **412** `weak_etag_never_matches`: If-Match requires strong comparison (RFC 9110 §13.1.1). Garbage, `"0"` or a non-ASCII digit returns 422; a missing header still returns 422. | `test_S6_F5c`. |
+| **F5d** | `task_state_truth`: a `running` managed row with a mismatched incarnation now reads `recovery_required` (medium confidence), matching the fenced recovery; it is never re-offered. A `claimed` (unstarted) row with a mismatch stays `stale_claim`. | `test_S6_F5d`. |
+| **F5e** cursor gap | **No gap exists.** `queue_sequence` is assigned once at insert as the per-session max+1 over ALL protocol-1 rows, terminal ones included (rows are never deleted). It is never rewritten: requeue, release and resolve keep it, and retries are new admissions. So no open row can appear below a cursor a client already paged past. | `test_S6_F5e` pins this (it passed at RED: an invariant guard). |
+| **Telegram parity** (§10 deviation) | One shared service, `turn_admission.set_queue_paused_sync/_async`, used by the web pause/resume routes, the web stop and Telegram. `stop_managed_session_turn(pause_queue=True)` commits the persistent pause before the active-turn cancel; the web stop, Telegram `/session_cancel` and the session-scoped `/cancel` all use it. The old control_api `_pause_enrolled_queue_for_stop` is removed. New `/session_resume [id]`: user-permission and ownership checks; an unenrolled session gets a no-op reply and no writes. It is listed in the bot commands and in help. A Telegram admission reply on a paused queue now says "Queue paused — nothing starts until you send /session_resume." Legacy and unenrolled paths are unchanged. | `tests/test_telegram_turn_queue_resume.py` (5). 4b T01 updated: the explicit release is now `/session_resume`, because a new send no longer resumes. That is the intended semantic change. |
+
+**Other stale-cache paths checked for F1.**
+- Every managed transition out of queued/pending hints the scheduler or runs inside a pass that refreshes: claim, the claim expiry refusal, release, cancel, close, edit, withdraw, expiry and dead-carrier requeue.
+- The legacy queue shares `ALLOWANCE` only in `_start_turn_scheduler`, the same call that starts the loop. A gateway without the scheduler therefore never gates legacy puts on the managed cache.
+- A pass exception already falls back to the 3 s clock.
+
+**Verification (plain pytest, explicit paths, no CLI, no restart, no live writes).**
+- `tests/test_control_api*.py tests/test_turn_queue*.py test_session_timeline test_task_state_truth test_task_lifecycle test_transcript_read_a81 tests/test_telegram_*.py test_pending_reaper`: **771 passed** in one broad run.
+- Web: `pnpm --dir web test` 20 files / 182 tests; `tsc -b` clean; build OK (worktree `web/dist`).
+
+**Residuals.** Stage 6 residual 1 is closed: Telegram now has a persistent pause and resume. The `pending` presentation change applies to the session op-state only; the card still reads Starting.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
