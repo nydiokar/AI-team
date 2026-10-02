@@ -832,11 +832,19 @@ class TelemetryStore:
         for row in rows:
             candidate_id = str(row["turn_id"])
             task = self.db.get_task(candidate_id)
-            if not task or task.get("status") not in (
+            # [A84] A managed (protocol-1) turn also ends cancelled / withdrawn
+            # (operator stop, withdrawal, session close) and nothing else ever
+            # emits its turn.completed; legacy rows keep their semantics.
+            managed_cancel = bool(
+                task
+                and int(task.get("queue_protocol") or 0) == 1
+                and task.get("status") in ("cancelled", "withdrawn")
+            )
+            if not task or (not managed_cancel and task.get("status") not in (
                 "completed",
                 "failed",
                 "failed_node_offline",
-            ):
+            )):
                 skipped.append(
                     {"turn_id": candidate_id, "reason": "mesh_task_not_terminal"}
                 )
@@ -850,7 +858,7 @@ class TelemetryStore:
             success = task.get("status") == "completed" and bool(
                 result.get("success", True)
             )
-            status = "success" if success else "failed"
+            status = "cancelled" if managed_cancel else ("success" if success else "failed")
             invocation_id = (
                 result.get("telemetry_invocation_id")
                 or self._latest_invocation_id(candidate_id)
@@ -908,7 +916,9 @@ class TelemetryStore:
                         backend=backend,
                         attributes={
                             "status": status,
-                            "error_code": None if success else "reconciled_failure",
+                            "error_code": (
+                                None if success or managed_cancel else "reconciled_failure"
+                            ),
                         },
                     ),
                     build_event(

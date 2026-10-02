@@ -3695,6 +3695,7 @@ class MeshDB:
                     """
                     UPDATE mesh_tasks
                     SET status = 'withdrawn', revision = ?, completed_at = ?, updated_at = ?,
+                        effects_state = 'telemetry',
                         lineage_state = CASE WHEN lineage_state = 'pending'
                                                OR (? AND lineage_state = 'done')
                                              THEN 'void' ELSE lineage_state END,
@@ -3786,7 +3787,7 @@ class MeshDB:
                         """
                         UPDATE mesh_tasks
                         SET status = 'cancelled', error = ?, cancel_requested_at = ?,
-                            completed_at = ?, updated_at = ?
+                            completed_at = ?, updated_at = ?, effects_state = 'telemetry'
                         WHERE id = ? AND queue_protocol = 1 AND status = 'pending'
                           AND claim_token IS NULL
                         """,
@@ -3797,7 +3798,8 @@ class MeshDB:
                         """
                         UPDATE mesh_tasks
                         SET status = 'cancelled', error = ?, cancel_token = claim_token,
-                            cancel_requested_at = ?, completed_at = ?, updated_at = ?
+                            cancel_requested_at = ?, completed_at = ?, updated_at = ?,
+                            effects_state = 'telemetry'
                         WHERE id = ? AND queue_protocol = 1 AND status = 'claimed'
                           AND started_at IS NULL AND claim_token = ?
                         """,
@@ -3897,6 +3899,7 @@ class MeshDB:
                         """
                         UPDATE mesh_tasks
                         SET status = 'withdrawn', revision = ?, completed_at = ?, updated_at = ?,
+                        effects_state = 'telemetry',
                             lineage_lease_until = CASE WHEN lineage_state = 'pending'
                                                        THEN lineage_lease_until ELSE NULL END,
                             lineage_state = CASE WHEN lineage_state IN ('pending', 'done')
@@ -4778,7 +4781,7 @@ class MeshDB:
                         """
                         UPDATE mesh_tasks
                         SET status = 'withdrawn', revision = ?, completed_at = ?,
-                            updated_at = ?
+                            updated_at = ?, effects_state = 'telemetry'
                         WHERE id = ? AND queue_protocol = 1 AND status = 'pending'
                         """,
                         (new_rev, now, now, task_id),
@@ -4970,7 +4973,8 @@ class MeshDB:
                         """
                         UPDATE mesh_tasks
                         SET status = 'cancelled', completed_at = ?, updated_at = ?,
-                            error = COALESCE(error, 'cancelled by operator (backend not invoked)')
+                            error = COALESCE(error, 'cancelled by operator (backend not invoked)'),
+                            effects_state = 'telemetry'
                         WHERE id = ? AND queue_protocol = 1 AND claim_token = ?
                           AND (claimed_by = ? OR ? = 0)
                           AND status IN ('claimed', 'running', 'recovery_required')
@@ -7515,7 +7519,7 @@ class MeshDB:
     # ------------------------------------------------------------------ #
     _PENDING_EFFECTS_SQL = (
         "SELECT id FROM mesh_tasks INDEXED BY idx_mesh_tasks_turn_effects "
-        "WHERE effects_state IN ('pending', 'notifying', 'notified') "
+        "WHERE effects_state IN ('pending', 'notifying', 'notified', 'telemetry') "
         "ORDER BY completed_at LIMIT ?"
     )
 
@@ -7534,20 +7538,44 @@ class MeshDB:
         *,
         error: Optional[str] = None,
         bump_attempts: bool = False,
+        fence: Optional[str] = None,
+        new_fence: Optional[str] = None,
     ) -> bool:
         """CAS ``effects_state`` ``from_state``→``to_state`` (optionally
-        recording ``error`` and counting a failed attempt). True iff this call
-        moved the row. Raises on a DB error."""
+        recording ``error`` and counting a failed attempt). ``fence`` also
+        requires the row to still carry that notify fence (only its holder
+        may move it); ``new_fence`` stamps one (taking the fence). True iff
+        this call moved the row. Raises on a DB error."""
         with self._managed_write("transition_turn_effects") as conn:
             conn.execute(
                 "UPDATE mesh_tasks SET effects_state = ?, "
                 "effects_error = COALESCE(?, effects_error), "
-                "effects_attempts = effects_attempts + ?, updated_at = ? "
-                "WHERE id = ? AND effects_state = ?",
+                "effects_attempts = effects_attempts + ?, "
+                "effects_fence = COALESCE(?, effects_fence), updated_at = ? "
+                "WHERE id = ? AND effects_state = ? AND (? IS NULL OR effects_fence = ?)",
                 (to_state, (error or None) and str(error)[:2000], 1 if bump_attempts else 0,
-                 _now(), task_id, from_state),
+                 new_fence, _now(), task_id, from_state, fence, fence),
             )
             return conn.execute("SELECT changes()").fetchone()[0] > 0
+
+    def record_turn_effects_failure(self, task_id: str, error: str, max_attempts: int) -> Optional[str]:
+        """[A84 review F4] Count one failed pass of a row whose processing
+        raised outside the per-effect containment (garbled row, read error).
+        At ``max_attempts`` it ends ``failed`` (visible; it leaves the index,
+        so poisoned rows cannot starve newer ones). A fenced ``notifying`` row
+        is never touched (its send may be in flight). Returns the new state."""
+        with self._managed_write("record_turn_effects_failure") as conn:
+            conn.execute(
+                "UPDATE mesh_tasks SET effects_attempts = effects_attempts + 1, "
+                "effects_error = ?, updated_at = ?, effects_state = CASE "
+                "WHEN effects_attempts + 1 >= ? THEN 'failed' ELSE effects_state END "
+                "WHERE id = ? AND effects_state IN ('pending', 'notified', 'telemetry')",
+                (str(error)[:2000], _now(), int(max_attempts), task_id),
+            )
+            row = conn.execute(
+                "SELECT effects_state FROM mesh_tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            return str(row[0]) if row and row[0] is not None else None
 
     def project_turn_session(
         self,
@@ -10475,14 +10503,17 @@ def _get_migrations() -> List[tuple]:
             ALTER TABLE mesh_tasks ADD COLUMN effects_state TEXT;
             ALTER TABLE mesh_tasks ADD COLUMN effects_attempts INTEGER NOT NULL DEFAULT 0;
             ALTER TABLE mesh_tasks ADD COLUMN effects_error TEXT;
+            ALTER TABLE mesh_tasks ADD COLUMN effects_fence TEXT;
             CREATE INDEX IF NOT EXISTS idx_mesh_tasks_turn_effects
                 ON mesh_tasks(completed_at)
-                WHERE effects_state IN ('pending', 'notifying', 'notified')
-        """),  # A84: post-commit effects outbox of a STARTED managed turn
-               # (notification, telemetry reconcile, session summary/history,
-               # Case task.finished), marked 'pending' in its terminal txn and
-               # drained by the gateway consumer. NULL on every legacy row; the
-               # partial index holds only rows with effects outstanding.
+                WHERE effects_state IN ('pending', 'notifying', 'notified', 'telemetry')
+        """),  # A84: post-commit effects outbox of a terminal managed turn —
+               # 'pending' (it ran: notification, telemetry reconcile, session
+               # summary/history, Case task.finished) or 'telemetry' (it never
+               # ran: telemetry close only), marked in its terminal txn and
+               # drained by the gateway consumer; ``effects_fence`` is the
+               # notify fence ("<epoch>:<nonce>"). NULL on every legacy row;
+               # the partial index holds only rows with effects outstanding.
     ]
 
 
