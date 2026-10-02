@@ -231,3 +231,36 @@ def test_S7_C1f_claimed_rows_keep_a_bounded_refresh_clock(db, hints):
     timeout = turn_scheduler._next_timeout(res, turn_scheduler.ACTIVATION_LIMIT_PER_PASS,
                                            turn_scheduler.SAFETY_NET_SEC)
     assert timeout is not None and timeout <= turn_scheduler.FALLBACK_INTERVAL_SEC
+
+
+# --------------------------------------------------------------------------- #
+# Stage 7 pressure finding — worker spool boot replay held EVERY envelope
+# --------------------------------------------------------------------------- #
+def test_S7_M1_spool_boot_replay_keeps_one_envelope_in_memory(tmp_path):
+    """Design §8: worker spool contents are not all loaded in memory. The boot
+    replay only needs the task ids, yet it built the full ``list_spooled()``
+    list (up to the 128 MiB retained budget, as parsed Python objects). Peak
+    traced allocation must stay at about one envelope, not the sum."""
+    import tracemalloc
+
+    from src.worker.agent import WorkerAgent
+    from src.worker.managed_result_spool import ManagedResultSpool
+
+    spool = ManagedResultSpool(str(tmp_path))
+    one_mib = "x" * (1024 * 1024)
+    n = 12
+    for i in range(n):
+        spool.commit(f"t-{i:03d}", f"tok{i}", {"success": True, "output": one_mib})
+    del one_mib
+    w = WorkerAgent.__new__(WorkerAgent)
+    w._result_spool = spool
+    w._claim_store = None
+    w._pending_result_delivery = set()
+    tracemalloc.start()
+    try:
+        replayed = WorkerAgent._replay_result_spool(w)
+        _cur, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert replayed == n and len(w._pending_result_delivery) == n
+    assert peak < 6 * 1024 * 1024, f"replay peak {peak / 2**20:.1f} MiB holds every envelope"
