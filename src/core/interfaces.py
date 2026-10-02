@@ -362,6 +362,12 @@ class CodingBackend(ABC):
         (unknown ⇒ not quiescent, fail closed)."""
         return False
 
+    def quiescence_reason(self, session: "Session") -> Optional[str]:
+        """[A82 pre-cutover, m2] Why the last :meth:`is_quiescent` for
+        ``session`` was False (short, operator-visible), or None if unknown.
+        Default: None (the carrier then reports a generic reason)."""
+        return None
+
     def provision_sender_capability(self, session_id: str, token: Optional[str]) -> bool:
         """[A82 Stage 5] Give (or, with ``None``, withdraw) the session's scoped
         ``send_instruction`` capability to THIS backend instance — memory only,

@@ -3402,8 +3402,11 @@ class MeshDB:
                     UPDATE mesh_tasks
                     SET status = 'pending', activated_at = ?, updated_at = ?,
                         action = ?, payload = ?, machine_id = ?,
-                        intent_bytes = ?, blocked_reason = NULL,
-                        blocked_until = NULL, blocked_attempts = 0
+                        intent_bytes = ?, blocked_until = NULL,
+                        blocked_reason = CASE WHEN blocked_reason LIKE 'backend_conflict:%'
+                                         THEN blocked_reason ELSE NULL END,
+                        blocked_attempts = CASE WHEN blocked_reason LIKE 'backend_conflict:%'
+                                           THEN blocked_attempts ELSE 0 END
                     WHERE id = ? AND queue_protocol = 1 AND status = 'queued'
                       AND (lineage_state IS NULL OR lineage_state != 'pending')
                       AND revision = ?
@@ -4644,7 +4647,8 @@ class MeshDB:
                         SET status = 'claimed', claim_token = ?, claimed_by = ?,
                             claim_carrier_kind = ?, claim_incarnation = ?,
                             claimer_incarnation = ?, claimed_at = ?, updated_at = ?,
-                            blocked_reason = NULL
+                            blocked_reason = CASE WHEN blocked_reason LIKE 'backend_conflict:%'
+                                             THEN blocked_reason ELSE NULL END
                         WHERE id = ? AND queue_protocol = 1
                           AND status IN ('pending', 'claimed')
                           AND machine_id = ?
@@ -4825,6 +4829,10 @@ class MeshDB:
                     )
                     return conn.execute("SELECT changes()").fetchone()[0] > 0
                 if backend_not_invoked:
+                    previous = conn.execute(
+                        "SELECT blocked_reason, blocked_attempts FROM mesh_tasks WHERE id = ?",
+                        (task_id,),
+                    ).fetchone()
                     conn.execute(
                         """
                         UPDATE mesh_tasks
@@ -4840,7 +4848,7 @@ class MeshDB:
                     )
                     released = conn.execute("SELECT changes()").fetchone()[0] > 0
                     if released and blocked_reason:
-                        _apply_backend_conflict(conn, task_id, blocked_reason)
+                        _apply_backend_conflict(conn, task_id, blocked_reason, previous)
                     return released
                 conn.execute(
                     """
@@ -4954,7 +4962,9 @@ class MeshDB:
                         artifact_path = COALESCE(?, artifact_path),
                         error_class = COALESCE(?, error_class),
                         retry_pause_state = COALESCE(?, retry_pause_state),
-                        completed_at = ?, updated_at = ?
+                        completed_at = ?, updated_at = ?, blocked_attempts = 0,
+                        blocked_reason = CASE WHEN blocked_reason LIKE 'backend_conflict:%'
+                                         THEN NULL ELSE blocked_reason END
                     WHERE id = ? AND queue_protocol = 1 AND claim_token = ?
                       AND status IN ('running', 'recovery_required')
                     """,
@@ -10360,17 +10370,24 @@ def _apply_turn_block(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
 _BACKEND_CONFLICT_BACKOFF_AFTER = 3
 
 
-def _apply_backend_conflict(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
+def _apply_backend_conflict(conn: sqlite3.Connection, task_id: str, reason: str,
+                            previous: Optional[sqlite3.Row] = None) -> None:
     """[A82 step 4 rework, m2] Inside the not-invoked release txn (row already
     back to `pending`): a backend that refused BEFORE submit (native busy, an
     identity-less legacy owner, a held turn) must never be requeued silently
     forever. The refusal is an operator-visible ``blocked_reason`` and is
     counted; the N-th consecutive refusal returns the row to `queued` under the
     blocked-head backoff — the ``carrier_offline`` pattern: visible, bounded,
-    operator-withdrawable; activation re-offers it after ``blocked_until``."""
+    operator-withdrawable; activation re-offers it after ``blocked_until``.
+
+    [A82 pre-cutover, m2] ``previous`` = the row's (blocked_reason,
+    blocked_attempts) before this release. The count continues only for the
+    SAME refusal reason (claim and activation keep a ``backend_conflict:``
+    record, so the backoff grows across re-activation cycles); a different
+    reason restarts it, and a completed turn clears it."""
     bounded = f"backend_conflict: {reason}"[:500]
-    row = conn.execute("SELECT blocked_attempts FROM mesh_tasks WHERE id = ?", (task_id,)).fetchone()
-    attempts = int((row["blocked_attempts"] if row else 0) or 0) + 1
+    same = previous is not None and previous["blocked_reason"] == bounded
+    attempts = (int(previous["blocked_attempts"] or 0) if same else 0) + 1
     if attempts < _BACKEND_CONFLICT_BACKOFF_AFTER:
         conn.execute(
             "UPDATE mesh_tasks SET blocked_reason = ?, blocked_attempts = ? "

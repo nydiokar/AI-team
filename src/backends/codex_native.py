@@ -233,6 +233,7 @@ class CodexBackend(CodingBackend):
         # forgotten hold's still-unanswered submission: busy until it is
         # answered or that app-server is gone (recycled when unresponsive).
         self._unanswered: dict[str, tuple[CodexAppServerClient, int]] = {}
+        self._busy_reasons: dict[str, str] = {}  # [A82 pre-cutover, m2] last not-quiescent reason
 
     def provision_sender_capability(self, session_id: str, token: str | None) -> bool:
         """[A82 Stage 5] Per-thread sender tool: the next attach of this
@@ -465,8 +466,11 @@ class CodexBackend(CodingBackend):
 
     def forget_managed_turn(self, session: Session, turn_uuid: str) -> bool:
         """Drop the wait for ``turn_uuid`` (its row is terminal server-side): no
-        late delivery. Quiescence still follows native truth — a turn that is
-        still running natively keeps the session busy until it ends."""
+        late delivery; a held attempt's hold (and its late route) is dropped and
+        its ownership released. Quiescence still follows native truth — a turn
+        that is still running natively, or a submission still unanswered by a
+        live app-server, keeps the session busy until it ends (bounded by the
+        unresponsive-app-server recycle, [A82 pre-cutover, N1])."""
         removed = False
         with self._lock:
             call = self._calls.get(turn_uuid)
@@ -523,15 +527,32 @@ class CodexBackend(CodingBackend):
         """No native work for ``session``: no live run here, no held turn still
         running natively, no other owner whose app-server is not provably gone,
         and the native thread status (on this carrier's app-server) is not
-        active. Anything unknown ⇒ False."""
+        active. Anything unknown ⇒ False ([A82 pre-cutover, m2] the reason is
+        kept for :meth:`quiescence_reason`)."""
+        key = session.session_id or ""
+        reason = self._busy_reason(session)
+        with self._lock:
+            if reason:
+                self._busy_reasons[key] = reason
+            else:
+                self._busy_reasons.pop(key, None)
+        return not reason
+
+    def quiescence_reason(self, session: Session) -> str | None:
+        """[A82 pre-cutover, m2] Why the last ``is_quiescent`` was False."""
+        with self._lock:
+            return self._busy_reasons.get(session.session_id or "")
+
+    def _busy_reason(self, session: Session) -> str:
+        """"" iff quiescent, else the short reason it is not."""
         key = session.session_id
         if not key:
-            return False
+            return "no_session_key"
         with self._lock:
             if key in self._active:
-                return False
+                return "turn_running_here"
             if any(call.abandoned and call.session_key == key for call in self._calls.values()):
-                return False  # a late reply is still being delivered
+                return "late_reply_delivery_pending"
         self._recycle_unresponsive()
         with self._lock:
             unanswered = self._unanswered.get(key)
@@ -539,17 +560,20 @@ class CodexBackend(CodingBackend):
             client, request_id = unanswered
             process = client.process
             if process is not None and process.poll() is None and client.outstanding(request_id):
-                return False  # [N1] a forgotten submission may still be accepted
+                return "forgotten_submission_unanswered"  # [N1] it may still be accepted
             with self._lock:
                 if self._unanswered.get(key) == unanswered:
                     self._unanswered.pop(key, None)
         if not self._settle_hold(key):
-            return False
+            return "held_turn_unresolved"
         ownership = CodexOwnership()
         thread_id = session.backend_session_id or ownership.thread_for(key)
         if not ownership.clear_dead_owners(key, thread_id, process_gone_proof):
-            return False
-        return not thread_id or self._native_status(self._client, thread_id) in _QUIET_STATES
+            return "other_owner_not_provably_gone"
+        if not thread_id:
+            return ""
+        status = self._native_status(self._client, thread_id)
+        return "" if status in _QUIET_STATES else f"native_status:{status or 'unknown'}"
 
     def _native_status(self, client: CodexAppServerClient | None, thread_id: str) -> str | None:
         """Native status of ``thread_id`` on ``client``'s app-server, "gone" when
