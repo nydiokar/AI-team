@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, List
 
 import pytest
@@ -107,12 +108,12 @@ def _legacy_put_admitted(cap: int, legacy_waiting: int) -> bool:
     beyond the current legacy occupancy is admitted."""
     from src.core.session_task_queue import SessionTaskQueue
 
-    q = SessionTaskQueue(maxsize=cap, key=lambda t: str(t))
+    q = SessionTaskQueue(maxsize=cap, key=lambda t: str(t.id))
     q.share_allowance(turn_scheduler.ALLOWANCE)
     for i in range(legacy_waiting):
-        q.put_nowait(f"seed-{i}")  # type: ignore[arg-type]
+        q.put_nowait(SimpleNamespace(id=f"seed-{i}"))  # type: ignore[arg-type]
     try:
-        q.put_nowait("over")  # type: ignore[arg-type]
+        q.put_nowait(SimpleNamespace(id="over"))  # type: ignore[arg-type]
     except asyncio.QueueFull:
         return False
     return True
