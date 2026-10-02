@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from src.control import control_api
 from src.services.session_store import SessionStore
 from src.services.session_service import CommandResult, SessionService
+from tests.stage8a_legacy import claim_pre_cutover, enqueue_pre_cutover
 
 
 TOKEN = "test-control-token"
@@ -447,7 +448,8 @@ def test_session_timeline_returns_durable_mixed_items(client, orch, tmp_path):
         max_concurrent=2,
         incarnation_id="inc-a",
     )
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         "task_timeline",
         sid,
         "worker-a",
@@ -455,7 +457,7 @@ def test_session_timeline_returns_durable_mixed_items(client, orch, tmp_path):
         "resume_session",
         {"prompt": "build timeline"},
     )
-    assert db.claim_task("task_timeline", "worker-a")
+    assert claim_pre_cutover(db, "task_timeline", "worker-a")
     db.heartbeat_node(
         "worker-a",
         live_state='{"v":1,"active_tasks":["task_timeline"],"slots_used":1,"slots_total":2}',
@@ -529,7 +531,8 @@ def test_session_timeline_is_bounded_stably_ordered_and_missing_telemetry_ok(cli
     db = get_db()
     for i in range(3):
         task_id = f"task_order_{i}"
-        db.enqueue_task(
+        enqueue_pre_cutover(
+            db,
             task_id,
             sid,
             None,
@@ -583,8 +586,8 @@ def test_session_timeline_surfaces_restart_stale_detached_recovered_and_lost(cli
             incarnation_id=incarnation,
         )
 
-    db.enqueue_task("task_worker_unknown", sid, "worker-stale", "codex", "resume_session", {})
-    assert db.claim_task("task_worker_unknown", "worker-stale")
+    enqueue_pre_cutover(db, "task_worker_unknown", sid, "worker-stale", "codex", "resume_session", {})
+    assert claim_pre_cutover(db, "task_worker_unknown", "worker-stale")
     db.heartbeat_node(
         "worker-stale",
         live_state=json.dumps({"v": 1, "active_tasks": ["task_worker_unknown"]}),
@@ -599,8 +602,8 @@ def test_session_timeline_surfaces_restart_stale_detached_recovered_and_lost(cli
             (old, old, old, "worker-stale"),
         )
 
-    db.enqueue_task("task_stale_claim", sid, "worker-restarted", "codex", "resume_session", {})
-    assert db.claim_task("task_stale_claim", "worker-restarted")
+    enqueue_pre_cutover(db, "task_stale_claim", sid, "worker-restarted", "codex", "resume_session", {})
+    assert claim_pre_cutover(db, "task_stale_claim", "worker-restarted")
     db.upsert_node(
         node_id="worker-restarted",
         tailscale_ip="100.64.0.10",
@@ -610,14 +613,14 @@ def test_session_timeline_surfaces_restart_stale_detached_recovered_and_lost(cli
         incarnation_id="inc-b",
     )
 
-    db.enqueue_task("task_detached", sid, "worker-detached", "codex", "resume_session", {})
-    assert db.claim_task("task_detached", "worker-detached")
+    enqueue_pre_cutover(db, "task_detached", sid, "worker-detached", "codex", "resume_session", {})
+    assert claim_pre_cutover(db, "task_detached", "worker-detached")
     db.heartbeat_node(
         "worker-detached",
         live_state=json.dumps({"v": 1, "active_tasks": ["some_other_task"]}),
     )
 
-    db.enqueue_task("task_recovered", sid, None, "codex", "resume_session", {})
+    enqueue_pre_cutover(db, "task_recovered", sid, None, "codex", "resume_session", {})
     db.complete_task("task_recovered", {"success": True, "output": "recovered"})
     start = now - timedelta(minutes=1)
     common = {

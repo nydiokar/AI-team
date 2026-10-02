@@ -340,6 +340,7 @@ def test_S6_08b_unenrolled_sessions_carry_no_queue_block(env: _Env) -> None:
         session_id="legacy", backend="claude", repo_path="/tmp/repo",
         status=SessionStatus.BUSY, created_at=NOW, updated_at=NOW, machine_id="worker-a",
     ))
+    env.db.unenroll_session_drained("legacy")  # [A82 Stage 8a] born managed: model unenrolled
     listed = {s["session_id"]: s for s in env.client.get("/api/sessions", headers=AUTH).json()["sessions"]}
     # [F5a] byte-identical legacy payload: the key is absent, not null.
     assert "turn_queue" not in listed["legacy"] and listed["legacy"]["status"] == "busy"

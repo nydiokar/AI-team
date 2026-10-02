@@ -29,13 +29,10 @@ import { useModels, useProjects, useTargets } from "../../hooks/useLiveData";
 import { useForkStore } from "../../stores/forkStore";
 import { useManagerBootStore } from "../../stores/managerBootStore";
 import { cn } from "../../lib/cn";
+import { NEW_SESSION_BACKENDS, retiredBackendReason } from "../../lib/backends";
 
-const BACKENDS = [
-  { id: "claude", label: "Claude Code", icon: "🧠" },
-  { id: "codex", label: "Codex", icon: "🤖" },
-  { id: "opencode", label: "OpenCode", icon: "🛠" },
-  { id: "opencode-server", label: "OpenCode Server", icon: "🛰" },
-] as const;
+// [A82 Stage 8a] Retired backends (the OpenCode CLI) are not offered.
+const BACKENDS = NEW_SESSION_BACKENDS;
 
 type Step = "backend" | "node" | "repo";
 export type SessionRole = "bare" | "worker" | "manager";
@@ -109,7 +106,10 @@ export function NewSessionSheet({
   // A fork is the ordinary create flow, pre-filled from the source — the FULL
   // wizard (backend → node → repo), so it works on the mesh exactly like "+".
   const [step, setStep] = useState<Step>("backend");
-  const [backend, setBackend] = useState<string>(fork?.backend ?? "claude");
+  // A fork of a retired-backend session pre-selects its successor backend.
+  const [backend, setBackend] = useState<string>(
+    retiredBackendReason(fork?.backend) ? "opencode-server" : (fork?.backend ?? "claude"),
+  );
   const [nodeId, setNodeId] = useState<string>(fork?.nodeId ?? "__local__");
   const [repoPath, setRepoPath] = useState<string>(fork?.repoPath ?? "");
   const [model, setModel] = useState<string | null>(fork?.model ?? null);

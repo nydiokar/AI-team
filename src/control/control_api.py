@@ -71,6 +71,8 @@ def _scrub_surrogates(obj: Any) -> Any:
 # always still carries {ok, reason} so the client owns the wording (no prose here).
 _REASON_STATUS = {
     "unknown_backend": 400,
+    # [A82 Stage 8a] retired backend (e.g. the OpenCode CLI): use opencode-server
+    "backend_retired": 410,
     "unknown_model": 400,
     "unknown_effort": 400,
     "invalid_repo_path": 400,
@@ -443,6 +445,10 @@ class TurnRequestPageOut(BaseModel):
     enrolled: bool
     paused: bool
     hold: Optional[str] = None
+    # [A82 Stage 8a] Finished turns of this session whose post-commit effects
+    # (notification / history / telemetry) ended ``failed`` + the latest one.
+    effects_failed: int = 0
+    effects_failed_turn_id: Optional[str] = None
 
 
 class TurnRequestDetailOut(TurnRequestSummaryOut):
@@ -451,6 +457,10 @@ class TurnRequestDetailOut(TurnRequestSummaryOut):
     body: str = ""
     completed_at: Optional[str] = None
     flow_run_id: Optional[str] = None
+    # [A82 Stage 8a] A84 post-commit effects outcome of a finished turn
+    # (``failed`` = the reply/notification may never have reached the user).
+    effects_state: Optional[str] = None
+    effects_error: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: Dict[str, Any]) -> "TurnRequestDetailOut":
@@ -1568,7 +1578,29 @@ def build_control_api(orchestrator) -> FastAPI:
             governor["sdk_max_budget_usd"] = getattr(_cfg.claude, "sdk_max_budget_usd", None)
         except Exception:
             pass
-        return {"status": "ok", "governor": governor}
+        # [A82 Stage 8a, review F4] Unauthenticated probe: only whether every
+        # open session's (carrier, backend) has a live managed carrier, from the
+        # gateway's periodic check (no DB read). None ⇒ not checked yet. The
+        # node ids / pins / counts live behind auth: /api/turn-queue/coverage.
+        missing = getattr(orchestrator, "_managed_carrier_missing", None)
+        coverage_ok = (not missing) if isinstance(missing, list) else None
+        return {"status": "ok", "governor": governor, "turn_queue": {"coverage_ok": coverage_ok}}
+
+    @app.get("/api/turn-queue/coverage", dependencies=[Depends(_require_auth)])
+    def api_turn_queue_coverage() -> Dict[str, Any]:
+        """[A82 Stage 8a, review F4] The latest managed-carrier coverage check:
+        (carrier, pin, backend, sessions) groups no live managed carrier covers
+        and the open retired-backend session count. Read from the gateway's
+        cached check (startup + periodic); ``checked`` False until it ran."""
+        missing = getattr(orchestrator, "_managed_carrier_missing", None)
+        retired = getattr(orchestrator, "_retired_backend_sessions", None)
+        checked = isinstance(missing, list)
+        return {
+            "checked": checked,
+            "coverage_ok": (not missing) if checked else None,
+            "managed_carrier_missing": missing if checked else [],
+            "retired_backend_sessions": retired if isinstance(retired, int) else None,
+        }
 
     @app.post("/api/turn-requests/{task_id}/resolve-recovery", dependencies=[Depends(_require_auth)])
     def api_resolve_turn_recovery(task_id: str, body: TurnRecoveryResolveBody) -> JSONResponse:
@@ -2541,6 +2573,14 @@ def build_control_api(orchestrator) -> FastAPI:
                             "session": await asyncio.to_thread(_session_payload, session, with_queue=True)}
                     _idem_put("instructions", idempotency_key, resp)
                     return JSONResponse(resp)
+                # [A82 Stage 8a, review F2] No pathway for a non-enrolled session
+                # turn after the cutover: refuse BEFORE the optimistic BUSY write.
+                refuse = getattr(orchestrator, "refuse_unenrolled_session_turn", None)
+                if callable(refuse):
+                    try:
+                        refuse(session.session_id, enrolled=False)
+                    except TurnQueueError as err:
+                        raise _turn_queue_http(err)
                 # Status write (BUSY + last_user_message) lives on the service.
                 orchestrator.session_service.mark_busy(
                     session.session_id, last_user_message=body.description)

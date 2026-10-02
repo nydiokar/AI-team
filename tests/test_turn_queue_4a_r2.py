@@ -17,6 +17,7 @@ from src.control.db import MeshDB
 from tests.test_turn_queue_producer1 import (  # noqa: F401 — autouse fixtures
     _flags, _managed_rows, _no_cli_spawn, _setup, _submit,
 )
+from tests.stage8a_legacy import unenrolled
 
 PAST = (datetime.now(tz=timezone.utc) - timedelta(seconds=1)).isoformat()
 
@@ -149,6 +150,7 @@ def test_R3_refresh_during_enroll_never_lowers_presence(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     db.upsert_session(Session(session_id="x", backend="claude", repo_path="/tmp/r",
                               status=SessionStatus.IDLE, created_at=P.NOW, updated_at=P.NOW))
+    unenrolled(db, "x")  # [A82 Stage 8a] born managed: model the unenrolled session
     assert db.any_session_enrolled() is False
     real_write = db._write
     seen = {}

@@ -448,8 +448,10 @@ def notify_turn_queue_changed() -> None:
 
 def notify_managed_released(count: int) -> None:
     """[A82 Stage 7] ``count`` managed rows re-entered the waiting count
-    (claimed → pending): count them in the process allowance at once — the
-    task server is embedded in the gateway, so this is the scheduler's own
-    allowance — then hint the scheduler to re-read the DB."""
+    (claimed → pending): count them in THIS process's allowance at once, then
+    hint THIS process's scheduler to re-read the DB. Only reaches the
+    scheduler when the task server runs inside the gateway process; with a
+    separate task-server process (the Docker deployment) the gateway's
+    scheduler converges on its own DB refresh / safety-net pass instead."""
     ALLOWANCE.note_managed_released(count)
     notify_turn_queue_changed()

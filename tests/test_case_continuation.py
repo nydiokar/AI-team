@@ -137,6 +137,7 @@ class _FakeOrch:
         self.emitted = []
         self.finalized = []
         self.affiliations = []
+        self.managed_respawns = []
 
     def _emit_event(self, name, _a, payload):
         self.emitted.append((name, payload))
@@ -173,6 +174,14 @@ class _FakeOrch:
         return await TaskOrchestrator._do_respawn_manager_for_case(
             self, db, case_id, generation, dead_sid,
         )
+
+    async def _respawn_manager_managed(self, db, case_id, generation, dead_sid, objective):
+        # [A82 Stage 8a] Every dead Manager is replaced on the managed path
+        # (producer 7, born-managed replacement). Its mechanics are proven on
+        # real pieces in test_turn_queue_stage8a.py (S8-10) and the 4e suites;
+        # here only the tick's decision to respawn is observed.
+        self.managed_respawns.append((case_id, generation, dead_sid))
+        return True
 
     async def _handle_dead_manager_session(self, db, case_id, generation, dead_sid):
         # The approval gate in front of the respawn. These tests assert the
@@ -493,8 +502,8 @@ def test_satisfied_case_with_closed_manager_respawns_when_role_on(tmp_path, monk
     session = _FakeSession("mgr-sess", status=SessionStatus.CLOSED)
     orch = _FakeOrch(_FakeStore(session))
     assert _continue(orch, db, fid) == 0
-    assert len(orch.session_service.created) == 1  # exactly one respawn
-    assert len(_events(db, fid, "case.manager_respawned")) == 1
+    # [A82 Stage 8a] exactly one (managed) respawn on the SAME Case, no strand
+    assert orch.managed_respawns == [(fid, 1, "mgr-sess")]
     assert _events(db, fid, "case.manager_unavailable") == []
 
 
@@ -511,8 +520,8 @@ def test_missing_manager_session_respawns_when_role_on(tmp_path, monkeypatch):
 
     orch = _FakeOrch(_FakeStore())  # empty store → session_store.get() returns None
     assert _continue(orch, db, fid) == 0
-    assert len(orch.session_service.created) == 1
-    assert len(_events(db, fid, "case.manager_respawned")) == 1
+    # [A82 Stage 8a] exactly one (managed) respawn on the SAME Case, no strand
+    assert [r[0] for r in orch.managed_respawns] == [fid]
     assert _events(db, fid, "case.manager_unavailable") == []
 
 

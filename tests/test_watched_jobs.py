@@ -389,6 +389,12 @@ async def test_gateway_terminal_job_notifies_session_and_agent(tmp_path, monkeyp
 
     store = SessionStore()
     session = store.create("codex", str(tmp_path), telegram_chat_id=100, owner_user_id=1)
+    # [A82 Stage 8a] born managed: the legacy watched-job delivery is the
+    # unenrolled session's branch (managed delivery: test_turn_queue_4d).
+    from src.control.db import get_db
+    from tests.stage8a_legacy import unenrolled
+
+    unenrolled(get_db(), session.session_id)
 
     class _Notifier:
         def __init__(self):

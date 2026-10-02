@@ -838,6 +838,20 @@ TRANSIENT_RESUME_ACTION = "manager_transient_resume"
 # latest pause event keeps B held; only R linked to that exact pause can pass.
 # The correlated lookups are bounded by the waiting subset and the
 # (flow_run_id, id) event index; no Case event log is materialized per tick.
+# [A82 Stage 8a] The activation drain predicate's read: one protocol-0
+# session EXECUTION row of a session still claimed/running. Its terms match the
+# partial index ``idx_mesh_tasks_legacy_exec_live`` (migration 43) exactly, so
+# it is index-served; INDEXED BY makes a lost index a loud error, not a scan.
+_LEGACY_EXEC_LIVE_SQL = (
+    "SELECT id FROM mesh_tasks INDEXED BY idx_mesh_tasks_legacy_exec_live "
+    "WHERE session_id = ? AND queue_protocol = 0 AND status IN ('claimed', 'running') "
+    "AND action IN ('create_session', 'resume_session', 'compact_session') LIMIT 1"
+)
+
+# [review F3] A draining head re-checks at most every 15 s, so it starts
+# within ~15 s of the legacy row finishing (not after the generic 300 s cap).
+_LEGACY_DRAIN_BACKOFF_CAP_SEC = 15.0
+
 _MANAGED_RETRY_GATE_SQL = """
     NOT EXISTS (
         SELECT 1 FROM mesh_tasks pm INDEXED BY idx_mesh_tasks_retry_pause
@@ -1883,7 +1897,7 @@ class MeshDB:
         """Mirror a Session dataclass into the sessions table."""
         try:
             with self._write() as conn:
-                conn.execute(
+                marker = conn.execute(
                     """
                     INSERT INTO sessions (
                         session_id, backend, repo_path, status,
@@ -1896,7 +1910,7 @@ class MeshDB:
                         driver_type, driver_status, cache_health, cache_unhealthy_count,
                         previous_backend_session_ids,
                         current_case_id, case_role, role_boot, continued_from,
-                        keep_pinned, keep_note
+                        keep_pinned, keep_note, turn_queue_enrolled
                     ) VALUES (
                         :session_id, :backend, :repo_path, :status,
                         :created_at, :updated_at, :machine_id, :backend_session_id, :model,
@@ -1908,7 +1922,7 @@ class MeshDB:
                         :driver_type, :driver_status, :cache_health, :cache_unhealthy_count,
                         :previous_backend_session_ids,
                         :current_case_id, :case_role, :role_boot, :continued_from,
-                        :keep_pinned, :keep_note
+                        :keep_pinned, :keep_note, 1
                     )
                     ON CONFLICT(session_id) DO UPDATE SET
                         backend             = excluded.backend,
@@ -1951,6 +1965,10 @@ class MeshDB:
                         -- tier. Absent ⇒ NULL ⇒ tier-0 default (byte-identical).
                         -- continued_from is the same: session lineage is fixed at fork
                         -- time, so it is INSERT-seeded ONLY and never updated here.
+                        -- [A82 Stage 8a] turn_queue_enrolled: every session is BORN
+                        -- managed (INSERT writes 1); this UPDATE never touches it, so
+                        -- a stale whole-row save cannot flip the marker either way.
+                    RETURNING turn_queue_enrolled
                     """,
                     {
                         "session_id":          session.session_id,
@@ -1986,13 +2004,19 @@ class MeshDB:
                         "keep_pinned":           1 if bool(getattr(session, "keep_pinned", False)) else 0,
                         "keep_note":             getattr(session, "keep_note", "") or "",
                     },
-                )
+                ).fetchone()
                 status_val = session.status.value if hasattr(session.status, "value") else session.status
                 if status_val in ("closed", "cancelled"):
                     # [A82 Stage 5] A closed session's sender capability is revoked.
                     _revoke_sender_caps(conn, _now(), session.session_id)
         except Exception as e:
             logger.warning("event=db_upsert_session_failed session_id=%s err=%s", session.session_id, e)
+            return
+        if marker is not None and marker[0]:
+            # [A82 Stage 8a] A born-managed row committed: raise the process
+            # presence flag (only ever raised here, never lowered).
+            with self._presence_lock:
+                self._any_enrolled = True
 
     def set_session_case(
         self,
@@ -2234,10 +2258,12 @@ class MeshDB:
         """Insert a new pending task into the dispatch queue.
 
         [A82 Stage 4e review F4] ``status`` other than ``pending`` inserts a
-        NON-claimable record directly in that state (spool replay). A claimable
-        legacy EXECUTION row (``LEGACY_EXECUTION_ACTIONS``) for a session
-        enrolled in the managed turn queue raises
-        ``LegacyExecutionRefusedError`` (checked in the insert txn)."""
+        NON-claimable record directly in that state (spool replay).
+        [A82 Stage 8a] A claimable legacy session EXECUTION row
+        (``LEGACY_EXECUTION_ACTIONS`` with a session) raises
+        ``LegacyExecutionRefusedError`` UNCONDITIONALLY — no marker or presence
+        read: session turns run only on the managed queue. Control rows and
+        session-less one-offs are untouched."""
         from .turn_queue import LegacyExecutionRefusedError, TurnQueueError
 
         now = _now()
@@ -2245,24 +2271,13 @@ class MeshDB:
         completed_at: Optional[str] = (
             now if status in ("completed", "failed", "failed_node_offline", "cancelled") else None
         )
-        # No read at all while nothing is enrolled (the canonical fail-closed
-        # process presence predicate: unknown ⇒ checked).
-        fence = (
-            status == "pending" and bool(session_id) and action in LEGACY_EXECUTION_ACTIONS
-            and self.any_session_enrolled() is not False
-        )
+        if status == "pending" and bool(session_id) and action in LEGACY_EXECUTION_ACTIONS:
+            raise LegacyExecutionRefusedError(
+                "legacy session execution is retired: session turns run on the managed turn queue",
+                task_id=task_id, session_id=session_id, action=action,
+            )
         try:
             with self._write() as conn:
-                if fence:
-                    enrolled = conn.execute(
-                        "SELECT 1 FROM sessions WHERE session_id = ? AND turn_queue_enrolled = 1",
-                        (session_id,),
-                    ).fetchone()
-                    if enrolled is not None:
-                        raise LegacyExecutionRefusedError(
-                            "legacy execution refused: session is enrolled in the managed turn queue",
-                            task_id=task_id, session_id=session_id, action=action,
-                        )
                 conn.execute(
                     """
                     INSERT INTO mesh_tasks (
@@ -2392,34 +2407,30 @@ class MeshDB:
     def claim_task(self, task_id: str, node_id: str) -> bool:
         """Atomically claim a pending task. Returns True if claim succeeded.
 
-        [A82 Stage 4e review F4] A pending legacy EXECUTION row whose session is
-        now enrolled in the managed turn queue is never claimed: it is failed
-        (terminal, visible, never re-offered) in this txn and
-        ``LegacyExecutionRefusedError`` is raised after commit."""
+        [A82 Stage 4e review F4 / Stage 8a] A pending legacy session EXECUTION
+        row is never claimed — unconditionally, whatever the session's marker
+        or the presence cache says: it is failed (terminal, visible, never
+        re-offered) in this txn and ``LegacyExecutionRefusedError`` is raised
+        after commit. Control rows and session-less one-offs claim as before."""
         from .turn_queue import LegacyExecutionRefusedError
 
         now = _now()
         refused = False
-        # No read at all while nothing is enrolled (fail-closed presence).
-        fence = self.any_session_enrolled() is not False
         try:
             with self._write() as conn:
-                if fence:
-                    placeholders = ",".join("?" * len(LEGACY_EXECUTION_ACTIONS))
-                    conn.execute(
-                        f"""
-                        UPDATE mesh_tasks
-                        SET status = 'failed', completed_at = ?, updated_at = ?,
-                            error = 'legacy_execution_refused: session is enrolled in the managed turn queue'
-                        WHERE id = ? AND status = 'pending' AND COALESCE(queue_protocol, 0) = 0
-                          AND action IN ({placeholders})
-                          AND session_id IN (
-                              SELECT session_id FROM sessions WHERE turn_queue_enrolled = 1
-                          )
-                        """,
-                        (now, now, task_id, *LEGACY_EXECUTION_ACTIONS),
-                    )
-                    refused = conn.execute("SELECT changes()").fetchone()[0] > 0
+                placeholders = ",".join("?" * len(LEGACY_EXECUTION_ACTIONS))
+                conn.execute(
+                    f"""
+                    UPDATE mesh_tasks
+                    SET status = 'failed', completed_at = ?, updated_at = ?,
+                        error = 'legacy_execution_refused: legacy session execution is retired'
+                    WHERE id = ? AND status = 'pending' AND COALESCE(queue_protocol, 0) = 0
+                      AND action IN ({placeholders}) AND session_id IS NOT NULL
+                      AND session_id != ''
+                    """,
+                    (now, now, task_id, *LEGACY_EXECUTION_ACTIONS),
+                )
+                refused = conn.execute("SELECT changes()").fetchone()[0] > 0
                 claimed = False
                 if not refused:
                     conn.execute(
@@ -2439,7 +2450,7 @@ class MeshDB:
             return False
         if refused:  # committed above (terminal); refused outside the txn
             raise LegacyExecutionRefusedError(
-                "legacy execution refused: session is enrolled in the managed turn queue",
+                "legacy session execution is retired: session turns run on the managed turn queue",
                 task_id=task_id, node_id=node_id,
             )
         return claimed
@@ -3342,7 +3353,10 @@ class MeshDB:
           * the row is still its session's head and no slot holder exists
             (else ``"ineligible"``; the one-active index is the backstop);
           * the prepared payload fits the per-row cap (else ``"oversize"``,
-            recorded as a bounded `blocked_reason`, row stays queued).
+            recorded as a bounded `blocked_reason`, row stays queued);
+          * [A82 Stage 8a] no protocol-0 session EXECUTION row of the session
+            is still claimed/running (else ``"blocked"``: reason
+            ``legacy_work_draining: <id>`` + backoff, row stays queued).
         Returns ``"activated"`` on commit."""
         from .turn_queue import ADMISSION_DEADLINE_SEC, MAX_INTENT_BYTES_PER_ROW
 
@@ -3403,6 +3417,15 @@ class MeshDB:
                 ).fetchone()
                 if blocker is not None:
                     return "ineligible"
+                # [A82 Stage 8a] Cutover drain: a protocol-0 session EXECUTION
+                # row still claimed/running (left by migration 43 to finish)
+                # owns the session's process — no managed turn starts beside
+                # it. Index-served; the head backs off with a visible reason.
+                legacy = conn.execute(_LEGACY_EXEC_LIVE_SQL, (row["session_id"],)).fetchone()
+                if legacy is not None:
+                    _apply_turn_block(conn, task_id, f"legacy_work_draining: {legacy[0]}",
+                                      cap_sec=_LEGACY_DRAIN_BACKOFF_CAP_SEC)
+                    return "blocked"
                 prompt_bytes = len((row["prompt"] or "").encode("utf-8"))
                 if prepared_bytes + prompt_bytes > MAX_INTENT_BYTES_PER_ROW:
                     _apply_turn_block(
@@ -4135,8 +4158,34 @@ class MeshDB:
                     f"{open_rows} managed turn(s) still waiting/active/in recovery",
                     reason="managed_obligation_remaining", session_id=sid,
                     open_rows=int(open_rows))
+            # [A82 Stage 8a, final-review F3] Terminal managed turns can still
+            # carry obligations: a retry-pause mark the gateway has not recorded
+            # yet, or a producer token (Case continuation / watched job /
+            # heartbeat / retry / respawn) linked to one and not yet finalized.
+            # Both indexes are partial (only the outstanding rows).
+            pending_pause = conn.execute(
+                "SELECT COUNT(*) FROM mesh_tasks INDEXED BY idx_mesh_tasks_retry_pause "
+                "WHERE retry_pause_state = 'pending' AND session_id = ? AND queue_protocol = 1",
+                (sid,),
+            ).fetchone()[0]
+            linked = conn.execute(
+                "SELECT COUNT(*) FROM mesh_tasks p INDEXED BY idx_mesh_tasks_producer_link "
+                "JOIN mesh_tasks t ON t.id = p.producer_turn_id "
+                "WHERE p.producer_turn_id IS NOT NULL AND p.status = 'claimed' "
+                "AND t.session_id = ? AND t.queue_protocol = 1",
+                (sid,),
+            ).fetchone()[0]
+            if pending_pause or linked:
+                raise EnrollmentRefusedError(
+                    f"{pending_pause} retry pause(s) unrecorded, {linked} producer link(s) unfinalized",
+                    reason="managed_obligation_remaining", session_id=sid,
+                    retry_pauses=int(pending_pause), producer_links=int(linked))
+            # [final-review F2] The queue-level pause / operator-stop hold are
+            # managed-queue state: an unenrolled session must not keep them (a
+            # later re-enrollment would otherwise be skipped forever).
             conn.execute(
-                "UPDATE sessions SET turn_queue_enrolled = 0, updated_at = ? WHERE session_id = ?",
+                "UPDATE sessions SET turn_queue_enrolled = 0, turn_queue_paused = 0, "
+                "turn_queue_hold = NULL, updated_at = ? WHERE session_id = ?",
                 (_now(), sid),
             )
         return True
@@ -4472,6 +4521,27 @@ class MeshDB:
             return False
         return _session_idle_for_optional_turn(self._conn(), sid, exclude_turn_id)
 
+    def open_session_routes(self) -> List[Dict[str, Any]]:
+        """[A82 Stage 8a] ``(machine_id, backend, sessions)`` groups of the
+        enrolled, non-closed sessions — the carrier-coverage input. One bounded
+        scan of the sessions table (no mesh_tasks read)."""
+        rows = self._conn().execute(
+            "SELECT COALESCE(machine_id, '') AS machine_id, COALESCE(backend, '') AS backend, "
+            "COUNT(*) AS sessions FROM sessions "
+            "WHERE turn_queue_enrolled = 1 AND COALESCE(status, '') != 'closed' "
+            "GROUP BY COALESCE(machine_id, ''), COALESCE(backend, '')"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def session_ever_claimed(self, session_id: str) -> bool:
+        """[A82 Stage 8a] Did any carrier ever claim a row of this session (any
+        protocol)? One index-served existence read."""
+        row = self._conn().execute(
+            "SELECT 1 FROM mesh_tasks WHERE session_id = ? AND claimed_by IS NOT NULL LIMIT 1",
+            ((session_id or "").strip(),),
+        ).fetchone()
+        return row is not None
+
     def is_session_enrolled(self, session_id: str) -> bool:
         row = self._conn().execute(
             "SELECT turn_queue_enrolled FROM sessions WHERE session_id = ?",
@@ -4533,7 +4603,36 @@ class MeshDB:
                     "utf-8", errors="ignore",
                 )
                 item["queue_position"] = int(counts["before_cursor"]) + offset + 1
+            # [A82 Stage 8a] Operator surface: finished turns whose post-commit
+            # effects (notification / history / telemetry) ended `failed` —
+            # [review F5] only those AFTER the session's latest delivered turn
+            # (a later conversational turn that ran and reached `done`), so the
+            # label clears once a reply gets through. Failed rows come from
+            # their partial index; each probes only later sequences of its
+            # session (idx_mesh_turns_session_sequence).
+            effects = conn.execute(
+                """
+                SELECT COUNT(*),
+                       (SELECT f2.id FROM mesh_tasks f2 INDEXED BY idx_mesh_tasks_effects_failed
+                        WHERE f2.session_id = ? AND f2.effects_state = 'failed'
+                        ORDER BY f2.queue_sequence DESC LIMIT 1)
+                FROM mesh_tasks f INDEXED BY idx_mesh_tasks_effects_failed
+                WHERE f.session_id = ? AND f.effects_state = 'failed'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM mesh_tasks d INDEXED BY idx_mesh_turns_session_sequence
+                      WHERE d.session_id = f.session_id AND d.queue_protocol = 1
+                        AND d.queue_sequence > f.queue_sequence
+                        AND d.effects_state = 'done' AND d.started_at IS NOT NULL
+                        AND COALESCE(d.turn_kind, '') != 'compaction'
+                  )
+                """,
+                (sid, sid),
+            ).fetchone()
+            if not int(effects[0] or 0):
+                effects = (0, None)
             return {
+                "effects_failed": int(effects[0] or 0),
+                "effects_failed_turn_id": effects[1],
                 "turns": page, "count": int(counts["open_count"]),
                 "queued": int(counts["queued"]),
                 "active_turn_id": counts["active_id"],
@@ -4560,7 +4659,7 @@ class MeshDB:
                        CASE WHEN {_MANAGED_CASE_BINDING_GATE_SQL}
                             THEN t.blocked_reason ELSE 'manager_rebound' END AS blocked_reason,
                        t.prompt AS body, t.created_at, t.activated_at, t.started_at,
-                       t.completed_at, t.flow_run_id,
+                       t.completed_at, t.flow_run_id, t.effects_state, t.effects_error,
                        CASE WHEN t.status IN ('queued', 'pending', 'claimed', 'running',
                                               'recovery_required')
                             THEN (SELECT COUNT(*) FROM mesh_tasks o
@@ -7586,12 +7685,17 @@ class MeshDB:
         summary: str,
         files_modified: List[str],
         artifact_path: Optional[str] = None,
+        session_status: Optional[str] = None,
     ) -> bool:
         """[A84] Field-scoped, idempotent session projection of a managed turn
         (the legacy ``_task_worker`` session update, without a whole-row save):
         appends ``entry`` to ``task_history`` once per task id (last 20 kept)
         and, only while this turn is the session's latest completion
-        (``last_task_id``), sets the last-result preview fields. Raises."""
+        (``last_task_id``), sets the last-result preview fields.
+        [A82 Stage 8a] ...and the terminal session badge ``session_status``
+        (legacy ``_session_status_after_result`` parity: a failed turn shows
+        needs-attention) — only ``awaiting_input``/``error``, never over a
+        closed or operator-stopped (``cancelled``) session. Raises."""
         with self._managed_write("project_turn_session") as conn:
             row = conn.execute(
                 "SELECT task_history, last_task_id FROM sessions WHERE session_id = ?",
@@ -7614,6 +7718,13 @@ class MeshDB:
                          "last_files_modified = ?",
                          "last_artifact_path = COALESCE(?, last_artifact_path)"]
                 params += [summary, summary, json.dumps(files_modified), artifact_path]
+                if session_status in ("awaiting_input", "error"):
+                    # Never BUSY (queued is not busy) and never `cancelled`: on
+                    # an enrolled session that status is the operator-stop
+                    # gate of activation, owned by the stop/hold path.
+                    sets.append("status = CASE WHEN status IN ('closed', 'cancelled') "
+                                "THEN status ELSE ? END")
+                    params.append(session_status)
             conn.execute(
                 f"UPDATE sessions SET {', '.join(sets)} WHERE session_id = ?",
                 params + [session_id],
@@ -10514,6 +10625,33 @@ def _get_migrations() -> List[tuple]:
                # drained by the gateway consumer; ``effects_fence`` is the
                # notify fence ("<epoch>:<nonce>"). NULL on every legacy row;
                # the partial index holds only rows with effects outstanding.
+        (43, """
+            UPDATE sessions SET turn_queue_enrolled = 1 WHERE turn_queue_enrolled = 0;
+            UPDATE mesh_tasks
+               SET status = 'failed',
+                   error = 'legacy_execution_retired: protocol-0 session execution was retired at the managed-queue cutover (A82 Stage 8a) before this row was claimed - resend the message',
+                   completed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE status = 'pending' AND queue_protocol = 0
+               AND session_id IS NOT NULL AND session_id != ''
+               AND action IN ('create_session', 'resume_session', 'compact_session');
+            CREATE INDEX IF NOT EXISTS idx_mesh_tasks_legacy_exec_live
+                ON mesh_tasks(session_id)
+                WHERE queue_protocol = 0 AND status IN ('claimed', 'running')
+                  AND action IN ('create_session', 'resume_session', 'compact_session');
+            CREATE INDEX IF NOT EXISTS idx_mesh_tasks_effects_failed
+                ON mesh_tasks(session_id) WHERE effects_state = 'failed'
+        """),  # A82 Stage 8a cutover, ONE txn (the runner's BEGIN IMMEDIATE):
+               # every session enrolled (closed ones too: restore_session reopens
+               # a closed session, and every new row is born enrolled); every
+               # PENDING protocol-0 session EXECUTION row failed — its gateway
+               # waiter died with the restart that applied this, and protocol-0
+               # session execution is refused at insert/claim from now on.
+               # CLAIMED/RUNNING legacy rows are left to finish: the partial
+               # index serves the activation drain predicate (no managed head
+               # activates while its session still has one). Control rows and
+               # one-offs are untouched. The second index serves the operator
+               # surface for managed turns whose post-commit effects failed.
     ]
 
 
@@ -10649,10 +10787,13 @@ _TURN_BLOCK_BACKOFF_BASE_SEC = 3.0
 _TURN_BLOCK_BACKOFF_CAP_SEC = 300.0
 
 
-def _apply_turn_block(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
+def _apply_turn_block(
+    conn: sqlite3.Connection, task_id: str, reason: str, cap_sec: Optional[float] = None,
+) -> bool:
     """[A82 Stage 4a rework] Inside an open write txn: record a bounded
     `blocked_reason`, bump `blocked_attempts` and set `blocked_until` =
-    now + min(3 s * 2^(attempts-1), 300 s). Returns True if the reason changed."""
+    now + min(3 s * 2^(attempts-1), cap) — cap 300 s unless ``cap_sec`` is
+    given. Returns True if the reason changed."""
     row = conn.execute(
         "SELECT blocked_reason, blocked_attempts FROM mesh_tasks "
         "WHERE id = ? AND queue_protocol = 1 AND status = 'queued'",
@@ -10663,7 +10804,7 @@ def _apply_turn_block(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
     bounded = (reason or "blocked")[:500]
     attempts = int(row["blocked_attempts"] or 0) + 1
     delay = min(_TURN_BLOCK_BACKOFF_BASE_SEC * (2 ** min(attempts - 1, 16)),
-                _TURN_BLOCK_BACKOFF_CAP_SEC)
+                _TURN_BLOCK_BACKOFF_CAP_SEC if cap_sec is None else cap_sec)
     until = (datetime.now(tz=timezone.utc) + timedelta(seconds=delay)).isoformat()
     conn.execute(
         "UPDATE mesh_tasks SET blocked_reason = ?, blocked_attempts = ?, blocked_until = ?, "
