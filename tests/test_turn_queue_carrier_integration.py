@@ -559,12 +559,12 @@ class _UnsupportedBackend:
 
 
 def test_INT10b_worker_advertises_only_backends_with_a_managed_path(tmp_path):
-    from src.backends.codex_native import CodexBackend
     from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend
     from src.core.interfaces import CodingBackend
 
-    # Codex/OpenCode keep the interface default today (verified: no override).
-    for cls in (CodexBackend, OpenCodeBackend, OpenCodeServerBackend):
+    # OpenCode keeps the interface default today (verified: no override);
+    # [A82 step 4a] Codex implements the contract (test_codex_managed_turns).
+    for cls in (OpenCodeBackend, OpenCodeServerBackend):
         assert cls.supports_managed_turns is CodingBackend.supports_managed_turns
         assert cls.run_managed_turn is CodingBackend.run_managed_turn
     reg = _RecordingHTTP()

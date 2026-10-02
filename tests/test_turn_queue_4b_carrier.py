@@ -366,10 +366,10 @@ def test_K05b_used_process_cannot_take_an_unechoed_local_command(pooled_claude):
 
 
 def test_K06_backends_without_a_managed_compaction_path_fail_closed():
-    from src.backends.codex_native import CodexBackend
     from src.backends.opencode import OpenCodeBackend, OpenCodeServerBackend
 
-    for cls in (CodexBackend, OpenCodeBackend, OpenCodeServerBackend):
+    # [A82 step 4a] Codex now implements managed compaction/cancel natively.
+    for cls in (OpenCodeBackend, OpenCodeServerBackend):
         assert cls.run_managed_compaction is CodingBackend.run_managed_compaction
         assert cls.cancel_managed_turn is CodingBackend.cancel_managed_turn
     fake = SimpleNamespace()
