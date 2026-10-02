@@ -82,6 +82,18 @@ def _session_queue_paused(session_id: str) -> bool:
     return bool(state.get("paused"))
 
 
+async def _session_queue_paused_async(session_id: str) -> bool:
+    """[A82 Stage 7] ``_session_queue_paused`` in a worker thread: the sync
+    SQLite read never runs on the bot's event loop."""
+    return await asyncio.to_thread(_session_queue_paused, session_id)
+
+
+async def _stop_pause_hint(session_id: str) -> str:
+    """[A82 Stage 7] The stop reply's pause line, only when the pause actually
+    holds (stop skips it when the session closed meanwhile)."""
+    return f"\n{_QUEUE_PAUSED_HINT}" if await _session_queue_paused_async(session_id) else ""
+
+
 async def _session_turn_queue_enrolled(session_id: str) -> bool:
     """[A82 Stage 4a] Durable enrollment marker: no read while no session is
     enrolled; unreadable while enrollment exists ⇒ treated as enrolled (fail
@@ -398,7 +410,7 @@ class TelegramInterface:
                 active_session.last_user_message, active_session.status = prior
                 await self.app.bot.send_message(
                     chat_id=chat_id,
-                    text=_turn_queued_text(task_id, _session_queue_paused(active_session.session_id)),
+                    text=_turn_queued_text(task_id, await _session_queue_paused_async(active_session.session_id)),
                 )
                 return
             active_session.last_task_id = task_id
@@ -1253,7 +1265,7 @@ class TelegramInterface:
             "If omitted, `session_id` defaults to the active session."
         )
 
-    def _managed_session_cancel_reply(self, update: Update, args: list[str]) -> Optional[str]:
+    async def _managed_session_cancel_reply(self, update: Update, args: list[str]) -> Optional[str]:
         """[A82 Stage 4b] Reply text when a session-scoped /cancel targets an
         enrolled session (stop = cancel the active managed turn); None for an
         explicit task id, an unenrolled session, or when nothing is enrolled
@@ -1281,11 +1293,11 @@ class TelegramInterface:
         if managed is None:
             return None
         cancelled, active_id = managed
+        hint = await _stop_pause_hint(session.session_id)
         if cancelled:
             return (f"🔄 Cancellation requested for session {self._session_tag(session.session_id)} "
-                    f"task `{active_id}`.\n{_QUEUE_PAUSED_HINT}")
-        return (f"No active turn to cancel in session {self._session_tag(session.session_id)}.\n"
-                f"{_QUEUE_PAUSED_HINT}")
+                    f"task `{active_id}`.{hint}")
+        return f"No active turn to cancel in session {self._session_tag(session.session_id)}.{hint}"
 
     def _resolve_task_scope(
         self,
@@ -1353,7 +1365,7 @@ class TelegramInterface:
                 # [A82 Stage 4a] Enrolled session: durably queued, not BUSY.
                 active_session.last_user_message, active_session.status = prior
                 await update.message.reply_text(
-                    _turn_queued_text(task_id, _session_queue_paused(active_session.session_id)),
+                    _turn_queued_text(task_id, await _session_queue_paused_async(active_session.session_id)),
                 )
                 return
             active_session.last_task_id = task_id
@@ -1937,7 +1949,7 @@ class TelegramInterface:
         # [A82 Stage 4b] Session-scoped /cancel on an ENROLLED session cancels
         # the turn owning the ACTIVE slot (ledger truth, never last_task_id).
         # None ⇒ legacy resolution below, unchanged.
-        managed_reply = self._managed_session_cancel_reply(update, context.args or [])
+        managed_reply = await self._managed_session_cancel_reply(update, context.args or [])
         if managed_reply is not None:
             await update.message.reply_text(managed_reply)
             return
@@ -2129,7 +2141,7 @@ class TelegramInterface:
                     return
                 await update.message.reply_text(
                     f"{save_msg}\n"
-                    + _turn_queued_text(admitted, _session_queue_paused(active_session.session_id)),
+                    + _turn_queued_text(admitted, await _session_queue_paused_async(active_session.session_id)),
                 )
                 logger.info(
                     "file+instruction queued user=%s chat=%s file=%s task=%s session=%s",
@@ -2799,13 +2811,14 @@ class TelegramInterface:
             return
         if managed is not None:
             cancelled, active_id = managed
+            hint = await _stop_pause_hint(session.session_id)
             if cancelled:
                 await update.message.reply_text(
                     f"Cancellation requested for `{active_id}` in session {self._session_tag(session.session_id)}."
-                    f"\n{_QUEUE_PAUSED_HINT}"
+                    f"{hint}"
                 )
             else:
-                await update.message.reply_text(f"No active turn to cancel in that session.\n{_QUEUE_PAUSED_HINT}")
+                await update.message.reply_text(f"No active turn to cancel in that session.{hint}")
             return
         if not session.last_task_id:
             await update.message.reply_text("No task is associated with that session yet.")
