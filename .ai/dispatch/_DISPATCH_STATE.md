@@ -4,7 +4,7 @@
 
 | status | job_id | created | updated | depends_on | proof | flags |
 |---|---|---|---|---|---|---|
-| active | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-21 | — | ✓ | STALE_41d |
+| active | AGENT_60_WARM_WORKER_IDLE_REAPER | 2026-07-30 | 2026-08-21 | — | ✓ | STALE_42d |
 | active | AGENT_65_COST_MONITORING_VISIBILITY | 2026-08-03 | 2026-08-03 | — | ✓ | STALE_59d |
 | active | AGENT_82_SESSION_TURN_QUEUE | 2026-09-22 | 2026-09-27 | — | ✓ |  |
 | active | AGENT_84_WORKER_COMPLETION_OUTBOX | 2026-09-24 | 2026-10-02 | AGENT_82_SESSION_TURN_QUEUE | — |  |
