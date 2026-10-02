@@ -1042,6 +1042,7 @@ class OpenCodeServerBackend(CodingBackend):
         self._native: Dict[str, tuple[str, str]] = {}        # gateway sid -> (server key, native id)
         self._proactive_sink: Any = None                     # [m4] carrier late-reply sink
         self._refused_since: Dict[str, float] = {}           # [m6] server key -> first refusal (monotonic)
+        self._refused_last: Dict[str, float] = {}            # [m6] server key -> latest refusal (monotonic)
 
     @staticmethod
     def _server_key(repo_path: str) -> str:
@@ -2534,6 +2535,14 @@ class OpenCodeServerBackend(CodingBackend):
                 proc = self._procs.get(key)
                 dead = proc is None or proc.poll() is not None
                 refusing = isinstance(reason, ConnectionRefusedError)
+                if refusing:
+                    # [A82 pre-cutover, m6] Only a CONTINUOUS refusal streak
+                    # counts: an earlier refusal older than the window (no
+                    # refusal since) is isolated — the streak restarts.
+                    last = self._refused_last.get(key)
+                    if last is not None and now - last >= self._UNREACHABLE_TERMINATE_SEC:
+                        self._refused_since.pop(key, None)
+                    self._refused_last[key] = now
                 first = self._refused_since.setdefault(key, now) if refusing else None
                 wedged = first is not None and now - first >= self._UNREACHABLE_TERMINATE_SEC
                 if dead or wedged:
