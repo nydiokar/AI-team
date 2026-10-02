@@ -2415,20 +2415,14 @@ def build_control_api(orchestrator) -> FastAPI:
         return TurnRequestSummaryOut.from_row({**(current or row), "preview": ""})
 
     async def _set_queue_paused(session_id: str, paused: bool) -> TurnQueueControlOut:
-        from src.control.turn_queue import TurnQueueError, emit_turn_queue_changed
-        from src.control.turn_admission import run_turn_mutation_async
-        from src.control.turn_scheduler import notify_turn_queue_changed
+        from src.control.turn_queue import TurnQueueError
+        from src.control.turn_admission import set_queue_paused_async
 
         db = _require_queue_db()
         try:
-            state = await run_turn_mutation_async(
-                lambda: db.set_turn_queue_paused(session_id, paused),
-            )
+            state = await set_queue_paused_async(db, session_id, paused)
         except TurnQueueError as err:
             raise _turn_queue_http(err)
-        if not paused:
-            notify_turn_queue_changed()
-        emit_turn_queue_changed(session_id, "paused" if paused else "resumed")
         return TurnQueueControlOut.model_validate(state)
 
     @app.post("/api/sessions/{session_id}/turn-requests/pause", dependencies=[Depends(_require_auth)],
@@ -2977,22 +2971,6 @@ def build_control_api(orchestrator) -> FastAPI:
             raise HTTPException(status_code=_REASON_STATUS.get(result.reason, 400), detail=env)
         return JSONResponse(env)
 
-    def _pause_enrolled_queue_for_stop(session_id: str) -> None:
-        """[A82 Stage 6] Sync (threadpool) half of the web stop: persist the
-        operator queue pause for an ENROLLED session. No read while nothing is
-        enrolled; a closed session is tolerated; other typed failures raise."""
-        from src.control.turn_admission import session_enrollment_sync
-        from src.control.turn_queue import OwnershipConflictError, emit_turn_queue_changed
-
-        db = _db()
-        if db is None or not session_enrollment_sync(db, session_id):
-            return
-        try:
-            db.set_turn_queue_paused(session_id, True)
-        except OwnershipConflictError:
-            return  # closed meanwhile: nothing can activate there anyway
-        emit_turn_queue_changed(session_id, "paused")
-
     @app.post("/api/sessions/{session_id}/stop", dependencies=[Depends(_require_auth)])
     def api_stop_session(session_id: str) -> JSONResponse:
         session = orchestrator.session_service.store.get(session_id)
@@ -3009,11 +2987,9 @@ def build_control_api(orchestrator) -> FastAPI:
             # committed BEFORE the cancel (freeing the slot can never launch the
             # next queued instruction), then cancel ONLY the active turn. Waiting
             # work stays visible and paused until the explicit resume route (a
-            # new admission does not clear it — design §7). Telegram's stop has
-            # no resume command and keeps the Stage-4b release-on-send hold.
-            if callable(stop_managed):
-                _pause_enrolled_queue_for_stop(session_id)
-            managed = stop_managed(session) if callable(stop_managed) else None
+            # new admission does not clear it — design §7). Same service as
+            # Telegram's stop (``pause_queue=True``).
+            managed = stop_managed(session, pause_queue=True) if callable(stop_managed) else None
         except TurnQueueError as err:
             raise _turn_queue_http(err)
         if managed is not None:

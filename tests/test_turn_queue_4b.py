@@ -585,8 +585,11 @@ def test_T01_telegram_session_cancel_targets_the_active_managed_turn(tmp_path, m
     assert db.get_task(t1)["cancel_token"] == tok and db.get_task(t2)["status"] == "queued"
     assert _sess().status == SessionStatus.CANCELLED  # stop hold (rework)
     # Explicit task id through /cancel goes through the fenced cancel_task path
-    # (after an operator action released the stop hold).
+    # (after an operator action released the stop hold). [A82 Stage 6] Telegram
+    # stop now sets the persistent pause like the web stop: that action is the
+    # explicit /session_resume (a new send no longer resumes).
     db.complete_turn(t1, tok, {"success": False}, status="failed")
+    asyncio.run(bot._handle_session_resume(_Upd(), _Ctx(["sess-1"])))
     _submit(o, operation_id="c")
     _pass(db, o)
     upd = _Upd()
