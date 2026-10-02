@@ -551,6 +551,8 @@ def _rebind_setup(tmp_path, monkeypatch, *, enroll_new):
     o.session_store.save(s9)
     if enroll_new:
         db.enroll_session("sess-9")
+    else:  # [A82 Stage 8a] born managed: model the unenrolled S2
+        db.unenroll_session_drained("sess-9")
     db.create_flow_link(cid, "session", "sess-9", "manager", created_by="system")
     return db, o, cid, c
 

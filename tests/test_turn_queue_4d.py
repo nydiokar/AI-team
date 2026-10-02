@@ -543,7 +543,10 @@ def test_U01_unenrolled_producers_touch_no_managed_state(tmp_path, monkeypatch):
     forbidden = ("turn_queue_enrolled", "queue_protocol = 1", "turn_queue_hold",
                  "producer_turn_id", "idx_mesh_tasks_producer_link",
                  "idx_mesh_turns_session_open", "mesh_turn_revisions")
-    assert not [q for q in stmts if any(f in q for f in forbidden)]
+    # [A82 Stage 8a] The session upsert names the marker column (INSERT-seeded
+    # born managed, never updated on conflict) — a row write, not a read of
+    # managed state (C07 excludes it the same way).
+    assert not [q for q in stmts if any(f in q for f in forbidden) and "INSERT INTO sessions" not in q]
     # legacy deliveries exactly as before
     assert [k["source"] for k in submits] == ["watched_job", "cache_heartbeat"]
     assert submits[0]["extra_metadata"] == {"job_id": "job_x", "source": "watched_job"}

@@ -8,6 +8,7 @@ from config import config
 from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus, Task, TaskPriority, TaskStatus, TaskType
 from src.orchestrator import TaskOrchestrator
+from tests.stage8a_legacy import claim_pre_cutover, enqueue_pre_cutover
 
 
 def _session(session_id: str) -> Session:
@@ -49,7 +50,8 @@ async def test_claimed_remote_task_is_not_failed_by_pickup_timeout(tmp_path, mon
     saves = []
 
     db.upsert_session(session)
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         task_id=task.id,
         session_id=session.session_id,
         machine_id=session.machine_id,
@@ -57,7 +59,7 @@ async def test_claimed_remote_task_is_not_failed_by_pickup_timeout(tmp_path, mon
         action="resume_session",
         payload={"prompt": task.prompt, "task_id": task.id},
     )
-    assert db.claim_task(task.id, session.machine_id)
+    assert claim_pre_cutover(db, task.id, session.machine_id)
 
     class MinimalOrchestrator:
         _task_cancel_events = {}

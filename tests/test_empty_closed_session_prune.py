@@ -1,6 +1,7 @@
 from src.core.interfaces import SessionStatus
 from src.services.session_service import SessionService
 from src.services.session_store import SessionStore
+from tests.stage8a_legacy import enqueue_pre_cutover
 
 
 def _service() -> SessionService:
@@ -59,7 +60,8 @@ def test_prune_empty_closed_sessions_keeps_sessions_with_content_or_refs():
 
     from src.control.db import get_db
     db = get_db()
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         "task_has_history",
         with_task,
         None,

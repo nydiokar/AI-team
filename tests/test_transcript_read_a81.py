@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from src.control.db import MeshDB
 from src.control import transcript as transcript_mod
 from src.core.interfaces import Session, SessionStatus
+from tests.stage8a_legacy import enqueue_pre_cutover
 
 
 def _session(session_id: str) -> Session:
@@ -33,8 +34,8 @@ def _session(session_id: str) -> Session:
 def test_get_session_turns_omits_unused_blob_columns(tmp_path):
     db = MeshDB(str(tmp_path / "mesh.db"))
     db.upsert_session(_session("sess_slim"))
-    db.enqueue_task(task_id="task_1", session_id="sess_slim", machine_id="Horse",
-                    backend="claude", action="resume_session", payload={"prompt": "hi"})
+    enqueue_pre_cutover(db, task_id="task_1", session_id="sess_slim", machine_id="Horse",
+                        backend="claude", action="resume_session", payload={"prompt": "hi"})
     with db._write() as conn:
         conn.execute(
             """UPDATE mesh_tasks SET created_at=?, completed_at=?, status='completed',
@@ -67,8 +68,8 @@ def test_transcript_still_renders_full_content_after_slim(tmp_path):
     full reply_text, correct file_count, usage summary."""
     db = MeshDB(str(tmp_path / "mesh.db"))
     db.upsert_session(_session("sess_render"))
-    db.enqueue_task(task_id="task_r", session_id="sess_render", machine_id="Horse",
-                    backend="claude", action="resume_session", payload={"prompt": "do it"})
+    enqueue_pre_cutover(db, task_id="task_r", session_id="sess_render", machine_id="Horse",
+                        backend="claude", action="resume_session", payload={"prompt": "do it"})
     with db._write() as conn:
         conn.execute(
             """UPDATE mesh_tasks SET created_at=?, completed_at=?, status='completed',

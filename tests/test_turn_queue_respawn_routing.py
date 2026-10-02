@@ -4,16 +4,14 @@
 ``TaskOrchestrator._do_respawn_manager_for_case`` (src/orchestrator.py) contains
 the Producer-7 fork at the enrollment gate::
 
-    from src.control.turn_admission import session_enrollment
-    if dead_session_id and await session_enrollment(db, dead_session_id):
+    if dead_session_id:  # [A82 Stage 8a] enrolled or not
         return await self._respawn_manager_managed(...)
-    # else: legacy single-flight claim via db.enqueue_task(respawn_id,
-    #        action=RESPAWN_ACTION, ...)
+    # else (no Manager session id at all): legacy single-flight claim
 
-Every tick respawn path funnels through this method, but no test proved the
-ROUTING end to end: that an ENROLLED dead Manager takes the managed path and an
-UNENROLLED one takes the legacy single-flight path. These two tests close that
-gap, driving the GENUINE method against a real ``MeshDB`` with the duck-typed
+Every tick respawn path funnels through this method. These two tests prove the
+ROUTING end to end: an ENROLLED dead Manager and (since Stage 8a, the
+replacement being born managed) an UNENROLLED one both take the managed path,
+driving the GENUINE method against a real ``MeshDB`` with the duck-typed
 ``_FakeOrch`` harness reused from test_case_respawn.py. The only override is
 ``_respawn_manager_managed`` — stubbed to record (never enter the real managed
 machinery) so the test observes WHICH branch fired, not what the branch does.
@@ -24,7 +22,7 @@ Hermetic: real MeshDB on tmp_path, no network, no CLI.
 import asyncio
 
 from src.core import Session, SessionStatus
-from src.control.db import MeshDB, RESPAWN_ACTION, respawn_task_id
+from src.control.db import MeshDB, respawn_task_id
 from src.orchestrator import TaskOrchestrator
 
 # Reuse the proven harness verbatim — same duck-typed self / store / service.
@@ -116,20 +114,21 @@ def test_enrolled_dead_manager_routes_to_managed_respawn(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# (b) UNENROLLED dead Manager → legacy single-flight claim, managed NOT called #
+# (b) [A82 Stage 8a] UNENROLLED (legacy-born) dead Manager → ALSO managed      #
 # --------------------------------------------------------------------------- #
 
-def test_unenrolled_dead_manager_takes_legacy_respawn(tmp_path, monkeypatch):
+def test_unenrolled_dead_manager_also_routes_to_managed_respawn(tmp_path, monkeypatch):
+    """Converted from ``test_unenrolled_dead_manager_takes_legacy_respawn``: the
+    replacement session is born managed, so its first turn must be a managed
+    turn — the legacy single-flight branch (whose first turn the managed
+    admission would refuse) is no longer taken for any dead Manager."""
     _on(monkeypatch)
     db = _db(tmp_path)
 
     dead_sid = "dead-mgr-legacy"
     objective = "ship feature X"
     case_id, _ = _open_case_with_dead_manager(db, dead_sid=dead_sid, objective=objective)
-
-    # Deliberately do NOT enroll. any_session_enrolled() is False here (nothing
-    # enrolled anywhere) so session_enrollment(...) → False with no marker read.
-    assert db.is_session_enrolled(dead_sid) is False
+    assert db.is_session_enrolled(dead_sid) is False  # no row: a pre-cutover / pruned Manager
 
     store = _FakeStore()
     svc = _FakeSessionService(store)
@@ -140,13 +139,10 @@ def test_unenrolled_dead_manager_takes_legacy_respawn(tmp_path, monkeypatch):
         orch._do_respawn_manager_for_case(db, case_id, generation, dead_sid)
     )
 
-    # ROUTING PROOF: the managed path was NEVER taken.
-    assert orch.managed_calls == [], "unenrolled dead Manager wrongly routed to managed respawn"
-
-    # The LEGACY single-flight claim row was created & owned by this tick.
     assert owned is True
-    row = db.get_task(respawn_task_id(case_id, generation))
-    assert row is not None, "legacy single-flight respawn row was NOT created"
-    assert row["action"] == RESPAWN_ACTION
-    # The legacy path drove through to a real spawn (one fresh session).
-    assert len(svc.created) == 1
+    assert len(orch.managed_calls) == 1
+    assert orch.managed_calls[0]["dead_session_id"] == dead_sid
+    assert orch.managed_calls[0]["objective"] == objective
+    # No legacy single-flight row, no legacy spawn.
+    assert db.get_task(respawn_task_id(case_id, generation)) is None
+    assert svc.created == []

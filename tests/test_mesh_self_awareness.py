@@ -8,6 +8,7 @@ from src.control.db import MeshDB
 from src.core.interfaces import Session, SessionStatus
 from src.orchestrator import TaskOrchestrator
 from src.worker.agent import WorkerAgent, _mark_nudge_received
+from tests.stage8a_legacy import claim_pre_cutover, enqueue_pre_cutover
 
 
 def _session(session_id: str, status: SessionStatus = SessionStatus.BUSY) -> Session:
@@ -54,7 +55,8 @@ def test_list_stale_busy_sessions_excludes_pending_and_claimed(tmp_path):
     for session in (stale, pending, claimed, idle):
         db.upsert_session(session)
 
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         task_id=pending.last_task_id,
         session_id=pending.session_id,
         machine_id=pending.machine_id,
@@ -62,7 +64,8 @@ def test_list_stale_busy_sessions_excludes_pending_and_claimed(tmp_path):
         action="resume_session",
         payload={"task_id": pending.last_task_id, "prompt": "pending"},
     )
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         task_id=claimed.last_task_id,
         session_id=claimed.session_id,
         machine_id=claimed.machine_id,
@@ -70,7 +73,7 @@ def test_list_stale_busy_sessions_excludes_pending_and_claimed(tmp_path):
         action="resume_session",
         payload={"task_id": claimed.last_task_id, "prompt": "claimed"},
     )
-    assert db.claim_task(claimed.last_task_id, claimed.machine_id)
+    assert claim_pre_cutover(db, claimed.last_task_id, claimed.machine_id)
 
     rows = db.list_stale_busy_sessions()
     assert [row["session_id"] for row in rows] == ["stale"]
@@ -332,7 +335,8 @@ async def test_reconcile_stale_busy_sessions_recovers_completed_task(monkeypatch
     db = MeshDB(str(tmp_path / "mesh.db"))
     session = _session("completed")
     db.upsert_session(session)
-    db.enqueue_task(
+    enqueue_pre_cutover(
+        db,
         task_id=session.last_task_id,
         session_id=session.session_id,
         machine_id=session.machine_id,
