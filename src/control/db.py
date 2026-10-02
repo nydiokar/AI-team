@@ -3228,13 +3228,19 @@ class MeshDB:
         index; the waiting subset itself is capped (count + bytes)."""
         row = self._conn().execute(
             f"""
-            SELECT COUNT(*) AS n, COALESCE(SUM(intent_bytes), 0) AS b,
-                   COALESCE(SUM(status = 'queued'), 0) AS q
+            SELECT COALESCE(SUM(status IN ('queued', 'pending')), 0) AS n,
+                   COALESCE(SUM(CASE WHEN status IN ('queued', 'pending')
+                                     THEN intent_bytes ELSE 0 END), 0) AS b,
+                   COALESCE(SUM(status = 'queued'), 0) AS q,
+                   COALESCE(SUM(status = 'claimed'), 0) AS c
             FROM mesh_tasks INDEXED BY idx_mesh_turns_session_open
-            WHERE {_MANAGED_OPEN_PREDICATE} AND status IN ('queued', 'pending')
+            WHERE {_MANAGED_OPEN_PREDICATE} AND status IN ('queued', 'pending', 'claimed')
             """
         ).fetchone()
-        return {"count": int(row["n"]), "bytes": int(row["b"]), "queued": int(row["q"])}
+        # [A82 Stage 7] ``claimed`` (granted, not started) is reported apart:
+        # the shared legacy gate counts it, the admission caps do not.
+        return {"count": int(row["n"]), "bytes": int(row["b"]), "queued": int(row["q"]),
+                "claimed": int(row["c"])}
 
     def managed_queued_bytes(self) -> int:
         """[A82 Stage 4a] Persisted stored-intent byte accounting for the waiting
