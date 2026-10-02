@@ -94,3 +94,52 @@ def test_reaper_leaves_managed_rows_of_a_closed_session_to_close_session_turns(t
         conn.execute("UPDATE sessions SET status = 'closed' WHERE session_id = 's-busy'")
     stale = {r["id"] for r in db.list_stale_pending_tasks(grace_sec=GRACE, max_age_sec=MAX_AGE, now=NOW)}
     assert "m-head" not in stale and "m-wait" not in stale
+
+
+# --------------------------------------------------------------------------- #
+# #177 unknown-node pin rejection vs managed admission / host affinity
+# --------------------------------------------------------------------------- #
+import pytest  # noqa: E402
+
+from tests.test_turn_queue_producer1 import _no_cli_spawn  # noqa: E402,F401 — autouse guard
+from tests.test_turn_queue_sender import ADMIN, SOLO, _mk_world  # noqa: E402
+
+
+@pytest.mark.parametrize("pinned", [True, False])
+def test_enrolled_admission_never_reaches_legacy_unknown_node_rejection(tmp_path, monkeypatch, pinned):
+    """Enrolled sessions (pinned, or unpinned routed via MESH_LOCAL_CARRIER_NODE_ID)
+    are admitted on the managed path — #177's legacy ``_mesh_enqueue_task``
+    unknown-node rejection is never consulted. Once the pinned carrier goes
+    offline the admitted turn WAITS (host affinity: requeued with a visible
+    reason, never relocated), and repeated pending-reaper passes far past the
+    grace/age ceiling never cancel it."""
+    import src.control.db as db_mod
+    from config import config as cfg
+    from src.control import task_server
+    from src.orchestrator import TaskOrchestrator
+
+    def _legacy(*_a, **_k):
+        raise AssertionError("enrolled admission reached the legacy mesh enqueue")
+
+    monkeypatch.setattr(TaskOrchestrator, "_mesh_enqueue_task", _legacy, raising=True)
+    w = _mk_world(tmp_path, monkeypatch, pinned=pinned)
+    r = w.api.post(f"/api/sessions/{SOLO}/turn-requests",
+                   json={"body": "operator turn", "operation_id": "op-aff"},
+                   headers={"Authorization": f"Bearer {ADMIN}", "Idempotency-Key": "op-aff"})
+    assert r.status_code == 202, r.text
+    tid = r.json()["turn_id"]
+    row = w.db.get_task(tid)
+    assert row["machine_id"] == w.node and row["status"] in ("queued", "pending")
+    w.db.activate_turn(tid)
+    w.db.upsert_node(w.node, "127.0.0.1", 0, ["claude"], 2, status="offline")
+    w.db.requeue_turns_on_dead_carriers()
+    _backdate_all(w.db, MAX_AGE + 60)
+    monkeypatch.setattr(db_mod, "_db_instance", w.db, raising=False)
+    monkeypatch.setattr(cfg.mesh, "pending_reaper_enabled", True, raising=False)
+    monkeypatch.setattr(cfg.mesh, "pending_reaper_grace_sec", GRACE, raising=False)
+    monkeypatch.setattr(cfg.mesh, "pending_max_age_sec", MAX_AGE, raising=False)
+    for _ in range(3):
+        task_server._reap_stale_pending_once()
+    row = w.db.get_task(tid)
+    assert row["status"] in ("queued", "pending"), row["status"]
+    assert row["machine_id"] == w.node
