@@ -1114,16 +1114,11 @@ async def _store_session_upload(
     from pathlib import Path as _Path
     from src.control.node_inspector import session_node
 
-    if await _session_turn_queue_enrolled(session.session_id):
-        # [A82 Stage 4a] Session-scoped file ingestion is producer 8 (not yet
-        # converted). Refuse BEFORE any file write / BUSY mark rather than run
-        # an unmanaged or half-managed turn into an enrolled session.
-        from src.control.turn_queue import ManagedUnsupportedError
-
-        raise _turn_queue_http(ManagedUnsupportedError(
-            "file upload into a turn-queue-enrolled session is not supported yet",
-            session_id=session.session_id,
-        ))
+    # [A82 pre-cutover P2] Producer 8: an ENROLLED session's file is always
+    # staged for its managed carrier (which fetches it before invoking — the
+    # gateway never writes the repo), and an attached instruction is a managed
+    # turn: durable before ack, never BUSY / last_task_id.
+    enrolled: bool = await _session_turn_queue_enrolled(session.session_id)
 
     ext = _os.path.splitext(raw_name)[1].lower()
     blocked_exts: set[str] = {
@@ -1149,7 +1144,7 @@ async def _store_session_upload(
     attached_instruction: str = _upload_attached_instruction(instruction or "", file_path)
 
     remote_node = session_node(session)
-    if remote_node is not None:
+    if remote_node is not None or enrolled:
         stage_id: str = _uuid.uuid4().hex[:16]
         stage_dir = _upload_staging_root() / stage_id
         dest = (stage_dir / safe_name).resolve()
@@ -1184,6 +1179,41 @@ async def _store_session_upload(
                 "size": len(content),
                 "path": file_path,
                 "delivery": "pending_instruction",
+                "staged_file": staged_file_meta,
+            }
+
+        if enrolled:
+            from src.control.turn_queue import TurnQueueError
+            from src.orchestrator import HarnessAdmissionBlocked
+
+            try:
+                admitted = await orchestrator.submit_instruction(
+                    description=attached_instruction,
+                    session_id=session.session_id,
+                    cwd=session.repo_path,
+                    source="web_session",
+                    extra_metadata={"staged_file": staged_file_meta},
+                    turn_queue_enrolled=True,
+                )
+            except Exception as exc:
+                _shutil.rmtree(stage_dir, ignore_errors=True)
+                if isinstance(exc, TurnQueueError):
+                    raise _turn_queue_http(exc) from exc
+                if isinstance(exc, HarnessAdmissionBlocked):
+                    raise _harness_blocked_http(exc) from exc
+                logger.error(
+                    "event=web_upload_attached_enqueue_failed session=%s file=%s error=%s",
+                    session.session_id, safe_name, exc,
+                )
+                raise _upload_error(500, "delivery_enqueue_failed") from exc
+            return {
+                "ok": True,
+                "filename": safe_name,
+                "size": len(content),
+                "path": file_path,
+                "delivery": "attached",
+                "task_id": str(admitted),
+                "instruction": attached_instruction,
                 "staged_file": staged_file_meta,
             }
 
