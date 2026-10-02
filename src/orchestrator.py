@@ -10732,11 +10732,15 @@ Generated from user description: {description}
                 "refusing unmanaged execution into an enrolled session",
                 session_id=sid, source=source,
             )
-        if meta.get("staged_file") or meta.get("task_type") == "fetch_staged_file":
-            raise ManagedUnsupportedError(
-                "session-scoped file ingestion is not converted to managed "
-                "admission yet (A82 producer 8)", session_id=sid,
-            )
+        if meta.get("staged_file") is not None or meta.get("task_type") == "fetch_staged_file":
+            # [A82 pre-cutover P2] Producer 8: a staged-file ref rides the turn's
+            # intent; the carrier fetches it BEFORE invoking (a fetch failure is
+            # a not-invoked release). A file-only delivery runs nothing in the
+            # session: a protocol-0 control row, never a turn.
+            ref = self._staged_file_ref(meta.get("staged_file"), sid)
+            if meta.get("task_type") == "fetch_staged_file":
+                return await self._deliver_staged_file_control(task, sid, ref)
+            meta["staged_file"] = ref.model_dump()
         db = get_db()
         principal = self._MANAGED_SOURCE_PRINCIPAL.get(source, source)
         sender_session_id = str(meta.pop("__turn_sender_session_id", "") or "") if source == "agent_session" else ""
@@ -10823,6 +10827,47 @@ Generated from user description: {description}
             self._record_flow_stage(flow_run_id, "queued")
         notify_turn_queue_changed()
         return admission
+
+    def _staged_file_ref(self, raw: Any, sid: str) -> "StagedFileRef":
+        """Validated ``StagedFileRef`` or a typed 422 (nothing admitted)."""
+        from pydantic import ValidationError
+        from src.control.turn_queue import MalformedTurnError, StagedFileRef
+
+        try:
+            return StagedFileRef.model_validate(raw)
+        except ValidationError as e:
+            raise MalformedTurnError(
+                f"invalid staged_file reference: {e.errors()[0].get('msg', 'invalid')}"[:300],
+                session_id=sid,
+            ) from None
+
+    async def _deliver_staged_file_control(self, task: Task, sid: str, ref: "StagedFileRef") -> str:
+        """[A82 pre-cutover P2] File-only delivery into an ENROLLED session: ONE
+        protocol-0 ``fetch_staged_file`` control row (control rows stay protocol
+        0 by design, §3 item 2) pinned to the session's managed carrier — no
+        turn, no BUSY / last_task_id, no legacy gateway queue. Durable trigger
+        identity = the staged file id (deterministic row id ⇒ a replay inserts
+        nothing). Commit is verified before acknowledging."""
+        from src.control.db import get_db
+        from src.control.turn_queue import BackingStoreError
+
+        session = self.session_store.get(sid)
+        backend = self._resolve_task_backend(task)
+        carrier, _offline = self._managed_admission_carrier(session, backend)
+        task.id = f"fetch-staged-{ref.file_id}"
+        action, payload = self._mesh_dispatch_payload(task, sid, session, socket.gethostname())
+        db = get_db()
+        await asyncio.to_thread(
+            db.enqueue_task, task_id=task.id, session_id=sid, machine_id=carrier,
+            backend=backend, action=action, payload=payload,
+        )
+        if await asyncio.to_thread(db.get_task, task.id) is None:
+            raise BackingStoreError("file delivery row was not committed", session_id=sid)
+        logger.info(
+            "event=staged_file_delivery_enqueued task_id=%s session_id=%s node=%s",
+            task.id, sid, carrier,
+        )
+        return task.id
 
     async def _admit_managed_producer_turn(
         self, task: Task, sid: str, producer: Dict[str, Any],

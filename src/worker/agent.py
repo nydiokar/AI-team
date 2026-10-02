@@ -586,10 +586,14 @@ async def _fetch_staged_file(
     staged: Dict[str, Any],
     payload: Dict[str, Any],
     http: "_HTTP",
+    delete: bool = True,
 ) -> Optional[str]:
     """Fetch a staged file from the controller and save it into the session's uploads dir.
 
     Returns the local path string on success, None on failure.
+    [A82 pre-cutover P2] ``delete=False`` keeps the controller copy (a managed
+    turn deletes it only after its prompt was submitted, so a not-invoked
+    release can re-fetch it on the next attempt).
     """
     file_id = staged.get("file_id", "")
     filename = staged.get("filename", "upload")
@@ -611,11 +615,18 @@ async def _fetch_staged_file(
     except Exception as e:
         logger.error("event=staged_file_fetch_failed file_id=%s err=%s", file_id, e)
         return None
+    if delete:
+        await _delete_staged_file(staged, http)
+    return str(dest)
+
+
+async def _delete_staged_file(staged: Dict[str, Any], http: "_HTTP") -> None:
+    """Best-effort removal of the controller's staged copy."""
+    file_id = staged.get("file_id", "")
     try:
         await asyncio.to_thread(http.delete, f"/files/{file_id}")
     except Exception as e:
         logger.warning("event=staged_file_cleanup_failed file_id=%s err=%s", file_id, e)
-    return str(dest)
 
 
 async def _execute_task(
@@ -657,8 +668,23 @@ async def _execute_task(
 
     # Fetch any file staged on the controller before backend execution
     staged = (payload.get("metadata") or {}).get("staged_file")
+    fetched: Optional[str] = None
     if staged and http is not None:
-        await _fetch_staged_file(staged, payload, http)
+        fetched = await _fetch_staged_file(staged, payload, http, delete=not managed)
+    if managed and staged and fetched is None:
+        # [A82 pre-cutover P2] Never run a managed turn without its file: a
+        # pre-submit refusal ⇒ the carrier releases the attempt NOT invoked
+        # with this visible reason (prompt kept; repeated refusals back off).
+        return {
+            "success": False,
+            "output": "",
+            "errors": [f"staged_file_unavailable: {str(staged.get('file_id', ''))[:64]}"],
+            "files_modified": [],
+            "execution_time": 0.0,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "return_code": 1,
+            "error_class": "managed_conflict",
+        }
 
     # Repo inspection tasks: read-only (or commit) ops against the session's
     # repo, which lives on THIS worker. No backend needed — the gateway routes
@@ -877,6 +903,11 @@ async def _execute_task(
                     telemetry_context=context,
                     telemetry_sink=sink,
                 )
+                if staged and http is not None and getattr(raw, "error_class", "") not in (
+                    "managed_conflict", "recovery_required",
+                ):
+                    # [A82 pre-cutover P2] submitted ⇒ the staged copy is spent.
+                    await _delete_staged_file(staged, http)
             elif action == "create_session" or not session.backend_session_id:
                 raw = await asyncio.to_thread(
                     call_backend,
