@@ -4195,18 +4195,22 @@ class MeshDB:
         except Exception as exc:
             raise _turn_backing_error("revoke_sender_capabilities", session_id=session_id, err=exc)
 
-    def node_managed_backends(self, node_id: str) -> List[str]:
+    def node_managed_backends(self, node_id: str, *, live: bool = True) -> List[str]:
         """[A82 Stage 4a rework] Backends the node REGISTERED as managed-capable
         (persisted at registration, so any gateway process can resolve a carrier
         assignment even when the task server runs out of process). Only a LIVE
         carrier counts (rework 2): status online AND a heartbeat within
-        `mesh.node_heartbeat_timeout_sec`; an offline/stale node ⇒ []."""
+        `mesh.node_heartbeat_timeout_sec`; an offline/stale node ⇒ [].
+        [A82 pre-cutover] ``live=False`` returns the registration regardless of
+        liveness (the offline-carrier admission policy); unknown node ⇒ []."""
         if not node_id:
             return []
         row = self._conn().execute(
             "SELECT managed_backends FROM nodes WHERE node_id = ? "
             "AND status = 'online' AND last_heartbeat >= ?",
             (node_id, _carrier_fresh_cutoff()),
+        ).fetchone() if live else self._conn().execute(
+            "SELECT managed_backends FROM nodes WHERE node_id = ?", (node_id,),
         ).fetchone()
         if row is None:
             return []

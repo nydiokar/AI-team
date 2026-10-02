@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # --------------------------------------------------------------------------- #
@@ -158,6 +158,20 @@ class CarrierUnavailableError(TurnQueueError):
     code = "carrier_unavailable"
 
 
+class CarrierOfflineError(CarrierUnavailableError):
+    """[A82 pre-cutover] The assigned carrier REGISTERED ``backend`` as managed
+    but is offline / heart-beat stale right now. Under the offline-carrier
+    admission policy the turn is admitted queued and this is its operator-
+    visible ``blocked_reason`` until the carrier returns (host affinity:
+    never relocated); otherwise it is a plain 503 refusal."""
+
+    code = "carrier_offline"
+
+    @property
+    def blocked_reason(self) -> str:
+        return f"carrier_offline: {self.context.get('node_id') or ''}"
+
+
 class LegacyExecutionRefusedError(TurnQueueError):
     """409 — a protocol-0 (legacy) EXECUTION row for a session enrolled in the
     managed turn queue, refused at the DB insert / claim boundary (design §3
@@ -238,6 +252,25 @@ class ManagedTurnOwnership(BaseModel):
     # the prompt under it, and a late reply is bound back to EXACTLY this
     # attempt by it — never by session.
     turn_uuid: Optional[str] = None
+
+
+class StagedFileRef(BaseModel):
+    """[A82 pre-cutover P2] A gateway-staged upload carried by a managed turn
+    (or a file-only delivery). The carrier GETs ``/files/{file_id}`` and writes
+    ``<repo>/uploads/<filename>``, so both are validated as single plain path
+    segments at admission — a traversal is refused (422), never stored."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    file_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    filename: str = Field(min_length=1, max_length=255)
+
+    @field_validator("filename")
+    @classmethod
+    def _plain_file_name(cls, v: str) -> str:
+        if "/" in v or "\\" in v or "\x00" in v or not v.strip(". "):
+            raise ValueError("filename must be a plain file name")
+        return v
 
 
 class SenderIdentity(BaseModel):
