@@ -212,6 +212,25 @@ describe("TurnQueuePanel", () => {
     expect(apiMock.pauseTurnRequests).not.toHaveBeenCalled();
   });
 
+  it("an operator-stop hold is visible with no cards and offers Resume, never Pause", async () => {
+    // [S6-F4] e.g. a stop that held the session without the pause flag.
+    apiMock.resumeTurnRequests.mockResolvedValueOnce({ session_id: "s1", paused: false, hold: null });
+    render(
+      <TurnQueuePanel sessionId="s1" page={page([], { paused: false, hold: "operator_stop" })} ownedIds={owned()} />,
+    );
+    expect(container.textContent).toContain("Stopped by operator");
+    expect(container.textContent).not.toContain("Pause queue");
+    expect(button("Resume queue").getAttribute("aria-pressed")).toBe("true");
+    await click(button("Resume queue"));
+    expect(apiMock.resumeTurnRequests).toHaveBeenCalledWith(expect.anything(), "s1");
+    expect(apiMock.pauseTurnRequests).not.toHaveBeenCalled();
+  });
+
+  it("an enrolled session with no cards, no pause and no hold renders nothing", () => {
+    render(<TurnQueuePanel sessionId="s1" page={page([])} ownedIds={owned()} />);
+    expect(container.querySelector("section")).toBeNull();
+  });
+
   it("recovery resolution requires an explicit acknowledgement", async () => {
     apiMock.resolveTurnRecovery.mockResolvedValueOnce({ ok: true, task_id: "d", status: "failed" });
     render(
