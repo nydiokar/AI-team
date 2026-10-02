@@ -132,6 +132,7 @@ class NodeRegistry:
                 )
             dead_grants = self._db_release_superseded_managed_grants(info.node_id, new_incarnation)
             if dead_grants:
+                self._note_managed_released(len(dead_grants))
                 logger.warning(
                     "event=superseded_managed_grants_released node_id=%s new_incarnation=%s count=%d task_ids=%s",
                     info.node_id, new_incarnation, len(dead_grants), dead_grants,
@@ -379,6 +380,16 @@ class NodeRegistry:
             logger.info("event=carrier_offline_holds_released node_id=%s", node_id)
         except Exception as e:
             logger.warning("event=carrier_offline_release_failed node_id=%s err=%s", node_id, e)
+
+    def _note_managed_released(self, count: int) -> None:
+        """[A82 Stage 7] Released superseded grants re-entered the waiting count:
+        raise the shared allowance + hint the scheduler (in-process: the task
+        server is embedded in the gateway). The scheduler refresh is the backstop."""
+        try:
+            from src.control.turn_scheduler import notify_managed_released
+            notify_managed_released(count)
+        except Exception as e:
+            logger.warning("event=managed_release_note_failed count=%d err=%s", count, e)
 
     def _db_mark_offline(self, node_id: str) -> None:
         try:

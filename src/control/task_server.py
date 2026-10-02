@@ -1230,6 +1230,7 @@ def release_managed(task_id: str, payload: ManagedAttemptPayload) -> Dict[str, A
             status_code=409,
             detail="managed turn not releasable (started, superseded or not claimed)",
         )
+    _note_managed_released(1)  # [A82 Stage 7] waiting count rose: keep the fleet cap
     status = "pending"
     if payload.blocked_reason and payload.backend_not_invoked:
         try:
@@ -1438,6 +1439,18 @@ def _hint_turn_scheduler() -> None:
         notify_turn_queue_changed()
     except Exception:  # noqa: BLE001 — the 3 s fallback still covers it
         logger.debug("event=turn_scheduler_hint_failed", exc_info=True)
+
+
+def _note_managed_released(count: int) -> None:
+    """[A82 Stage 7] Post-commit: released managed rows re-entered the waiting
+    count — raise the shared allowance and hint the scheduler (the task server
+    is embedded in the gateway process). The scheduler refresh is the backstop."""
+    try:
+        from .turn_scheduler import notify_managed_released
+
+        notify_managed_released(count)
+    except Exception:  # noqa: BLE001 — the scheduler refresh still covers it
+        logger.debug("event=turn_allowance_release_note_failed", exc_info=True)
 
 
 class ManagedTerminalResult(_ManagedResultFields):

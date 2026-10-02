@@ -1598,9 +1598,9 @@ def build_control_api(orchestrator) -> FastAPI:
                     raise HTTPException(status_code=409, detail={"ok": False, "reason": "unstarted_turn_requeue_only"})
                 if not db.release_turn(task_id, token):
                     raise HTTPException(status_code=409, detail={"ok": False, "reason": "state_changed"})
-                from src.control.turn_scheduler import notify_turn_queue_changed
+                from src.control.turn_scheduler import notify_managed_released
 
-                notify_turn_queue_changed()  # [A82 Stage 6 F1] waiting count rose: refresh allowance
+                notify_managed_released(1)  # [A82 Stage 6 F1 / Stage 7] waiting count rose: count it + refresh
                 emit_turn_queue_changed(row.get("session_id"), "released", turn_id=task_id, status="pending")
                 return JSONResponse({"ok": True, "task_id": task_id, "status": "pending"})
             if status in ("running", "recovery_required"):

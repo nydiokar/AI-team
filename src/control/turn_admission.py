@@ -133,6 +133,18 @@ class SharedWaitingAllowance:
             self._managed_cache = max(0, int(db_count))
             return True
 
+    def note_managed_released(self, count: int) -> None:
+        """[A82 Stage 7] ``count`` managed rows moved claimed → pending (carrier
+        release, superseded-grant release, operator requeue) and re-entered the
+        waiting count. Raise the cache at once (conservative; the next scheduler
+        refresh corrects any over-count) and bump the generation so a refresh
+        whose DB read predates the release cannot apply its stale-low figure."""
+        if count <= 0:
+            return
+        with self.lock:
+            self._managed_cache += int(count)
+            self._generation += 1
+
     def managed_cached(self) -> int:
         with self.lock:
             return self._managed_cache
