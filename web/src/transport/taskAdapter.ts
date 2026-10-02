@@ -18,10 +18,12 @@ import type {
 export function deriveTaskState(meshStatus: string): TaskState {
   switch (meshStatus) {
     case "pending":
+    case "queued": // [A82 Stage 6] managed turn waiting in its session queue
       return "queued";
     case "claimed":
       return "dispatching";
     case "processing": // TaskStatus enum value, in case a row carries it
+    case "running": // [A82 Stage 6] managed start authorized
       return "running";
     case "completed":
       return "succeeded";
@@ -29,7 +31,10 @@ export function deriveTaskState(meshStatus: string): TaskState {
     case "failed_node_offline":
       return "failed";
     case "cancelled":
+    case "withdrawn": // [A82 Stage 6] withdrawn while waiting — never ran
       return "cancelled";
+    // [A82 Stage 6] `recovery_required`: outcome unproven ⇒ connection_unknown
+    // (attention), mirroring core/task_lifecycle._MESH_STATE.
     default:
       return "connection_unknown";
   }

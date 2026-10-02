@@ -71,8 +71,10 @@ export function useSessionTimeline(
     // 1 — real conversation turns. Each task is one exchange.
     const seenInstructions = new Set<string>();
     for (const t of turns) {
-      // The queue card owns a managed request until there is a completed
-      // exchange. A pending transcript prompt does not mean the model read it.
+      // [A82 Stage 6] The queue card owns a managed request (by durable id)
+      // until there is a finished exchange; a starting/working prompt is shown
+      // on its card, never twice. (Waiting/withdrawn prompts never reach the
+      // transcript at all — the backend filters them.)
       if (queueIds.has(t.task_id) && !t.result) continue;
       // Distinct anchors: the USER bubble is stamped when the turn STARTED (when
       // the message was sent); the ASSISTANT bubble when the reply LANDED (start +
@@ -132,6 +134,8 @@ export function useSessionTimeline(
       return seen.some((s) => s.startsWith(t) || t.startsWith(s));
     };
     for (const m of sent ?? []) {
+      // [A82 Stage 6] An acknowledged managed send is reconciled by durable id
+      // into its queue card ("Next up") — never a second optimistic bubble.
       if (m.taskId && queueIds.has(m.taskId)) continue;
       if (isDup(m.text)) continue;
       items.push({
@@ -173,7 +177,7 @@ export function useSessionTimeline(
       items.push({
         kind: "task_state",
         at: session.updatedAt,
-        taskId: session.lastTaskId ?? "current",
+        taskId: session.turnQueue?.activeTurnId ?? session.lastTaskId ?? "current",
         state: "running",
         objective: "Working…",
       });

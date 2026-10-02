@@ -16,6 +16,7 @@ import { toArtifacts, toArtifactDetail } from "../transport/artifactAdapter";
 import { toSessionActivityTimeline } from "../transport/sessionTimelineAdapter";
 import { useAuthStore } from "../stores/authStore";
 import { SAFETY_NET_MS } from "../lib/refreshPolicy";
+import { sessionTurnQueueKey, TURN_QUEUE_REFETCH_MS } from "../lib/turnQueue";
 
 // A81: every POLL_MS hook here is event-covered (SSE → invalidateLiveTargets),
 // so the 3 s poll is now the SAFETY NET only. Rollback = SAFETY_NET_MS in
@@ -163,16 +164,25 @@ export function useSessionTurns(sessionId: string | undefined) {
   });
 }
 
-/** Durable managed requests; separate from completed-turn telemetry. */
-export function useSessionTurnQueue(sessionId: string | undefined) {
+/**
+ * [A82 Stage 6] The session's managed turn queue (design §9) — a read model
+ * SEPARATE from the telemetry `useSessionTurns` / `["session-turns", id]`.
+ * Event-covered: `turn_queue_changed` (post-commit) + reconnect resync
+ * invalidate `["session-turn-queue", id]`; the poll is only the shared
+ * SAFETY_NET_MS. `enabled` = the session is enrolled (no read for legacy).
+ */
+export function useSessionTurnQueue(sessionId: string | undefined, enabled = true) {
   const token = useAuthStore((s) => s.token);
   return useQuery({
-    queryKey: ["session-turn-queue", sessionId],
+    queryKey: sessionTurnQueueKey(sessionId ?? ""),
     queryFn: async () => api.turnRequests(token, sessionId!),
-    enabled: Boolean(token) && Boolean(sessionId),
-    refetchInterval: POLL_MS,
+    enabled: Boolean(token) && Boolean(sessionId) && enabled,
+    refetchInterval: TURN_QUEUE_REFETCH_MS,
     refetchOnReconnect: true,
-    placeholderData: (prev) => prev,
+    // Keep the previous page only for the SAME session (never show another
+    // session's queue while navigating).
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey[1] === sessionId ? prev : undefined,
   });
 }
 
