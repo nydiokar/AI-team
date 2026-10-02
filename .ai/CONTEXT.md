@@ -69,6 +69,9 @@ Only jobs that are genuinely open. Everything merged/done is in git and the disp
 
 ## Recent shift notes
 
+**2026-10-02 — A84 slice 1 MERGED + DEPLOYED (PR #184 `06f3f69`, schema 42): managed-turn completion effects consumer.**
+Closes A82 final-review F1: managed completions now persist the full result envelope + `effects_state='pending'` in the terminal txn; a gateway loop (3 s, DB-discovered, cross-process safe) runs history/summary/telemetry reconcile/Case `task.finished` then notify with a CAS fence (at-most-once send, bounded retries, transient DB errors not counted, 4 s stop grace + compose `stop_grace_period: 30s`). Compaction stays silent (legacy parity). Never-ran turns get a telemetry-only effect so `llm_turns` close. Two review rounds, ACCEPT. Open for Stage 8a: session badge not set from a managed result (failed turn won't show needs-attention); no operator surface for `effects_state='failed'` beyond DB/log; Case-outbox part of A84 (carry (o)) still open.
+
 **2026-10-02 — A82 R0 MERGED + DEPLOYED (PR #182 `e6838f6`); gateway lock self-kill fixed (PR #183 `888cecb`).**
 Controller rebuilt twice; migrations 34–41 applied (schema 41), 0 sessions enrolled, all new flags OFF; both workers (`kanebra-worker`, `Horse`) heartbeating on the new controller; legacy turns flowing. **Incident:** first recreate restart-looped (exit 143): stale `logs/gateway.lock` named the new process's own recycled pid → `_GatewayInstanceLock` terminated itself every start. Recovered by removing the stale lock; PR #183 makes own-pid/parent-pid locks stale-by-definition. **Workers NOT restarted** (still pre-A82 code in memory; on-disk checkout is now A82 main): restart is operator-gated and activates psutil's `reap_stale_worker_children` + needs `pip install -c constraints.txt -e .` for psutil. Next: A84-scope managed-completion consumer, then Stage 8 (see A82 row).
 
