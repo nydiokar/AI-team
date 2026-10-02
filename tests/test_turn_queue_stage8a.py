@@ -754,3 +754,20 @@ def test_S8_11b_a_non_enrolled_session_turn_is_refused_up_front_F2(tmp_path, mon
     assert s.status == SessionStatus.AWAITING_INPUT and not s.last_task_id  # no BUSY/ERROR flip
     assert o.task_queue.qsize() == 0 and db._conn().execute(
         "SELECT COUNT(*) FROM mesh_tasks").fetchone()[0] == 0
+
+
+def test_S8_12_draining_backoff_is_capped_F3(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    _raw_legacy_row(db, "legacy-live", "sess-1", status="claimed", claimed_by="worker-a")
+    tid = str(_submit(o, operation_id="after-cutover"))
+    for _ in range(12):  # well past where the generic 3 s·2^n backoff reaches 300 s
+        db._conn().execute("UPDATE mesh_tasks SET blocked_until = NULL WHERE id = ?", (tid,))
+        db._conn().commit()
+        _pass(db, o)
+    row = db.get_task(tid)
+    assert row["blocked_reason"] == "legacy_work_draining: legacy-live"
+    wait = (datetime.fromisoformat(row["blocked_until"]) - datetime.now(tz=timezone.utc)).total_seconds()
+    assert 0 < wait <= 15.0, wait  # resumes within ~15 s of the legacy row finishing

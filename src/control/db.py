@@ -848,6 +848,10 @@ _LEGACY_EXEC_LIVE_SQL = (
     "AND action IN ('create_session', 'resume_session', 'compact_session') LIMIT 1"
 )
 
+# [review F3] A draining head re-checks at most every 15 s, so it starts
+# within ~15 s of the legacy row finishing (not after the generic 300 s cap).
+_LEGACY_DRAIN_BACKOFF_CAP_SEC = 15.0
+
 _MANAGED_RETRY_GATE_SQL = """
     NOT EXISTS (
         SELECT 1 FROM mesh_tasks pm INDEXED BY idx_mesh_tasks_retry_pause
@@ -3419,7 +3423,8 @@ class MeshDB:
                 # it. Index-served; the head backs off with a visible reason.
                 legacy = conn.execute(_LEGACY_EXEC_LIVE_SQL, (row["session_id"],)).fetchone()
                 if legacy is not None:
-                    _apply_turn_block(conn, task_id, f"legacy_work_draining: {legacy[0]}")
+                    _apply_turn_block(conn, task_id, f"legacy_work_draining: {legacy[0]}",
+                                      cap_sec=_LEGACY_DRAIN_BACKOFF_CAP_SEC)
                     return "blocked"
                 prompt_bytes = len((row["prompt"] or "").encode("utf-8"))
                 if prepared_bytes + prompt_bytes > MAX_INTENT_BYTES_PER_ROW:
@@ -10762,10 +10767,13 @@ _TURN_BLOCK_BACKOFF_BASE_SEC = 3.0
 _TURN_BLOCK_BACKOFF_CAP_SEC = 300.0
 
 
-def _apply_turn_block(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
+def _apply_turn_block(
+    conn: sqlite3.Connection, task_id: str, reason: str, cap_sec: Optional[float] = None,
+) -> bool:
     """[A82 Stage 4a rework] Inside an open write txn: record a bounded
     `blocked_reason`, bump `blocked_attempts` and set `blocked_until` =
-    now + min(3 s * 2^(attempts-1), 300 s). Returns True if the reason changed."""
+    now + min(3 s * 2^(attempts-1), cap) — cap 300 s unless ``cap_sec`` is
+    given. Returns True if the reason changed."""
     row = conn.execute(
         "SELECT blocked_reason, blocked_attempts FROM mesh_tasks "
         "WHERE id = ? AND queue_protocol = 1 AND status = 'queued'",
@@ -10776,7 +10784,7 @@ def _apply_turn_block(conn: sqlite3.Connection, task_id: str, reason: str) -> bo
     bounded = (reason or "blocked")[:500]
     attempts = int(row["blocked_attempts"] or 0) + 1
     delay = min(_TURN_BLOCK_BACKOFF_BASE_SEC * (2 ** min(attempts - 1, 16)),
-                _TURN_BLOCK_BACKOFF_CAP_SEC)
+                _TURN_BLOCK_BACKOFF_CAP_SEC if cap_sec is None else cap_sec)
     until = (datetime.now(tz=timezone.utc) + timedelta(seconds=delay)).isoformat()
     conn.execute(
         "UPDATE mesh_tasks SET blocked_reason = ?, blocked_attempts = ?, blocked_until = ?, "

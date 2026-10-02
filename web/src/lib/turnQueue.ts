@@ -109,7 +109,7 @@ const BLOCKED_REASON_LABEL: Record<string, string> = {
   prepare_failed: "Could not prepare — retrying",
   operator_stop: "Stopped by operator",
   carrier_offline: "Carrier offline — waits for it to return",
-  legacy_work_draining: "Finishing a pre-cutover turn — starts right after it",
+  legacy_work_draining: "Waiting for a pre-cutover turn to finish — starts shortly after",
 };
 
 /** [A82 Stage 8a] Queue-level label for finished turns whose post-commit

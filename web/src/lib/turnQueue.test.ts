@@ -227,7 +227,7 @@ describe("UI06 pending/terminal dedup by durable id", () => {
 describe("[A82 Stage 8a] cutover labels", () => {
   it("a head waiting on a pre-cutover legacy turn says so", () => {
     expect(blockedReasonLabel("legacy_work_draining: task_1234")).toBe(
-      "Finishing a pre-cutover turn — starts right after it",
+      "Waiting for a pre-cutover turn to finish — starts shortly after",
     );
   });
 
