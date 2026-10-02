@@ -77,6 +77,10 @@ services:
 
     command: ["python", "main.py"]
 
+    # A84: room for an orderly stop() (incl. the bounded 4 s grace of a
+    # notification in flight) before docker escalates to SIGKILL.
+    stop_grace_period: 30s
+
     env_file:
       - ./.env
 

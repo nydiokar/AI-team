@@ -176,6 +176,52 @@ CACHE_HEARTBEAT_PROMPT = (
 #: late heartbeat competing with real work.
 MANAGED_HEARTBEAT_TTL_SEC = 300
 
+#: [A84] Managed-completion effects consumer: failed passes (a raising notifier
+#: or a failing idempotent effect) a row may take before it is ``failed``
+#: (visible), rows per pass (ids only), and the cadence of the unconditional
+#: sweep while nothing is enrolled (every Nth pass; otherwise zero reads).
+MANAGED_EFFECTS_MAX_ATTEMPTS = 5
+MANAGED_EFFECTS_BATCH = 25
+MANAGED_EFFECTS_IDLE_SWEEP_EVERY = 20
+#: [A84] A notification that has not returned by then has an UNKNOWN delivery
+#: outcome: it is closed (never re-sent) instead of stalling the consumer.
+MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC = 60.0
+#: [A84 review F2/N1] On a gateway stop, a fenced send in flight gets this long
+#: to finish and be marked (the fence is already committed before the send).
+#: Kept well inside the container stop budget (compose ``stop_grace_period``).
+MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC = 4.0
+#: [A84 review F3] A ``notifying`` fence older than the notify timeout plus
+#: this slack is abandoned (its holder died); a younger one may be in flight.
+MANAGED_EFFECTS_FENCE_SLACK_SEC = 30.0
+
+
+def _transient_db_error(err: BaseException) -> bool:
+    """[A84 review N2] A DB backing failure (write-lock / busy deadline,
+    ``database is locked``) is transient contention, not a defect of the row:
+    it is retried on the next pass and never counts toward the attempt limit."""
+    import sqlite3
+
+    from src.control.turn_queue import BackingStoreError
+
+    return isinstance(err, (BackingStoreError, sqlite3.OperationalError))
+
+
+def _effect_error(label: str, err: BaseException) -> str:
+    """An effect failure line; transient DB failures are tagged so they do not
+    count toward ``MANAGED_EFFECTS_MAX_ATTEMPTS``."""
+    return f"{'transient ' if _transient_db_error(err) else ''}{label}: {err}"
+
+
+def _managed_fence_abandoned(fence: str) -> bool:
+    """[A84 review F3] True when the notify fence ``"<epoch>:<nonce>"`` has
+    outlived any live holder's bounded send + mark (an unreadable fence is
+    treated as abandoned)."""
+    try:
+        taken = float(str(fence).split(":", 1)[0])
+    except (TypeError, ValueError):
+        return True
+    return time.time() - taken > MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC + MANAGED_EFFECTS_FENCE_SLACK_SEC
+
 
 async def _reconcile_heartbeat_leases(db: Any) -> None:
     """[A82 Stage 4d] Run the durable heartbeat finalizer (bounded) off the
@@ -708,6 +754,8 @@ class TaskOrchestrator(ITaskOrchestrator):
         # [A82 Stage 4a] Managed turn-queue scheduler loop handle.
         self._turn_scheduler: Any = None
         self._turn_scheduler_task: Optional[asyncio.Task] = None
+        # [A84] Managed-completion effects consumer loop handle.
+        self._managed_effects_task: Optional[asyncio.Task] = None
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -5520,6 +5568,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._start_stale_busy_reconciler()
         self._start_wake_dispatcher()
         self._start_turn_scheduler()
+        self._start_managed_effects_consumer()
 
         # Start the job completion poller (T3 — Watched Jobs)
         asyncio.create_task(self._job_completion_poller())
@@ -5611,6 +5660,12 @@ class TaskOrchestrator(ITaskOrchestrator):
                 await self._turn_scheduler_task
         self._turn_scheduler_task = None
         self._turn_scheduler = None
+        effects_task = getattr(self, "_managed_effects_task", None)
+        if effects_task and not effects_task.done():
+            effects_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await effects_task
+        self._managed_effects_task = None
 
         # Cancel worker tasks
         for worker in self.worker_tasks:
@@ -12005,6 +12060,332 @@ Generated from user description: {description}
         self._turn_scheduler_task = asyncio.create_task(
             self._turn_scheduler.run(), name="turn-scheduler",
         )
+
+    def _start_managed_effects_consumer(self) -> None:
+        """[A84] Start the gateway-side consumer of managed-turn completions.
+        The completion commits in the task-server process (another process in
+        production), so the consumer discovers it through the DB on the
+        scheduler's fallback cadence — never through an in-process hint."""
+        from src.control.db import get_db
+        from src.control.turn_scheduler import FALLBACK_INTERVAL_SEC
+
+        task = getattr(self, "_managed_effects_task", None)
+        if task and not task.done():
+            return
+        if get_db() is None:
+            return
+        self._managed_effects_task = asyncio.create_task(
+            self._managed_effects_loop(FALLBACK_INTERVAL_SEC), name="managed-turn-effects",
+        )
+
+    async def _managed_effects_loop(self, interval_sec: float) -> None:
+        """[A84] One bounded drain per ``interval_sec``. While nothing is
+        enrolled it reads only on every ``MANAGED_EFFECTS_IDLE_SWEEP_EVERY``-th
+        pass (incl. the first), so rows left behind by a later unenroll still
+        drain. Errors are contained; the loop never dies on a bad pass."""
+        from src.control.db import get_db
+
+        passes = 0
+        while getattr(self, "running", False):
+            try:
+                db = get_db()
+                if db is not None and (
+                    passes % MANAGED_EFFECTS_IDLE_SWEEP_EVERY == 0
+                    or db.any_session_enrolled() is not False
+                ):
+                    await self._drain_managed_turn_effects_once(db)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — next pass retries
+                logger.warning("event=managed_effects_pass_failed err=%s", e)
+            passes += 1
+            await asyncio.sleep(interval_sec)
+
+    async def _drain_managed_turn_effects_once(self, db: Any) -> int:
+        """[A84] Drain up to ``MANAGED_EFFECTS_BATCH`` terminal managed turns
+        with effects outstanding, one row at a time (bounded memory). Per-row
+        containment WITH accounting (review F4): a row whose processing raises
+        outside the per-effect containment counts a failed attempt and ends
+        ``failed`` at the bound, leaving the index — poisoned rows can never
+        starve newer ones. Returns the rows finalized this pass."""
+        ids = await asyncio.to_thread(db.pending_turn_effects, MANAGED_EFFECTS_BATCH)
+        finalized = 0
+        for tid in ids:
+            try:
+                if await self._run_managed_turn_effects(db, tid):
+                    finalized += 1
+            except Exception as e:  # noqa: BLE001 — counted; failed at the bound
+                logger.warning("event=managed_effects_row_failed task_id=%s err=%s", tid, e)
+                if _transient_db_error(e):
+                    continue  # N2: contention — retried next pass, never counted
+                try:
+                    state = await asyncio.to_thread(
+                        db.record_turn_effects_failure, tid, f"effects_error: {e}",
+                        MANAGED_EFFECTS_MAX_ATTEMPTS,
+                    )
+                    if state == "failed":
+                        finalized += 1
+                        logger.warning("event=managed_effects_failed task_id=%s err=%s", tid, e)
+                except Exception as e2:  # noqa: BLE001 — DB down: next pass
+                    logger.warning("event=managed_effects_account_failed task_id=%s err=%s", tid, e2)
+        return finalized
+
+    async def _run_managed_turn_effects(self, db: Any, task_id: str) -> bool:
+        """[A84] The legacy ``_task_worker`` post-completion effects for ONE
+        terminal managed turn, exactly once for the user-visible notification:
+
+          1. idempotent effects (re-run safely on retry/crash): session
+             summary + ``task_history`` (field-scoped, once per task id), the
+             reply enrichment of a result-less outcome, telemetry reconcile,
+             the Case ``task.finished`` event (written at most once). A
+             compaction turn gets only the telemetry/enrichment (legacy
+             compaction never notified nor touched the history); a turn that
+             never ran (``telemetry``) gets only the telemetry close;
+          2. the notification inside the fenced critical section
+             (``_notify_managed_turn``), shielded from a gateway stop;
+          3. ``notified``→``done`` (or ``failed``) once every effect succeeded.
+        Returns True iff the row was finalized by this call."""
+        row = await asyncio.to_thread(db.get_task, task_id)
+        state = str((row or {}).get("effects_state") or "")
+        if state not in ("pending", "notifying", "notified", "telemetry"):
+            return False
+        if state == "telemetry":
+            from src.control.telemetry_store import TelemetryStore
+
+            await asyncio.to_thread(
+                lambda: TelemetryStore(db).reconcile(turn_id=task_id, since_hours=0),
+            )
+            return bool(await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "telemetry", "done",
+            ))
+        if state == "notifying":
+            fence = str(row.get("effects_fence") or "")
+            if not _managed_fence_abandoned(fence):
+                return False  # another consumer's send may be in flight (F3)
+            # Its holder died between the fence and its mark: the notification
+            # may have been delivered — never send it twice. [N3] A NULL fence
+            # (no stamp) is matched on state alone: a fence can only be taken
+            # from 'pending', so no live holder can own this 'notifying' row.
+            if not await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "notifying", "notified",
+                error="notify_outcome_unknown", fence=fence or None,
+            ):
+                return False
+            logger.warning("event=managed_notify_outcome_unknown task_id=%s", task_id)
+            state = "notified"
+        task, result, case_id = self._managed_turn_effect_inputs(row)
+        compaction = str(row.get("turn_kind") or "") == "compaction"
+        errors = await asyncio.to_thread(
+            self._apply_managed_turn_projections, db, row, task, result, case_id,
+        )
+        attempts = int(row.get("effects_attempts") or 0)
+        notify_failed = str(row.get("effects_error") or "").startswith("notify_failed")
+        bumped = False
+        if state == "pending" and compaction:
+            # [A84 review F6] Legacy compaction never notified.
+            if not await asyncio.to_thread(db.transition_turn_effects, task_id, "pending", "notified"):
+                return False
+        elif state == "pending":
+            crit = asyncio.ensure_future(self._notify_managed_turn(db, row, result, attempts))
+            try:
+                outcome, attempts, bumped = await asyncio.shield(crit)
+            except asyncio.CancelledError:
+                # [A84 review F2] Gateway stop: the fence + send + mark run as
+                # one shielded unit — give it a bounded grace so a send in
+                # flight is marked (or a row not yet fenced stays pending).
+                done, _ = await asyncio.wait({crit}, timeout=MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC)
+                if not done:
+                    crit.cancel()
+                    with contextlib.suppress(BaseException):
+                        await crit
+                raise
+            if outcome in ("raced", "retry"):
+                return False
+            notify_failed = notify_failed or outcome == "failed"
+        if errors and all(e.startswith("transient ") for e in errors):
+            # N2: only DB contention — retried next pass, not counted.
+            await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "notified", "notified",
+                error="; ".join(errors),
+            )
+            return False
+        if errors:
+            if not bumped:
+                attempts += 1
+            if attempts < MANAGED_EFFECTS_MAX_ATTEMPTS:
+                await asyncio.to_thread(
+                    db.transition_turn_effects, task_id, "notified", "notified",
+                    error="; ".join(errors), bump_attempts=not bumped,
+                )
+                return False
+            await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "notified", "failed",
+                error="; ".join(errors), bump_attempts=not bumped,
+            )
+            logger.warning("event=managed_effects_failed task_id=%s errors=%s", task_id, errors)
+            return True
+        final = "failed" if notify_failed else "done"
+        return bool(await asyncio.to_thread(db.transition_turn_effects, task_id, "notified", final))
+
+    async def _notify_managed_turn(
+        self, db: Any, row: Dict[str, Any], result: TaskResult, attempts: int,
+    ) -> Tuple[str, int, bool]:
+        """[A84] The notify critical section: take the fence (CAS
+        ``pending``→``notifying`` stamping ``"<epoch>:<nonce>"``), send with a
+        timeout, and move the row out of ``notifying`` — every move out is
+        fenced, so only the holder can. Returns ``(outcome, attempts,
+        bumped)``; outcome ∈ raced | sent | unknown | retry | failed.
+        A raising notifier ⇒ back to ``pending`` (bounded retries, then
+        ``failed``); a timeout or a cancellation mid-send ⇒ outcome unknown,
+        never re-sent (a cancelled send leaves the fence, which a later pass
+        closes once abandoned)."""
+        task_id = str(row["id"])
+        fence = f"{time.time():.3f}:{uuid.uuid4().hex[:12]}"
+        if not await asyncio.to_thread(
+            db.transition_turn_effects, task_id, "pending", "notifying", new_fence=fence,
+        ):
+            return "raced", attempts, False
+        sid = str(row.get("session_id") or "")
+        session = self.session_store.get(sid) if sid else None
+        try:
+            await asyncio.wait_for(self.notifier.notify_task_outcome(
+                task_id, result, session=session,
+                chat_id=getattr(session, "telegram_chat_id", None) if session else None,
+            ), timeout=MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC)
+        except asyncio.CancelledError:
+            logger.warning("event=managed_notify_cancelled_in_flight task_id=%s", task_id)
+            raise
+        except asyncio.TimeoutError:
+            # The send may have gone out: unknown ⇒ never retried.
+            await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "notifying", "notified",
+                error="notify_timeout (outcome unknown)", fence=fence,
+            )
+            logger.warning("event=managed_notify_timeout task_id=%s", task_id)
+            return "unknown", attempts, False
+        except Exception as e:  # noqa: BLE001 — bounded retry
+            attempts += 1
+            if attempts < MANAGED_EFFECTS_MAX_ATTEMPTS:
+                await asyncio.to_thread(
+                    db.transition_turn_effects, task_id, "notifying", "pending",
+                    error=f"notify_error: {e}", bump_attempts=True, fence=fence,
+                )
+                return "retry", attempts, True
+            await asyncio.to_thread(
+                db.transition_turn_effects, task_id, "notifying", "notified",
+                error=f"notify_failed: {e}", bump_attempts=True, fence=fence,
+            )
+            logger.warning("event=managed_notify_failed task_id=%s attempts=%d err=%s",
+                           task_id, attempts, e)
+            return "failed", attempts, True
+        await asyncio.to_thread(
+            db.transition_turn_effects, task_id, "notifying", "notified", fence=fence,
+        )
+        return "sent", attempts, False
+
+    def _managed_turn_effect_inputs(
+        self, row: Dict[str, Any],
+    ) -> Tuple[Task, TaskResult, str]:
+        """[A84] Pure: the runtime Task, the TaskResult rebuilt from the
+        persisted (legacy-shaped) result and the turn's Case id."""
+        task = self._task_from_managed_row(row)
+        res = _token_json(row.get("result"))
+        status = str(row.get("status") or "")
+        success = status == "completed"
+        errors = [str(e) for e in (res.get("errors") or [])]
+        if not success and not errors and row.get("error"):
+            errors = [str(row.get("error"))]
+        if status == "cancelled" and not any("cancelled" in e.lower() for e in errors):
+            errors.append("cancelled")
+        # [A84 review F5] The carrier's raw transcript is not persisted; the
+        # reply extracted from it at commit (``reply_text``) stands in for an
+        # empty ``output`` of a success. Legacy remote shape otherwise:
+        # raw_stdout mirrors output, error_detail / invocation id attached.
+        output = str(res.get("output") or "")
+        if success and not output.strip():
+            output = str(row.get("reply_text") or "")
+        result = TaskResult(
+            task_id=str(row["id"]), success=success,
+            output=output, errors=errors,
+            files_modified=[str(f) for f in (res.get("files_modified") or [])],
+            execution_time=float(res.get("execution_time") or 0.0),
+            timestamp=str(res.get("timestamp") or row.get("completed_at") or ""),
+            raw_stdout=output,
+            return_code=int(res.get("return_code") or 0),
+            usage=res.get("usage") if isinstance(res.get("usage"), dict) else None,
+            error_class=str(row.get("error_class") or ""),
+        )
+        if res.get("error_detail"):
+            setattr(result, "error_detail", res.get("error_detail"))
+        setattr(result, "telemetry_invocation_id", res.get("telemetry_invocation_id") or None)
+        meta = task.metadata or {}
+        case_id = str(
+            row.get("flow_run_id") or meta.get(self._FLOW_RUN_META_KEY)
+            or meta.get(self._CASE_ID_META_KEY) or ""
+        )
+        return task, result, case_id
+
+    def _apply_managed_turn_projections(
+        self, db: Any, row: Dict[str, Any], task: Task, result: TaskResult, case_id: str,
+    ) -> List[str]:
+        """[A84] The idempotent effects (run in a worker thread). Each is
+        isolated; the failures are returned for the bounded retry."""
+        from src.control.telemetry_store import TelemetryStore
+
+        tid = str(row["id"])
+        sid = str(row.get("session_id") or "")
+        errors: List[str] = []
+        stored_reply = str(row.get("reply_text") or "").strip()
+        if result.success:
+            full_out = stored_reply or self._session_reply_text(result).strip()
+        else:
+            full_out = (stored_reply or (result.output or "").strip()
+                        or (self._short_failure_reason(result) or "(failed)").strip())
+        if not stored_reply:
+            # A result-less outcome (recovery resolution) still gets its
+            # transcript reply (``_mesh_complete_task`` parity).
+            db.enrich_task(tid, reply_text=full_out)
+        # [A84 review F6] Legacy compaction never touched the session history
+        # / preview, the summary, the session log or the Case.
+        conversational = str(row.get("turn_kind") or "") != "compaction"
+        if sid and conversational:
+            try:
+                summary = full_out[-400:] if len(full_out) > 400 else full_out
+                db.project_turn_session(
+                    sid, tid,
+                    entry={
+                        "task_id": tid, "timestamp": result.timestamp,
+                        "success": result.success,
+                        "execution_time": round(result.execution_time or 0.0, 2),
+                        "user_message": task.prompt, "result_summary": full_out,
+                        "files_modified": list(result.files_modified or [])[:20],
+                    },
+                    summary=summary, files_modified=list(result.files_modified or []),
+                    artifact_path=row.get("artifact_path") or None,
+                )
+                session = self.session_store.get(sid)
+                if session is not None:
+                    self._write_session_summary(session, result)
+                self._append_session_event(sid, tid, result)
+            except Exception as e:  # noqa: BLE001 — retried
+                errors.append(_effect_error("session", e))
+        try:
+            TelemetryStore(db).reconcile(turn_id=tid, since_hours=0)
+        except Exception as e:  # noqa: BLE001 — retried
+            errors.append(_effect_error("telemetry", e))
+        if conversational and case_id and self._harness_flow_drive_enabled():
+            try:
+                self._record_flow_event(
+                    case_id, "task.finished", "system", entity_type="task", entity_id=tid,
+                    payload={
+                        "outcome": "success" if result.success else "failed",
+                        "error_class": (result.error_class or None) if not result.success else None,
+                    },
+                    strict=True, once=True,
+                )
+            except Exception as e:  # noqa: BLE001 — retried
+                errors.append(_effect_error("case", e))
+        return errors
 
     def _mesh_dispatch_payload(
         self,
