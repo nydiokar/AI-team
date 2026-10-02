@@ -190,6 +190,30 @@ def _make_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, *, chat_id: Option
                 notifier, reconciled, summaries)
 
 
+def _age_fence(env: _Env, tid: str, seconds: float = 3600.0) -> None:
+    """Simulate time passing since the notify fence was taken."""
+    import time
+
+    fence = str(env.row(tid)["effects_fence"] or "")
+    token = fence.split(":", 1)[1] if ":" in fence else "x"
+    env.gw._conn().execute("UPDATE mesh_tasks SET effects_fence = ? WHERE id = ?",
+                           (f"{time.time() - seconds:.3f}:{token}", tid))
+    env.gw._conn().commit()
+
+
+def _driver(env: _Env) -> Tuple[Any, ...]:
+    s = env.session_row()
+    return (s["driver_type"], s["driver_status"], s["cache_health"],
+            s["cache_unhealthy_count"], s["previous_backend_session_ids"])
+
+
+REAL_DRIVER: Dict[str, Any] = {
+    "driver_type": "sdk", "driver_status": "lost", "cache_health": "unhealthy",
+    "cache_unhealthy_count": 2, "previous_backend_session_ids": ["old-1"],
+    "backend_session_id": "native-1",
+}
+
+
 @pytest.fixture()
 def tg(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> _Env:
     return _make_env(tmp_path, monkeypatch, chat_id=CHAT)
@@ -272,6 +296,8 @@ def test_E03_crash_after_notify_before_mark_never_resends(tg: _Env, monkeypatch:
     assert len(tg.notifier.calls) == 1
     assert tg.row(tid)["effects_state"] == "notifying"
     monkeypatch.setattr(tg.gw, "transition_turn_effects", real)  # "restart"
+    assert tg.drain() == 0  # a fresh fence may be another consumer in flight
+    _age_fence(tg, tid)     # ... until it outlives the notify bound
     assert tg.drain() == 1
     assert tg.drain() == 0
     assert len(tg.notifier.calls) == 1  # the user never gets the reply twice
@@ -389,12 +415,15 @@ def test_E07_legacy_completion_is_untouched(tg: _Env) -> None:
 
 
 # E08 ----------------------------------------------------------------------- #
-def test_E08_never_started_turn_has_no_effects(tg: _Env) -> None:
+def test_E08_never_started_turn_gets_telemetry_only(tg: _Env) -> None:
     tid = tg.create("withdraw me", "op-x")
     rev = int(tg.row(tid)["revision"])
     tg.gw.withdraw_turn(tid, rev, actor="operator")
-    assert tg.row(tid)["effects_state"] is None
-    assert tg.drain() == 0 and tg.notifier.calls == []
+    assert tg.row(tid)["effects_state"] == "telemetry"
+    assert tg.drain() == 1 and tg.drain() == 0
+    assert tg.notifier.calls == [] and tg.summaries == []
+    assert tg.reconciled == [tid]
+    assert tg.row(tid)["effects_state"] == "done"
 
 
 def test_E08b_recovery_resolution_runs_effects_once(tg: _Env) -> None:
@@ -459,3 +488,253 @@ def test_E11_consumer_loop_discovers_cross_process_completion(
     asyncio.run(_run())
     assert [c["task_id"] for c in tg.notifier.calls] == [tid]
     assert tg.row(tid)["effects_state"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (REWORK) regressions — reviewer probes P1-P3 + mig_probe
+# inverted, plus F4-F6 and the telemetry gap.
+# ---------------------------------------------------------------------------
+
+def _finish(env: _Env, tid: str, **result: Any) -> None:
+    env.schedule()
+    tok = env.claim_start(tid)
+    envelope: Dict[str, Any] = {"node_id": "worker-a", "claim_token": tok, "success": True,
+                                "output": "ok"}
+    envelope.update(result)
+    r = env.carrier.post(f"/tasks/{tid}/result-managed", headers=WAUTH, json=envelope)
+    assert r.status_code == 200, r.text
+
+
+# F1 (P1) ------------------------------------------------------------------- #
+def test_R1_default_envelope_never_wipes_driver_state(tg: _Env) -> None:
+    tg.run_turn("a", "op-a", **REAL_DRIVER)
+    before = _driver(tg)
+    assert before == ("sdk", "lost", "unhealthy", 2, '["old-1"]')
+    tg.run_turn("b", "op-b")  # carrier defaults: '', '', 'unknown', 0, []
+    assert _driver(tg) == before
+
+
+def test_R1b_compaction_envelope_never_wipes_driver_state(tg: _Env) -> None:
+    tg.run_turn("a", "op-a", **REAL_DRIVER)
+    before = _driver(tg)
+    asyncio.run(tg.orch.compact_session(SID, operation_id="cmp-1"))
+    [cid] = [r[0] for r in tg.gw._conn().execute(
+        "SELECT id FROM mesh_tasks WHERE turn_kind = 'compaction'").fetchall()]
+    _finish(tg, cid, output="compacted")
+    assert tg.row(cid)["action"] == "compact_session"
+    assert _driver(tg) == before
+
+
+# F2 (P2) ------------------------------------------------------------------- #
+def test_R2_stop_during_send_lets_the_send_finish_and_marks_it(tg: _Env) -> None:
+    tid = tg.run_turn("a", "op-a")
+    real = tg.notifier.notify_task_outcome
+
+    async def _slow(*a: Any, **k: Any) -> None:
+        await asyncio.sleep(0.3)
+        await real(*a, **k)
+
+    tg.notifier.notify_task_outcome = _slow  # type: ignore[method-assign]
+
+    async def _stop() -> None:
+        t = asyncio.create_task(tg.orch._run_managed_turn_effects(tg.gw, tid))
+        await asyncio.sleep(0.1)
+        t.cancel()  # gateway stop() cancels the consumer
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(_stop())
+    assert len(tg.notifier.calls) == 1
+    assert tg.row(tid)["effects_state"] == "notified"
+    tg.notifier.notify_task_outcome = real  # type: ignore[method-assign]
+    assert tg.drain() == 1
+    assert len(tg.notifier.calls) == 1 and tg.row(tid)["effects_state"] == "done"
+
+
+def test_R2b_stop_before_the_fence_keeps_the_row_pending(
+    tg: _Env, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = tg.run_turn("a", "op-a")
+    real = tg.orch._apply_managed_turn_projections
+
+    def _slow(*a: Any, **k: Any) -> List[str]:
+        import time
+        time.sleep(0.3)
+        return real(*a, **k)
+
+    monkeypatch.setattr(tg.orch, "_apply_managed_turn_projections", _slow)
+
+    async def _stop() -> None:
+        t = asyncio.create_task(tg.orch._run_managed_turn_effects(tg.gw, tid))
+        await asyncio.sleep(0.1)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(_stop())
+    assert tg.notifier.calls == [] and tg.row(tid)["effects_state"] == "pending"
+    monkeypatch.setattr(tg.orch, "_apply_managed_turn_projections", real)
+    assert tg.drain() == 1 and len(tg.notifier.calls) == 1
+
+
+# F3 (P3) ------------------------------------------------------------------- #
+def test_R3_second_consumer_never_steals_an_in_flight_fence(tg: _Env) -> None:
+    tid = tg.run_turn("a", "op-a")
+    real = tg.notifier.notify_task_outcome
+
+    async def _slow(*a: Any, **k: Any) -> None:
+        await real(*a, **k)
+        await asyncio.sleep(0.5)
+
+    tg.notifier.notify_task_outcome = _slow  # type: ignore[method-assign]
+
+    async def _race() -> Tuple[bool, bool]:
+        a = asyncio.create_task(tg.orch._run_managed_turn_effects(tg.gw, tid))
+        await asyncio.sleep(0.2)
+        b = await tg.orch._run_managed_turn_effects(tg.ts_db, tid)  # a 2nd gateway
+        return await a, b
+
+    ra, rb = asyncio.run(_race())
+    assert (ra, rb) == (True, False)
+    row = tg.row(tid)
+    assert len(tg.notifier.calls) == 1
+    assert row["effects_state"] == "done" and not row["effects_error"]
+
+
+# F4 ------------------------------------------------------------------------ #
+def test_R4_poisoned_rows_fail_visibly_and_never_starve_good_rows(tg: _Env) -> None:
+    from src.orchestrator import MANAGED_EFFECTS_BATCH, MANAGED_EFFECTS_MAX_ATTEMPTS
+
+    seed = tg.run_turn("seed", "op-s")
+    assert tg.drain() == 1
+    base = tg.row(seed)
+    conn = tg.gw._conn()
+    poisoned: List[str] = []
+    for i in range(MANAGED_EFFECTS_BATCH + 1):
+        r = dict(base, id=f"poison-{i:02d}", payload="{garbled", effects_state="pending",
+                 effects_attempts=0, effects_error=None,
+                 completed_at=f"2000-01-01T00:00:{i:02d}+00:00",
+                 idempotency_key=f"poison-{i}", queue_sequence=None)
+        cols = ", ".join(r)
+        conn.execute(f"INSERT INTO mesh_tasks ({cols}) VALUES ({', '.join('?' * len(r))})",
+                     list(r.values()))
+        poisoned.append(r["id"])
+    conn.commit()
+    good = tg.run_turn("good", "op-g")
+    for _ in range(MANAGED_EFFECTS_MAX_ATTEMPTS + 2):
+        tg.drain()
+    assert [c["task_id"] for c in tg.notifier.calls] == [seed, good]
+    for pid in poisoned:
+        row = tg.row(pid)
+        assert row["effects_state"] == "failed", pid
+        assert int(row["effects_attempts"]) == MANAGED_EFFECTS_MAX_ATTEMPTS
+        assert row["effects_error"]
+
+
+# F5 ------------------------------------------------------------------------ #
+def test_R5_empty_output_notifies_the_stored_reply(tg: _Env) -> None:
+    ndjson = json.dumps({"type": "result", "subtype": "success", "result": "the real answer"})
+    tid = tg.run_turn("q", "op-q", output="", raw_stdout=ndjson)
+    assert tg.row(tid)["reply_text"] == "the real answer"
+    tg.drain()
+    assert [c["output"] for c in tg.notifier.calls] == ["the real answer"]
+
+
+# F6 ------------------------------------------------------------------------ #
+def test_R6_compaction_never_notifies_nor_touches_history(tg: _Env) -> None:
+    first = tg.run_turn("a", "op-a", **REAL_DRIVER)
+    tg.drain()
+    srow = tg.session_row()
+    asyncio.run(tg.orch.compact_session(SID, operation_id="cmp-2"))
+    [cid] = [r[0] for r in tg.gw._conn().execute(
+        "SELECT id FROM mesh_tasks WHERE turn_kind = 'compaction'").fetchall()]
+    _finish(tg, cid, output="compacted")
+    assert tg.drain() == 1 and tg.drain() == 0
+    assert [c["task_id"] for c in tg.notifier.calls] == [first]
+    after = tg.session_row()
+    assert [h["task_id"] for h in json.loads(after["task_history"])] == [first]
+    assert after["last_result_summary"] == srow["last_result_summary"]
+    assert tg.summaries == [SID]
+    assert tg.row(cid)["effects_state"] == "done"
+    assert cid in tg.reconciled
+
+
+# Telemetry gap ------------------------------------------------------------- #
+def _accept_telemetry(env: _Env, tid: str) -> None:
+    from src.control.telemetry_store import TelemetryStore
+    from src.core.telemetry import build_event
+
+    TelemetryStore(env.gw).insert_events([build_event(
+        "turn.accepted", turn_id=tid, session_id=SID, node_id="gw",
+        emitter_process_instance_id="gw-1", source="gateway",
+        attributes={"task_id": tid, "source": "web"},
+    )])
+    assert TelemetryStore(env.gw).get_turn(tid)["final_status"] == "running"
+
+
+def test_R7_cancelled_managed_turn_closes_its_telemetry_turn(tg: _Env) -> None:
+    from src.control.telemetry_store import TelemetryStore
+
+    tid = tg.create("cancel me", "op-cc")
+    _accept_telemetry(tg, tid)
+    tg.schedule()
+    tok = tg.claim_start(tid)
+    tg.gw.request_turn_cancel(tid, actor="operator")
+    r = tg.carrier.post(f"/tasks/{tid}/result-managed", headers=WAUTH, json={
+        "node_id": "worker-a", "claim_token": tok, "success": False, "errors": ["interrupted"],
+    })
+    assert r.status_code == 200 and tg.row(tid)["status"] == "cancelled"
+    tg.drain()
+    assert TelemetryStore(tg.gw).get_turn(tid)["final_status"] == "cancelled"
+
+
+def test_R7b_withdrawn_managed_turn_closes_its_telemetry_turn(tg: _Env) -> None:
+    from src.control.telemetry_store import TelemetryStore
+
+    tid = tg.create("withdraw me", "op-wt")
+    _accept_telemetry(tg, tid)
+    tg.gw.withdraw_turn(tid, int(tg.row(tid)["revision"]), actor="operator")
+    tg.drain()
+    assert TelemetryStore(tg.gw).get_turn(tid)["final_status"] == "cancelled"
+    assert tg.notifier.calls == []
+
+
+def test_R7c_legacy_cancelled_row_reconcile_semantics_unchanged(tg: _Env) -> None:
+    from src.control.telemetry_store import TelemetryStore
+
+    tg.gw.enqueue_task("legacy-c", None, None, "claude", "run_oneoff", {"prompt": "x"})
+    _accept_telemetry(tg, "legacy-c")
+    assert tg.gw.cancel_task("legacy-c", "test") is True
+    out = TelemetryStore(tg.gw).reconcile(turn_id="legacy-c", since_hours=0)
+    assert out["reconciled"] == []
+    assert TelemetryStore(tg.gw).get_turn("legacy-c")["final_status"] == "running"
+
+
+# mig_probe ----------------------------------------------------------------- #
+def test_R8_migration_42_is_cheap_on_a_large_table_and_reads_stay_indexed(tmp_path: Any) -> None:
+    import sqlite3
+    import time
+
+    from src.control.db import _get_migrations
+
+    [sql] = [m for v, m in _get_migrations() if v == 42]
+    c = sqlite3.connect(str(tmp_path / "big.db"))
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("CREATE TABLE mesh_tasks(id TEXT PRIMARY KEY, status TEXT, completed_at TEXT, "
+              "result TEXT, reply_text TEXT, payload TEXT)")
+    blob = "x" * 1100
+    c.executemany("INSERT INTO mesh_tasks VALUES (?, ?, ?, ?, ?, ?)", (
+        (f"t{i}", "completed", f"2026-{i:09d}", blob, blob[:500], blob[:300]) for i in range(60000)))
+    c.commit()
+    t0 = time.monotonic()
+    c.execute("BEGIN IMMEDIATE")
+    for stmt in [x for x in sql.split(";") if x.strip()]:
+        c.execute(stmt)
+    c.execute("COMMIT")
+    assert time.monotonic() - t0 < 5.0  # additive ALTERs + an empty partial index
+    q = MeshDB._PENDING_EFFECTS_SQL
+    plan = " ".join(str(r[-1]) for r in c.execute("EXPLAIN QUERY PLAN " + q, (25,)))
+    assert "USING INDEX idx_mesh_tasks_turn_effects" in plan and "TEMP B-TREE" not in plan
+    t1 = time.monotonic()
+    assert c.execute(q, (25,)).fetchall() == []
+    assert time.monotonic() - t1 < 0.05
