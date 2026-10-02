@@ -3460,7 +3460,8 @@ class MeshDB:
         row = self._conn().execute(
             """
             SELECT COUNT(DISTINCT t.session_id)
-            FROM mesh_tasks t JOIN sessions s ON s.session_id = t.session_id
+            FROM mesh_tasks t INDEXED BY idx_mesh_turns_waiting
+            JOIN sessions s ON s.session_id = t.session_id
             WHERE t.queue_protocol = 1 AND t.status = 'queued'
               AND s.turn_queue_enrolled = 1 AND s.turn_queue_paused = 0
               AND COALESCE(s.status, '') NOT IN ('closed', 'cancelled')
@@ -4351,10 +4352,15 @@ class MeshDB:
         moved: List[str] = []
         # Read first (no write lock): the common case — nothing to requeue — never
         # takes BEGIN IMMEDIATE on every scheduler pass.
+        # [A82 Stage 7] INDEXED BY the open-row partial index (+ its exact
+        # predicate): with history + ANALYZE stats SQLite otherwise chose a full
+        # mesh_tasks scan on every scheduler pass.
         if self._conn().execute(
-            """
-            SELECT 1 FROM mesh_tasks t LEFT JOIN nodes n ON n.node_id = t.machine_id
-            WHERE t.queue_protocol = 1 AND t.status = 'pending'
+            f"""
+            SELECT 1 FROM mesh_tasks t INDEXED BY idx_mesh_turns_session_open
+            LEFT JOIN nodes n ON n.node_id = t.machine_id
+            WHERE {_MANAGED_OPEN_PREDICATE.replace("queue_protocol", "t.queue_protocol").replace("status IN", "t.status IN")}
+              AND t.status = 'pending'
               AND (n.node_id IS NULL OR n.status != 'online' OR n.last_heartbeat < ?)
             LIMIT 1
             """,
@@ -4364,10 +4370,11 @@ class MeshDB:
         try:
             with self._managed_write("requeue_turns_on_dead_carriers") as conn:
                 rows = conn.execute(
-                    """
-                    SELECT t.id, t.machine_id FROM mesh_tasks t
+                    f"""
+                    SELECT t.id, t.machine_id FROM mesh_tasks t INDEXED BY idx_mesh_turns_session_open
                     LEFT JOIN nodes n ON n.node_id = t.machine_id
-                    WHERE t.queue_protocol = 1 AND t.status = 'pending'
+                    WHERE {_MANAGED_OPEN_PREDICATE.replace("queue_protocol", "t.queue_protocol").replace("status IN", "t.status IN")}
+                      AND t.status = 'pending'
                       AND (n.node_id IS NULL OR n.status != 'online' OR n.last_heartbeat < ?)
                     LIMIT ?
                     """,
