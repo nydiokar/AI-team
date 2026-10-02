@@ -756,6 +756,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._turn_scheduler_task: Optional[asyncio.Task] = None
         # [A84] Managed-completion effects consumer loop handle.
         self._managed_effects_task: Optional[asyncio.Task] = None
+        # [A82 Stage 8a] carrier-coverage monitor (see check_managed_carrier_coverage)
+        self._carrier_coverage_task: Optional[asyncio.Task] = None
+        self._managed_carrier_missing: Optional[List[Dict[str, Any]]] = None
+        self._retired_backend_sessions: Optional[int] = None
         
         # Initialize Telegram interface if configured
         self.telegram_interface = None
@@ -3837,11 +3841,11 @@ class TaskOrchestrator(ITaskOrchestrator):
         objective = str(brief.get("objective") or "").strip()
         if not objective:
             return False
-        # [A82 Stage 4e] An ENROLLED dead Manager is replaced on the managed path
-        # (producer 7). No marker read while nothing is enrolled (legacy
-        # byte-identical); an unreadable marker raises (Case skipped this tick).
-        from src.control.turn_admission import session_enrollment
-        if dead_session_id and await session_enrollment(db, dead_session_id):
+        # [A82 Stage 4e] A dead Manager is replaced on the managed path
+        # (producer 7). [Stage 8a] Whatever the dead session's marker: the
+        # replacement is born managed, so its first turn must be a managed
+        # turn (the legacy branch below would be refused at admission).
+        if dead_session_id:
             return await self._respawn_manager_managed(
                 db, case_id, generation, dead_session_id, objective,
             )
@@ -5569,6 +5573,7 @@ class TaskOrchestrator(ITaskOrchestrator):
         self._start_wake_dispatcher()
         self._start_turn_scheduler()
         self._start_managed_effects_consumer()
+        self._start_carrier_coverage_monitor()
 
         # Start the job completion poller (T3 — Watched Jobs)
         asyncio.create_task(self._job_completion_poller())
@@ -5666,6 +5671,12 @@ class TaskOrchestrator(ITaskOrchestrator):
             with contextlib.suppress(asyncio.CancelledError):
                 await effects_task
         self._managed_effects_task = None
+        coverage_task = getattr(self, "_carrier_coverage_task", None)
+        if coverage_task and not coverage_task.done():
+            coverage_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await coverage_task
+        self._carrier_coverage_task = None
 
         # Cancel worker tasks
         for worker in self.worker_tasks:
@@ -6037,6 +6048,10 @@ class TaskOrchestrator(ITaskOrchestrator):
         """
         _sid = str((task.metadata or {}).get("session_id") or "").strip()
         _known = (task.metadata or {}).pop(self._TURN_ENROLLED_META_KEY, None)
+        if _sid:
+            # [A82 Stage 8a] No managed carrier in this deployment ⇒ a session
+            # turn is refused (typed) before any side effect, enrolled or not.
+            self._require_session_carrier_mode(_sid)
         # A controller-only deployment still needs this gateway queue to dispatch
         # remote-pinned tasks. Reject local work *before* queueing it, otherwise a
         # controller image without agent CLIs would leave an unpinned turn stuck.
@@ -7008,12 +7023,9 @@ class TaskOrchestrator(ITaskOrchestrator):
         line of work AND its role prompt AND its worker-dispatch tools. All three are
         optional; absent all three the boot is byte-identical to the legacy path.
 
-        DEFERRED EDGE (A38): if the Level-3 guard blocks the first-turn submit, the
-        already-created session (left IDLE, reusable) and the freshly-opened Case
-        (left OPEN, visible in /api/flows) are NOT rolled back — a clean cancel is
-        blocked by close_case's completion_criteria guard when criteria were set.
-        Low-risk on this OFF-by-default path (a short rendered assignment rarely
-        trips Level-3); revisit with a criteria-waiving cancel if it shows up live.
+        [A82 Stage 8a] A Level-3 block of the first-turn submit is undone like a
+        typed refusal (``_abandon_manager_boot``: Case force-cancelled, session
+        closed) and then re-raised — no orphan Case/session per retry.
         """
         from src.core.interfaces import SessionOrigin
         from src.core.roles import ManagerInvocation, render_first_assignment
@@ -7112,9 +7124,10 @@ class TaskOrchestrator(ITaskOrchestrator):
                 # legacy path strips it).
                 operation_id=f"manager_invoke:{case_id}",
             )
-        except TurnQueueError:
+        except (TurnQueueError, HarnessAdmissionBlocked):
             # [A82 pre-cutover rework, F2] The first turn was refused: cancel
-            # the Case and close the session (a retry starts clean).
+            # the Case and close the session (a retry starts clean). [Stage 8a]
+            # A Level-3 admission block is the same refusal.
             self._abandon_manager_boot(session.session_id, case_id)
             raise
         return {
@@ -11652,6 +11665,13 @@ Generated from user description: {description}
             out = db.request_turn_cancel(closed.active_task_id, actor="session_close")
             carrier = out.node_id or ""
         carrier = carrier or self._managed_carrier_node(session)
+        if carrier and not closed.active_task_id and not self._carrier_may_hold_session(db, session, carrier):
+            # [A82 Stage 8a, pre-cutover N-B] Nothing to tear down: the carrier
+            # is not a registered node, or no carrier ever claimed a turn of
+            # this session (e.g. a refused Manager invoke) — a teardown row
+            # would only sit pending forever, pinned to that node.
+            logger.info("event=managed_close_teardown_skipped session_id=%s carrier=%s", sid, carrier)
+            carrier = ""
         if carrier:
             self._dispatch_remote_close(session, node_id=carrier)
         notify_turn_queue_changed()
@@ -11660,6 +11680,20 @@ Generated from user description: {description}
             sid, len(closed.withdrawn), closed.active_task_id, carrier,
         )
         return carrier
+
+    def _carrier_may_hold_session(self, db: Any, session: Any, carrier: str) -> bool:
+        """[A82 Stage 8a, N-B] Could ``carrier`` hold a backend process for
+        ``session``? Only a REGISTERED node that has (or had) a native session
+        or a claimed turn of it. Unknown ⇒ True (send the teardown)."""
+        try:
+            if db.get_node(carrier) is None:
+                return False
+            if str(getattr(session, "backend_session_id", "") or ""):
+                return True
+            return bool(db.session_ever_claimed(str(getattr(session, "session_id", "") or "")))
+        except Exception:  # noqa: BLE001 — unknown: a harmless extra teardown row
+            logger.warning("event=managed_close_teardown_probe_failed carrier=%s", carrier, exc_info=True)
+            return True
 
     def _void_withdrawn_lineage(self, turn_id: str) -> bool:
         """Void the Case lineage of a withdrawn managed turn — ONE convergent,
@@ -11986,6 +12020,26 @@ Generated from user description: {description}
             )
         return target
 
+    # [A82 Stage 8a] No-carrier policy — the ONE switch (operator decision
+    # pending). True: with MESH_ENABLED=false (single box, no task server, so
+    # no managed carrier can ever claim) every SESSION turn is refused with a
+    # typed 503 ``carrier_required`` before anything is admitted; one-offs
+    # keep running locally. False: session turns follow the normal routing
+    # (an enrolled session is admitted to its managed carrier).
+    _REFUSE_SESSION_TURNS_WITHOUT_MESH = True
+
+    def _require_session_carrier_mode(self, session_id: Optional[str]) -> None:
+        """Raise ``CarrierRequiredError`` for a session turn in a deployment
+        without a managed carrier (see ``_REFUSE_SESSION_TURNS_WITHOUT_MESH``)."""
+        if self._REFUSE_SESSION_TURNS_WITHOUT_MESH and not config.mesh.enabled:
+            from src.control.turn_queue import CarrierRequiredError
+
+            raise CarrierRequiredError(
+                "session turns need a managed carrier: enable the mesh (MESH_ENABLED) "
+                "and run a worker with WORKER_MANAGED_TURNS=1; one-off tasks still run here",
+                session_id=session_id,
+            )
+
     # [A82 pre-cutover] Offline-carrier admission policy — the ONE switch
     # (operator decision pending). True: a new managed turn whose carrier
     # REGISTERED the backend as managed but is offline / heartbeat-stale is
@@ -12006,9 +12060,18 @@ Generated from user description: {description}
         """Admission-time carrier: ``(node_id, None)`` for a live carrier, or
         ``(node_id, blocked_reason)`` when the offline-carrier policy admits
         the turn queued for a registered-but-offline carrier. Any other
-        unavailability raises the typed 503 (nothing admitted)."""
-        from src.control.turn_queue import CarrierOfflineError
+        unavailability raises the typed 503 (nothing admitted).
 
+        [A82 Stage 8a] Before ANY carrier lookup: a retired backend is a typed
+        410 (``backend_retired``) and a deployment without a managed carrier
+        a typed 503 (``carrier_required``)."""
+        from src.backends.registry import retired_backend_reason
+        from src.control.turn_queue import BackendRetiredError, CarrierOfflineError
+
+        sid = getattr(session, "session_id", None)
+        if retired_backend_reason(backend):
+            raise BackendRetiredError(retired_backend_reason(backend), session_id=sid, backend=backend)
+        self._require_session_carrier_mode(sid)
         try:
             return self._managed_carrier_assignment(session, backend), None
         except CarrierOfflineError as offline:
@@ -12077,6 +12140,71 @@ Generated from user description: {description}
         self._managed_effects_task = asyncio.create_task(
             self._managed_effects_loop(FALLBACK_INTERVAL_SEC), name="managed-turn-effects",
         )
+
+    # [A82 Stage 8a] Carrier-coverage monitor cadence (startup + periodic).
+    _CARRIER_COVERAGE_INTERVAL_SEC = 600.0
+
+    def _start_carrier_coverage_monitor(self) -> None:
+        """[A82 Stage 8a] Startup + periodic check that every (carrier,
+        backend) pair an open session routes to has a live managed carrier."""
+        from src.control.db import get_db
+
+        task = getattr(self, "_carrier_coverage_task", None)
+        if (task and not task.done()) or get_db() is None:
+            return
+        self._carrier_coverage_task = asyncio.create_task(
+            self._carrier_coverage_loop(self._CARRIER_COVERAGE_INTERVAL_SEC),
+            name="managed-carrier-coverage",
+        )
+
+    async def _carrier_coverage_loop(self, interval_sec: float) -> None:
+        """One coverage check per ``interval_sec``; errors contained."""
+        while getattr(self, "running", False):
+            try:
+                await asyncio.to_thread(self.check_managed_carrier_coverage)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — next pass retries
+                logger.warning("event=managed_carrier_coverage_failed err=%s", e)
+            await asyncio.sleep(interval_sec)
+
+    def check_managed_carrier_coverage(self) -> List[Dict[str, Any]]:
+        """[A82 Stage 8a] The (carrier, backend) pairs of open sessions that NO
+        live managed carrier covers — their turns are refused (503) or wait
+        queued (offline-carrier policy). Logs ``event=managed_carrier_missing``
+        per pair and keeps the list for ``/health``. Retired-backend sessions
+        are counted apart (their turns are refused 410 by design)."""
+        from types import SimpleNamespace
+
+        from src.backends.registry import is_retired_backend
+        from src.control.db import get_db
+
+        db = get_db()
+        if db is None:
+            return []
+        missing: List[Dict[str, Any]] = []
+        retired = 0
+        live: Dict[str, List[str]] = {}
+        for route in db.open_session_routes():
+            backend = str(route.get("backend") or "")
+            if is_retired_backend(backend):
+                retired += int(route.get("sessions") or 0)
+                continue
+            pin = str(route.get("machine_id") or "")
+            carrier = self._managed_carrier_node(SimpleNamespace(machine_id=pin))
+            if carrier and carrier not in live:
+                live[carrier] = db.node_managed_backends(carrier)
+            if not carrier or backend not in live.get(carrier, []):
+                missing.append({"carrier": carrier or None, "pin": pin or None,
+                                "backend": backend, "sessions": int(route.get("sessions") or 0)})
+        for gap in missing:
+            logger.warning(
+                "event=managed_carrier_missing carrier=%s pin=%s backend=%s sessions=%d",
+                gap["carrier"], gap["pin"], gap["backend"], gap["sessions"],
+            )
+        self._managed_carrier_missing = missing
+        self._retired_backend_sessions = retired
+        return missing
 
     async def _managed_effects_loop(self, interval_sec: float) -> None:
         """[A84] One bounded drain per ``interval_sec``. While nothing is
@@ -12362,6 +12490,8 @@ Generated from user description: {description}
                     },
                     summary=summary, files_modified=list(result.files_modified or []),
                     artifact_path=row.get("artifact_path") or None,
+                    # [A82 Stage 8a] the truthful terminal badge (never BUSY).
+                    session_status=_session_status_after_result(result).value,
                 )
                 session = self.session_store.get(sid)
                 if session is not None:

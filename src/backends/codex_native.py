@@ -318,6 +318,13 @@ class CodexBackend(CodingBackend):
                 return  # The turn's owner unloads after confirmed interruption.
         with self._lock:
             self._sender_tokens.pop(session.session_id, None)  # [A82 Stage 5]
+            # [A82 Stage 8a, pre-cutover N-A] A held or forgotten managed turn
+            # may still run natively: unloading the thread here would make
+            # ``_native_status`` report ``notLoaded`` (quiet) without asking the
+            # app-server, releasing the ownership fence early. Keep it loaded;
+            # the hold / forgotten entry settles on native truth.
+            if session.session_id in self._held or session.session_id in self._unanswered:
+                return
         with self._runtime_lock:
             thread_id = session.backend_session_id
             if self._client and thread_id in self._loaded:
