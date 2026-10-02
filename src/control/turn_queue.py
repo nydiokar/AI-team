@@ -201,6 +201,16 @@ class LegacyExecutionRefusedError(TurnQueueError):
     code = "legacy_execution_refused"
 
 
+class LegacyExecutionRetiredError(TurnQueueError):
+    """[A82 Stage 8a] 409 — after the cutover a session turn runs ONLY on the
+    managed queue: a session that is not enrolled is refused up front (no
+    BUSY/ERROR flip, nothing queued), and the operator unenroll exit is
+    refused (enrollment is the only mode)."""
+
+    status_code = 409
+    code = "legacy_execution_retired"
+
+
 class EnrollmentRefusedError(TurnQueueError):
     """[A82 Stage 7] 409 — the enrollment service (design §10 steps 6/8) refused
     to enroll / unenroll a session. ``code`` is the stable reason:

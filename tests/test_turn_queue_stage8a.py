@@ -721,3 +721,36 @@ def test_S8_10b_spawn_failure_is_not_owned_and_a_later_tick_converges(tmp_path, 
     assert asyncio.run(o._do_respawn_manager_for_case(db, case_id, 1, DEAD)) is True
     assert db._conn().execute(
         "SELECT COUNT(*) FROM mesh_tasks WHERE turn_kind = 'respawn'").fetchone()[0] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Review minors (PR #185)
+# --------------------------------------------------------------------------- #
+def test_S8_11_operator_unenroll_is_refused_after_the_cutover_F2(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    monkeypatch.setattr(TaskOrchestrator, "_LEGACY_SESSION_EXECUTION_RETIRED", True)
+    r = _api(monkeypatch, o).post("/api/sessions/sess-1/turn-requests/unenroll",
+                                  headers={"Authorization": "Bearer tok"})
+    assert r.status_code == 409 and r.json()["detail"]["reason"] == "legacy_execution_retired"
+    assert _marker(db, "sess-1") == 1
+
+
+def test_S8_11b_a_non_enrolled_session_turn_is_refused_up_front_F2(tmp_path, monkeypatch):
+    db, o = _setup(tmp_path, monkeypatch)
+    _wire(o)
+    monkeypatch.setattr(TaskOrchestrator, "_LEGACY_SESSION_EXECUTION_RETIRED", True)
+    db.unenroll_session_drained("sess-1")  # forced (raw DB): the route refuses it
+    db.refresh_enrollment_presence()
+    db._conn().execute("UPDATE sessions SET status = 'awaiting_input' WHERE session_id = 'sess-1'")
+    db._conn().commit()
+    with pytest.raises(tq.LegacyExecutionRetiredError) as ei:
+        _submit(o, operation_id="direct")
+    assert ei.value.status_code == 409 and ei.value.code == "legacy_execution_retired"
+    r = _api(monkeypatch, o).post("/api/instructions", headers={"Authorization": "Bearer tok"},
+                                  json={"description": "hello", "session_id": "sess-1"})
+    assert r.status_code == 409 and r.json()["detail"]["reason"] == "legacy_execution_retired"
+    s = _sess()
+    assert s.status == SessionStatus.AWAITING_INPUT and not s.last_task_id  # no BUSY/ERROR flip
+    assert o.task_queue.qsize() == 0 and db._conn().execute(
+        "SELECT COUNT(*) FROM mesh_tasks").fetchone()[0] == 0
