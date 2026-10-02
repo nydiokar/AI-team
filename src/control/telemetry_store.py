@@ -804,7 +804,11 @@ class TelemetryStore:
         """Close stale running turns from authoritative terminal mesh-task state."""
         params: List[Any] = []
         where = ["t.final_status IN ('queued', 'running')"]
+        # [A84] A turn-scoped call aggregates only that turn's events (it runs
+        # once per managed outcome); the unscoped form is unchanged.
+        events_where = "WHERE turn_id = ?" if turn_id else ""
         if turn_id:
+            params.append(turn_id)
             where.append("t.turn_id = ?")
             params.append(turn_id)
         if since_hours > 0:
@@ -819,6 +823,7 @@ class TelemetryStore:
             LEFT JOIN (
                 SELECT turn_id, MAX(received_at) AS latest_received_at
                 FROM llm_events
+                {events_where}
                 GROUP BY turn_id
             ) e ON e.turn_id = t.turn_id
             WHERE {' AND '.join(where)}
