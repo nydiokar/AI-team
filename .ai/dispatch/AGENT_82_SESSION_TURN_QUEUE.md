@@ -2145,6 +2145,61 @@ That test passed on HEAD too, so it adds coverage rather than fixing anything. T
 4. The m7 fallback assumes a gateway session with an empty `backend_session_id` wants its pending first-turn native session. If a future "reset native session" feature clears the id while a write-ahead record still exists (that is, the last turn was not terminal), the old session would be reused.
 5. Both fixes were validated against fakes only. No live Codex or OpenCode turn was run.
 
+### Pre-cutover backend carries — Stage 8 preconditions from the step-4 review (2026-10-02, branch `feat/session-turn-queue`, commits `4854045` (N2), `fac7281` (N1), `75fedae` (m2 remainder), `d5ab4ff` (m2 sweep safety), `660dbbe` (m6), `241666b` (m7), `5fb2a86` (close stops the late watcher), `e833eaf` (capability probe off the loop) + this record) — SUBMITTED FOR REVIEW, NOT ACCEPTED
+
+Every fix was written test-first. RED was observed on the unchanged code and GREEN after the fix; each commit message records its RED.
+
+**N2 — a Codex pre-submit RPC deadline was a terminal failure.** (`4854045`)
+- A `CodexRPCTimeout` before submission (`thread/start` or `thread/resume`, status read) now returns `managed_conflict`, so the turn is requeued. Ownership is released and the late reply is dropped.
+- `attach_thread` now binds its deadline at call time. Before, `RPC_TIMEOUT` was frozen as a default argument.
+- Test: `test_N2_pre_submit_thread_start_timeout_is_not_submitted_and_requeues`. RED returned `codex_rpc_deadline_exceeded:thread/start` as a plain failure.
+
+**N1 — a hung app-server wedged the session until a worker restart.** (`fac7281`)
+- *Client tracking:* the client records when each late id was abandoned (`late_at`). `unresponsive(window)` reports a request left unanswered past the window while the process is alive.
+- *Forgetting a late route:* `forget_late(id)` moves the id into `ignored`. Its reply is still matched, so it is discarded rather than read as unmatched, which would fail the shared client. The `MAX_LATE` budget covers both maps.
+- *`forget_managed_turn`:* it now drops the hold (`_held`) and its late route, and releases the hold's ownership. A submission the live app-server still has not answered keeps the session busy (`_unanswered`), because it may yet be accepted.
+- *Recycle:* past `UNRESPONSIVE_AFTER_SEC` (300 s), `is_quiescent` recycles the app-server, but only when no live run (`_active`) is on it. Process-group death then settles every hold on it as `stopped`. It never closes an app-server that has a live run.
+- *Tests:*
+  - forget, then recycle unwedges the session: the pid is provably gone, there are no owners, and the next turn runs on a new app-server;
+  - a held turn resolves by recycle without any forget;
+  - there is no recycle under a live neighbour turn, and that neighbour completes on the same pid;
+  - the restored `hang`-mode test in `test_codex_app_server.py`.
+- Reviewer probe `test_probe_codex_hung.py`: after forget it now prints `held after forget: [] late ids: []`. `quiescent: False` there is correct inside the window. `test_probe_codex_neighbour.py` passes.
+
+**m2 remainder.** (`75fedae`)
+- (a) The carrier's pre-start not-quiescent release is now `not_invoked=True` with `blocked_reason="session_not_quiescent[: <reason>]"`. The reason comes from the new optional `CodingBackend.quiescence_reason(session)`, which defaults to None. There is no backend-name branching. Codex records why `is_quiescent` was False, e.g. `other_owner_not_provably_gone` (an identity-less legacy owner), `held_turn_unresolved`, `forgotten_submission_unanswered`, `native_status:<s>`.
+- (b) The backoff now grows. Claim and activation keep a `backend_conflict:` record, and `_apply_backend_conflict` continues the count only for the SAME reason. A different reason restarts it, and completion clears it (`blocked_attempts=0`, reason NULL). Measured: 3rd refusal → 12 s, 4th (after re-activation) → 24 s, … up to the 300 s cap.
+- Tests: 4 new in `test_turn_queue_backend_conflict.py`, plus `test_m2_quiescence_reason_names_an_identityless_legacy_owner`.
+
+**m2 sweep safety.** (`d5ab4ff`)
+- `sweep_legacy_owners(proc_root=...)` raises `LegacySweepRefused`, and the CLI exits 2 with `{"refused": …}`, while any `codex app-server` whose effective `CODEX_HOME` (from env, else `$HOME/.codex`) matches is alive. It reads `/proc/<pid>/cmdline` and `environ`.
+- It fails closed when an environ is unreadable, when `CODEX_HOME` is unknown, or when there is no `/proc`.
+- The container pid-namespace caveat is in the module docstring.
+- Tests: 4 with a fake `/proc` root. The existing cutover test now uses an empty fake root.
+- Read-only check on this host: 3 live app-servers found for `~/.codex`, so the sweep would refuse now. The sweep was not run against the real `CODEX_HOME`.
+
+**m6.** (`660dbbe`) If the last refusal is older than `_UNREACHABLE_TERMINATE_SEC` and none came since, the refusal streak restarts. A continuous streak still terminates a live process that is not serving. Tests: isolated refusals (RED: terminated) and a continuous streak.
+
+**m7.** (`241666b`)
+- The write-ahead store is now `$WORKER_STATE_DIR` (default `logs/carrier_state`) `/opencode-native-sessions.sqlite3`. That is the carrier's spool/claim base, so it shares that volume. `AI_TEAM_OPENCODE_STATE_DIR` and the `~/.local/state` default are gone.
+- Rows are cleared in three cases: by a terminal result (as before), when a late capture delivers the id (recovery resolved), and when the gateway already knows the native id.
+- Tests: the store path, late-capture cleanup, and stale-row cleanup.
+
+**OpenCode `close(session)`.** (`5fb2a86`) Close marks that session's held entries `forgotten`, so the watcher exits and there is no late delivery. The entries are kept, so quiescence still follows native truth. Test: the watcher thread ends and nothing is delivered.
+
+**Capability probe off the event loop.** (`e833eaf`) `_managed_backends()` now runs via `asyncio.to_thread` in `_fetch_pending_managed` and in the `_handle_task` gate. Registration already runs in a thread at startup, which warms the per-binary cache. The cache and the 300 s retry are unchanged. Tests: the loop stalled 0.41 s behind a 0.4 s probe (RED); after the fix the stall stays under 0.2 s.
+
+**Verification.** `timeout 1800 pytest tests/test_codex_*.py tests/test_opencode*.py tests/test_backend_activity.py tests/test_turn_queue*.py` → **693 passed, 12 skipped** (opt-in e2e). The new tests passed 3 more times in a row (28/28 each run).
+
+**Open / uncertain.**
+1. *Forget releases ownership.* `forget_managed_turn` now releases the forgotten hold's ownership rows. This carrier still reads the session busy while the submission is unanswered, but another carrier is no longer fenced by the owner rows during that window.
+2. *Recycle trigger.* Recycle runs only from `is_quiescent` (the pre-start check and reconcile), not on a timer. It also stops every other session's *held* (not live) turn on that app-server, as specified.
+3. *Claimed rows show the reason.* A claimed or pending row now keeps its `backend_conflict:` reason visible until the turn completes or the reason changes.
+4. *m7 store scope.* The store is not node-scoped: the backend does not know the node id. Its default path is relative to the cwd, as the carrier spool's is.
+5. *m6 sparse callers.* Callers spaced more than 60 s apart never build a refusal streak.
+6. *Leftover test artifact.* `~/.local/state/ai-team/opencode-native-sessions.sqlite3` was created by one of my RED runs and holds one test row. Nothing reads it now. Deleting it was refused by the permission classifier, so it needs operator cleanup.
+7. *Fakes only.* All of this was validated against fakes only. No live Codex or OpenCode turn was run.
+
 ## 16. Review record
 
 ### Stage 0 review — Manager/A87 — 2026-09-25 — VERDICT: ACCEPT (authorize Stage 1)
