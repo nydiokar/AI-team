@@ -12163,10 +12163,12 @@ Generated from user description: {description}
             if not _managed_fence_abandoned(fence):
                 return False  # another consumer's send may be in flight (F3)
             # Its holder died between the fence and its mark: the notification
-            # may have been delivered — never send it twice.
+            # may have been delivered — never send it twice. [N3] A NULL fence
+            # (no stamp) is matched on state alone: a fence can only be taken
+            # from 'pending', so no live holder can own this 'notifying' row.
             if not await asyncio.to_thread(
                 db.transition_turn_effects, task_id, "notifying", "notified",
-                error="notify_outcome_unknown", fence=fence,
+                error="notify_outcome_unknown", fence=fence or None,
             ):
                 return False
             logger.warning("event=managed_notify_outcome_unknown task_id=%s", task_id)
