@@ -109,7 +109,18 @@ const BLOCKED_REASON_LABEL: Record<string, string> = {
   prepare_failed: "Could not prepare — retrying",
   operator_stop: "Stopped by operator",
   carrier_offline: "Carrier offline — waits for it to return",
+  legacy_work_draining: "Finishing a pre-cutover turn — starts right after it",
 };
+
+/** [A82 Stage 8a] Queue-level label for finished turns whose post-commit
+ *  effects (reply notification / history / telemetry) ended `failed`. */
+export function effectsFailedLabel(count: number | null | undefined): string | null {
+  const n = Number(count) || 0;
+  if (n <= 0) return null;
+  return n === 1
+    ? "1 finished turn: reply delivery failed — check the transcript"
+    : `${n} finished turns: reply delivery failed — check the transcript`;
+}
 
 /** Bounded, human label for a blocked/recovery reason (raw detail kept as title). */
 export function blockedReasonLabel(reason: string | null | undefined): string | null {

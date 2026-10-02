@@ -182,6 +182,9 @@ export interface TurnRequestPage {
   enrolled: boolean;
   paused: boolean;
   hold: string | null;
+  /** [A82 Stage 8a] Finished turns whose post-commit effects ended `failed`. */
+  effects_failed?: number;
+  effects_failed_turn_id?: string | null;
 }
 
 export interface TurnRequestDetail extends TurnRequestSummary {
@@ -189,6 +192,9 @@ export interface TurnRequestDetail extends TurnRequestSummary {
   body: string;
   completed_at: string | null;
   flow_run_id: string | null;
+  /** [A82 Stage 8a] A84 post-commit effects outcome (`failed` ⇒ reply may not have been delivered). */
+  effects_state?: string | null;
+  effects_error?: string | null;
 }
 
 export interface TurnQueueControl {
