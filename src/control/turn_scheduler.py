@@ -218,6 +218,11 @@ async def run_scheduler_pass(
                 result.withdrawn += 1
             except Exception:  # noqa: BLE001 — raced; next pass re-reads
                 logger.debug("event=turn_scheduler_expire_race task_id=%s", task_id)
+                continue
+            # [A82 Stage 6 F3] post-commit UI invalidation (obsolete automation).
+            emit_turn_queue_changed(
+                str(head.get("session_id") or ""), "withdrawn", turn_id=task_id, status="withdrawn",
+            )
             continue
         outcome = await _activate_head(db, prepare, head, limit)
         if outcome in ("activated", "withdrawn"):

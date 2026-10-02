@@ -528,3 +528,31 @@ def test_S6_F1_deferred_allowance_refresh_keeps_a_bounded_wake() -> None:
     assert res2.refresh_deferred is False and a.managed_cached() == 0
     assert a.legacy_blocked(15, 50) is False
     assert sched._next_timeout(res2, 25, sched.SAFETY_NET_SEC, 3.0) is None  # idle again
+
+
+# F3: the expiry withdrawal in the scheduler pass and a managed compaction
+# admission are queue changes too — each emits ONE post-commit event.
+def test_S6_F3a_expired_automation_withdrawal_emits_post_commit(env: _Env) -> None:
+    past: str = datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat()
+    t = env.db.enqueue_turn(session_id=SID, body="hb", operation_id="op-exp", turn_source="system",
+                            expires_at=past, fleet_cap=1000)
+    env.events.clear()
+    res: sched.SchedulerPassResult = env.schedule()
+    assert res.withdrawn == 1 and env.db.get_task(str(t))["status"] == "withdrawn"
+    assert [(e.get("turn_id"), e.get("change"), e.get("status")) for e in env.queue_events()] == [
+        (str(t), "withdrawn", "withdrawn"),
+    ]
+
+
+def test_S6_F3b_managed_compaction_admission_emits_post_commit(env: _Env) -> None:
+    env.db._conn().execute("UPDATE sessions SET backend_session_id = 'b-1' WHERE session_id = ?", (SID,))
+    env.db._conn().commit()
+    env.events.clear()
+    res = asyncio.run(env.orch.compact_session(SID, operation_id="k1"))
+    tid: str = res.parsed_output["task_id"]
+    assert [(e.get("turn_id"), e.get("change"), e.get("status")) for e in env.queue_events()] == [
+        (tid, "admitted", "queued"),
+    ]
+    env.events.clear()
+    asyncio.run(env.orch.compact_session(SID, operation_id="k1"))  # replay: no new queue state
+    assert env.queue_events() == []

@@ -11229,6 +11229,11 @@ Generated from user description: {description}
             get_db(), request, fleet_cap=int(config.system.max_queue_size),
         )
         notify_turn_queue_changed()
+        if not admission.idempotent_replay and not admission.coalesced:
+            from src.control.turn_queue import emit_turn_queue_changed
+
+            # [A82 Stage 6 F3] post-commit UI invalidation (a new queued turn).
+            emit_turn_queue_changed(sid, "admitted", turn_id=str(admission), status=admission.status)
         logger.info(
             "event=managed_compaction_admitted task_id=%s session_id=%s replay=%s coalesced=%s",
             admission, sid, admission.idempotent_replay, admission.coalesced,
