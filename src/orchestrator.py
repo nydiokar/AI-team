@@ -12174,7 +12174,11 @@ Generated from user description: {description}
         )
 
     # [A82 Stage 8a] Carrier-coverage monitor cadence (startup + periodic).
-    _CARRIER_COVERAGE_INTERVAL_SEC = 600.0
+    # [review F6] Carriers (re)register with the task server — a separate
+    # process in the Docker deployment — so the gateway cannot be hinted; a
+    # 60 s re-check (one sessions GROUP BY + a few node reads) bounds how long
+    # a carrier that was briefly stale at gateway start stays "missing".
+    _CARRIER_COVERAGE_INTERVAL_SEC = 60.0
 
     def _start_carrier_coverage_monitor(self) -> None:
         """[A82 Stage 8a] Startup + periodic check that every (carrier,
@@ -12204,7 +12208,8 @@ Generated from user description: {description}
         """[A82 Stage 8a] The (carrier, backend) pairs of open sessions that NO
         live managed carrier covers — their turns are refused (503) or wait
         queued (offline-carrier policy). Logs ``event=managed_carrier_missing``
-        per pair and keeps the list for ``/health``. Retired-backend sessions
+        per pair when the set changes and keeps the list for ``/health``
+        (``coverage_ok``) and ``/api/turn-queue/coverage``. Retired-backend sessions
         are counted apart (their turns are refused 410 by design)."""
         from types import SimpleNamespace
 
@@ -12229,11 +12234,16 @@ Generated from user description: {description}
             if not carrier or backend not in live.get(carrier, []):
                 missing.append({"carrier": carrier or None, "pin": pin or None,
                                 "backend": backend, "sessions": int(route.get("sessions") or 0)})
-        for gap in missing:
-            logger.warning(
-                "event=managed_carrier_missing carrier=%s pin=%s backend=%s sessions=%d",
-                gap["carrier"], gap["pin"], gap["backend"], gap["sessions"],
-            )
+        if missing != getattr(self, "_managed_carrier_missing", None):
+            # Logged on startup and whenever the uncovered set changes (the
+            # 60 s re-check would otherwise repeat the same lines).
+            for gap in missing:
+                logger.warning(
+                    "event=managed_carrier_missing carrier=%s pin=%s backend=%s sessions=%d",
+                    gap["carrier"], gap["pin"], gap["backend"], gap["sessions"],
+                )
+            if not missing and getattr(self, "_managed_carrier_missing", None):
+                logger.info("event=managed_carrier_coverage_restored")
         self._managed_carrier_missing = missing
         self._retired_backend_sessions = retired
         return missing

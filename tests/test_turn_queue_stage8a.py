@@ -826,3 +826,36 @@ def test_S8_14_effects_failed_banner_clears_after_a_delivered_turn_F5(tmp_path, 
     assert (page()["effects_failed"], page()["effects_failed_turn_id"]) == (0, None)
     again = failing_turn("op-f2")
     assert (page()["effects_failed"], page()["effects_failed_turn_id"]) == (1, again)
+
+
+def test_S8_15_coverage_recovers_within_a_minute_and_logs_on_change_F6(tmp_path, monkeypatch, caplog):
+    """Registration happens in the task-server process (separate in Docker), so
+    the gateway cannot be hinted: the periodic check runs every 60 s (was 600)
+    and logs only when the uncovered set changes."""
+    from config import config
+
+    db, o = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(config.mesh, "local_carrier_node_id", "local-daemon")
+    db.upsert_session(Session(session_id="loc-1", backend="claude", repo_path="/r",
+                              status=SessionStatus.IDLE, created_at=NOW, updated_at=NOW, machine_id=""))
+    assert TaskOrchestrator._CARRIER_COVERAGE_INTERVAL_SEC <= 60.0
+    with caplog.at_level("WARNING"):
+        o.check_managed_carrier_coverage()
+        o.check_managed_carrier_coverage()  # unchanged ⇒ not logged again
+    assert caplog.text.count("event=managed_carrier_missing") == 1
+
+    async def run_loop() -> None:
+        o.running = True
+        loop_task = asyncio.create_task(o._carrier_coverage_loop(0.01))
+        await asyncio.sleep(0.05)
+        assert o._managed_carrier_missing  # a stale/absent carrier at gateway start
+        _register_carrier(db, "local-daemon")  # the worker (re)registers elsewhere
+        for _ in range(200):
+            if o._managed_carrier_missing == []:
+                break
+            await asyncio.sleep(0.01)
+        o.running = False
+        loop_task.cancel()
+
+    asyncio.run(run_loop())
+    assert o._managed_carrier_missing == []
