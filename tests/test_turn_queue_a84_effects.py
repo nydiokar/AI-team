@@ -525,6 +525,19 @@ def test_R1b_compaction_envelope_never_wipes_driver_state(tg: _Env) -> None:
     assert _driver(tg) == before
 
 
+def test_R1c_non_conversational_action_never_applies_driver_state(tg: _Env) -> None:
+    """Even a non-empty driver report on a compaction row is not the
+    session's conversational driver state (action gate)."""
+    tg.run_turn("a", "op-a", **REAL_DRIVER)
+    before = _driver(tg)
+    asyncio.run(tg.orch.compact_session(SID, operation_id="cmp-3"))
+    [cid] = [r[0] for r in tg.gw._conn().execute(
+        "SELECT id FROM mesh_tasks WHERE turn_kind = 'compaction'").fetchall()]
+    _finish(tg, cid, output="compacted", driver_type="sdk", driver_status="live",
+            cache_health="healthy", previous_backend_session_ids=[])
+    assert _driver(tg) == before
+
+
 # F2 (P2) ------------------------------------------------------------------- #
 def test_R2_stop_during_send_lets_the_send_finish_and_marks_it(tg: _Env) -> None:
     tid = tg.run_turn("a", "op-a")
