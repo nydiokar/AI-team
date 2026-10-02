@@ -186,9 +186,10 @@ MANAGED_EFFECTS_IDLE_SWEEP_EVERY = 20
 #: [A84] A notification that has not returned by then has an UNKNOWN delivery
 #: outcome: it is closed (never re-sent) instead of stalling the consumer.
 MANAGED_EFFECTS_NOTIFY_TIMEOUT_SEC = 60.0
-#: [A84 review F2] On a gateway stop, a fenced send in flight gets this long to
-#: finish and be marked (> the 5 s managed-write deadline of the fence CAS).
-MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC = 10.0
+#: [A84 review F2/N1] On a gateway stop, a fenced send in flight gets this long
+#: to finish and be marked (the fence is already committed before the send).
+#: Kept well inside the container stop budget (compose ``stop_grace_period``).
+MANAGED_EFFECTS_SHUTDOWN_GRACE_SEC = 4.0
 #: [A84 review F3] A ``notifying`` fence older than the notify timeout plus
 #: this slack is abandoned (its holder died); a younger one may be in flight.
 MANAGED_EFFECTS_FENCE_SLACK_SEC = 30.0
